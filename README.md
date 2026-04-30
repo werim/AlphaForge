@@ -1,36 +1,42 @@
-# AlphaForge Phase 1
+# AlphaForge (Phase 1)
 
-SQL-first scaffold for V3 master spec + merged V2 constraints.
-
-## Included in Phase 1
-- Python project scaffold (`src/` layout)
+Phase 1 implements only the SQL-first foundation:
+- Python scaffold
 - SQLAlchemy 2.x typed ORM
-- SQLite dev + PostgreSQL prod config
+- SQLite (dev) / PostgreSQL (prod) configuration
 - Alembic migrations
-- Mandatory Phase 1 tables:
-  - candles, indicator_snapshots, regime_states, strategy_signals
-  - selector_decisions, order_intents, risk_decisions, trade_lifecycle_events
-  - positions, orders, closed_trades
-  - rejection_audit, order_decision_audit, config_snapshots
-  - strategy_performance, regime_performance
-  - optimizer_trials, optimizer_results, runtime_state, exchange_symbols
-- `exchange_symbols` expanded spec fields and composite uniqueness
-- Enum/check constraints + foreign-key lineage
-- JSONB for PostgreSQL with SQLite-compatible JSON fallback
-- Append-only triggers for audit/config tables (SQLite + PostgreSQL)
-- Tests for imports, table presence, constraints, append-only behavior
+- Mandatory schema including `exchange_symbols`
+- `market_type` support (`USDT_M`, `COIN_M`)
+- Binance USDT-M and COIN-M client interfaces (contract stubs only)
+- Symbol discovery contract
+- Config snapshot persistence
+- Immutable append-only audit/config tables via DB trigger policy
+- Schema/constraint tests
 
 ## Setup
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
+```
+
+## Run migration
+
+```bash
 alembic upgrade head
+```
+
+## Run tests
+
+```bash
 pytest -q
 ```
 
-## Out of scope in Phase 1
-- live trading
-- real order placement
-- strategy execution
-- backtest engine
+## Out of scope for Phase 1
+
+- Live trading
+- Real order placement
+- Strategy execution
+- Backtest engine
+- Optimizer logic
