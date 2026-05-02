@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -12,6 +13,14 @@ from alphaforge.db.base import Base
 from alphaforge.models import ai_schema, schema  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+
+def _json_dumps(value: Any) -> str:
+    if value is None:
+        return "{}"
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True, default=str)
 
 
 def init_db(database_url: str):
@@ -33,26 +42,26 @@ def _safe_write(session: Session, query: str, values: Mapping[str, Any]) -> Any:
 
 def save_signal(session: Session, **payload: Any) -> int | None:
     result = _safe_write(session, "INSERT INTO signals (symbol, side, timeframe, payload, created_at) VALUES (:symbol,:side,:timeframe,:payload,:created_at) RETURNING id", {
-        "symbol": str(payload.get("symbol", "UNKNOWN")), "side": str(payload.get("side", "N/A")), "timeframe": str(payload.get("timeframe", "NA")), "payload": dict(payload), "created_at": _now(),
+        "symbol": str(payload.get("symbol", "UNKNOWN")), "side": str(payload.get("side", "N/A")), "timeframe": str(payload.get("timeframe", "NA")), "payload": _json_dumps(dict(payload)), "created_at": _now(),
     })
     return result.scalar_one() if result is not None else None
 
 
 def save_order_decision(session: Session, **payload: Any) -> int | None:
-    result = _safe_write(session, "INSERT INTO order_decisions (signal_id,phase,decision,order_type,confidence,explanation,order_payload,created_at) VALUES (:signal_id,:phase,:decision,:order_type,:confidence,:explanation,:order_payload,:created_at) RETURNING id", {**payload, "created_at": _now()})
+    result = _safe_write(session, "INSERT INTO order_decisions (signal_id,phase,decision,order_type,confidence,explanation,order_payload,created_at) VALUES (:signal_id,:phase,:decision,:order_type,:confidence,:explanation,:order_payload,:created_at) RETURNING id", {**payload, "order_payload": _json_dumps(payload.get("order_payload")), "created_at": _now()})
     return result.scalar_one() if result is not None else None
 
 
 def save_ai_decision_features(session: Session, **payload: Any) -> None:
-    _safe_write(session, "INSERT INTO ai_decision_features (decision_id,features,penalties,reason_flags,created_at) VALUES (:decision_id,:features,:penalties,:reason_flags,:created_at)", {**payload, "created_at": _now()})
+    _safe_write(session, "INSERT INTO ai_decision_features (decision_id,features,penalties,reason_flags,created_at) VALUES (:decision_id,:features,:penalties,:reason_flags,:created_at)", {**payload, "features": _json_dumps(payload.get("features")), "penalties": _json_dumps(payload.get("penalties")), "reason_flags": _json_dumps(payload.get("reason_flags")), "created_at": _now()})
 
 
 def save_trade_lifecycle_event(session: Session, **payload: Any) -> None:
-    _safe_write(session, "INSERT INTO trade_lifecycle_events (signal_id,event_type,payload,created_at) VALUES (:signal_id,:event_type,:payload,:created_at)", {**payload, "created_at": _now()})
+    _safe_write(session, "INSERT INTO trade_lifecycle_events (signal_id,event_type,payload,created_at) VALUES (:signal_id,:event_type,:payload,:created_at)", {**payload, "payload": _json_dumps(payload.get("payload")), "created_at": _now()})
 
 
 def save_closed_trade_review(session: Session, **payload: Any) -> None:
-    _safe_write(session, "INSERT INTO closed_trade_reviews (trade_id,symbol,review_payload,created_at) VALUES (:trade_id,:symbol,:review_payload,:created_at)", {**payload, "created_at": _now()})
+    _safe_write(session, "INSERT INTO closed_trade_reviews (trade_id,symbol,review_payload,created_at) VALUES (:trade_id,:symbol,:review_payload,:created_at)", {**payload, "review_payload": _json_dumps(payload.get("review_payload")), "created_at": _now()})
 
 
 def upsert_expectancy_stats(session: Session, table: str, key_col: str, key_val: str, pnl: float) -> None:
@@ -62,7 +71,7 @@ def upsert_expectancy_stats(session: Session, table: str, key_col: str, key_val:
 
 
 def save_cooldown_state(session: Session, **payload: Any) -> None:
-    _safe_write(session, "INSERT INTO cooldown_states (scope,scope_key,active_until_ts,reason,payload,updated_at) VALUES (:scope,:scope_key,:active_until_ts,:reason,:payload,:updated_at) ON CONFLICT(scope,scope_key) DO UPDATE SET active_until_ts=:active_until_ts, reason=:reason, payload=:payload, updated_at=:updated_at", {**payload, "updated_at": _now()})
+    _safe_write(session, "INSERT INTO cooldown_states (scope,scope_key,active_until_ts,reason,payload,updated_at) VALUES (:scope,:scope_key,:active_until_ts,:reason,:payload,:updated_at) ON CONFLICT(scope,scope_key) DO UPDATE SET active_until_ts=:active_until_ts, reason=:reason, payload=:payload, updated_at=:updated_at", {**payload, "payload": _json_dumps(payload.get("payload")), "updated_at": _now()})
 
 
 def make_session_factory(database_url: str):

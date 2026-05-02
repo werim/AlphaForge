@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -170,7 +171,7 @@ class AIBrain:
             {
                 "trade_id": str(closed_trade.get("trade_id", "")),
                 "symbol": symbol,
-                "payload": {"closed_trade": dict(closed_trade), "replay_ctx": dict(replay_ctx)},
+                "payload": _json_dumps({"closed_trade": dict(closed_trade), "replay_ctx": dict(replay_ctx)}),
                 "created_at": _now(),
             },
         )
@@ -208,7 +209,7 @@ class AIBrain:
                 "symbol": str(signal.get("symbol", "UNKNOWN")),
                 "side": str(signal.get("side", "N/A")),
                 "timeframe": str(signal.get("timeframe", "NA")),
-                "payload": dict(signal),
+                "payload": _json_dumps(dict(signal)),
                 "created_at": _now(),
             },
         ).scalar_one()
@@ -229,11 +230,11 @@ class AIBrain:
                 "order_type": order_plan.order_type,
                 "confidence": score_ctx.total_score,
                 "explanation": explanation,
-                "order_payload": {
+                "order_payload": _json_dumps({
                     "limit_price": order_plan.limit_price,
                     "stop_price": order_plan.stop_price,
                     "reason": order_plan.reason,
-                },
+                }),
                 "created_at": _now(),
             },
         ).scalar_one()
@@ -248,9 +249,9 @@ class AIBrain:
             ),
             {
                 "decision_id": decision_id,
-                "features": score_ctx.components,
-                "penalties": score_ctx.penalties,
-                "reason_flags": score_ctx.reason_flags,
+                "features": _json_dumps(score_ctx.components),
+                "penalties": _json_dumps(score_ctx.penalties),
+                "reason_flags": _json_dumps(score_ctx.reason_flags),
                 "created_at": _now(),
             },
         )
@@ -265,7 +266,7 @@ class AIBrain:
             {
                 "signal_id": signal_id,
                 "event_type": f"decision_{order_plan.decision.lower()}",
-                "payload": {"phase": phase, "order_type": order_plan.order_type, "explanation": explanation},
+                "payload": _json_dumps({"phase": phase, "order_type": order_plan.order_type, "explanation": explanation}),
                 "created_at": _now(),
             },
         )
@@ -329,3 +330,11 @@ def _num(data: Mapping[str, Any], key: str, default: float) -> float:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _json_dumps(value: Any) -> str:
+    if value is None:
+        return "{}"
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, sort_keys=True, default=str)
