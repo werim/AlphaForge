@@ -64,6 +64,9 @@ class AIBrain:
         funding_penalty = self._clip01(abs(_num(market_ctx, "funding_rate", 0.0)) / max(_num(signal, "max_funding_rate", 0.0006), 1e-8))
         fakeout_risk = self._clip01(_num(market_ctx, "fakeout_risk", 0.25))
         recent_loss_penalty = self._recent_loss_penalty(stats_ctx)
+        slippage_penalty = self._clip01(_num(market_ctx, "expected_slippage_pct", 0.0) / max(_num(signal, "max_expected_slippage_pct", 0.003), 1e-8))
+        latency_penalty = self._clip01(_num(market_ctx, "latency_ms", 50.0) / max(_num(signal, "max_latency_ms", 300.0), 1.0))
+        funding_exec_penalty = self._clip01(abs(_num(market_ctx, "funding_rate_pct", 0.0)) / max(_num(signal, "max_funding_rate_pct", 0.05), 1e-8))
 
         components = {
             "setup_quality": setup_quality,
@@ -79,6 +82,9 @@ class AIBrain:
             "funding_penalty": funding_penalty,
             "fakeout_risk": fakeout_risk,
             "recent_loss_penalty": recent_loss_penalty,
+            "slippage_penalty": slippage_penalty,
+            "latency_penalty": latency_penalty,
+            "funding_exec_penalty": funding_exec_penalty,
         }
 
         weighted = (
@@ -93,6 +99,9 @@ class AIBrain:
             - funding_penalty * 0.04
             - fakeout_risk * 0.07
             - recent_loss_penalty * 0.06
+            - slippage_penalty * 0.08
+            - latency_penalty * 0.04
+            - funding_exec_penalty * 0.04
         )
         total_score = self._clip01(weighted)
 

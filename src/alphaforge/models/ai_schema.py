@@ -30,6 +30,8 @@ class OrderDecision(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     order_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    expected_slippage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    effective_rr: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
@@ -41,6 +43,7 @@ class AIDecisionFeatures(Base):
     features: Mapped[dict] = mapped_column(JSON, nullable=False)
     penalties: Mapped[dict] = mapped_column(JSON, nullable=False)
     reason_flags: Mapped[list] = mapped_column(JSON, nullable=False)
+    execution_features: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
@@ -61,6 +64,7 @@ class ClosedTradeReview(Base):
     trade_id: Mapped[str] = mapped_column(String(128), nullable=False)
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
     review_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    execution_metrics: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
