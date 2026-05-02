@@ -41,15 +41,39 @@ def _safe_write(session: Session, query: str, values: Mapping[str, Any]) -> Any:
 
 
 def save_signal(session: Session, **payload: Any) -> int | None:
-    result = _safe_write(session, "INSERT INTO signals (symbol, side, timeframe, payload, created_at) VALUES (:symbol,:side,:timeframe,:payload,:created_at) RETURNING id", {
-        "symbol": str(payload.get("symbol", "UNKNOWN")), "side": str(payload.get("side", "N/A")), "timeframe": str(payload.get("timeframe", "NA")), "payload": _json_dumps(dict(payload)), "created_at": _now(),
-    })
-    return result.scalar_one() if result is not None else None
+    try:
+        result = session.execute(
+            text("INSERT INTO signals (symbol, side, timeframe, payload, created_at) VALUES (:symbol,:side,:timeframe,:payload,:created_at) RETURNING id"),
+            {
+                "symbol": str(payload.get("symbol", "UNKNOWN")),
+                "side": str(payload.get("side", "N/A")),
+                "timeframe": str(payload.get("timeframe", "NA")),
+                "payload": _json_dumps(dict(payload)),
+                "created_at": _now(),
+            },
+        )
+        inserted_id = result.scalar_one()
+        session.commit()
+        return inserted_id
+    except Exception as exc:  # pragma: no cover
+        session.rollback()
+        logger.warning("Persistence write failed: %s", exc)
+        return None
 
 
 def save_order_decision(session: Session, **payload: Any) -> int | None:
-    result = _safe_write(session, "INSERT INTO order_decisions (signal_id,phase,decision,order_type,confidence,explanation,order_payload,created_at) VALUES (:signal_id,:phase,:decision,:order_type,:confidence,:explanation,:order_payload,:created_at) RETURNING id", {**payload, "order_payload": _json_dumps(payload.get("order_payload")), "created_at": _now()})
-    return result.scalar_one() if result is not None else None
+    try:
+        result = session.execute(
+            text("INSERT INTO order_decisions (signal_id,phase,decision,order_type,confidence,explanation,order_payload,created_at) VALUES (:signal_id,:phase,:decision,:order_type,:confidence,:explanation,:order_payload,:created_at) RETURNING id"),
+            {**payload, "order_payload": _json_dumps(payload.get("order_payload")), "created_at": _now()},
+        )
+        inserted_id = result.scalar_one()
+        session.commit()
+        return inserted_id
+    except Exception as exc:  # pragma: no cover
+        session.rollback()
+        logger.warning("Persistence write failed: %s", exc)
+        return None
 
 
 def save_ai_decision_features(session: Session, **payload: Any) -> None:
