@@ -64,8 +64,8 @@ def save_signal(session: Session, **payload: Any) -> int | None:
 def save_order_decision(session: Session, **payload: Any) -> int | None:
     try:
         result = session.execute(
-            text("INSERT INTO order_decisions (signal_id,phase,decision,order_type,confidence,explanation,order_payload,created_at) VALUES (:signal_id,:phase,:decision,:order_type,:confidence,:explanation,:order_payload,:created_at) RETURNING id"),
-            {**payload, "order_payload": _json_dumps(payload.get("order_payload")), "created_at": _now()},
+            text("INSERT INTO order_decisions (signal_id,phase,decision,order_type,confidence,explanation,order_payload,expected_slippage_pct,effective_rr,created_at) VALUES (:signal_id,:phase,:decision,:order_type,:confidence,:explanation,:order_payload,:expected_slippage_pct,:effective_rr,:created_at) RETURNING id"),
+            {**payload, "order_payload": _json_dumps(payload.get("order_payload")), "expected_slippage_pct": float(payload.get("expected_slippage_pct", 0.0) or 0.0), "effective_rr": float(payload.get("effective_rr", 0.0) or 0.0), "created_at": _now()},
         )
         inserted_id = result.scalar_one()
         session.commit()
@@ -77,7 +77,7 @@ def save_order_decision(session: Session, **payload: Any) -> int | None:
 
 
 def save_ai_decision_features(session: Session, **payload: Any) -> None:
-    _safe_write(session, "INSERT INTO ai_decision_features (decision_id,features,penalties,reason_flags,created_at) VALUES (:decision_id,:features,:penalties,:reason_flags,:created_at)", {**payload, "features": _json_dumps(payload.get("features")), "penalties": _json_dumps(payload.get("penalties")), "reason_flags": _json_dumps(payload.get("reason_flags")), "created_at": _now()})
+    _safe_write(session, "INSERT INTO ai_decision_features (decision_id,features,penalties,reason_flags,execution_features,created_at) VALUES (:decision_id,:features,:penalties,:reason_flags,:execution_features,:created_at)", {**payload, "features": _json_dumps(payload.get("features")), "penalties": _json_dumps(payload.get("penalties")), "reason_flags": _json_dumps(payload.get("reason_flags")), "execution_features": _json_dumps(payload.get("execution_features")), "created_at": _now()})
 
 
 def save_trade_lifecycle_event(session: Session, **payload: Any) -> None:
@@ -85,7 +85,7 @@ def save_trade_lifecycle_event(session: Session, **payload: Any) -> None:
 
 
 def save_closed_trade_review(session: Session, **payload: Any) -> None:
-    _safe_write(session, "INSERT INTO closed_trade_reviews (trade_id,symbol,review_payload,created_at) VALUES (:trade_id,:symbol,:review_payload,:created_at)", {**payload, "review_payload": _json_dumps(payload.get("review_payload")), "created_at": _now()})
+    _safe_write(session, "INSERT INTO closed_trade_reviews (trade_id,symbol,review_payload,execution_metrics,created_at) VALUES (:trade_id,:symbol,:review_payload,:execution_metrics,:created_at)", {**payload, "review_payload": _json_dumps(payload.get("review_payload")), "execution_metrics": _json_dumps(payload.get("execution_metrics")), "created_at": _now()})
 
 
 def upsert_expectancy_stats(session: Session, table: str, key_col: str, key_val: str, pnl: float) -> None:
