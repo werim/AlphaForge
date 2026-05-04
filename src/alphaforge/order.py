@@ -86,6 +86,26 @@ class TradeQualityDecision:
     quality_score: float = 0.0
 
 
+def normalize_execution_payload(payload: Mapping[str, Any] | None, order: Mapping[str, Any] | None = None, ctx: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    base = dict(payload or {})
+    order = dict(order or {})
+    base_rr = (
+        order.get("risk_reward")
+        or order.get("rr")
+        or base.get("risk_reward")
+        or base.get("effective_rr")
+        or 0.0
+    )
+    base.setdefault("execution_flags", [])
+    base["effective_rr"] = round(float(base.get("effective_rr", base_rr) or base_rr), 10)
+    base.setdefault("execution_metrics", {})
+    base.setdefault("execution_ctx_missing", bool((ctx or {}).get("execution_ctx_missing", False)))
+    base.setdefault("adjusted_risk_reward", base["effective_rr"])
+    base.setdefault("block_reason", "")
+    base.setdefault("reject_reason", "")
+    return base
+
+
 def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Mapping[str, Any]) -> OrderCandidate | OrderRejection:
     entry = float(market_ctx.get("entry", 0.0) or 0.0)
     sl = float(market_ctx.get("sl", 0.0) or 0.0)
@@ -172,6 +192,8 @@ def _audit(ctx: OrderExecutionContext, candidate: OrderCandidate | None, status_
 def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContext) -> dict[str, Any]:
     if ctx.mode != TradingMode.LIVE:
         assert ctx.allow_live_orders is False
+        if "allow_telegram" not in ctx.diagnostics:
+            ctx.allow_telegram = False
         ctx.allow_telegram = bool(ctx.allow_telegram)
     status = LifecycleState.ORDER_PLACED
     if ctx.mode == TradingMode.BACKTEST:
@@ -227,10 +249,17 @@ def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_
 
 def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], *, fail_closed_live: bool = True, mode: str = "live") -> tuple[bool, dict[str, Any]]:
     brain = AIBrain(session)
+    ctx = dict(market_ctx) if isinstance(market_ctx, Mapping) else {}
+    payload = normalize_execution_payload({}, order=order, ctx=ctx)
+    execution_ctx_raw = ctx.get("execution_ctx") if isinstance(ctx, dict) else None
+    if not execution_ctx_raw:
+        payload["execution_ctx_missing"] = True
+        if "EXECUTION_CTX_MISSING" not in payload["execution_flags"]:
+            payload["execution_flags"].append("EXECUTION_CTX_MISSING")
     try:
         signal = _signal_adapter(order)
         execution_ctx, missing_execution_ctx = _resolve_execution_ctx(market_ctx)
-        enriched_market_ctx = {**dict(market_ctx), **execution_ctx}
+        enriched_market_ctx = {**ctx, **execution_ctx}
 
         score, plan, explanation = brain.before_real_order(signal, enriched_market_ctx, regime_ctx, stats_ctx)
         effective_rr, execution_flags = _effective_rr(order, execution_ctx)
@@ -242,18 +271,27 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         slippage_penalty_factor = min(execution_ctx["expected_slippage_pct"] * 10.0, 0.9)
         qty *= max(0.0, 1.0 - slippage_penalty_factor)
 
-        payload = dict(order)
+        payload.update(dict(order))
         payload["quantity"] = max(qty, 0.0)
         payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 10), "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {}, "adjusted_risk_reward": round(effective_rr, 10), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
         payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx})
+        if "HIGH_SLIPPAGE" in payload["execution_flags"]:
+            payload["block_reason"] = "HIGH_SLIPPAGE"
+            payload["reject_reason"] = "HIGH_SLIPPAGE"
         signal_id = save_signal(session, **signal)
         decision_id = save_order_decision(session, signal_id=signal_id, phase="real", decision="REJECTED" if blocked else plan.decision, order_type=plan.order_type, confidence=score.total_score, explanation=explanation, order_payload=payload, expected_slippage_pct=execution_ctx["expected_slippage_pct"], effective_rr=effective_rr)
         if decision_id:
             save_ai_decision_features(session, decision_id=decision_id, features=score.components, penalties=score.penalties, reason_flags=score.reason_flags, execution_features=execution_ctx)
         save_trade_lifecycle_event(session, signal_id=signal_id, event_type="before_real_blocked" if blocked else "before_real_allowed", payload={"reason_flags": score.reason_flags, "execution_flags": execution_flags})
-        return (not blocked, payload)
+        return (not blocked, normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx}))
     except Exception as exc:
         logger.warning("AI real-order check failed: %s", exc)
+        safe_payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": _resolve_execution_ctx(market_ctx)[1]})
+        if safe_payload["execution_ctx_missing"] and "EXECUTION_CTX_MISSING" not in safe_payload["execution_flags"]:
+            safe_payload["execution_flags"].append("EXECUTION_CTX_MISSING")
+        if mode == "live" and fail_closed_live:
+            return (False, normalize_execution_payload(safe_payload, order=order, ctx=ctx))
+        return (True, normalize_execution_payload(safe_payload, order=order, ctx=ctx))
         safe_payload = normalize_execution_payload(dict(order), order=order, ctx={"execution_ctx_missing": _resolve_execution_ctx(market_ctx)[1]})
         if safe_payload["execution_ctx_missing"] and "EXECUTION_CTX_MISSING" not in safe_payload["execution_flags"]:
             safe_payload["execution_flags"].append("EXECUTION_CTX_MISSING")
