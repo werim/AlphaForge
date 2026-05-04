@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Mapping
 
@@ -193,6 +194,7 @@ def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContex
         assert ctx.allow_live_orders is False
         if "allow_telegram" not in ctx.diagnostics:
             ctx.allow_telegram = False
+        ctx.allow_telegram = bool(ctx.allow_telegram)
     status = LifecycleState.ORDER_PLACED
     if ctx.mode == TradingMode.BACKTEST:
         result = {"type": "virtual", "candidate": candidate}
@@ -243,6 +245,8 @@ def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_
     order.update({"ai_score": score.total_score, "confidence_band": _band(score.total_score), "position_size_mult": _position_mult(score.total_score), "ai_reason": explanation, "ai_flags": score.reason_flags, "ai_order_type": plan.order_type})
     return order
 
+# (rest unchanged omitted for brevity in this rewrite)
+
 def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], *, fail_closed_live: bool = True, mode: str = "live") -> tuple[bool, dict[str, Any]]:
     brain = AIBrain(session)
     ctx = dict(market_ctx) if isinstance(market_ctx, Mapping) else {}
@@ -288,6 +292,12 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         if mode == "live" and fail_closed_live:
             return (False, normalize_execution_payload(safe_payload, order=order, ctx=ctx))
         return (True, normalize_execution_payload(safe_payload, order=order, ctx=ctx))
+        safe_payload = normalize_execution_payload(dict(order), order=order, ctx={"execution_ctx_missing": _resolve_execution_ctx(market_ctx)[1]})
+        if safe_payload["execution_ctx_missing"] and "EXECUTION_CTX_MISSING" not in safe_payload["execution_flags"]:
+            safe_payload["execution_flags"].append("EXECUTION_CTX_MISSING")
+        if mode == "live" and fail_closed_live:
+            return (False, safe_payload)
+        return (True, safe_payload)
 
 
 def after_position_close(session: Session, closed_trade: Mapping[str, Any], replay_ctx: Mapping[str, Any]) -> None:
