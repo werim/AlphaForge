@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Callable, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -20,6 +23,189 @@ logger = logging.getLogger(__name__)
 MIN_RR_THRESHOLD = 1.1
 
 
+class TradingMode(str, Enum):
+    BACKTEST = "BACKTEST"
+    PAPER = "PAPER"
+    LIVE = "LIVE"
+
+
+class LifecycleState(str, Enum):
+    SIGNAL_CREATED = "SIGNAL_CREATED"
+    SIGNAL_REJECTED = "SIGNAL_REJECTED"
+    WAITING_ENTRY_ZONE = "WAITING_ENTRY_ZONE"
+    ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
+    ORDER_PLACED = "ORDER_PLACED"
+    POSITION_OPENED = "POSITION_OPENED"
+    POSITION_CLOSED = "POSITION_CLOSED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+    ERROR = "ERROR"
+
+
+@dataclass
+class OrderExecutionContext:
+    mode: TradingMode
+    timestamp: int
+    symbol: str
+    balance: float
+    risk_pct: float
+    allow_telegram: bool = False
+    allow_live_orders: bool = False
+    market_ctx: Mapping[str, Any] = field(default_factory=dict)
+    storage: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class OrderCandidate:
+    symbol: str
+    side: str
+    setup_type: str
+    setup_reason: str
+    regime: str
+    score: float
+    rr: float
+    expectancy: float | None
+    entry: float
+    sl: float
+    tp: float
+    order_type: str = "MARKET"
+
+
+@dataclass
+class OrderRejection:
+    symbol: str
+    reject_reason: str
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TradeQualityDecision:
+    accepted: bool
+    reason: str = ""
+    quality_score: float = 0.0
+
+
+def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Mapping[str, Any]) -> OrderCandidate | OrderRejection:
+    entry = float(market_ctx.get("entry", 0.0) or 0.0)
+    sl = float(market_ctx.get("sl", 0.0) or 0.0)
+    tp = float(market_ctx.get("tp", 0.0) or 0.0)
+    if entry <= 0 or sl <= 0 or tp <= 0:
+        return OrderRejection(symbol=symbol, reject_reason="INVALID_LEVELS")
+    side = str(market_ctx.get("side", "LONG"))
+    score = float(market_ctx.get("score", 0.0) or 0.0)
+    rr = float(market_ctx.get("rr", 0.0) or 0.0)
+    expectancy = market_ctx.get("expectancy")
+    return OrderCandidate(
+        symbol=symbol,
+        side=side,
+        setup_type=str(market_ctx.get("setup_type", "GENERIC")),
+        setup_reason=str(market_ctx.get("setup_reason", "NONE")),
+        regime=str(market_ctx.get("regime", "UNKNOWN")),
+        score=score,
+        rr=rr,
+        expectancy=float(expectancy) if expectancy is not None else None,
+        entry=entry,
+        sl=sl,
+        tp=tp,
+        order_type=str(market_ctx.get("order_type", "MARKET")),
+    )
+
+
+def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, Any], recent_stats: Mapping[str, Any], config: Mapping[str, Any]) -> TradeQualityDecision:
+    min_score = float(config.get("MIN_TRADE_SCORE", 0.6) or 0.6)
+    min_rr = float(config.get("MIN_RR", 1.1) or 1.1)
+    max_spread = float(config.get("MAX_SPREAD_PCT", 0.002) or 0.002)
+    min_sl_pct = float(config.get("MIN_SL_PCT", 0.001) or 0.001)
+    max_sl_pct = float(config.get("MAX_SL_PCT", 0.05) or 0.05)
+    if candidate.score < min_score:
+        return TradeQualityDecision(False, "SCORE_TOO_LOW", candidate.score)
+    if candidate.expectancy is None:
+        return TradeQualityDecision(False, "EXPECTANCY_MISSING", candidate.score)
+    if candidate.expectancy <= 0:
+        return TradeQualityDecision(False, "EXPECTANCY_NON_POSITIVE", candidate.score)
+    if str(market_ctx.get("expected_regime", candidate.regime)) != candidate.regime:
+        return TradeQualityDecision(False, "REGIME_MISMATCH", candidate.score)
+    if candidate.rr < min_rr:
+        return TradeQualityDecision(False, "RR_TOO_LOW", candidate.score)
+    if float(market_ctx.get("spread_pct", 0.0) or 0.0) > max_spread:
+        return TradeQualityDecision(False, "SPREAD_TOO_HIGH", candidate.score)
+    sl_pct = abs(candidate.entry - candidate.sl) / candidate.entry
+    if sl_pct < min_sl_pct:
+        return TradeQualityDecision(False, "SL_TOO_TIGHT", candidate.score)
+    if sl_pct > max_sl_pct:
+        return TradeQualityDecision(False, "SL_TOO_WIDE", candidate.score)
+    if bool(recent_stats.get("cooldown_active", False)):
+        return TradeQualityDecision(False, "SYMBOL_COOLDOWN_ACTIVE", candidate.score)
+    if bool(recent_stats.get("daily_trade_limit_hit", False)):
+        return TradeQualityDecision(False, "DAILY_TRADE_LIMIT_HIT", candidate.score)
+    if bool(recent_stats.get("loss_streak_circuit_breaker", False)):
+        return TradeQualityDecision(False, "LOSS_STREAK_CIRCUIT_BREAKER", candidate.score)
+    return TradeQualityDecision(True, quality_score=candidate.score)
+
+
+def _audit(ctx: OrderExecutionContext, candidate: OrderCandidate | None, status_before: LifecycleState, status_after: LifecycleState, reject_reason: str = "") -> None:
+    event = {
+        "timestamp": ctx.timestamp,
+        "mode": ctx.mode.value,
+        "symbol": ctx.symbol,
+        "side": getattr(candidate, "side", ""),
+        "setup_type": getattr(candidate, "setup_type", ""),
+        "setup_reason": getattr(candidate, "setup_reason", ""),
+        "regime": getattr(candidate, "regime", ""),
+        "score": getattr(candidate, "score", 0.0),
+        "rr": getattr(candidate, "rr", 0.0),
+        "expectancy": getattr(candidate, "expectancy", None),
+        "entry": getattr(candidate, "entry", 0.0),
+        "sl": getattr(candidate, "sl", 0.0),
+        "tp": getattr(candidate, "tp", 0.0),
+        "status_before": status_before.value,
+        "status_after": status_after.value,
+        "reject_reason": reject_reason,
+        "quality_score": getattr(candidate, "score", 0.0),
+        "order_type": getattr(candidate, "order_type", ""),
+        "diagnostics": dict(ctx.diagnostics),
+    }
+    ctx.storage.setdefault("audit", []).append(event)
+
+
+def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContext) -> dict[str, Any]:
+    if ctx.mode != TradingMode.LIVE:
+        assert ctx.allow_live_orders is False
+        ctx.allow_telegram = bool(ctx.allow_telegram)
+    status = LifecycleState.ORDER_PLACED
+    if ctx.mode == TradingMode.BACKTEST:
+        result = {"type": "virtual", "candidate": candidate}
+    elif ctx.mode == TradingMode.PAPER:
+        result = {"type": "paper", "candidate": candidate, "paper_balance": ctx.balance}
+    else:
+        bal_fn: Callable[[], float] = ctx.storage["real_balance_fetcher"]
+        ord_fn: Callable[[OrderCandidate], Mapping[str, Any]] = ctx.storage["binance_place_order"]
+        _ = bal_fn()
+        result = dict(ord_fn(candidate))
+        result["type"] = "live"
+    if ctx.allow_telegram and "telegram_sender" in ctx.storage:
+        ctx.storage["telegram_sender"](f"{ctx.mode.value}:{candidate.symbol}:{candidate.side}")
+    _audit(ctx, candidate, LifecycleState.ENTRY_TRIGGERED, status)
+    return result
+
+
+def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None = None, recent_stats: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    config = config or {}
+    recent_stats = recent_stats or {}
+    decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
+    if isinstance(decision, OrderRejection):
+        _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
+        return {"status": "rejected", "reason": decision.reject_reason}
+    quality = evaluate_trade_quality(decision, ctx.market_ctx, recent_stats, config)
+    if not quality.accepted:
+        _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, quality.reason)
+        return {"status": "rejected", "reason": quality.reason}
+    execution = execute_order_candidate(decision, ctx)
+    return {"status": "executed", "execution": execution, "candidate": decision}
+
+# Existing functions kept below
+
 def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], *, ai_enabled: bool = True) -> dict[str, Any] | None:
     if not ai_enabled:
         return dict(candidate)
@@ -37,6 +223,7 @@ def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_
     order.update({"ai_score": score.total_score, "confidence_band": _band(score.total_score), "position_size_mult": _position_mult(score.total_score), "ai_reason": explanation, "ai_flags": score.reason_flags, "ai_order_type": plan.order_type})
     return order
 
+# (rest unchanged omitted for brevity in this rewrite)
 
 def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], *, fail_closed_live: bool = True, mode: str = "live") -> tuple[bool, dict[str, Any]]:
     brain = AIBrain(session)
