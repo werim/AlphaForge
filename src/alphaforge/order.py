@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Mapping
 
@@ -83,21 +84,6 @@ class TradeQualityDecision:
     accepted: bool
     reason: str = ""
     quality_score: float = 0.0
-
-
-def normalize_execution_payload(payload: Mapping[str, Any] | None, order: Mapping[str, Any] | None = None, ctx: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    base = dict(payload or {})
-    order = dict(order or {})
-    rr = float(order.get("risk_reward", order.get("rr", 0.0)) or 0.0)
-    base.setdefault("execution_flags", [])
-    base.setdefault("effective_rr", rr)
-    base["effective_rr"] = round(float(base.get("effective_rr", rr) or rr), 10)
-    base.setdefault("execution_metrics", {})
-    base.setdefault("execution_ctx_missing", bool((ctx or {}).get("execution_ctx_missing", False)))
-    base.setdefault("adjusted_risk_reward", base["effective_rr"])
-    base.setdefault("block_reason", "")
-    base.setdefault("reject_reason", "")
-    return base
 
 
 def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Mapping[str, Any]) -> OrderCandidate | OrderRejection:
@@ -186,8 +172,7 @@ def _audit(ctx: OrderExecutionContext, candidate: OrderCandidate | None, status_
 def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContext) -> dict[str, Any]:
     if ctx.mode != TradingMode.LIVE:
         assert ctx.allow_live_orders is False
-        if "allow_telegram" not in ctx.diagnostics:
-            ctx.allow_telegram = False
+        ctx.allow_telegram = bool(ctx.allow_telegram)
     status = LifecycleState.ORDER_PLACED
     if ctx.mode == TradingMode.BACKTEST:
         result = {"type": "virtual", "candidate": candidate}
@@ -237,6 +222,8 @@ def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_
     order = dict(candidate)
     order.update({"ai_score": score.total_score, "confidence_band": _band(score.total_score), "position_size_mult": _position_mult(score.total_score), "ai_reason": explanation, "ai_flags": score.reason_flags, "ai_order_type": plan.order_type})
     return order
+
+# (rest unchanged omitted for brevity in this rewrite)
 
 def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], *, fail_closed_live: bool = True, mode: str = "live") -> tuple[bool, dict[str, Any]]:
     brain = AIBrain(session)
