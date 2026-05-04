@@ -156,7 +156,8 @@ def scan_symbol_backtest(symbol: str, candles: List[Candle], idx: int, context: 
     tp = entry + 2 * (entry - sl)
     mctx = {"entry": entry, "sl": sl, "tp": tp, "rr": 2.0, "score": 0.8, "setup_type": context.get("mode", "BACKTEST"), "setup_reason": "BREAKOUT_UP", "regime": "TREND", "expectancy": 0.1, "side": "LONG"}
     ctx = OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=now.timestamp, symbol=symbol, balance=float(context.get("balance",1000)), risk_pct=float(context.get("risk_pct",1.0)), market_ctx=mctx)
-    result = run_order_cycle(ctx)
+    result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
+    context["last_result"] = result
     if result.get("status") != "executed":
         return None
     c = result["candidate"]
@@ -239,22 +240,54 @@ def main():
     candidates = []
     rejected = []
     open_rows = []
+    recent_stats: Dict[str, Any] = {
+        "last_trade_ts_by_symbol": {},
+        "trades_today_by_symbol": {},
+        "global_trades_today": 0,
+        "symbol_loss_streak": {},
+        "global_loss_streak": 0,
+        "symbol_loss_block_until": {},
+        "global_loss_block_until": 0,
+    }
+    rejection_counts: Dict[str, int] = {}
     for symbol, candles in candles_by_symbol.items():
         for i in range(len(candles)):
-            cand = scan_symbol_backtest(symbol, candles, i, {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct})
+            scan_ctx = {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct, "recent_stats": recent_stats}
+            cand = scan_symbol_backtest(symbol, candles, i, scan_ctx)
+            result = scan_ctx.get("last_result", {})
+            if result:
+                if result.get("status") == "rejected":
+                    reason = result.get("reason", "UNKNOWN")
+                    rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                    diagnostics = result.get("diagnostics", {})
+                    rejected.append({
+                        "timestamp": candles[i].timestamp,
+                        "symbol": symbol,
+                        "side": (diagnostics.get("side") or "LONG"),
+                        "setup_type": diagnostics.get("setup_type", ""),
+                        "setup_reason": diagnostics.get("setup_reason", ""),
+                        "regime": diagnostics.get("regime", ""),
+                        "score": diagnostics.get("score", 0.0),
+                        "rr": diagnostics.get("rr", 0.0),
+                        "expectancy": diagnostics.get("expectancy"),
+                        "quality_score": diagnostics.get("quality_score", 0.0),
+                        "reject_reason": reason,
+                        "diagnostics": json.dumps(diagnostics, sort_keys=True),
+                    })
             if not cand:
                 continue
             candidates.append(cand)
-            if cand.rr < 1.0:
-                rejected.append({"timestamp": cand.timestamp, "symbol": symbol, "reject_reason": "LOW_EXPECTANCY"})
-                continue
             row = simulate_candidate(cand, candles, i, args.balance, args.risk_pct)
             lifecycle.append(row)
+            recent_stats["last_trade_ts_by_symbol"][symbol] = candles[i].timestamp
+            recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
+            recent_stats["global_trades_today"] += 1
             if row.status_after == "OPEN_AT_END":
                 open_rows.append(row)
 
     os.makedirs(args.output_dir, exist_ok=True)
-    for name, rows in [("order_lifecycle.csv", [asdict(x) for x in lifecycle]), ("order_candidates.csv", [asdict(x) for x in candidates]), ("rejected_orders.csv", rejected), ("open_at_end.csv", [asdict(x) for x in open_rows])]:
+    candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]
+    for name, rows in [("order_lifecycle.csv", [asdict(x) for x in lifecycle]), ("order_candidates.csv", candidate_rows), ("rejected_orders.csv", rejected), ("open_at_end.csv", [asdict(x) for x in open_rows])]:
         with open(os.path.join(args.output_dir, name), "w", newline="") as f:
             if not rows:
                 f.write("")
@@ -263,12 +296,12 @@ def main():
             w.writeheader(); w.writerows(rows)
 
     summary = {
-        "selected_symbols": len(universe), "total_candidates": len(candidates), "total_rejected": len(rejected), "total_orders": len(lifecycle),
+        "selected_symbols": len(universe), "total_candidates": len(candidates) + len(rejected), "total_rejected": len(rejected), "rejection_rate": (0.0 if (len(candidates)+len(rejected)) == 0 else len(rejected)/(len(candidates)+len(rejected))), "total_orders": len(lifecycle),
         "triggered_orders": sum(1 for r in lifecycle if r.status_after in {"TP_HIT", "SL_HIT", "OPEN_AT_END"}), "not_triggered_orders": sum(1 for r in lifecycle if r.status_after == "TIMEOUT"),
         "tp_hits": sum(1 for r in lifecycle if r.status_after == "TP_HIT"), "sl_hits": sum(1 for r in lifecycle if r.status_after == "SL_HIT"), "open_at_end": len(open_rows),
         "win_rate": 0.0 if not lifecycle else sum(1 for r in lifecycle if r.status_after == "TP_HIT") / len(lifecycle), "avg_rr": 0.0 if not lifecycle else sum(r.rr for r in lifecycle)/len(lifecycle),
         "avg_pnl_pct": 0.0 if not lifecycle else sum(r.net_pnl_pct for r in lifecycle)/len(lifecycle), "total_pnl_pct": sum(r.net_pnl_pct for r in lifecycle), "total_net_pnl_usdt": sum(r.net_pnl_usdt for r in lifecycle),
-        "avg_hold_minutes": 0.0 if not lifecycle else sum(r.hold_minutes for r in lifecycle)/len(lifecycle), "performance_by_symbol": {}, "performance_by_regime": {}, "performance_by_setup_type": {}, "rejection_counts": {}, "cancel_counts": {},
+        "avg_hold_minutes": 0.0 if not lifecycle else sum(r.hold_minutes for r in lifecycle)/len(lifecycle), "performance_by_symbol": {}, "performance_by_regime": {}, "performance_by_setup_type": {}, "rejection_counts": json.dumps(rejection_counts, sort_keys=True), "cancel_counts": {},
     }
     with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys())); w.writeheader(); w.writerow(summary)

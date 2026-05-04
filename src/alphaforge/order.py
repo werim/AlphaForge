@@ -82,8 +82,9 @@ class OrderRejection:
 @dataclass
 class TradeQualityDecision:
     accepted: bool
-    reason: str = ""
+    reject_reason: str = ""
     quality_score: float = 0.0
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def normalize_execution_payload(payload: Mapping[str, Any] | None, order: Mapping[str, Any] | None = None, ctx: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -133,35 +134,101 @@ def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Ma
 
 
 def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, Any], recent_stats: Mapping[str, Any], config: Mapping[str, Any]) -> TradeQualityDecision:
-    min_score = float(config.get("MIN_TRADE_SCORE", 0.6) or 0.6)
-    min_rr = float(config.get("MIN_RR", 1.1) or 1.1)
-    max_spread = float(config.get("MAX_SPREAD_PCT", 0.002) or 0.002)
-    min_sl_pct = float(config.get("MIN_SL_PCT", 0.001) or 0.001)
-    max_sl_pct = float(config.get("MAX_SL_PCT", 0.05) or 0.05)
-    if candidate.score < min_score:
-        return TradeQualityDecision(False, "SCORE_TOO_LOW", candidate.score)
-    if candidate.expectancy is None:
-        return TradeQualityDecision(False, "EXPECTANCY_MISSING", candidate.score)
-    if candidate.expectancy <= 0:
-        return TradeQualityDecision(False, "EXPECTANCY_NON_POSITIVE", candidate.score)
-    if str(market_ctx.get("expected_regime", candidate.regime)) != candidate.regime:
-        return TradeQualityDecision(False, "REGIME_MISMATCH", candidate.score)
-    if candidate.rr < min_rr:
-        return TradeQualityDecision(False, "RR_TOO_LOW", candidate.score)
-    if float(market_ctx.get("spread_pct", 0.0) or 0.0) > max_spread:
-        return TradeQualityDecision(False, "SPREAD_TOO_HIGH", candidate.score)
-    sl_pct = abs(candidate.entry - candidate.sl) / candidate.entry
-    if sl_pct < min_sl_pct:
-        return TradeQualityDecision(False, "SL_TOO_TIGHT", candidate.score)
-    if sl_pct > max_sl_pct:
-        return TradeQualityDecision(False, "SL_TOO_WIDE", candidate.score)
-    if bool(recent_stats.get("cooldown_active", False)):
-        return TradeQualityDecision(False, "SYMBOL_COOLDOWN_ACTIVE", candidate.score)
-    if bool(recent_stats.get("daily_trade_limit_hit", False)):
-        return TradeQualityDecision(False, "DAILY_TRADE_LIMIT_HIT", candidate.score)
-    if bool(recent_stats.get("loss_streak_circuit_breaker", False)):
-        return TradeQualityDecision(False, "LOSS_STREAK_CIRCUIT_BREAKER", candidate.score)
-    return TradeQualityDecision(True, quality_score=candidate.score)
+    cfg = {
+        "MIN_TRADE_SCORE": 8.0, "MIN_RR": 2.0, "MIN_EXPECTANCY": 0.0, "SYMBOL_COOLDOWN_MINUTES": 60,
+        "MAX_TRADES_PER_SYMBOL_PER_DAY": 2, "MAX_TRADES_GLOBAL_PER_DAY": 10, "MIN_SL_PCT": 0.15, "MAX_SL_PCT": 1.5,
+        "MAX_SPREAD_PCT": 0.05, "MAX_EXPECTED_SLIPPAGE_PCT": 0.05, "MIN_ATR_PCT": 0.25, "MAX_ATR_PCT": 3.0,
+        "SYMBOL_LOSS_STREAK_LIMIT": 3, "SYMBOL_LOSS_STREAK_COOLDOWN_HOURS": 6, "GLOBAL_LOSS_STREAK_LIMIT": 5,
+        "GLOBAL_LOSS_STREAK_COOLDOWN_HOURS": 3, "BLOCK_UNKNOWN_EXPECTANCY": True, "BLOCK_CHOP_MARKET": True, "REQUIRE_REGIME_ALIGNMENT": True,
+    }
+    cfg.update(dict(config or {}))
+    reject_reason = ""
+    failed_filter = ""
+    symbol = getattr(candidate, "symbol", "")
+    side = getattr(candidate, "side", "")
+    setup_type = str(getattr(candidate, "setup_type", "") or "")
+    setup_reason = str(getattr(candidate, "setup_reason", "") or "")
+    regime = str(getattr(candidate, "regime", "") or market_ctx.get("regime", "UNKNOWN"))
+    volatility_regime = str(market_ctx.get("volatility_regime", "unknown"))
+    spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
+    expected_slippage_pct = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
+    atr_pct = market_ctx.get("atr_pct", recent_stats.get("atr_pct"))
+    atr_pct = float(atr_pct) if atr_pct not in (None, "") else None
+    sl_pct = abs(float(candidate.entry) - float(candidate.sl)) / float(candidate.entry) * 100 if getattr(candidate, "entry", 0) else 0.0
+    expectancy = candidate.expectancy
+    if expectancy in (None, "UNKNOWN", ""):
+        bucket = market_ctx.get("expectancy_bucket", getattr(candidate, "expectancy_bucket", None))
+        for e in (bucket, market_ctx.get("expectancy"), recent_stats.get("expectancy")):
+            try:
+                expectancy = float(e)
+                break
+            except (TypeError, ValueError):
+                continue
+    try:
+        expectancy_val = float(expectancy) if expectancy not in (None, "UNKNOWN", "") else None
+    except (TypeError, ValueError):
+        expectancy_val = None
+    score = float(getattr(candidate, "score", 0.0) or 0.0)
+    rr = float(getattr(candidate, "rr", 0.0) or 0.0)
+    pattern_flags = [str(f).upper() for f in (market_ctx.get("pattern_flags", []) or [])]
+    # compute quality score first
+    score_comp = max(0.0, min(1.0, score / float(cfg["MIN_TRADE_SCORE"]))) * 25
+    exp_comp = 0.0 if expectancy_val is None else max(0.0, min(1.0, (expectancy_val - float(cfg["MIN_EXPECTANCY"])) / 0.5)) * 25
+    rr_comp = max(0.0, min(1.0, rr / float(cfg["MIN_RR"]))) * 10
+    regime_ok = True
+    if "TREND_CONTINUATION" in setup_type or "PULLBACK_" in setup_type:
+        regime_ok = regime == "TREND"
+    elif "BREAKOUT_UP" in setup_type or "BREAKOUT_DOWN" in setup_type:
+        regime_ok = regime in {"TREND", "BREAKOUT"} and volatility_regime.lower() in {"normal", "high"}
+    elif "RANGE_MEAN_REVERSION" in setup_type:
+        regime_ok = regime == "RANGE"
+    regime_comp = (20.0 if regime_ok else 0.0)
+    micro_ok = spread_pct <= float(cfg["MAX_SPREAD_PCT"]) and expected_slippage_pct <= float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"])
+    vol_ok = atr_pct is None or (float(cfg["MIN_ATR_PCT"]) <= atr_pct <= float(cfg["MAX_ATR_PCT"]))
+    vol_comp = (10.0 if (micro_ok and vol_ok) else 0.0)
+    hygiene_comp = 10.0
+    quality_score = round(score_comp + exp_comp + rr_comp + regime_comp + vol_comp + hygiene_comp, 2)
+    if not candidate or not getattr(candidate, "symbol", None):
+        reject_reason, failed_filter = "INVALID_CANDIDATE", "candidate"
+    elif score < float(cfg["MIN_TRADE_SCORE"]):
+        reject_reason, failed_filter = "LOW_SCORE", "score"
+    elif rr < float(cfg["MIN_RR"]):
+        reject_reason, failed_filter = "RR_TOO_LOW", "rr"
+    elif cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
+        reject_reason, failed_filter = "EXPECTANCY_MISSING", "expectancy"
+    elif expectancy_val is not None and expectancy_val <= float(cfg["MIN_EXPECTANCY"]):
+        reject_reason, failed_filter = "NEGATIVE_EXPECTANCY", "expectancy"
+    elif cfg["BLOCK_CHOP_MARKET"] and any("CHOP" in f for f in pattern_flags):
+        reject_reason, failed_filter = "CHOP_MARKET_BLOCK", "pattern_flags"
+    elif cfg["REQUIRE_REGIME_ALIGNMENT"] and not regime_ok:
+        reject_reason, failed_filter = "REGIME_MISMATCH", "regime"
+    elif sl_pct < float(cfg["MIN_SL_PCT"]):
+        reject_reason, failed_filter = "STOP_TOO_TIGHT", "sl_pct"
+    elif sl_pct > float(cfg["MAX_SL_PCT"]):
+        reject_reason, failed_filter = "STOP_TOO_WIDE", "sl_pct"
+    elif spread_pct > float(cfg["MAX_SPREAD_PCT"]):
+        reject_reason, failed_filter = "SPREAD_TOO_HIGH", "spread_pct"
+    elif expected_slippage_pct > float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]):
+        reject_reason, failed_filter = "SLIPPAGE_TOO_HIGH", "expected_slippage_pct"
+    elif atr_pct is not None and atr_pct < float(cfg["MIN_ATR_PCT"]):
+        reject_reason, failed_filter = "VOLATILITY_TOO_LOW", "atr_pct"
+    elif atr_pct is not None and atr_pct > float(cfg["MAX_ATR_PCT"]):
+        reject_reason, failed_filter = "VOLATILITY_TOO_HIGH", "atr_pct"
+    else:
+        now_ts = int(market_ctx.get("timestamp", 0) or 0)
+        last_ts = int((recent_stats.get("last_trade_ts_by_symbol", {}) or {}).get(symbol, 0) or 0)
+        if last_ts and now_ts and (now_ts - last_ts) < int(cfg["SYMBOL_COOLDOWN_MINUTES"]) * 60_000:
+            reject_reason, failed_filter = "SYMBOL_COOLDOWN_ACTIVE", "cooldown"
+        elif int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]):
+            reject_reason, failed_filter = "DAILY_SYMBOL_TRADE_LIMIT", "daily_symbol"
+        elif int(recent_stats.get("global_trades_today", 0) or 0) >= int(cfg["MAX_TRADES_GLOBAL_PER_DAY"]):
+            reject_reason, failed_filter = "DAILY_GLOBAL_TRADE_LIMIT", "daily_global"
+        elif int((recent_stats.get("symbol_loss_block_until", {}) or {}).get(symbol, 0) or 0) > now_ts:
+            reject_reason, failed_filter = "SYMBOL_LOSS_STREAK_BLOCK", "symbol_block"
+        elif int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
+            reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score}
+    return TradeQualityDecision(accepted=(reject_reason == ""), reject_reason=reject_reason, quality_score=quality_score, diagnostics=diagnostics)
 
 
 def _audit(ctx: OrderExecutionContext, candidate: OrderCandidate | None, status_before: LifecycleState, status_after: LifecycleState, reject_reason: str = "") -> None:
@@ -221,8 +288,9 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
         return {"status": "rejected", "reason": decision.reject_reason}
     quality = evaluate_trade_quality(decision, ctx.market_ctx, recent_stats, config)
     if not quality.accepted:
-        _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, quality.reason)
-        return {"status": "rejected", "reason": quality.reason}
+        ctx.diagnostics.update(quality.diagnostics)
+        _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, quality.reject_reason)
+        return {"status": "rejected", "reason": quality.reject_reason, "diagnostics": quality.diagnostics}
     execution = execute_order_candidate(decision, ctx)
     return {"status": "executed", "execution": execution, "candidate": decision}
 
