@@ -57,4 +57,4 @@ def test_same_candidate_and_rejection_reason_across_modes_and_quality_filters():
     bad["score"] = 0.1
     r1 = run_order_cycle(OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=1, symbol="BTCUSDT", balance=1, risk_pct=1, market_ctx=bad), {"MIN_TRADE_SCORE": 0.5})
     r2 = run_order_cycle(OrderExecutionContext(mode=TradingMode.LIVE, timestamp=1, symbol="BTCUSDT", balance=1, risk_pct=1, allow_live_orders=True, market_ctx=bad, storage={"binance_place_order": lambda c: {}, "real_balance_fetcher": lambda: 1}), {"MIN_TRADE_SCORE": 0.5})
-    assert r1["reason"] == r2["reason"] == "SCORE_TOO_LOW"
+    assert r1["reason"] == r2["reason"] == "LOW_SCORE"
