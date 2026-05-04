@@ -46,3 +46,19 @@ def test_missing_execution_ctx_safe() -> None:
         ok, payload = before_real_order(s, {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 2.0}, {}, {"alignment": 0.8}, {})
         assert isinstance(ok, bool)
         assert "EXECUTION_CTX_MISSING" in payload.get("execution_flags", [])
+        assert payload["execution_ctx_missing"] is True
+        assert "effective_rr" in payload
+
+
+def test_execution_payload_contract_always_present() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        _, payload = before_real_order(
+            s,
+            {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 1.5},
+            {},
+            {"alignment": 0.8},
+            {},
+        )
+        for key in ["execution_flags", "effective_rr", "execution_metrics", "execution_ctx_missing", "adjusted_risk_reward", "block_reason", "reject_reason"]:
+            assert key in payload

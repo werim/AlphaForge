@@ -244,7 +244,8 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
 
         payload = dict(order)
         payload["quantity"] = max(qty, 0.0)
-        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": effective_rr, "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx})
+        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 10), "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {}, "adjusted_risk_reward": round(effective_rr, 10), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
+        payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx})
         signal_id = save_signal(session, **signal)
         decision_id = save_order_decision(session, signal_id=signal_id, phase="real", decision="REJECTED" if blocked else plan.decision, order_type=plan.order_type, confidence=score.total_score, explanation=explanation, order_payload=payload, expected_slippage_pct=execution_ctx["expected_slippage_pct"], effective_rr=effective_rr)
         if decision_id:
@@ -253,9 +254,12 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         return (not blocked, payload)
     except Exception as exc:
         logger.warning("AI real-order check failed: %s", exc)
+        safe_payload = normalize_execution_payload(dict(order), order=order, ctx={"execution_ctx_missing": _resolve_execution_ctx(market_ctx)[1]})
+        if safe_payload["execution_ctx_missing"] and "EXECUTION_CTX_MISSING" not in safe_payload["execution_flags"]:
+            safe_payload["execution_flags"].append("EXECUTION_CTX_MISSING")
         if mode == "live" and fail_closed_live:
-            return (False, dict(order))
-        return (True, dict(order))
+            return (False, safe_payload)
+        return (True, safe_payload)
 
 
 def after_position_close(session: Session, closed_trade: Mapping[str, Any], replay_ctx: Mapping[str, Any]) -> None:
@@ -279,6 +283,8 @@ def after_position_close(session: Session, closed_trade: Mapping[str, Any], repl
 def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
     raw = market_ctx.get("execution_ctx")
     if isinstance(raw, Mapping):
+        if len(raw) == 0:
+            return neutral_execution_context(), True
         return dict(raw), False
     if market_ctx:
         return build_execution_context(market_ctx), False
