@@ -3,6 +3,8 @@ import csv
 import json
 import os
 from dataclasses import dataclass, asdict
+
+from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlencode
@@ -147,12 +149,18 @@ def scan_symbol_backtest(symbol: str, candles: List[Candle], idx: int, context: 
         return None
     now = candles[idx]
     prev = candles[idx - 1]
-    if now.close > prev.high:
-        entry = now.close
-        sl = min(now.low, prev.low)
-        tp = entry + 2 * (entry - sl)
-        return CandidateOrder(now.timestamp, symbol, "LONG", entry, sl, tp, 2.0, context.get("mode", "BACKTEST"), "BREAKOUT_UP", "TREND", 0.8, "MARKET")
-    return None
+    if now.close <= prev.high:
+        return None
+    entry = now.close
+    sl = min(now.low, prev.low)
+    tp = entry + 2 * (entry - sl)
+    mctx = {"entry": entry, "sl": sl, "tp": tp, "rr": 2.0, "score": 0.8, "setup_type": context.get("mode", "BACKTEST"), "setup_reason": "BREAKOUT_UP", "regime": "TREND", "expectancy": 0.1, "side": "LONG"}
+    ctx = OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=now.timestamp, symbol=symbol, balance=float(context.get("balance",1000)), risk_pct=float(context.get("risk_pct",1.0)), market_ctx=mctx)
+    result = run_order_cycle(ctx)
+    if result.get("status") != "executed":
+        return None
+    c = result["candidate"]
+    return CandidateOrder(now.timestamp, symbol, c.side, c.entry, c.sl, c.tp, c.rr, c.setup_type, c.setup_reason, c.regime, c.score, c.order_type)
 
 
 def simulate_candidate(candidate: CandidateOrder, candles: List[Candle], idx: int, balance: float, risk_pct: float) -> LifecycleRow:
@@ -233,7 +241,7 @@ def main():
     open_rows = []
     for symbol, candles in candles_by_symbol.items():
         for i in range(len(candles)):
-            cand = scan_symbol_backtest(symbol, candles, i, {"mode": args.mode})
+            cand = scan_symbol_backtest(symbol, candles, i, {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct})
             if not cand:
                 continue
             candidates.append(cand)
