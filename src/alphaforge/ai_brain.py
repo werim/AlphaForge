@@ -170,17 +170,31 @@ class AIBrain:
         self._upsert_expectancy("regime_expectancy_stats", "regime", regime, pnl)
         self._upsert_expectancy("symbol_expectancy_stats", "symbol", symbol, pnl)
 
+        execution_metrics = {
+            "expected_slippage_pct": _num(closed_trade, "expected_slippage_pct", 0.0),
+            "actual_slippage_pct": _num(closed_trade, "actual_slippage_pct", 0.0),
+            "filled_entry_price": _num(closed_trade, "filled_entry_price", _num(closed_trade, "entry_price", 0.0)),
+            "entry_price": _num(closed_trade, "entry_price", 0.0),
+            "pnl": pnl,
+            "spread_pct": _num(closed_trade, "spread_pct", 0.0),
+            "latency_ms": int(_num(closed_trade, "latency_ms", 0)),
+            "orderbook_imbalance": _num(closed_trade, "orderbook_imbalance", 0.0),
+            "funding_rate_pct": _num(closed_trade, "funding_rate_pct", 0.0),
+            "volatility_regime": str(closed_trade.get("volatility_regime", "unknown")),
+        }
+
         self.session.execute(
             text(
                 """
-                INSERT INTO closed_trade_reviews (trade_id, symbol, review_payload, created_at)
-                VALUES (:trade_id, :symbol, :payload, :created_at)
+                INSERT INTO closed_trade_reviews (trade_id, symbol, review_payload, execution_metrics, created_at)
+                VALUES (:trade_id, :symbol, :payload, :execution_metrics, :created_at)
                 """
             ),
             {
                 "trade_id": str(closed_trade.get("trade_id", "")),
                 "symbol": symbol,
                 "payload": _json_dumps({"closed_trade": dict(closed_trade), "replay_ctx": dict(replay_ctx)}),
+                "execution_metrics": _json_dumps(execution_metrics),
                 "created_at": _now(),
             },
         )
@@ -201,11 +215,11 @@ class AIBrain:
         score_ctx = self.score_signal(signal, market_ctx, regime_ctx, stats_ctx)
         order_plan = self.choose_order_plan(signal, market_ctx, score_ctx)
         explanation = self.explain_decision(signal, score_ctx, order_plan)
-        self._persist_decision(signal, score_ctx, order_plan, explanation, phase)
+        self._persist_decision(signal, score_ctx, order_plan, explanation, phase, market_ctx)
         self.session.commit()
         return score_ctx, order_plan, explanation
 
-    def _persist_decision(self, signal: Mapping[str, Any], score_ctx: ScoreContext, order_plan: OrderPlan, explanation: str, phase: str) -> None:
+    def _persist_decision(self, signal: Mapping[str, Any], score_ctx: ScoreContext, order_plan: OrderPlan, explanation: str, phase: str, market_ctx: Mapping[str, Any] | None = None) -> None:
         signal_id = self.session.execute(
             text(
                 """
@@ -223,12 +237,24 @@ class AIBrain:
             },
         ).scalar_one()
 
+        ctx = market_ctx or {}
+        expected_slippage_pct = _num(ctx, "expected_slippage_pct", 0.0)
+        spread_pct = _num(ctx, "spread_pct", 0.0)
+        latency_ms = int(_num(ctx, "latency_ms", 0))
+        orderbook_imbalance = _num(ctx, "orderbook_imbalance", 0.0)
+        funding_rate_pct = _num(ctx, "funding_rate_pct", 0.0)
+        volatility_regime = str(ctx.get("volatility_regime", "unknown"))
+        execution_flags = ctx.get("execution_flags", [])
+        if not isinstance(execution_flags, list):
+            execution_flags = [str(execution_flags)]
+        effective_rr = max(0.0, _num(signal, "risk_reward", 1.0) - (expected_slippage_pct * 100) - (spread_pct * 100))
+
         decision_id = self.session.execute(
             text(
                 """
                 INSERT INTO order_decisions
-                (signal_id, phase, decision, order_type, confidence, explanation, order_payload, created_at)
-                VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :created_at)
+                (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, volatility_regime, effective_rr, execution_flags, created_at)
+                VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance, :funding_rate_pct, :volatility_regime, :effective_rr, :execution_flags, :created_at)
                 RETURNING id
                 """
             ),
@@ -244,6 +270,14 @@ class AIBrain:
                     "stop_price": order_plan.stop_price,
                     "reason": order_plan.reason,
                 }),
+                "expected_slippage_pct": expected_slippage_pct,
+                "spread_pct": spread_pct,
+                "latency_ms": latency_ms,
+                "orderbook_imbalance": orderbook_imbalance,
+                "funding_rate_pct": funding_rate_pct,
+                "volatility_regime": volatility_regime,
+                "effective_rr": effective_rr,
+                "execution_flags": _json_dumps(execution_flags),
                 "created_at": _now(),
             },
         ).scalar_one()

@@ -1,9 +1,12 @@
 import argparse
 import csv
+import json
 import os
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional, Any
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 
 @dataclass
@@ -17,25 +20,51 @@ class Candle:
 
 
 @dataclass
-class VirtualOrder:
+class CandidateOrder:
+    timestamp: int
     symbol: str
     side: str
     entry: float
     sl: float
     tp: float
-    score: float = 0.0
-    rr: float = 0.0
-    setup_type: str = "BACKTEST"
-    setup_reason: str = "MANUAL_OR_IMPORTED"
-    regime: str = "UNKNOWN"
-    status: str = "CREATED"
-    created_ts: int = 0
-    triggered_ts: Optional[int] = None
-    closed_ts: Optional[int] = None
+    rr: float
+    setup_type: str
+    setup_reason: str
+    regime: str
+    score: float
+    order_type: str
+    expectancy_bucket: str = "UNKNOWN"
+
+
+@dataclass
+class LifecycleRow:
+    timestamp: int
+    symbol: str
+    side: str
+    setup_type: str
+    setup_reason: str
+    regime: str
+    score: float
+    rr: float
+    entry: float
+    sl: float
+    tp: float
+    status_before: str
+    status_after: str
+    trigger_price: float = 0.0
+    close_price: float = 0.0
     close_reason: str = ""
-    close_price: Optional[float] = None
     net_pnl_pct: float = 0.0
+    net_pnl_usdt: float = 0.0
     hold_minutes: float = 0.0
+    reject_reason: str = ""
+    cancel_reason: str = ""
+    order_type: str = "LIMIT"
+    expectancy_bucket: str = "UNKNOWN"
+    event_flags: str = ""
+    volume_24h_usdt: float = 0.0
+    spread_pct: float = 0.0
+    funding_rate_pct: float = 0.0
 
 
 def parse_ts(value: str) -> int:
@@ -45,221 +74,196 @@ def parse_ts(value: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def load_candles(path: str) -> List[Candle]:
-    candles = []
+def fetch_json(url: str) -> Any:
+    with urlopen(url) as resp:  # nosec - public market data
+        return json.loads(resp.read().decode("utf-8"))
 
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
 
-        for row in reader:
-            ts = (
-                row.get("timestamp")
-                or row.get("open_time")
-                or row.get("time")
-                or row.get("date")
-            )
+def select_symbol_universe(top_n: int, quote: str = "USDT") -> List[Dict[str, Any]]:
+    info = fetch_json("https://fapi.binance.com/fapi/v1/exchangeInfo")
+    tickers = fetch_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
+    ticker_map = {t["symbol"]: t for t in tickers}
+    selected = []
+    for s in info.get("symbols", []):
+        sym = s.get("symbol", "")
+        if s.get("status") != "TRADING" or s.get("contractType") != "PERPETUAL":
+            continue
+        if s.get("quoteAsset") != quote or not sym.endswith(quote):
+            continue
+        t = ticker_map.get(sym)
+        if not t:
+            continue
+        qv = float(t.get("quoteVolume", 0.0) or 0.0)
+        if qv <= 0:
+            continue
+        if not s.get("filters"):
+            continue
+        selected.append({"symbol": sym, "quoteVolume": qv})
+    selected.sort(key=lambda x: x["quoteVolume"], reverse=True)
+    return selected[:top_n]
 
-            candles.append(
-                Candle(
-                    timestamp=parse_ts(str(ts)),
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
-                    volume=float(row.get("volume", 0.0)),
-                )
-            )
 
-    candles.sort(key=lambda x: x.timestamp)
+def save_symbol_universe(path: str, universe: List[Dict[str, Any]]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["symbol", "quoteVolume"])
+        w.writeheader()
+        w.writerows(universe)
+
+
+def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> List[Candle]:
+    params = urlencode({"symbol": symbol, "interval": interval, "startTime": start_ms, "endTime": end_ms, "limit": 1500})
+    rows = fetch_json(f"https://fapi.binance.com/fapi/v1/klines?{params}")
+    return [Candle(timestamp=int(r[0]), open=float(r[1]), high=float(r[2]), low=float(r[3]), close=float(r[4]), volume=float(r[5])) for r in rows]
+
+
+def load_or_fetch_candles(symbol: str, interval: str, start_ms: int, end_ms: int, output_dir: str) -> List[Candle]:
+    path = os.path.join(output_dir, "candles", f"{symbol}_{interval}.csv")
+    if os.path.exists(path):
+        return load_candles(path, start_ms, end_ms)
+    candles = fetch_klines(symbol, interval, start_ms, end_ms)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["timestamp", "open", "high", "low", "close", "volume"])
+        w.writeheader()
+        for c in candles:
+            w.writerow(asdict(c))
     return candles
 
 
-def touched_entry(order: VirtualOrder, candle: Candle) -> bool:
-    return candle.low <= order.entry <= candle.high
+def load_candles(path: str, start_ms: int, end_ms: int) -> List[Candle]:
+    out = []
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            ts = parse_ts(str(row.get("timestamp") or row.get("open_time") or row.get("time") or row.get("date")))
+            if start_ms <= ts <= end_ms:
+                out.append(Candle(ts, float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row.get("volume", 0.0))))
+    out.sort(key=lambda x: x.timestamp)
+    return out
 
 
-def hit_tp(order: VirtualOrder, candle: Candle) -> bool:
-    if order.side == "LONG":
-        return candle.high >= order.tp
-    return candle.low <= order.tp
+def scan_symbol_backtest(symbol: str, candles: List[Candle], idx: int, context: Dict[str, Any]) -> Optional[CandidateOrder]:
+    if idx < 2:
+        return None
+    now = candles[idx]
+    prev = candles[idx - 1]
+    if now.close > prev.high:
+        entry = now.close
+        sl = min(now.low, prev.low)
+        tp = entry + 2 * (entry - sl)
+        return CandidateOrder(now.timestamp, symbol, "LONG", entry, sl, tp, 2.0, context.get("mode", "BACKTEST"), "BREAKOUT_UP", "TREND", 0.8, "MARKET")
+    return None
 
 
-def hit_sl(order: VirtualOrder, candle: Candle) -> bool:
-    if order.side == "LONG":
-        return candle.low <= order.sl
-    return candle.high >= order.sl
+def simulate_candidate(candidate: CandidateOrder, candles: List[Candle], idx: int, balance: float, risk_pct: float) -> LifecycleRow:
+    status_before = "CREATED"
+    triggered_ts = None
+    trigger_price = 0.0
+    if candidate.order_type in {"MARKET", "BREAKOUT", "IMMEDIATE"}:
+        status_after = "TRIGGERED"
+        triggered_ts = candles[idx].timestamp
+        trigger_price = candidate.entry
+        start_idx = idx
+    else:
+        status_after = "WAITING_ENTRY_ZONE"
+        start_idx = idx
+        for j in range(idx, len(candles)):
+            c = candles[j]
+            if c.low <= candidate.entry <= c.high:
+                status_after = "TRIGGERED"
+                triggered_ts = c.timestamp
+                trigger_price = candidate.entry
+                start_idx = j
+                break
+        if triggered_ts is None:
+            return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, status_before, "TIMEOUT", cancel_reason="TIMEOUT", order_type=candidate.order_type)
+
+    for j in range(start_idx, len(candles)):
+        c = candles[j]
+        hit_sl = c.low <= candidate.sl
+        hit_tp = c.high >= candidate.tp
+        if hit_sl and hit_tp:
+            hit_tp = False
+        if hit_sl:
+            pnl_pct = ((candidate.sl - candidate.entry) / candidate.entry) * 100
+            return finalize(candidate, status_before, "SL_HIT", trigger_price, candidate.sl, "SL_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp)
+        if hit_tp:
+            pnl_pct = ((candidate.tp - candidate.entry) / candidate.entry) * 100
+            return finalize(candidate, status_before, "TP_HIT", trigger_price, candidate.tp, "TP_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp)
+
+    c = candles[-1]
+    pnl_pct = ((c.close - candidate.entry) / candidate.entry) * 100
+    return finalize(candidate, status_before, "OPEN_AT_END", trigger_price, c.close, "BACKTEST_END", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp)
 
 
-def calc_pnl_pct(order: VirtualOrder, exit_price: float) -> float:
-    if order.side == "LONG":
-        return ((exit_price - order.entry) / order.entry) * 100
-    return ((order.entry - exit_price) / order.entry) * 100
-
-
-def simulate_order(
-    symbol: str,
-    candles: List[Candle],
-    side: str,
-    entry: float,
-    sl: float,
-    tp: float,
-    timeout_minutes: int = 240,
-    immediate: bool = False,
-) -> VirtualOrder:
-
-    order = VirtualOrder(
-        symbol=symbol,
-        side=side.upper(),
-        entry=entry,
-        sl=sl,
-        tp=tp,
-        created_ts=candles[0].timestamp,
-    )
-
-    risk = abs(entry - sl)
-    reward = abs(tp - entry)
-    order.rr = reward / risk if risk > 0 else 0.0
-
-    if risk <= 0:
-        order.status = "REJECTED"
-        order.close_reason = "INVALID_RISK"
-        return order
-
-    order.status = "WATCHING"
-
-    for candle in candles:
-        age_minutes = (candle.timestamp - order.created_ts) / 60000
-
-        if order.triggered_ts is None:
-            if age_minutes > timeout_minutes:
-                order.status = "CANCELLED"
-                order.close_reason = "TIMEOUT_NOT_TRIGGERED"
-                order.closed_ts = candle.timestamp
-                return order
-
-            if immediate or touched_entry(order, candle):
-                order.status = "POSITION_OPENED"
-                order.triggered_ts = candle.timestamp
-            else:
-                order.status = "WAITING_ENTRY_ZONE"
-                continue
-
-        # Conservative rule:
-        # If TP and SL happen in same candle, assume SL first.
-        if hit_sl(order, candle):
-            order.status = "SL_HIT"
-            order.close_reason = "SL_HIT"
-            order.close_price = order.sl
-            order.closed_ts = candle.timestamp
-            break
-
-        if hit_tp(order, candle):
-            order.status = "TP_HIT"
-            order.close_reason = "TP_HIT"
-            order.close_price = order.tp
-            order.closed_ts = candle.timestamp
-            break
-
-    if order.closed_ts is None:
-        last = candles[-1]
-        order.status = "OPEN_AT_END"
-        order.close_reason = "BACKTEST_END"
-        order.close_price = last.close
-        order.closed_ts = last.timestamp
-
-    order.net_pnl_pct = calc_pnl_pct(order, order.close_price)
-    order.hold_minutes = (
-        (order.closed_ts - order.triggered_ts) / 60000
-        if order.triggered_ts
-        else 0.0
-    )
-
-    return order
-
-
-def write_results(path: str, rows: List[VirtualOrder]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-
-    fields = list(asdict(rows[0]).keys())
-
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-
-        for row in rows:
-            writer.writerow(asdict(row))
-
-
-def write_summary(path: str, rows: List[VirtualOrder]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-
-    total = len(rows)
-    triggered = [r for r in rows if r.triggered_ts]
-    wins = [r for r in rows if r.status == "TP_HIT"]
-    losses = [r for r in rows if r.status == "SL_HIT"]
-
-    summary = {
-        "total_orders": total,
-        "triggered_orders": len(triggered),
-        "not_triggered_orders": total - len(triggered),
-        "tp_hits": len(wins),
-        "sl_hits": len(losses),
-        "win_rate": round(len(wins) / len(triggered) * 100, 2) if triggered else 0.0,
-        "avg_rr": round(sum(r.rr for r in rows) / total, 4) if total else 0.0,
-        "avg_pnl_pct": round(sum(r.net_pnl_pct for r in rows) / total, 4) if total else 0.0,
-        "total_pnl_pct": round(sum(r.net_pnl_pct for r in rows), 4),
-        "avg_hold_minutes": round(sum(r.hold_minutes for r in triggered) / len(triggered), 2)
-        if triggered
-        else 0.0,
-    }
-
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=summary.keys())
-        writer.writeheader()
-        writer.writerow(summary)
+def finalize(candidate, before, after, trigger_price, close_price, close_reason, pnl_pct, balance, risk_pct, triggered_ts, closed_ts):
+    risk_usdt = balance * (risk_pct / 100)
+    net_pnl_usdt = risk_usdt * (pnl_pct / 100)
+    hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
+    return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, before, after, trigger_price=trigger_price, close_price=close_price, close_reason=close_reason, net_pnl_pct=pnl_pct, net_pnl_usdt=net_pnl_usdt, hold_minutes=hold, order_type=candidate.order_type)
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    p = argparse.ArgumentParser()
+    p.add_argument("--start", required=True)
+    p.add_argument("--end", required=True)
+    p.add_argument("--top-n", type=int, default=100)
+    p.add_argument("--quote", default="USDT")
+    p.add_argument("--interval", default="1m")
+    p.add_argument("--output-dir", default="data/backtest")
+    p.add_argument("--mode", default="BACKTEST")
+    p.add_argument("--balance", type=float, default=1000)
+    p.add_argument("--risk-pct", type=float, default=1.0)
+    p.add_argument("--telegram", action="store_true")
+    args = p.parse_args()
 
-    parser.add_argument("--symbol", required=True)
-    parser.add_argument("--candles", required=True)
-    parser.add_argument("--side", required=True, choices=["LONG", "SHORT"])
-    parser.add_argument("--entry", type=float, required=True)
-    parser.add_argument("--sl", type=float, required=True)
-    parser.add_argument("--tp", type=float, required=True)
-    parser.add_argument("--timeout-minutes", type=int, default=240)
-    parser.add_argument("--immediate", action="store_true")
-    parser.add_argument("--output-dir", default="data/backtest")
+    start_ms, end_ms = parse_ts(args.start), parse_ts(args.end)
+    universe = select_symbol_universe(args.top_n, args.quote)
+    save_symbol_universe(os.path.join(args.output_dir, "symbol_universe.csv"), universe)
 
-    args = parser.parse_args()
+    candles_by_symbol = {}
+    for row in universe:
+        c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir)
+        if c:
+            candles_by_symbol[row["symbol"]] = c
 
-    candles = load_candles(args.candles)
+    lifecycle = []
+    candidates = []
+    rejected = []
+    open_rows = []
+    for symbol, candles in candles_by_symbol.items():
+        for i in range(len(candles)):
+            cand = scan_symbol_backtest(symbol, candles, i, {"mode": args.mode})
+            if not cand:
+                continue
+            candidates.append(cand)
+            if cand.rr < 1.0:
+                rejected.append({"timestamp": cand.timestamp, "symbol": symbol, "reject_reason": "LOW_EXPECTANCY"})
+                continue
+            row = simulate_candidate(cand, candles, i, args.balance, args.risk_pct)
+            lifecycle.append(row)
+            if row.status_after == "OPEN_AT_END":
+                open_rows.append(row)
 
-    if not candles:
-        raise RuntimeError("No candles loaded")
+    os.makedirs(args.output_dir, exist_ok=True)
+    for name, rows in [("order_lifecycle.csv", [asdict(x) for x in lifecycle]), ("order_candidates.csv", [asdict(x) for x in candidates]), ("rejected_orders.csv", rejected), ("open_at_end.csv", [asdict(x) for x in open_rows])]:
+        with open(os.path.join(args.output_dir, name), "w", newline="") as f:
+            if not rows:
+                f.write("")
+                continue
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader(); w.writerows(rows)
 
-    result = simulate_order(
-        symbol=args.symbol,
-        candles=candles,
-        side=args.side,
-        entry=args.entry,
-        sl=args.sl,
-        tp=args.tp,
-        timeout_minutes=args.timeout_minutes,
-        immediate=args.immediate,
-    )
-
-    lifecycle_path = os.path.join(args.output_dir, "order_lifecycle.csv")
-    summary_path = os.path.join(args.output_dir, "order_backtest_summary.csv")
-
-    write_results(lifecycle_path, [result])
-    write_summary(summary_path, [result])
-
-    print("Backtest complete")
-    print(f"Lifecycle: {lifecycle_path}")
-    print(f"Summary: {summary_path}")
-    print(result)
+    summary = {
+        "selected_symbols": len(universe), "total_candidates": len(candidates), "total_rejected": len(rejected), "total_orders": len(lifecycle),
+        "triggered_orders": sum(1 for r in lifecycle if r.status_after in {"TP_HIT", "SL_HIT", "OPEN_AT_END"}), "not_triggered_orders": sum(1 for r in lifecycle if r.status_after == "TIMEOUT"),
+        "tp_hits": sum(1 for r in lifecycle if r.status_after == "TP_HIT"), "sl_hits": sum(1 for r in lifecycle if r.status_after == "SL_HIT"), "open_at_end": len(open_rows),
+        "win_rate": 0.0 if not lifecycle else sum(1 for r in lifecycle if r.status_after == "TP_HIT") / len(lifecycle), "avg_rr": 0.0 if not lifecycle else sum(r.rr for r in lifecycle)/len(lifecycle),
+        "avg_pnl_pct": 0.0 if not lifecycle else sum(r.net_pnl_pct for r in lifecycle)/len(lifecycle), "total_pnl_pct": sum(r.net_pnl_pct for r in lifecycle), "total_net_pnl_usdt": sum(r.net_pnl_usdt for r in lifecycle),
+        "avg_hold_minutes": 0.0 if not lifecycle else sum(r.hold_minutes for r in lifecycle)/len(lifecycle), "performance_by_symbol": {}, "performance_by_regime": {}, "performance_by_setup_type": {}, "rejection_counts": {}, "cancel_counts": {},
+    }
+    with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(summary.keys())); w.writeheader(); w.writerow(summary)
 
 
 if __name__ == "__main__":

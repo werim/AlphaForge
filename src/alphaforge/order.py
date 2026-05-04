@@ -40,24 +40,36 @@ def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_
 
 def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], *, fail_closed_live: bool = True, mode: str = "live") -> tuple[bool, dict[str, Any]]:
     brain = AIBrain(session)
+    execution_ctx, missing_execution_ctx = _resolve_execution_ctx(market_ctx)
+    effective_rr, execution_flags = _effective_rr(order, execution_ctx)
+    if missing_execution_ctx:
+        execution_flags.append("EXECUTION_CTX_MISSING")
+    base_payload = dict(order)
+    base_payload.update({
+        "effective_rr": effective_rr,
+        "expected_slippage_pct": float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0),
+        "spread_pct": float(execution_ctx.get("spread_pct", 0.0) or 0.0),
+        "latency_ms": int(float(execution_ctx.get("latency_ms", 0) or 0)),
+        "orderbook_imbalance": float(execution_ctx.get("orderbook_imbalance", 0.0) or 0.0),
+        "funding_rate_pct": float(execution_ctx.get("funding_rate_pct", 0.0) or 0.0),
+        "volatility_regime": str(execution_ctx.get("volatility_regime", "unknown")),
+        "execution_flags": execution_flags,
+        "execution_ctx": execution_ctx,
+    })
     try:
         signal = _signal_adapter(order)
-        execution_ctx, missing_execution_ctx = _resolve_execution_ctx(market_ctx)
         enriched_market_ctx = {**dict(market_ctx), **execution_ctx}
 
         score, plan, explanation = brain.before_real_order(signal, enriched_market_ctx, regime_ctx, stats_ctx)
-        effective_rr, execution_flags = _effective_rr(order, execution_ctx)
-        if missing_execution_ctx:
-            execution_flags.append("EXECUTION_CTX_MISSING")
         blocked = _is_blocked(score, regime_ctx, stats_ctx) or effective_rr < MIN_RR_THRESHOLD
 
         qty = float(order.get("quantity", 0.0)) * _position_mult(score.total_score)
         slippage_penalty_factor = min(execution_ctx["expected_slippage_pct"] * 10.0, 0.9)
         qty *= max(0.0, 1.0 - slippage_penalty_factor)
 
-        payload = dict(order)
+        payload = dict(base_payload)
         payload["quantity"] = max(qty, 0.0)
-        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": effective_rr, "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx})
+        payload.update({"ai_score": score.total_score, "ai_reason": explanation})
         signal_id = save_signal(session, **signal)
         decision_id = save_order_decision(session, signal_id=signal_id, phase="real", decision="REJECTED" if blocked else plan.decision, order_type=plan.order_type, confidence=score.total_score, explanation=explanation, order_payload=payload, expected_slippage_pct=execution_ctx["expected_slippage_pct"], effective_rr=effective_rr)
         if decision_id:
@@ -67,8 +79,8 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
     except Exception as exc:
         logger.warning("AI real-order check failed: %s", exc)
         if mode == "live" and fail_closed_live:
-            return (False, dict(order))
-        return (True, dict(order))
+            return (False, base_payload)
+        return (True, base_payload)
 
 
 def after_position_close(session: Session, closed_trade: Mapping[str, Any], replay_ctx: Mapping[str, Any]) -> None:

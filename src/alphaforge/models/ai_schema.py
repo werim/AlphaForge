@@ -31,7 +31,13 @@ class OrderDecision(Base):
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     order_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     expected_slippage_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    spread_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    orderbook_imbalance: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    funding_rate_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    volatility_regime: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     effective_rr: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    execution_flags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 

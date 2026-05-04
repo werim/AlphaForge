@@ -19,7 +19,7 @@ jobs:
         run: |
           curl -v https://pypi.org
           dig pypi.org
-          ping -c 4 pypi.org
+          ping -c 4 pypi.org || true
 
       - name: Install dependencies
         run: |
