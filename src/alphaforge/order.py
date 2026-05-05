@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 MIN_RR_THRESHOLD = 1.1
 
 
+def normalize_execution_ctx(ctx: Mapping[str, Any] | None) -> dict[str, Any]:
+    base = dict(ctx or {})
+    return {
+        "expected_slippage_pct": float(base.get("expected_slippage_pct", 0.0) or 0.0),
+        "spread_pct": float(base.get("spread_pct", 0.0) or 0.0),
+        "latency_ms": int(base.get("latency_ms", 0) or 0),
+        "funding_rate_pct": float(base.get("funding_rate_pct", 0.0) or 0.0),
+    }
+
+
 class TradingMode(str, Enum):
     BACKTEST = "BACKTEST"
     PAPER = "PAPER"
@@ -303,10 +313,14 @@ def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_
     signal = _signal_adapter(candidate)
     score, plan, explanation = brain.before_virtual_order(signal, market_ctx, regime_ctx, stats_ctx)
     signal_id = save_signal(session, **signal)
-    decision_id = save_order_decision(session, signal_id=signal_id, phase="virtual", decision=plan.decision, order_type=plan.order_type, confidence=score.total_score, explanation=explanation, order_payload={"limit_price": plan.limit_price, "stop_price": plan.stop_price})
-    if decision_id:
-        save_ai_decision_features(session, decision_id=decision_id, features=score.components, penalties=score.penalties, reason_flags=score.reason_flags, execution_features={})
-    save_trade_lifecycle_event(session, signal_id=signal_id, event_type=f"before_virtual_{plan.decision.lower()}", payload={"order_type": plan.order_type})
+    virtual_exec_ctx = normalize_execution_ctx((market_ctx or {}).get("execution_ctx"))
+    try:
+        decision_id = save_order_decision(session, signal_id=signal_id, phase="virtual", decision=plan.decision, order_type=plan.order_type, confidence=score.total_score, explanation=explanation, order_payload={"limit_price": plan.limit_price, "stop_price": plan.stop_price, "execution_ctx": virtual_exec_ctx}, expected_slippage_pct=virtual_exec_ctx["expected_slippage_pct"], effective_rr=float(candidate.get("risk_reward", 1.0) or 1.0))
+        if decision_id:
+            save_ai_decision_features(session, decision_id=decision_id, features=score.components, penalties=score.penalties, reason_flags=score.reason_flags, execution_features=virtual_exec_ctx)
+        save_trade_lifecycle_event(session, signal_id=signal_id, event_type=f"before_virtual_{plan.decision.lower()}", payload={"order_type": plan.order_type})
+    except Exception as exc:
+        logger.warning("Persist failed: %s", exc)
     if plan.decision == "REJECTED":
         return None
     order = dict(candidate)
@@ -327,6 +341,7 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
     try:
         signal = _signal_adapter(order)
         execution_ctx, missing_execution_ctx = _resolve_execution_ctx(market_ctx)
+        ctx["execution_ctx"] = execution_ctx
         enriched_market_ctx = {**ctx, **execution_ctx}
 
         score, plan, explanation = brain.before_real_order(signal, enriched_market_ctx, regime_ctx, stats_ctx)
@@ -341,13 +356,13 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
 
         payload.update(dict(order))
         payload["quantity"] = max(qty, 0.0)
-        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 10), "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {}, "adjusted_risk_reward": round(effective_rr, 10), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
+        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 6), "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {}, "adjusted_risk_reward": round(effective_rr, 6), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
         payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx})
         if "HIGH_SLIPPAGE" in payload["execution_flags"]:
             payload["block_reason"] = "HIGH_SLIPPAGE"
             payload["reject_reason"] = "HIGH_SLIPPAGE"
         signal_id = save_signal(session, **signal)
-        decision_id = save_order_decision(session, signal_id=signal_id, phase="real", decision="REJECTED" if blocked else plan.decision, order_type=plan.order_type, confidence=score.total_score, explanation=explanation, order_payload=payload, expected_slippage_pct=execution_ctx["expected_slippage_pct"], effective_rr=effective_rr)
+        decision_id = save_order_decision(session, signal_id=signal_id, phase="real", decision="REJECTED" if blocked else plan.decision, order_type=plan.order_type, confidence=score.total_score, explanation=explanation, order_payload=payload, expected_slippage_pct=execution_ctx["expected_slippage_pct"], effective_rr=round(effective_rr, 6))
         if decision_id:
             save_ai_decision_features(session, decision_id=decision_id, features=score.components, penalties=score.penalties, reason_flags=score.reason_flags, execution_features=execution_ctx)
         save_trade_lifecycle_event(session, signal_id=signal_id, event_type="before_real_blocked" if blocked else "before_real_allowed", payload={"reason_flags": score.reason_flags, "execution_flags": execution_flags})
@@ -360,12 +375,6 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         if mode == "live" and fail_closed_live:
             return (False, normalize_execution_payload(safe_payload, order=order, ctx=ctx))
         return (True, normalize_execution_payload(safe_payload, order=order, ctx=ctx))
-        safe_payload = normalize_execution_payload(dict(order), order=order, ctx={"execution_ctx_missing": _resolve_execution_ctx(market_ctx)[1]})
-        if safe_payload["execution_ctx_missing"] and "EXECUTION_CTX_MISSING" not in safe_payload["execution_flags"]:
-            safe_payload["execution_flags"].append("EXECUTION_CTX_MISSING")
-        if mode == "live" and fail_closed_live:
-            return (False, safe_payload)
-        return (True, safe_payload)
 
 
 def after_position_close(session: Session, closed_trade: Mapping[str, Any], replay_ctx: Mapping[str, Any]) -> None:
@@ -390,20 +399,19 @@ def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any
     raw = market_ctx.get("execution_ctx")
     if isinstance(raw, Mapping):
         if len(raw) == 0:
-            return neutral_execution_context(), True
-        return dict(raw), False
+            return normalize_execution_ctx(neutral_execution_context()), True
+        return normalize_execution_ctx(raw), False
     if market_ctx:
-        return build_execution_context(market_ctx), False
-    return neutral_execution_context(), True
+        return normalize_execution_ctx(build_execution_context(market_ctx)), False
+    return normalize_execution_ctx(neutral_execution_context()), True
 
 
 def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float, list[str]]:
     rr = float(order.get("risk_reward", 1.0) or 1.0)
-    slippage_cost = float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0) * 100
-    spread_cost = float(execution_ctx.get("spread_pct", 0.0) or 0.0) * 100
-    effective = rr - slippage_cost - spread_cost
+    slippage = float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0)
+    effective = rr * (1 - slippage * 10)
     flags = []
-    if slippage_cost > 0.2:
+    if slippage > 0.02:
         flags.append("HIGH_SLIPPAGE")
     if float(execution_ctx.get("spread_pct", 0.0) or 0.0) > 0.002:
         flags.append("LOW_LIQUIDITY")
