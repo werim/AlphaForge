@@ -170,17 +170,23 @@ class AIBrain:
         self._upsert_expectancy("regime_expectancy_stats", "regime", regime, pnl)
         self._upsert_expectancy("symbol_expectancy_stats", "symbol", symbol, pnl)
 
+        execution_metrics = {
+            "expected_slippage_pct": float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0),
+            "filled_entry_price": closed_trade.get("filled_entry_price"),
+            "entry_price": closed_trade.get("entry_price"),
+        }
         self.session.execute(
             text(
                 """
-                INSERT INTO closed_trade_reviews (trade_id, symbol, review_payload, created_at)
-                VALUES (:trade_id, :symbol, :payload, :created_at)
+                INSERT INTO closed_trade_reviews (trade_id, symbol, review_payload, execution_metrics, created_at)
+                VALUES (:trade_id, :symbol, :payload, :execution_metrics, :created_at)
                 """
             ),
             {
                 "trade_id": str(closed_trade.get("trade_id", "")),
                 "symbol": symbol,
                 "payload": _json_dumps({"closed_trade": dict(closed_trade), "replay_ctx": dict(replay_ctx)}),
+                "execution_metrics": _json_dumps(execution_metrics),
                 "created_at": _now(),
             },
         )
@@ -201,8 +207,12 @@ class AIBrain:
         score_ctx = self.score_signal(signal, market_ctx, regime_ctx, stats_ctx)
         order_plan = self.choose_order_plan(signal, market_ctx, score_ctx)
         explanation = self.explain_decision(signal, score_ctx, order_plan)
-        self._persist_decision(signal, score_ctx, order_plan, explanation, phase)
-        self.session.commit()
+        try:
+            self._persist_decision(signal, score_ctx, order_plan, explanation, phase)
+            self.session.commit()
+        except Exception as exc:
+            self.session.rollback()
+            logger.warning("Persist failed: %s", exc)
         return score_ctx, order_plan, explanation
 
     def _persist_decision(self, signal: Mapping[str, Any], score_ctx: ScoreContext, order_plan: OrderPlan, explanation: str, phase: str) -> None:
@@ -227,8 +237,8 @@ class AIBrain:
             text(
                 """
                 INSERT INTO order_decisions
-                (signal_id, phase, decision, order_type, confidence, explanation, order_payload, created_at)
-                VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :created_at)
+                (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, effective_rr, created_at)
+                VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :effective_rr, :created_at)
                 RETURNING id
                 """
             ),
@@ -244,6 +254,8 @@ class AIBrain:
                     "stop_price": order_plan.stop_price,
                     "reason": order_plan.reason,
                 }),
+                "expected_slippage_pct": 0.0,
+                "effective_rr": float(signal.get("risk_reward", 1.0) or 1.0),
                 "created_at": _now(),
             },
         ).scalar_one()
