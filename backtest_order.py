@@ -4,9 +4,8 @@ import json
 import os
 from dataclasses import dataclass, asdict
 
-from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Mapping
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -64,9 +63,50 @@ class LifecycleRow:
     order_type: str = "LIMIT"
     expectancy_bucket: str = "UNKNOWN"
     event_flags: str = ""
-    volume_24h_usdt: float = 0.0
-    spread_pct: float = 0.0
-    funding_rate_pct: float = 0.0
+    volume_24h_usdt: Any = "UNAVAILABLE_BACKTEST"
+    spread_pct: Any = "UNAVAILABLE_BACKTEST"
+    funding_rate_pct: Any = "UNAVAILABLE_BACKTEST"
+
+
+def _bucket_expectancy(expectancy: Optional[float]) -> str:
+    if expectancy is None:
+        return "UNKNOWN"
+    if expectancy < 0.0:
+        return "NEGATIVE"
+    if expectancy < 0.05:
+        return "LOW"
+    if expectancy < 0.2:
+        return "MEDIUM"
+    return "HIGH"
+
+
+def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any]) -> Dict[str, Any]:
+    entry = now.close
+    sl = min(now.low, prev.low)
+    risk = max(entry - sl, 1e-9)
+    body = abs(now.close - now.open)
+    breakout_strength = max(0.0, (now.close - prev.high) / max(prev.high, 1e-9))
+    range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
+    rr = max(1.1, min(3.5, 1.2 + breakout_strength * 25.0 + body / max(now.open, 1e-9) * 8.0))
+    tp = entry + rr * risk
+    score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
+    expectancy = ((score / 10.0) - 0.5) * (rr - 1.0)
+    return {
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "rr": rr,
+        "score": score,
+        "setup_type": "BREAKOUT_UP",
+        "setup_reason": "CLOSE_ABOVE_PREV_HIGH",
+        "regime": "BREAKOUT" if breakout_strength > 0.002 else "TREND",
+        "expectancy": expectancy,
+        "expectancy_bucket": _bucket_expectancy(expectancy),
+        "side": "LONG",
+        "volume_24h_usdt": symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST"),
+        "spread_pct": "UNAVAILABLE_BACKTEST",
+        "funding_rate_pct": "UNAVAILABLE_BACKTEST",
+    }
 
 
 def parse_ts(value: str) -> int:
@@ -145,47 +185,49 @@ def load_candles(path: str, start_ms: int, end_ms: int) -> List[Candle]:
 
 
 def scan_symbol_backtest(symbol: str, candles: List[Candle], idx: int, context: Dict[str, Any]) -> Optional[CandidateOrder]:
+    OrderExecutionContext, TradingMode, run_order_cycle = _order_runtime()
     if idx < 2:
         return None
     now = candles[idx]
     prev = candles[idx - 1]
     if now.close <= prev.high:
         return None
-    entry = now.close
-    sl = min(now.low, prev.low)
-    tp = entry + 2 * (entry - sl)
-    mctx = {"entry": entry, "sl": sl, "tp": tp, "rr": 2.0, "score": 0.8, "setup_type": context.get("mode", "BACKTEST"), "setup_reason": "BREAKOUT_UP", "regime": "TREND", "expectancy": 0.1, "side": "LONG"}
+    mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}))
     ctx = OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=now.timestamp, symbol=symbol, balance=float(context.get("balance",1000)), risk_pct=float(context.get("risk_pct",1.0)), market_ctx=mctx)
     result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
     context["last_result"] = result
     if result.get("status") != "executed":
         return None
     c = result["candidate"]
-    return CandidateOrder(now.timestamp, symbol, c.side, c.entry, c.sl, c.tp, c.rr, c.setup_type, c.setup_reason, c.regime, c.score, c.order_type)
+    return CandidateOrder(now.timestamp, symbol, c.side, c.entry, c.sl, c.tp, c.rr, c.setup_type, c.setup_reason, c.regime, c.score, c.order_type, expectancy_bucket=mctx.get("expectancy_bucket", "UNKNOWN"))
 
 
-def simulate_candidate(candidate: CandidateOrder, candles: List[Candle], idx: int, balance: float, risk_pct: float) -> LifecycleRow:
-    status_before = "CREATED"
+def simulate_candidate(candidate: CandidateOrder, candles: List[Candle], idx: int, balance: float, risk_pct: float, market_ctx: Optional[Mapping[str, Any]] = None) -> List[LifecycleRow]:
+    status_before = "SIGNAL_CREATED"
+    market_ctx = market_ctx or {}
+    rows: List[LifecycleRow] = [LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "SIGNAL_CREATED", "WAITING_ENTRY_ZONE", order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"))]
     triggered_ts = None
     trigger_price = 0.0
     if candidate.order_type in {"MARKET", "BREAKOUT", "IMMEDIATE"}:
-        status_after = "TRIGGERED"
         triggered_ts = candles[idx].timestamp
         trigger_price = candidate.entry
         start_idx = idx
+        rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
+        rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "ENTRY_TRIGGERED", "ORDER_PLACED", trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
     else:
-        status_after = "WAITING_ENTRY_ZONE"
         start_idx = idx
         for j in range(idx, len(candles)):
             c = candles[j]
             if c.low <= candidate.entry <= c.high:
-                status_after = "TRIGGERED"
                 triggered_ts = c.timestamp
                 trigger_price = candidate.entry
                 start_idx = j
+                rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
+                rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "ENTRY_TRIGGERED", "ORDER_PLACED", trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
                 break
         if triggered_ts is None:
-            return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, status_before, "TIMEOUT", cancel_reason="TIMEOUT", order_type=candidate.order_type)
+            rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "WAITING_ENTRY_ZONE", "EXPIRED", cancel_reason="TIMEOUT", order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
+            return rows
 
     for j in range(start_idx, len(candles)):
         c = candles[j]
@@ -195,21 +237,25 @@ def simulate_candidate(candidate: CandidateOrder, candles: List[Candle], idx: in
             hit_tp = False
         if hit_sl:
             pnl_pct = ((candidate.sl - candidate.entry) / candidate.entry) * 100
-            return finalize(candidate, status_before, "SL_HIT", trigger_price, candidate.sl, "SL_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp)
+            rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, candidate.sl, "SL_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx))
+            return rows
         if hit_tp:
             pnl_pct = ((candidate.tp - candidate.entry) / candidate.entry) * 100
-            return finalize(candidate, status_before, "TP_HIT", trigger_price, candidate.tp, "TP_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp)
+            rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, candidate.tp, "TP_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx))
+            return rows
 
     c = candles[-1]
     pnl_pct = ((c.close - candidate.entry) / candidate.entry) * 100
-    return finalize(candidate, status_before, "OPEN_AT_END", trigger_price, c.close, "BACKTEST_END", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp)
+    rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, c.close, "OPEN_AT_END", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx))
+    return rows
 
 
-def finalize(candidate, before, after, trigger_price, close_price, close_reason, pnl_pct, balance, risk_pct, triggered_ts, closed_ts):
+def finalize(candidate, before, after, trigger_price, close_price, close_reason, pnl_pct, balance, risk_pct, triggered_ts, closed_ts, market_ctx: Optional[Mapping[str, Any]] = None):
+    market_ctx = market_ctx or {}
     risk_usdt = balance * (risk_pct / 100)
     net_pnl_usdt = risk_usdt * (pnl_pct / 100)
     hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
-    return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, before, after, trigger_price=trigger_price, close_price=close_price, close_reason=close_reason, net_pnl_pct=pnl_pct, net_pnl_usdt=net_pnl_usdt, hold_minutes=hold, order_type=candidate.order_type)
+    return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, before, after, trigger_price=trigger_price, close_price=close_price, close_reason=close_reason, net_pnl_pct=pnl_pct, net_pnl_usdt=net_pnl_usdt, hold_minutes=hold, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"))
 
 
 def main():
@@ -231,6 +277,7 @@ def main():
     save_symbol_universe(os.path.join(args.output_dir, "symbol_universe.csv"), universe)
 
     candles_by_symbol = {}
+    symbol_meta_by_symbol = {row["symbol"]: row for row in universe}
     for row in universe:
         c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir)
         if c:
@@ -252,7 +299,8 @@ def main():
     rejection_counts: Dict[str, int] = {}
     for symbol, candles in candles_by_symbol.items():
         for i in range(len(candles)):
-            scan_ctx = {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct, "recent_stats": recent_stats}
+            symbol_meta = symbol_meta_by_symbol.get(symbol, {})
+            scan_ctx = {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct, "recent_stats": recent_stats, "symbol_meta": symbol_meta}
             cand = scan_symbol_backtest(symbol, candles, i, scan_ctx)
             result = scan_ctx.get("last_result", {})
             if result:
@@ -260,7 +308,7 @@ def main():
                     reason = result.get("reason", "UNKNOWN")
                     rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
                     diagnostics = result.get("diagnostics", {})
-                    rejected.append({
+                    rejected_row = {
                         "timestamp": candles[i].timestamp,
                         "symbol": symbol,
                         "side": (diagnostics.get("side") or "LONG"),
@@ -273,21 +321,24 @@ def main():
                         "quality_score": diagnostics.get("quality_score", 0.0),
                         "reject_reason": reason,
                         "diagnostics": json.dumps(diagnostics, sort_keys=True),
-                    })
+                    }
+                    rejected.append(rejected_row)
+                    lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=(diagnostics.get("side") or "LONG"), setup_type=diagnostics.get("setup_type", ""), setup_reason=diagnostics.get("setup_reason", ""), regime=diagnostics.get("regime", ""), score=diagnostics.get("score", 0.0), rr=diagnostics.get("rr", 0.0), entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type="N/A", expectancy_bucket=_bucket_expectancy(diagnostics.get("expectancy")), volume_24h_usdt=symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST"), spread_pct="UNAVAILABLE_BACKTEST", funding_rate_pct="UNAVAILABLE_BACKTEST"))
             if not cand:
                 continue
             candidates.append(cand)
-            row = simulate_candidate(cand, candles, i, args.balance, args.risk_pct)
-            lifecycle.append(row)
+            sim_rows = simulate_candidate(cand, candles, i, args.balance, args.risk_pct, market_ctx={"volume_24h_usdt": symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST"), "spread_pct": "UNAVAILABLE_BACKTEST", "funding_rate_pct": "UNAVAILABLE_BACKTEST"})
+            lifecycle.extend(sim_rows)
             recent_stats["last_trade_ts_by_symbol"][symbol] = candles[i].timestamp
             recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
             recent_stats["global_trades_today"] += 1
-            if row.status_after == "OPEN_AT_END":
-                open_rows.append(row)
+            for sim_row in sim_rows:
+                if sim_row.close_reason == "OPEN_AT_END":
+                    open_rows.append(sim_row)
 
     os.makedirs(args.output_dir, exist_ok=True)
     candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]
-    for name, rows in [("order_lifecycle.csv", [asdict(x) for x in lifecycle]), ("order_candidates.csv", candidate_rows), ("rejected_orders.csv", rejected), ("open_at_end.csv", [asdict(x) for x in open_rows])]:
+    for name, rows in [("order_lifecycle.csv", [asdict(x) for x in lifecycle]), ("order_candidates.csv", candidate_rows), ("open_at_end.csv", [asdict(x) for x in open_rows])]:
         with open(os.path.join(args.output_dir, name), "w", newline="") as f:
             if not rows:
                 f.write("")
@@ -297,9 +348,9 @@ def main():
 
     summary = {
         "selected_symbols": len(universe), "total_candidates": len(candidates) + len(rejected), "total_rejected": len(rejected), "rejection_rate": (0.0 if (len(candidates)+len(rejected)) == 0 else len(rejected)/(len(candidates)+len(rejected))), "total_orders": len(lifecycle),
-        "triggered_orders": sum(1 for r in lifecycle if r.status_after in {"TP_HIT", "SL_HIT", "OPEN_AT_END"}), "not_triggered_orders": sum(1 for r in lifecycle if r.status_after == "TIMEOUT"),
-        "tp_hits": sum(1 for r in lifecycle if r.status_after == "TP_HIT"), "sl_hits": sum(1 for r in lifecycle if r.status_after == "SL_HIT"), "open_at_end": len(open_rows),
-        "win_rate": 0.0 if not lifecycle else sum(1 for r in lifecycle if r.status_after == "TP_HIT") / len(lifecycle), "avg_rr": 0.0 if not lifecycle else sum(r.rr for r in lifecycle)/len(lifecycle),
+        "triggered_orders": sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED"), "not_triggered_orders": sum(1 for r in lifecycle if r.status_after == "EXPIRED"),
+        "tp_hits": sum(1 for r in lifecycle if r.close_reason == "TP_HIT"), "sl_hits": sum(1 for r in lifecycle if r.close_reason == "SL_HIT"), "open_at_end": len(open_rows),
+        "win_rate": 0.0 if not lifecycle else sum(1 for r in lifecycle if r.close_reason == "TP_HIT") / max(1, sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED")), "avg_rr": 0.0 if not lifecycle else sum(r.rr for r in lifecycle)/len(lifecycle),
         "avg_pnl_pct": 0.0 if not lifecycle else sum(r.net_pnl_pct for r in lifecycle)/len(lifecycle), "total_pnl_pct": sum(r.net_pnl_pct for r in lifecycle), "total_net_pnl_usdt": sum(r.net_pnl_usdt for r in lifecycle),
         "avg_hold_minutes": 0.0 if not lifecycle else sum(r.hold_minutes for r in lifecycle)/len(lifecycle), "performance_by_symbol": {}, "performance_by_regime": {}, "performance_by_setup_type": {}, "rejection_counts": json.dumps(rejection_counts, sort_keys=True), "cancel_counts": {},
     }
@@ -309,3 +360,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+def _order_runtime():
+    from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
+    return OrderExecutionContext, TradingMode, run_order_cycle
+    OrderExecutionContext, TradingMode, run_order_cycle = _order_runtime()
