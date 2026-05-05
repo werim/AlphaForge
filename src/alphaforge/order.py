@@ -345,7 +345,10 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         enriched_market_ctx = {**ctx, **execution_ctx}
 
         score, plan, explanation = brain.before_real_order(signal, enriched_market_ctx, regime_ctx, stats_ctx)
-        effective_rr, execution_flags = _effective_rr(order, execution_ctx)
+        rr = float(order.get("risk_reward", 1.0) or 1.0)
+        slippage = float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0)
+        effective_rr = rr * (1 - slippage * 10)
+        _, execution_flags = _effective_rr(order, execution_ctx)
         if missing_execution_ctx:
             execution_flags.append("EXECUTION_CTX_MISSING")
         blocked = _is_blocked(score, regime_ctx, stats_ctx) or effective_rr < MIN_RR_THRESHOLD
@@ -369,12 +372,12 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         return (not blocked, normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx}))
     except Exception as exc:
         logger.warning("AI real-order check failed: %s", exc)
-        safe_payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": _resolve_execution_ctx(market_ctx)[1]})
-        if safe_payload["execution_ctx_missing"] and "EXECUTION_CTX_MISSING" not in safe_payload["execution_flags"]:
+        missing_execution_ctx = _resolve_execution_ctx(market_ctx)[1]
+        safe_payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx})
+        safe_payload.setdefault("execution_flags", [])
+        if missing_execution_ctx and "EXECUTION_CTX_MISSING" not in safe_payload["execution_flags"]:
             safe_payload["execution_flags"].append("EXECUTION_CTX_MISSING")
-        if mode == "live" and fail_closed_live:
-            return (False, normalize_execution_payload(safe_payload, order=order, ctx=ctx))
-        return (True, normalize_execution_payload(safe_payload, order=order, ctx=ctx))
+        return (False if (mode == "live" and fail_closed_live) else True, safe_payload)
 
 
 def after_position_close(session: Session, closed_trade: Mapping[str, Any], replay_ctx: Mapping[str, Any]) -> None:
