@@ -309,9 +309,10 @@ def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContex
     elif ctx.mode == TradingMode.PAPER:
         result = {"type": "paper", "candidate": candidate, "paper_balance": ctx.balance}
     else:
-        bal_fn: Callable[[], float] = ctx.storage["real_balance_fetcher"]
+        bal_fn = ctx.storage.get("real_balance_fetcher")
         ord_fn: Callable[[OrderCandidate], Mapping[str, Any]] = ctx.storage["binance_place_order"]
-        _ = bal_fn()
+        if callable(bal_fn):
+            _ = bal_fn()
         result = dict(ord_fn(candidate))
         result["type"] = "live"
     if ctx.allow_telegram and "telegram_sender" in ctx.storage:
@@ -326,7 +327,7 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
     if isinstance(decision, OrderRejection):
         _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
-        return {"status": "rejected", "reason": decision.reject_reason}
+        return {"status": "rejected", "candidate": None, "rejection_reason": decision.reject_reason, "execution": None}
     session = ctx.storage.get("session")
     if decision.expectancy is None and isinstance(session, Session):
         setup_exp = fetch_expectancy_stat(session, "setup_expectancy_stats", "setup", decision.setup_type)
@@ -340,9 +341,9 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     if not quality.accepted:
         ctx.diagnostics.update(quality.diagnostics)
         _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, quality.reject_reason)
-        return {"status": "rejected", "reason": quality.reject_reason, "diagnostics": quality.diagnostics}
+        return {"status": "rejected", "candidate": decision, "rejection_reason": quality.reject_reason, "execution": None, "diagnostics": quality.diagnostics}
     execution = execute_order_candidate(decision, ctx)
-    return {"status": "executed", "execution": execution, "candidate": decision}
+    return {"status": "executed", "candidate": decision, "rejection_reason": "", "execution": execution}
 
 # Existing functions kept below
 
