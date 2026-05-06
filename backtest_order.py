@@ -195,8 +195,6 @@ def scan_symbol_backtest(symbol: str, candles: List[Candle], idx: int, context: 
         return None
     now = candles[idx]
     prev = candles[idx - 1]
-    if now.close <= prev.high:
-        return None
     mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}))
     ctx = OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=now.timestamp, symbol=symbol, balance=float(context.get("balance",1000)), risk_pct=float(context.get("risk_pct",1.0)), market_ctx=mctx)
     result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
@@ -292,8 +290,9 @@ def simulate_rejected_counterfactual(candidate: CandidateOrder, candles: List[Ca
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--start", required=True)
-    p.add_argument("--end", required=True)
+    p.add_argument("--start")
+    p.add_argument("--end")
+    p.add_argument("--last-n-days", type=int, default=7)
     p.add_argument("--top-n", type=int, default=100)
     p.add_argument("--quote", default="USDT")
     p.add_argument("--interval", default="1m")
@@ -304,7 +303,11 @@ def main():
     p.add_argument("--telegram", action="store_true")
     args = p.parse_args()
 
-    start_ms, end_ms = parse_ts(args.start), parse_ts(args.end)
+    now = datetime.now(timezone.utc)
+    default_end = int(now.timestamp() * 1000)
+    default_start = int((now.timestamp() - args.last_n_days * 86400) * 1000)
+    start_ms = parse_ts(args.start) if args.start else default_start
+    end_ms = parse_ts(args.end) if args.end else default_end
     universe = select_symbol_universe(args.top_n, args.quote)
     save_symbol_universe(os.path.join(args.output_dir, "symbol_universe.csv"), universe)
 
@@ -365,7 +368,7 @@ def main():
             recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
             recent_stats["global_trades_today"] += 1
             for sim_row in sim_rows:
-                if sim_row.close_reason == "OPEN_AT_END":
+                if sim_row.close_reason == "TIMEOUT":
                     open_rows.append(sim_row)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -380,7 +383,7 @@ def main():
 
     summary = {
         "selected_symbols": len(universe), "total_candidates": len(candidates) + len(rejected), "total_rejected": len(rejected), "rejection_rate": (0.0 if (len(candidates)+len(rejected)) == 0 else len(rejected)/(len(candidates)+len(rejected))), "total_orders": len(lifecycle),
-        "triggered_orders": sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED"), "not_triggered_orders": sum(1 for r in lifecycle if r.status_after == "EXPIRED"),
+        "triggered_orders": sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED"), "not_triggered_orders": sum(1 for r in lifecycle if r.status_after == "ENTRY_TIMEOUT"),
         "tp_hits": sum(1 for r in lifecycle if r.close_reason == "TP_HIT"), "sl_hits": sum(1 for r in lifecycle if r.close_reason == "SL_HIT"), "open_at_end": len(open_rows),
         "win_rate": 0.0 if not lifecycle else sum(1 for r in lifecycle if r.close_reason == "TP_HIT") / max(1, sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED")), "avg_rr": 0.0 if not lifecycle else sum(r.rr for r in lifecycle)/len(lifecycle),
         "avg_pnl_pct": 0.0 if not lifecycle else sum(r.net_pnl_pct for r in lifecycle)/len(lifecycle), "total_pnl_pct": sum(r.net_pnl_pct for r in lifecycle), "total_net_pnl_usdt": sum(r.net_pnl_usdt for r in lifecycle),

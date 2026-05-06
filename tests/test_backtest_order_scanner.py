@@ -45,6 +45,25 @@ def test_scan_creates_virtual_candidate(monkeypatch):
     assert c.score > 0
 
 
+def test_scan_routes_non_breakout_bar_through_order_cycle(monkeypatch):
+    class _Mode:
+        BACKTEST = "BACKTEST"
+    class _Ctx:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+    seen = {"called": 0}
+    def _fake_cycle(ctx, recent_stats=None):
+        seen["called"] += 1
+        class _C:
+            side = "LONG"; entry = ctx.market_ctx["entry"]; sl = ctx.market_ctx["sl"]; tp = ctx.market_ctx["tp"]; rr = ctx.market_ctx["rr"]; setup_type = "BREAKOUT_UP"; setup_reason = "CLOSE_ABOVE_PREV_HIGH"; regime = ctx.market_ctx["regime"]; score = ctx.market_ctx["score"]; order_type = "LIMIT"
+        return {"status": "executed", "candidate": _C()}
+    monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, _fake_cycle))
+    candles = [bo.Candle(1, 1, 1.1, 0.9, 1.0, 1), bo.Candle(2, 1, 1.1, 0.9, 1.0, 1), bo.Candle(3, 1.0, 1.05, 0.95, 1.0, 1)]
+    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, {"mode": "BACKTEST"})
+    assert seen["called"] == 1
+    assert c is not None
+
+
 def test_expectancy_rejection_written(tmp_path: Path):
     c = bo.CandidateOrder(1, "S", "LONG", 1, 0.9, 1.05, 0.5, "BACKTEST", "R", "X", 0.5, "LIMIT")
     rejects = []
