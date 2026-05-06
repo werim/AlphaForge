@@ -1,4 +1,5 @@
 from alphaforge.order import OrderCandidate, OrderExecutionContext, TradingMode, evaluate_trade_quality, run_order_cycle
+from alphaforge.order import compute_adaptive_thresholds
 
 
 def base_candidate():
@@ -85,3 +86,15 @@ def test_run_order_cycle_does_not_execute_rejected_candidate():
 def test_backtest_rejected_orders_count_increases():
     r=run_order_cycle(OrderExecutionContext(mode=TradingMode.BACKTEST,timestamp=1,symbol="BTCUSDT",balance=1,risk_pct=1,market_ctx={"entry":100,"sl":99.95,"tp":102,"rr":2.5,"score":9,"setup_type":"TREND_CONTINUATION_LONG","setup_reason":"x","regime":"TREND","expectancy":0.2,"side":"LONG","volatility_regime":"normal"}))
     assert r["status"]=="rejected"
+
+
+def test_consecutive_sl_increases_thresholds():
+    t = compute_adaptive_thresholds({"consecutive_sl_count": 5})
+    assert t["min_score"] == 9.0
+    assert t["min_rr"] == 1.8
+
+
+def test_consecutive_tp_decreases_thresholds():
+    t = compute_adaptive_thresholds({"consecutive_tp_count": 5})
+    assert t["min_score"] == 6.5
+    assert t["min_rr"] == 1.2

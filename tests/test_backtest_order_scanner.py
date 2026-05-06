@@ -90,7 +90,15 @@ def test_open_at_end():
     c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 15, 5, "BACKTEST", "R", "X", 1, "MARKET")
     rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 10.5, 9.8, 10.2, 1), bo.Candle(2, 10.2, 10.4, 10.0, 10.3, 1)], 0, 1000, 1)
     assert rows[-1].status_after == "POSITION_CLOSED"
-    assert rows[-1].close_reason == "OPEN_AT_END"
+    assert rows[-1].close_reason == "TIMEOUT"
+
+
+def test_rejected_counterfactual_simulation():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(1, 10, 10.1, 9.9, 10, 1), bo.Candle(2, 10, 11.2, 9.9, 11, 1)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0)
+    assert sim["would_trigger"] is True
+    assert sim["would_tp_hit"] is True
 
 
 def test_score_varies_by_market_conditions():

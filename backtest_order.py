@@ -66,6 +66,11 @@ class LifecycleRow:
     volume_24h_usdt: Any = "UNAVAILABLE_BACKTEST"
     spread_pct: Any = "UNAVAILABLE_BACKTEST"
     funding_rate_pct: Any = "UNAVAILABLE_BACKTEST"
+    mfe: float = 0.0
+    mae: float = 0.0
+    would_tp_hit: bool = False
+    would_sl_hit: bool = False
+    would_trigger: bool = False
 
 
 def _bucket_expectancy(expectancy: Optional[float]) -> str:
@@ -226,36 +231,63 @@ def simulate_candidate(candidate: CandidateOrder, candles: List[Candle], idx: in
                 rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "ENTRY_TRIGGERED", "ORDER_PLACED", trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
                 break
         if triggered_ts is None:
-            rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "WAITING_ENTRY_ZONE", "EXPIRED", cancel_reason="TIMEOUT", order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
+            rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "WAITING_ENTRY_ZONE", "ENTRY_TIMEOUT", cancel_reason="TIMEOUT", order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
             return rows
 
+    mfe = 0.0
+    mae = 0.0
+    tp_distance = max(candidate.tp - candidate.entry, 1e-9)
+    sl_distance = max(candidate.entry - candidate.sl, 1e-9)
     for j in range(start_idx, len(candles)):
         c = candles[j]
+        mfe = max(mfe, c.high - candidate.entry)
+        mae = max(mae, candidate.entry - c.low)
         hit_sl = c.low <= candidate.sl
         hit_tp = c.high >= candidate.tp
         if hit_sl and hit_tp:
             hit_tp = False
         if hit_sl:
             pnl_pct = ((candidate.sl - candidate.entry) / candidate.entry) * 100
-            rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, candidate.sl, "SL_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx))
+            rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, candidate.sl, "SL_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx, mfe / tp_distance, mae / sl_distance))
             return rows
         if hit_tp:
             pnl_pct = ((candidate.tp - candidate.entry) / candidate.entry) * 100
-            rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, candidate.tp, "TP_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx))
+            rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, candidate.tp, "TP_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx, mfe / tp_distance, mae / sl_distance))
             return rows
 
     c = candles[-1]
     pnl_pct = ((c.close - candidate.entry) / candidate.entry) * 100
-    rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, c.close, "OPEN_AT_END", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx))
+    rows.append(finalize(candidate, "ORDER_PLACED", "POSITION_CLOSED", trigger_price, c.close, "TIMEOUT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx, mfe / tp_distance, mae / sl_distance))
     return rows
 
 
-def finalize(candidate, before, after, trigger_price, close_price, close_reason, pnl_pct, balance, risk_pct, triggered_ts, closed_ts, market_ctx: Optional[Mapping[str, Any]] = None):
+def finalize(candidate, before, after, trigger_price, close_price, close_reason, pnl_pct, balance, risk_pct, triggered_ts, closed_ts, market_ctx: Optional[Mapping[str, Any]] = None, mfe: float = 0.0, mae: float = 0.0):
     market_ctx = market_ctx or {}
     risk_usdt = balance * (risk_pct / 100)
     net_pnl_usdt = risk_usdt * (pnl_pct / 100)
     hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
-    return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, before, after, trigger_price=trigger_price, close_price=close_price, close_reason=close_reason, net_pnl_pct=pnl_pct, net_pnl_usdt=net_pnl_usdt, hold_minutes=hold, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"))
+    return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, before, after, trigger_price=trigger_price, close_price=close_price, close_reason=close_reason, net_pnl_pct=pnl_pct, net_pnl_usdt=net_pnl_usdt, hold_minutes=hold, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), mfe=mfe, mae=mae)
+
+
+def simulate_rejected_counterfactual(candidate: CandidateOrder, candles: List[Candle], idx: int) -> dict[str, Any]:
+    would_trigger = False
+    would_tp = False
+    would_sl = False
+    mfe = 0.0
+    mae = 0.0
+    for c in candles[idx:]:
+        if c.low <= candidate.entry <= c.high:
+            would_trigger = True
+        if would_trigger:
+            mfe = max(mfe, c.high - candidate.entry)
+            mae = max(mae, candidate.entry - c.low)
+            if c.high >= candidate.tp:
+                would_tp = True
+                break
+            if c.low <= candidate.sl:
+                would_sl = True
+                break
+    return {"would_trigger": would_trigger, "would_tp_hit": would_tp, "would_sl_hit": would_sl, "max_favorable_excursion": mfe, "max_adverse_excursion": mae}
 
 
 def main():
