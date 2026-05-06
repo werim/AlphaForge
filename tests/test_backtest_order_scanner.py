@@ -129,3 +129,14 @@ def test_score_varies_by_market_conditions():
 def test_no_real_binance_orders_called():
     # scanner uses public endpoints only and has no order placement function
     assert not hasattr(bo, "create_order")
+
+
+def test_recent_stats_updates_streaks_and_winrate():
+    stats = {"consecutive_sl_count": 0, "consecutive_tp_count": 0, "outcomes": []}
+    bo._update_recent_stats_after_close(stats, "BTCUSDT", "SL_HIT")
+    assert stats["consecutive_sl_count"] == 1
+    assert stats["consecutive_tp_count"] == 0
+    bo._update_recent_stats_after_close(stats, "BTCUSDT", "TP_HIT")
+    assert stats["consecutive_sl_count"] == 0
+    assert stats["consecutive_tp_count"] == 1
+    assert 0.0 <= stats["rolling_winrate"] <= 1.0

@@ -288,6 +288,21 @@ def simulate_rejected_counterfactual(candidate: CandidateOrder, candles: List[Ca
     return {"would_trigger": would_trigger, "would_tp_hit": would_tp, "would_sl_hit": would_sl, "max_favorable_excursion": mfe, "max_adverse_excursion": mae}
 
 
+def _update_recent_stats_after_close(recent_stats: Dict[str, Any], symbol: str, close_reason: str) -> None:
+    if close_reason == "SL_HIT":
+        recent_stats["consecutive_sl_count"] = int(recent_stats.get("consecutive_sl_count", 0) or 0) + 1
+        recent_stats["consecutive_tp_count"] = 0
+    elif close_reason == "TP_HIT":
+        recent_stats["consecutive_tp_count"] = int(recent_stats.get("consecutive_tp_count", 0) or 0) + 1
+        recent_stats["consecutive_sl_count"] = 0
+    outcomes = recent_stats.setdefault("outcomes", [])
+    if close_reason in {"TP_HIT", "SL_HIT"}:
+        outcomes.append(1 if close_reason == "TP_HIT" else 0)
+    window = int(recent_stats.get("rolling_window", 20) or 20)
+    recent = outcomes[-window:]
+    recent_stats["rolling_winrate"] = (sum(recent) / len(recent)) if recent else 0.0
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--start")
@@ -330,6 +345,10 @@ def main():
         "global_loss_streak": 0,
         "symbol_loss_block_until": {},
         "global_loss_block_until": 0,
+        "consecutive_sl_count": 0,
+        "consecutive_tp_count": 0,
+        "rolling_winrate": 0.0,
+        "outcomes": [],
     }
     rejection_counts: Dict[str, int] = {}
     for symbol, candles in candles_by_symbol.items():
@@ -370,6 +389,8 @@ def main():
             for sim_row in sim_rows:
                 if sim_row.close_reason == "TIMEOUT":
                     open_rows.append(sim_row)
+                if sim_row.status_after == "POSITION_CLOSED":
+                    _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
 
     os.makedirs(args.output_dir, exist_ok=True)
     candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]

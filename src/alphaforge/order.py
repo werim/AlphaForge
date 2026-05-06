@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from alphaforge.ai_brain import AIBrain
 from alphaforge.execution import build_execution_context, neutral_execution_context
 from alphaforge.persistence import (
+    fetch_expectancy_stat,
     save_ai_decision_features,
     save_closed_trade_review,
     save_order_decision,
@@ -211,7 +212,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         reject_reason, failed_filter = "RR_TOO_LOW", "rr"
     elif cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
         reject_reason, failed_filter = "EXPECTANCY_MISSING", "expectancy"
-    elif expectancy_val is not None and expectancy_val <= float(cfg["MIN_EXPECTANCY"]):
+    elif expectancy_val is not None and expectancy_val < float(cfg["MIN_EXPECTANCY"]):
         reject_reason, failed_filter = "NEGATIVE_EXPECTANCY", "expectancy"
     elif cfg["BLOCK_CHOP_MARKET"] and any("CHOP" in f for f in pattern_flags):
         reject_reason, failed_filter = "CHOP_MARKET_BLOCK", "pattern_flags"
@@ -326,6 +327,15 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     if isinstance(decision, OrderRejection):
         _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
         return {"status": "rejected", "reason": decision.reject_reason}
+    session = ctx.storage.get("session")
+    if decision.expectancy is None and isinstance(session, Session):
+        setup_exp = fetch_expectancy_stat(session, "setup_expectancy_stats", "setup", decision.setup_type)
+        regime_exp = fetch_expectancy_stat(session, "regime_expectancy_stats", "regime", decision.regime)
+        if setup_exp is not None or regime_exp is not None:
+            values = [v for v in (setup_exp, regime_exp) if v is not None]
+            inferred_expectancy = sum(values) / len(values)
+            decision.expectancy = inferred_expectancy
+            ctx.market_ctx = {**ctx.market_ctx, "expectancy": inferred_expectancy}
     quality = evaluate_trade_quality(decision, ctx.market_ctx, recent_stats, config)
     if not quality.accepted:
         ctx.diagnostics.update(quality.diagnostics)
