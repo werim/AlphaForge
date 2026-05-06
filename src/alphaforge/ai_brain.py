@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+
+logger = logging.getLogger(__name__)
 
 DecisionType = str
 
@@ -264,8 +267,8 @@ class AIBrain:
             text(
                 """
                 INSERT INTO ai_decision_features
-                (decision_id, features, penalties, reason_flags, created_at)
-                VALUES (:decision_id, :features, :penalties, :reason_flags, :created_at)
+                (decision_id, features, penalties, reason_flags, execution_features, created_at)
+                VALUES (:decision_id, :features, :penalties, :reason_flags, :execution_features, :created_at)
                 """
             ),
             {
@@ -273,6 +276,7 @@ class AIBrain:
                 "features": _json_dumps(score_ctx.components),
                 "penalties": _json_dumps(score_ctx.penalties),
                 "reason_flags": _json_dumps(score_ctx.reason_flags),
+                "execution_features": _json_dumps({}),
                 "created_at": _now(),
             },
         )
