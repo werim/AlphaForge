@@ -98,3 +98,10 @@ def test_consecutive_tp_decreases_thresholds():
     t = compute_adaptive_thresholds({"consecutive_tp_count": 5})
     assert t["min_score"] == 6.5
     assert t["min_rr"] == 1.2
+
+
+def test_sl_streak_makes_threshold_binding():
+    c = base_candidate()
+    c.score = 8.0
+    d = evaluate_trade_quality(c, base_market(), {"consecutive_sl_count": 5}, {})
+    assert d.reject_reason == "LOW_SCORE"

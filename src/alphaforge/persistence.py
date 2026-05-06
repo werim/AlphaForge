@@ -105,3 +105,16 @@ def make_session_factory(database_url: str):
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def fetch_expectancy_stat(session: Session, table: str, key_col: str, key_val: str) -> float | None:
+    try:
+        result = session.execute(text(f"SELECT expectancy FROM {table} WHERE {key_col} = :key_val"), {"key_val": key_val})
+        row = result.first()
+        if not row:
+            return None
+        value = row[0]
+        return float(value) if value is not None else None
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Expectancy read failed: %s", exc)
+        return None
