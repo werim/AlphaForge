@@ -21,6 +21,8 @@ from alphaforge.persistence import (
 
 logger = logging.getLogger(__name__)
 MIN_RR_THRESHOLD = 1.1
+MIN_SCORE_BASE = 7.5
+MIN_RR_BASE = 1.3
 
 
 def normalize_execution_ctx(ctx: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -47,6 +49,8 @@ class LifecycleState(str, Enum):
     ORDER_PLACED = "ORDER_PLACED"
     POSITION_OPENED = "POSITION_OPENED"
     POSITION_CLOSED = "POSITION_CLOSED"
+    ENTRY_TIMEOUT = "ENTRY_TIMEOUT"
+    ORDER_CANCELLED = "ORDER_CANCELLED"
     EXPIRED = "EXPIRED"
     CANCELLED = "CANCELLED"
     ERROR = "ERROR"
@@ -144,8 +148,9 @@ def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Ma
 
 
 def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, Any], recent_stats: Mapping[str, Any], config: Mapping[str, Any]) -> TradeQualityDecision:
+    adaptive = compute_adaptive_thresholds(recent_stats)
     cfg = {
-        "MIN_TRADE_SCORE": 8.0, "MIN_RR": 2.0, "MIN_EXPECTANCY": 0.0, "SYMBOL_COOLDOWN_MINUTES": 60,
+        "MIN_TRADE_SCORE": adaptive["min_score"], "MIN_RR": adaptive["min_rr"], "MIN_EXPECTANCY": 0.0, "SYMBOL_COOLDOWN_MINUTES": 60,
         "MAX_TRADES_PER_SYMBOL_PER_DAY": 2, "MAX_TRADES_GLOBAL_PER_DAY": 10, "MIN_SL_PCT": 0.15, "MAX_SL_PCT": 1.5,
         "MAX_SPREAD_PCT": 0.05, "MAX_EXPECTED_SLIPPAGE_PCT": 0.05, "MIN_ATR_PCT": 0.25, "MAX_ATR_PCT": 3.0,
         "SYMBOL_LOSS_STREAK_LIMIT": 3, "SYMBOL_LOSS_STREAK_COOLDOWN_HOURS": 6, "GLOBAL_LOSS_STREAK_LIMIT": 5,
@@ -237,8 +242,33 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             reject_reason, failed_filter = "SYMBOL_LOSS_STREAK_BLOCK", "symbol_block"
         elif int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
             reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
-    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score}
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive}
     return TradeQualityDecision(accepted=(reject_reason == ""), reject_reason=reject_reason, quality_score=quality_score, diagnostics=diagnostics)
+
+
+def compute_adaptive_thresholds(stats: Mapping[str, Any]) -> dict[str, float]:
+    min_score = MIN_SCORE_BASE
+    min_rr = MIN_RR_BASE
+    consecutive_sl = int(stats.get("consecutive_sl_count", 0) or 0)
+    consecutive_tp = int(stats.get("consecutive_tp_count", 0) or 0)
+
+    if consecutive_sl >= 5:
+        min_score = MIN_SCORE_BASE + 1.5
+        min_rr = MIN_RR_BASE + 0.5
+    elif consecutive_sl >= 3:
+        min_score = MIN_SCORE_BASE + 1.0
+        min_rr = MIN_RR_BASE + 0.3
+
+    if consecutive_tp >= 5:
+        min_score = MIN_SCORE_BASE - 1.0
+        min_rr = MIN_RR_BASE - 0.3
+    elif consecutive_tp >= 3:
+        min_score = MIN_SCORE_BASE - 0.5
+        min_rr = MIN_RR_BASE - 0.2
+
+    min_score = max(6.0, min(9.5, min_score))
+    min_rr = max(1.2, min(3.0, min_rr))
+    return {"min_score": min_score, "min_rr": min_rr}
 
 
 def _audit(ctx: OrderExecutionContext, candidate: OrderCandidate | None, status_before: LifecycleState, status_after: LifecycleState, reject_reason: str = "") -> None:

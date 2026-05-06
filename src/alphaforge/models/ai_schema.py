@@ -115,3 +115,32 @@ class CooldownState(Base):
     reason: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AdaptiveThresholdStat(Base):
+    __tablename__ = "adaptive_threshold_stats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    window_size: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    consecutive_sl_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    consecutive_tp_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rolling_winrate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    rolling_expectancy: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    min_score: Mapped[float] = mapped_column(Float, nullable=False, default=7.5)
+    min_rr: Mapped[float] = mapped_column(Float, nullable=False, default=1.3)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class ExpectancyStat(Base):
+    __tablename__ = "expectancy_stats"
+    __table_args__ = (UniqueConstraint("setup_type", "regime", "bucket", name="uq_expectancy_stats_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    setup_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    regime: Mapped[str] = mapped_column(String(128), nullable=False)
+    bucket: Mapped[str] = mapped_column(String(32), nullable=False)
+    trades: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    winrate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    avg_rr: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    expectancy: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
