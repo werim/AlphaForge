@@ -325,13 +325,28 @@ def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContex
     return result
 
 
+def _rejected_cycle_result(reject_reason: str, candidate: OrderCandidate | None, execution: Any = None, diagnostics: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "rejected",
+        "accepted": False,
+        "candidate": candidate,
+        "reason": reject_reason,
+        "reject_reason": reject_reason,
+        "rejection_reason": reject_reason,
+        "execution": execution,
+    }
+    if diagnostics is not None:
+        result["diagnostics"] = diagnostics
+    return result
+
+
 def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None = None, recent_stats: Mapping[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
     recent_stats = recent_stats or {}
     decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
     if isinstance(decision, OrderRejection):
         _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
-        return {"status": "rejected", "candidate": None, "reason": decision.reject_reason, "rejection_reason": decision.reject_reason, "execution": None}
+        return _rejected_cycle_result(decision.reject_reason, candidate=None)
     session = ctx.storage.get("session")
     if decision.expectancy is None and isinstance(session, Session):
         setup_exp = fetch_expectancy_stat(session, "setup_expectancy_stats", "setup", decision.setup_type)
@@ -345,7 +360,7 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     if not quality.accepted:
         ctx.diagnostics.update(quality.diagnostics)
         _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, quality.reject_reason)
-        return {"status": "rejected", "candidate": decision, "reason": quality.reject_reason, "rejection_reason": quality.reject_reason, "execution": None, "diagnostics": quality.diagnostics}
+        return _rejected_cycle_result(quality.reject_reason, candidate=decision, diagnostics=quality.diagnostics)
     execution = execute_order_candidate(decision, ctx)
     return {"status": "executed", "candidate": decision, "rejection_reason": "", "execution": execution}
 
