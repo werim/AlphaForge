@@ -344,6 +344,58 @@ def _offline_fixture(start_ms: int) -> tuple[list[dict[str, float]], dict[str, l
     return universe, {"BTCUSDT": candles}
 
 
+
+def process_backtest_result(symbol: str, candle: Candle, idx: int, candles: List[Candle], result: Dict[str, Any], mctx: Mapping[str, Any],
+                            balance: float, risk_pct: float, lifecycle: List[LifecycleRow], rejected: List[Dict[str, Any]],
+                            rejection_counts: Dict[str, int], open_rows: List[LifecycleRow], recent_stats: Dict[str, Any]) -> Optional[CandidateOrder]:
+    diagnostics = result.get("diagnostics", {})
+    side = diagnostics.get("side") or "LONG"
+    setup_type = diagnostics.get("setup_type", mctx.get("setup_type", ""))
+    setup_reason = diagnostics.get("setup_reason", mctx.get("setup_reason", ""))
+    regime = diagnostics.get("regime", mctx.get("regime", ""))
+    score = float(diagnostics.get("score", mctx.get("score", 0.0)) or 0.0)
+    rr = float(diagnostics.get("rr", mctx.get("rr", 0.0)) or 0.0)
+    entry = float(diagnostics.get("entry", mctx.get("entry", 0.0)) or 0.0)
+    sl = float(diagnostics.get("sl", mctx.get("sl", 0.0)) or 0.0)
+    tp = float(diagnostics.get("tp", mctx.get("tp", 0.0)) or 0.0)
+    order_type = diagnostics.get("order_type", "LIMIT")
+    expectancy = diagnostics.get("expectancy", mctx.get("expectancy"))
+    expectancy_bucket = _bucket_expectancy(expectancy)
+
+    lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=side, setup_type=setup_type, setup_reason=setup_reason, regime=regime, score=score, rr=rr, entry=entry, sl=sl, tp=tp, status_before="NONE", status_after="SIGNAL_CREATED", order_type=order_type, expectancy_bucket=expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
+
+    if result.get("status") == "rejected":
+        reason = result.get("reason", "UNKNOWN")
+        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=side, setup_type=setup_type, setup_reason=setup_reason, regime=regime, score=score, rr=rr, entry=entry, sl=sl, tp=tp, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type=order_type, expectancy_bucket=expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
+        rejected.append({"timestamp": candle.timestamp, "symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "regime": regime, "score": score, "rr": rr, "expectancy": expectancy, "quality_score": diagnostics.get("quality_score", 0.0), "reject_reason": reason, "diagnostics": json.dumps(diagnostics, sort_keys=True)})
+        return None
+
+    if result.get("status") != "executed":
+        return None
+
+    c = result["candidate"]
+    cand = CandidateOrder(candle.timestamp, symbol, c.side, c.entry, c.sl, c.tp, c.rr, c.setup_type, c.setup_reason, c.regime, c.score, c.order_type, expectancy_bucket=expectancy_bucket)
+    effective_rr, execution_flags = _execution_reject_flags(cand.rr, mctx)
+    if execution_flags:
+        reason = execution_flags[0]
+        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="SIGNAL_CREATED", status_after="ORDER_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
+        rejected.append({"timestamp": candle.timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "expectancy": expectancy, "quality_score": diagnostics.get("quality_score", ""), "reject_reason": reason, "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True)})
+        return None
+
+    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=mctx)
+    lifecycle.extend(sim_rows)
+    recent_stats["last_trade_ts_by_symbol"][symbol] = candle.timestamp
+    recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
+    recent_stats["global_trades_today"] += 1
+    for sim_row in sim_rows:
+        if sim_row.close_reason == "TIMEOUT":
+            open_rows.append(sim_row)
+        if sim_row.status_after == "POSITION_CLOSED":
+            _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
+    return cand
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--start")
@@ -406,56 +458,19 @@ def main():
             for i in range(len(candles)):
                 symbol_meta = symbol_meta_by_symbol.get(symbol, {})
                 scan_ctx = {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct, "recent_stats": recent_stats, "symbol_meta": symbol_meta}
-                cand = scan_symbol_backtest(symbol, candles, i, scan_ctx)
+                _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})
                 mctx = scan_ctx.get("market_ctx", {})
-                if result:
-                    if result.get("status") == "rejected":
-                        reason = result.get("reason", "UNKNOWN")
-                        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-                        diagnostics = result.get("diagnostics", {})
-                        rejected_row = {
-                            "timestamp": candles[i].timestamp,
-                            "symbol": symbol,
-                            "side": (diagnostics.get("side") or "LONG"),
-                            "setup_type": diagnostics.get("setup_type", ""),
-                            "setup_reason": diagnostics.get("setup_reason", ""),
-                            "regime": diagnostics.get("regime", ""),
-                            "score": diagnostics.get("score", 0.0),
-                            "rr": diagnostics.get("rr", 0.0),
-                            "expectancy": diagnostics.get("expectancy"),
-                            "quality_score": diagnostics.get("quality_score", 0.0),
-                            "reject_reason": reason,
-                            "diagnostics": json.dumps(diagnostics, sort_keys=True),
-                        }
-                        rejected.append(rejected_row)
-                        lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=(diagnostics.get("side") or "LONG"), setup_type=diagnostics.get("setup_type", ""), setup_reason=diagnostics.get("setup_reason", ""), regime=diagnostics.get("regime", ""), score=diagnostics.get("score", 0.0), rr=diagnostics.get("rr", 0.0), entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type="N/A", expectancy_bucket=_bucket_expectancy(diagnostics.get("expectancy")), volume_24h_usdt=mctx.get("volume_24h_usdt", symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST")), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
-                if not cand:
-                    continue
-                effective_rr, execution_flags = _execution_reject_flags(cand.rr, mctx)
-                if execution_flags:
-                    reason = execution_flags[0]
-                    rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-                    lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="ENTRY_TRIGGERED", status_after="ORDER_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
-                    rejected.append({"timestamp": candles[i].timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "expectancy": "", "quality_score": "", "reject_reason": reason, "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True)})
-                    continue
-                candidates.append(cand)
-                sim_rows = simulate_candidate(cand, candles, i, args.balance, args.risk_pct, market_ctx=mctx)
-                lifecycle.extend(sim_rows)
-                recent_stats["last_trade_ts_by_symbol"][symbol] = candles[i].timestamp
-                recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
-                recent_stats["global_trades_today"] += 1
-                for sim_row in sim_rows:
-                    if sim_row.close_reason == "TIMEOUT":
-                        open_rows.append(sim_row)
-                    if sim_row.status_after == "POSITION_CLOSED":
-                        _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
+                cand = process_backtest_result(symbol, candles[i], i, candles, result, mctx, args.balance, args.risk_pct, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
+                if cand:
+                    candidates.append(cand)
 
     if args.offline and not candidates and candles_by_symbol:
         symbol = next(iter(candles_by_symbol.keys()))
         fixture_candles = candles_by_symbol[symbol]
         c0 = fixture_candles[5]
-        synthetic = CandidateOrder(c0.timestamp, symbol, "LONG", c0.close, c0.close - 0.5, c0.close + 1.0, 2.0, "BREAKOUT_UP", "OFFLINE_FIXTURE", "TREND", 7.5, "LIMIT", expectancy_bucket="MEDIUM")
+        mctx = _build_market_ctx(fixture_candles[6], fixture_candles[5], {"quoteVolume": 100000000.0}, fixture_candles[:7])
+        synthetic = CandidateOrder(c0.timestamp, symbol, "LONG", c0.close, c0.close - 0.5, c0.close + (c0.close - (c0.close - 0.5)) * mctx["rr"], mctx["rr"], "BREAKOUT_UP", "OFFLINE_FIXTURE", "TREND", mctx["score"], "LIMIT", expectancy_bucket=mctx.get("expectancy_bucket", "UNKNOWN"))
         candidates.append(synthetic)
         lifecycle.extend(simulate_candidate(synthetic, fixture_candles, 5, args.balance, args.risk_pct, market_ctx={"volume_24h_usdt": 100000000.0}))
         rejected.append({"timestamp": fixture_candles[8].timestamp, "symbol": symbol, "side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "OFFLINE_FIXTURE", "regime": "TREND", "score": 4.0, "rr": 0.9, "expectancy": -0.1, "quality_score": 0.1, "reject_reason": "LOW_EFFECTIVE_RR", "diagnostics": json.dumps({"offline": True}, sort_keys=True)})
