@@ -62,10 +62,13 @@ def save_signal(session: Session, **payload: Any) -> int | None:
 
 
 def save_order_decision(session: Session, **payload: Any) -> int | None:
+    effective_rr = payload.get("effective_rr")
+    if effective_rr is None:
+        effective_rr = payload.get("risk_reward", 0.0)
     try:
         result = session.execute(
             text("INSERT INTO order_decisions (signal_id,phase,decision,order_type,confidence,explanation,order_payload,expected_slippage_pct,effective_rr,created_at) VALUES (:signal_id,:phase,:decision,:order_type,:confidence,:explanation,:order_payload,:expected_slippage_pct,:effective_rr,:created_at) RETURNING id"),
-            {**payload, "order_payload": _json_dumps(payload.get("order_payload")), "expected_slippage_pct": float(payload.get("expected_slippage_pct", 0.0) or 0.0), "effective_rr": float(payload.get("effective_rr", 0.0) or 0.0), "created_at": _now()},
+            {**payload, "order_payload": _json_dumps(payload.get("order_payload")), "expected_slippage_pct": float(payload.get("expected_slippage_pct", 0.0) or 0.0), "effective_rr": float(effective_rr or 0.0), "created_at": _now()},
         )
         inserted_id = result.scalar_one()
         session.commit()

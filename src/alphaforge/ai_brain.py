@@ -252,13 +252,13 @@ class AIBrain:
                 "stop_price": order_plan.stop_price,
                 "reason": order_plan.reason,
             }),
-            "expected_slippage_pct": _num(market_ctx, "expected_slippage_pct", 0.0),
+            "expected_slippage_pct": float(_num(market_ctx, "expected_slippage_pct", 0.0) or 0.0),
             "spread_pct": _num(market_ctx, "spread_pct", 0.0),
             "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)),
             "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0),
             "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
             "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
-            "effective_rr": float(signal.get("risk_reward", 1.0) or 1.0),
+            "effective_rr": float(signal.get("risk_reward", 0.0) or 0.0),
             "created_at": _now(),
         }
         try:
