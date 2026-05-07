@@ -174,3 +174,32 @@ def test_high_slippage_order_rejected_lifecycle_row():
     )
     assert row.status_after == "ORDER_REJECTED"
     assert row.reject_reason == "HIGH_SLIPPAGE"
+
+
+def test_process_backtest_result_writes_rejection_rows_and_skips_sim(monkeypatch):
+    lifecycle = []
+    rejected = []
+    rejection_counts = {}
+    open_rows = []
+    recent_stats = {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "outcomes": []}
+    candles = [bo.Candle(1, 10, 10.5, 9.5, 10.1, 1)]
+    result = {
+        "status": "rejected",
+        "reason": "QUALITY_BELOW_THRESHOLD",
+        "diagnostics": {"side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "score": 6.2, "rr": 1.8}
+    }
+    mctx = {"entry": 10.0, "sl": 9.5, "tp": 11.0, "score": 6.2, "rr": 1.8}
+
+    called = {"n": 0}
+    def _fake_sim(*args, **kwargs):
+        called["n"] += 1
+        return []
+    monkeypatch.setattr(bo, "simulate_candidate", _fake_sim)
+
+    cand = bo.process_backtest_result("AAAUSDT", candles[0], 0, candles, result, mctx, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
+
+    assert cand is None
+    assert called["n"] == 0
+    assert [r.status_after for r in lifecycle] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
+    assert lifecycle[-1].reject_reason == "QUALITY_BELOW_THRESHOLD"
+    assert rejected[0]["reject_reason"] == "QUALITY_BELOW_THRESHOLD"
