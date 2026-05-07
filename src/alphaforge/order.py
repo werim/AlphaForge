@@ -452,11 +452,16 @@ def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any
 def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float, list[str]]:
     rr = float(order.get("risk_reward", 1.0) or 1.0)
     slippage = float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-    effective = rr * (1 - (slippage + float(execution_ctx.get("spread_pct", 0.0) or 0.0)) * 100)
+    spread = float(execution_ctx.get("spread_pct", 0.0) or 0.0)
+    effective = rr * (1 - ((slippage + spread) * 50.0))
     flags = []
     if slippage >= 0.02:
         flags.append("HIGH_SLIPPAGE")
-    if float(execution_ctx.get("spread_pct", 0.0) or 0.0) > 0.002:
+    liquidity_score = execution_ctx.get("liquidity_score")
+    low_liquidity_flag = execution_ctx.get("low_liquidity")
+    if low_liquidity_flag is True:
+        flags.append("LOW_LIQUIDITY")
+    elif liquidity_score is not None and float(liquidity_score) < 0.3:
         flags.append("LOW_LIQUIDITY")
     if float(execution_ctx.get("funding_rate_pct", 0.0) or 0.0) > 0.03:
         flags.append("FUNDING_UNFAVORABLE")
