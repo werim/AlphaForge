@@ -39,3 +39,22 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+      - name: Run offline backtest
+        run: |
+          PYTHONPATH=src python backtest_order.py --ci --offline --output-dir artifacts/backtest
+
+      - name: Verify backtest outputs
+        run: |
+          test -s artifacts/backtest/order_lifecycle.csv
+
+      - name: Upload backtest artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-artifacts
+          path: |
+            artifacts/backtest/order_lifecycle.csv
+            artifacts/backtest/rejected_orders.csv
+            artifacts/backtest/backtest_orders.csv
+            artifacts/backtest/order_backtest_summary.csv
+          if-no-files-found: warn
