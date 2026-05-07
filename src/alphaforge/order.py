@@ -32,9 +32,12 @@ def normalize_execution_ctx(ctx: Mapping[str, Any] | None) -> dict[str, Any]:
         "expected_slippage_pct": float(base.get("expected_slippage_pct", 0.0) or 0.0),
         "spread_pct": float(base.get("spread_pct", 0.0) or 0.0),
         "latency_ms": int(base.get("latency_ms", 0) or 0),
+        "liquidity_score": float(base.get("liquidity_score", 1.0) or 1.0),
+        "volatility_regime": str(base.get("volatility_regime", "unknown") or "unknown"),
         "orderbook_imbalance": float(base.get("orderbook_imbalance", 0.0) or 0.0),
         "funding_rate_pct": float(base.get("funding_rate_pct", 0.0) or 0.0),
-        "volatility_regime": str(base.get("volatility_regime", "unknown") or "unknown"),
+        "spoof_risk": float(base.get("spoof_risk", 0.0) or 0.0),
+        "absorption_score": float(base.get("absorption_score", 0.0) or 0.0),
     }
 
 
@@ -132,8 +135,6 @@ def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Ma
         return OrderRejection(symbol=symbol, reject_reason="INVALID_LEVELS")
     side = str(market_ctx.get("side", "LONG"))
     score = float(market_ctx.get("score", 0.0) or 0.0)
-    if 0.0 <= score <= 1.0:
-        score *= 10.0
     rr = float(market_ctx.get("rr", 0.0) or 0.0)
     expectancy = market_ctx.get("expectancy")
     return OrderCandidate(
@@ -190,9 +191,11 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         expectancy_val = None
     score = float(getattr(candidate, "score", 0.0) or 0.0)
     rr = float(getattr(candidate, "rr", 0.0) or 0.0)
+    min_trade_score = float(cfg["MIN_TRADE_SCORE"])
+    score_eval = score if min_trade_score <= 1.0 else (score * 10.0 if 0.0 <= score < 1.0 else score)
     pattern_flags = [str(f).upper() for f in (market_ctx.get("pattern_flags", []) or [])]
     # compute quality score first
-    score_comp = max(0.0, min(1.0, score / float(cfg["MIN_TRADE_SCORE"]))) * 25
+    score_comp = max(0.0, min(1.0, score_eval / min_trade_score)) * 25
     exp_comp = 0.0 if expectancy_val is None else max(0.0, min(1.0, (expectancy_val - float(cfg["MIN_EXPECTANCY"])) / 0.5)) * 25
     rr_comp = max(0.0, min(1.0, rr / float(cfg["MIN_RR"]))) * 10
     regime_ok = True
@@ -210,7 +213,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     quality_score = round(score_comp + exp_comp + rr_comp + regime_comp + vol_comp + hygiene_comp, 2)
     if not candidate or not getattr(candidate, "symbol", None):
         reject_reason, failed_filter = "INVALID_CANDIDATE", "candidate"
-    elif score < float(cfg["MIN_TRADE_SCORE"]):
+    elif score_eval < min_trade_score:
         reject_reason, failed_filter = "LOW_SCORE", "score"
     elif rr < float(cfg["MIN_RR"]):
         reject_reason, failed_filter = "RR_TOO_LOW", "rr"
@@ -247,7 +250,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             reject_reason, failed_filter = "SYMBOL_LOSS_STREAK_BLOCK", "symbol_block"
         elif int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
             reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
-    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive}
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive}
     return TradeQualityDecision(accepted=(reject_reason == ""), reject_reason=reject_reason, quality_score=quality_score, diagnostics=diagnostics)
 
 
@@ -368,7 +371,7 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
         payload["reject_reason"] = reason
         return payload
     execution = execute_order_candidate(decision, ctx)
-    return {"status": "executed", "candidate": decision, "rejection_reason": "", "execution": execution}
+    return {"status": "executed", "accepted": True, "candidate": decision, "reason": "", "reject_reason": "", "rejection_reason": "", "execution": execution}
 
 # Existing functions kept below
 
@@ -424,9 +427,9 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         payload["quantity"] = max(qty, 0.0)
         payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 6), "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {}, "adjusted_risk_reward": round(effective_rr, 6), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
         payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx})
-        if "HIGH_SLIPPAGE" in payload["execution_flags"]:
-            payload["block_reason"] = "HIGH_SLIPPAGE"
-            payload["reject_reason"] = "HIGH_SLIPPAGE"
+        if blocked and payload["execution_flags"]:
+            payload["block_reason"] = payload["execution_flags"][0]
+            payload["reject_reason"] = "|".join(payload["execution_flags"])
         signal_id = save_signal(session, **signal)
         decision_id = save_order_decision(session, signal_id=signal_id, phase="real", decision="REJECTED" if blocked else plan.decision, order_type=plan.order_type, confidence=score.total_score, explanation=explanation, order_payload=payload, expected_slippage_pct=execution_ctx["expected_slippage_pct"], effective_rr=round(effective_rr, 6))
         if decision_id:
@@ -476,16 +479,19 @@ def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any]) ->
     rr = float(order.get("risk_reward", 1.0) or 1.0)
     slippage = float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0)
     spread = float(execution_ctx.get("spread_pct", 0.0) or 0.0)
-    effective = rr * (1 - ((slippage + spread) * 50.0))
-    flags = []
-    if slippage >= 0.02:
+    latency_ms = float(execution_ctx.get("latency_ms", 0.0) or 0.0)
+    liquidity_score = float(execution_ctx.get("liquidity_score", 1.0) or 1.0)
+
+    execution_penalty = (slippage + spread) * 50.0
+    effective = round(max(rr * (1.0 - execution_penalty), 0.0), 6)
+
+    flags: list[str] = []
+    if slippage >= 0.02 or (slippage + spread >= 0.03 and str(execution_ctx.get("volatility_regime", "")).lower() == "high"):
         flags.append("HIGH_SLIPPAGE")
-    liquidity_score = execution_ctx.get("liquidity_score")
-    low_liquidity_flag = execution_ctx.get("low_liquidity")
-    if low_liquidity_flag is True:
+    if liquidity_score < 0.3:
         flags.append("LOW_LIQUIDITY")
-    elif liquidity_score is not None and float(liquidity_score) < 0.3:
-        flags.append("LOW_LIQUIDITY")
+    if effective < MIN_RR_THRESHOLD:
+        flags.append("LOW_EFFECTIVE_RR")
     if float(execution_ctx.get("funding_rate_pct", 0.0) or 0.0) > 0.03:
         flags.append("FUNDING_UNFAVORABLE")
     return effective, flags

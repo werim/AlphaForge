@@ -140,3 +140,14 @@ def test_recent_stats_updates_streaks_and_winrate():
     assert stats["consecutive_sl_count"] == 0
     assert stats["consecutive_tp_count"] == 1
     assert 0.0 <= stats["rolling_winrate"] <= 1.0
+
+
+def test_rejected_signals_present_in_lifecycle_trace():
+    lifecycle = []
+    rejected = [{"timestamp": 1, "symbol": "AAAUSDT", "reject_reason": "LOW_EFFECTIVE_RR"}]
+    lifecycle.append(bo.LifecycleRow(
+        timestamp=1, symbol="AAAUSDT", side="LONG", setup_type="", setup_reason="", regime="", score=0.0, rr=0.0,
+        entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason="LOW_EFFECTIVE_RR"
+    ))
+    assert rejected[0]["reject_reason"] == lifecycle[0].reject_reason
+    assert lifecycle[0].status_after == "SIGNAL_REJECTED"
