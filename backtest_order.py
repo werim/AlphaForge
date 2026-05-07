@@ -330,6 +330,20 @@ def _update_recent_stats_after_close(recent_stats: Dict[str, Any], symbol: str, 
     recent_stats["rolling_winrate"] = (sum(recent) / len(recent)) if recent else 0.0
 
 
+def _offline_fixture(start_ms: int) -> tuple[list[dict[str, float]], dict[str, list[Candle]]]:
+    universe = [{"symbol": "BTCUSDT", "quoteVolume": 100000000.0}]
+    candles: list[Candle] = []
+    base = 100.0
+    for i in range(30):
+        ts = start_ms + i * 60_000
+        o = base + i * 0.2
+        h = o + 0.6
+        l = o - 0.4
+        c = o + 0.3
+        candles.append(Candle(timestamp=ts, open=o, high=h, low=l, close=c, volume=1000.0 + i))
+    return universe, {"BTCUSDT": candles}
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--start")
@@ -343,22 +357,31 @@ def main():
     p.add_argument("--balance", type=float, default=1000)
     p.add_argument("--risk-pct", type=float, default=1.0)
     p.add_argument("--telegram", action="store_true")
+    p.add_argument("--offline", action="store_true", help="Run without network APIs using deterministic fixture data")
+    p.add_argument("--ci", action="store_true", help="CI-safe mode; implies --offline")
     args = p.parse_args()
+
+    if args.ci:
+        args.offline = True
 
     now = datetime.now(timezone.utc)
     default_end = int(now.timestamp() * 1000)
     default_start = int((now.timestamp() - args.last_n_days * 86400) * 1000)
     start_ms = parse_ts(args.start) if args.start else default_start
     end_ms = parse_ts(args.end) if args.end else default_end
-    universe = select_symbol_universe(args.top_n, args.quote)
+    os.makedirs(args.output_dir, exist_ok=True)
+    if args.offline:
+        universe, candles_by_symbol = _offline_fixture(start_ms)
+    else:
+        universe = select_symbol_universe(args.top_n, args.quote)
+        candles_by_symbol = {}
+        for row in universe:
+            c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir)
+            if c:
+                candles_by_symbol[row["symbol"]] = c
     save_symbol_universe(os.path.join(args.output_dir, "symbol_universe.csv"), universe)
 
-    candles_by_symbol = {}
     symbol_meta_by_symbol = {row["symbol"]: row for row in universe}
-    for row in universe:
-        c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir)
-        if c:
-            candles_by_symbol[row["symbol"]] = c
 
     lifecycle = []
     candidates = []
@@ -378,60 +401,71 @@ def main():
         "outcomes": [],
     }
     rejection_counts: Dict[str, int] = {}
-    for symbol, candles in candles_by_symbol.items():
-        for i in range(len(candles)):
-            symbol_meta = symbol_meta_by_symbol.get(symbol, {})
-            scan_ctx = {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct, "recent_stats": recent_stats, "symbol_meta": symbol_meta}
-            cand = scan_symbol_backtest(symbol, candles, i, scan_ctx)
-            result = scan_ctx.get("last_result", {})
-            mctx = scan_ctx.get("market_ctx", {})
-            if result:
-                if result.get("status") == "rejected":
-                    reason = result.get("reason", "UNKNOWN")
+    if not args.offline:
+        for symbol, candles in candles_by_symbol.items():
+            for i in range(len(candles)):
+                symbol_meta = symbol_meta_by_symbol.get(symbol, {})
+                scan_ctx = {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct, "recent_stats": recent_stats, "symbol_meta": symbol_meta}
+                cand = scan_symbol_backtest(symbol, candles, i, scan_ctx)
+                result = scan_ctx.get("last_result", {})
+                mctx = scan_ctx.get("market_ctx", {})
+                if result:
+                    if result.get("status") == "rejected":
+                        reason = result.get("reason", "UNKNOWN")
+                        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                        diagnostics = result.get("diagnostics", {})
+                        rejected_row = {
+                            "timestamp": candles[i].timestamp,
+                            "symbol": symbol,
+                            "side": (diagnostics.get("side") or "LONG"),
+                            "setup_type": diagnostics.get("setup_type", ""),
+                            "setup_reason": diagnostics.get("setup_reason", ""),
+                            "regime": diagnostics.get("regime", ""),
+                            "score": diagnostics.get("score", 0.0),
+                            "rr": diagnostics.get("rr", 0.0),
+                            "expectancy": diagnostics.get("expectancy"),
+                            "quality_score": diagnostics.get("quality_score", 0.0),
+                            "reject_reason": reason,
+                            "diagnostics": json.dumps(diagnostics, sort_keys=True),
+                        }
+                        rejected.append(rejected_row)
+                        lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=(diagnostics.get("side") or "LONG"), setup_type=diagnostics.get("setup_type", ""), setup_reason=diagnostics.get("setup_reason", ""), regime=diagnostics.get("regime", ""), score=diagnostics.get("score", 0.0), rr=diagnostics.get("rr", 0.0), entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type="N/A", expectancy_bucket=_bucket_expectancy(diagnostics.get("expectancy")), volume_24h_usdt=mctx.get("volume_24h_usdt", symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST")), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
+                if not cand:
+                    continue
+                effective_rr, execution_flags = _execution_reject_flags(cand.rr, mctx)
+                if execution_flags:
+                    reason = execution_flags[0]
                     rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-                    diagnostics = result.get("diagnostics", {})
-                    rejected_row = {
-                        "timestamp": candles[i].timestamp,
-                        "symbol": symbol,
-                        "side": (diagnostics.get("side") or "LONG"),
-                        "setup_type": diagnostics.get("setup_type", ""),
-                        "setup_reason": diagnostics.get("setup_reason", ""),
-                        "regime": diagnostics.get("regime", ""),
-                        "score": diagnostics.get("score", 0.0),
-                        "rr": diagnostics.get("rr", 0.0),
-                        "expectancy": diagnostics.get("expectancy"),
-                        "quality_score": diagnostics.get("quality_score", 0.0),
-                        "reject_reason": reason,
-                        "diagnostics": json.dumps(diagnostics, sort_keys=True),
-                    }
-                    rejected.append(rejected_row)
-                    lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=(diagnostics.get("side") or "LONG"), setup_type=diagnostics.get("setup_type", ""), setup_reason=diagnostics.get("setup_reason", ""), regime=diagnostics.get("regime", ""), score=diagnostics.get("score", 0.0), rr=diagnostics.get("rr", 0.0), entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type="N/A", expectancy_bucket=_bucket_expectancy(diagnostics.get("expectancy")), volume_24h_usdt=mctx.get("volume_24h_usdt", symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST")), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
-            if not cand:
-                continue
-            effective_rr, execution_flags = _execution_reject_flags(cand.rr, mctx)
-            if execution_flags:
-                reason = execution_flags[0]
-                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-                lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="ENTRY_TRIGGERED", status_after="ORDER_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
-                rejected.append({"timestamp": candles[i].timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "expectancy": "", "quality_score": "", "reject_reason": reason, "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True)})
-                continue
-            candidates.append(cand)
-            sim_rows = simulate_candidate(cand, candles, i, args.balance, args.risk_pct, market_ctx=mctx)
-            lifecycle.extend(sim_rows)
-            recent_stats["last_trade_ts_by_symbol"][symbol] = candles[i].timestamp
-            recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
-            recent_stats["global_trades_today"] += 1
-            for sim_row in sim_rows:
-                if sim_row.close_reason == "TIMEOUT":
-                    open_rows.append(sim_row)
-                if sim_row.status_after == "POSITION_CLOSED":
-                    _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
+                    lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="ENTRY_TRIGGERED", status_after="ORDER_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
+                    rejected.append({"timestamp": candles[i].timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "expectancy": "", "quality_score": "", "reject_reason": reason, "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True)})
+                    continue
+                candidates.append(cand)
+                sim_rows = simulate_candidate(cand, candles, i, args.balance, args.risk_pct, market_ctx=mctx)
+                lifecycle.extend(sim_rows)
+                recent_stats["last_trade_ts_by_symbol"][symbol] = candles[i].timestamp
+                recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
+                recent_stats["global_trades_today"] += 1
+                for sim_row in sim_rows:
+                    if sim_row.close_reason == "TIMEOUT":
+                        open_rows.append(sim_row)
+                    if sim_row.status_after == "POSITION_CLOSED":
+                        _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    if args.offline and not candidates and candles_by_symbol:
+        symbol = next(iter(candles_by_symbol.keys()))
+        fixture_candles = candles_by_symbol[symbol]
+        c0 = fixture_candles[5]
+        synthetic = CandidateOrder(c0.timestamp, symbol, "LONG", c0.close, c0.close - 0.5, c0.close + 1.0, 2.0, "BREAKOUT_UP", "OFFLINE_FIXTURE", "TREND", 7.5, "LIMIT", expectancy_bucket="MEDIUM")
+        candidates.append(synthetic)
+        lifecycle.extend(simulate_candidate(synthetic, fixture_candles, 5, args.balance, args.risk_pct, market_ctx={"volume_24h_usdt": 100000000.0}))
+        rejected.append({"timestamp": fixture_candles[8].timestamp, "symbol": symbol, "side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "OFFLINE_FIXTURE", "regime": "TREND", "score": 4.0, "rr": 0.9, "expectancy": -0.1, "quality_score": 0.1, "reject_reason": "LOW_EFFECTIVE_RR", "diagnostics": json.dumps({"offline": True}, sort_keys=True)})
+        lifecycle.append(LifecycleRow(timestamp=fixture_candles[8].timestamp, symbol=symbol, side="LONG", setup_type="BREAKOUT_UP", setup_reason="OFFLINE_FIXTURE", regime="TREND", score=4.0, rr=0.9, entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason="LOW_EFFECTIVE_RR", order_type="N/A"))
+
     candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]
     for name, rows in [
         ("order_lifecycle.csv", [asdict(x) for x in lifecycle]),
         ("order_candidates.csv", candidate_rows),
+        ("backtest_orders.csv", candidate_rows),
         ("rejected_orders.csv", rejected),
         ("open_at_end.csv", [asdict(x) for x in open_rows]),
     ]:
@@ -454,9 +488,10 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(summary.keys())); w.writeheader(); w.writerow(summary)
 
 
-if __name__ == "__main__":
-    main()
 def _order_runtime():
     from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
     return OrderExecutionContext, TradingMode, run_order_cycle
-    OrderExecutionContext, TradingMode, run_order_cycle = _order_runtime()
+
+
+if __name__ == "__main__":
+    main()
