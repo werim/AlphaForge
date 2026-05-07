@@ -6,6 +6,8 @@ from dataclasses import dataclass, asdict
 
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Mapping
+
+from alphaforge.execution import build_execution_context
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -66,6 +68,9 @@ class LifecycleRow:
     volume_24h_usdt: Any = "UNAVAILABLE_BACKTEST"
     spread_pct: Any = "UNAVAILABLE_BACKTEST"
     funding_rate_pct: Any = "UNAVAILABLE_BACKTEST"
+    expected_slippage_pct: Any = "UNAVAILABLE_BACKTEST"
+    volatility_regime: str = "UNAVAILABLE_BACKTEST"
+    liquidity_score: Any = "UNAVAILABLE_BACKTEST"
     mfe: float = 0.0
     mae: float = 0.0
     would_tp_hit: bool = False
@@ -85,7 +90,23 @@ def _bucket_expectancy(expectancy: Optional[float]) -> str:
     return "HIGH"
 
 
-def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any]) -> Dict[str, Any]:
+def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[float, list[str]]:
+    slippage = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
+    spread = float(market_ctx.get("spread_pct", 0.0) or 0.0)
+    liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
+    execution_penalty = (slippage + spread) * 50.0
+    effective = round(max(float(rr) * (1.0 - execution_penalty), 0.0), 6)
+    flags: list[str] = []
+    if slippage >= 0.02:
+        flags.append("HIGH_SLIPPAGE")
+    if liquidity_score < 0.3:
+        flags.append("LOW_LIQUIDITY")
+    if effective < 1.1:
+        flags.append("LOW_EFFECTIVE_RR")
+    return effective, flags
+
+
+def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any], recent: Optional[List[Candle]] = None) -> Dict[str, Any]:
     entry = now.close
     sl = min(now.low, prev.low)
     risk = max(entry - sl, 1e-9)
@@ -96,7 +117,7 @@ def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any])
     tp = entry + rr * risk
     score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
     expectancy = ((score / 10.0) - 0.5) * (rr - 1.0)
-    return {
+    base = {
         "entry": entry,
         "sl": sl,
         "tp": tp,
@@ -109,9 +130,13 @@ def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any])
         "expectancy_bucket": _bucket_expectancy(expectancy),
         "side": "LONG",
         "volume_24h_usdt": symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST"),
-        "spread_pct": "UNAVAILABLE_BACKTEST",
-        "funding_rate_pct": "UNAVAILABLE_BACKTEST",
+        "spread_pct": 0.0,
+        "funding_rate_pct": float(symbol_meta.get("fundingRate", 0.0) or 0.0),
     }
+    klines = [{"high": c.high, "low": c.low, "close": c.close} for c in (recent or [])[-20:] if c]
+    exec_ctx = build_execution_context({**base, "recent_klines": klines, "liquidity_score": min(1.0, max(0.1, float(symbol_meta.get("quoteVolume", 0.0) or 0.0) / 100000000.0))})
+    base.update(exec_ctx)
+    return base
 
 
 def parse_ts(value: str) -> int:
@@ -195,27 +220,28 @@ def scan_symbol_backtest(symbol: str, candles: List[Candle], idx: int, context: 
         return None
     now = candles[idx]
     prev = candles[idx - 1]
-    mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}))
+    mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx-20):idx+1])
     ctx = OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=now.timestamp, symbol=symbol, balance=float(context.get("balance",1000)), risk_pct=float(context.get("risk_pct",1.0)), market_ctx=mctx)
     result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
     context["last_result"] = result
     if result.get("status") != "executed":
         return None
     c = result["candidate"]
+    context["market_ctx"] = mctx
     return CandidateOrder(now.timestamp, symbol, c.side, c.entry, c.sl, c.tp, c.rr, c.setup_type, c.setup_reason, c.regime, c.score, c.order_type, expectancy_bucket=mctx.get("expectancy_bucket", "UNKNOWN"))
 
 
 def simulate_candidate(candidate: CandidateOrder, candles: List[Candle], idx: int, balance: float, risk_pct: float, market_ctx: Optional[Mapping[str, Any]] = None) -> List[LifecycleRow]:
     status_before = "SIGNAL_CREATED"
     market_ctx = market_ctx or {}
-    rows: List[LifecycleRow] = [LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "SIGNAL_CREATED", "WAITING_ENTRY_ZONE", order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"))]
+    rows: List[LifecycleRow] = [LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "SIGNAL_CREATED", "WAITING_ENTRY_ZONE", order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"))]
     triggered_ts = None
     trigger_price = 0.0
     if candidate.order_type in {"MARKET", "BREAKOUT", "IMMEDIATE"}:
         triggered_ts = candles[idx].timestamp
         trigger_price = candidate.entry
         start_idx = idx
-        rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
+        rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
         rows.append(LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, "ENTRY_TRIGGERED", "ORDER_PLACED", trigger_price=trigger_price, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST")))
     else:
         start_idx = idx
@@ -264,7 +290,7 @@ def finalize(candidate, before, after, trigger_price, close_price, close_reason,
     risk_usdt = balance * (risk_pct / 100)
     net_pnl_usdt = risk_usdt * (pnl_pct / 100)
     hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
-    return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, before, after, trigger_price=trigger_price, close_price=close_price, close_reason=close_reason, net_pnl_pct=pnl_pct, net_pnl_usdt=net_pnl_usdt, hold_minutes=hold, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), mfe=mfe, mae=mae)
+    return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, before, after, trigger_price=trigger_price, close_price=close_price, close_reason=close_reason, net_pnl_pct=pnl_pct, net_pnl_usdt=net_pnl_usdt, hold_minutes=hold, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), mfe=mfe, mae=mae)
 
 
 def simulate_rejected_counterfactual(candidate: CandidateOrder, candles: List[Candle], idx: int) -> dict[str, Any]:
@@ -285,7 +311,8 @@ def simulate_rejected_counterfactual(candidate: CandidateOrder, candles: List[Ca
             if c.low <= candidate.sl:
                 would_sl = True
                 break
-    return {"would_trigger": would_trigger, "would_tp_hit": would_tp, "would_sl_hit": would_sl, "max_favorable_excursion": mfe, "max_adverse_excursion": mae}
+    base = {"would_trigger": would_trigger, "would_tp_hit": would_tp, "would_sl_hit": would_sl, "max_favorable_excursion": mfe, "max_adverse_excursion": mae}
+    return base
 
 
 def _update_recent_stats_after_close(recent_stats: Dict[str, Any], symbol: str, close_reason: str) -> None:
@@ -357,6 +384,7 @@ def main():
             scan_ctx = {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct, "recent_stats": recent_stats, "symbol_meta": symbol_meta}
             cand = scan_symbol_backtest(symbol, candles, i, scan_ctx)
             result = scan_ctx.get("last_result", {})
+            mctx = scan_ctx.get("market_ctx", {})
             if result:
                 if result.get("status") == "rejected":
                     reason = result.get("reason", "UNKNOWN")
@@ -377,11 +405,18 @@ def main():
                         "diagnostics": json.dumps(diagnostics, sort_keys=True),
                     }
                     rejected.append(rejected_row)
-                    lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=(diagnostics.get("side") or "LONG"), setup_type=diagnostics.get("setup_type", ""), setup_reason=diagnostics.get("setup_reason", ""), regime=diagnostics.get("regime", ""), score=diagnostics.get("score", 0.0), rr=diagnostics.get("rr", 0.0), entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type="N/A", expectancy_bucket=_bucket_expectancy(diagnostics.get("expectancy")), volume_24h_usdt=symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST"), spread_pct="UNAVAILABLE_BACKTEST", funding_rate_pct="UNAVAILABLE_BACKTEST"))
+                    lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=(diagnostics.get("side") or "LONG"), setup_type=diagnostics.get("setup_type", ""), setup_reason=diagnostics.get("setup_reason", ""), regime=diagnostics.get("regime", ""), score=diagnostics.get("score", 0.0), rr=diagnostics.get("rr", 0.0), entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type="N/A", expectancy_bucket=_bucket_expectancy(diagnostics.get("expectancy")), volume_24h_usdt=mctx.get("volume_24h_usdt", symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST")), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
             if not cand:
                 continue
+            effective_rr, execution_flags = _execution_reject_flags(cand.rr, mctx)
+            if execution_flags:
+                reason = execution_flags[0]
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="ENTRY_TRIGGERED", status_after="ORDER_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
+                rejected.append({"timestamp": candles[i].timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "expectancy": "", "quality_score": "", "reject_reason": reason, "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True)})
+                continue
             candidates.append(cand)
-            sim_rows = simulate_candidate(cand, candles, i, args.balance, args.risk_pct, market_ctx={"volume_24h_usdt": symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST"), "spread_pct": "UNAVAILABLE_BACKTEST", "funding_rate_pct": "UNAVAILABLE_BACKTEST"})
+            sim_rows = simulate_candidate(cand, candles, i, args.balance, args.risk_pct, market_ctx=mctx)
             lifecycle.extend(sim_rows)
             recent_stats["last_trade_ts_by_symbol"][symbol] = candles[i].timestamp
             recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1

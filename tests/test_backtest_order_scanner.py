@@ -124,6 +124,19 @@ def test_score_varies_by_market_conditions():
     low = bo._build_market_ctx(bo.Candle(3, 100, 101, 99.5, 100.2, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
     high = bo._build_market_ctx(bo.Candle(3, 100, 105, 99.5, 104.8, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
     assert high["score"] != low["score"]
+    assert high["rr"] != low["rr"]
+
+
+def test_execution_ctx_fields_populated():
+    ctx = bo._build_market_ctx(
+        bo.Candle(3, 100, 102, 99, 101.5, 1),
+        bo.Candle(2, 100, 101, 99.5, 100.2, 1),
+        {"quoteVolume": 25000000},
+        recent=[bo.Candle(1, 99, 101, 98, 100, 1), bo.Candle(2, 100, 102, 99, 101, 1)],
+    )
+    assert ctx["spread_pct"] >= 0.0
+    assert ctx["expected_slippage_pct"] > 0.0
+    assert ctx["volatility_regime"] in {"low", "normal", "high"}
 
 
 def test_no_real_binance_orders_called():
@@ -151,3 +164,13 @@ def test_rejected_signals_present_in_lifecycle_trace():
     ))
     assert rejected[0]["reject_reason"] == lifecycle[0].reject_reason
     assert lifecycle[0].status_after == "SIGNAL_REJECTED"
+
+
+def test_high_slippage_order_rejected_lifecycle_row():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 12, 2, "BACKTEST", "R", "TREND", 8, "MARKET", "MEDIUM")
+    row = bo.LifecycleRow(
+        timestamp=1, symbol=c.symbol, side=c.side, setup_type=c.setup_type, setup_reason=c.setup_reason, regime=c.regime, score=c.score, rr=c.rr, entry=c.entry, sl=c.sl, tp=c.tp,
+        status_before="ENTRY_TRIGGERED", status_after="ORDER_REJECTED", reject_reason="HIGH_SLIPPAGE", expected_slippage_pct=0.03, spread_pct=0.005
+    )
+    assert row.status_after == "ORDER_REJECTED"
+    assert row.reject_reason == "HIGH_SLIPPAGE"
