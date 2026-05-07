@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 
@@ -239,37 +240,53 @@ class AIBrain:
             },
         ).scalar_one()
 
-        decision_id = self.session.execute(
-            text(
-                """
-                INSERT INTO order_decisions
-                (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, volatility_regime, effective_rr, created_at)
-                VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance, :funding_rate_pct, :volatility_regime, :effective_rr, :created_at)
-                RETURNING id
-                """
-            ),
-            {
-                "signal_id": signal_id,
-                "phase": phase,
-                "decision": order_plan.decision,
-                "order_type": order_plan.order_type,
-                "confidence": score_ctx.total_score,
-                "explanation": explanation,
-                "order_payload": _json_dumps({
-                    "limit_price": order_plan.limit_price,
-                    "stop_price": order_plan.stop_price,
-                    "reason": order_plan.reason,
-                }),
-                "expected_slippage_pct": _num(market_ctx, "expected_slippage_pct", 0.0),
-                "spread_pct": _num(market_ctx, "spread_pct", 0.0),
-                "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)),
-                "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0),
-                "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
-                "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
-                "effective_rr": float(signal.get("risk_reward", 1.0) or 1.0),
-                "created_at": _now(),
-            },
-        ).scalar_one()
+        decision_payload = {
+            "signal_id": signal_id,
+            "phase": phase,
+            "decision": order_plan.decision,
+            "order_type": order_plan.order_type,
+            "confidence": score_ctx.total_score,
+            "explanation": explanation,
+            "order_payload": _json_dumps({
+                "limit_price": order_plan.limit_price,
+                "stop_price": order_plan.stop_price,
+                "reason": order_plan.reason,
+            }),
+            "expected_slippage_pct": _num(market_ctx, "expected_slippage_pct", 0.0),
+            "spread_pct": _num(market_ctx, "spread_pct", 0.0),
+            "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)),
+            "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0),
+            "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
+            "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
+            "effective_rr": float(signal.get("risk_reward", 1.0) or 1.0),
+            "created_at": _now(),
+        }
+        try:
+            decision_id = self.session.execute(
+                text(
+                    """
+                    INSERT INTO order_decisions
+                    (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, volatility_regime, effective_rr, created_at)
+                    VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance, :funding_rate_pct, :volatility_regime, :effective_rr, :created_at)
+                    RETURNING id
+                    """
+                ),
+                decision_payload,
+            ).scalar_one()
+        except OperationalError as exc:
+            if "no column named spread_pct" not in str(exc):
+                raise
+            decision_id = self.session.execute(
+                text(
+                    """
+                    INSERT INTO order_decisions
+                    (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, effective_rr, created_at)
+                    VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :effective_rr, :created_at)
+                    RETURNING id
+                    """
+                ),
+                decision_payload,
+            ).scalar_one()
 
         self.session.execute(
             text(

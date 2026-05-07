@@ -22,7 +22,7 @@ from alphaforge.persistence import (
 
 logger = logging.getLogger(__name__)
 MIN_RR_THRESHOLD = 1.1
-MIN_SCORE_BASE = 7.5
+MIN_SCORE_BASE = 0.75
 MIN_RR_BASE = 1.3
 
 
@@ -329,7 +329,7 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
     if isinstance(decision, OrderRejection):
         _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
-        return {"status": "rejected", "candidate": None, "rejection_reason": decision.reject_reason, "execution": None}
+        return {"status": "rejected", "candidate": None, "reason": decision.reject_reason, "rejection_reason": decision.reject_reason, "execution": None}
     session = ctx.storage.get("session")
     if decision.expectancy is None and isinstance(session, Session):
         setup_exp = fetch_expectancy_stat(session, "setup_expectancy_stats", "setup", decision.setup_type)
@@ -343,7 +343,7 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     if not quality.accepted:
         ctx.diagnostics.update(quality.diagnostics)
         _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, quality.reject_reason)
-        return {"status": "rejected", "candidate": decision, "rejection_reason": quality.reject_reason, "execution": None, "diagnostics": quality.diagnostics}
+        return {"status": "rejected", "candidate": decision, "reason": quality.reject_reason, "rejection_reason": quality.reject_reason, "execution": None, "diagnostics": quality.diagnostics}
     execution = execute_order_candidate(decision, ctx)
     return {"status": "executed", "candidate": decision, "rejection_reason": "", "execution": execution}
 
