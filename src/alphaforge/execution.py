@@ -9,6 +9,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     spread_pct = float(market_ctx.get("spread_pct", _spread_pct_from_prices(market_ctx)) or 0.0)
     latency_ms = float(market_ctx.get("latency_ms", 50.0) or 50.0)
     orderbook_imbalance = float(market_ctx.get("orderbook_imbalance", 0.0) or 0.0)
+    liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
     funding = funding_rate_pct if funding_rate_pct is not None else market_ctx.get("funding_rate_pct", 0.0)
     funding_rate_pct_val = float(funding or 0.0)
     volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
@@ -18,8 +19,11 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "latency_ms": max(latency_ms, 0.0),
         "spread_pct": max(spread_pct, 0.0),
         "orderbook_imbalance": max(min(orderbook_imbalance, 1.0), -1.0),
+        "liquidity_score": max(min(liquidity_score, 1.0), 0.0),
         "funding_rate_pct": funding_rate_pct_val,
         "volatility_regime": volatility_regime,
+        "spoof_risk": float(market_ctx.get("spoof_risk", 0.0) or 0.0),
+        "absorption_score": float(market_ctx.get("absorption_score", 0.0) or 0.0),
     }
 
 
@@ -29,8 +33,11 @@ def neutral_execution_context() -> dict[str, Any]:
         "latency_ms": 50.0,
         "spread_pct": 0.0,
         "orderbook_imbalance": 0.0,
+        "liquidity_score": 1.0,
         "funding_rate_pct": 0.0,
         "volatility_regime": "normal",
+        "spoof_risk": 0.0,
+        "absorption_score": 0.0,
     }
 
 

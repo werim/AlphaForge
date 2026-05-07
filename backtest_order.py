@@ -394,7 +394,12 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]
-    for name, rows in [("order_lifecycle.csv", [asdict(x) for x in lifecycle]), ("order_candidates.csv", candidate_rows), ("open_at_end.csv", [asdict(x) for x in open_rows])]:
+    for name, rows in [
+        ("order_lifecycle.csv", [asdict(x) for x in lifecycle]),
+        ("order_candidates.csv", candidate_rows),
+        ("rejected_orders.csv", rejected),
+        ("open_at_end.csv", [asdict(x) for x in open_rows]),
+    ]:
         with open(os.path.join(args.output_dir, name), "w", newline="") as f:
             if not rows:
                 f.write("")

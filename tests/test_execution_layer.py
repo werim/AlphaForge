@@ -69,3 +69,32 @@ def test_execution_payload_contract_always_present() -> None:
         )
         for key in ["execution_flags", "effective_rr", "execution_metrics", "execution_ctx_missing", "adjusted_risk_reward", "block_reason", "reject_reason"]:
             assert key in payload
+
+
+def test_low_liquidity_flag_requires_low_liquidity_score() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        ok, payload = before_real_order(
+            s,
+            {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 1.2},
+            {"execution_ctx": {"expected_slippage_pct": 0.02, "spread_pct": 0.01, "latency_ms": 20, "liquidity_score": 0.8, "orderbook_imbalance": 0.1, "funding_rate_pct": 0.0, "volatility_regime": "high"}},
+            {"alignment": 0.8},
+            {},
+        )
+        assert not ok
+        assert "HIGH_SLIPPAGE" in payload["execution_flags"]
+        assert "LOW_LIQUIDITY" not in payload["execution_flags"]
+
+
+def test_low_liquidity_flag_when_liquidity_score_is_low() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        ok, payload = before_real_order(
+            s,
+            {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 1.2},
+            {"execution_ctx": {"expected_slippage_pct": 0.001, "spread_pct": 0.001, "latency_ms": 20, "liquidity_score": 0.2, "orderbook_imbalance": 0.1, "funding_rate_pct": 0.0, "volatility_regime": "normal"}},
+            {"alignment": 0.8},
+            {},
+        )
+        assert not ok
+        assert "LOW_LIQUIDITY" in payload["execution_flags"]
