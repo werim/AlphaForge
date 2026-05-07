@@ -22,7 +22,7 @@ from alphaforge.persistence import (
 
 logger = logging.getLogger(__name__)
 MIN_RR_THRESHOLD = 1.1
-MIN_SCORE_BASE = 0.75
+MIN_SCORE_BASE = 7.5
 MIN_RR_BASE = 1.3
 
 
@@ -132,6 +132,8 @@ def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Ma
         return OrderRejection(symbol=symbol, reject_reason="INVALID_LEVELS")
     side = str(market_ctx.get("side", "LONG"))
     score = float(market_ctx.get("score", 0.0) or 0.0)
+    if 0.0 <= score <= 1.0:
+        score *= 10.0
     rr = float(market_ctx.get("rr", 0.0) or 0.0)
     expectancy = market_ctx.get("expectancy")
     return OrderCandidate(
