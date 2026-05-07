@@ -326,13 +326,14 @@ def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContex
 
 
 def _rejected_cycle_result(reject_reason: str, candidate: OrderCandidate | None, execution: Any = None, diagnostics: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    normalized_reason = str(reject_reason or "")
     result: dict[str, Any] = {
         "status": "rejected",
         "accepted": False,
         "candidate": candidate,
-        "reason": reject_reason,
-        "reject_reason": reject_reason,
-        "rejection_reason": reject_reason,
+        "reason": normalized_reason,
+        "reject_reason": normalized_reason,
+        "rejection_reason": normalized_reason,
         "execution": execution,
     }
     if diagnostics is not None:
