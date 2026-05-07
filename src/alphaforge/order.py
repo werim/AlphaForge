@@ -359,8 +359,13 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     quality = evaluate_trade_quality(decision, ctx.market_ctx, recent_stats, config)
     if not quality.accepted:
         ctx.diagnostics.update(quality.diagnostics)
-        _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, quality.reject_reason)
-        return _rejected_cycle_result(quality.reject_reason, candidate=decision, diagnostics=quality.diagnostics)
+        reason = quality.reject_reason or "UNKNOWN"
+        _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, reason)
+        payload = _rejected_cycle_result(reason, candidate=decision, diagnostics=quality.diagnostics)
+        payload["accepted"] = False
+        payload["reason"] = reason
+        payload["reject_reason"] = reason
+        return payload
     execution = execute_order_candidate(decision, ctx)
     return {"status": "executed", "candidate": decision, "rejection_reason": "", "execution": execution}
 
