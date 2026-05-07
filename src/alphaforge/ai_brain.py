@@ -173,10 +173,13 @@ class AIBrain:
         self._upsert_expectancy("regime_expectancy_stats", "regime", regime, pnl)
         self._upsert_expectancy("symbol_expectancy_stats", "symbol", symbol, pnl)
 
+        entry_price = float(closed_trade.get("entry_price", 0.0) or 0.0)
+        filled_entry_price = float(closed_trade.get("filled_entry_price", entry_price) or entry_price)
         execution_metrics = {
             "expected_slippage_pct": float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0),
-            "filled_entry_price": closed_trade.get("filled_entry_price"),
-            "entry_price": closed_trade.get("entry_price"),
+            "filled_entry_price": filled_entry_price,
+            "entry_price": entry_price,
+            "realized_slippage_pct": abs(filled_entry_price - entry_price) / entry_price if entry_price > 0 else 0.0,
         }
         self.session.execute(
             text(
@@ -211,14 +214,14 @@ class AIBrain:
         order_plan = self.choose_order_plan(signal, market_ctx, score_ctx)
         explanation = self.explain_decision(signal, score_ctx, order_plan)
         try:
-            self._persist_decision(signal, score_ctx, order_plan, explanation, phase)
+            self._persist_decision(signal, market_ctx, score_ctx, order_plan, explanation, phase)
             self.session.commit()
         except Exception as exc:
             self.session.rollback()
             logger.warning("Persist failed: %s", exc)
         return score_ctx, order_plan, explanation
 
-    def _persist_decision(self, signal: Mapping[str, Any], score_ctx: ScoreContext, order_plan: OrderPlan, explanation: str, phase: str) -> None:
+    def _persist_decision(self, signal: Mapping[str, Any], market_ctx: Mapping[str, Any], score_ctx: ScoreContext, order_plan: OrderPlan, explanation: str, phase: str) -> None:
         signal_id = self.session.execute(
             text(
                 """
@@ -240,8 +243,8 @@ class AIBrain:
             text(
                 """
                 INSERT INTO order_decisions
-                (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, effective_rr, created_at)
-                VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :effective_rr, :created_at)
+                (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, volatility_regime, effective_rr, created_at)
+                VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance, :funding_rate_pct, :volatility_regime, :effective_rr, :created_at)
                 RETURNING id
                 """
             ),
@@ -257,7 +260,12 @@ class AIBrain:
                     "stop_price": order_plan.stop_price,
                     "reason": order_plan.reason,
                 }),
-                "expected_slippage_pct": 0.0,
+                "expected_slippage_pct": _num(market_ctx, "expected_slippage_pct", 0.0),
+                "spread_pct": _num(market_ctx, "spread_pct", 0.0),
+                "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)),
+                "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0),
+                "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
+                "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
                 "effective_rr": float(signal.get("risk_reward", 1.0) or 1.0),
                 "created_at": _now(),
             },
@@ -276,7 +284,14 @@ class AIBrain:
                 "features": _json_dumps(score_ctx.components),
                 "penalties": _json_dumps(score_ctx.penalties),
                 "reason_flags": _json_dumps(score_ctx.reason_flags),
-                "execution_features": _json_dumps({}),
+                "execution_features": _json_dumps({
+                    "expected_slippage_pct": _num(market_ctx, "expected_slippage_pct", 0.0),
+                    "spread_pct": _num(market_ctx, "spread_pct", 0.0),
+                    "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)),
+                    "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0),
+                    "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
+                    "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
+                }),
                 "created_at": _now(),
             },
         )

@@ -32,7 +32,9 @@ def normalize_execution_ctx(ctx: Mapping[str, Any] | None) -> dict[str, Any]:
         "expected_slippage_pct": float(base.get("expected_slippage_pct", 0.0) or 0.0),
         "spread_pct": float(base.get("spread_pct", 0.0) or 0.0),
         "latency_ms": int(base.get("latency_ms", 0) or 0),
+        "orderbook_imbalance": float(base.get("orderbook_imbalance", 0.0) or 0.0),
         "funding_rate_pct": float(base.get("funding_rate_pct", 0.0) or 0.0),
+        "volatility_regime": str(base.get("volatility_regime", "unknown") or "unknown"),
     }
 
 
@@ -386,10 +388,7 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         enriched_market_ctx = {**ctx, **execution_ctx}
 
         score, plan, explanation = brain.before_real_order(signal, enriched_market_ctx, regime_ctx, stats_ctx)
-        rr = float(order.get("risk_reward", 1.0) or 1.0)
-        slippage = float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-        effective_rr = rr * (1 - slippage * 10)
-        _, execution_flags = _effective_rr(order, execution_ctx)
+        effective_rr, execution_flags = _effective_rr(order, execution_ctx)
         if missing_execution_ctx:
             execution_flags.append("EXECUTION_CTX_MISSING")
         blocked = _is_blocked(score, regime_ctx, stats_ctx) or effective_rr < MIN_RR_THRESHOLD
@@ -453,9 +452,9 @@ def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any
 def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float, list[str]]:
     rr = float(order.get("risk_reward", 1.0) or 1.0)
     slippage = float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-    effective = rr * (1 - slippage * 10)
+    effective = rr * (1 - (slippage + float(execution_ctx.get("spread_pct", 0.0) or 0.0)) * 100)
     flags = []
-    if slippage > 0.02:
+    if slippage >= 0.02:
         flags.append("HIGH_SLIPPAGE")
     if float(execution_ctx.get("spread_pct", 0.0) or 0.0) > 0.002:
         flags.append("LOW_LIQUIDITY")
