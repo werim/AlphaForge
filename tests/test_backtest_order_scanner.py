@@ -203,3 +203,65 @@ def test_process_backtest_result_writes_rejection_rows_and_skips_sim(monkeypatch
     assert [r.status_after for r in lifecycle] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
     assert lifecycle[-1].reject_reason == "QUALITY_BELOW_THRESHOLD"
     assert rejected[0]["reject_reason"] == "QUALITY_BELOW_THRESHOLD"
+
+
+def test_symbol_filter_rejects_before_order_eval(monkeypatch):
+    candles = [bo.Candle(i, 10, 10.1, 9.9, 10, 0.1) for i in range(1, 8)]
+    meta = {"quoteVolume": 10.0}
+    called = {"n": 0}
+    def _fake_scan(*args, **kwargs):
+        called["n"] += 1
+        return None
+    monkeypatch.setattr(bo, "scan_symbol_backtest", _fake_scan)
+
+    lifecycle, rejected, rejection_counts = [], [], {}
+    for i in range(len(candles)):
+        if i < 2:
+            continue
+        selector_market = bo._build_symbol_market_data(meta, candles, i)
+        selector_result = bo.select_symbol("AAAUSDT", selector_market)
+        if not selector_result.tradable:
+            reason = selector_result.reject_reasons[0]
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            rejected.append({"reject_reason": reason})
+            lifecycle.append(bo.LifecycleRow(timestamp=candles[i].timestamp, symbol="AAAUSDT", side="N/A", setup_type="", setup_reason="", regime=selector_result.regime_hint, score=selector_result.symbol_score, rr=0.0, entry=0.0, sl=0.0, tp=0.0, status_before="NONE", status_after="SYMBOL_REJECTED", reject_reason=reason))
+            continue
+        bo.scan_symbol_backtest("AAAUSDT", candles, i, {})
+
+    assert called["n"] == 0
+    assert rejection_counts.get("LOW_VOLUME", 0) > 0
+    assert lifecycle[-1].status_after == "SYMBOL_REJECTED"
+
+
+def test_symbol_filter_tradable_keeps_existing_order_reject_behavior(monkeypatch):
+    lifecycle = []
+    rejected = []
+    rejection_counts = {}
+    open_rows = []
+    recent_stats = {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "outcomes": []}
+    candles = [bo.Candle(1, 10, 10.5, 9.5, 10.1, 1000)]
+    result = {"status": "rejected", "reason": "LOW_SCORE", "diagnostics": {"side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "score": 2.0, "rr": 1.1}}
+    mctx = {"entry": 10.0, "sl": 9.5, "tp": 11.0, "score": 2.0, "rr": 1.1}
+
+    cand = bo.process_backtest_result("AAAUSDT", candles[0], 0, candles, result, mctx, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
+    assert cand is None
+    assert rejection_counts["LOW_SCORE"] == 1
+
+
+def test_symbol_market_mapping_missing_fields_safe_defaults():
+    candles = [bo.Candle(1, 10, 10.1, 9.9, 10, 0), bo.Candle(2, 10, 10.2, 9.8, 9.9, 0), bo.Candle(3, 9.9, 10.0, 9.4, 9.5, 0)]
+    out = bo._build_symbol_market_data({}, candles, 2)
+    assert "volume_24h_usdt" in out
+    assert "selector_diagnostics" in out
+    assert isinstance(out["spread_pct"], float)
+
+
+def test_symbol_filter_deterministic_for_same_input():
+    candles = [bo.Candle(i, 10+i*0.01, 10.2+i*0.01, 9.8+i*0.01, 10.1+i*0.01, 1000+i) for i in range(1, 15)]
+    meta = {"quoteVolume": 5_000_000.0}
+    a = bo._build_symbol_market_data(meta, candles, 10)
+    b = bo._build_symbol_market_data(meta, candles, 10)
+    ra = bo.select_symbol("AAAUSDT", a)
+    rb = bo.select_symbol("AAAUSDT", b)
+    assert ra.tradable == rb.tradable
+    assert ra.reject_reasons == rb.reject_reasons
