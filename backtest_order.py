@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Mapping
 
 from alphaforge.execution import build_execution_context
+from alphaforge.symbol_selector import select_symbol
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -138,6 +139,61 @@ def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any],
     base.update(exec_ctx)
     return base
 
+
+
+
+def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Candle], idx: int) -> Dict[str, Any]:
+    now = candles[idx]
+    prev = candles[idx - 1] if idx > 0 else now
+    recent = candles[max(0, idx - 20):idx + 1]
+    diagnostics: Dict[str, Any] = {}
+
+    quote_volume = symbol_meta.get("quoteVolume")
+    if quote_volume in (None, "", 0, 0.0):
+        close = max(now.close, 1e-9)
+        quote_volume = now.volume * close * 1440.0
+        diagnostics["volume_24h_usdt"] = "derived_from_candle_volume"
+
+    spread_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
+    volatility_pct = spread_pct
+
+    lookback = recent[-10:] if recent else [now]
+    up_bars = sum(1 for c in lookback if c.close > c.open)
+    trend_strength = up_bars / max(1, len(lookback))
+
+    liquidity_score = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
+
+    recent_vol = [c.volume for c in recent[-6:]]
+    prev_vol = [c.volume for c in recent[-12:-6]]
+    if recent_vol and prev_vol:
+        recent_avg = sum(recent_vol) / len(recent_vol)
+        prev_avg = sum(prev_vol) / len(prev_vol)
+        recent_volume_change_pct = ((recent_avg - prev_avg) / max(prev_avg, 1e-9)) * 100.0
+    else:
+        recent_volume_change_pct = 0.0
+        diagnostics["recent_volume_change_pct"] = "defaulted_insufficient_history"
+
+    closes = [c.close for c in lookback]
+    close_min = min(closes)
+    close_max = max(closes)
+    chop_score = min(1.0, max(0.0, 1.0 - abs((closes[-1] - closes[0]) / max(close_max - close_min, 1e-9))))
+
+    panic_score = 0.0
+    drop_pct = ((prev.close - now.close) / max(prev.close, 1e-9)) * 100.0
+    if drop_pct > 3.0 and spread_pct > 2.0:
+        panic_score = min(1.0, (drop_pct / 10.0) + (spread_pct / 20.0))
+
+    return {
+        "volume_24h_usdt": float(quote_volume),
+        "spread_pct": spread_pct,
+        "volatility_pct": volatility_pct,
+        "trend_strength": trend_strength,
+        "liquidity_score": liquidity_score,
+        "recent_volume_change_pct": recent_volume_change_pct,
+        "chop_score": chop_score,
+        "panic_score": panic_score,
+        "selector_diagnostics": diagnostics,
+    }
 
 def parse_ts(value: str) -> int:
     if value.isdigit():
@@ -457,10 +513,24 @@ def main():
         for symbol, candles in candles_by_symbol.items():
             for i in range(len(candles)):
                 symbol_meta = symbol_meta_by_symbol.get(symbol, {})
+                if i < 2:
+                    continue
+                selector_market = _build_symbol_market_data(symbol_meta, candles, i)
+                selector_result = select_symbol(symbol, selector_market)
+                if not selector_result.tradable:
+                    reason = selector_result.reject_reasons[0] if selector_result.reject_reasons else "SYMBOL_FILTER_REJECTED"
+                    rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                    lifecycle.append(LifecycleRow(timestamp=candles[i].timestamp, symbol=symbol, side="N/A", setup_type="", setup_reason="", regime=selector_result.regime_hint, score=selector_result.symbol_score, rr=0.0, entry=0.0, sl=0.0, tp=0.0, status_before="NONE", status_after="SYMBOL_REJECTED", reject_reason=reason, event_flags="SYMBOL_SELECTOR", volume_24h_usdt=selector_market.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=selector_market.get("spread_pct", "UNAVAILABLE_BACKTEST"), liquidity_score=selector_market.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
+                    rejected.append({"timestamp": candles[i].timestamp, "symbol": symbol, "side": "N/A", "setup_type": "", "setup_reason": "SYMBOL_SELECTOR", "regime": selector_result.regime_hint, "score": selector_result.symbol_score, "rr": 0.0, "expectancy": "", "quality_score": "", "reject_reason": reason, "diagnostics": json.dumps({"selector": selector_result.diagnostics, "warnings": selector_result.warnings, "reject_reasons": selector_result.reject_reasons, "derived": selector_market.get("selector_diagnostics", {})}, sort_keys=True)})
+                    continue
                 scan_ctx = {"mode": args.mode, "balance": args.balance, "risk_pct": args.risk_pct, "recent_stats": recent_stats, "symbol_meta": symbol_meta}
                 _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})
                 mctx = scan_ctx.get("market_ctx", {})
+                if isinstance(mctx, dict):
+                    mctx.setdefault("symbol_score", selector_result.symbol_score)
+                    mctx.setdefault("regime_hint", selector_result.regime_hint)
+                    mctx.setdefault("symbol_selector_warnings", selector_result.warnings)
                 cand = process_backtest_result(symbol, candles[i], i, candles, result, mctx, args.balance, args.risk_pct, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
                 if cand:
                     candidates.append(cand)
