@@ -302,3 +302,93 @@ def test_symbol_filter_deterministic_for_same_input():
     rb = bo.select_symbol("AAAUSDT", b)
     assert ra.tradable == rb.tradable
     assert ra.reject_reasons == rb.reject_reasons
+
+def test_rejected_candidates_saved_with_shadow_fields():
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "LONG",
+        "entry": 10,
+        "sl": 9,
+        "tp": 11,
+        "rr": 1.2,
+        "reject_reason": "LOW_SCORE",
+        "score": 2.0,
+        "regime": "TREND",
+        "spread_pct": 0.1,
+        "liquidity_score": 0.8,
+        "volatility_score": 0.2,
+        "expected_slippage_pct": 0.001,
+    }
+    candles = [bo.Candle(1, 10, 11.2, 9.8, 11, 1)]
+    shadow = bo.evaluate_rejected_shadow(row, candles, 0)
+    assert shadow.symbol == "AAAUSDT"
+    assert shadow.raw_rr == 1.2
+    assert shadow.spread_pct == 0.1
+
+
+def test_shadow_outcome_calculated_for_low_score_reject():
+    row = {"timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 11, "rr": 1.5, "reject_reason": "LOW_SCORE", "score": 1.5, "regime": "RANGE", "spread_pct": 0.01, "liquidity_score": 0.9, "volatility_score": 0.5}
+    candles = [bo.Candle(1, 10, 10.2, 9.9, 10, 1), bo.Candle(2, 10, 11.1, 9.9, 11, 1)]
+    shadow = bo.evaluate_rejected_shadow(row, candles, 0)
+    assert shadow.shadow_outcome == "WOULD_TP"
+
+
+def test_wide_spread_reject_penalized_by_execution_cost():
+    row = {"timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 11, "rr": 1.2, "reject_reason": "WIDE_SPREAD", "score": 6.0, "regime": "TREND", "spread_pct": 1.5, "liquidity_score": 0.9, "volatility_score": 0.5}
+    candles = [bo.Candle(1, 10, 11.5, 9.9, 11, 1)]
+    shadow = bo.evaluate_rejected_shadow(row, candles, 0)
+    assert shadow.effective_rr < shadow.raw_rr
+    assert shadow.effective_tp_hit is False
+
+
+def test_rejected_shadow_summary_csv_created(tmp_path: Path):
+    out = tmp_path / "out"
+    bo.main.__globals__["sys"].argv = ["backtest_order.py", "--offline", "--output-dir", str(out)]
+    bo.main()
+    f = out / "rejected_shadow_summary.csv"
+    assert f.exists()
+    with open(f, newline="") as h:
+        rows = list(csv.DictReader(h))
+    assert rows and "total_rejected" in rows[0]
+
+
+def test_false_positive_reject_rate_reported():
+    s1 = bo.RejectedShadowEvaluation("A", 1, "LONG", 10, 9, 11, 1.5, 1.4, "LOW_SCORE", 2, "TREND", 0.1, 0.8, 0.2, "WOULD_TP", True, 0.1, True, True)
+    s2 = bo.RejectedShadowEvaluation("B", 1, "LONG", 10, 9, 11, 1.0, 1.0, "LOW_SCORE", 2, "TREND", 0.1, 0.8, 0.2, "WOULD_SL", False, 0.0, True, True)
+    summary = bo.build_rejected_shadow_summary([s1, s2])
+    assert "reject_false_positive_rate" in summary
+    assert summary["reject_false_positive_rate"] == 0.5
+
+
+def test_rejected_counterfactual_same_candle_priority_is_sl():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(1, 10, 11.5, 8.8, 10.5, 1)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0)
+    assert sim["outcome"] == "WOULD_SL"
+
+
+def test_rejected_counterfactual_uses_bounded_lookahead_timeout():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 12, 2, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(i, 10, 10.1, 9.9, 10, 1) for i in range(1, 8)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0, timeout_bars=3)
+    assert sim["outcome"] == "WOULD_TIMEOUT"
+
+
+def test_shadow_summary_zero_rejects_and_unknown_supported():
+    empty = bo.build_rejected_shadow_summary([])
+    assert empty["total_rejected"] == 0
+    assert empty["rejected_raw_win_rate"] == 0.0
+    assert empty["reject_false_positive_rate"] == 0.0
+
+    one_unknown = bo.RejectedShadowEvaluation("A", 1, "LONG", 10, 9, 11, 1.2, 1.2, "LOW_SCORE", 1.0, "TREND", 0.0, 1.0, 0.0, "UNKNOWN", False, 0.0, True, True)
+    summary = bo.build_rejected_shadow_summary([one_unknown])
+    assert summary["would_tp"] == 0
+    assert summary["rejected_effective_expectancy"] == 0.0
+
+
+def test_missing_execution_context_does_not_crash_shadow_eval():
+    row = {"timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 11, "rr": 1.1, "reject_reason": "LOW_SCORE"}
+    shadow = bo.evaluate_rejected_shadow(row, [], 0)
+    assert shadow.shadow_outcome == "UNKNOWN"
+    assert shadow.effective_rr >= 0.0
