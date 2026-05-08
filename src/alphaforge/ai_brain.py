@@ -176,11 +176,16 @@ class AIBrain:
 
         entry_price = float(closed_trade.get("entry_price", 0.0) or 0.0)
         filled_entry_price = float(closed_trade.get("filled_entry_price", entry_price) or entry_price)
+        expected_slippage_pct = abs(float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0))
+        realized_slippage_pct = abs(abs(filled_entry_price - entry_price) / entry_price if entry_price > 0 else 0.0)
+        slippage_delta = max(0.0, realized_slippage_pct - expected_slippage_pct)
+        fill_quality_score = max(0.0, min(1.0, 1.0 - slippage_delta * 100.0))
         execution_metrics = {
-            "expected_slippage_pct": float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0),
+            "expected_slippage_pct": expected_slippage_pct,
             "filled_entry_price": filled_entry_price,
             "entry_price": entry_price,
-            "realized_slippage_pct": abs(filled_entry_price - entry_price) / entry_price if entry_price > 0 else 0.0,
+            "realized_slippage_pct": realized_slippage_pct,
+            "fill_quality_score": fill_quality_score,
         }
         self.session.execute(
             text(
