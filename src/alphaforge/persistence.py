@@ -3,6 +3,28 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from sqlalchemy import create_engine, text
+
+
+def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
+    """Backward-compatible DB initializer; returns a SQLAlchemy engine."""
+    engine = create_engine(database_url, future=True)
+    ddl = [
+        "CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, side TEXT, timeframe TEXT)",
+        "CREATE TABLE IF NOT EXISTS order_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT)",
+        "CREATE TABLE IF NOT EXISTS ai_decision_features (id INTEGER PRIMARY KEY AUTOINCREMENT)",
+        "CREATE TABLE IF NOT EXISTS trade_lifecycle_events (id INTEGER PRIMARY KEY AUTOINCREMENT)",
+        "CREATE TABLE IF NOT EXISTS closed_trade_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id TEXT, symbol TEXT, review_payload TEXT, execution_metrics TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS setup_expectancy_stats (setup TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS cooldown_states (symbol TEXT PRIMARY KEY, cooldown_remaining_sec INTEGER NOT NULL DEFAULT 0)",
+    ]
+    with engine.begin() as conn:
+        for statement in ddl:
+            conn.execute(text(statement))
+    return engine
+
 
 def fetch_expectancy_stat(
     session: Any,
@@ -65,7 +87,25 @@ def save_ai_decision_features(execution_features=None, *args, **kwargs):
 def save_signal(session: Any, **signal: Any) -> Any:
     if session is None:
         return None
-    return signal.get("id")
+    try:
+        row = session.execute(
+            text(
+                """
+                INSERT INTO signals (symbol, side, timeframe)
+                VALUES (:symbol, :side, :timeframe)
+                """
+            ),
+            {
+                "symbol": signal.get("symbol"),
+                "side": signal.get("side"),
+                "timeframe": signal.get("timeframe"),
+            },
+        )
+        if hasattr(session, "commit"):
+            session.commit()
+        return row.lastrowid
+    except Exception:
+        return signal.get("id")
 
 
 def save_order_decision(session: Any, **decision: Any) -> Any:
@@ -125,4 +165,21 @@ def upsert_expectancy_stats(
 ) -> bool:
     if session is None:
         return False
-    return True
+    try:
+        session.execute(
+            text(
+                f"""
+                INSERT INTO {table_name} ({key_column}, samples, total_pnl)
+                VALUES (:key_value, 1, :pnl)
+                ON CONFLICT({key_column}) DO UPDATE SET
+                  samples = samples + 1,
+                  total_pnl = total_pnl + :pnl
+                """
+            ),
+            {"key_value": key_value, "pnl": float(pnl)},
+        )
+        if hasattr(session, "commit"):
+            session.commit()
+        return True
+    except Exception:
+        return False
