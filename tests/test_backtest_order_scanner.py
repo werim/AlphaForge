@@ -205,6 +205,43 @@ def test_process_backtest_result_writes_rejection_rows_and_skips_sim(monkeypatch
     assert rejected[0]["reject_reason"] == "QUALITY_BELOW_THRESHOLD"
 
 
+def test_process_backtest_result_writes_order_rejected_row(monkeypatch):
+    lifecycle = []
+    rejected = []
+    rejection_counts = {}
+    open_rows = []
+    recent_stats = {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "outcomes": []}
+    candles = [bo.Candle(1, 10, 12.0, 9.0, 11.0, 1)]
+    result = {
+        "status": "executed",
+        "candidate": type("C", (), {
+            "side": "LONG", "entry": 10.0, "sl": 9.5, "tp": 11.5, "rr": 1.6,
+            "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "score": 8.2, "order_type": "MARKET"
+        })(),
+        "diagnostics": {"expectancy": 0.12},
+    }
+    mctx = {"entry": 10.0, "sl": 9.5, "tp": 11.5, "score": 8.2, "rr": 1.6, "expected_slippage_pct": 0.03, "spread_pct": 0.01}
+    monkeypatch.setattr(bo, "simulate_candidate", lambda *args, **kwargs: [])
+
+    cand = bo.process_backtest_result("AAAUSDT", candles[0], 0, candles, result, mctx, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
+    assert cand is None
+    assert lifecycle[0].status_after == "SIGNAL_CREATED"
+    assert lifecycle[1].status_after == "ORDER_REJECTED"
+    assert lifecycle[1].reject_reason == "HIGH_SLIPPAGE"
+    assert rejected[0]["reject_reason"] == "HIGH_SLIPPAGE"
+
+
+def test_build_market_ctx_derives_non_zero_execution_inputs_when_missing_meta():
+    ctx = bo._build_market_ctx(
+        bo.Candle(3, 100, 104, 99, 103, 2500),
+        bo.Candle(2, 100, 101, 99.5, 100.2, 2000),
+        {},
+        recent=[bo.Candle(1, 99, 100, 98, 99.5, 1200), bo.Candle(2, 100, 101, 99, 100.2, 2000), bo.Candle(3, 100, 104, 99, 103, 2500)],
+    )
+    assert ctx["volume_24h_usdt"] > 0.0
+    assert ctx["spread_pct"] > 0.0
+
+
 def test_symbol_filter_rejects_before_order_eval(monkeypatch):
     candles = [bo.Candle(i, 10, 10.1, 9.9, 10, 0.1) for i in range(1, 8)]
     meta = {"quoteVolume": 10.0}
