@@ -118,6 +118,10 @@ def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any],
     tp = entry + rr * risk
     score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
     expectancy = ((score / 10.0) - 0.5) * (rr - 1.0)
+    quote_volume = symbol_meta.get("quoteVolume")
+    if quote_volume in (None, "", 0, 0.0):
+        quote_volume = now.volume * now.close * 1440.0
+    spread_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
     base = {
         "entry": entry,
         "sl": sl,
@@ -130,8 +134,8 @@ def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any],
         "expectancy": expectancy,
         "expectancy_bucket": _bucket_expectancy(expectancy),
         "side": "LONG",
-        "volume_24h_usdt": symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST"),
-        "spread_pct": 0.0,
+        "volume_24h_usdt": float(quote_volume),
+        "spread_pct": spread_pct,
         "funding_rate_pct": float(symbol_meta.get("fundingRate", 0.0) or 0.0),
     }
     klines = [{"high": c.high, "low": c.low, "close": c.close} for c in (recent or [])[-20:] if c]
