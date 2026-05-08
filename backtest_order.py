@@ -2,10 +2,19 @@ import argparse
 import csv
 import json
 import os
+import sys
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Mapping
+
+# Allow running this script directly from the repo root without requiring
+# prior editable install.
+ROOT_DIR = Path(__file__).resolve().parent
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 from alphaforge.execution import build_execution_context
 from alphaforge.symbol_selector import select_symbol
