@@ -1,5 +1,6 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+import json
 import pytest
 
 from alphaforge.order import after_position_close, before_real_order
@@ -35,7 +36,23 @@ def test_execution_metrics_persisted() -> None:
     with Session(engine) as s:
         after_position_close(s, {"trade_id": "t1", "symbol": "BTCUSDT", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.2, "expected_slippage_pct": 0.001}, {})
         row = s.execute(text("SELECT execution_metrics FROM closed_trade_reviews WHERE trade_id='t1' ORDER BY id DESC LIMIT 1")).one()
-        assert "fill_quality_score" in row.execution_metrics
+        metrics = json.loads(row.execution_metrics)
+        assert "entry_price" in metrics
+        assert "filled_entry_price" in metrics
+        assert "expected_slippage_pct" in metrics
+        assert "realized_slippage_pct" in metrics
+        assert "fill_quality_score" in metrics
+        assert 0.0 <= metrics["fill_quality_score"] <= 1.0
+        assert metrics["fill_quality_score"] == pytest.approx(0.9, rel=1e-6)
+
+def test_execution_metrics_worse_slippage_lowers_quality() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        after_position_close(s, {"trade_id": "t2", "symbol": "BTCUSDT", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.05, "expected_slippage_pct": 0.001}, {})
+        after_position_close(s, {"trade_id": "t3", "symbol": "BTCUSDT", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.3, "expected_slippage_pct": 0.001}, {})
+        better = json.loads(s.execute(text("SELECT execution_metrics FROM closed_trade_reviews WHERE trade_id='t2' ORDER BY id DESC LIMIT 1")).one().execution_metrics)
+        worse = json.loads(s.execute(text("SELECT execution_metrics FROM closed_trade_reviews WHERE trade_id='t3' ORDER BY id DESC LIMIT 1")).one().execution_metrics)
+        assert worse["fill_quality_score"] < better["fill_quality_score"]
 
 def test_missing_execution_ctx_safe() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")

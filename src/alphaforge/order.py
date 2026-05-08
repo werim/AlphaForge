@@ -498,13 +498,28 @@ def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any]) ->
 
 
 def _execution_review(closed_trade: Mapping[str, Any]) -> dict[str, float]:
-    expected = float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0)
-    entry = float(closed_trade.get("entry_price", 0.0) or 0.0)
-    filled = float(closed_trade.get("filled_entry_price", entry) or entry)
-    realized = abs(filled - entry) / entry if entry > 0 else 0.0
-    diff = realized - expected
-    fill_quality = max(0.0, min(1.0, 1.0 - abs(diff) * 10.0))
-    return {"realized_slippage_pct": realized, "entry_expected_diff_pct": diff, "fill_quality_score": fill_quality}
+    expected = abs(float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0))
+    fill_quality = 1.0
+
+    try:
+        entry = float(closed_trade.get("entry_price", 0.0) or 0.0)
+        filled = float(closed_trade.get("filled_entry_price", entry) or entry)
+        realized = abs(filled - entry) / entry if entry > 0 else 0.0
+    except (TypeError, ValueError):
+        entry = 0.0
+        filled = 0.0
+        realized = 0.0
+
+    realized = abs(realized)
+    slippage_delta = max(0.0, realized - expected)
+    fill_quality = max(0.0, min(1.0, 1.0 - slippage_delta * 100.0))
+    return {
+        "entry_price": entry,
+        "filled_entry_price": filled,
+        "expected_slippage_pct": expected,
+        "realized_slippage_pct": realized,
+        "fill_quality_score": fill_quality,
+    }
 
 
 def _signal_adapter(payload: Mapping[str, Any]) -> dict[str, Any]:
