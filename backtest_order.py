@@ -50,6 +50,29 @@ class CandidateOrder:
 
 
 @dataclass
+class RejectedShadowEvaluation:
+    symbol: str
+    timestamp: int
+    side: str
+    entry: float
+    stop_loss: float
+    take_profit: float
+    raw_rr: float
+    effective_rr: float
+    reject_reasons: str
+    score: float
+    regime: str
+    spread_pct: Any
+    liquidity_score: Any
+    volatility_score: Any
+    shadow_outcome: str
+    effective_tp_hit: bool
+    cost_penalty: float
+    liquidity_ok: bool
+    volatility_ok: bool
+
+
+@dataclass
 class LifecycleRow:
     timestamp: int
     symbol: str
@@ -362,26 +385,44 @@ def finalize(candidate, before, after, trigger_price, close_price, close_reason,
     return LifecycleRow(candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason, candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp, before, after, trigger_price=trigger_price, close_price=close_price, close_reason=close_reason, net_pnl_pct=pnl_pct, net_pnl_usdt=net_pnl_usdt, hold_minutes=hold, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket, volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), mfe=mfe, mae=mae)
 
 
-def simulate_rejected_counterfactual(candidate: CandidateOrder, candles: List[Candle], idx: int) -> dict[str, Any]:
+def simulate_rejected_counterfactual(candidate: CandidateOrder, candles: List[Candle], idx: int, timeout_bars: int = 240) -> dict[str, Any]:
+    if idx >= len(candles):
+        return {"outcome": "UNKNOWN", "would_trigger": False, "would_tp_hit": False, "would_sl_hit": False, "max_favorable_excursion": 0.0, "max_adverse_excursion": 0.0}
     would_trigger = False
     would_tp = False
     would_sl = False
     mfe = 0.0
     mae = 0.0
-    for c in candles[idx:]:
+    scan = candles[idx: idx + timeout_bars]
+    for c in scan:
         if c.low <= candidate.entry <= c.high:
             would_trigger = True
         if would_trigger:
             mfe = max(mfe, c.high - candidate.entry)
             mae = max(mae, candidate.entry - c.low)
-            if c.high >= candidate.tp:
-                would_tp = True
-                break
-            if c.low <= candidate.sl:
+            hit_sl = c.low <= candidate.sl
+            hit_tp = c.high >= candidate.tp
+            # deterministic same-candle rule for diagnostics parity:
+            # if both touch, count as stop loss first.
+            if hit_sl and hit_tp:
+                hit_tp = False
+            if hit_sl:
                 would_sl = True
                 break
-    base = {"would_trigger": would_trigger, "would_tp_hit": would_tp, "would_sl_hit": would_sl, "max_favorable_excursion": mfe, "max_adverse_excursion": mae}
-    return base
+            if hit_tp:
+                would_tp = True
+                break
+    if not would_trigger:
+        outcome = "WOULD_NOT_TRIGGER"
+    elif would_tp:
+        outcome = "WOULD_TP"
+    elif would_sl:
+        outcome = "WOULD_SL"
+    elif len(scan) < timeout_bars and idx + timeout_bars > len(candles):
+        outcome = "UNKNOWN"
+    else:
+        outcome = "WOULD_TIMEOUT"
+    return {"outcome": outcome, "would_trigger": would_trigger, "would_tp_hit": would_tp, "would_sl_hit": would_sl, "max_favorable_excursion": mfe, "max_adverse_excursion": mae}
 
 
 def _update_recent_stats_after_close(recent_stats: Dict[str, Any], symbol: str, close_reason: str) -> None:
@@ -437,7 +478,7 @@ def process_backtest_result(symbol: str, candle: Candle, idx: int, candles: List
         reason = result.get("reason", "UNKNOWN")
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
         lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=side, setup_type=setup_type, setup_reason=setup_reason, regime=regime, score=score, rr=rr, entry=entry, sl=sl, tp=tp, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type=order_type, expectancy_bucket=expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
-        rejected.append({"timestamp": candle.timestamp, "symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "regime": regime, "score": score, "rr": rr, "expectancy": expectancy, "quality_score": diagnostics.get("quality_score", 0.0), "reject_reason": reason, "diagnostics": json.dumps(diagnostics, sort_keys=True)})
+        rejected.append({"timestamp": candle.timestamp, "symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "regime": regime, "score": score, "rr": rr, "expectancy": expectancy, "quality_score": diagnostics.get("quality_score", 0.0), "reject_reason": reason, "diagnostics": json.dumps(diagnostics, sort_keys=True), "entry": entry, "sl": sl, "tp": tp, "spread_pct": mctx.get("spread_pct", 0.0), "liquidity_score": mctx.get("liquidity_score", 1.0), "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", 0.0)), "expected_slippage_pct": mctx.get("expected_slippage_pct", 0.0)})
         return None
 
     if result.get("status") != "executed":
@@ -450,7 +491,7 @@ def process_backtest_result(symbol: str, candle: Candle, idx: int, candles: List
         reason = execution_flags[0]
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
         lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="SIGNAL_CREATED", status_after="ORDER_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
-        rejected.append({"timestamp": candle.timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "expectancy": expectancy, "quality_score": diagnostics.get("quality_score", ""), "reject_reason": reason, "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True)})
+        rejected.append({"timestamp": candle.timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "expectancy": expectancy, "quality_score": diagnostics.get("quality_score", ""), "reject_reason": reason, "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True), "entry": cand.entry, "sl": cand.sl, "tp": cand.tp, "spread_pct": mctx.get("spread_pct", 0.0), "liquidity_score": mctx.get("liquidity_score", 1.0), "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", 0.0)), "expected_slippage_pct": mctx.get("expected_slippage_pct", 0.0)})
         return None
 
     sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=mctx)
@@ -464,6 +505,50 @@ def process_backtest_result(symbol: str, candle: Candle, idx: int, candles: List
         if sim_row.status_after == "POSITION_CLOSED":
             _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
     return cand
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def evaluate_rejected_shadow(candidate_row: Mapping[str, Any], candles: List[Candle], idx: int) -> RejectedShadowEvaluation:
+    rr = _safe_float(candidate_row.get("rr"), 0.0)
+    spread_pct = _safe_float(candidate_row.get("spread_pct"), 0.0)
+    liquidity_score = _safe_float(candidate_row.get("liquidity_score"), 1.0)
+    volatility_score = _safe_float(candidate_row.get("volatility_score"), spread_pct)
+    effective_rr, _ = _execution_reject_flags(rr, {"spread_pct": spread_pct, "expected_slippage_pct": _safe_float(candidate_row.get("expected_slippage_pct"), 0.0), "liquidity_score": liquidity_score})
+    counterfactual = simulate_rejected_counterfactual(CandidateOrder(timestamp=int(candidate_row.get("timestamp", 0)), symbol=str(candidate_row.get("symbol", "")), side=str(candidate_row.get("side", "LONG")), entry=_safe_float(candidate_row.get("entry"), 0.0), sl=_safe_float(candidate_row.get("sl"), 0.0), tp=_safe_float(candidate_row.get("tp"), 0.0), rr=rr, setup_type=str(candidate_row.get("setup_type", "")), setup_reason=str(candidate_row.get("setup_reason", "")), regime=str(candidate_row.get("regime", "")), score=_safe_float(candidate_row.get("score"), 0.0), order_type=str(candidate_row.get("order_type", "LIMIT"))), candles, idx)
+    liquidity_ok = liquidity_score >= 0.3
+    volatility_ok = volatility_score <= 5.0
+    cost_penalty = max(rr - effective_rr, 0.0)
+    effective_tp_hit = counterfactual["outcome"] == "WOULD_TP" and effective_rr >= 1.1 and liquidity_ok and volatility_ok
+    return RejectedShadowEvaluation(symbol=str(candidate_row.get("symbol", "")), timestamp=int(candidate_row.get("timestamp", 0)), side=str(candidate_row.get("side", "LONG")), entry=_safe_float(candidate_row.get("entry"), 0.0), stop_loss=_safe_float(candidate_row.get("sl"), 0.0), take_profit=_safe_float(candidate_row.get("tp"), 0.0), raw_rr=rr, effective_rr=effective_rr, reject_reasons=str(candidate_row.get("reject_reason", "UNKNOWN")), score=_safe_float(candidate_row.get("score"), 0.0), regime=str(candidate_row.get("regime", "UNKNOWN")), spread_pct=spread_pct, liquidity_score=liquidity_score, volatility_score=volatility_score, shadow_outcome=counterfactual["outcome"], effective_tp_hit=effective_tp_hit, cost_penalty=cost_penalty, liquidity_ok=liquidity_ok, volatility_ok=volatility_ok)
+
+
+def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Dict[str, Any]:
+    total = len(shadows)
+    counts = {k: sum(1 for s in shadows if s.shadow_outcome == k) for k in ["WOULD_TP", "WOULD_SL", "WOULD_NOT_TRIGGER", "WOULD_TIMEOUT", "UNKNOWN"]}
+    profitable = sum(1 for s in shadows if s.effective_tp_hit)
+    unprofitable = counts["WOULD_SL"]
+    avoidable_loss = sum(1 for s in shadows if s.shadow_outcome == "WOULD_SL")
+    missed_profit = profitable
+    false_positive_rate = (profitable / total) if total else 0.0
+    reject_precision = ((total - profitable) / total) if total else 0.0
+    expectancy = 0.0 if total == 0 else sum((s.effective_rr if s.effective_tp_hit else (-1.0 if s.shadow_outcome == "WOULD_SL" else 0.0)) for s in shadows) / total
+    def _group(attr: str) -> Dict[str, Dict[str, float]]:
+        out: Dict[str, Dict[str, float]] = {}
+        for s in shadows:
+            key = str(getattr(s, attr))
+            bucket = out.setdefault(key, {"count": 0, "would_tp": 0, "would_sl": 0, "effective_tp": 0})
+            bucket["count"] += 1
+            bucket["would_tp"] += int(s.shadow_outcome == "WOULD_TP")
+            bucket["would_sl"] += int(s.shadow_outcome == "WOULD_SL")
+            bucket["effective_tp"] += int(s.effective_tp_hit)
+        return out
+    return {"total_rejected": total, "would_tp": counts["WOULD_TP"], "would_sl": counts["WOULD_SL"], "would_not_trigger": counts["WOULD_NOT_TRIGGER"], "would_timeout": counts["WOULD_TIMEOUT"], "rejected_raw_win_rate": (counts["WOULD_TP"] / total if total else 0.0), "rejected_effective_expectancy": expectancy, "performance_by_reject_reason": json.dumps(_group("reject_reasons"), sort_keys=True), "performance_by_regime": json.dumps(_group("regime"), sort_keys=True), "performance_by_symbol": json.dumps(_group("symbol"), sort_keys=True), "profitable_reject_count": profitable, "unprofitable_reject_count": unprofitable, "avoidable_loss_count": avoidable_loss, "missed_profit_count": missed_profit, "reject_precision": reject_precision, "reject_false_positive_rate": false_positive_rate}
 
 def main():
     p = argparse.ArgumentParser()
@@ -556,15 +641,24 @@ def main():
         synthetic = CandidateOrder(c0.timestamp, symbol, "LONG", c0.close, c0.close - 0.5, c0.close + (c0.close - (c0.close - 0.5)) * mctx["rr"], mctx["rr"], "BREAKOUT_UP", "OFFLINE_FIXTURE", "TREND", mctx["score"], "LIMIT", expectancy_bucket=mctx.get("expectancy_bucket", "UNKNOWN"))
         candidates.append(synthetic)
         lifecycle.extend(simulate_candidate(synthetic, fixture_candles, 5, args.balance, args.risk_pct, market_ctx={"volume_24h_usdt": 100000000.0}))
-        rejected.append({"timestamp": fixture_candles[8].timestamp, "symbol": symbol, "side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "OFFLINE_FIXTURE", "regime": "TREND", "score": 4.0, "rr": 0.9, "expectancy": -0.1, "quality_score": 0.1, "reject_reason": "LOW_EFFECTIVE_RR", "diagnostics": json.dumps({"offline": True}, sort_keys=True)})
+        rejected.append({"timestamp": fixture_candles[8].timestamp, "symbol": symbol, "side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "OFFLINE_FIXTURE", "regime": "TREND", "score": 4.0, "rr": 0.9, "expectancy": -0.1, "quality_score": 0.1, "reject_reason": "LOW_EFFECTIVE_RR", "diagnostics": json.dumps({"offline": True}, sort_keys=True), "entry": fixture_candles[8].close, "sl": fixture_candles[8].close - 0.5, "tp": fixture_candles[8].close + 0.3, "spread_pct": 0.2, "liquidity_score": 0.8, "volatility_score": 0.2, "expected_slippage_pct": 0.001})
         lifecycle.append(LifecycleRow(timestamp=fixture_candles[8].timestamp, symbol=symbol, side="LONG", setup_type="BREAKOUT_UP", setup_reason="OFFLINE_FIXTURE", regime="TREND", score=4.0, rr=0.9, entry=0.0, sl=0.0, tp=0.0, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason="LOW_EFFECTIVE_RR", order_type="N/A"))
 
     candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]
+    rejected_shadow: List[RejectedShadowEvaluation] = []
+    for row in rejected:
+        symbol = row.get("symbol")
+        ts = int(row.get("timestamp", 0) or 0)
+        candles = candles_by_symbol.get(symbol, [])
+        idx = next((i for i, c in enumerate(candles) if c.timestamp >= ts), len(candles))
+        rejected_shadow.append(evaluate_rejected_shadow(row, candles, idx))
+
     for name, rows in [
         ("order_lifecycle.csv", [asdict(x) for x in lifecycle]),
         ("order_candidates.csv", candidate_rows),
         ("backtest_orders.csv", candidate_rows),
         ("rejected_orders.csv", rejected),
+        ("rejected_shadow.csv", [asdict(x) for x in rejected_shadow]),
         ("open_at_end.csv", [asdict(x) for x in open_rows]),
     ]:
         with open(os.path.join(args.output_dir, name), "w", newline="") as f:
@@ -584,6 +678,10 @@ def main():
     }
     with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys())); w.writeheader(); w.writerow(summary)
+
+    rejected_shadow_summary = build_rejected_shadow_summary(rejected_shadow)
+    with open(os.path.join(args.output_dir, "rejected_shadow_summary.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys())); w.writeheader(); w.writerow(rejected_shadow_summary)
 
 
 def _order_runtime():
