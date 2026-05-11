@@ -203,3 +203,43 @@ def test_process_backtest_result_writes_rejection_rows_and_skips_sim(monkeypatch
     assert [r.status_after for r in lifecycle] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
     assert lifecycle[-1].reject_reason == "QUALITY_BELOW_THRESHOLD"
     assert rejected[0]["reject_reason"] == "QUALITY_BELOW_THRESHOLD"
+
+
+def test_rejected_rows_preserve_execution_context_when_available():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    recent_stats = {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "outcomes": []}
+    candle = bo.Candle(1, 10, 11, 9, 10.5, 1)
+    mctx = {"entry": 10.0, "sl": 9.0, "tp": 11.5, "spread_pct": 0.004, "expected_slippage_pct": 0.012, "liquidity_score": 0.42}
+    result = {"status": "rejected", "reason": "QUALITY_BELOW_THRESHOLD", "diagnostics": {"side": "LONG", "rr": 1.5}}
+    bo.process_backtest_result("AAAUSDT", candle, 0, [candle], result, mctx, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
+    assert rejected[0]["spread_pct"] == 0.004
+    assert rejected[0]["expected_slippage_pct"] == 0.012
+    assert rejected[0]["liquidity_score"] == 0.42
+
+
+def test_missing_execution_context_does_not_crash_shadow_eval():
+    out = bo.evaluate_rejected_shadow([
+        {"timestamp": 1, "symbol": "AAA", "reject_reason": "LOW_EFFECTIVE_RR", "entry": 10.0, "sl": 9.0, "tp": 11.0}
+    ], {})
+    assert out["rejected_shadow_denominator"] == 1
+    assert out["rejected_shadow_evaluated"] == 0
+
+
+def test_non_order_rejects_excluded_from_shadow_denominator():
+    rows = [
+        {"timestamp": 1, "symbol": "AAA", "reject_reason": "SYMBOL_SELECTOR_REJECTED", "entry": 10, "sl": 9, "tp": 11},
+        {"timestamp": 1, "symbol": "AAA", "reject_reason": "NO_ORDER", "entry": 10, "sl": 9, "tp": 11},
+        {"timestamp": 1, "symbol": "AAA", "reject_reason": "LOW_EFFECTIVE_RR", "entry": 10, "sl": 9, "tp": 11},
+    ]
+    c = [bo.Candle(1, 10, 10.2, 9.8, 10.1, 1), bo.Candle(2, 10.1, 11.2, 10.0, 11.0, 1)]
+    out = bo.evaluate_rejected_shadow(rows, {"AAA": c})
+    assert out["rejected_shadow_denominator"] == 1
+
+
+def test_actionable_rejected_denominator_counts_only_valid_levels():
+    rows = [
+        {"timestamp": 1, "symbol": "AAA", "reject_reason": "LOW_EFFECTIVE_RR", "entry": 0.0, "sl": 0.0, "tp": 0.0},
+        {"timestamp": 1, "symbol": "AAA", "reject_reason": "LOW_EFFECTIVE_RR", "entry": 10.0, "sl": 9.0, "tp": 11.0},
+    ]
+    out = bo.evaluate_rejected_shadow(rows, {"AAA": [bo.Candle(1, 10, 11, 9, 10, 1)]})
+    assert out["rejected_shadow_denominator"] == 1
