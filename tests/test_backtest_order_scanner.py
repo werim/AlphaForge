@@ -434,6 +434,7 @@ def test_rejected_signal_lifecycle_precedes_any_trade_simulation(monkeypatch):
     rejected_idx = next(i for i, row in enumerate(lifecycle) if row.status_after == "SIGNAL_REJECTED")
     assert rejected_idx < first_closed_idx
     assert [lifecycle[0].status_after, lifecycle[1].status_after] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
+    assert all(row.status_after != "CREATED" for row in lifecycle)
 
 
 def test_scan_symbol_backtest_exposes_market_ctx_for_rejected_signals(monkeypatch):
