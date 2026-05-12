@@ -361,9 +361,9 @@ def test_false_positive_reject_rate_reported():
     assert summary["reject_false_positive_rate"] == 0.5
 
 
-def test_rejected_counterfactual_same_candle_priority_is_sl():
+def test_rejected_counterfactual_same_candle_sl_priority():
     c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "BACKTEST", "R", "X", 1, "LIMIT")
-    candles = [bo.Candle(1, 10, 11.5, 8.8, 10.5, 1)]
+    candles = [bo.Candle(1, 10, 11.2, 8.8, 10.5, 1)]
     sim = bo.simulate_rejected_counterfactual(c, candles, 0)
     assert sim["outcome"] == "WOULD_SL"
 
@@ -378,17 +378,125 @@ def test_rejected_counterfactual_uses_bounded_lookahead_timeout():
 def test_shadow_summary_zero_rejects_and_unknown_supported():
     empty = bo.build_rejected_shadow_summary([])
     assert empty["total_rejected"] == 0
+    assert empty["would_tp"] == 0
     assert empty["rejected_raw_win_rate"] == 0.0
     assert empty["reject_false_positive_rate"] == 0.0
 
-    one_unknown = bo.RejectedShadowEvaluation("A", 1, "LONG", 10, 9, 11, 1.2, 1.2, "LOW_SCORE", 1.0, "TREND", 0.0, 1.0, 0.0, "UNKNOWN", False, 0.0, True, True)
-    summary = bo.build_rejected_shadow_summary([one_unknown])
+    unknown = bo.RejectedShadowEvaluation(
+        "A",
+        1,
+        "LONG",
+        10,
+        9,
+        11,
+        1.2,
+        1.2,
+        "LOW_SCORE",
+        1.0,
+        "TREND",
+        0.1,
+        0.8,
+        0.2,
+        "UNKNOWN",
+        False,
+        0.0,
+        True,
+        True,
+    )
+    summary = bo.build_rejected_shadow_summary([unknown])
+    assert summary["total_rejected"] == 1
     assert summary["would_tp"] == 0
     assert summary["rejected_effective_expectancy"] == 0.0
 
 
 def test_missing_execution_context_does_not_crash_shadow_eval():
-    row = {"timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 11, "rr": 1.1, "reject_reason": "LOW_SCORE"}
-    shadow = bo.evaluate_rejected_shadow(row, [], 0)
-    assert shadow.shadow_outcome == "UNKNOWN"
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "LONG",
+        "entry": 10.0,
+        "sl": 9.0,
+        "tp": 11.0,
+        "rr": 1.3,
+        "reject_reason": "LOW_SCORE",
+        "score": 2.0,
+        "regime": "TREND",
+    }
+    shadow = bo.evaluate_rejected_shadow(row, [bo.Candle(1, 10, 10.2, 9.9, 10.1, 1)], 0)
     assert shadow.effective_rr >= 0.0
+
+
+def test_rejected_rows_use_unavailable_execution_sentinel_when_ctx_missing():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 10.5, 9.8, 10.2, 100)]
+    result = {
+        "status": "rejected",
+        "reason": "LOW_SCORE",
+        "diagnostics": {
+            "side": "LONG",
+            "setup_type": "BREAKOUT_UP",
+            "setup_reason": "X",
+            "regime": "TREND",
+            "score": 2.0,
+            "rr": 1.1,
+        },
+    }
+
+    bo.process_backtest_result(
+        "AAAUSDT",
+        candles[0],
+        0,
+        candles,
+        result,
+        {},
+        1000,
+        1.0,
+        lifecycle,
+        rejected,
+        rejection_counts,
+        open_rows,
+        {
+            "last_trade_ts_by_symbol": {},
+            "trades_today_by_symbol": {},
+            "global_trades_today": 0,
+            "symbol_loss_streak": {},
+            "global_loss_streak": 0,
+            "symbol_loss_block_until": {},
+            "global_loss_block_until": 0,
+            "consecutive_sl_count": 0,
+            "consecutive_tp_count": 0,
+            "rolling_winrate": 0.0,
+            "outcomes": [],
+        },
+    )
+
+    assert rejected[0]["spread_pct"] == "UNAVAILABLE_BACKTEST"
+    assert rejected[0]["liquidity_score"] == "UNAVAILABLE_BACKTEST"
+    assert rejected[0]["expected_slippage_pct"] == "UNAVAILABLE_BACKTEST"
+
+
+def test_symbol_selector_reject_is_not_actionable_shadow_order():
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "N/A",
+        "setup_reason": "SYMBOL_SELECTOR",
+        "reject_reason": "LOW_VOLUME",
+    }
+    assert bo._is_actionable_rejected_order(row) is False
+
+
+def test_rejected_order_with_valid_levels_is_actionable_shadow_order():
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "LONG",
+        "setup_type": "BREAKOUT_UP",
+        "setup_reason": "X",
+        "entry": 10.0,
+        "sl": 9.0,
+        "tp": 11.0,
+        "rr": 1.2,
+        "reject_reason": "LOW_SCORE",
+    }
+    assert bo._is_actionable_rejected_order(row) is True
