@@ -312,8 +312,15 @@ def scan_symbol_backtest(symbol: str, candles: List[Candle], idx: int, context: 
         return None
     now = candles[idx]
     prev = candles[idx - 1]
-    mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx-20):idx+1])
-    ctx = OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=now.timestamp, symbol=symbol, balance=float(context.get("balance",1000)), risk_pct=float(context.get("risk_pct",1.0)), market_ctx=mctx)
+    mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx - 20):idx + 1])
+    ctx = OrderExecutionContext(
+        mode=TradingMode.BACKTEST,
+        timestamp=now.timestamp,
+        symbol=symbol,
+        balance=float(context.get("balance", 1000)),
+        risk_pct=float(context.get("risk_pct", 1.0)),
+        market_ctx=mctx,
+    )
     result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
     context["last_result"] = result
     context["market_ctx"] = mctx
@@ -478,7 +485,27 @@ def process_backtest_result(symbol: str, candle: Candle, idx: int, candles: List
         reason = result.get("reason", "UNKNOWN")
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
         lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=side, setup_type=setup_type, setup_reason=setup_reason, regime=regime, score=score, rr=rr, entry=entry, sl=sl, tp=tp, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type=order_type, expectancy_bucket=expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
-        rejected.append({"timestamp": candle.timestamp, "symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "regime": regime, "score": score, "rr": rr, "expectancy": expectancy, "quality_score": diagnostics.get("quality_score", 0.0), "reject_reason": reason, "diagnostics": json.dumps(diagnostics, sort_keys=True), "entry": entry, "sl": sl, "tp": tp, "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")), "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST")})
+        rejected.append({
+            "timestamp": candle.timestamp,
+            "symbol": symbol,
+            "side": side,
+            "setup_type": setup_type,
+            "setup_reason": setup_reason,
+            "regime": regime,
+            "score": score,
+            "rr": rr,
+            "expectancy": expectancy,
+            "quality_score": diagnostics.get("quality_score", 0.0),
+            "reject_reason": reason,
+            "diagnostics": json.dumps(diagnostics, sort_keys=True),
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+            "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+            "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")),
+            "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+        })
         return None
 
     if result.get("status") != "executed":
@@ -491,7 +518,27 @@ def process_backtest_result(symbol: str, candle: Candle, idx: int, candles: List
         reason = execution_flags[0]
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
         lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="SIGNAL_CREATED", status_after="ORDER_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST")))
-        rejected.append({"timestamp": candle.timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "expectancy": expectancy, "quality_score": diagnostics.get("quality_score", ""), "reject_reason": reason, "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True), "entry": cand.entry, "sl": cand.sl, "tp": cand.tp, "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")), "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST")})
+        rejected.append({
+            "timestamp": candle.timestamp,
+            "symbol": symbol,
+            "side": cand.side,
+            "setup_type": cand.setup_type,
+            "setup_reason": cand.setup_reason,
+            "regime": cand.regime,
+            "score": cand.score,
+            "rr": cand.rr,
+            "expectancy": expectancy,
+            "quality_score": diagnostics.get("quality_score", ""),
+            "reject_reason": reason,
+            "diagnostics": json.dumps({"effective_rr": effective_rr, "execution_flags": execution_flags}, sort_keys=True),
+            "entry": cand.entry,
+            "sl": cand.sl,
+            "tp": cand.tp,
+            "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+            "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+            "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")),
+            "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+        })
         return None
 
     sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=mctx)
