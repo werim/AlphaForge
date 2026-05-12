@@ -140,6 +140,13 @@ def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[f
     return effective, flags
 
 
+
+
+def _estimate_backtest_spread_pct(liquidity_score: float, volatility_pct: float) -> float:
+    base_spread_pct = 0.015 + (1.0 - liquidity_score) * 0.09
+    volatility_widening = min(0.04, max(0.0, (volatility_pct - 2.0) * 0.0015))
+    return max(0.005, min(0.22, base_spread_pct + volatility_widening))
+
 def _build_market_ctx(
     now: Candle,
     prev: Candle,
@@ -161,7 +168,10 @@ def _build_market_ctx(
     if quote_volume in (None, "", 0, 0.0):
         quote_volume = now.volume * now.close * 1440.0
 
-    spread_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
+    candle_range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
+    liq = min(1.0, max(0.05, float(symbol_meta.get("quoteVolume", 0.0) or 0.0) / 100000000.0))
+    spread_source = "ACTUAL" if symbol_meta.get("actual_spread_pct") not in (None, "") else "ESTIMATED_BACKTEST"
+    spread_pct = float(symbol_meta.get("actual_spread_pct") or symbol_meta.get("estimated_spread_pct") or _estimate_backtest_spread_pct(liq, candle_range_pct))
 
     base = {
         "entry": entry,
@@ -177,6 +187,9 @@ def _build_market_ctx(
         "side": "LONG",
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
+        "spread_source": spread_source,
+        "candle_range_pct": candle_range_pct,
+        "volatility_pct": candle_range_pct,
         "funding_rate_pct": float(symbol_meta.get("fundingRate", 0.0) or 0.0),
     }
 
@@ -207,14 +220,21 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
         quote_volume = now.volume * close * 1440.0
         diagnostics["volume_24h_usdt"] = "derived_from_candle_volume"
 
-    spread_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
-    volatility_pct = spread_pct
+    candle_range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
+    volatility_pct = candle_range_pct
 
     lookback = recent[-10:] if recent else [now]
     up_bars = sum(1 for c in lookback if c.close > c.open)
     trend_strength = up_bars / max(1, len(lookback))
 
     liquidity_score = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
+    actual_spread_pct = symbol_meta.get("actual_spread_pct")
+    spread_source = "ACTUAL" if actual_spread_pct not in (None, "") else "ESTIMATED_BACKTEST"
+    if actual_spread_pct not in (None, ""):
+        spread_pct = float(actual_spread_pct)
+    else:
+        # Conservative offline estimate: wider for lower liquidity and high volatility.
+        spread_pct = _estimate_backtest_spread_pct(liquidity_score, volatility_pct)
 
     recent_vol = [c.volume for c in recent[-6:]]
     prev_vol = [c.volume for c in recent[-12:-6]]
@@ -233,12 +253,16 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
 
     panic_score = 0.0
     drop_pct = ((prev.close - now.close) / max(prev.close, 1e-9)) * 100.0
-    if drop_pct > 3.0 and spread_pct > 2.0:
-        panic_score = min(1.0, (drop_pct / 10.0) + (spread_pct / 20.0))
+    if drop_pct > 3.0 and volatility_pct > 2.0:
+        panic_score = min(1.0, (drop_pct / 10.0) + (volatility_pct / 20.0))
 
     return {
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
+        "spread_source": spread_source,
+        "actual_spread_pct": float(actual_spread_pct) if actual_spread_pct not in (None, "") else None,
+        "estimated_spread_pct": spread_pct if spread_source == "ESTIMATED_BACKTEST" else None,
+        "candle_range_pct": candle_range_pct,
         "volatility_pct": volatility_pct,
         "trend_strength": trend_strength,
         "liquidity_score": liquidity_score,

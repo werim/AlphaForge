@@ -546,3 +546,49 @@ def test_rejected_order_with_valid_levels_is_actionable_shadow_order():
         "reject_reason": "LOW_SCORE",
     }
     assert bo._is_actionable_rejected_order(row) is True
+
+def test_high_candle_range_alone_does_not_trigger_wide_spread():
+    candles = [bo.Candle(1, 100, 120, 80, 101, 1000), bo.Candle(2, 100, 125, 75, 100, 1000), bo.Candle(3, 100, 130, 70, 102, 1000)]
+    out = bo._build_symbol_market_data({"quoteVolume": 80_000_000.0}, candles, 2)
+    result = bo.select_symbol("AAAUSDT", out)
+    assert out["candle_range_pct"] > 10.0
+    assert out["spread_source"] == "ESTIMATED_BACKTEST"
+    assert out["spread_pct"] <= 0.12
+    assert "WIDE_SPREAD" not in result.reject_reasons
+
+
+def test_explicit_high_actual_spread_triggers_wide_spread():
+    candles = [bo.Candle(1, 10, 10.2, 9.8, 10, 1000), bo.Candle(2, 10, 10.2, 9.8, 10, 1000), bo.Candle(3, 10, 10.2, 9.8, 10, 1000)]
+    out = bo._build_symbol_market_data({"quoteVolume": 80_000_000.0, "actual_spread_pct": 0.35}, candles, 2)
+    result = bo.select_symbol("AAAUSDT", out)
+    assert out["spread_source"] == "ACTUAL"
+    assert "WIDE_SPREAD" in result.reject_reasons
+
+
+def test_offline_fixture_not_all_rejected_by_wide_spread():
+    start_ms = 1_700_000_000_000
+    universe, candles_by_symbol = bo._offline_fixture(start_ms)
+    counts = {}
+    total = 0
+    for row in universe:
+        symbol = row["symbol"]
+        candles = candles_by_symbol[symbol]
+        for i in range(2, len(candles)):
+            total += 1
+            market = bo._build_symbol_market_data(row, candles, i)
+            res = bo.select_symbol(symbol, market)
+            if not res.tradable and res.reject_reasons:
+                r = res.reject_reasons[0]
+                counts[r] = counts.get(r, 0) + 1
+    assert total > 0
+    assert counts.get("WIDE_SPREAD", 0) < total
+
+
+def test_spread_source_propagated_to_execution_context():
+    ctx = bo._build_market_ctx(
+        bo.Candle(3, 100, 102, 99, 101.5, 1),
+        bo.Candle(2, 100, 101, 99.5, 100.2, 1),
+        {"quoteVolume": 25_000_000, "estimated_spread_pct": 0.04},
+        recent=[bo.Candle(1, 99, 101, 98, 100, 1), bo.Candle(2, 100, 102, 99, 101, 1)],
+    )
+    assert ctx["spread_source"] == "ESTIMATED_BACKTEST"
