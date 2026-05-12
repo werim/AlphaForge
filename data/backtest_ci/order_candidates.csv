@@ -1,0 +1,2 @@
+timestamp,symbol,side,entry,sl,tp,rr,setup_type,setup_reason,regime,score,order_type,expectancy_bucket,quality_score,accepted,reject_reason
+1777964702893,BTCUSDT,LONG,101.3,100.8,101.91185770750988,1.2237154150197627,BREAKOUT_UP,OFFLINE_FIXTURE,TREND,3.9852216748768474,LIMIT,NEGATIVE,,True,
