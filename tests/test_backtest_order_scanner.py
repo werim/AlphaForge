@@ -395,3 +395,18 @@ def test_missing_execution_context_defaults_for_shadow_eval():
     }
     shadow = bo.evaluate_rejected_shadow(row, [bo.Candle(1, 10, 10.2, 9.9, 10.1, 1)], 0)
     assert shadow.effective_rr >= 0.0
+
+def test_rejected_rows_use_unavailable_execution_sentinel_when_ctx_missing():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 10.5, 9.8, 10.2, 100)]
+    result = {
+        "status": "rejected",
+        "reason": "LOW_SCORE",
+        "diagnostics": {
+            "side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "score": 2.0, "rr": 1.1
+        },
+    }
+    bo.process_backtest_result("AAAUSDT", candles[0], 0, candles, result, {}, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "symbol_loss_streak": {}, "global_loss_streak": 0, "symbol_loss_block_until": {}, "global_loss_block_until": 0, "consecutive_sl_count": 0, "consecutive_tp_count": 0, "rolling_winrate": 0.0, "outcomes": []})
+    assert rejected[0]["spread_pct"] == "UNAVAILABLE_BACKTEST"
+    assert rejected[0]["liquidity_score"] == "UNAVAILABLE_BACKTEST"
+    assert rejected[0]["expected_slippage_pct"] == "UNAVAILABLE_BACKTEST"
