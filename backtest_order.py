@@ -78,6 +78,32 @@ class LifecycleRow:
     would_trigger: bool = False
 
 
+_CSV_EXECUTION_FIELDS = [
+    "entry",
+    "sl",
+    "tp",
+    "spread_pct",
+    "expected_slippage_pct",
+    "liquidity_score",
+    "volatility_score",
+]
+
+
+def _derive_csv_fieldnames(rows: List[Dict[str, Any]]) -> List[str]:
+    fieldnames: List[str] = []
+    seen = set()
+    for row in rows:
+        for key in row.keys():
+            if key not in seen:
+                seen.add(key)
+                fieldnames.append(key)
+    for key in _CSV_EXECUTION_FIELDS:
+        if key not in seen:
+            fieldnames.append(key)
+            seen.add(key)
+    return fieldnames
+
+
 def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy is None:
         return "UNKNOWN"
@@ -519,7 +545,7 @@ def main():
             if not rows:
                 f.write("")
                 continue
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w = csv.DictWriter(f, fieldnames=_derive_csv_fieldnames(rows), extrasaction="ignore")
             w.writeheader(); w.writerows(rows)
 
     rejected_shadow_summary = evaluate_rejected_shadow(rejected, candles_by_symbol)

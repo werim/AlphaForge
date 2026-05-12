@@ -243,3 +243,34 @@ def test_actionable_rejected_denominator_counts_only_valid_levels():
     ]
     out = bo.evaluate_rejected_shadow(rows, {"AAA": [bo.Candle(1, 10, 11, 9, 10, 1)]})
     assert out["rejected_shadow_denominator"] == 1
+
+
+def test_csv_export_fieldnames_cover_execution_lifecycle_rows(tmp_path: Path):
+    rows = [
+        {"timestamp": 1, "symbol": "AAAUSDT", "rr": 1.2},
+        {
+            "timestamp": 2,
+            "symbol": "AAAUSDT",
+            "entry": 10.0,
+            "sl": 9.5,
+            "tp": 11.2,
+            "spread_pct": 0.004,
+            "expected_slippage_pct": 0.011,
+            "liquidity_score": 0.44,
+            "volatility_score": 0.67,
+        },
+    ]
+
+    out = tmp_path / "rows.csv"
+    with open(out, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=bo._derive_csv_fieldnames(rows), extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with open(out, newline="") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames is not None
+        for k in ["entry", "sl", "tp", "spread_pct", "expected_slippage_pct", "liquidity_score", "volatility_score"]:
+            assert k in reader.fieldnames
+        written = list(reader)
+    assert len(written) == 2
