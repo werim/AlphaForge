@@ -5,6 +5,17 @@ from typing import Any
 
 from sqlalchemy import create_engine, text
 
+__all__ = [
+    "init_db",
+    "fetch_expectancy_stat",
+    "save_ai_decision_features",
+    "save_signal",
+    "save_order_decision",
+    "save_trade_lifecycle_event",
+    "save_closed_trade_review",
+    "upsert_expectancy_stats",
+]
+
 
 def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
     """Backward-compatible DB initializer; returns a SQLAlchemy engine."""

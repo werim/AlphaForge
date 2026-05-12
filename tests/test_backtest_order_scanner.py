@@ -302,3 +302,247 @@ def test_symbol_filter_deterministic_for_same_input():
     rb = bo.select_symbol("AAAUSDT", b)
     assert ra.tradable == rb.tradable
     assert ra.reject_reasons == rb.reject_reasons
+
+def test_rejected_candidates_saved_with_shadow_fields():
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "LONG",
+        "entry": 10,
+        "sl": 9,
+        "tp": 11,
+        "rr": 1.2,
+        "reject_reason": "LOW_SCORE",
+        "score": 2.0,
+        "regime": "TREND",
+        "spread_pct": 0.1,
+        "liquidity_score": 0.8,
+        "volatility_score": 0.2,
+        "expected_slippage_pct": 0.001,
+    }
+    candles = [bo.Candle(1, 10, 11.2, 9.8, 11, 1)]
+    shadow = bo.evaluate_rejected_shadow(row, candles, 0)
+    assert shadow.symbol == "AAAUSDT"
+    assert shadow.raw_rr == 1.2
+    assert shadow.spread_pct == 0.1
+
+
+def test_shadow_outcome_calculated_for_low_score_reject():
+    row = {"timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 11, "rr": 1.5, "reject_reason": "LOW_SCORE", "score": 1.5, "regime": "RANGE", "spread_pct": 0.01, "liquidity_score": 0.9, "volatility_score": 0.5}
+    candles = [bo.Candle(1, 10, 10.2, 9.9, 10, 1), bo.Candle(2, 10, 11.1, 9.9, 11, 1)]
+    shadow = bo.evaluate_rejected_shadow(row, candles, 0)
+    assert shadow.shadow_outcome == "WOULD_TP"
+
+
+def test_wide_spread_reject_penalized_by_execution_cost():
+    row = {"timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 11, "rr": 1.2, "reject_reason": "WIDE_SPREAD", "score": 6.0, "regime": "TREND", "spread_pct": 1.5, "liquidity_score": 0.9, "volatility_score": 0.5}
+    candles = [bo.Candle(1, 10, 11.5, 9.9, 11, 1)]
+    shadow = bo.evaluate_rejected_shadow(row, candles, 0)
+    assert shadow.effective_rr < shadow.raw_rr
+    assert shadow.effective_tp_hit is False
+
+
+def test_rejected_shadow_summary_csv_created(tmp_path: Path):
+    out = tmp_path / "out"
+    bo.main.__globals__["sys"].argv = ["backtest_order.py", "--offline", "--output-dir", str(out)]
+    bo.main()
+    f = out / "rejected_shadow_summary.csv"
+    assert f.exists()
+    with open(f, newline="") as h:
+        rows = list(csv.DictReader(h))
+    assert rows and "total_rejected" in rows[0]
+
+
+def test_false_positive_reject_rate_reported():
+    s1 = bo.RejectedShadowEvaluation("A", 1, "LONG", 10, 9, 11, 1.5, 1.4, "LOW_SCORE", 2, "TREND", 0.1, 0.8, 0.2, "WOULD_TP", True, 0.1, True, True)
+    s2 = bo.RejectedShadowEvaluation("B", 1, "LONG", 10, 9, 11, 1.0, 1.0, "LOW_SCORE", 2, "TREND", 0.1, 0.8, 0.2, "WOULD_SL", False, 0.0, True, True)
+    summary = bo.build_rejected_shadow_summary([s1, s2])
+    assert "reject_false_positive_rate" in summary
+    assert summary["reject_false_positive_rate"] == 0.5
+
+
+def test_rejected_counterfactual_same_candle_sl_priority():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(1, 10, 11.2, 8.8, 10.5, 1)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0)
+    assert sim["outcome"] == "WOULD_SL"
+
+
+def test_rejected_counterfactual_uses_bounded_lookahead_timeout():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 12, 2, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(i, 10, 10.1, 9.9, 10, 1) for i in range(1, 8)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0, timeout_bars=3)
+    assert sim["outcome"] == "WOULD_TIMEOUT"
+
+
+def test_shadow_summary_zero_rejects_and_unknown_supported():
+    empty = bo.build_rejected_shadow_summary([])
+    assert empty["total_rejected"] == 0
+    assert empty["would_tp"] == 0
+    assert empty["rejected_raw_win_rate"] == 0.0
+    assert empty["reject_false_positive_rate"] == 0.0
+
+    unknown = bo.RejectedShadowEvaluation(
+        "A",
+        1,
+        "LONG",
+        10,
+        9,
+        11,
+        1.2,
+        1.2,
+        "LOW_SCORE",
+        1.0,
+        "TREND",
+        0.1,
+        0.8,
+        0.2,
+        "UNKNOWN",
+        False,
+        0.0,
+        True,
+        True,
+    )
+    summary = bo.build_rejected_shadow_summary([unknown])
+    assert summary["total_rejected"] == 1
+    assert summary["would_tp"] == 0
+    assert summary["rejected_effective_expectancy"] == 0.0
+
+
+def test_missing_execution_context_does_not_crash_shadow_eval():
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "LONG",
+        "entry": 10.0,
+        "sl": 9.0,
+        "tp": 11.0,
+        "rr": 1.3,
+        "reject_reason": "LOW_SCORE",
+        "score": 2.0,
+        "regime": "TREND",
+    }
+    shadow = bo.evaluate_rejected_shadow(row, [bo.Candle(1, 10, 10.2, 9.9, 10.1, 1)], 0)
+    assert shadow.effective_rr >= 0.0
+
+
+def test_rejected_rows_use_unavailable_execution_sentinel_when_ctx_missing():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 10.5, 9.8, 10.2, 100)]
+    result = {
+        "status": "rejected",
+        "reason": "LOW_SCORE",
+        "diagnostics": {
+            "side": "LONG",
+            "setup_type": "BREAKOUT_UP",
+            "setup_reason": "X",
+            "regime": "TREND",
+            "score": 2.0,
+            "rr": 1.1,
+        },
+    }
+
+    bo.process_backtest_result(
+        "AAAUSDT",
+        candles[0],
+        0,
+        candles,
+        result,
+        {},
+        1000,
+        1.0,
+        lifecycle,
+        rejected,
+        rejection_counts,
+        open_rows,
+        {
+            "last_trade_ts_by_symbol": {},
+            "trades_today_by_symbol": {},
+            "global_trades_today": 0,
+            "symbol_loss_streak": {},
+            "global_loss_streak": 0,
+            "symbol_loss_block_until": {},
+            "global_loss_block_until": 0,
+            "consecutive_sl_count": 0,
+            "consecutive_tp_count": 0,
+            "rolling_winrate": 0.0,
+            "outcomes": [],
+        },
+    )
+
+    assert rejected[0]["spread_pct"] == "UNAVAILABLE_BACKTEST"
+    assert rejected[0]["liquidity_score"] == "UNAVAILABLE_BACKTEST"
+    assert rejected[0]["expected_slippage_pct"] == "UNAVAILABLE_BACKTEST"
+
+def test_rejected_signal_lifecycle_precedes_any_trade_simulation(monkeypatch):
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    recent_stats = {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "symbol_loss_streak": {}, "global_loss_streak": 0, "symbol_loss_block_until": {}, "global_loss_block_until": 0, "consecutive_sl_count": 0, "consecutive_tp_count": 0, "rolling_winrate": 0.0, "outcomes": []}
+    candles = [bo.Candle(1, 10, 10.2, 9.8, 10.0, 100), bo.Candle(2, 10, 10.3, 9.9, 10.1, 100)]
+
+    rejected_result = {
+        "status": "rejected",
+        "reason": "LOW_SCORE",
+        "diagnostics": {"side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "score": 2.0, "rr": 1.2, "entry": 10.0, "sl": 9.5, "tp": 11.0},
+    }
+    bo.process_backtest_result("AAAUSDT", candles[0], 0, candles, rejected_result, {"entry": 10.0, "sl": 9.5, "tp": 11.0}, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
+
+    executed_result = {
+        "status": "executed",
+        "candidate": type("X", (), {"side": "LONG", "entry": 10.0, "sl": 9.5, "tp": 10.8, "rr": 1.6, "setup_type": "BREAKOUT_UP", "setup_reason": "Y", "regime": "TREND", "score": 8.0, "order_type": "MARKET"})(),
+        "diagnostics": {"expectancy": 0.12},
+    }
+    bo.process_backtest_result("AAAUSDT", candles[1], 1, candles, executed_result, {"entry": 10.0, "sl": 9.5, "tp": 10.8, "expected_slippage_pct": 0.0, "spread_pct": 0.0, "liquidity_score": 1.0}, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
+
+    first_closed_idx = next(i for i, row in enumerate(lifecycle) if row.status_after == "POSITION_CLOSED")
+    rejected_idx = next(i for i, row in enumerate(lifecycle) if row.status_after == "SIGNAL_REJECTED")
+    assert rejected_idx < first_closed_idx
+    assert [lifecycle[0].status_after, lifecycle[1].status_after] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
+    assert all(row.status_after != "CREATED" for row in lifecycle)
+
+
+def test_scan_symbol_backtest_exposes_market_ctx_for_rejected_signals(monkeypatch):
+    class StubMode:
+        BACKTEST = "BACKTEST"
+
+    class StubCtx:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def _stub_runtime():
+        def _run_order_cycle(ctx, recent_stats=None):
+            return {"status": "rejected", "reason": "LOW_SCORE", "diagnostics": {"side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "score": 2.0, "rr": 1.1}}
+        return StubCtx, StubMode, _run_order_cycle
+
+    monkeypatch.setattr(bo, "_order_runtime", _stub_runtime)
+    candles = [bo.Candle(1, 10, 10.2, 9.9, 10.0, 100), bo.Candle(2, 10.0, 10.3, 9.9, 10.1, 100), bo.Candle(3, 10.1, 10.4, 10.0, 10.3, 100)]
+    ctx = {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 1000000}, "balance": 1000, "risk_pct": 1.0}
+    cand = bo.scan_symbol_backtest("AAAUSDT", candles, 2, ctx)
+    assert cand is None
+    assert "market_ctx" in ctx
+    assert ctx["market_ctx"].get("entry", 0.0) > 0.0
+
+def test_symbol_selector_reject_is_not_actionable_shadow_order():
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "N/A",
+        "setup_reason": "SYMBOL_SELECTOR",
+        "reject_reason": "LOW_VOLUME",
+    }
+    assert bo._is_actionable_rejected_order(row) is False
+
+
+def test_rejected_order_with_valid_levels_is_actionable_shadow_order():
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "LONG",
+        "setup_type": "BREAKOUT_UP",
+        "setup_reason": "X",
+        "entry": 10.0,
+        "sl": 9.0,
+        "tp": 11.0,
+        "rr": 1.2,
+        "reject_reason": "LOW_SCORE",
+    }
+    assert bo._is_actionable_rejected_order(row) is True
