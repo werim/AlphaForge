@@ -21,6 +21,7 @@ class ExecutionMode(str, Enum):
     BACKTEST = "BACKTEST"
     PAPER = "PAPER"
     LIVE = "LIVE"
+    SIMULATED = "SIMULATED"
 
 
 @dataclass
@@ -65,7 +66,7 @@ class SimulatedAIBrain:
 
 
 def execution_mode_from_env(value: str | None = None) -> ExecutionMode:
-    raw = (value or os.getenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")).strip().upper()
+    raw = (value or os.getenv("ALPHAFORGE_EXECUTION_MODE", "SIMULATED")).strip().upper()
     try:
         return ExecutionMode(raw)
     except ValueError as exc:
@@ -113,9 +114,13 @@ def build_runtime_from_env() -> tuple[RuntimeOrchestrator, bool]:
     run_once = _bool_env("ALPHAFORGE_RUN_ONCE", False)
 
     if mode == ExecutionMode.LIVE:
-        raise ValueError("LIVE mode requires explicit application wiring with real_execution_adapter")
+        raise ValueError("LIVE mode requires explicit application wiring with real_execution_adapter and validated secrets/config")
+    if mode == ExecutionMode.PAPER:
+        raise ValueError("PAPER mode requires explicit application wiring with real market scanner + AI brain; implicit simulation disabled")
+    if mode == ExecutionMode.BACKTEST:
+        raise ValueError("BACKTEST mode must run through backtest_order.py; runtime env bootstrap disabled")
 
-    logger.warning("SIMULATED PAPER MODE: building runtime with simulated scanner/AI brain")
+    logger.warning("SIMULATED mode: building runtime with simulated scanner/AI brain")
     return RuntimeOrchestrator(cfg, SimulatedAIBrain(), _simulated_market_scanner), run_once
 
 

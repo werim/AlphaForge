@@ -52,11 +52,60 @@ def save_signal(session, **signal):
     return result.lastrowid
 
 def save_order_decision(session, *args, **kwargs):
-    return None
+    """Persist order decision payload and return inserted row id.
+
+    Accepts either explicit keyword fields or a legacy single `payload` argument.
+    Raises RuntimeError if persistence is unavailable.
+    """
+    if session is None:
+        raise RuntimeError("Persistence unavailable: session is required for save_order_decision")
+    now = datetime.now(timezone.utc).isoformat()
+    payload = kwargs.get("payload")
+    if payload is None and args:
+        payload = args[0]
+    if payload is None:
+        payload = {k: v for k, v in kwargs.items() if k not in {"signal_id", "phase", "decision", "order_type", "confidence", "explanation", "order_payload", "expected_slippage_pct", "effective_rr"}}
+    row = {
+        "signal_id": kwargs.get("signal_id"),
+        "phase": kwargs.get("phase", "unknown"),
+        "decision": kwargs.get("decision", "UNKNOWN"),
+        "order_type": kwargs.get("order_type", "UNKNOWN"),
+        "confidence": float(kwargs.get("confidence", 0.0) or 0.0),
+        "explanation": str(kwargs.get("explanation", "")),
+        "order_payload": str(kwargs.get("order_payload", payload)),
+        "expected_slippage_pct": float(kwargs.get("expected_slippage_pct", 0.0) or 0.0),
+        "effective_rr": float(kwargs.get("effective_rr", 0.0) or 0.0),
+        "created_at": now,
+    }
+    result = session.execute(
+        text("INSERT INTO order_decisions(payload, created_at) VALUES (:payload, :created_at)"),
+        {"payload": str(row), "created_at": now},
+    )
+    session.commit()
+    return result.lastrowid
 
 
 def save_trade_lifecycle_event(session, *args, **kwargs):
-    return None
+    """Persist lifecycle event and return inserted row id; fail fast if unavailable."""
+    if session is None:
+        raise RuntimeError("Persistence unavailable: session is required for save_trade_lifecycle_event")
+    now = datetime.now(timezone.utc).isoformat()
+    trade_id = kwargs.get("trade_id") or kwargs.get("signal_id")
+    state = kwargs.get("state") or kwargs.get("event_type") or "UNKNOWN"
+    payload = kwargs.get("payload")
+    if payload is None and args:
+        payload = args[0]
+    result = session.execute(
+        text("INSERT INTO trade_lifecycle_events(trade_id, state, payload, created_at) VALUES (:trade_id,:state,:payload,:created_at)"),
+        {
+            "trade_id": str(trade_id) if trade_id is not None else None,
+            "state": str(state),
+            "payload": str(payload) if payload is not None else "{}",
+            "created_at": now,
+        },
+    )
+    session.commit()
+    return result.lastrowid
 
 
 def save_closed_trade_review(session, trade_id: str, symbol: str, execution_metrics: Any, review_payload: Any | None = None, pnl: float | None = None):
