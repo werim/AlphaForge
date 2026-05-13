@@ -49,6 +49,21 @@ class RuntimeMetrics:
     last_heartbeat_ts: str | None = None
 
 
+@dataclass(frozen=True)
+class SimulatedOrderPlan:
+    decision: str
+    order_type: str
+    reason: str
+
+
+class SimulatedAIBrain:
+    def before_real_order(self, signal: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]):
+        score = float(signal.get("risk_reward", 0.0) or 0.0)
+        if score >= 1.5:
+            return {}, SimulatedOrderPlan("ACCEPTED", "MARKET", "SIMULATED_ACCEPT"), "simulated accepted"
+        return {}, SimulatedOrderPlan("REJECTED", "NONE", "SIMULATED_REJECT"), "simulated rejected"
+
+
 def execution_mode_from_env(value: str | None = None) -> ExecutionMode:
     raw = (value or os.getenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")).strip().upper()
     try:
@@ -57,17 +72,55 @@ def execution_mode_from_env(value: str | None = None) -> ExecutionMode:
         raise ValueError(f"Invalid execution mode: {raw}") from exc
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _simulated_market_scanner() -> list[dict[str, Any]]:
+    logger.info("SIMULATED PAPER MODE: using simulated market scanner")
+    return [
+        {
+            "symbol": "SIM-BTCUSDT",
+            "entry": 50000.0,
+            "side": "BUY",
+            "timeframe": "5m",
+            "risk_reward": 2.0,
+            "volume_24h_usdt": 8_000_000.0,
+            "spread_pct": 0.08,
+            "liquidity_score": 0.9,
+            "volatility_pct": 2.0,
+            "trend_strength": 0.7,
+            "recent_volume_change_pct": 5.0,
+            "chop_score": 0.4,
+        }
+    ]
+
+
+def build_runtime_from_env() -> tuple[RuntimeOrchestrator, bool]:
+    mode = execution_mode_from_env()
+    cfg = RuntimeConfig(
+        execution_mode=mode,
+        scan_interval_sec=float(os.getenv("ALPHAFORGE_SCAN_INTERVAL_SEC", "2.0")),
+        heartbeat_interval_sec=float(os.getenv("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", "5.0")),
+        scan_timeout_sec=float(os.getenv("ALPHAFORGE_SCAN_TIMEOUT_SEC", "2.0")),
+        max_symbols_per_scan=int(os.getenv("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", "5")),
+        max_reject_log_entries=int(os.getenv("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", "100")),
+        require_market_context=_bool_env("ALPHAFORGE_REQUIRE_MARKET_CONTEXT", True),
+    )
+    run_once = _bool_env("ALPHAFORGE_RUN_ONCE", False)
+
+    if mode == ExecutionMode.LIVE:
+        raise ValueError("LIVE mode requires explicit application wiring with real_execution_adapter")
+
+    logger.warning("SIMULATED PAPER MODE: building runtime with simulated scanner/AI brain")
+    return RuntimeOrchestrator(cfg, SimulatedAIBrain(), _simulated_market_scanner), run_once
+
+
 class RuntimeOrchestrator:
-    def __init__(
-        self,
-        config: RuntimeConfig,
-        ai_brain: Any,
-        market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]],
-        *,
-        real_execution_adapter: Any | None = None,
-        on_lifecycle_event: Callable[[dict[str, Any]], Any] | None = None,
-        on_reject_persist: Callable[[dict[str, Any]], Any] | None = None,
-    ) -> None:
+    def __init__(self, config: RuntimeConfig, ai_brain: Any, market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]], *, real_execution_adapter: Any | None = None, on_lifecycle_event: Callable[[dict[str, Any]], Any] | None = None, on_reject_persist: Callable[[dict[str, Any]], Any] | None = None) -> None:
         self.config = config
         self.ai_brain = ai_brain
         self.market_scanner = market_scanner
@@ -79,17 +132,25 @@ class RuntimeOrchestrator:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._reject_log: deque[dict[str, Any]] = deque(maxlen=config.max_reject_log_entries)
 
-    async def start(self) -> None:
+    async def start(self, *, run_once: bool = False) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
             raise ValueError("LIVE mode requires real_execution_adapter")
+
+        if run_once:
+            await self._scan_once()
+            logger.info("runtime_once metrics=%s", asdict(self.metrics))
+            return
+
         self._register_signals()
         self._stop_event.clear()
         self._tasks = {
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat_loop"),
         }
+
         for task in list(self._tasks):
             task.add_done_callback(self._on_task_done)
+
         await self._stop_event.wait()
         await self._shutdown_tasks()
 
@@ -296,10 +357,12 @@ class RuntimeOrchestrator:
                 await asyncio.sleep(self.config.heartbeat_interval_sec)
         except asyncio.CancelledError:
             raise
-
+            
 
 async def main() -> None:
-    logger.info("runtime module loaded; provide market_scanner and ai_brain via application factory")
+    logging.basicConfig(level=os.getenv("ALPHAFORGE_LOG_LEVEL", "INFO").upper())
+    runtime, run_once = build_runtime_from_env()
+    await runtime.start(run_once=run_once)
 
 
 if __name__ == "__main__":
