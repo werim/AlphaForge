@@ -132,7 +132,7 @@ class RuntimeOrchestrator:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._reject_log: deque[dict[str, Any]] = deque(maxlen=config.max_reject_log_entries)
 
-    async def start(self, *, run_once: bool = False) -> None:
+        async def start(self, *, run_once: bool = False) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
             raise ValueError("LIVE mode requires real_execution_adapter")
         if run_once:
@@ -141,7 +141,10 @@ class RuntimeOrchestrator:
             return
         self._register_signals()
         self._stop_event.clear()
-        self._tasks = {asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"), asyncio.create_task(self._heartbeat_loop(), name="heartbeat_loop")}
+        self._tasks = {
+            asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
+            asyncio.create_task(self._heartbeat_loop(), name="heartbeat_loop"),
+        }
         for task in list(self._tasks):
             task.add_done_callback(self._on_task_done)
         await self._stop_event.wait()
@@ -190,8 +193,12 @@ class RuntimeOrchestrator:
             self.metrics.scan_failures += 1
             logger.exception("Market scanner failed")
             return
-        selections = select_symbols(candidates)[: self.config.max_symbols_per_scan]
+
+        selections = select_symbols(candidates)
+        selections = selections[: self.config.max_symbols_per_scan]
         self.metrics.symbols_selected += len(selections)
+
+        # TODO: Replace sequential flow with backpressure-aware worker queue once DB/session ownership is explicit.
         for selection in selections:
             await self._process_symbol(selection)
 
@@ -203,39 +210,78 @@ class RuntimeOrchestrator:
             await self._persist_reject(reject_payload)
             await self._emit_lifecycle_event("SIGNAL_REJECTED", selection.symbol, reject_payload)
             return
+
         signal_payload = self._build_signal(selection, market_ctx)
         self.metrics.signals_created += 1
         await self._emit_lifecycle_event("SIGNAL_CREATED", selection.symbol, signal_payload)
+
         execution_ctx = build_execution_context(market_ctx)
         signal_payload["execution_ctx"] = execution_ctx
         ai_market_ctx = self._enrich_ai_market_context(market_ctx, execution_ctx)
-        _, order_plan, explanation = self.ai_brain.before_real_order(signal_payload, ai_market_ctx, {}, {})
+
+        # TODO: before_real_order currently runs on event-loop thread because SQLAlchemy session ownership
+        # must be refactored before safe worker-thread offload.
+        score_ctx, order_plan, explanation = self.ai_brain.before_real_order(signal_payload, ai_market_ctx, {}, {})
         self.metrics.decisions_generated += 1
+
         if getattr(order_plan, "decision", None) != "ACCEPTED":
-            reject_payload = {"symbol": selection.symbol, "decision": getattr(order_plan, "decision", "REJECTED"), "reason": getattr(order_plan, "reason", "AI_REJECTED"), "explanation": explanation}
+            reject_payload = {
+                "symbol": selection.symbol,
+                "decision": getattr(order_plan, "decision", "REJECTED"),
+                "reason": getattr(order_plan, "reason", "AI_REJECTED"),
+                "explanation": explanation,
+            }
             await self._persist_reject(reject_payload)
             await self._emit_lifecycle_event("SIGNAL_REJECTED", selection.symbol, reject_payload)
             return
+
         await self._emit_lifecycle_event("ORDER_PLACED", selection.symbol, {"order_type": getattr(order_plan, "order_type", "UNKNOWN")})
         self.metrics.orders_placed += 1
+
         result = await self._execute(selection.symbol, order_plan, ai_market_ctx)
         self.metrics.executions += 1
         event = "ORDER_FILLED" if str(result.get("status", "")).upper() == "FILLED" else "ORDER_EXECUTED"
         await self._emit_lifecycle_event(event, selection.symbol, result)
 
     def _extract_market_context(self, selection: SymbolSelectionResult) -> dict[str, Any]:
-        return dict((selection.diagnostics or {}).get("inputs", {}) or {})
+        diagnostics = selection.diagnostics or {}
+        return dict(diagnostics.get("inputs", {}) or {})
 
     def _validate_market_context(self, market_ctx: Mapping[str, Any]) -> list[str]:
-        return [k for k in ("entry", "side", "timeframe") if market_ctx.get(k) in (None, "")]
+        missing: list[str] = []
+        for field in ("entry", "side", "timeframe"):
+            value = market_ctx.get(field)
+            if value is None or value == "":
+                missing.append(field)
+        return missing
 
     def _build_signal(self, selection: SymbolSelectionResult, market_ctx: Mapping[str, Any]) -> dict[str, Any]:
+        # TODO: default RR is a temporary fallback; replace with adaptive RR from expectancy/risk modules.
         rr = float(market_ctx.get("risk_reward", market_ctx.get("rr", 2.0)) or 2.0)
-        return {"symbol": selection.symbol, "side": market_ctx.get("side"), "timeframe": market_ctx.get("timeframe"), "entry_price": market_ctx.get("entry"), "risk_reward": rr, "max_spread_bps": market_ctx.get("max_spread_bps", 8.0), "max_funding_rate": market_ctx.get("max_funding_rate", 0.0006), "max_expected_slippage_pct": market_ctx.get("max_expected_slippage_pct", 0.003), "execution_ctx": {}}
+        return {
+            "symbol": selection.symbol,
+            "side": market_ctx.get("side"),
+            "timeframe": market_ctx.get("timeframe"),
+            "entry_price": market_ctx.get("entry"),
+            "risk_reward": rr,
+            "max_spread_bps": market_ctx.get("max_spread_bps", 8.0),
+            "max_funding_rate": market_ctx.get("max_funding_rate", 0.0006),
+            "max_expected_slippage_pct": market_ctx.get("max_expected_slippage_pct", 0.003),
+            "execution_ctx": {},
+        }
 
     def _enrich_ai_market_context(self, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
         enriched = dict(market_ctx)
-        for key in ("expected_slippage_pct", "spread_pct", "funding_rate_pct", "latency_ms", "liquidity_score", "orderbook_imbalance", "volatility_regime", "volume_24h_usdt"):
+        for key in (
+            "expected_slippage_pct",
+            "spread_pct",
+            "funding_rate_pct",
+            "latency_ms",
+            "liquidity_score",
+            "orderbook_imbalance",
+            "volatility_regime",
+            "volume_24h_usdt",
+        ):
             if enriched.get(key) in (None, "") and key in execution_ctx:
                 enriched[key] = execution_ctx[key]
         return enriched
@@ -244,7 +290,12 @@ class RuntimeOrchestrator:
         if self.config.execution_mode == ExecutionMode.PAPER:
             return self._simulate_paper_execution(symbol, decision, market_ctx)
         if self.config.execution_mode == ExecutionMode.BACKTEST:
-            return {"mode": ExecutionMode.BACKTEST.value, "symbol": symbol, "status": "SIMULATED", "note": "Historical TP/SL simulation belongs to backtest_order.py"}
+            return {
+                "mode": ExecutionMode.BACKTEST.value,
+                "symbol": symbol,
+                "status": "SIMULATED",
+                "note": "Historical TP/SL simulation belongs to backtest_order.py",
+            }
         if self.config.execution_mode == ExecutionMode.LIVE:
             if self.real_execution_adapter is None:
                 raise ValueError("LIVE mode requires real_execution_adapter")
@@ -254,39 +305,58 @@ class RuntimeOrchestrator:
     def _simulate_paper_execution(self, symbol: str, decision: Any, market_ctx: Mapping[str, Any]) -> dict[str, Any]:
         entry = float(market_ctx.get("entry", 0.0) or 0.0)
         slip = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-        return {"mode": ExecutionMode.PAPER.value, "symbol": symbol, "status": "FILLED", "order_type": getattr(decision, "order_type", "MARKET"), "expected_slippage_pct": slip, "fill_price": entry * (1.0 + slip)}
+        fill_price = entry * (1.0 + slip)
+        return {
+            "mode": ExecutionMode.PAPER.value,
+            "symbol": symbol,
+            "status": "FILLED",
+            "order_type": getattr(decision, "order_type", "MARKET"),
+            "expected_slippage_pct": slip,
+            "fill_price": fill_price,
+        }
 
     async def _persist_reject(self, payload: dict[str, Any]) -> None:
         self._reject_log.append(payload)
         self.metrics.rejects_persisted += 1
-        if self.on_reject_persist is not None:
-            try:
-                res = self.on_reject_persist(payload)
-                if inspect.isawaitable(res):
-                    await res
-            except Exception:
-                logger.exception("reject persistence callback failed")
+        if self.on_reject_persist is None:
+            return
+        try:
+            result = self.on_reject_persist(payload)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("reject persistence callback failed")
 
     async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any]) -> None:
-        payload = {"event": event, "symbol": symbol, "ts": datetime.now(timezone.utc).isoformat(), "mode": self.config.execution_mode.value, "details": dict(details)}
+        payload = {
+            "event": event,
+            "symbol": symbol,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "mode": self.config.execution_mode.value,
+            "details": dict(details),
+        }
         self.metrics.lifecycle_events += 1
-        if self.on_lifecycle_event is not None:
-            try:
-                res = self.on_lifecycle_event(payload)
-                if inspect.isawaitable(res):
-                    await res
-            except Exception:
-                logger.exception("lifecycle callback failed")
+        if self.on_lifecycle_event is None:
+            return
+        try:
+            result = self.on_lifecycle_event(payload)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("lifecycle callback failed")
 
     async def _heartbeat_loop(self) -> None:
-        while not self._stop_event.is_set():
-            self.metrics.last_heartbeat_ts = datetime.now(timezone.utc).isoformat()
-            logger.info("runtime_heartbeat metrics=%s", asdict(self.metrics))
-            await asyncio.sleep(self.config.heartbeat_interval_sec)
-
+        try:
+            while not self._stop_event.is_set():
+                self.metrics.last_heartbeat_ts = datetime.now(timezone.utc).isoformat()
+                logger.info("runtime_heartbeat metrics=%s", asdict(self.metrics))
+                await asyncio.sleep(self.config.heartbeat_interval_sec)
+        except asyncio.CancelledError:
+            raise
+            
 
 async def main() -> None:
-    logging.basicConfig(level=os.getenv("ALPHAFORGE_LOG_LEVEL", "INFO"))
+    logging.basicConfig(level=os.getenv("ALPHAFORGE_LOG_LEVEL", "INFO").upper())
     runtime, run_once = build_runtime_from_env()
     await runtime.start(run_once=run_once)
 
