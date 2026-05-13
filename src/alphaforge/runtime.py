@@ -133,12 +133,12 @@ class RuntimeOrchestrator:
         self._reject_log: deque[dict[str, Any]] = deque(maxlen=config.max_reject_log_entries)
 
         async def start(self, *, run_once: bool = False) -> None:
-        if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
-            raise ValueError("LIVE mode requires real_execution_adapter")
-        if run_once:
-            await self._scan_once()
-            logger.info("runtime_once metrics=%s", asdict(self.metrics))
-            return
+            if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
+                raise ValueError("LIVE mode requires real_execution_adapter")
+            if run_once:
+                await self._scan_once()
+                logger.info("runtime_once metrics=%s", asdict(self.metrics))
+                return
         self._register_signals()
         self._stop_event.clear()
         self._tasks = {
