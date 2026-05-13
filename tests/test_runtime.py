@@ -209,3 +209,23 @@ def test_reject_log_bounded():
         assert len(rt._reject_log) == 2
 
     asyncio.run(run())
+
+
+def test_build_runtime_from_env_requires_explicit_non_simulated_modes(monkeypatch):
+    from alphaforge.runtime import build_runtime_from_env
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    with pytest.raises(ValueError):
+        build_runtime_from_env()
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "LIVE")
+    with pytest.raises(ValueError):
+        build_runtime_from_env()
+
+
+def test_build_runtime_from_env_allows_explicit_simulated(monkeypatch):
+    from alphaforge.runtime import build_runtime_from_env
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "SIMULATED")
+    rt, _ = build_runtime_from_env()
+    assert rt.config.execution_mode == ExecutionMode.SIMULATED

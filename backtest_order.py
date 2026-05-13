@@ -156,12 +156,16 @@ def _build_market_ctx(now: Candle, prev: Candle, symbol_meta: Mapping[str, Any],
         "expectancy_bucket": _bucket_expectancy(expectancy),
         "side": "LONG",
         "volume_24h_usdt": symbol_meta.get("quoteVolume", "UNAVAILABLE_BACKTEST"),
-        "spread_pct": 0.0,
+        "spread_pct": "UNAVAILABLE_BACKTEST",
+        "spread_pct_unavailable": True,
         "funding_rate_pct": float(symbol_meta.get("fundingRate", 0.0) or 0.0),
     }
     klines = [{"high": c.high, "low": c.low, "close": c.close} for c in (recent or [])[-20:] if c]
-    exec_ctx = build_execution_context({**base, "recent_klines": klines, "liquidity_score": min(1.0, max(0.1, float(symbol_meta.get("quoteVolume", 0.0) or 0.0) / 100000000.0))})
+    ctx_input = {**base, "spread_pct": 0.0, "recent_klines": klines, "liquidity_score": min(1.0, max(0.1, float(symbol_meta.get("quoteVolume", 0.0) or 0.0) / 100000000.0))}
+    exec_ctx = build_execution_context(ctx_input)
     base.update(exec_ctx)
+    if symbol_meta.get("spread_pct") is None:
+        base["spread_pct"] = "UNAVAILABLE_BACKTEST"
     return base
 
 

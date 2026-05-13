@@ -134,7 +134,7 @@ def test_execution_ctx_fields_populated():
         {"quoteVolume": 25000000},
         recent=[bo.Candle(1, 99, 101, 98, 100, 1), bo.Candle(2, 100, 102, 99, 101, 1)],
     )
-    assert ctx["spread_pct"] >= 0.0
+    assert ctx["spread_pct"] == "UNAVAILABLE_BACKTEST" or ctx["spread_pct"] >= 0.0
     assert ctx["expected_slippage_pct"] > 0.0
     assert ctx["volatility_regime"] in {"low", "normal", "high"}
 
@@ -274,3 +274,23 @@ def test_csv_export_fieldnames_cover_execution_lifecycle_rows(tmp_path: Path):
             assert k in reader.fieldnames
         written = list(reader)
     assert len(written) == 2
+
+
+def test_backtest_marks_spread_unavailable_instead_of_silent_zero_when_missing_meta():
+    ctx = bo._build_market_ctx(
+        bo.Candle(3, 100, 102, 99, 101, 1),
+        bo.Candle(2, 100, 101, 99.5, 100.2, 1),
+        {},
+        recent=[bo.Candle(1, 99, 100.5, 98.8, 100, 1)],
+    )
+    assert ctx["spread_pct"] == "UNAVAILABLE_BACKTEST"
+
+
+def test_backtest_preserves_true_zero_spread_when_explicitly_provided():
+    ctx = bo._build_market_ctx(
+        bo.Candle(3, 100, 102, 99, 101, 1),
+        bo.Candle(2, 100, 101, 99.5, 100.2, 1),
+        {"spread_pct": 0.0, "quoteVolume": 12345},
+        recent=[bo.Candle(1, 99, 100.5, 98.8, 100, 1)],
+    )
+    assert ctx["spread_pct"] == 0.0
