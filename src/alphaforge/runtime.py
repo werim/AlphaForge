@@ -132,21 +132,25 @@ class RuntimeOrchestrator:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._reject_log: deque[dict[str, Any]] = deque(maxlen=config.max_reject_log_entries)
 
-        async def start(self, *, run_once: bool = False) -> None:
-            if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
-                raise ValueError("LIVE mode requires real_execution_adapter")
-            if run_once:
-                await self._scan_once()
-                logger.info("runtime_once metrics=%s", asdict(self.metrics))
-                return
+    async def start(self, *, run_once: bool = False) -> None:
+        if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
+            raise ValueError("LIVE mode requires real_execution_adapter")
+
+        if run_once:
+            await self._scan_once()
+            logger.info("runtime_once metrics=%s", asdict(self.metrics))
+            return
+
         self._register_signals()
         self._stop_event.clear()
         self._tasks = {
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat_loop"),
         }
+
         for task in list(self._tasks):
             task.add_done_callback(self._on_task_done)
+
         await self._stop_event.wait()
         await self._shutdown_tasks()
 
