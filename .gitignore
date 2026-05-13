@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 alphaforge.db
 .env
+data/
