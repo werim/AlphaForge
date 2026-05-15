@@ -69,7 +69,29 @@ def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
     with engine.begin() as conn:
         for statement in ddl:
             conn.execute(text(statement))
+        if engine.dialect.name == "sqlite":
+            _ensure_legacy_sqlite_compat(conn)
     return engine
+
+
+def _ensure_legacy_sqlite_compat(conn: Any) -> None:
+    table_columns = {
+        "order_decisions": [
+            "signal_id", "symbol", "mode", "decision", "reject_reason", "score", "rr",
+            "effective_rr", "expectancy_bucket", "volume_24h_usdt", "spread_pct",
+            "funding_rate_pct", "expected_slippage_pct", "volatility_regime",
+            "liquidity_score", "decision_ts", "created_at",
+        ],
+        "trade_lifecycle_events": [
+            "signal_id", "symbol", "mode", "state", "reject_reason", "details", "event_ts", "created_at",
+        ],
+    }
+    for table, columns in table_columns.items():
+        existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()}
+        for col in columns:
+            if col in existing:
+                continue
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} TEXT"))
 
 
 def fetch_expectancy_stat(

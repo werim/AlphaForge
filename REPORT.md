@@ -34,3 +34,9 @@ YES — `save_order_decision` and `save_trade_lifecycle_event` changed from no-o
 
 ## pytest -q result
 PASS
+
+
+## Follow-up adjustments
+- Added legacy SQLite schema compatibility in `init_db` by non-destructive `ALTER TABLE ADD COLUMN` migration for old minimal `order_decisions` and `trade_lifecycle_events` tables.
+- Added regression test `test_init_db_migrates_legacy_schema_without_drop`.
+- Runtime module invocation note: `python -m alphaforge.runtime` still requires src path/package install in this environment; validated via test import path and suite execution.

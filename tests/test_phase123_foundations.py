@@ -92,3 +92,21 @@ def test_backtest_paper_decision_contract_fields_match() -> None:
         save_order_decision(s, signal_id='sig-p', symbol='BTCUSDT', mode='PAPER', decision='ACCEPTED')
         cols = {r[1] for r in s.execute(text("PRAGMA table_info(order_decisions)" )).fetchall()}
     assert fields.issubset(cols)
+
+
+def test_init_db_migrates_legacy_schema_without_drop(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE order_decisions"))
+        conn.execute(text("DROP TABLE trade_lifecycle_events"))
+        conn.execute(text("CREATE TABLE order_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT)"))
+        conn.execute(text("CREATE TABLE trade_lifecycle_events (id INTEGER PRIMARY KEY AUTOINCREMENT)"))
+
+    migrated_engine = init_db(f"sqlite+pysqlite:///{db_path}")
+    with Session(migrated_engine) as s:
+        decision_cols = {r[1] for r in s.execute(text("PRAGMA table_info(order_decisions)")).fetchall()}
+        lifecycle_cols = {r[1] for r in s.execute(text("PRAGMA table_info(trade_lifecycle_events)")).fetchall()}
+
+    assert {"signal_id", "decision", "reject_reason", "effective_rr"}.issubset(decision_cols)
+    assert {"signal_id", "state", "reject_reason", "event_ts"}.issubset(lifecycle_cols)
