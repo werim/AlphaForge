@@ -1,61 +1,51 @@
-Version{}
-# AlphaForge Technical Status Report
+# AlphaForge Phase 1-3 Completion Patch Report
 
-## Executive Summary
+## 1) Why the change was needed
+Persistence helpers for order decisions and lifecycle events were effectively no-ops, which prevented Phase 2/3 contract verification and made rejection/lifecycle auditability incomplete.
 
-AlphaForge has progressed beyond a Phase-1-only SQL scaffold. The codebase now includes symbol selection, a deterministic decision/reject pipeline, runtime orchestration, and backtest lifecycle export logic. However, this remains a prototype-level system and is not ready for production live trading.
-
-## Current Phase Assessment
-
-- The previous README documented AlphaForge as "Phase 1" only.
-- Current code appears materially closer to **Phase 3.5 / Phase 4**: symbol selection + runtime + decision engine prototypes.
-- Live execution readiness is not achieved.
-
-## Implemented Components
-
-- `src/alphaforge/runtime.py`
-  - Runtime orchestrator with periodic scan loop, heartbeat loop, mode switch (`BACKTEST`/`PAPER`/`LIVE`), reject persistence hook, lifecycle-event hook, and paper execution simulation.
-
-- `src/alphaforge/ai_brain.py`
-  - Deterministic scoring pipeline (`score_signal`), decision planning (`choose_order_plan`), explanation builder, SQL persistence of signals/decisions/features, and expectancy stat updates.
-
-- `src/alphaforge/symbol_selector.py`
-  - Rule-based symbol filtering/scoring with reject reasons, diagnostics, and ranked output.
-
-- `src/alphaforge/execution.py`
-  - Execution-context assembly: slippage estimate, spread handling, latency, liquidity, funding, and volatility regime annotations.
-
+## 2) Exact behavior changed
 - `src/alphaforge/persistence.py`
-  - Persistence helper module. Present and used by the project, but detailed behavior still needs deeper review before live readiness.
+  - Expanded DB schema for `signals`, `order_decisions`, and `trade_lifecycle_events` with contract fields (`mode`, `decision`, `reject_reason`, `score`, `rr`, `effective_rr`, `expectancy_bucket`, execution context payload/missing flags, timestamps, IDs).
+  - Implemented real SQL upsert writes for `save_signal`, `save_order_decision`, and `save_trade_lifecycle_event`.
+  - Preserved defensive behavior for expectancy fetches and other existing helper semantics.
+- Added Phase 1-3 regression tests in `tests/test_phase123_foundations.py` covering package shadowing, runtime package origin, decision reject persistence, lifecycle persistence, rejection lifecycle ordering, reject reason propagation, lifecycle pre-trade states, UNAVAILABLE_BACKTEST sentinels, and contract field consistency.
 
-- `backtest_order.py`
-  - Backtest scanning, candidate generation, lifecycle row export, rejected-order shadow evaluation, and report artifact generation.
+## 3) Expected runtime/backtest impact
+- Rejected decisions and lifecycle states are now persisted in SQL instead of dropped.
+- Backtest lifecycle and rejection contracts are now guarded with explicit regression tests.
+- Sentinel values such as `UNAVAILABLE_BACKTEST` are preserved in persistence payloads (not coerced to 0.0).
 
-- `tests/`
-  - Test coverage exists for runtime, decision logic, schema, trading modes, and backtest scanner behavior.
+## 4) Compatibility risks
+- SQLite schema in `init_db` is broader; any consumers assuming prior minimal columns may need to tolerate additional columns.
+- Upsert requires SQLite `ON CONFLICT` support (available in project baseline environments).
 
-## Decision Pipeline Assessment
+## 5) Migration concerns
+- For in-memory/ephemeral DB usage: no migration action needed.
+- For persistent DB usage with prior schema: apply migrations or recreate local dev DB so new columns/unique IDs are present.
 
-- Signals are scored in `AIBrain.score_signal` via weighted quality components:
-  - setup quality
-  - regime alignment
-  - expectancy
-  - momentum
-  - liquidity
-  - volatility fit
-  - risk/reward quality
+## 6) Whether decision contract changed
+YES.
+- `order_decisions` persistence now stores/updates decision contract fields (`decision`, `reject_reason`, scoring/RR fields, mode, execution context metadata).
 
-- Penalties include:
-  - spread
-  - funding
-  - fakeout risk
-  - recent loss streak
-  - slippage
-  - latency
-  - funding execution penalty
+## 7) Whether lifecycle schema changed
+YES.
+- `trade_lifecycle_events` persistence now stores explicit lifecycle contract fields including state, decision, reject reason, execution context metadata, and event timestamps.
 
-- Reject/accept decisions are determined by score threshold and expectancy gate:
+## 8) Whether persistence semantics changed
+YES.
+- `save_order_decision` and `save_trade_lifecycle_event` moved from no-op behavior to real idempotent upsert writes.
 
-```text
-accepted = total_score >= min_accept_score and expectancy_edge >= 0.5
-```
+## 9) Tests added/updated
+Added:
+- `test_no_duplicate_alphaforge_package_shadowing`
+- `test_runtime_imports_from_src_package`
+- `test_save_order_decision_persists_reject`
+- `test_save_trade_lifecycle_event_persists_state`
+- `test_rejected_signal_lifecycle_precedes_trade_creation`
+- `test_order_rejected_lifecycle_contains_reason`
+- `test_backtest_lifecycle_does_not_start_directly_at_created`
+- `test_unavailable_backtest_context_uses_sentinel_not_zero`
+- `test_backtest_paper_decision_contract_fields_match`
+
+## 10) pytest -q result
+- `122 passed, 21 warnings in 2.14s`

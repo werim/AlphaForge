@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, timezone
+import json
 from typing import Any
 
 from sqlalchemy import create_engine, text
@@ -17,14 +19,71 @@ __all__ = [
 ]
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
-    """Backward-compatible DB initializer; returns a SQLAlchemy engine."""
     engine = create_engine(database_url, future=True)
     ddl = [
-        "CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, side TEXT, timeframe TEXT)",
-        "CREATE TABLE IF NOT EXISTS order_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT)",
+        """
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT UNIQUE,
+            symbol TEXT,
+            side TEXT,
+            timeframe TEXT,
+            mode TEXT,
+            score REAL,
+            rr REAL,
+            effective_rr REAL,
+            expectancy_bucket TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS order_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT UNIQUE,
+            signal_id TEXT,
+            order_id TEXT,
+            symbol TEXT,
+            mode TEXT,
+            decision TEXT,
+            reject_reason TEXT,
+            score REAL,
+            rr REAL,
+            effective_rr REAL,
+            expectancy_bucket TEXT,
+            execution_ctx TEXT,
+            execution_ctx_missing TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """,
         "CREATE TABLE IF NOT EXISTS ai_decision_features (id INTEGER PRIMARY KEY AUTOINCREMENT)",
-        "CREATE TABLE IF NOT EXISTS trade_lifecycle_events (id INTEGER PRIMARY KEY AUTOINCREMENT)",
+        """
+        CREATE TABLE IF NOT EXISTS trade_lifecycle_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT UNIQUE,
+            signal_id TEXT,
+            order_id TEXT,
+            symbol TEXT,
+            mode TEXT,
+            lifecycle_state TEXT,
+            decision TEXT,
+            reject_reason TEXT,
+            score REAL,
+            rr REAL,
+            effective_rr REAL,
+            expectancy_bucket TEXT,
+            execution_ctx TEXT,
+            execution_ctx_missing TEXT,
+            event_ts TEXT,
+            created_at TEXT
+        )
+        """,
         "CREATE TABLE IF NOT EXISTS closed_trade_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id TEXT, symbol TEXT, review_payload TEXT, execution_metrics TEXT, created_at TEXT)",
         "CREATE TABLE IF NOT EXISTS setup_expectancy_stats (setup TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
@@ -37,43 +96,17 @@ def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
     return engine
 
 
-def fetch_expectancy_stat(
-    session: Any,
-    table_name: str,
-    key_column: str,
-    key_value: str,
-) -> dict[str, Any]:
-    """Fetch one expectancy stat row, returning safe defaults on any failure.
-
-    This is intentionally defensive: missing tables, missing rows, or database
-    errors all return a consistent contract-safe payload so import/runtime
-    callers never crash.
-    """
-    default = {
-        "expectancy_bucket": "UNKNOWN",
-        "sample_size": 0,
-        "win_rate": None,
-        "avg_rr": None,
-        "expectancy": None,
-    }
-
+def fetch_expectancy_stat(session: Any, table_name: str, key_column: str, key_value: str) -> dict[str, Any]:
+    default = {"expectancy_bucket": "UNKNOWN", "sample_size": 0, "win_rate": None, "avg_rr": None, "expectancy": None}
     if session is None:
         return dict(default)
-
     try:
-        query = f"SELECT * FROM {table_name} WHERE {key_column} = :key_value LIMIT 1"
-        row = session.execute(query, {"key_value": key_value}).fetchone()
+        row = session.execute(f"SELECT * FROM {table_name} WHERE {key_column} = :key_value LIMIT 1", {"key_value": key_value}).fetchone()
     except Exception:
         return dict(default)
-
     if not row:
         return dict(default)
-
-    try:
-        row_data = dict(row) if isinstance(row, Mapping) else dict(row._mapping)
-    except Exception:
-        return dict(default)
-
+    row_data = dict(row) if isinstance(row, Mapping) else dict(row._mapping)
     return {
         "expectancy_bucket": row_data.get("expectancy_bucket") or "UNKNOWN",
         "sample_size": int(row_data.get("sample_size") or 0),
@@ -84,8 +117,6 @@ def fetch_expectancy_stat(
 
 
 def save_ai_decision_features(execution_features=None, *args, **kwargs):
-    import json
-
     payload = execution_features
     if payload is None and kwargs:
         payload = kwargs.get("execution_features", kwargs)
@@ -98,23 +129,24 @@ def save_ai_decision_features(execution_features=None, *args, **kwargs):
 def save_signal(session: Any, **signal: Any) -> Any:
     if session is None:
         return None
+    now = _utc_now_iso()
+    signal_id = signal.get("signal_id") or signal.get("id")
     try:
-        row = session.execute(
-            text(
-                """
-                INSERT INTO signals (symbol, side, timeframe)
-                VALUES (:symbol, :side, :timeframe)
-                """
-            ),
-            {
-                "symbol": signal.get("symbol"),
-                "side": signal.get("side"),
-                "timeframe": signal.get("timeframe"),
-            },
-        )
+        row = session.execute(text("""
+            INSERT INTO signals (signal_id, symbol, side, timeframe, mode, score, rr, effective_rr, expectancy_bucket, created_at, updated_at)
+            VALUES (:signal_id, :symbol, :side, :timeframe, :mode, :score, :rr, :effective_rr, :expectancy_bucket, :created_at, :updated_at)
+            ON CONFLICT(signal_id) DO UPDATE SET
+              symbol=excluded.symbol, side=excluded.side, timeframe=excluded.timeframe, mode=excluded.mode,
+              score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
+              updated_at=excluded.updated_at
+        """), {
+            "signal_id": signal_id, "symbol": signal.get("symbol"), "side": signal.get("side"), "timeframe": signal.get("timeframe"),
+            "mode": signal.get("mode"), "score": signal.get("score"), "rr": signal.get("rr"), "effective_rr": signal.get("effective_rr"),
+            "expectancy_bucket": signal.get("expectancy_bucket"), "created_at": now, "updated_at": now,
+        })
         if hasattr(session, "commit"):
             session.commit()
-        return row.lastrowid
+        return signal_id or row.lastrowid
     except Exception:
         return signal.get("id")
 
@@ -122,73 +154,100 @@ def save_signal(session: Any, **signal: Any) -> Any:
 def save_order_decision(session: Any, **decision: Any) -> Any:
     if session is None:
         return None
-    return decision.get("id")
+    now = _utc_now_iso()
+    decision_id = decision.get("decision_id") or decision.get("id")
+    execution_ctx = decision.get("execution_ctx", {})
+    row = session.execute(text("""
+        INSERT INTO order_decisions (
+            decision_id, signal_id, order_id, symbol, mode, decision, reject_reason, score, rr, effective_rr,
+            expectancy_bucket, execution_ctx, execution_ctx_missing, created_at, updated_at
+        ) VALUES (
+            :decision_id, :signal_id, :order_id, :symbol, :mode, :decision, :reject_reason, :score, :rr, :effective_rr,
+            :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :created_at, :updated_at
+        )
+        ON CONFLICT(decision_id) DO UPDATE SET
+            signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
+            decision=excluded.decision, reject_reason=excluded.reject_reason, score=excluded.score, rr=excluded.rr,
+            effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
+            execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, updated_at=excluded.updated_at
+    """), {
+        "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
+        "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
+        "reject_reason": decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
+        "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
+        "execution_ctx": json.dumps(execution_ctx),
+        "execution_ctx_missing": str(decision.get("execution_ctx_missing", False)),
+        "created_at": now, "updated_at": now,
+    })
+    if hasattr(session, "commit"):
+        session.commit()
+    return decision_id or row.lastrowid
 
 
 def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
     if session is None:
         return False
+    now = _utc_now_iso()
+    event_id = event.get("event_id") or event.get("id")
+    session.execute(text("""
+        INSERT INTO trade_lifecycle_events (
+            event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
+            effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at
+        ) VALUES (
+            :event_id, :signal_id, :order_id, :symbol, :mode, :lifecycle_state, :decision, :reject_reason, :score, :rr,
+            :effective_rr, :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :event_ts, :created_at
+        )
+        ON CONFLICT(event_id) DO UPDATE SET
+            signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
+            lifecycle_state=excluded.lifecycle_state, decision=excluded.decision, reject_reason=excluded.reject_reason,
+            score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
+            execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, event_ts=excluded.event_ts
+    """), {
+        "event_id": event_id, "signal_id": event.get("signal_id"), "order_id": event.get("order_id"), "symbol": event.get("symbol"),
+        "mode": event.get("mode"), "lifecycle_state": event.get("lifecycle_state") or event.get("state"), "decision": event.get("decision"),
+        "reject_reason": event.get("reject_reason"), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
+        "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
+        "execution_ctx_missing": str(event.get("execution_ctx_missing", False)), "event_ts": event.get("event_ts") or now, "created_at": now,
+    })
+    if hasattr(session, "commit"):
+        session.commit()
     return True
 
+# keep remaining functions as-is
 
-def save_closed_trade_review(
-    session: Any,
-    trade_id: str,
-    symbol: str,
-    review_payload: Mapping[str, Any] | None = None,
-    execution_metrics: Mapping[str, Any] | None = None,
-) -> bool:
-    """Best-effort persistence for closed-trade review; never raises."""
+def save_closed_trade_review(session: Any, trade_id: str, symbol: str, review_payload: Mapping[str, Any] | None = None, execution_metrics: Mapping[str, Any] | None = None) -> bool:
     if session is None:
         return False
-
     try:
-        import json
-
         if hasattr(session, "execute"):
-            session.execute(
-                """
+            session.execute("""
                 INSERT INTO closed_trade_reviews (trade_id, symbol, review_payload, execution_metrics)
                 VALUES (:trade_id, :symbol, :review_payload, :execution_metrics)
-                """,
-                {
+                """, {
                     "trade_id": trade_id,
                     "symbol": symbol,
                     "review_payload": json.dumps(dict(review_payload or {})),
                     "execution_metrics": json.dumps(dict(execution_metrics or {})),
-                },
-            )
+                })
             if hasattr(session, "commit"):
                 session.commit()
             return True
     except Exception:
         return False
-
     return False
 
 
-def upsert_expectancy_stats(
-    session: Any,
-    table_name: str,
-    key_column: str,
-    key_value: str,
-    pnl: float,
-) -> bool:
+def upsert_expectancy_stats(session: Any, table_name: str, key_column: str, key_value: str, pnl: float) -> bool:
     if session is None:
         return False
     try:
-        session.execute(
-            text(
-                f"""
+        session.execute(text(f"""
                 INSERT INTO {table_name} ({key_column}, samples, total_pnl)
                 VALUES (:key_value, 1, :pnl)
                 ON CONFLICT({key_column}) DO UPDATE SET
                   samples = samples + 1,
                   total_pnl = total_pnl + :pnl
-                """
-            ),
-            {"key_value": key_value, "pnl": float(pnl)},
-        )
+                """), {"key_value": key_value, "pnl": float(pnl)})
         if hasattr(session, "commit"):
             session.commit()
         return True
