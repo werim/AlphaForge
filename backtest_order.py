@@ -17,7 +17,10 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from alphaforge.execution import build_execution_context
+from alphaforge.persistence import init_db, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -1064,6 +1067,61 @@ def process_backtest_result(
     return cand
 
 
+def _lifecycle_event_id(row: LifecycleRow, index: int) -> str:
+    return (
+        f"{row.timestamp}:{row.symbol}:{row.status_before}:{row.status_after}:"
+        f"{row.entry}:{row.sl}:{row.tp}:{index}"
+    )
+
+
+def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        for idx, row in enumerate(rows):
+            execution_ctx_missing = any(
+                row_value == "UNAVAILABLE_BACKTEST"
+                for row_value in (row.volume_24h_usdt, row.spread_pct, row.funding_rate_pct, row.expected_slippage_pct, row.liquidity_score)
+            )
+            save_trade_lifecycle_event(
+                session,
+                event_id=_lifecycle_event_id(row, idx),
+                signal_id=f"{row.symbol}:{row.timestamp}",
+                order_id=None,
+                symbol=row.symbol,
+                mode="BACKTEST",
+                lifecycle_state=row.status_after,
+                decision="REJECTED" if row.status_after in {"SIGNAL_REJECTED", "ORDER_REJECTED"} else "ACCEPTED",
+                reject_reason=row.reject_reason,
+                score=row.score,
+                rr=row.rr,
+                effective_rr=row.rr,
+                expectancy_bucket=row.expectancy_bucket,
+                execution_ctx={
+                    "volume_24h_usdt": row.volume_24h_usdt,
+                    "spread_pct": row.spread_pct,
+                    "funding_rate_pct": row.funding_rate_pct,
+                    "expected_slippage_pct": row.expected_slippage_pct,
+                    "volatility_regime": row.volatility_regime,
+                    "liquidity_score": row.liquidity_score,
+                    "close_reason": row.close_reason,
+                },
+                execution_ctx_missing=execution_ctx_missing,
+                event_ts=str(row.timestamp),
+            )
+        persisted = session.execute(
+            text(
+                """
+                SELECT event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason,
+                       score, rr, effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing,
+                       event_ts, created_at
+                FROM trade_lifecycle_events
+                ORDER BY event_ts, event_id
+                """
+            )
+        ).mappings().all()
+    return [dict(row) for row in persisted]
+
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -1486,8 +1544,9 @@ def main():
 
         rejected_shadow.append(evaluate_rejected_shadow(row, candles, idx))
 
+    persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle)
     for name, rows in [
-        ("order_lifecycle.csv", [asdict(x) for x in lifecycle]),
+        ("order_lifecycle.csv", persisted_lifecycle_rows),
         ("order_candidates.csv", candidate_rows),
         ("backtest_orders.csv", candidate_rows),
         ("rejected_orders.csv", rejected),

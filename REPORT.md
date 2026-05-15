@@ -1,51 +1,53 @@
-# AlphaForge Phase 1-3 Completion Patch Report
+# AlphaForge Phase 2/3 Lifecycle Export + Contract Parity Patch Report
 
-## 1) Why the change was needed
-Persistence helpers for order decisions and lifecycle events were effectively no-ops, which prevented Phase 2/3 contract verification and made rejection/lifecycle auditability incomplete.
+## Why this patch was needed
+- Backtest lifecycle export was list/dataclass-driven and not proven against persisted SQL lifecycle events.
+- BACKTEST/PAPER contract parity coverage relied on a handcrafted dict key check.
+- `execution_ctx_missing` was persisted as stringified bool values (`"True"`/`"False"`) causing mixed semantics risk.
 
-## 2) Exact behavior changed
+## Exact behavior changed
+- `backtest_order.py`
+  - Added deterministic lifecycle event ID generation for backtest rows.
+  - Added persistence of in-memory lifecycle rows into SQL `trade_lifecycle_events` before writing lifecycle CSV.
+  - Changed `order_lifecycle.csv` export source to persisted SQL rows (sorted deterministically by `event_ts,event_id`).
+  - Rejected lifecycle rows (`SIGNAL_REJECTED`, `ORDER_REJECTED`) are persisted and exported in this SQL-backed path.
 - `src/alphaforge/persistence.py`
-  - Expanded DB schema for `signals`, `order_decisions`, and `trade_lifecycle_events` with contract fields (`mode`, `decision`, `reject_reason`, `score`, `rr`, `effective_rr`, `expectancy_bucket`, execution context payload/missing flags, timestamps, IDs).
-  - Implemented real SQL upsert writes for `save_signal`, `save_order_decision`, and `save_trade_lifecycle_event`.
-  - Preserved defensive behavior for expectancy fetches and other existing helper semantics.
-- Added Phase 1-3 regression tests in `tests/test_phase123_foundations.py` covering package shadowing, runtime package origin, decision reject persistence, lifecycle persistence, rejection lifecycle ordering, reject reason propagation, lifecycle pre-trade states, UNAVAILABLE_BACKTEST sentinels, and contract field consistency.
+  - Normalized `execution_ctx_missing` schema columns to INTEGER in `init_db` table definitions.
+  - Normalized write-path conversion to canonical 0/1 for both decisions and lifecycle events.
+- `tests/test_backtest_order_scanner.py`
+  - Added SQL-backed lifecycle export verification and duplicate-event-id checks.
+- `tests/test_phase123_foundations.py`
+  - Added idempotency tests for order decision/lifecycle upserts.
+  - Added execution_ctx_missing round-trip consistency test (including compatibility with legacy `True`/`False` text rows).
+  - Supplemented real output parity checks using real BACKTEST and PAPER order-cycle outputs plus runtime paper execution output fields.
 
-## 3) Expected runtime/backtest impact
-- Rejected decisions and lifecycle states are now persisted in SQL instead of dropped.
-- Backtest lifecycle and rejection contracts are now guarded with explicit regression tests.
-- Sentinel values such as `UNAVAILABLE_BACKTEST` are preserved in persistence payloads (not coerced to 0.0).
+## OPEN_AT_END representation note
+- This patch does **not** introduce a fake `OPEN_AT_END` lifecycle state.
+- Current architecture continues representing open-at-end via timeout/open rows (`close_reason == "TIMEOUT"` + `open_at_end.csv`).
 
-## 4) Compatibility risks
-- SQLite schema in `init_db` is broader; any consumers assuming prior minimal columns may need to tolerate additional columns.
-- Upsert requires SQLite `ON CONFLICT` support (available in project baseline environments).
+## Compatibility and migration concerns
+- Existing persistent SQLite DBs created with TEXT `execution_ctx_missing` may require migration/rebuild to adopt INTEGER canonical storage.
+- Read paths that may encounter historical TEXT values should tolerate both legacy text and integer representations.
 
-## 5) Migration concerns
-- For in-memory/ephemeral DB usage: no migration action needed.
-- For persistent DB usage with prior schema: apply migrations or recreate local dev DB so new columns/unique IDs are present.
+## Decision/lifecycle contract impact
+- Decision contract persistence semantics changed at storage boundary: `execution_ctx_missing` now canonical 0/1.
+- Lifecycle schema semantics changed for `execution_ctx_missing` storage type and export source-of-truth for backtest lifecycle CSV.
 
-## 6) Whether decision contract changed
-YES.
-- `order_decisions` persistence now stores/updates decision contract fields (`decision`, `reject_reason`, scoring/RR fields, mode, execution context metadata).
+## Tests added/updated
+- Added:
+  - `test_lifecycle_export_reads_persisted_sql_events`
+  - `test_lifecycle_export_has_no_duplicate_event_ids`
+  - `test_order_decision_upsert_is_idempotent`
+  - `test_trade_lifecycle_event_upsert_is_idempotent`
+  - `test_backtest_and_paper_real_outputs_share_required_contract_fields`
+  - `test_execution_ctx_missing_round_trip_type_is_consistent`
+  - `test_runtime_paper_output_has_execution_fields`
 
-## 7) Whether lifecycle schema changed
-YES.
-- `trade_lifecycle_events` persistence now stores explicit lifecycle contract fields including state, decision, reject reason, execution context metadata, and event timestamps.
+## Actual verification run
+- `python -m compileall src tests`
+- `pytest -q` => `129 passed, 21 warnings in 1.13s`
+- `PYTHONPATH=src python -c "import alphaforge.runtime as r; print(r.__file__)"` => `/workspace/AlphaForge/src/alphaforge/runtime.py`
 
-## 8) Whether persistence semantics changed
-YES.
-- `save_order_decision` and `save_trade_lifecycle_event` moved from no-op behavior to real idempotent upsert writes.
-
-## 9) Tests added/updated
-Added:
-- `test_no_duplicate_alphaforge_package_shadowing`
-- `test_runtime_imports_from_src_package`
-- `test_save_order_decision_persists_reject`
-- `test_save_trade_lifecycle_event_persists_state`
-- `test_rejected_signal_lifecycle_precedes_trade_creation`
-- `test_order_rejected_lifecycle_contains_reason`
-- `test_backtest_lifecycle_does_not_start_directly_at_created`
-- `test_unavailable_backtest_context_uses_sentinel_not_zero`
-- `test_backtest_paper_decision_contract_fields_match`
-
-## 10) pytest -q result
-- `122 passed, 21 warnings in 2.14s`
+## Remaining known gaps
+- Full end-to-end parity assertion across every optional field (including all lifecycle/persistence timestamp typing nuances) can be extended further.
+- Legacy DB migration automation is not included in this patch.

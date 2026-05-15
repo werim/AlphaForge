@@ -57,7 +57,7 @@ def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
             effective_rr REAL,
             expectancy_bucket TEXT,
             execution_ctx TEXT,
-            execution_ctx_missing TEXT,
+            execution_ctx_missing INTEGER,
             created_at TEXT,
             updated_at TEXT
         )
@@ -79,7 +79,7 @@ def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
             effective_rr REAL,
             expectancy_bucket TEXT,
             execution_ctx TEXT,
-            execution_ctx_missing TEXT,
+            execution_ctx_missing INTEGER,
             event_ts TEXT,
             created_at TEXT
         )
@@ -176,7 +176,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "reject_reason": decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
         "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
         "execution_ctx": json.dumps(execution_ctx),
-        "execution_ctx_missing": str(decision.get("execution_ctx_missing", False)),
+        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
         "created_at": now, "updated_at": now,
     })
     if hasattr(session, "commit"):
@@ -207,7 +207,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
         "mode": event.get("mode"), "lifecycle_state": event.get("lifecycle_state") or event.get("state"), "decision": event.get("decision"),
         "reject_reason": event.get("reject_reason"), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
         "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
-        "execution_ctx_missing": str(event.get("execution_ctx_missing", False)), "event_ts": event.get("event_ts") or now, "created_at": now,
+        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", False)) else 0, "event_ts": event.get("event_ts") or now, "created_at": now,
     })
     if hasattr(session, "commit"):
         session.commit()

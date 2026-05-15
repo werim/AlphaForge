@@ -7,6 +7,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
+from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
+from alphaforge.runtime import RuntimeConfig, RuntimeOrchestrator, ExecutionMode
 
 
 def test_no_duplicate_alphaforge_package_shadowing() -> None:
@@ -108,3 +110,82 @@ def test_backtest_paper_decision_contract_fields_match() -> None:
         "score": 1.0, "rr": 1.1, "effective_rr": 1.0, "expectancy_bucket": "LOW", "execution_ctx_missing": True,
     }
     assert required.issubset(payload.keys())
+
+
+def test_order_decision_upsert_is_idempotent() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        save_order_decision(s, decision_id="d1", signal_id="s1", symbol="BTCUSDT", mode="BACKTEST", decision="REJECTED", reject_reason="LOW_SCORE", execution_ctx_missing=True)
+        save_order_decision(s, decision_id="d1", signal_id="s1", symbol="BTCUSDT", mode="BACKTEST", decision="ACCEPTED", reject_reason="", execution_ctx_missing=False)
+        rows = s.execute(text("SELECT decision_id,decision,reject_reason,execution_ctx_missing FROM order_decisions WHERE decision_id='d1'")).all()
+        assert len(rows) == 1
+        assert rows[0].decision == "ACCEPTED"
+        assert rows[0].execution_ctx_missing == 0
+
+
+def test_trade_lifecycle_event_upsert_is_idempotent() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        save_trade_lifecycle_event(s, event_id="e1", signal_id="s1", symbol="BTCUSDT", mode="BACKTEST", lifecycle_state="SIGNAL_REJECTED", reject_reason="A", execution_ctx_missing=True)
+        save_trade_lifecycle_event(s, event_id="e1", signal_id="s1", symbol="BTCUSDT", mode="BACKTEST", lifecycle_state="ORDER_REJECTED", reject_reason="B", execution_ctx_missing=False)
+        rows = s.execute(text("SELECT event_id,lifecycle_state,reject_reason,execution_ctx_missing FROM trade_lifecycle_events WHERE event_id='e1'")).all()
+        assert len(rows) == 1
+        assert rows[0].lifecycle_state == "ORDER_REJECTED"
+        assert rows[0].execution_ctx_missing == 0
+
+
+def test_backtest_and_paper_real_outputs_share_required_contract_fields() -> None:
+    backtest_ctx = OrderExecutionContext(
+        mode=TradingMode.BACKTEST,
+        timestamp=1,
+        symbol="BTCUSDT",
+        balance=1000,
+        risk_pct=1.0,
+        market_ctx={"entry": 10.0, "sl": 9.9, "tp": 10.2, "score": 9.0, "rr": 1.5, "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "expectancy": 0.2},
+    )
+    paper_ctx = OrderExecutionContext(
+        mode=TradingMode.PAPER,
+        timestamp=1,
+        symbol="BTCUSDT",
+        balance=1000,
+        risk_pct=1.0,
+        market_ctx={"entry": 10.0, "sl": 9.9, "tp": 10.2, "score": 9.0, "rr": 1.5, "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "expectancy": 0.2},
+    )
+    cfg = {"MIN_TRADE_SCORE": 1.0, "MIN_RR": 1.0, "MAX_SPREAD_PCT": 1.0, "MAX_EXPECTED_SLIPPAGE_PCT": 1.0}
+    backtest_out = run_order_cycle(backtest_ctx, config=cfg)
+    paper_out = run_order_cycle(paper_ctx, config=cfg)
+    assert backtest_out["accepted"] == paper_out["accepted"]
+    if backtest_out["accepted"]:
+        bt = backtest_out["candidate"]
+        pp = paper_out["candidate"]
+        required = ("symbol", "side", "setup_type", "setup_reason", "regime", "score", "rr", "entry", "sl", "tp", "order_type")
+        for field in required:
+            assert hasattr(bt, field)
+            assert hasattr(pp, field)
+    else:
+        assert isinstance(backtest_out.get("reject_reason"), str)
+        assert isinstance(paper_out.get("reject_reason"), str)
+
+
+def test_execution_ctx_missing_round_trip_type_is_consistent() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        s.execute(text("INSERT INTO order_decisions (decision_id, execution_ctx_missing) VALUES ('legacy-true','True')"))
+        s.execute(text("INSERT INTO order_decisions (decision_id, execution_ctx_missing) VALUES ('legacy-false','False')"))
+        save_order_decision(s, decision_id="new-1", execution_ctx_missing=True)
+        save_order_decision(s, decision_id="new-2", execution_ctx_missing=False)
+        rows = s.execute(text("SELECT decision_id,execution_ctx_missing FROM order_decisions ORDER BY decision_id")).all()
+        as_map = {r.decision_id: r.execution_ctx_missing for r in rows}
+        assert as_map["new-1"] == 1
+        assert as_map["new-2"] == 0
+        assert str(as_map["legacy-true"]).lower() in {"true", "1"}
+        assert str(as_map["legacy-false"]).lower() in {"false", "0"}
+
+
+def test_runtime_paper_output_has_execution_fields() -> None:
+    async def _scanner():
+        return []
+    rt = RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER), ai_brain=None, market_scanner=_scanner)
+    out = rt._simulate_paper_execution("BTCUSDT", {"order_type": "LIMIT"}, {"entry": 10.0, "side": "LONG"})
+    assert out["mode"] == "PAPER"
+    assert "expected_slippage_pct" in out and "fill_price" in out
