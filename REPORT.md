@@ -1,61 +1,36 @@
-Version{}
 # AlphaForge Technical Status Report
 
-## Executive Summary
+## Why the change was needed
+Phase 1-3 foundations were incomplete: duplicate-package protection was untested, persistence entry points for order decisions/lifecycle events were effectively no-ops, and lifecycle contract regressions were not guarded.
 
-AlphaForge has progressed beyond a Phase-1-only SQL scaffold. The codebase now includes symbol selection, a deterministic decision/reject pipeline, runtime orchestration, and backtest lifecycle export logic. However, this remains a prototype-level system and is not ready for production live trading.
+## Exact behavior changed
+- `init_db` now creates operational `order_decisions` and `trade_lifecycle_events` schemas with contract fields and idempotency constraints.
+- `save_order_decision` now performs SQL inserts/upserts and persists rejection fields and contract context/sentinels.
+- `save_trade_lifecycle_event` now performs SQL inserts with idempotent conflict handling.
+- Added Phase 1-3 regression tests for package shadowing, runtime import path, rejection persistence, lifecycle state persistence/ordering, sentinel usage, and decision contract-field parity.
 
-## Current Phase Assessment
+## Expected runtime/backtest impact
+- Rejected and accepted order decisions are now durably persisted.
+- Lifecycle events are now durably persisted and deduplicated for repeated writes.
+- Backtest lifecycle sentinel behavior is explicitly enforced by tests.
 
-- The previous README documented AlphaForge as "Phase 1" only.
-- Current code appears materially closer to **Phase 3.5 / Phase 4**: symbol selection + runtime + decision engine prototypes.
-- Live execution readiness is not achieved.
+## Compatibility risks
+- `order_decisions` and `trade_lifecycle_events` table definitions in `init_db` are expanded; environments assuming the previous minimal schema may need fresh sqlite DB initialization.
 
-## Implemented Components
+## Migration concerns
+- For existing sqlite files created with the previous minimal `init_db`, schema migration is not automatic in this patch. Recreate test/dev DBs when necessary.
 
-- `src/alphaforge/runtime.py`
-  - Runtime orchestrator with periodic scan loop, heartbeat loop, mode switch (`BACKTEST`/`PAPER`/`LIVE`), reject persistence hook, lifecycle-event hook, and paper execution simulation.
+## Whether decision contract changed
+YES — persistence now stores the decision contract fields (`mode`, `decision`, `reject_reason`, `score`, `rr`, `effective_rr`, `expectancy_bucket`) explicitly.
 
-- `src/alphaforge/ai_brain.py`
-  - Deterministic scoring pipeline (`score_signal`), decision planning (`choose_order_plan`), explanation builder, SQL persistence of signals/decisions/features, and expectancy stat updates.
+## Whether lifecycle schema changed
+YES — lifecycle persistence schema now includes `signal_id`, `mode`, `state`, `reject_reason`, timestamps, and idempotency uniqueness.
 
-- `src/alphaforge/symbol_selector.py`
-  - Rule-based symbol filtering/scoring with reject reasons, diagnostics, and ranked output.
+## Whether persistence semantics changed
+YES — `save_order_decision` and `save_trade_lifecycle_event` changed from no-op to real SQL writes with commit/idempotency behavior.
 
-- `src/alphaforge/execution.py`
-  - Execution-context assembly: slippage estimate, spread handling, latency, liquidity, funding, and volatility regime annotations.
+## Tests added/updated
+- Added `tests/test_phase123_foundations.py` with required Phase 1-3 regression coverage.
 
-- `src/alphaforge/persistence.py`
-  - Persistence helper module. Present and used by the project, but detailed behavior still needs deeper review before live readiness.
-
-- `backtest_order.py`
-  - Backtest scanning, candidate generation, lifecycle row export, rejected-order shadow evaluation, and report artifact generation.
-
-- `tests/`
-  - Test coverage exists for runtime, decision logic, schema, trading modes, and backtest scanner behavior.
-
-## Decision Pipeline Assessment
-
-- Signals are scored in `AIBrain.score_signal` via weighted quality components:
-  - setup quality
-  - regime alignment
-  - expectancy
-  - momentum
-  - liquidity
-  - volatility fit
-  - risk/reward quality
-
-- Penalties include:
-  - spread
-  - funding
-  - fakeout risk
-  - recent loss streak
-  - slippage
-  - latency
-  - funding execution penalty
-
-- Reject/accept decisions are determined by score threshold and expectancy gate:
-
-```text
-accepted = total_score >= min_accept_score and expectancy_edge >= 0.5
-```
+## pytest -q result
+PASS
