@@ -5,17 +5,14 @@ import os
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
-
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Mapping
-
 # Allow running this script directly from the repo root without requiring
 # prior editable install.
 ROOT_DIR = Path(__file__).resolve().parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-
 from alphaforge.execution import build_execution_context
 from alphaforge.persistence import init_db, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
@@ -23,8 +20,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from urllib.parse import urlencode
 from urllib.request import urlopen
-
-
 @dataclass
 class Candle:
     timestamp: int
@@ -33,8 +28,6 @@ class Candle:
     low: float
     close: float
     volume: float
-
-
 @dataclass
 class CandidateOrder:
     timestamp: int
@@ -50,8 +43,6 @@ class CandidateOrder:
     score: float
     order_type: str
     expectancy_bucket: str = "UNKNOWN"
-
-
 @dataclass
 class RejectedShadowEvaluation:
     symbol: str
@@ -73,8 +64,6 @@ class RejectedShadowEvaluation:
     cost_penalty: float
     liquidity_ok: bool
     volatility_ok: bool
-
-
 @dataclass
 class LifecycleRow:
     timestamp: int
@@ -107,13 +96,12 @@ class LifecycleRow:
     expected_slippage_pct: Any = "UNAVAILABLE_BACKTEST"
     volatility_regime: str = "UNAVAILABLE_BACKTEST"
     liquidity_score: Any = "UNAVAILABLE_BACKTEST"
+    effective_rr: Optional[float] = None
     mfe: float = 0.0
     mae: float = 0.0
     would_tp_hit: bool = False
     would_sl_hit: bool = False
     would_trigger: bool = False
-
-
 def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy is None:
         return "UNKNOWN"
@@ -124,15 +112,12 @@ def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy < 0.2:
         return "MEDIUM"
     return "HIGH"
-
-
 def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[float, list[str]]:
     slippage = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
     spread = float(market_ctx.get("spread_pct", 0.0) or 0.0)
     liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
     execution_penalty = (slippage + spread) * 50.0
     effective = round(max(float(rr) * (1.0 - execution_penalty), 0.0), 6)
-
     flags: list[str] = []
     if slippage >= 0.02:
         flags.append("HIGH_SLIPPAGE")
@@ -141,15 +126,10 @@ def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[f
     if effective < 1.1:
         flags.append("LOW_EFFECTIVE_RR")
     return effective, flags
-
-
-
-
 def _estimate_backtest_spread_pct(liquidity_score: float, volatility_pct: float) -> float:
     base_spread_pct = 0.015 + (1.0 - liquidity_score) * 0.09
     volatility_widening = min(0.04, max(0.0, (volatility_pct - 2.0) * 0.0015))
     return max(0.005, min(0.22, base_spread_pct + volatility_widening))
-
 def _build_market_ctx(
     now: Candle,
     prev: Candle,
@@ -166,16 +146,13 @@ def _build_market_ctx(
     tp = entry + rr * risk
     score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
     expectancy = ((score / 10.0) - 0.5) * (rr - 1.0)
-
     quote_volume = symbol_meta.get("quoteVolume")
     if quote_volume in (None, "", 0, 0.0):
         quote_volume = now.volume * now.close * 1440.0
-
     candle_range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
     liq = min(1.0, max(0.05, float(symbol_meta.get("quoteVolume", 0.0) or 0.0) / 100000000.0))
     spread_source = "ACTUAL" if symbol_meta.get("actual_spread_pct") not in (None, "") else "ESTIMATED_BACKTEST"
     spread_pct = float(symbol_meta.get("actual_spread_pct") or symbol_meta.get("estimated_spread_pct") or _estimate_backtest_spread_pct(liq, candle_range_pct))
-
     base = {
         "entry": entry,
         "sl": sl,
@@ -195,7 +172,6 @@ def _build_market_ctx(
         "volatility_pct": candle_range_pct,
         "funding_rate_pct": float(symbol_meta.get("fundingRate", 0.0) or 0.0),
     }
-
     klines = [{"high": c.high, "low": c.low, "close": c.close} for c in (recent or [])[-20:] if c]
     exec_ctx = build_execution_context(
         {
@@ -209,27 +185,21 @@ def _build_market_ctx(
     )
     base.update(exec_ctx)
     return base
-
-
 def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Candle], idx: int) -> Dict[str, Any]:
     now = candles[idx]
     prev = candles[idx - 1] if idx > 0 else now
     recent = candles[max(0, idx - 20):idx + 1]
     diagnostics: Dict[str, Any] = {}
-
     quote_volume = symbol_meta.get("quoteVolume")
     if quote_volume in (None, "", 0, 0.0):
         close = max(now.close, 1e-9)
         quote_volume = now.volume * close * 1440.0
         diagnostics["volume_24h_usdt"] = "derived_from_candle_volume"
-
     candle_range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
     volatility_pct = candle_range_pct
-
     lookback = recent[-10:] if recent else [now]
     up_bars = sum(1 for c in lookback if c.close > c.open)
     trend_strength = up_bars / max(1, len(lookback))
-
     liquidity_score = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
     actual_spread_pct = symbol_meta.get("actual_spread_pct")
     spread_source = "ACTUAL" if actual_spread_pct not in (None, "") else "ESTIMATED_BACKTEST"
@@ -238,7 +208,6 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     else:
         # Conservative offline estimate: wider for lower liquidity and high volatility.
         spread_pct = _estimate_backtest_spread_pct(liquidity_score, volatility_pct)
-
     recent_vol = [c.volume for c in recent[-6:]]
     prev_vol = [c.volume for c in recent[-12:-6]]
     if recent_vol and prev_vol:
@@ -248,17 +217,14 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     else:
         recent_volume_change_pct = 0.0
         diagnostics["recent_volume_change_pct"] = "defaulted_insufficient_history"
-
     closes = [c.close for c in lookback]
     close_min = min(closes)
     close_max = max(closes)
     chop_score = min(1.0, max(0.0, 1.0 - abs((closes[-1] - closes[0]) / max(close_max - close_min, 1e-9))))
-
     panic_score = 0.0
     drop_pct = ((prev.close - now.close) / max(prev.close, 1e-9)) * 100.0
     if drop_pct > 3.0 and volatility_pct > 2.0:
         panic_score = min(1.0, (drop_pct / 10.0) + (volatility_pct / 20.0))
-
     return {
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
@@ -274,57 +240,42 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
         "panic_score": panic_score,
         "selector_diagnostics": diagnostics,
     }
-
-
 def parse_ts(value: str) -> int:
     if value.isdigit():
         return int(value)
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return int(dt.timestamp() * 1000)
-
-
 def fetch_json(url: str) -> Any:
     with urlopen(url) as resp:  # nosec - public market data
         return json.loads(resp.read().decode("utf-8"))
-
-
 def select_symbol_universe(top_n: int, quote: str = "USDT") -> List[Dict[str, Any]]:
     info = fetch_json("https://fapi.binance.com/fapi/v1/exchangeInfo")
     tickers = fetch_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
     ticker_map = {t["symbol"]: t for t in tickers}
     selected = []
-
     for s in info.get("symbols", []):
         sym = s.get("symbol", "")
         if s.get("status") != "TRADING" or s.get("contractType") != "PERPETUAL":
             continue
         if s.get("quoteAsset") != quote or not sym.endswith(quote):
             continue
-
         t = ticker_map.get(sym)
         if not t:
             continue
-
         qv = float(t.get("quoteVolume", 0.0) or 0.0)
         if qv <= 0:
             continue
         if not s.get("filters"):
             continue
-
         selected.append({"symbol": sym, "quoteVolume": qv})
-
     selected.sort(key=lambda x: x["quoteVolume"], reverse=True)
     return selected[:top_n]
-
-
 def save_symbol_universe(path: str, universe: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["symbol", "quoteVolume"])
         w.writeheader()
         w.writerows(universe)
-
-
 def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> List[Candle]:
     params = urlencode(
         {
@@ -347,13 +298,10 @@ def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> List
         )
         for r in rows
     ]
-
-
 def load_or_fetch_candles(symbol: str, interval: str, start_ms: int, end_ms: int, output_dir: str) -> List[Candle]:
     path = os.path.join(output_dir, "candles", f"{symbol}_{interval}.csv")
     if os.path.exists(path):
         return load_candles(path, start_ms, end_ms)
-
     candles = fetch_klines(symbol, interval, start_ms, end_ms)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", newline="") as f:
@@ -362,8 +310,6 @@ def load_or_fetch_candles(symbol: str, interval: str, start_ms: int, end_ms: int
         for c in candles:
             w.writerow(asdict(c))
     return candles
-
-
 def load_candles(path: str, start_ms: int, end_ms: int) -> List[Candle]:
     out = []
     with open(path, newline="") as f:
@@ -382,8 +328,6 @@ def load_candles(path: str, start_ms: int, end_ms: int) -> List[Candle]:
                 )
     out.sort(key=lambda x: x.timestamp)
     return out
-
-
 def scan_symbol_backtest(
     symbol: str,
     candles: List[Candle],
@@ -391,14 +335,11 @@ def scan_symbol_backtest(
     context: Dict[str, Any],
 ) -> Optional[CandidateOrder]:
     OrderExecutionContext, TradingMode, run_order_cycle = _order_runtime()
-
     if idx < 2:
         return None
-
     now = candles[idx]
     prev = candles[idx - 1]
     mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx - 20):idx + 1])
-
     ctx = OrderExecutionContext(
         mode=TradingMode.BACKTEST,
         timestamp=now.timestamp,
@@ -410,10 +351,8 @@ def scan_symbol_backtest(
     result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
     context["last_result"] = result
     context["market_ctx"] = mctx
-
     if result.get("status") != "executed":
         return None
-
     c = result["candidate"]
     return CandidateOrder(
         now.timestamp,
@@ -430,8 +369,6 @@ def scan_symbol_backtest(
         c.order_type,
         expectancy_bucket=mctx.get("expectancy_bucket", "UNKNOWN"),
     )
-
-
 def simulate_candidate(
     candidate: CandidateOrder,
     candles: List[Candle],
@@ -466,15 +403,12 @@ def simulate_candidate(
             liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
         )
     ]
-
     triggered_ts = None
     trigger_price = 0.0
-
     if candidate.order_type in {"MARKET", "BREAKOUT", "IMMEDIATE"}:
         triggered_ts = candles[idx].timestamp
         trigger_price = candidate.entry
         start_idx = idx
-
         rows.append(
             LifecycleRow(
                 candidate.timestamp,
@@ -501,7 +435,6 @@ def simulate_candidate(
                 liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
             )
         )
-
         rows.append(
             LifecycleRow(
                 candidate.timestamp,
@@ -536,7 +469,6 @@ def simulate_candidate(
                 triggered_ts = c.timestamp
                 trigger_price = candidate.entry
                 start_idx = j
-
                 rows.append(
                     LifecycleRow(
                         candidate.timestamp,
@@ -563,7 +495,6 @@ def simulate_candidate(
                         liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                     )
                 )
-
                 rows.append(
                     LifecycleRow(
                         candidate.timestamp,
@@ -591,7 +522,6 @@ def simulate_candidate(
                     )
                 )
                 break
-
         if triggered_ts is None:
             rows.append(
                 LifecycleRow(
@@ -620,25 +550,20 @@ def simulate_candidate(
                 )
             )
             return rows
-
     mfe = 0.0
     mae = 0.0
     tp_distance = max(candidate.tp - candidate.entry, 1e-9)
     sl_distance = max(candidate.entry - candidate.sl, 1e-9)
-
     for j in range(start_idx, len(candles)):
         c = candles[j]
         mfe = max(mfe, c.high - candidate.entry)
         mae = max(mae, candidate.entry - c.low)
-
         hit_sl = c.low <= candidate.sl
         hit_tp = c.high >= candidate.tp
-
         # Conservative same-candle rule:
         # if both TP and SL touch inside the same candle, count SL first.
         if hit_sl and hit_tp:
             hit_tp = False
-
         if hit_sl:
             pnl_pct = ((candidate.sl - candidate.entry) / candidate.entry) * 100
             rows.append(
@@ -660,7 +585,6 @@ def simulate_candidate(
                 )
             )
             return rows
-
         if hit_tp:
             pnl_pct = ((candidate.tp - candidate.entry) / candidate.entry) * 100
             rows.append(
@@ -682,7 +606,6 @@ def simulate_candidate(
                 )
             )
             return rows
-
     c = candles[-1]
     pnl_pct = ((c.close - candidate.entry) / candidate.entry) * 100
     rows.append(
@@ -704,8 +627,6 @@ def simulate_candidate(
         )
     )
     return rows
-
-
 def finalize(
     candidate,
     before,
@@ -726,7 +647,6 @@ def finalize(
     risk_usdt = balance * (risk_pct / 100)
     net_pnl_usdt = risk_usdt * (pnl_pct / 100)
     hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
-
     return LifecycleRow(
         candidate.timestamp,
         candidate.symbol,
@@ -758,8 +678,6 @@ def finalize(
         mfe=mfe,
         mae=mae,
     )
-
-
 def simulate_rejected_counterfactual(
     candidate: CandidateOrder,
     candles: List[Candle],
@@ -775,37 +693,30 @@ def simulate_rejected_counterfactual(
             "max_favorable_excursion": 0.0,
             "max_adverse_excursion": 0.0,
         }
-
     would_trigger = False
     would_tp = False
     would_sl = False
     mfe = 0.0
     mae = 0.0
     scan = candles[idx:idx + timeout_bars]
-
     for c in scan:
         if c.low <= candidate.entry <= c.high:
             would_trigger = True
-
         if would_trigger:
             mfe = max(mfe, c.high - candidate.entry)
             mae = max(mae, candidate.entry - c.low)
             hit_sl = c.low <= candidate.sl
             hit_tp = c.high >= candidate.tp
-
             # Deterministic same-candle rule for diagnostics parity:
             # if both touch, count stop loss first.
             if hit_sl and hit_tp:
                 hit_tp = False
-
             if hit_sl:
                 would_sl = True
                 break
-
             if hit_tp:
                 would_tp = True
                 break
-
     if not would_trigger:
         outcome = "WOULD_NOT_TRIGGER"
     elif would_tp:
@@ -816,7 +727,6 @@ def simulate_rejected_counterfactual(
         outcome = "UNKNOWN"
     else:
         outcome = "WOULD_TIMEOUT"
-
     return {
         "outcome": outcome,
         "would_trigger": would_trigger,
@@ -825,8 +735,6 @@ def simulate_rejected_counterfactual(
         "max_favorable_excursion": mfe,
         "max_adverse_excursion": mae,
     }
-
-
 def _update_recent_stats_after_close(recent_stats: Dict[str, Any], symbol: str, close_reason: str) -> None:
     if close_reason == "SL_HIT":
         recent_stats["consecutive_sl_count"] = int(recent_stats.get("consecutive_sl_count", 0) or 0) + 1
@@ -834,21 +742,16 @@ def _update_recent_stats_after_close(recent_stats: Dict[str, Any], symbol: str, 
     elif close_reason == "TP_HIT":
         recent_stats["consecutive_tp_count"] = int(recent_stats.get("consecutive_tp_count", 0) or 0) + 1
         recent_stats["consecutive_sl_count"] = 0
-
     outcomes = recent_stats.setdefault("outcomes", [])
     if close_reason in {"TP_HIT", "SL_HIT"}:
         outcomes.append(1 if close_reason == "TP_HIT" else 0)
-
     window = int(recent_stats.get("rolling_window", 20) or 20)
     recent = outcomes[-window:]
     recent_stats["rolling_winrate"] = (sum(recent) / len(recent)) if recent else 0.0
-
-
 def _offline_fixture(start_ms: int) -> tuple[list[dict[str, float]], dict[str, list[Candle]]]:
     universe = [{"symbol": "BTCUSDT", "quoteVolume": 100000000.0}]
     candles: list[Candle] = []
     base = 100.0
-
     for i in range(30):
         ts = start_ms + i * 60_000
         o = base + i * 0.2
@@ -856,10 +759,7 @@ def _offline_fixture(start_ms: int) -> tuple[list[dict[str, float]], dict[str, l
         l = o - 0.4
         c = o + 0.3
         candles.append(Candle(timestamp=ts, open=o, high=h, low=l, close=c, volume=1000.0 + i))
-
     return universe, {"BTCUSDT": candles}
-
-
 def process_backtest_result(
     symbol: str,
     candle: Candle,
@@ -888,7 +788,6 @@ def process_backtest_result(
     order_type = diagnostics.get("order_type", "LIMIT")
     expectancy = diagnostics.get("expectancy", mctx.get("expectancy"))
     expectancy_bucket = _bucket_expectancy(expectancy)
-
     lifecycle.append(
         LifecycleRow(
             timestamp=candle.timestamp,
@@ -914,11 +813,9 @@ def process_backtest_result(
             liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
         )
     )
-
     if result.get("status") == "rejected":
         reason = result.get("reason", "UNKNOWN")
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-
         lifecycle.append(
             LifecycleRow(
                 timestamp=candle.timestamp,
@@ -945,7 +842,6 @@ def process_backtest_result(
                 liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
             )
         )
-
         rejected.append(
             {
                 "timestamp": candle.timestamp,
@@ -970,10 +866,8 @@ def process_backtest_result(
             }
         )
         return None
-
     if result.get("status") != "executed":
         return None
-
     c = result["candidate"]
     cand = CandidateOrder(
         candle.timestamp,
@@ -990,12 +884,10 @@ def process_backtest_result(
         c.order_type,
         expectancy_bucket=expectancy_bucket,
     )
-
     effective_rr, execution_flags = _execution_reject_flags(cand.rr, mctx)
     if execution_flags:
         reason = execution_flags[0]
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-
         lifecycle.append(
             LifecycleRow(
                 timestamp=candle.timestamp,
@@ -1020,9 +912,9 @@ def process_backtest_result(
                 expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
                 volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
                 liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+                effective_rr=effective_rr,
             )
         )
-
         rejected.append(
             {
                 "timestamp": candle.timestamp,
@@ -1050,30 +942,22 @@ def process_backtest_result(
             }
         )
         return None
-
     sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=mctx)
     lifecycle.extend(sim_rows)
-
     recent_stats["last_trade_ts_by_symbol"][symbol] = candle.timestamp
     recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
     recent_stats["global_trades_today"] += 1
-
     for sim_row in sim_rows:
         if sim_row.close_reason == "TIMEOUT":
             open_rows.append(sim_row)
         if sim_row.status_after == "POSITION_CLOSED":
             _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
-
     return cand
-
-
 def _lifecycle_event_id(row: LifecycleRow, index: int) -> str:
     return (
         f"{row.timestamp}:{row.symbol}:{row.status_before}:{row.status_after}:"
         f"{row.entry}:{row.sl}:{row.tp}:{index}"
     )
-
-
 def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
@@ -1094,7 +978,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 reject_reason=row.reject_reason,
                 score=row.score,
                 rr=row.rr,
-                effective_rr=row.rr,
+                effective_rr=(row.effective_rr if row.effective_rr is not None else row.rr),
                 expectancy_bucket=row.expectancy_bucket,
                 execution_ctx={
                     "volume_24h_usdt": row.volume_24h_usdt,
@@ -1120,15 +1004,11 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
             )
         ).mappings().all()
     return [dict(row) for row in persisted]
-
-
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
 def _is_actionable_rejected_order(row: Mapping[str, Any]) -> bool:
     if row.get("setup_reason") == "SYMBOL_SELECTOR":
         return False
@@ -1136,16 +1016,12 @@ def _is_actionable_rejected_order(row: Mapping[str, Any]) -> bool:
         return False
     if row.get("side") in {"N/A", "", None}:
         return False
-
     for key in ("entry", "sl", "tp"):
         if key not in row:
             return False
         if _safe_float(row.get(key), 0.0) <= 0.0:
             return False
-
     return True
-
-
 def evaluate_rejected_shadow(
     candidate_row: Mapping[str, Any],
     candles: List[Candle],
@@ -1155,7 +1031,6 @@ def evaluate_rejected_shadow(
     spread_pct = _safe_float(candidate_row.get("spread_pct"), 0.0)
     liquidity_score = _safe_float(candidate_row.get("liquidity_score"), 1.0)
     volatility_score = _safe_float(candidate_row.get("volatility_score"), spread_pct)
-
     effective_rr, _ = _execution_reject_flags(
         rr,
         {
@@ -1164,7 +1039,6 @@ def evaluate_rejected_shadow(
             "liquidity_score": liquidity_score,
         },
     )
-
     counterfactual = simulate_rejected_counterfactual(
         CandidateOrder(
             timestamp=int(candidate_row.get("timestamp", 0)),
@@ -1183,7 +1057,6 @@ def evaluate_rejected_shadow(
         candles,
         idx,
     )
-
     liquidity_ok = liquidity_score >= 0.3
     volatility_ok = volatility_score <= 5.0
     cost_penalty = max(rr - effective_rr, 0.0)
@@ -1193,7 +1066,6 @@ def evaluate_rejected_shadow(
         and liquidity_ok
         and volatility_ok
     )
-
     return RejectedShadowEvaluation(
         symbol=str(candidate_row.get("symbol", "")),
         timestamp=int(candidate_row.get("timestamp", 0)),
@@ -1215,22 +1087,18 @@ def evaluate_rejected_shadow(
         liquidity_ok=liquidity_ok,
         volatility_ok=volatility_ok,
     )
-
-
 def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Dict[str, Any]:
     total = len(shadows)
     counts = {
         k: sum(1 for s in shadows if s.shadow_outcome == k)
         for k in ["WOULD_TP", "WOULD_SL", "WOULD_NOT_TRIGGER", "WOULD_TIMEOUT", "UNKNOWN"]
     }
-
     profitable = sum(1 for s in shadows if s.effective_tp_hit)
     unprofitable = counts["WOULD_SL"]
     avoidable_loss = sum(1 for s in shadows if s.shadow_outcome == "WOULD_SL")
     missed_profit = profitable
     false_positive_rate = (profitable / total) if total else 0.0
     reject_precision = ((total - profitable) / total) if total else 0.0
-
     expectancy = (
         0.0
         if total == 0
@@ -1244,7 +1112,6 @@ def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Di
         )
         / total
     )
-
     def _group(attr: str) -> Dict[str, Dict[str, float]]:
         out: Dict[str, Dict[str, float]] = {}
         for s in shadows:
@@ -1255,7 +1122,6 @@ def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Di
             bucket["would_sl"] += int(s.shadow_outcome == "WOULD_SL")
             bucket["effective_tp"] += int(s.effective_tp_hit)
         return out
-
     return {
         "total_rejected": total,
         "would_tp": counts["WOULD_TP"],
@@ -1274,8 +1140,6 @@ def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Di
         "reject_precision": reject_precision,
         "reject_false_positive_rate": false_positive_rate,
     }
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--start")
@@ -1292,18 +1156,14 @@ def main():
     p.add_argument("--offline", action="store_true", help="Run without network APIs using deterministic fixture data")
     p.add_argument("--ci", action="store_true", help="CI-safe mode; implies --offline")
     args = p.parse_args()
-
     if args.ci:
         args.offline = True
-
     now = datetime.now(timezone.utc)
     default_end = int(now.timestamp() * 1000)
     default_start = int((now.timestamp() - args.last_n_days * 86400) * 1000)
     start_ms = parse_ts(args.start) if args.start else default_start
     end_ms = parse_ts(args.end) if args.end else default_end
-
     os.makedirs(args.output_dir, exist_ok=True)
-
     if args.offline:
         universe, candles_by_symbol = _offline_fixture(start_ms)
     else:
@@ -1313,15 +1173,12 @@ def main():
             c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir)
             if c:
                 candles_by_symbol[row["symbol"]] = c
-
     save_symbol_universe(os.path.join(args.output_dir, "symbol_universe.csv"), universe)
     symbol_meta_by_symbol = {row["symbol"]: row for row in universe}
-
     lifecycle = []
     candidates = []
     rejected = []
     open_rows = []
-
     recent_stats: Dict[str, Any] = {
         "last_trade_ts_by_symbol": {},
         "trades_today_by_symbol": {},
@@ -1336,21 +1193,17 @@ def main():
         "outcomes": [],
     }
     rejection_counts: Dict[str, int] = {}
-
     if not args.offline:
         for symbol, candles in candles_by_symbol.items():
             for i in range(len(candles)):
                 symbol_meta = symbol_meta_by_symbol.get(symbol, {})
                 if i < 2:
                     continue
-
                 selector_market = _build_symbol_market_data(symbol_meta, candles, i)
                 selector_result = select_symbol(symbol, selector_market)
-
                 if not selector_result.tradable:
                     reason = selector_result.reject_reasons[0] if selector_result.reject_reasons else "SYMBOL_FILTER_REJECTED"
                     rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-
                     lifecycle.append(
                         LifecycleRow(
                             timestamp=candles[i].timestamp,
@@ -1373,7 +1226,6 @@ def main():
                             liquidity_score=selector_market.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                         )
                     )
-
                     rejected.append(
                         {
                             "timestamp": candles[i].timestamp,
@@ -1400,7 +1252,6 @@ def main():
                         }
                     )
                     continue
-
                 scan_ctx = {
                     "mode": args.mode,
                     "balance": args.balance,
@@ -1408,16 +1259,13 @@ def main():
                     "recent_stats": recent_stats,
                     "symbol_meta": symbol_meta,
                 }
-
                 _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})
                 mctx = scan_ctx.get("market_ctx", {})
-
                 if isinstance(mctx, dict):
                     mctx.setdefault("symbol_score", selector_result.symbol_score)
                     mctx.setdefault("regime_hint", selector_result.regime_hint)
                     mctx.setdefault("symbol_selector_warnings", selector_result.warnings)
-
                 cand = process_backtest_result(
                     symbol,
                     candles[i],
@@ -1433,10 +1281,8 @@ def main():
                     open_rows,
                     recent_stats,
                 )
-
                 if cand:
                     candidates.append(cand)
-
     if args.offline and not candidates and candles_by_symbol:
         symbol = next(iter(candles_by_symbol.keys()))
         fixture_candles = candles_by_symbol[symbol]
@@ -1447,7 +1293,6 @@ def main():
             {"quoteVolume": 100000000.0},
             fixture_candles[:7],
         )
-
         synthetic = CandidateOrder(
             c0.timestamp,
             symbol,
@@ -1464,7 +1309,6 @@ def main():
             expectancy_bucket=mctx.get("expectancy_bucket", "UNKNOWN"),
         )
         candidates.append(synthetic)
-
         lifecycle.extend(
             simulate_candidate(
                 synthetic,
@@ -1481,7 +1325,6 @@ def main():
                 },
             )
         )
-
         rejected.append(
             {
                 "timestamp": fixture_candles[8].timestamp,
@@ -1505,7 +1348,6 @@ def main():
                 "expected_slippage_pct": 0.001,
             }
         )
-
         lifecycle.append(
             LifecycleRow(
                 timestamp=fixture_candles[8].timestamp,
@@ -1529,21 +1371,16 @@ def main():
                 expected_slippage_pct=0.001,
             )
         )
-
     candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]
-
     rejected_shadow: List[RejectedShadowEvaluation] = []
     for row in rejected:
         if not _is_actionable_rejected_order(row):
             continue
-
         symbol = row.get("symbol")
         ts = int(row.get("timestamp", 0) or 0)
         candles = candles_by_symbol.get(symbol, [])
         idx = next((i for i, c in enumerate(candles) if c.timestamp >= ts), len(candles))
-
         rejected_shadow.append(evaluate_rejected_shadow(row, candles, idx))
-
     persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle)
     for name, rows in [
         ("order_lifecycle.csv", persisted_lifecycle_rows),
@@ -1560,7 +1397,6 @@ def main():
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
             w.writerows(rows)
-
     summary = {
         "selected_symbols": len(universe),
         "total_candidates": len(candidates) + len(rejected),
@@ -1593,24 +1429,17 @@ def main():
         "rejection_counts": json.dumps(rejection_counts, sort_keys=True),
         "cancel_counts": {},
     }
-
     with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))
         w.writeheader()
         w.writerow(summary)
-
     rejected_shadow_summary = build_rejected_shadow_summary(rejected_shadow)
     with open(os.path.join(args.output_dir, "rejected_shadow_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))
         w.writeheader()
         w.writerow(rejected_shadow_summary)
-
-
 def _order_runtime():
     from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
-
     return OrderExecutionContext, TradingMode, run_order_cycle
-
-
 if __name__ == "__main__":
     main()

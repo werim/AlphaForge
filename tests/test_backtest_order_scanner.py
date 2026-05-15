@@ -635,6 +635,42 @@ def test_lifecycle_export_reads_persisted_sql_events():
     assert persisted[1]["reject_reason"] == "LOW_SCORE"
 
 
+
+
+def test_lifecycle_persistence_uses_effective_rr_when_available():
+    rows = [
+        bo.LifecycleRow(
+            timestamp=1,
+            symbol="BTCUSDT",
+            side="LONG",
+            setup_type="BREAKOUT_UP",
+            setup_reason="X",
+            regime="TREND",
+            score=8.0,
+            rr=1.8,
+            entry=10.0,
+            sl=9.5,
+            tp=10.9,
+            status_before="SIGNAL_CREATED",
+            status_after="ORDER_REJECTED",
+            reject_reason="LOW_EFFECTIVE_RR",
+            effective_rr=1.05,
+            volume_24h_usdt=125000000.0,
+            spread_pct=0.2,
+            funding_rate_pct="UNAVAILABLE_BACKTEST",
+            expected_slippage_pct=0.001,
+            liquidity_score=0.8,
+        )
+    ]
+
+    persisted = bo._persist_lifecycle_rows(rows)
+
+    assert len(persisted) == 1
+    assert persisted[0]["rr"] == 1.8
+    assert persisted[0]["effective_rr"] == 1.05
+    assert persisted[0]["effective_rr"] != persisted[0]["rr"]
+    assert persisted[0]["execution_ctx_missing"] == 1
+
 def test_lifecycle_export_has_no_duplicate_event_ids():
     rows = [
         bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 1.0, 1.1, 10.0, 9.0, 11.0, "NONE", "SIGNAL_CREATED"),
