@@ -679,3 +679,49 @@ def test_lifecycle_export_has_no_duplicate_event_ids():
     persisted = bo._persist_lifecycle_rows(rows)
     event_ids = [r["event_id"] for r in persisted]
     assert len(event_ids) == len(set(event_ids))
+
+def test_backtest_quality_summary_includes_effective_rr_distribution():
+    rows = [
+        {
+            "decision": "REJECTED",
+            "reject_reason": "LOW_EFFECTIVE_RR",
+            "score": 5.0,
+            "rr": 1.8,
+            "effective_rr": 1.05,
+            "expectancy_bucket": "LOW",
+            "execution_ctx_missing": 1,
+            "execution_ctx": '{"volume_24h_usdt":"UNAVAILABLE_BACKTEST","spread_pct":0.2,"funding_rate_pct":"UNAVAILABLE_BACKTEST","expected_slippage_pct":"UNAVAILABLE_BACKTEST"}',
+        },
+        {
+            "decision": "ACCEPTED",
+            "reject_reason": "",
+            "score": 8.0,
+            "rr": 2.2,
+            "effective_rr": 2.2,
+            "expectancy_bucket": "HIGH",
+            "execution_ctx_missing": 0,
+            "execution_ctx": '{"volume_24h_usdt":1000000.0,"spread_pct":0.0,"funding_rate_pct":0.0,"expected_slippage_pct":0.0,"latency_ms":0}',
+        },
+    ]
+
+    summary = bo.build_backtest_quality_summary(rows)
+
+    assert summary["total_candidates"] == 2
+    assert summary["effective_rr_distribution"]["1.05"] == 1
+    assert summary["effective_rr_distribution"]["2.2"] == 1
+    assert summary["effective_rr_differs_from_rr_count"] == 1
+    assert summary["unavailable_execution_context_field_counts"]["volume_24h_usdt"] == 1
+
+
+def test_backtest_quality_summary_includes_reject_reason_distribution():
+    rows = [
+        {"decision": "REJECTED", "reject_reason": "LOW_SCORE", "score": 1.0, "rr": 1.0, "effective_rr": 1.0, "expectancy_bucket": "LOW", "execution_ctx_missing": 1, "execution_ctx": "{}"},
+        {"decision": "REJECTED", "reject_reason": "LOW_SCORE", "score": 2.0, "rr": 1.1, "effective_rr": 1.0, "expectancy_bucket": "LOW", "execution_ctx_missing": 1, "execution_ctx": "{}"},
+        {"decision": "REJECTED", "reject_reason": "HIGH_SLIPPAGE", "score": 7.0, "rr": 1.8, "effective_rr": 1.2, "expectancy_bucket": "MEDIUM", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+    ]
+
+    summary = bo.build_backtest_quality_summary(rows)
+
+    assert summary["rejected_count"] == 3
+    assert summary["reject_reason_distribution"]["LOW_SCORE"] == 2
+    assert summary["reject_reason_distribution"]["HIGH_SLIPPAGE"] == 1

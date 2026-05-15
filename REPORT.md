@@ -71,3 +71,10 @@
 ### Remaining gaps (not addressed in this patch)
 - Backtest still depends on live Binance endpoints for top-N universe unless fixture mode is used.
 - Some execution context fields are estimated/offline-derived in backtest mode (by design); this patch does not introduce new live dependencies.
+
+## Phase 3.5 Next Patch: Backtest Quality Distribution Report
+
+- Added `build_backtest_quality_summary(...)` to aggregate lifecycle-backed quality distributions (accepted/rejected split, reject-rate, reject reasons, score/RR/effective-RR distributions, effective-vs-raw RR divergence count, expectancy buckets, execution-context missing distribution, and unavailable execution context field counts).
+- Added `write_backtest_quality_summary(...)` and integrated it into `main()` to emit `data/backtest/backtest_quality_summary.csv` alongside existing backtest outputs.
+- Added tests to verify quality summary explicitly includes `effective_rr` distribution and reject-reason distribution counts.
+- Kept unavailable execution context as explicit sentinel/null semantics (no synthetic `0.0` coercion for missing values).
