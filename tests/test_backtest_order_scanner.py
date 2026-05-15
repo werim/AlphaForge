@@ -592,3 +592,54 @@ def test_spread_source_propagated_to_execution_context():
         recent=[bo.Candle(1, 99, 101, 98, 100, 1), bo.Candle(2, 100, 102, 99, 101, 1)],
     )
     assert ctx["spread_source"] == "ESTIMATED_BACKTEST"
+
+
+def test_lifecycle_export_reads_persisted_sql_events():
+    rows = [
+        bo.LifecycleRow(
+            timestamp=1,
+            symbol="BTCUSDT",
+            side="LONG",
+            setup_type="BREAKOUT_UP",
+            setup_reason="X",
+            regime="TREND",
+            score=8.0,
+            rr=1.5,
+            entry=10.0,
+            sl=9.0,
+            tp=11.5,
+            status_before="NONE",
+            status_after="SIGNAL_CREATED",
+        ),
+        bo.LifecycleRow(
+            timestamp=1,
+            symbol="BTCUSDT",
+            side="LONG",
+            setup_type="BREAKOUT_UP",
+            setup_reason="X",
+            regime="TREND",
+            score=8.0,
+            rr=1.5,
+            entry=10.0,
+            sl=9.0,
+            tp=11.5,
+            status_before="SIGNAL_CREATED",
+            status_after="SIGNAL_REJECTED",
+            reject_reason="LOW_SCORE",
+        ),
+    ]
+    persisted = bo._persist_lifecycle_rows(rows)
+    assert len(persisted) == 2
+    assert persisted[0]["lifecycle_state"] == "SIGNAL_CREATED"
+    assert persisted[1]["lifecycle_state"] == "SIGNAL_REJECTED"
+    assert persisted[1]["reject_reason"] == "LOW_SCORE"
+
+
+def test_lifecycle_export_has_no_duplicate_event_ids():
+    rows = [
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 1.0, 1.1, 10.0, 9.0, 11.0, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 1.0, 1.1, 10.0, 9.0, 11.0, "SIGNAL_CREATED", "SIGNAL_REJECTED", reject_reason="X"),
+    ]
+    persisted = bo._persist_lifecycle_rows(rows)
+    event_ids = [r["event_id"] for r in persisted]
+    assert len(event_ids) == len(set(event_ids))
