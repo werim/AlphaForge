@@ -1004,6 +1004,85 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
             )
         ).mappings().all()
     return [dict(row) for row in persisted]
+
+
+def _distribution(values: List[Any]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for value in values:
+        key = str(value)
+        out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items(), key=lambda item: item[0]))
+
+
+def _value_unavailable(value: Any) -> bool:
+    return value is None or value == "" or value == "UNAVAILABLE_BACKTEST"
+
+
+def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    total = len(rows)
+    rejected_rows = [r for r in rows if str(r.get("decision", "")).upper() == "REJECTED"]
+    accepted_rows = [r for r in rows if str(r.get("decision", "")).upper() == "ACCEPTED"]
+    execution_ctx_missing_true = sum(1 for r in rows if bool(r.get("execution_ctx_missing")))
+    effective_rr_diff_count = sum(
+        1
+        for r in rows
+        if abs(_safe_float(r.get("effective_rr"), 0.0) - _safe_float(r.get("rr"), 0.0)) > 1e-12
+    )
+
+    unavailable_counts = {
+        "volume_24h_usdt": 0,
+        "spread_pct": 0,
+        "funding_rate_pct": 0,
+        "slippage_pct": 0,
+        "latency_ms": 0,
+    }
+    for row in rows:
+        ctx = row.get("execution_ctx")
+        if isinstance(ctx, str):
+            try:
+                ctx = json.loads(ctx)
+            except Exception:
+                ctx = {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+        if _value_unavailable(ctx.get("volume_24h_usdt")):
+            unavailable_counts["volume_24h_usdt"] += 1
+        if _value_unavailable(ctx.get("spread_pct")):
+            unavailable_counts["spread_pct"] += 1
+        if _value_unavailable(ctx.get("funding_rate_pct")):
+            unavailable_counts["funding_rate_pct"] += 1
+        if "expected_slippage_pct" in ctx and _value_unavailable(ctx.get("expected_slippage_pct")):
+            unavailable_counts["slippage_pct"] += 1
+        if "latency_ms" in ctx and _value_unavailable(ctx.get("latency_ms")):
+            unavailable_counts["latency_ms"] += 1
+
+    return {
+        "total_candidates": total,
+        "accepted_count": len(accepted_rows),
+        "rejected_count": len(rejected_rows),
+        "reject_rate": (len(rejected_rows) / total) if total else 0.0,
+        "reject_reason_distribution": _distribution([r.get("reject_reason", "") or "" for r in rejected_rows]),
+        "score_distribution": _distribution([r.get("score") for r in rows]),
+        "rr_distribution": _distribution([r.get("rr") for r in rows]),
+        "effective_rr_distribution": _distribution([r.get("effective_rr") for r in rows]),
+        "effective_rr_differs_from_rr_count": effective_rr_diff_count,
+        "expectancy_bucket_distribution": _distribution([r.get("expectancy_bucket", "UNKNOWN") for r in rows]),
+        "execution_ctx_missing_distribution": {
+            "true": execution_ctx_missing_true,
+            "false": total - execution_ctx_missing_true,
+        },
+        "unavailable_execution_context_field_counts": unavailable_counts,
+    }
+
+
+def write_backtest_quality_summary(path: str, summary: Mapping[str, Any]) -> None:
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["metric", "value"])
+        w.writeheader()
+        for key, value in summary.items():
+            serialized = json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
+            w.writerow({"metric": key, "value": serialized})
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -1433,6 +1512,11 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))
         w.writeheader()
         w.writerow(summary)
+    quality_summary = build_backtest_quality_summary(persisted_lifecycle_rows)
+    write_backtest_quality_summary(
+        os.path.join(args.output_dir, "backtest_quality_summary.csv"),
+        quality_summary,
+    )
     rejected_shadow_summary = build_rejected_shadow_summary(rejected_shadow)
     with open(os.path.join(args.output_dir, "rejected_shadow_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))
