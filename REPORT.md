@@ -51,3 +51,23 @@
 ## Remaining known gaps
 - Full end-to-end parity assertion across every optional field (including all lifecycle/persistence timestamp typing nuances) can be extended further.
 - Legacy DB migration automation is not included in this patch.
+
+## Phase 3.5 Backtest quality semantics patch (effective_rr integrity)
+
+### Scope
+- Fixed a semantic integrity bug in backtest lifecycle persistence where `effective_rr` was incorrectly persisted as raw `rr`.
+- Preserved existing lifecycle/export architecture and early-rejection flow.
+
+### Exact change
+- `backtest_order.py`
+  - `LifecycleRow` now includes an explicit `effective_rr` field (optional) so execution-adjusted RR can be carried with lifecycle events.
+  - SQL lifecycle persistence now writes `effective_rr` from `LifecycleRow.effective_rr` when present, and falls back to raw `rr` only when no effective value is provided.
+  - Execution-penalty rejection path now stores computed `effective_rr` onto the emitted `ORDER_REJECTED` lifecycle row.
+
+### Tests updated
+- `tests/test_backtest_order_scanner.py`
+  - Added `test_lifecycle_persistence_uses_effective_rr_when_available` to prove persisted `effective_rr` can differ from raw `rr` under execution-penalty conditions and remains exported via SQL-backed lifecycle rows.
+
+### Remaining gaps (not addressed in this patch)
+- Backtest still depends on live Binance endpoints for top-N universe unless fixture mode is used.
+- Some execution context fields are estimated/offline-derived in backtest mode (by design); this patch does not introduce new live dependencies.
