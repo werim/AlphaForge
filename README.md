@@ -38,6 +38,14 @@ AlphaForge is a SQL-first, execution-aware futures trading research/runtime prot
 - Persistence and schema modules: `src/alphaforge/persistence.py`, `src/alphaforge/models/`, `alembic/`
 - Backtest runner/export script: `backtest_order.py`
 
+
+## Documentation Index
+
+- [Repository operating rules](AGENTS.md)
+- [Current version and readiness snapshot](VERSION.md)
+- [Technical patch report](REPORT.md)
+- [Change history](CHANGELOG.md)
+
 ## Setup
 
 ```bash
