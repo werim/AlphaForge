@@ -725,3 +725,13 @@ def test_backtest_quality_summary_includes_reject_reason_distribution():
     assert summary["rejected_count"] == 3
     assert summary["reject_reason_distribution"]["LOW_SCORE"] == 2
     assert summary["reject_reason_distribution"]["HIGH_SLIPPAGE"] == 1
+
+
+def test_export_integrity_verifier_catches_row_count_mismatch():
+    errors = bo.verify_export_integrity(
+        persisted_lifecycle_rows=[{"decision": "ACCEPTED", "reject_reason": "", "expectancy_bucket": "LOW"}],
+        rejected_rows=[],
+        lifecycle_csv_rows=[],
+        rejected_csv_rows=[],
+    )
+    assert any("lifecycle row count mismatch" in e for e in errors)

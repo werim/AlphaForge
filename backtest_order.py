@@ -1083,6 +1083,28 @@ def write_backtest_quality_summary(path: str, summary: Mapping[str, Any]) -> Non
             serialized = json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
             w.writerow({"metric": key, "value": serialized})
 
+
+def verify_export_integrity(
+    persisted_lifecycle_rows: List[Mapping[str, Any]],
+    rejected_rows: List[Mapping[str, Any]],
+    lifecycle_csv_rows: List[Mapping[str, Any]],
+    rejected_csv_rows: List[Mapping[str, Any]],
+) -> list[str]:
+    errors: list[str] = []
+    if len(persisted_lifecycle_rows) != len(lifecycle_csv_rows):
+        errors.append("lifecycle row count mismatch between SQLite lifecycle and order_lifecycle.csv")
+    if len(rejected_rows) != len(rejected_csv_rows):
+        errors.append("rejected row count mismatch between rejected records and rejected_orders.csv")
+    for idx, row in enumerate(persisted_lifecycle_rows):
+        decision = str(row.get("decision", "")).upper()
+        reject_reason = str(row.get("reject_reason", "") or "").strip().upper()
+        if decision == "REJECTED" and reject_reason in {"", "UNKNOWN"}:
+            errors.append(f"rejected lifecycle row index={idx} missing reject_reason")
+        expectancy_bucket = str(row.get("expectancy_bucket", "") or "").strip().upper()
+        if expectancy_bucket == "":
+            errors.append(f"lifecycle row index={idx} missing expectancy_bucket")
+    return errors
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -1522,6 +1544,18 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))
         w.writeheader()
         w.writerow(rejected_shadow_summary)
+    with open(os.path.join(args.output_dir, "order_lifecycle.csv"), newline="") as f:
+        lifecycle_csv_rows = list(csv.DictReader(f))
+    with open(os.path.join(args.output_dir, "rejected_orders.csv"), newline="") as f:
+        rejected_csv_rows = list(csv.DictReader(f))
+    export_errors = verify_export_integrity(
+        persisted_lifecycle_rows=persisted_lifecycle_rows,
+        rejected_rows=rejected,
+        lifecycle_csv_rows=lifecycle_csv_rows,
+        rejected_csv_rows=rejected_csv_rows,
+    )
+    if export_errors:
+        raise ValueError(f"Export integrity check failed: {'; '.join(export_errors)}")
 def _order_runtime():
     from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
     return OrderExecutionContext, TradingMode, run_order_cycle

@@ -1,7 +1,7 @@
 # AlphaForge Version Status
 
 ## Current Version
-- **Version:** `0.3.6-dev`
+- **Version:** `0.3.7-dev`
 - **Date:** `2026-05-16`
 - **Basis:** Consolidated from current README and REPORT documentation.
 
@@ -57,3 +57,8 @@
 - Decision/lifecycle contract fields are now emitted with canonical runtime lifecycle event names and UTC `Z` timestamps.
 - Reject reasons are normalized through a shared contract utility and persisted explicitly.
 - Deterministic lifecycle transition guardrails now mark invalid transitions as `ERROR` instead of silently coercing to CREATED.
+
+
+## Generation 2 Persistence Note
+- SQLite migrations now apply non-destructive lifecycle/persistence hardening and legacy bool/text/int normalization at init time.
+- Backtest export path now performs explicit SQLite↔CSV integrity verification before completing.
