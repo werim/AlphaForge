@@ -94,7 +94,56 @@ def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
     with engine.begin() as conn:
         for statement in ddl:
             conn.execute(text(statement))
+        _apply_sqlite_migrations(conn)
     return engine
+
+
+def _table_columns(conn: Any, table_name: str) -> set[str]:
+    rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
+    return {str(r.get("name")) for r in rows}
+
+
+def _apply_sqlite_migrations(conn: Any) -> None:
+    conn.execute(text("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL, notes TEXT)"))
+    existing = {str(r[0]) for r in conn.execute(text("SELECT version FROM schema_migrations")).all()}
+    migrations: list[tuple[str, str]] = [
+        ("2026_05_16_persistence_integrity_v1", "Backfill missing persistence columns and normalize legacy execution_ctx_missing semantics."),
+    ]
+    signal_cols = _table_columns(conn, "signals")
+    if "signal_id" in signal_cols and "uq_signals_signal_id_not_null" not in existing:
+        conn.execute(text("UPDATE signals SET signal_id = 'legacy-signal-' || id WHERE signal_id IS NULL OR TRIM(signal_id) = ''"))
+    decision_cols = _table_columns(conn, "order_decisions")
+    if "execution_ctx_missing" in decision_cols:
+        conn.execute(text("""
+            UPDATE order_decisions
+            SET execution_ctx_missing =
+                CASE
+                    WHEN LOWER(TRIM(CAST(execution_ctx_missing AS TEXT))) IN ('1','true','t','yes','y') THEN 1
+                    ELSE 0
+                END
+            WHERE execution_ctx_missing IS NOT NULL
+        """))
+    lifecycle_cols = _table_columns(conn, "trade_lifecycle_events")
+    if "execution_ctx_missing" in lifecycle_cols:
+        conn.execute(text("""
+            UPDATE trade_lifecycle_events
+            SET execution_ctx_missing =
+                CASE
+                    WHEN LOWER(TRIM(CAST(execution_ctx_missing AS TEXT))) IN ('1','true','t','yes','y') THEN 1
+                    ELSE 0
+                END
+            WHERE execution_ctx_missing IS NOT NULL
+        """))
+    if "lifecycle_seq" not in lifecycle_cols:
+        conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN lifecycle_seq INTEGER"))
+    if "cancel_reason" not in lifecycle_cols:
+        conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN cancel_reason TEXT"))
+    if "lifecycle_id" not in lifecycle_cols:
+        conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN lifecycle_id TEXT"))
+    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
+    for version, notes in migrations:
+        if version not in existing:
+            conn.execute(text("INSERT INTO schema_migrations(version, applied_at, notes) VALUES (:v, :at, :n)"), {"v": version, "at": _utc_now_iso(), "n": notes})
 
 
 def fetch_expectancy_stat(session: Any, table_name: str, key_column: str, key_value: str) -> dict[str, Any]:
@@ -131,7 +180,7 @@ def save_signal(session: Any, **signal: Any) -> Any:
     if session is None:
         return None
     now = _utc_now_iso()
-    signal_id = signal.get("signal_id") or signal.get("id")
+    signal_id = signal.get("signal_id") or signal.get("id") or f"{signal.get('symbol', 'UNKNOWN')}:{now}"
     try:
         row = session.execute(text("""
             INSERT INTO signals (signal_id, symbol, side, timeframe, mode, score, rr, effective_rr, expectancy_bucket, created_at, updated_at)
@@ -156,7 +205,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
     if session is None:
         return None
     now = _utc_now_iso()
-    decision_id = decision.get("decision_id") or decision.get("id")
+    decision_id = decision.get("decision_id") or decision.get("id") or f"{decision.get('signal_id', 'UNKNOWN')}:{now}:{decision.get('decision', 'UNKNOWN')}"
     execution_ctx = decision.get("execution_ctx", {})
     row = session.execute(text("""
         INSERT INTO order_decisions (
@@ -174,7 +223,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
     """), {
         "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
         "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
-        "reject_reason": decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
+        "reject_reason": canonical_reject_reason(decision.get("reject_reason")) if str(decision.get("decision", "")).upper() == "REJECTED" else decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
         "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
         "execution_ctx": json.dumps(execution_ctx),
         "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
@@ -189,7 +238,8 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
     if session is None:
         return False
     now = _utc_now_iso()
-    event_id = event.get("event_id") or event.get("id")
+    event_id = event.get("event_id") or event.get("id") or f"{event.get('symbol', 'UNKNOWN')}:{canonical_utc_timestamp(event.get('event_ts'))}:{event.get('lifecycle_state') or event.get('state') or 'UNKNOWN'}"
+    signal_id = event.get("signal_id") or f"UNKNOWN_SIGNAL:{event.get('symbol', 'UNKNOWN')}:{canonical_utc_timestamp(event.get('event_ts'))}"
     lifecycle_state = event.get("lifecycle_state") or event.get("state")
     prev_state = event.get("previous_lifecycle_state")
     is_valid = validate_transition(prev_state, lifecycle_state) if lifecycle_state else False
@@ -198,22 +248,26 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
     session.execute(text("""
         INSERT INTO trade_lifecycle_events (
             event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
-            effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at
+            effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id
         ) VALUES (
             :event_id, :signal_id, :order_id, :symbol, :mode, :lifecycle_state, :decision, :reject_reason, :score, :rr,
-            :effective_rr, :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :event_ts, :created_at
+            :effective_rr, :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :event_ts, :created_at, :lifecycle_seq, :cancel_reason, :lifecycle_id
         )
         ON CONFLICT(event_id) DO UPDATE SET
             signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
             lifecycle_state=excluded.lifecycle_state, decision=excluded.decision, reject_reason=excluded.reject_reason,
             score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
-            execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, event_ts=excluded.event_ts
+            execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, event_ts=excluded.event_ts,
+            lifecycle_seq=excluded.lifecycle_seq, cancel_reason=excluded.cancel_reason, lifecycle_id=excluded.lifecycle_id
     """), {
-        "event_id": event_id, "signal_id": event.get("signal_id"), "order_id": event.get("order_id"), "symbol": event.get("symbol"),
+        "event_id": event_id, "signal_id": signal_id, "order_id": event.get("order_id"), "symbol": event.get("symbol"),
         "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),
         "reject_reason": canonical_reject_reason(event.get("reject_reason")), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
         "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
         "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", False)) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
+        "lifecycle_seq": event.get("lifecycle_seq"),
+        "cancel_reason": event.get("cancel_reason"),
+        "lifecycle_id": event.get("lifecycle_id") or f"{signal_id}:{canonical_utc_timestamp(event.get('event_ts'))}:{lifecycle_state}",
     })
     if hasattr(session, "commit"):
         session.commit()

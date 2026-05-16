@@ -189,3 +189,16 @@ def test_runtime_paper_output_has_execution_fields() -> None:
     out = rt._simulate_paper_execution("BTCUSDT", {"order_type": "LIMIT"}, {"entry": 10.0, "side": "LONG"})
     assert out["mode"] == "PAPER"
     assert "expected_slippage_pct" in out and "fill_price" in out
+
+
+def test_migration_columns_exist_after_init_db() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        cols = {r[1] for r in s.execute(text("PRAGMA table_info(trade_lifecycle_events)")).all()}
+        assert {"lifecycle_seq", "cancel_reason", "lifecycle_id"}.issubset(cols)
+
+
+def test_trade_lifecycle_generates_event_id_when_missing() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        assert save_trade_lifecycle_event(s, signal_id="s1", symbol="BTCUSDT", lifecycle_state="SIGNAL_CREATED") is True

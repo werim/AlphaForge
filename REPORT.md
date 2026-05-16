@@ -103,3 +103,40 @@
 - Decision contract: reject reason normalization utility added and used in runtime rejection path.
 - Lifecycle schema: no new DB columns were added; semantics are tightened via validation and canonical event/timestamp handling.
 - Persistence semantics: transition-invalid lifecycle writes are persisted as `ERROR` when prior state is provided and illegal.
+
+## Generation 2: Persistence Integrity & Migration Safety
+
+### Why this patch was needed
+- Persistence invariants were partially enforced by convention only, leaving schema drift and legacy bool/text/integer ambiguity risks during reruns/backfills.
+- Export integrity checks between persisted lifecycle rows and emitted CSV artifacts were not enforced as a hard gate.
+
+### Exact behavior changed
+- `src/alphaforge/persistence.py`
+  - Added idempotent SQLite migration bootstrap (`schema_migrations`) with version note `2026_05_16_persistence_integrity_v1`.
+  - Added non-destructive migration upgrades for `trade_lifecycle_events` (`lifecycle_seq`, `cancel_reason`, `lifecycle_id`) and unique index guard on `(signal_id,event_ts,lifecycle_state)`.
+  - Added explicit legacy normalization for `execution_ctx_missing` values (`True/False/1/0/...`) to canonical integer 0/1 semantics.
+  - Kept backward-compatible write behavior by deterministic fallback IDs for missing `signal_id/decision_id/event_id` while still enforcing canonical write fields when present.
+  - Normalized rejected decision persistence to canonical reject reason taxonomy.
+- `backtest_order.py`
+  - Added `verify_export_integrity(...)` to validate lifecycle/rejected row-count parity and required rejected/lifecycle fields.
+  - Main backtest flow now runs export verification after CSV writes and fails fast on mismatch.
+- Tests
+  - Added migration column presence test and generated-event-id fallback lifecycle persistence test.
+  - Added export integrity verifier mismatch detection test.
+
+### Expected runtime/backtest impact
+- Rerun/backfill behavior is safer against duplicate lifecycle persistence and mixed legacy bool/text/int field semantics.
+- Backtest export now explicitly fails when SQLite↔CSV lifecycle/rejected datasets diverge.
+
+### Compatibility risks
+- New lifecycle metadata columns are additive/non-destructive.
+- Unique index on `(signal_id,event_ts,lifecycle_state)` may surface pre-existing duplicate legacy rows as write conflicts (expected hardening behavior).
+
+### Migration concerns
+- Migration is idempotent and non-destructive.
+- Legacy rows remain readable; coercion normalizes boolean-like values for `execution_ctx_missing`.
+
+### Contract impact
+- Decision contract: reject-reason normalization tightened for rejected rows.
+- Lifecycle schema: additive columns (`lifecycle_seq`, `cancel_reason`, `lifecycle_id`) plus uniqueness constraint for deterministic replay safety.
+- Persistence semantics: stronger replay/backfill determinism and explicit export verification failure mode.

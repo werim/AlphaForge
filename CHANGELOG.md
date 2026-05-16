@@ -4,7 +4,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ## [Unreleased] - 2026-05-16
 
+
 ### Added
+- SQLite migration registry table (`schema_migrations`) and idempotent migration note `2026_05_16_persistence_integrity_v1`.
+- Additive lifecycle schema hardening columns: `lifecycle_seq`, `cancel_reason`, `lifecycle_id`.
+- Backtest export integrity verifier gating lifecycle/rejected CSV consistency.
+
+### Changed
+- Legacy `execution_ctx_missing` values now normalize to canonical integer 0/1 during DB init migration.
+- Added unique lifecycle replay/index guard on `(signal_id,event_ts,lifecycle_state)` to reduce rerun duplicates.
+
 - Deterministic lifecycle event ID generation for backtest lifecycle rows.
 - SQL-backed lifecycle export verification tests, duplicate event ID checks, and idempotency tests for decision/lifecycle upserts.
 - Contract parity tests using real BACKTEST/PAPER output fields and runtime paper execution field checks.
