@@ -78,3 +78,28 @@
 - Added `write_backtest_quality_summary(...)` and integrated it into `main()` to emit `data/backtest/backtest_quality_summary.csv` alongside existing backtest outputs.
 - Added tests to verify quality summary explicitly includes `effective_rr` distribution and reject-reason distribution counts.
 - Kept unavailable execution context as explicit sentinel/null semantics (no synthetic `0.0` coercion for missing values).
+
+
+## Generation 1: Contract Lockdown & Lifecycle Determinism
+
+### Why this change was needed
+- Runtime lifecycle events were ad-hoc (`event`/epoch fields), and invalid transitions could pass without explicit error state semantics.
+- Reject reason taxonomy and timestamp formatting were not normalized through one contract utility surface.
+
+### Exact behavior changed
+- Added `src/alphaforge/contracts.py` with canonical lifecycle event constants, reject reason normalization, UTC timestamp normalization, and legal transition map/validator.
+- `RuntimeOrchestrator` now emits canonical `lifecycle_event_type`, `lifecycle_state`, `timestamp` (UTC ISO8601 `Z`), `previous_lifecycle_state`, and enforces transition guardrails (`ERROR` on invalid transition).
+- `save_trade_lifecycle_event(...)` now validates transition intent (`previous_lifecycle_state` -> `lifecycle_state`), canonicalizes timestamps, and persists normalized reject reason values.
+
+### Runtime/backtest impact
+- BACKTEST/PAPER/LIVE runtime lifecycle event payloads are deterministic and contract-shaped.
+- Invalid lifecycle transition attempts are explicitly surfaced as `ERROR`, improving auditability and preventing silent lifecycle drift.
+
+### Compatibility risks / migration concerns
+- Consumers reading runtime event callbacks must accept `lifecycle_event_type`/`timestamp` canonical fields (old `event`/`ts` are no longer emitted by runtime orchestrator callbacks).
+- Persisted reject reasons remain backward-compatible strings; unknown/empty normalize to `UNKNOWN`.
+
+### Decision/lifecycle/persistence contract deltas
+- Decision contract: reject reason normalization utility added and used in runtime rejection path.
+- Lifecycle schema: no new DB columns were added; semantics are tightened via validation and canonical event/timestamp handling.
+- Persistence semantics: transition-invalid lifecycle writes are persisted as `ERROR` when prior state is provided and illegal.

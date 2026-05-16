@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from sqlalchemy import create_engine, text
+from alphaforge.contracts import canonical_reject_reason, canonical_utc_timestamp, validate_transition
 
 __all__ = [
     "init_db",
@@ -20,7 +21,7 @@ __all__ = [
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return canonical_utc_timestamp()
 
 
 def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
@@ -189,6 +190,11 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
         return False
     now = _utc_now_iso()
     event_id = event.get("event_id") or event.get("id")
+    lifecycle_state = event.get("lifecycle_state") or event.get("state")
+    prev_state = event.get("previous_lifecycle_state")
+    is_valid = validate_transition(prev_state, lifecycle_state) if lifecycle_state else False
+    if not is_valid and prev_state is not None:
+        lifecycle_state = "ERROR"
     session.execute(text("""
         INSERT INTO trade_lifecycle_events (
             event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
@@ -204,10 +210,10 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, event_ts=excluded.event_ts
     """), {
         "event_id": event_id, "signal_id": event.get("signal_id"), "order_id": event.get("order_id"), "symbol": event.get("symbol"),
-        "mode": event.get("mode"), "lifecycle_state": event.get("lifecycle_state") or event.get("state"), "decision": event.get("decision"),
-        "reject_reason": event.get("reject_reason"), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
+        "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),
+        "reject_reason": canonical_reject_reason(event.get("reject_reason")), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
         "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
-        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", False)) else 0, "event_ts": event.get("event_ts") or now, "created_at": now,
+        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", False)) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
     })
     if hasattr(session, "commit"):
         session.commit()
