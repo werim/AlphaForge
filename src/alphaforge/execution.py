@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 
@@ -87,3 +88,43 @@ def _volatility_regime(klines: list[Any]) -> str:
     if r < 0.005:
         return "low"
     return "normal"
+
+
+@dataclass(frozen=True)
+class ExecutionCostModel:
+    spread_penalty: float
+    slippage_penalty: float
+    latency_penalty: float
+    funding_penalty: float
+    liquidity_penalty: float
+    total_penalty: float
+    missing_fields: tuple[str, ...]
+    completeness: str
+
+
+def build_execution_cost_model(execution_ctx: Mapping[str, Any], *, include_missing_penalty: bool = False) -> ExecutionCostModel:
+    missing=[]
+    def req_float(k:str):
+        v=execution_ctx.get(k)
+        if v in (None, '', 'UNKNOWN', 'UNAVAILABLE', 'UNAVAILABLE_BACKTEST'):
+            missing.append(k); return None
+        try:return float(v)
+        except (TypeError,ValueError): missing.append(k); return None
+
+    spread=req_float('spread_pct')
+    slippage=req_float('expected_slippage_pct')
+    latency=req_float('latency_ms')
+    funding=req_float('funding_rate_pct')
+    liquidity=req_float('liquidity_score')
+
+    spread_penalty=max((spread or 0.0)*25.0,0.0)
+    slippage_penalty=max((slippage or 0.0)*30.0,0.0)
+    latency_penalty=max(((latency or 0.0)/1000.0)*0.2,0.0)
+    funding_penalty=max(abs(funding or 0.0)*2.5,0.0)
+    liquidity_penalty=max((1.0-max(min(liquidity if liquidity is not None else 1.0,1.0),0.0))*0.6,0.0)
+
+    completeness='complete' if not missing else ('partial' if len(missing)<5 else 'unavailable')
+    total=spread_penalty+slippage_penalty+latency_penalty+funding_penalty+liquidity_penalty
+    if include_missing_penalty and missing:
+        total += min(0.5, 0.1*len(missing))
+    return ExecutionCostModel(spread_penalty,slippage_penalty,latency_penalty,funding_penalty,liquidity_penalty,round(total,6),tuple(missing),completeness)

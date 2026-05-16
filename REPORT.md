@@ -140,3 +140,22 @@
 - Decision contract: reject-reason normalization tightened for rejected rows.
 - Lifecycle schema: additive columns (`lifecycle_seq`, `cancel_reason`, `lifecycle_id`) plus uniqueness constraint for deterministic replay safety.
 - Persistence semantics: stronger replay/backfill determinism and explicit export verification failure mode.
+
+
+## Generation 3 — Execution Realism Engine Hardening (2026-05-16)
+- Why needed: execution costs and missing context could be normalized toward optimistic defaults, weakening reject quality and effective RR traceability.
+- Root cause: prior effective RR formula used a compressed penalty shortcut and reused neutral defaults when context was partial/unknown.
+- Files changed: `src/alphaforge/execution.py`, `src/alphaforge/order.py`, `tests/test_execution_layer.py`, `CHANGELOG.md`, `VERSION.md`.
+- Runtime behavior changes: deterministic execution-cost primitive now computes spread/slippage/latency/funding/liquidity penalties and context completeness (`complete|partial|unavailable`).
+- Lifecycle changes: none to lifecycle schema/order; rejection flags are more explicit (`UNKNOWN_EXECUTION_CONTEXT`, `LOW_EFFECTIVE_RR`, etc.).
+- Persistence changes: decision payload now carries execution-cost completeness metadata through `execution_metrics` and existing persistence path.
+- Export/schema changes: none.
+- Decision contract changed: no required field removals; effective RR and execution flags semantics tightened.
+- Lifecycle schema changed: no.
+- Persistence semantics changed: yes (unknown execution context explicitly penalized/rejected instead of looking like zero costs).
+- Compatibility risks: tests/analytics expecting previous effective RR values may require baseline refresh.
+- Migration concerns: no DB migration required; downstream consumers should handle new execution flags and completeness metadata.
+- Tests added/updated: effective RR expectation update + unknown-context regression test in `tests/test_execution_layer.py`.
+- Tests executed: targeted execution-layer and trade-quality suites.
+- Remaining limitations: regime/volatility/liquidity band reject calibration is still rule-based and should be tuned with market-specific data.
+- Push recommendation: safe to merge for research/backtest hardening; schedule follow-up for full band calibration framework across broader modules.
