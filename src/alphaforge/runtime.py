@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from alphaforge.ai_brain import AIBrain
+from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.execution import build_execution_context
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 
@@ -60,6 +61,7 @@ class RuntimeOrchestrator:
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
+    _last_lifecycle_state_by_symbol: dict[str, str] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
@@ -128,13 +130,17 @@ class RuntimeOrchestrator:
             await self._persist_reject({
                 "symbol": selection.symbol,
                 "decision": order_plan.decision,
-                "reason": order_plan.reason,
+                "reason": canonical_reject_reason(order_plan.reason),
                 "confidence": order_plan.confidence,
                 "explanation": explanation,
             })
-            await self._emit_lifecycle_event("SIGNAL_REJECTED", selection.symbol, {"reason": order_plan.reason})
+            await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
+            await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_REJECTED.value, selection.symbol, {"reason": canonical_reject_reason(order_plan.reason)})
             return
 
+        await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
+        await self._emit_lifecycle_event(LifecycleEventType.WAITING_ENTRY_ZONE.value, selection.symbol, {})
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_TRIGGERED.value, selection.symbol, {})
         await self._execute(symbol=selection.symbol, decision={
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
@@ -154,7 +160,7 @@ class RuntimeOrchestrator:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
         self.metrics.executions += 1
-        await self._emit_lifecycle_event("ORDER_PLACED", symbol, {"decision": decision, "result": dict(result)})
+        await self._emit_lifecycle_event(LifecycleEventType.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
 
     def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
         entry = float(market_ctx.get("entry", 0.0) or 0.0)
@@ -179,13 +185,18 @@ class RuntimeOrchestrator:
                 await maybe_coro
 
     async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any] | None = None) -> None:
+        previous_state = self._last_lifecycle_state_by_symbol.get(symbol)
+        lifecycle_state = event if validate_transition(previous_state, event) else LifecycleEventType.ERROR.value
         event_payload = {
-            "event": event,
+            "lifecycle_event_type": lifecycle_state,
+            "lifecycle_state": lifecycle_state,
             "symbol": symbol,
-            "ts": time.time(),
+            "timestamp": canonical_utc_timestamp(),
             "mode": self.config.execution_mode.value,
+            "previous_lifecycle_state": previous_state,
             "details": dict(details or {}),
         }
+        self._last_lifecycle_state_by_symbol[symbol] = lifecycle_state
         self.metrics.lifecycle_events += 1
         if self.on_lifecycle_event is not None:
             maybe_coro = self.on_lifecycle_event(event_payload)

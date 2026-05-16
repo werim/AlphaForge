@@ -27,3 +27,7 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Full optional-field and timestamp-typing parity across BACKTEST/PAPER/LIVE is still incomplete.
 - Legacy SQLite stores may need migration/rebuild for canonical `execution_ctx_missing` persistence.
 - Backtest top-N universe may depend on live Binance endpoints unless fixture mode is used.
+
+- Added canonical contract utilities (`contracts.py`) for lifecycle transitions, reject reason normalization, and UTC timestamp normalization.
+- Changed runtime lifecycle callbacks to emit deterministic contract fields (`lifecycle_event_type`, `lifecycle_state`, `timestamp`, `previous_lifecycle_state`).
+- Fixed invalid lifecycle transition handling by explicitly emitting/persisting `ERROR` state semantics.

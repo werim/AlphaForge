@@ -63,6 +63,8 @@ def test_reject_lifecycle_persistence_increments_metrics() -> None:
     assert orchestrator.metrics.decisions_generated == 1
     assert orchestrator.metrics.rejects_persisted == 1
     assert rejects and events
+    assert all("lifecycle_event_type" in evt for evt in events)
+    assert any(evt["lifecycle_event_type"] == "SIGNAL_REJECTED" for evt in events)
 
 
 def test_rejected_signal_never_executes() -> None:
@@ -98,3 +100,15 @@ def test_shutdown_cancels_background_tasks() -> None:
 
     asyncio.run(_run())
     assert all(t.done() for t in orchestrator._tasks)
+
+
+def test_invalid_lifecycle_transition_explicitly_marked_error() -> None:
+    events: list[dict] = []
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        on_lifecycle_event=lambda e: events.append(e),
+    )
+    asyncio.run(orchestrator._emit_lifecycle_event("ORDER_PLACED", "BTCUSDT", {}))
+    assert events[-1]["lifecycle_event_type"] == "ERROR"

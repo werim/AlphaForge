@@ -1,7 +1,7 @@
 # AlphaForge Version Status
 
 ## Current Version
-- **Version:** `0.3.5-dev`
+- **Version:** `0.3.6-dev`
 - **Date:** `2026-05-16`
 - **Basis:** Consolidated from current README and REPORT documentation.
 
@@ -51,3 +51,9 @@
 ## Live-Readiness Verdict
 - **Verdict:** ❌ **NOT LIVE-READY**.
 - **Reason:** Lifecycle/persistence hardening has improved, but parity completeness, migration maturity, and operational safeguards remain below live deployment requirements.
+
+
+## Contract Lockdown (Gen1)
+- Decision/lifecycle contract fields are now emitted with canonical runtime lifecycle event names and UTC `Z` timestamps.
+- Reject reasons are normalized through a shared contract utility and persisted explicitly.
+- Deterministic lifecycle transition guardrails now mark invalid transitions as `ERROR` instead of silently coercing to CREATED.
