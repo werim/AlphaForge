@@ -40,3 +40,17 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Added canonical contract utilities (`contracts.py`) for lifecycle transitions, reject reason normalization, and UTC timestamp normalization.
 - Changed runtime lifecycle callbacks to emit deterministic contract fields (`lifecycle_event_type`, `lifecycle_state`, `timestamp`, `previous_lifecycle_state`).
 - Fixed invalid lifecycle transition handling by explicitly emitting/persisting `ERROR` state semantics.
+
+
+## Generation 3 - Execution Realism Engine Hardening (2026-05-16)
+### Added
+- Shared deterministic execution-cost model with explicit missing-context semantics and completeness grading.
+### Changed
+- Effective RR now uses additive execution penalties (spread, slippage, latency, funding, liquidity) instead of optimistic proportional shortcut.
+- Real-order decision payload now reports execution-cost completeness and missing fields.
+### Fixed
+- Unknown execution context now generates explicit rejection flags and does not silently act like measured zero cost.
+### Breaking Changes
+- Effective RR numeric behavior changed due to new penalty formulation.
+### Known Issues
+- Regime/liquidity band calibration remains config-light and should be tuned per venue/instrument.

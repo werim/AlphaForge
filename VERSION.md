@@ -62,3 +62,12 @@
 ## Generation 2 Persistence Note
 - SQLite migrations now apply non-destructive lifecycle/persistence hardening and legacy bool/text/int normalization at init time.
 - Backtest export path now performs explicit SQLite↔CSV integrity verification before completing.
+
+
+## 2026-05-16 Audit Update (Generation 3)
+- Runtime maturity: execution-realism hardening in progress.
+- BACKTEST/PAPER/LIVE alignment: shared effective RR and reject semantics improved for order gate path.
+- Lifecycle coverage: rejection lifecycle persistence unchanged and preserved.
+- Execution realism coverage: explicit cost penalties + context completeness classification added.
+- Known critical risks: threshold calibration by regime/volatility/liquidity bands is still conservative-default.
+- Live readiness verdict: NOT LIVE READY pending broader calibration and integration validation.

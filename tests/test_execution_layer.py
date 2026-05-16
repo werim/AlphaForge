@@ -25,11 +25,11 @@ def test_effective_rr_adjustment() -> None:
         _, payload = before_real_order(
             s,
             {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 2.0},
-            {"execution_ctx": {"expected_slippage_pct": 0.001, "spread_pct": 0.001, "latency_ms": 50, "orderbook_imbalance": 0.0, "funding_rate_pct": 0.0, "volatility_regime": "normal"}},
+            {"execution_ctx": {"expected_slippage_pct": 0.001, "spread_pct": 0.001, "latency_ms": 50, "orderbook_imbalance": 0.0, "funding_rate_pct": 0.0, "volatility_regime": "normal", "liquidity_score": 0.9}},
             {"alignment": 0.8},
             {},
         )
-        assert payload["effective_rr"] == pytest.approx(1.8, rel=1e-6)
+        assert payload["effective_rr"] == pytest.approx(1.875, rel=1e-6)
 
 def test_execution_metrics_persisted() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
@@ -60,3 +60,18 @@ def test_missing_execution_ctx_safe() -> None:
         ok, payload = before_real_order(s, {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 2.0}, {}, {"alignment": 0.8}, {})
         assert isinstance(ok, bool)
         assert "EXECUTION_CTX_MISSING" in payload.get("execution_flags", [])
+
+
+def test_unknown_execution_context_not_treated_as_zero() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        ok, payload = before_real_order(
+            s,
+            {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 2.0},
+            {"execution_ctx": {"expected_slippage_pct": None, "spread_pct": None, "latency_ms": None, "liquidity_score": None, "funding_rate_pct": None}},
+            {"alignment": 0.8},
+            {},
+        )
+        assert not ok
+        assert "UNKNOWN_EXECUTION_CONTEXT" in payload["execution_flags"]
+        assert payload["effective_rr"] == pytest.approx(1.4, rel=1e-6)
