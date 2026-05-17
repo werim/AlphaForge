@@ -206,6 +206,13 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     _check((not cfg["BLOCK_UNKNOWN_EXPECTANCY"]) or expectancy_val is not None, "expectancy_present")
     _check(expectancy_val is None or expectancy_val >= float(cfg["MIN_EXPECTANCY"]), "expectancy_non_negative")
     _check((not cfg["BLOCK_CHOP_MARKET"]) or (not any("CHOP" in f for f in pattern_flags)), "pattern_flags")
+    regime_ok = True
+    if "TREND_CONTINUATION" in setup_type or "PULLBACK_" in setup_type:
+        regime_ok = regime == "TREND"
+    elif "BREAKOUT_UP" in setup_type or "BREAKOUT_DOWN" in setup_type:
+        regime_ok = regime in {"TREND", "BREAKOUT"} and volatility_regime.lower() in {"normal", "high"}
+    elif "RANGE_MEAN_REVERSION" in setup_type:
+        regime_ok = regime == "RANGE"
     _check((not cfg["REQUIRE_REGIME_ALIGNMENT"]) or regime_ok, "regime")
     _check(sl_pct >= float(cfg["MIN_SL_PCT"]), "min_sl")
     _check(sl_pct <= float(cfg["MAX_SL_PCT"]), "max_sl")
@@ -218,13 +225,6 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     score_comp = max(0.0, min(1.0, score_eval / min_trade_score)) * 25
     exp_comp = 0.0 if expectancy_val is None else max(0.0, min(1.0, (expectancy_val - float(cfg["MIN_EXPECTANCY"])) / 0.5)) * 25
     rr_comp = max(0.0, min(1.0, rr / float(cfg["MIN_RR"]))) * 10
-    regime_ok = True
-    if "TREND_CONTINUATION" in setup_type or "PULLBACK_" in setup_type:
-        regime_ok = regime == "TREND"
-    elif "BREAKOUT_UP" in setup_type or "BREAKOUT_DOWN" in setup_type:
-        regime_ok = regime in {"TREND", "BREAKOUT"} and volatility_regime.lower() in {"normal", "high"}
-    elif "RANGE_MEAN_REVERSION" in setup_type:
-        regime_ok = regime == "RANGE"
     regime_comp = (20.0 if regime_ok else 0.0)
     micro_ok = spread_pct <= float(cfg["MAX_SPREAD_PCT"]) and expected_slippage_pct <= float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"])
     vol_ok = atr_pct is None or (float(cfg["MIN_ATR_PCT"]) <= atr_pct <= float(cfg["MAX_ATR_PCT"]))

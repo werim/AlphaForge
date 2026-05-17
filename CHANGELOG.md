@@ -148,3 +148,12 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Setup generation heuristics remain simplistic and may still overproduce weak breakout-style candidates in choppy regimes.
+
+## [Unreleased] - 2026-05-17 (Regime gate initialization hotfix)
+
+### Fixed
+- Resolved `UnboundLocalError` in trade-quality evaluation by initializing `regime_ok` before gate checks.
+- Preserved deterministic regime reject behavior (`REGIME_MISMATCH`) while preventing crashes for candidates with missing regime values.
+
+### Added
+- Regression tests covering missing-candidate-regime non-crash behavior and incompatible market-regime rejection behavior.
