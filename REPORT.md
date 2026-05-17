@@ -261,3 +261,62 @@
 
 ### Push recommendation
 - Merge for safety hardening in research/staging environments; do not claim production LIVE readiness until reconciliation telemetry and remediation automation are integrated.
+
+
+## Generation 6 — Exchange-Reconciled Live Control Plane (2026-05-17)
+
+### Why the patch was needed
+- Generation 5 gated LIVE startup but did not provide continuous runtime reconciliation supervision and deterministic incident/repair workflows after startup.
+
+### Root cause
+- Runtime had only localized timeout reconciliation events; there was no periodic reconciliation engine unifying intended orders, lifecycle state, and exchange/account snapshots with persistent incident tracking.
+
+### Files changed
+- `src/alphaforge/reconciliation.py`
+- `src/alphaforge/runtime.py`
+- `tests/test_reconciliation.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added a continuous reconciliation loop in `RuntimeOrchestrator` with configurable interval and timeout guard.
+- Added fail-closed escalation when reconciliation timeout occurs or findings require fail-closed action.
+- Added de-duplication guard to prevent repeated repair-trigger lifecycle spam for identical findings.
+
+### Lifecycle changes
+- Reconciliation findings emit deterministic `RECONCILIATION_REPAIR` lifecycle events including incident evidence payloads for auditability.
+
+### Persistence changes
+- Added additive `reconciliation_incidents` table creation path and indexes (timestamp/symbol/severity).
+- Added deterministic incident serialization (incident type, severity, symbol, lifecycle ref, remediation status, operator ack flag, fail-closed flag, forensic payload).
+
+### Reconciliation semantics
+- Detects and reports: `ORPHAN_ORDER`, `ORPHAN_POSITION`, `STALE_ORDER`, and `LIFECYCLE_DIVERGENCE` with deterministic remediation recommendations.
+- Supports PAPER/LIVE mode operation without live exchange dependency during tests via snapshot-source abstraction.
+
+### Fail-closed behavior
+- Runtime now triggers shutdown on reconciliation timeout and on fail-closed findings to preserve capital and execution integrity.
+
+### Tests added
+- `test_orphan_order_and_repair_generation`
+- `test_lifecycle_divergence_detection`
+- `test_reconciliation_persistence`
+- `test_runtime_reconciliation_fail_closed_and_no_duplicate_repair`
+- `test_snapshot_replay_consistency`
+
+### Tests executed
+- `pytest -q tests/test_reconciliation.py tests/test_runtime.py`
+
+### Migration/compatibility notes
+- Schema evolution is additive only (`reconciliation_incidents`), preserving backward compatibility for existing persistence paths.
+- No runtime architecture rewrite; orchestration flow and lifecycle semantics are extended minimally.
+
+### Remaining LIVE blockers / risks
+- Exchange snapshot lineage still requires deeper adapter integration for production-grade venue truth (fills/cancel lineage and account drift evidence).
+- Repair workflow is recommendation-first (dry-run/shadow flags) and still requires operator ack governance wiring for any live actioning.
+
+### Generation 7 recommendations
+- Wire reconciliation snapshot inputs to authoritative exchange/account endpoints with deterministic retry/backoff.
+- Persist fill lineage and cancellation lineage tables with replay IDs and duplicate-fill protection constraints.
+- Add operator acknowledgement workflow persistence for repair plans and escalation runbooks.

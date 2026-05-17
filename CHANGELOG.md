@@ -82,3 +82,15 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - LIVE startup now logs readiness report payload for deployment-state visibility and audits.
 ### Known Issues
 - Reconciliation checks currently consume deterministic snapshots and do not yet issue active exchange remediation actions.
+
+
+## Generation 6 - Exchange-Reconciled Live Control Plane (2026-05-17)
+### Added
+- New reconciliation subsystem `src/alphaforge/reconciliation.py` with structured findings, repair recommendations, snapshot model, and incident persistence table/index creation.
+- Continuous runtime reconciliation loop with bounded interval/timeout controls and deterministic fail-closed escalation on severe findings/timeouts.
+- Reconciliation incident SQL persistence (`reconciliation_incidents`) and deterministic forensic payload serialization.
+- New focused test module `tests/test_reconciliation.py` covering orphan/stale/divergence detection, persistence, no duplicate repair triggers, fail-closed behavior, and snapshot replay consistency.
+### Changed
+- Runtime orchestration now tracks pending orders and emits reconciliation lifecycle repair events from deterministic findings.
+### Known Issues
+- Exchange/account snapshots are currently runtime-fed abstractions and require deeper live adapter telemetry lineage for full venue-truth supervision.
