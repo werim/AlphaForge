@@ -54,3 +54,18 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Effective RR numeric behavior changed due to new penalty formulation.
 ### Known Issues
 - Regime/liquidity band calibration remains config-light and should be tuned per venue/instrument.
+
+## Generation 4 - Runtime Safety Controls & Reconciliation Layer (2026-05-16)
+### Added
+- Pre-trade runtime risk gates: global kill switch, stale market data rejection, spread/funding sanity gates, symbol cooldown, duplicate position guard, and max concurrent position guardrails.
+- New lifecycle states for deterministic runtime execution and failure semantics (`ENTRY_PENDING`, `ENTRY_SUBMITTED`, `ENTRY_ACKNOWLEDGED`, `ENTRY_PARTIAL`, `ENTRY_FILLED`, `STOP_SUBMITTED`, `TAKE_PROFIT_SUBMITTED`, `CANCEL_REQUESTED`, `RECONCILIATION_REPAIR`, `EXECUTION_ERROR`, `EXCHANGE_REJECT`, `RUNTIME_PROTECTIVE_EXIT`).
+- Runtime incident counters and reconciliation repair journaling payloads.
+- Lifecycle persistence migration columns: `failure_reason`, `reconciliation_reason`, `incident_payload`.
+### Changed
+- Runtime accepted-flow lifecycle moved from generic waiting/triggered placement to deterministic entry submission/ack/fill sequencing.
+- Timeout/error/missing-ack execution outcomes now emit explicit failure lifecycle events and trigger reconciliation events.
+### Fixed
+- Reduced silent runtime/exchange drift by forcing uncertain execution outcomes into auditable failure + reconciliation lifecycle rows.
+### Known Issues
+- Exposure/concentration gate inputs are presently inference-light and depend on market context quality.
+- Reconciliation currently journals snapshots but does not yet perform active exchange order amendment/cancel calls.

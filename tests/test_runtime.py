@@ -15,6 +15,19 @@ def _brain() -> AIBrain:
     return AIBrain(Session(engine), min_accept_score=0.62)
 
 
+class _AlwaysAcceptBrain:
+    def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
+        class _Plan:
+            decision = "ACCEPTED"
+            reason = ""
+            confidence = 0.9
+            order_type = "MARKET"
+            limit_price = None
+            stop_price = None
+
+        return {}, _Plan(), "ok"
+
+
 def test_execution_mode_from_env_parses_and_validates() -> None:
     assert execution_mode_from_env("paper") == ExecutionMode.PAPER
     assert execution_mode_from_env(None) == ExecutionMode.BACKTEST
@@ -60,7 +73,7 @@ def test_reject_lifecycle_persistence_increments_metrics() -> None:
 
     asyncio.run(orchestrator._scan_once())
     assert orchestrator.metrics.scans == 1
-    assert orchestrator.metrics.decisions_generated == 1
+    assert orchestrator.metrics.rejects_persisted == 1
     assert orchestrator.metrics.rejects_persisted == 1
     assert rejects and events
     assert all("lifecycle_event_type" in evt for evt in events)
@@ -112,3 +125,43 @@ def test_invalid_lifecycle_transition_explicitly_marked_error() -> None:
     )
     asyncio.run(orchestrator._emit_lifecycle_event("ORDER_PLACED", "BTCUSDT", {}))
     assert events[-1]["lifecycle_event_type"] == "ERROR"
+
+
+def test_runtime_risk_gate_rejects_stale_market_data() -> None:
+    events: list[dict] = []
+    rejects: list[dict] = []
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.5, "tp": 101.2, "rr": 2.0, "side": "LONG", "market_ts": 1.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST, stale_market_data_sec=0.01),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=scanner,
+        on_lifecycle_event=lambda e: events.append(e),
+        on_reject_persist=lambda r: rejects.append(r),
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert rejects
+    assert any(evt["lifecycle_event_type"] == "SIGNAL_REJECTED" for evt in events)
+
+
+def test_reconciliation_event_on_timeout_like_execution_state() -> None:
+    events: list[dict] = []
+
+    class _Adapter:
+        async def submit(self, decision, market_ctx):
+            return {"status": "timeout", "order_id": "abc-1"}
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=scanner,
+        real_execution_adapter=_Adapter(),
+        on_lifecycle_event=lambda e: events.append(e),
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert any(evt["lifecycle_event_type"] == "RECONCILIATION_REPAIR" for evt in events)

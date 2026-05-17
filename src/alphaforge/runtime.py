@@ -35,6 +35,14 @@ class RuntimeConfig:
     heartbeat_interval_sec: float = 30.0
     max_symbols_per_scan: int = 5
     max_reject_log_entries: int = 1000
+    max_concurrent_positions: int = 3
+    symbol_cooldown_sec: float = 120.0
+    max_notional_exposure: float = 100_000.0
+    max_symbol_notional: float = 50_000.0
+    stale_market_data_sec: float = 15.0
+    max_spread_pct: float = 0.0025
+    max_abs_funding_rate_pct: float = 0.0010
+    global_kill_switch: bool = False
 
 
 @dataclass(slots=True)
@@ -62,6 +70,9 @@ class RuntimeOrchestrator:
     _reject_log: deque[dict[str, Any]] = field(init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
     _last_lifecycle_state_by_symbol: dict[str, str] = field(default_factory=dict, init=False)
+    _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
+    _active_positions: dict[str, float] = field(default_factory=dict, init=False)
+    _incident_counters: dict[str, int] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
@@ -113,6 +124,12 @@ class RuntimeOrchestrator:
 
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
+        risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
+        await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
+        if risk_reject is not None:
+            await self._persist_reject({"symbol": selection.symbol, "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "explanation": "runtime_risk_gate"})
+            await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject})
+            return
         signal_payload = self._build_signal(selection, market_ctx)
         regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
         stats_ctx: dict[str, Any] = {}
@@ -134,13 +151,11 @@ class RuntimeOrchestrator:
                 "confidence": order_plan.confidence,
                 "explanation": explanation,
             })
-            await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
             await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_REJECTED.value, selection.symbol, {"reason": canonical_reject_reason(order_plan.reason)})
             return
 
-        await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
-        await self._emit_lifecycle_event(LifecycleEventType.WAITING_ENTRY_ZONE.value, selection.symbol, {})
-        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_TRIGGERED.value, selection.symbol, {})
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         await self._execute(symbol=selection.symbol, decision={
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
@@ -160,7 +175,22 @@ class RuntimeOrchestrator:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
         self.metrics.executions += 1
-        await self._emit_lifecycle_event(LifecycleEventType.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_ACKNOWLEDGED.value, symbol, {"decision": decision, "result": dict(result)})
+        result_status = str(result.get("status", "")).lower()
+        if result_status == "partial_fill":
+            await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PARTIAL.value, symbol, {"result": dict(result)})
+        elif result_status in {"rejected", "exchange_reject"}:
+            await self._record_incident(symbol, LifecycleEventType.EXCHANGE_REJECT.value, "exchange_rejected_order")
+            return
+        elif result_status in {"timeout", "error", "missing_ack"}:
+            await self._record_incident(symbol, LifecycleEventType.EXECUTION_ERROR.value, "execution_uncertain_state")
+            await self._reconcile_symbol_state(symbol, result, market_ctx)
+            return
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_FILLED.value, symbol, {"result": dict(result)})
+        await self._emit_lifecycle_event(LifecycleEventType.STOP_SUBMITTED.value, symbol, {})
+        await self._emit_lifecycle_event(LifecycleEventType.TAKE_PROFIT_SUBMITTED.value, symbol, {})
+        self._active_positions[symbol] = float(market_ctx.get("entry", 0.0) or 0.0)
+        self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
     def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
         entry = float(market_ctx.get("entry", 0.0) or 0.0)
@@ -202,6 +232,40 @@ class RuntimeOrchestrator:
             maybe_coro = self.on_lifecycle_event(event_payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
+    async def _record_incident(self, symbol: str, lifecycle_event: str, reason: str) -> None:
+        self._incident_counters[reason] = self._incident_counters.get(reason, 0) + 1
+        await self._emit_lifecycle_event(lifecycle_event, symbol, {"reason": reason, "incident_count": self._incident_counters[reason]})
+
+    def _evaluate_runtime_risk(self, symbol: str, market_ctx: Mapping[str, Any]) -> str | None:
+        now = time.time()
+        if self.config.global_kill_switch:
+            return "GLOBAL_KILL_SWITCH"
+        if len(self._active_positions) >= self.config.max_concurrent_positions:
+            return "MAX_CONCURRENT_POSITIONS"
+        if now < self._symbol_cooldown_until.get(symbol, 0.0):
+            return "SYMBOL_COOLDOWN"
+        market_ts = float(market_ctx.get("market_ts", now) or now)
+        if (now - market_ts) > self.config.stale_market_data_sec:
+            return "STALE_MARKET_DATA"
+        spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
+        if spread_pct > self.config.max_spread_pct:
+            return "HIGH_SPREAD"
+        funding = abs(float(market_ctx.get("funding_rate_pct", 0.0) or 0.0))
+        if funding > self.config.max_abs_funding_rate_pct:
+            return "FUNDING_SANITY_REJECT"
+        if symbol in self._active_positions:
+            return "DUPLICATE_POSITION"
+        return None
+
+    async def _reconcile_symbol_state(self, symbol: str, exchange_result: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> None:
+        reason = str(exchange_result.get("status") or "unknown")
+        snapshot = {
+            "intended_state": self._last_lifecycle_state_by_symbol.get(symbol),
+            "exchange_state": reason,
+            "persisted_state": self._last_lifecycle_state_by_symbol.get(symbol),
+            "market_ts": market_ctx.get("market_ts"),
+        }
+        await self._emit_lifecycle_event(LifecycleEventType.RECONCILIATION_REPAIR.value, symbol, {"reason": f"reconcile_{reason}", "snapshot": snapshot})
 
     async def _heartbeat_loop(self) -> None:
         try:
