@@ -74,3 +74,25 @@ pytest -q
 4. Ensure score/RR fields are computed from context and not hardcoded placeholders.
 5. Populate execution-context fields where data exists; otherwise mark as unavailable explicitly.
 6. Add regression tests for rejected lifecycle rows and lifecycle completeness.
+
+
+## Environment Configuration
+
+1. Copy the template:
+
+```bash
+cp .env.example .env
+```
+
+2. Start safely with defaults:
+- `.env.example` is conservative by default (`ALPHAFORGE_MODE=PAPER`, `ALPHAFORGE_ENABLE_LIVE_TRADING=false`, `ALPHAFORGE_ALLOW_LIVE_ORDERS=false`, `ALPHAFORGE_DRY_RUN=true`).
+- Keep API keys empty until PAPER/BACKTEST validations pass.
+
+3. Mode switching:
+- `ALPHAFORGE_MODE=BACKTEST` for historical simulation workflow.
+- `ALPHAFORGE_MODE=PAPER` for runtime path without real venue orders.
+- `ALPHAFORGE_MODE=LIVE` only after readiness qualification gates pass **and** operator acknowledgement is explicit.
+
+4. Live-risk warning:
+- LIVE trading can lose capital quickly from slippage, spread expansion, latency, and exchange-side failures.
+- Do not enable LIVE unless lifecycle integrity, rejection persistence, reconciliation checks, and execution-risk thresholds are validated in your environment.

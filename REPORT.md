@@ -351,3 +351,44 @@
 - Wire reconciliation snapshot inputs to authoritative exchange/account endpoints with deterministic retry/backoff.
 - Persist fill lineage and cancellation lineage tables with replay IDs and duplicate-fill protection constraints.
 - Add operator acknowledgement workflow persistence for repair plans and escalation runbooks.
+
+## Generation 7 — Production-grade `.env.example` and operational safety defaults (2026-05-17)
+
+### Why the patch was needed
+- Existing `.env.example` was incomplete relative to current runtime/backtest/live control-plane architecture and did not clearly separate safe mode defaults.
+
+### Root cause
+- Configuration coverage lagged behind runtime lifecycle/reconciliation/readiness evolution, and environment guidance did not fully reflect execution-risk controls.
+
+### Files changed
+- `.env.example`
+- `README.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+- No runtime code path rewrite; this patch is configuration/documentation hardening.
+- Added explicit environment template fields for runtime mode, risk limits, execution realism thresholds, readiness/reconciliation toggles, and notification/integration placeholders.
+
+### Lifecycle/persistence/schema impact
+- No schema change.
+- No lifecycle state-machine change.
+- No persistence write/read semantics change.
+
+### Safety defaults introduced
+- LIVE disabled by default.
+- Paper mode enabled by default.
+- Dry-run enabled by default.
+- Conservative risk/leverage-style thresholds and strict execution-risk gates included in template.
+
+### Compatibility and migration concerns
+- Backward-compatible: existing deployments can keep previous vars.
+- Risk: teams with strict env validators may need to allow additional optional keys.
+- Some fields are roadmap-aligned placeholders for adapters/integrations not fully wired yet.
+
+### Tests executed
+- Manual static verification of variable references and architecture mapping with ripgrep audits.
+
+### Remaining limitations
+- Current repository has limited direct `os.getenv` wiring; central env loader integration can be expanded in future patch without changing runtime architecture.
