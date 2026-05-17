@@ -981,6 +981,13 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 row_value == "UNAVAILABLE_BACKTEST"
                 for row_value in (row.volume_24h_usdt, row.spread_pct, row.funding_rate_pct, row.expected_slippage_pct, row.liquidity_score)
             )
+            lifecycle_state = row.status_after
+            if lifecycle_state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}:
+                decision = "REJECTED"
+            elif lifecycle_state == "SIGNAL_CREATED":
+                decision = "PENDING"
+            else:
+                decision = "ACCEPTED"
             save_trade_lifecycle_event(
                 session,
                 event_id=_lifecycle_event_id(row, idx),
@@ -988,8 +995,8 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 order_id=None,
                 symbol=row.symbol,
                 mode="BACKTEST",
-                lifecycle_state=row.status_after,
-                decision="REJECTED" if row.status_after in {"SIGNAL_REJECTED", "ORDER_REJECTED"} else "ACCEPTED",
+                lifecycle_state=lifecycle_state,
+                decision=decision,
                 reject_reason=row.reject_reason,
                 score=row.score,
                 rr=row.rr,
@@ -1019,6 +1026,29 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
             )
         ).mappings().all()
     return [dict(row) for row in persisted]
+
+
+def _derive_backtest_counts(lifecycle: List[LifecycleRow]) -> Dict[str, int]:
+    final_decision_by_signal: Dict[str, str] = {}
+    for row in lifecycle:
+        signal_id = f"{row.symbol}:{row.timestamp}"
+        if row.status_after in {"SYMBOL_REJECTED", "SIGNAL_REJECTED", "ORDER_REJECTED"}:
+            final_decision_by_signal[signal_id] = "REJECTED"
+        elif row.status_after in {"ENTRY_TIMEOUT", "ORDER_PLACED", "POSITION_CLOSED", "ENTRY_TRIGGERED", "WAITING_ENTRY_ZONE"}:
+            final_decision_by_signal.setdefault(signal_id, "ACCEPTED")
+    accepted_count = sum(1 for v in final_decision_by_signal.values() if v == "ACCEPTED")
+    rejected_count = sum(1 for v in final_decision_by_signal.values() if v == "REJECTED")
+    total_orders = sum(1 for row in lifecycle if row.status_after == "ORDER_PLACED")
+    triggered_orders = sum(1 for row in lifecycle if row.status_after == "ENTRY_TRIGGERED")
+    not_triggered_orders = sum(1 for row in lifecycle if row.status_after == "ENTRY_TIMEOUT")
+    return {
+        "total_candidates": accepted_count + rejected_count,
+        "accepted_count": accepted_count,
+        "rejected_count": rejected_count,
+        "total_orders": total_orders,
+        "triggered_orders": triggered_orders,
+        "not_triggered_orders": not_triggered_orders,
+    }
 
 
 def _distribution(values: List[Any]) -> Dict[str, int]:
@@ -1515,18 +1545,20 @@ def main():
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows(rows)
+    counts = _derive_backtest_counts(lifecycle)
     summary = {
         "selected_symbols": len(universe),
-        "total_candidates": len(candidates) + len(rejected),
-        "total_rejected": len(rejected),
+        "total_candidates": counts["total_candidates"],
+        "accepted_count": counts["accepted_count"],
+        "total_rejected": counts["rejected_count"],
         "rejection_rate": (
             0.0
-            if (len(candidates) + len(rejected)) == 0
-            else len(rejected) / (len(candidates) + len(rejected))
+            if counts["total_candidates"] == 0
+            else counts["rejected_count"] / counts["total_candidates"]
         ),
-        "total_orders": len(lifecycle),
-        "triggered_orders": sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED"),
-        "not_triggered_orders": sum(1 for r in lifecycle if r.status_after == "ENTRY_TIMEOUT"),
+        "total_orders": counts["total_orders"],
+        "triggered_orders": counts["triggered_orders"],
+        "not_triggered_orders": counts["not_triggered_orders"],
         "tp_hits": sum(1 for r in lifecycle if r.close_reason == "TP_HIT"),
         "sl_hits": sum(1 for r in lifecycle if r.close_reason == "SL_HIT"),
         "open_at_end": len(open_rows),

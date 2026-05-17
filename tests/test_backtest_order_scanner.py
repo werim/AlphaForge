@@ -645,7 +645,9 @@ def test_lifecycle_export_reads_persisted_sql_events():
     persisted = bo._persist_lifecycle_rows(rows)
     assert len(persisted) == 2
     assert persisted[0]["lifecycle_state"] == "SIGNAL_CREATED"
+    assert persisted[0]["decision"] == "PENDING"
     assert persisted[1]["lifecycle_state"] == "SIGNAL_REJECTED"
+    assert persisted[1]["decision"] == "REJECTED"
     assert persisted[1]["reject_reason"] == "LOW_SCORE"
 
 
@@ -749,3 +751,42 @@ def test_export_integrity_verifier_catches_row_count_mismatch():
         rejected_csv_rows=[],
     )
     assert any("lifecycle row count mismatch" in e for e in errors)
+
+
+def test_symbol_rejected_rows_are_persisted_as_rejected_decision():
+    rows = [
+        bo.LifecycleRow(1, "ETHUSDT", "N/A", "", "", "CHOP", 2.0, 0.0, 0.0, 0.0, 0.0, "NONE", "SYMBOL_REJECTED", reject_reason="LOW_LIQUIDITY")
+    ]
+    persisted = bo._persist_lifecycle_rows(rows)
+    assert persisted[0]["decision"] == "REJECTED"
+    assert persisted[0]["reject_reason"] == "LOW_LIQUIDITY"
+
+
+def test_derive_backtest_counts_uses_terminal_per_signal_and_order_placed_only():
+    lifecycle = [
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "SIGNAL_CREATED", "WAITING_ENTRY_ZONE"),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED"),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "ENTRY_TRIGGERED", "ORDER_PLACED"),
+        bo.LifecycleRow(2, "ETHUSDT", "LONG", "S", "R", "TREND", 3.0, 1.0, 20.0, 18.0, 21.0, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(2, "ETHUSDT", "LONG", "S", "R", "TREND", 3.0, 1.0, 20.0, 18.0, 21.0, "SIGNAL_CREATED", "SIGNAL_REJECTED", reject_reason="LOW_SCORE"),
+        bo.LifecycleRow(3, "SOLUSDT", "N/A", "", "", "CHOP", 1.0, 0.0, 0.0, 0.0, 0.0, "NONE", "SYMBOL_REJECTED", reject_reason="LOW_LIQUIDITY"),
+    ]
+    counts = bo._derive_backtest_counts(lifecycle)
+    assert counts["total_candidates"] == 3
+    assert counts["accepted_count"] == 1
+    assert counts["rejected_count"] == 2
+    assert counts["total_orders"] == 1
+    assert counts["triggered_orders"] == 1
+    assert counts["not_triggered_orders"] == 0
+
+
+def test_signal_id_cannot_end_with_both_terminal_accepted_and_rejected():
+    lifecycle = [
+        bo.LifecycleRow(10, "XRPUSDT", "LONG", "S", "R", "TREND", 7.0, 2.0, 1.0, 0.9, 1.2, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(10, "XRPUSDT", "LONG", "S", "R", "TREND", 7.0, 2.0, 1.0, 0.9, 1.2, "SIGNAL_CREATED", "ORDER_PLACED"),
+        bo.LifecycleRow(10, "XRPUSDT", "LONG", "S", "R", "TREND", 7.0, 2.0, 1.0, 0.9, 1.2, "ORDER_PLACED", "ORDER_REJECTED", reject_reason="EXECUTION_RISK"),
+    ]
+    counts = bo._derive_backtest_counts(lifecycle)
+    assert counts["accepted_count"] == 0
+    assert counts["rejected_count"] == 1

@@ -126,3 +126,12 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - README now documents safe `.env` bootstrap, mode switching, and live-trading risk warnings.
 ### Known Issues
 - Some template variables are forward-compatible operational toggles and are not yet wired by direct `os.getenv` reads in current modules.
+
+## [Unreleased] - 2026-05-17 (Backtest lifecycle accounting fix)
+
+### Fixed
+- Backtest lifecycle persistence now marks `SIGNAL_CREATED` as `PENDING` (not `ACCEPTED`) and treats `SYMBOL_REJECTED` as `REJECTED` to prevent contradictory terminal decisions.
+- Backtest summary counters now derive candidates/rejections by final per-signal terminal decision and count `total_orders` from `ORDER_PLACED` rows only.
+
+### Added
+- Regression tests for symbol-level reject decision integrity and per-signal terminal decision deduplication in backtest summary accounting.

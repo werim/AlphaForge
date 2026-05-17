@@ -432,3 +432,40 @@
 
 ### Remaining limitations
 - Current repository has limited direct `os.getenv` wiring; central env loader integration can be expanded in future patch without changing runtime architecture.
+
+## 2026-05-17 Patch: Backtest order lifecycle accounting correction
+
+### Root cause
+- Backtest lifecycle persistence classified every non-reject lifecycle event as `ACCEPTED`, including `SIGNAL_CREATED`, which created contradictory ACCEPTED+REJECTED rows for the same signal.
+- `SYMBOL_REJECTED` lifecycle events were not mapped to rejected decisions in SQL persistence.
+- Backtest summary used row-level counts (`len(lifecycle)`) for `total_orders`, inflating orders by counting non-order lifecycle events.
+
+### Exact fix
+- `backtest_order.py`
+  - Updated lifecycle decision mapping in `_persist_lifecycle_rows(...)`:
+    - `SIGNAL_CREATED` => `PENDING`
+    - `SIGNAL_REJECTED`/`ORDER_REJECTED`/`SYMBOL_REJECTED` => `REJECTED`
+    - all other progression states => `ACCEPTED`
+  - Added `_derive_backtest_counts(...)` to derive candidate/reject counts by final per-signal terminal decision and avoid double counting.
+  - Updated summary derivation to:
+    - compute `total_candidates`, `accepted_count`, `total_rejected`, `rejection_rate` from per-signal final decisions
+    - compute `total_orders` from `ORDER_PLACED` rows only
+    - compute `triggered_orders` from `ENTRY_TRIGGERED`
+
+### Behavior impact
+- Lifecycle exports no longer emit `ACCEPTED` for `SIGNAL_CREATED` rows.
+- Symbol-level rejections are now consistently marked `REJECTED` with preserved reject reason.
+- Summary metrics align with actual order lifecycle semantics instead of raw event-row counts.
+
+### Compatibility / migration risks
+- Decision value `PENDING` appears for `SIGNAL_CREATED` in persisted backtest lifecycle events; downstream consumers that assumed only ACCEPTED/REJECTED should tolerate this explicit non-terminal state.
+- No schema migration required.
+
+### Tests added/updated
+- Updated: `test_lifecycle_export_reads_persisted_sql_events` to assert `SIGNAL_CREATED` persists as `PENDING`.
+- Added: `test_symbol_rejected_rows_are_persisted_as_rejected_decision`.
+- Added: `test_derive_backtest_counts_uses_terminal_per_signal_and_order_placed_only`.
+- Added: `test_signal_id_cannot_end_with_both_terminal_accepted_and_rejected`.
+
+### Tests executed
+- `pytest -q tests/test_backtest_order_scanner.py -k "lifecycle_export_reads_persisted_sql_events or symbol_rejected_rows_are_persisted_as_rejected_decision or derive_backtest_counts_uses_terminal_per_signal_and_order_placed_only or signal_id_cannot_end_with_both_terminal_accepted_and_rejected"`
