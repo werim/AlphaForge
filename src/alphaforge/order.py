@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
-from alphaforge.execution import build_execution_context, neutral_execution_context
+from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model
 from alphaforge.persistence import (
     fetch_expectancy_stat,
     save_ai_decision_features,
@@ -425,7 +425,7 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
 
         payload.update(dict(order))
         payload["quantity"] = max(qty, 0.0)
-        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 6), "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {}, "adjusted_risk_reward": round(effective_rr, 6), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
+        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 6), "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {"execution_cost_completeness": build_execution_cost_model(execution_ctx).completeness, "missing_fields": list(build_execution_cost_model(execution_ctx).missing_fields)}, "adjusted_risk_reward": round(effective_rr, 6), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
         payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx})
         if blocked and payload["execution_flags"]:
             payload["block_reason"] = payload["execution_flags"][0]
@@ -443,6 +443,10 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         safe_payload.setdefault("execution_flags", [])
         if missing_execution_ctx and "EXECUTION_CTX_MISSING" not in safe_payload["execution_flags"]:
             safe_payload["execution_flags"].append("EXECUTION_CTX_MISSING")
+        if any((market_ctx or {}).get("execution_ctx", {}).get(k) in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST") for k in ("spread_pct", "expected_slippage_pct", "latency_ms", "funding_rate_pct", "liquidity_score")):
+            safe_payload["execution_flags"].append("UNKNOWN_EXECUTION_CONTEXT")
+            safe_payload["effective_rr"] = round(max(float(order.get("risk_reward", 1.0) or 1.0) - 0.6, 0.0), 6)
+        safe_payload["execution_flags"] = sorted(set(safe_payload["execution_flags"]))
         return (False if (mode == "live" and fail_closed_live) else True, safe_payload)
 
 
@@ -477,34 +481,52 @@ def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any
 
 def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float, list[str]]:
     rr = float(order.get("risk_reward", 1.0) or 1.0)
-    slippage = float(execution_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-    spread = float(execution_ctx.get("spread_pct", 0.0) or 0.0)
-    latency_ms = float(execution_ctx.get("latency_ms", 0.0) or 0.0)
-    liquidity_score = float(execution_ctx.get("liquidity_score", 1.0) or 1.0)
-
-    execution_penalty = (slippage + spread) * 50.0
-    effective = round(max(rr * (1.0 - execution_penalty), 0.0), 6)
+    model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
+    effective = round(max(rr - model.total_penalty, 0.0), 6)
 
     flags: list[str] = []
-    if slippage >= 0.02 or (slippage + spread >= 0.03 and str(execution_ctx.get("volatility_regime", "")).lower() == "high"):
+    if model.missing_fields:
+        flags.append("UNKNOWN_EXECUTION_CONTEXT")
+    if model.spread_penalty >= 0.20:
+        flags.append("HIGH_SPREAD")
+    if model.slippage_penalty >= 0.20:
         flags.append("HIGH_SLIPPAGE")
-    if liquidity_score < 0.3:
-        flags.append("LOW_LIQUIDITY")
+    if model.liquidity_penalty >= 0.35:
+        flags.append("THIN_LIQUIDITY")
+    if model.funding_penalty >= 0.08:
+        flags.append("FUNDING_RISK")
+    if model.latency_penalty >= 0.05:
+        flags.append("BAD_EXECUTION")
+    if str(execution_ctx.get("volatility_regime", "")).lower() == "high" and (model.spread_penalty + model.slippage_penalty) >= 0.25:
+        flags.append("EXCESSIVE_VOLATILITY")
     if effective < MIN_RR_THRESHOLD:
         flags.append("LOW_EFFECTIVE_RR")
-    if float(execution_ctx.get("funding_rate_pct", 0.0) or 0.0) > 0.03:
-        flags.append("FUNDING_UNFAVORABLE")
-    return effective, flags
+    return effective, sorted(set(flags))
 
 
 def _execution_review(closed_trade: Mapping[str, Any]) -> dict[str, float]:
-    expected = float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0)
-    entry = float(closed_trade.get("entry_price", 0.0) or 0.0)
-    filled = float(closed_trade.get("filled_entry_price", entry) or entry)
-    realized = abs(filled - entry) / entry if entry > 0 else 0.0
-    diff = realized - expected
-    fill_quality = max(0.0, min(1.0, 1.0 - abs(diff) * 10.0))
-    return {"realized_slippage_pct": realized, "entry_expected_diff_pct": diff, "fill_quality_score": fill_quality}
+    expected = abs(float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0))
+    fill_quality = 1.0
+
+    try:
+        entry = float(closed_trade.get("entry_price", 0.0) or 0.0)
+        filled = float(closed_trade.get("filled_entry_price", entry) or entry)
+        realized = abs(filled - entry) / entry if entry > 0 else 0.0
+    except (TypeError, ValueError):
+        entry = 0.0
+        filled = 0.0
+        realized = 0.0
+
+    realized = abs(realized)
+    slippage_delta = max(0.0, realized - expected)
+    fill_quality = max(0.0, min(1.0, 1.0 - slippage_delta * 100.0))
+    return {
+        "entry_price": entry,
+        "filled_entry_price": filled,
+        "expected_slippage_pct": expected,
+        "realized_slippage_pct": realized,
+        "fill_quality_score": fill_quality,
+    }
 
 
 def _signal_adapter(payload: Mapping[str, Any]) -> dict[str, Any]:

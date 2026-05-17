@@ -1,0 +1,2 @@
+selected_symbols,total_candidates,total_rejected,rejection_rate,total_orders,triggered_orders,not_triggered_orders,tp_hits,sl_hits,open_at_end,win_rate,avg_rr,avg_pnl_pct,total_pnl_pct,total_net_pnl_usdt,avg_hold_minutes,performance_by_symbol,performance_by_regime,performance_by_setup_type,rejection_counts,cancel_counts
+1,2,1,0.5,5,1,0,0,1,0,0.0,1.1589723320158103,-0.09871668311944717,-0.4935834155972359,-0.049358341559723594,0.0,{},{},{},{},{}

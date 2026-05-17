@@ -1,231 +1,205 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 
 import pytest
+from sqlalchemy.orm import Session
 
-from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, execution_mode_from_env
-from alphaforge.symbol_selector import SymbolSelectionResult
-
-
-@dataclass
-class DummyPlan:
-    decision: str
-    order_type: str = "MARKET"
-    reason: str = ""
+from alphaforge.ai_brain import AIBrain
+from alphaforge.persistence import init_db
+from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
 
 
-class DummyBrain:
-    def __init__(self, decision: str = "REJECTED") -> None:
-        self.decision = decision
-        self.called = 0
-        self.last_market_ctx = None
-
-    def before_real_order(self, signal, market_ctx, regime_ctx, stats_ctx):
-        self.called += 1
-        self.last_market_ctx = dict(market_ctx)
-        return {}, DummyPlan(decision=self.decision, reason="test"), "explain"
+def _brain() -> AIBrain:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    return AIBrain(Session(engine), min_accept_score=0.62)
 
 
-def make_cfg(mode: ExecutionMode = ExecutionMode.PAPER) -> RuntimeConfig:
-    return RuntimeConfig(mode, 0.01, 0.05, 0.01, 10, 2, True)
+class _AlwaysAcceptBrain:
+    def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
+        class _Plan:
+            decision = "ACCEPTED"
+            reason = ""
+            confidence = 0.9
+            order_type = "MARKET"
+            limit_price = None
+            stop_price = None
+
+        return {}, _Plan(), "ok"
 
 
-def make_selection(**inputs):
-    return SymbolSelectionResult(
-        symbol=inputs.get("symbol", "BTCUSDT"), tradable=True, symbol_score=1, regime_hint="TREND",
-        liquidity_score=1, volatility_score=1, trend_score=1, spread_score=1, volume_score=1,
-        diagnostics={"inputs": inputs},
+def test_execution_mode_from_env_parses_and_validates() -> None:
+    assert execution_mode_from_env("paper") == ExecutionMode.PAPER
+    assert execution_mode_from_env(None) == ExecutionMode.BACKTEST
+    with pytest.raises(ValueError):
+        execution_mode_from_env("sandbox")
+
+
+def test_paper_execution_simulator_produces_fill() -> None:
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+    )
+    result = orchestrator._simulate_paper_execution(
+        symbol="BTCUSDT",
+        decision={"order_type": "MARKET"},
+        market_ctx={"entry": 100.0, "side": "LONG"},
+    )
+    assert result["status"] == "filled"
+    assert result["fill_price"] > 100.0
+
+
+def test_reject_lifecycle_persistence_increments_metrics() -> None:
+    events: list[dict] = []
+    rejects: list[dict] = []
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.5, "tp": 100.8, "rr": 1.0, "side": "LONG", "volume_24h_usdt": 5_000_000, "spread_pct": 0.01, "volatility_pct": 2.0, "trend_strength": 0.4, "liquidity_score": 0.8, "chop_score": 0.3}]
+
+    def on_event(payload: dict) -> None:
+        events.append(payload)
+
+    def on_reject(payload: dict) -> None:
+        rejects.append(payload)
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+        on_lifecycle_event=on_event,
+        on_reject_persist=on_reject,
     )
 
-
-def test_execution_mode_from_env():
-    assert execution_mode_from_env("backtest") == ExecutionMode.BACKTEST
-    assert execution_mode_from_env("paper") == ExecutionMode.PAPER
-    assert execution_mode_from_env("LIVE") == ExecutionMode.LIVE
-    with pytest.raises(ValueError):
-        execution_mode_from_env("bad")
-
-
-def test_signal_created_before_rejected_and_no_execute():
-    async def run():
-        events = []
-        brain = DummyBrain("REJECTED")
-
-        async def scanner():
-            return []
-
-        rt = RuntimeOrchestrator(make_cfg(), brain, scanner, on_lifecycle_event=lambda p: events.append(p))
-
-        async def should_not_execute(*args, **kwargs):
-            pytest.fail("execute should not be called")
-
-        rt._execute = should_not_execute  # type: ignore[method-assign]
-        await rt._process_symbol(make_selection(entry=1.0, side="BUY", timeframe="1h"))
-        assert [e["event"] for e in events] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
-
-    asyncio.run(run())
+    asyncio.run(orchestrator._scan_once())
+    assert orchestrator.metrics.scans == 1
+    assert orchestrator.metrics.rejects_persisted == 1
+    assert orchestrator.metrics.rejects_persisted == 1
+    assert rejects and events
+    assert all("lifecycle_event_type" in evt for evt in events)
+    assert any(evt["lifecycle_event_type"] == "SIGNAL_REJECTED" for evt in events)
 
 
-def test_missing_context_rejects_before_ai():
-    async def run():
-        brain = DummyBrain("ACCEPTED")
+def test_rejected_signal_never_executes() -> None:
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.5, "tp": 100.8, "rr": 1.0, "side": "LONG", "volume_24h_usdt": 5_000_000, "spread_pct": 0.01, "volatility_pct": 2.0, "trend_strength": 0.4, "liquidity_score": 0.8, "chop_score": 0.3}]
 
-        async def scanner():
-            return []
-
-        rt = RuntimeOrchestrator(make_cfg(), brain, scanner)
-        await rt._process_symbol(make_selection(side="BUY", timeframe="1h"))
-        assert brain.called == 0
-        assert rt.metrics.rejects_persisted == 1
-
-    asyncio.run(run())
-
-
-def test_paper_mode_never_calls_live_adapter():
-    async def run():
-        called = False
-
-        class Adapter:
-            async def submit(self, **kwargs):
-                nonlocal called
-                called = True
-                return {}
-
-        brain = DummyBrain("ACCEPTED")
-
-        async def scanner():
-            return []
-
-        rt = RuntimeOrchestrator(make_cfg(ExecutionMode.PAPER), brain, scanner, real_execution_adapter=Adapter())
-        await rt._process_symbol(make_selection(entry=100, side="BUY", timeframe="5m"))
-        assert called is False
-
-    asyncio.run(run())
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+        real_execution_adapter=None,
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert orchestrator.metrics.executions == 0
 
 
-def test_live_mode_requires_adapter():
-    brain = DummyBrain()
-
-    async def scanner():
+def test_shutdown_cancels_background_tasks() -> None:
+    async def scanner() -> list[dict]:
+        await asyncio.sleep(0.01)
         return []
 
-    rt = RuntimeOrchestrator(make_cfg(ExecutionMode.LIVE), brain, scanner)
-    with pytest.raises(ValueError):
-        asyncio.run(rt.start())
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST, scan_interval_sec=0.01, heartbeat_interval_sec=0.1),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+    )
+
+    async def _run() -> None:
+        task = asyncio.create_task(orchestrator.start())
+        await asyncio.sleep(0.05)
+        orchestrator.shutdown()
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(_run())
+    assert all(t.done() for t in orchestrator._tasks)
 
 
-def test_execution_enrichment_reaches_brain_without_overwrite():
-    async def run():
-        brain = DummyBrain("REJECTED")
-
-        async def scanner():
-            return []
-
-        rt = RuntimeOrchestrator(make_cfg(), brain, scanner)
-        await rt._process_symbol(make_selection(entry=1, side="BUY", timeframe="1h", spread_pct=9.0))
-        assert brain.last_market_ctx["spread_pct"] == 9.0
-        assert "expected_slippage_pct" in brain.last_market_ctx
-
-    asyncio.run(run())
+def test_invalid_lifecycle_transition_explicitly_marked_error() -> None:
+    events: list[dict] = []
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        on_lifecycle_event=lambda e: events.append(e),
+    )
+    asyncio.run(orchestrator._emit_lifecycle_event("ORDER_PLACED", "BTCUSDT", {}))
+    assert events[-1]["lifecycle_event_type"] == "ERROR"
 
 
-def test_scan_timeout_and_failure_continue():
-    async def run():
-        brain = DummyBrain()
-        calls = 0
+def test_runtime_risk_gate_rejects_stale_market_data() -> None:
+    events: list[dict] = []
+    rejects: list[dict] = []
 
-        async def scanner():
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                await asyncio.sleep(0.05)
-                return []
-            if calls == 2:
-                raise RuntimeError("boom")
-            return []
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.5, "tp": 101.2, "rr": 2.0, "side": "LONG", "market_ts": 1.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
-        rt = RuntimeOrchestrator(make_cfg(), brain, scanner)
-        await rt._scan_once()
-        await rt._scan_once()
-        await rt._scan_once()
-        assert rt.metrics.scan_timeouts == 1
-        assert rt.metrics.scan_failures == 1
-
-    asyncio.run(run())
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST, stale_market_data_sec=0.01),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=scanner,
+        on_lifecycle_event=lambda e: events.append(e),
+        on_reject_persist=lambda r: rejects.append(r),
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert rejects
+    assert any(evt["lifecycle_event_type"] == "SIGNAL_REJECTED" for evt in events)
 
 
-def test_task_registry_clears_after_shutdown():
-    async def run():
-        brain = DummyBrain()
+def test_reconciliation_event_on_timeout_like_execution_state() -> None:
+    events: list[dict] = []
 
-        async def scanner():
-            return []
+    class _Adapter:
+        async def submit(self, decision, market_ctx):
+            return {"status": "timeout", "order_id": "abc-1"}
 
-        rt = RuntimeOrchestrator(make_cfg(), brain, scanner)
-        t = asyncio.create_task(rt.start())
+    async def scanner() -> list[dict]:
+        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=scanner,
+        real_execution_adapter=_Adapter(),
+        on_lifecycle_event=lambda e: events.append(e),
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert any(evt["lifecycle_event_type"] == "RECONCILIATION_REPAIR" for evt in events)
+
+
+def test_runtime_module_bootstrap_builds_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ALPHAFORGE_SCAN_INTERVAL_SEC", "0.01")
+    monkeypatch.setenv("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", "0.02")
+    rt = _build_runtime_from_env()
+    assert rt.config.execution_mode == ExecutionMode.PAPER
+    assert rt.config.scan_interval_sec == pytest.approx(0.01)
+    assert rt.config.heartbeat_interval_sec == pytest.approx(0.02)
+
+
+def test_runtime_start_loop_does_not_exit_until_shutdown() -> None:
+    async def scanner() -> list[dict]:
+        await asyncio.sleep(0)
+        return []
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST, scan_interval_sec=0.01, heartbeat_interval_sec=0.01),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+    )
+
+    async def _run() -> bool:
+        task = asyncio.create_task(orchestrator.start())
         await asyncio.sleep(0.03)
-        rt.shutdown()
-        await t
-        assert rt._tasks == set()
+        still_running = not task.done()
+        orchestrator.shutdown()
+        await asyncio.wait_for(task, timeout=1)
+        return still_running
 
-    asyncio.run(run())
-
-
-def test_register_signals_suppresses_errors(monkeypatch):
-    brain = DummyBrain()
-
-    async def scanner():
-        return []
-
-    rt = RuntimeOrchestrator(make_cfg(), brain, scanner)
-
-    class Loop:
-        def __init__(self):
-            self.calls = 0
-
-        def add_signal_handler(self, *args, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                raise NotImplementedError
-            raise RuntimeError
-
-    monkeypatch.setattr(asyncio, "get_running_loop", lambda: Loop())
-    rt._register_signals()
+    assert asyncio.run(_run())
 
 
-def test_reject_log_bounded():
-    async def run():
-        brain = DummyBrain()
-
-        async def scanner():
-            return []
-
-        rt = RuntimeOrchestrator(make_cfg(), brain, scanner)
-        await rt._persist_reject({"id": 1})
-        await rt._persist_reject({"id": 2})
-        await rt._persist_reject({"id": 3})
-        assert len(rt._reject_log) == 2
-
-    asyncio.run(run())
-
-
-def test_build_runtime_from_env_requires_explicit_non_simulated_modes(monkeypatch):
-    from alphaforge.runtime import build_runtime_from_env
-
-    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
-    with pytest.raises(ValueError):
-        build_runtime_from_env()
-
-    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "LIVE")
-    with pytest.raises(ValueError):
-        build_runtime_from_env()
-
-
-def test_build_runtime_from_env_allows_explicit_simulated(monkeypatch):
-    from alphaforge.runtime import build_runtime_from_env
-
-    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "SIMULATED")
-    rt, _ = build_runtime_from_env()
-    assert rt.config.execution_mode == ExecutionMode.SIMULATED
+def test_runtime_signal_uses_dynamic_rr_not_fallback_when_present() -> None:
+    selection = type("Sel", (), {"symbol": "BTCUSDT"})()
+    payload = RuntimeOrchestrator._build_signal(selection, {"entry": 100.0, "rr": 3.25})
+    assert payload["risk_reward"] == pytest.approx(3.25)

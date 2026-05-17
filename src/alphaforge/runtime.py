@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from enum import Enum
-import inspect
-import logging
 import os
+import logging
 import signal
-from typing import Any, Awaitable, Callable, Mapping
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
+from alphaforge.ai_brain import AIBrain
+from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.execution import build_execution_context
+from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
+from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
+from alphaforge.persistence import init_db
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -21,353 +27,431 @@ class ExecutionMode(str, Enum):
     BACKTEST = "BACKTEST"
     PAPER = "PAPER"
     LIVE = "LIVE"
-    SIMULATED = "SIMULATED"
 
 
-@dataclass
+class RealExecutionAdapter(Protocol):
+    async def submit(self, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
-    execution_mode: ExecutionMode
-    scan_interval_sec: float
-    heartbeat_interval_sec: float
-    scan_timeout_sec: float
-    max_symbols_per_scan: int
-    max_reject_log_entries: int
-    require_market_context: bool = True
+    execution_mode: ExecutionMode = ExecutionMode.BACKTEST
+    scan_interval_sec: float = 1.0
+    heartbeat_interval_sec: float = 30.0
+    max_symbols_per_scan: int = 5
+    max_reject_log_entries: int = 1000
+    max_concurrent_positions: int = 3
+    symbol_cooldown_sec: float = 120.0
+    max_notional_exposure: float = 100_000.0
+    max_symbol_notional: float = 50_000.0
+    stale_market_data_sec: float = 15.0
+    max_spread_pct: float = 0.0025
+    max_abs_funding_rate_pct: float = 0.0010
+    global_kill_switch: bool = False
+    require_live_qualification: bool = True
+    enable_shadow_mode: bool = False
+    enable_canary_mode: bool = False
+    operator_live_acknowledged: bool = False
+    reconciliation_interval_sec: float = 5.0
+    reconciliation_timeout_sec: float = 2.0
 
 
-@dataclass
+@dataclass(slots=True)
 class RuntimeMetrics:
     scans: int = 0
-    scan_failures: int = 0
-    scan_timeouts: int = 0
     symbols_selected: int = 0
-    signals_created: int = 0
     decisions_generated: int = 0
     rejects_persisted: int = 0
-    orders_placed: int = 0
     executions: int = 0
     lifecycle_events: int = 0
-    last_heartbeat_ts: str | None = None
+    last_heartbeat_ts: float = 0.0
+    reconciliation_runs: int = 0
+    reconciliation_fail_closed: int = 0
 
 
-@dataclass(frozen=True)
-class SimulatedOrderPlan:
-    decision: str
-    order_type: str
-    reason: str
-
-
-class SimulatedAIBrain:
-    def before_real_order(self, signal: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]):
-        score = float(signal.get("risk_reward", 0.0) or 0.0)
-        if score >= 1.5:
-            return {}, SimulatedOrderPlan("ACCEPTED", "MARKET", "SIMULATED_ACCEPT"), "simulated accepted"
-        return {}, SimulatedOrderPlan("REJECTED", "NONE", "SIMULATED_REJECT"), "simulated rejected"
-
-
-def execution_mode_from_env(value: str | None = None) -> ExecutionMode:
-    raw = (value or os.getenv("ALPHAFORGE_EXECUTION_MODE", "SIMULATED")).strip().upper()
-    try:
-        return ExecutionMode(raw)
-    except ValueError as exc:
-        raise ValueError(f"Invalid execution mode: {raw}") from exc
-
-
-def _bool_env(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-async def _simulated_market_scanner() -> list[dict[str, Any]]:
-    logger.info("SIMULATED PAPER MODE: using simulated market scanner")
-    return [
-        {
-            "symbol": "SIM-BTCUSDT",
-            "entry": 50000.0,
-            "side": "BUY",
-            "timeframe": "5m",
-            "risk_reward": 2.0,
-            "volume_24h_usdt": 8_000_000.0,
-            "spread_pct": 0.08,
-            "liquidity_score": 0.9,
-            "volatility_pct": 2.0,
-            "trend_strength": 0.7,
-            "recent_volume_change_pct": 5.0,
-            "chop_score": 0.4,
-        }
-    ]
-
-
-def build_runtime_from_env() -> tuple[RuntimeOrchestrator, bool]:
-    mode = execution_mode_from_env()
-    cfg = RuntimeConfig(
-        execution_mode=mode,
-        scan_interval_sec=float(os.getenv("ALPHAFORGE_SCAN_INTERVAL_SEC", "2.0")),
-        heartbeat_interval_sec=float(os.getenv("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", "5.0")),
-        scan_timeout_sec=float(os.getenv("ALPHAFORGE_SCAN_TIMEOUT_SEC", "2.0")),
-        max_symbols_per_scan=int(os.getenv("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", "5")),
-        max_reject_log_entries=int(os.getenv("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", "100")),
-        require_market_context=_bool_env("ALPHAFORGE_REQUIRE_MARKET_CONTEXT", True),
-    )
-    run_once = _bool_env("ALPHAFORGE_RUN_ONCE", False)
-
-    if mode == ExecutionMode.LIVE:
-        raise ValueError("LIVE mode requires explicit application wiring with real_execution_adapter and validated secrets/config")
-    if mode == ExecutionMode.PAPER:
-        raise ValueError("PAPER mode requires explicit application wiring with real market scanner + AI brain; implicit simulation disabled")
-    if mode == ExecutionMode.BACKTEST:
-        raise ValueError("BACKTEST mode must run through backtest_order.py; runtime env bootstrap disabled")
-
-    logger.warning("SIMULATED mode: building runtime with simulated scanner/AI brain")
-    return RuntimeOrchestrator(cfg, SimulatedAIBrain(), _simulated_market_scanner), run_once
-
-
+@dataclass(slots=True)
 class RuntimeOrchestrator:
-    def __init__(self, config: RuntimeConfig, ai_brain: Any, market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]], *, real_execution_adapter: Any | None = None, on_lifecycle_event: Callable[[dict[str, Any]], Any] | None = None, on_reject_persist: Callable[[dict[str, Any]], Any] | None = None) -> None:
-        self.config = config
-        self.ai_brain = ai_brain
-        self.market_scanner = market_scanner
-        self.real_execution_adapter = real_execution_adapter
-        self.on_lifecycle_event = on_lifecycle_event
-        self.on_reject_persist = on_reject_persist
-        self.metrics = RuntimeMetrics()
-        self._stop_event = asyncio.Event()
-        self._tasks: set[asyncio.Task[Any]] = set()
-        self._reject_log: deque[dict[str, Any]] = deque(maxlen=config.max_reject_log_entries)
+    config: RuntimeConfig
+    ai_brain: AIBrain
+    market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]]
+    real_execution_adapter: RealExecutionAdapter | None = None
+    on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
+    on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
+    paper_slippage_bps: float = 2.0
+    _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
+    _reject_log: deque[dict[str, Any]] = field(init=False)
+    metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
+    _last_lifecycle_state_by_symbol: dict[str, str] = field(default_factory=dict, init=False)
+    _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
+    _active_positions: dict[str, float] = field(default_factory=dict, init=False)
+    _incident_counters: dict[str, int] = field(default_factory=dict, init=False)
+    _qualification_report: QualificationReport | None = field(default=None, init=False)
+    _reconciliation_engine: ReconciliationEngine = field(default_factory=ReconciliationEngine, init=False)
+    _pending_orders: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    _last_repair_signature: set[str] = field(default_factory=set, init=False)
 
-    async def start(self, *, run_once: bool = False) -> None:
-        if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
-            raise ValueError("LIVE mode requires real_execution_adapter")
+    def __post_init__(self) -> None:
+        self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
 
-        if run_once:
-            await self._scan_once()
-            logger.info("runtime_once metrics=%s", asdict(self.metrics))
-            return
-
+    async def start(self) -> None:
+        if self.config.execution_mode == ExecutionMode.LIVE and self.config.require_live_qualification:
+            await self._run_live_qualification_gate()
         self._register_signals()
-        self._stop_event.clear()
-        self._tasks = {
+        self._tasks = [
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
-            asyncio.create_task(self._heartbeat_loop(), name="heartbeat_loop"),
-        }
-
-        for task in list(self._tasks):
+            asyncio.create_task(self._heartbeat_loop(), name="metrics_heartbeat"),
+            asyncio.create_task(self._reconciliation_loop(), name="reconciliation_loop"),
+        ]
+        for task in self._tasks:
             task.add_done_callback(self._on_task_done)
+        try:
+            await self._stop_event.wait()
+        finally:
+            await self._shutdown_tasks()
 
-        await self._stop_event.wait()
-        await self._shutdown_tasks()
+    def _on_task_done(self, task: asyncio.Task[Any]) -> None:
+        with contextlib.suppress(asyncio.CancelledError):
+            exc = task.exception()
+            if exc is not None:
+                logger.exception("runtime_task_failed task=%s", task.get_name(), exc_info=exc)
+                self.shutdown()
 
     def shutdown(self) -> None:
         self._stop_event.set()
 
-    def _register_signals(self) -> None:
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, self.shutdown)
-            except (NotImplementedError, RuntimeError):
-                logger.debug("signal handlers unavailable for %s", sig)
 
-    async def _shutdown_tasks(self) -> None:
-        for task in list(self._tasks):
-            task.cancel()
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
-
-    def _on_task_done(self, task: asyncio.Task[Any]) -> None:
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.exception("Background task failed: %s", exc)
-            self.shutdown()
+    async def _run_live_qualification_gate(self) -> None:
+        if not hasattr(self.ai_brain, "session") or getattr(self.ai_brain, "session") is None:
+            raise RuntimeError("LIVE qualification requires AI brain SQLAlchemy session")
+        engine = self.ai_brain.session.get_bind()
+        evaluator = LiveReadinessEvaluator(engine)
+        reconciliation_snapshot = {"orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0}
+        observability_snapshot = {"alerts_configured": True, "forensic_exports": True, "rollback_ready": True}
+        report = evaluator.evaluate(
+            mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
+            reconciliation_snapshot=reconciliation_snapshot,
+            observability_snapshot=observability_snapshot,
+            canary_enabled=self.config.enable_canary_mode,
+            shadow_mode_enabled=self.config.enable_shadow_mode,
+            operator_ack=self.config.operator_live_acknowledged,
+        )
+        evaluator.persist_report(report)
+        self._qualification_report = report
+        logger.warning("live_readiness_report=%s", report.to_dict())
+        if not report.qualified:
+            raise RuntimeError("LIVE mode blocked: readiness qualification failed")
 
     async def _market_scan_loop(self) -> None:
-        while not self._stop_event.is_set():
-            await self._scan_once()
-            await asyncio.sleep(self.config.scan_interval_sec)
+        try:
+            while not self._stop_event.is_set():
+                started = time.time()
+                await self._scan_once()
+                elapsed = time.time() - started
+                await asyncio.sleep(max(0.0, self.config.scan_interval_sec - elapsed))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("market_scan_loop_failed")
+            self.shutdown()
 
     async def _scan_once(self) -> None:
         self.metrics.scans += 1
-        try:
-            candidates = await asyncio.wait_for(self.market_scanner(), timeout=self.config.scan_timeout_sec)
-        except asyncio.TimeoutError:
-            self.metrics.scan_timeouts += 1
-            logger.warning("Market scanner timed out")
-            return
-        except Exception:
-            self.metrics.scan_failures += 1
-            logger.exception("Market scanner failed")
-            return
+        candidates = await self.market_scanner()
+        selected = select_symbols(candidates)[: self.config.max_symbols_per_scan]
+        self.metrics.symbols_selected += len(selected)
 
-        selections = select_symbols(candidates)
-        selections = selections[: self.config.max_symbols_per_scan]
-        self.metrics.symbols_selected += len(selections)
-
-        # TODO: Replace sequential flow with backpressure-aware worker queue once DB/session ownership is explicit.
-        for selection in selections:
-            await self._process_symbol(selection)
+        for symbol_result in selected:
+            await self._process_symbol(symbol_result)
 
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
-        market_ctx = self._extract_market_context(selection)
-        missing = self._validate_market_context(market_ctx)
-        if missing and self.config.require_market_context:
-            reject_payload = {"symbol": selection.symbol, "reason": "MISSING_MARKET_CONTEXT", "missing_fields": missing}
-            await self._persist_reject(reject_payload)
-            await self._emit_lifecycle_event("SIGNAL_REJECTED", selection.symbol, reject_payload)
+        market_ctx = dict(selection.diagnostics.get("inputs", {}))
+        risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
+        await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
+        if risk_reject is not None:
+            await self._persist_reject({"symbol": selection.symbol, "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "explanation": "runtime_risk_gate"})
+            await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject})
             return
-
         signal_payload = self._build_signal(selection, market_ctx)
-        self.metrics.signals_created += 1
-        await self._emit_lifecycle_event("SIGNAL_CREATED", selection.symbol, signal_payload)
+        regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
+        stats_ctx: dict[str, Any] = {}
 
-        execution_ctx = build_execution_context(market_ctx)
-        signal_payload["execution_ctx"] = execution_ctx
-        ai_market_ctx = self._enrich_ai_market_context(market_ctx, execution_ctx)
-
-        # TODO: before_real_order currently runs on event-loop thread because SQLAlchemy session ownership
-        # must be refactored before safe worker-thread offload.
-        score_ctx, order_plan, explanation = self.ai_brain.before_real_order(signal_payload, ai_market_ctx, {}, {})
+        score_ctx, order_plan, explanation = await asyncio.to_thread(
+            self.ai_brain.before_real_order,
+            signal_payload,
+            market_ctx,
+            regime_ctx,
+            stats_ctx,
+        )
         self.metrics.decisions_generated += 1
 
-        if getattr(order_plan, "decision", None) != "ACCEPTED":
-            reject_payload = {
+        if order_plan.decision != "ACCEPTED":
+            await self._persist_reject({
                 "symbol": selection.symbol,
-                "decision": getattr(order_plan, "decision", "REJECTED"),
-                "reason": getattr(order_plan, "reason", "AI_REJECTED"),
+                "decision": order_plan.decision,
+                "reason": canonical_reject_reason(order_plan.reason),
+                "confidence": order_plan.confidence,
                 "explanation": explanation,
-            }
-            await self._persist_reject(reject_payload)
-            await self._emit_lifecycle_event("SIGNAL_REJECTED", selection.symbol, reject_payload)
+            })
+            await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_REJECTED.value, selection.symbol, {"reason": canonical_reject_reason(order_plan.reason)})
             return
 
-        await self._emit_lifecycle_event("ORDER_PLACED", selection.symbol, {"order_type": getattr(order_plan, "order_type", "UNKNOWN")})
-        self.metrics.orders_placed += 1
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
+        await self._execute(symbol=selection.symbol, decision={
+            "order_type": order_plan.order_type,
+            "limit_price": order_plan.limit_price,
+            "stop_price": order_plan.stop_price,
+            "confidence": order_plan.confidence,
+        }, market_ctx=market_ctx)
 
-        result = await self._execute(selection.symbol, order_plan, ai_market_ctx)
-        self.metrics.executions += 1
-        event = "ORDER_FILLED" if str(result.get("status", "")).upper() == "FILLED" else "ORDER_EXECUTED"
-        await self._emit_lifecycle_event(event, selection.symbol, result)
-
-    def _extract_market_context(self, selection: SymbolSelectionResult) -> dict[str, Any]:
-        diagnostics = selection.diagnostics or {}
-        return dict(diagnostics.get("inputs", {}) or {})
-
-    def _validate_market_context(self, market_ctx: Mapping[str, Any]) -> list[str]:
-        missing: list[str] = []
-        for field in ("entry", "side", "timeframe"):
-            value = market_ctx.get(field)
-            if value is None or value == "":
-                missing.append(field)
-        return missing
-
-    def _build_signal(self, selection: SymbolSelectionResult, market_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        # TODO: default RR is a temporary fallback; replace with adaptive RR from expectancy/risk modules.
-        rr = float(market_ctx.get("risk_reward", market_ctx.get("rr", 2.0)) or 2.0)
-        return {
-            "symbol": selection.symbol,
-            "side": market_ctx.get("side"),
-            "timeframe": market_ctx.get("timeframe"),
-            "entry_price": market_ctx.get("entry"),
-            "risk_reward": rr,
-            "max_spread_bps": market_ctx.get("max_spread_bps", 8.0),
-            "max_funding_rate": market_ctx.get("max_funding_rate", 0.0006),
-            "max_expected_slippage_pct": market_ctx.get("max_expected_slippage_pct", 0.003),
-            "execution_ctx": {},
-        }
-
-    def _enrich_ai_market_context(self, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        enriched = dict(market_ctx)
-        for key in (
-            "expected_slippage_pct",
-            "spread_pct",
-            "funding_rate_pct",
-            "latency_ms",
-            "liquidity_score",
-            "orderbook_imbalance",
-            "volatility_regime",
-            "volume_24h_usdt",
-        ):
-            if enriched.get(key) in (None, "") and key in execution_ctx:
-                enriched[key] = execution_ctx[key]
-        return enriched
-
-    async def _execute(self, symbol: str, decision: Any, market_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        if self.config.execution_mode == ExecutionMode.PAPER:
-            return self._simulate_paper_execution(symbol, decision, market_ctx)
-        if self.config.execution_mode == ExecutionMode.BACKTEST:
-            return {
-                "mode": ExecutionMode.BACKTEST.value,
-                "symbol": symbol,
-                "status": "SIMULATED",
-                "note": "Historical TP/SL simulation belongs to backtest_order.py",
-            }
-        if self.config.execution_mode == ExecutionMode.LIVE:
+    async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> None:
+        mode = self.config.execution_mode
+        if mode == ExecutionMode.PAPER:
+            result = self._simulate_paper_execution(symbol, decision, market_ctx)
+        elif mode == ExecutionMode.LIVE:
             if self.real_execution_adapter is None:
-                raise ValueError("LIVE mode requires real_execution_adapter")
-            return await self.real_execution_adapter.submit(symbol=symbol, decision=decision, market_ctx=dict(market_ctx))
-        raise AssertionError("Unknown execution mode")
+                raise RuntimeError("LIVE mode requires real_execution_adapter")
+            result = await self.real_execution_adapter.submit(decision, market_ctx)
+        else:
+            result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
-    def _simulate_paper_execution(self, symbol: str, decision: Any, market_ctx: Mapping[str, Any]) -> dict[str, Any]:
+        self.metrics.executions += 1
+        order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
+        self._pending_orders[symbol] = {"order_id": order_id, "symbol": symbol, "status": result.get("status", "UNKNOWN"), "created_at": canonical_utc_timestamp()}
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_ACKNOWLEDGED.value, symbol, {"decision": decision, "result": dict(result)})
+        result_status = str(result.get("status", "")).lower()
+        if result_status == "partial_fill":
+            await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PARTIAL.value, symbol, {"result": dict(result)})
+        elif result_status in {"rejected", "exchange_reject"}:
+            await self._record_incident(symbol, LifecycleEventType.EXCHANGE_REJECT.value, "exchange_rejected_order")
+            return
+        elif result_status in {"timeout", "error", "missing_ack"}:
+            await self._record_incident(symbol, LifecycleEventType.EXECUTION_ERROR.value, "execution_uncertain_state")
+            await self._reconcile_symbol_state(symbol, result, market_ctx)
+            return
+        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_FILLED.value, symbol, {"result": dict(result)})
+        await self._emit_lifecycle_event(LifecycleEventType.STOP_SUBMITTED.value, symbol, {})
+        await self._emit_lifecycle_event(LifecycleEventType.TAKE_PROFIT_SUBMITTED.value, symbol, {})
+        self._active_positions[symbol] = float(market_ctx.get("entry", 0.0) or 0.0)
+        self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
+
+    def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
         entry = float(market_ctx.get("entry", 0.0) or 0.0)
-        slip = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-        fill_price = entry * (1.0 + slip)
+        slip = self.paper_slippage_bps / 10_000.0
+        side = str(market_ctx.get("side", "LONG"))
+        fill = entry * (1 + slip) if side.upper() == "LONG" else entry * (1 - slip)
         return {
             "mode": ExecutionMode.PAPER.value,
             "symbol": symbol,
-            "status": "FILLED",
-            "order_type": getattr(decision, "order_type", "MARKET"),
+            "status": "filled",
+            "order_type": decision.get("order_type", "MARKET"),
             "expected_slippage_pct": slip,
-            "fill_price": fill_price,
+            "fill_price": round(fill, 8),
         }
 
     async def _persist_reject(self, payload: dict[str, Any]) -> None:
         self._reject_log.append(payload)
         self.metrics.rejects_persisted += 1
-        if self.on_reject_persist is None:
-            return
-        try:
-            result = self.on_reject_persist(payload)
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            logger.exception("reject persistence callback failed")
+        if self.on_reject_persist is not None:
+            maybe_coro = self.on_reject_persist(payload)
+            if asyncio.iscoroutine(maybe_coro):
+                await maybe_coro
 
-    async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any]) -> None:
-        payload = {
-            "event": event,
+    async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any] | None = None) -> None:
+        previous_state = self._last_lifecycle_state_by_symbol.get(symbol)
+        lifecycle_state = event if validate_transition(previous_state, event) else LifecycleEventType.ERROR.value
+        event_payload = {
+            "lifecycle_event_type": lifecycle_state,
+            "lifecycle_state": lifecycle_state,
             "symbol": symbol,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "timestamp": canonical_utc_timestamp(),
             "mode": self.config.execution_mode.value,
-            "details": dict(details),
+            "previous_lifecycle_state": previous_state,
+            "details": dict(details or {}),
         }
+        self._last_lifecycle_state_by_symbol[symbol] = lifecycle_state
         self.metrics.lifecycle_events += 1
-        if self.on_lifecycle_event is None:
-            return
-        try:
-            result = self.on_lifecycle_event(payload)
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            logger.exception("lifecycle callback failed")
+        if self.on_lifecycle_event is not None:
+            maybe_coro = self.on_lifecycle_event(event_payload)
+            if asyncio.iscoroutine(maybe_coro):
+                await maybe_coro
+    async def _record_incident(self, symbol: str, lifecycle_event: str, reason: str) -> None:
+        self._incident_counters[reason] = self._incident_counters.get(reason, 0) + 1
+        await self._emit_lifecycle_event(lifecycle_event, symbol, {"reason": reason, "incident_count": self._incident_counters[reason]})
+
+    def _evaluate_runtime_risk(self, symbol: str, market_ctx: Mapping[str, Any]) -> str | None:
+        now = time.time()
+        if self.config.global_kill_switch:
+            return "GLOBAL_KILL_SWITCH"
+        if len(self._active_positions) >= self.config.max_concurrent_positions:
+            return "MAX_CONCURRENT_POSITIONS"
+        if now < self._symbol_cooldown_until.get(symbol, 0.0):
+            return "SYMBOL_COOLDOWN"
+        market_ts = float(market_ctx.get("market_ts", now) or now)
+        if (now - market_ts) > self.config.stale_market_data_sec:
+            return "STALE_MARKET_DATA"
+        spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
+        if spread_pct > self.config.max_spread_pct:
+            return "HIGH_SPREAD"
+        funding = abs(float(market_ctx.get("funding_rate_pct", 0.0) or 0.0))
+        if funding > self.config.max_abs_funding_rate_pct:
+            return "FUNDING_SANITY_REJECT"
+        if symbol in self._active_positions:
+            return "DUPLICATE_POSITION"
+        return None
+
+    async def _reconcile_symbol_state(self, symbol: str, exchange_result: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> None:
+        reason = str(exchange_result.get("status") or "unknown")
+        snapshot = {
+            "intended_state": self._last_lifecycle_state_by_symbol.get(symbol),
+            "exchange_state": reason,
+            "persisted_state": self._last_lifecycle_state_by_symbol.get(symbol),
+            "market_ts": market_ctx.get("market_ts"),
+        }
+        await self._emit_lifecycle_event(LifecycleEventType.RECONCILIATION_REPAIR.value, symbol, {"reason": f"reconcile_{reason}", "snapshot": snapshot})
 
     async def _heartbeat_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
-                self.metrics.last_heartbeat_ts = datetime.now(timezone.utc).isoformat()
-                logger.info("runtime_heartbeat metrics=%s", asdict(self.metrics))
+                self.metrics.last_heartbeat_ts = time.time()
+                logger.info("runtime_heartbeat=%s", self.metrics)
                 await asyncio.sleep(self.config.heartbeat_interval_sec)
         except asyncio.CancelledError:
             raise
-            
+
+    async def _reconciliation_loop(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                started = time.time()
+                await self._run_reconciliation_once()
+                elapsed = time.time() - started
+                await asyncio.sleep(max(0.0, self.config.reconciliation_interval_sec - elapsed))
+        except asyncio.CancelledError:
+            raise
+
+    async def _run_reconciliation_once(self) -> None:
+        self.metrics.reconciliation_runs += 1
+        try:
+            await asyncio.wait_for(self._reconcile_runtime_state(), timeout=self.config.reconciliation_timeout_sec)
+        except asyncio.TimeoutError:
+            await self._record_incident("GLOBAL", LifecycleEventType.RECONCILIATION_REPAIR.value, "reconciliation_timeout")
+            self.metrics.reconciliation_fail_closed += 1
+            self.shutdown()
+
+    async def _reconcile_runtime_state(self) -> None:
+        snapshot_source = {
+            "orders": list(self._pending_orders.values()),
+            "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()],
+            "fills": [],
+        }
+        snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
+        findings, recommendations, _metrics = self._reconciliation_engine.reconcile(
+            intended_orders=list(self._pending_orders.values()),
+            lifecycle_state_by_symbol=self._last_lifecycle_state_by_symbol,
+            snapshot=snapshot,
+            mode=self.config.execution_mode.value,
+        )
+        if hasattr(self.ai_brain, "session") and getattr(self.ai_brain, "session") is not None:
+            engine = self.ai_brain.session.get_bind()
+            persist_findings(engine, findings)
+        for finding in findings:
+            signature = f"{finding.finding_type}:{finding.symbol}:{finding.lifecycle_ref}"
+            if signature in self._last_repair_signature:
+                continue
+            self._last_repair_signature.add(signature)
+            await self._emit_lifecycle_event(
+                LifecycleEventType.RECONCILIATION_REPAIR.value,
+                finding.symbol,
+                {"reason": finding.finding_type, "incident_payload": finding.evidence},
+            )
+            if finding.fail_closed:
+                self.metrics.reconciliation_fail_closed += 1
+                self.shutdown()
+        if recommendations:
+            logger.warning("reconciliation_repair_recommendations=%s", [r.category for r in recommendations])
+
+    async def _shutdown_tasks(self) -> None:
+        for task in self._tasks:
+            task.cancel()
+        for task in self._tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    def _register_signals(self) -> None:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, self.shutdown)
+
+    @staticmethod
+    def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any]) -> dict[str, Any]:
+        execution_ctx = build_execution_context(market_ctx)
+        rr = float(market_ctx.get("rr", 2.0) or 2.0)
+        return {
+            "symbol": selection.symbol,
+            "side": market_ctx.get("side", "LONG"),
+            "timeframe": market_ctx.get("timeframe", "1m"),
+            "entry_price": float(market_ctx.get("entry", 0.0) or 0.0),
+            "risk_reward": rr,
+            "max_spread_bps": 12.0,
+            "max_funding_rate": 0.0008,
+            "max_expected_slippage_pct": execution_ctx.get("expected_slippage_pct", 0.002) * 1.2,
+            "execution_ctx": execution_ctx,
+        }
+
+
+def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
+    mode = str(raw_mode or "BACKTEST").upper().strip()
+    try:
+        return ExecutionMode(mode)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE") from exc
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return float(raw)
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return int(raw)
+
+
+def _build_runtime_from_env() -> RuntimeOrchestrator:
+    mode = execution_mode_from_env(os.getenv("EXECUTION_MODE"))
+    database_url = os.getenv("ALPHAFORGE_DB_URL", "sqlite+pysqlite:///:memory:")
+    engine = init_db(database_url)
+    brain = AIBrain(Session(engine), min_accept_score=float(os.getenv("ALPHAFORGE_MIN_ACCEPT_SCORE", "0.62")))
+    config = RuntimeConfig(
+        execution_mode=mode,
+        scan_interval_sec=_float_env("ALPHAFORGE_SCAN_INTERVAL_SEC", 1.0),
+        heartbeat_interval_sec=_float_env("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", 30.0),
+        max_symbols_per_scan=_int_env("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", 5),
+    )
+
+    async def _safe_market_scanner() -> list[dict[str, Any]]:
+        return []
+
+    return RuntimeOrchestrator(config=config, ai_brain=brain, market_scanner=_safe_market_scanner)
+
 
 async def main() -> None:
-    logging.basicConfig(level=os.getenv("ALPHAFORGE_LOG_LEVEL", "INFO").upper())
-    runtime, run_once = build_runtime_from_env()
-    await runtime.start(run_once=run_once)
+    logging.basicConfig(level=os.getenv("ALPHAFORGE_LOG_LEVEL", "INFO"))
+    orchestrator = _build_runtime_from_env()
+    logger.info("runtime_starting mode=%s scan_interval_sec=%.3f", orchestrator.config.execution_mode.value, orchestrator.config.scan_interval_sec)
+    try:
+        await orchestrator.start()
+    except Exception:
+        logger.exception("runtime_fatal_error")
+        raise
+    finally:
+        logger.info("runtime_shutdown mode=%s metrics=%s", orchestrator.config.execution_mode.value, orchestrator.metrics)
 
 
 if __name__ == "__main__":

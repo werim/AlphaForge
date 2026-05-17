@@ -1,0 +1,2 @@
+timestamp,symbol,side,setup_type,setup_reason,regime,score,rr,expectancy,quality_score,reject_reason,diagnostics
+1777964882893,BTCUSDT,LONG,BREAKOUT_UP,OFFLINE_FIXTURE,TREND,4.0,0.9,-0.1,0.1,LOW_EFFECTIVE_RR,"{""offline"": true}"

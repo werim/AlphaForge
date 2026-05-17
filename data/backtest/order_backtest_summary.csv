@@ -1,0 +1,2 @@
+selected_symbols,total_candidates,total_rejected,rejection_rate,total_orders,triggered_orders,not_triggered_orders,tp_hits,sl_hits,open_at_end,win_rate,avg_rr,avg_pnl_pct,total_pnl_pct,total_net_pnl_usdt,avg_hold_minutes,performance_by_symbol,performance_by_regime,performance_by_setup_type,rejection_counts,cancel_counts
+50,39693,39693,1.0,56725,0,0,0,0,0,0.0,0.7231533795118519,0.0,0.0,0.0,0.0,{},{},{},"{""LOW_SCORE"": 17032, ""TOO_CHOPPY"": 5502, ""WEAK_TREND_AND_NO_RANGE_EDGE"": 3103, ""WIDE_SPREAD"": 14056}",{}
