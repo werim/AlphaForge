@@ -75,6 +75,20 @@ def test_expectancy_rejection_written(tmp_path: Path):
     assert "LOW_EXPECTANCY" in f.read_text()
 
 
+def test_resolve_csv_fieldnames_preserves_base_and_adds_sorted_extras():
+    rows = [
+        {"timestamp": 1, "symbol": "AAAUSDT", "event_flags": "HIGH_SLIPPAGE", "tp": 11.0},
+        {"timestamp": 2, "symbol": "AAAUSDT", "entry": 10.1, "s1": 9.8, "spread_pct": 0.12},
+        {"timestamp": 3, "symbol": "AAAUSDT", "liquidity_score": 0.7, "volatility_score": 0.3},
+    ]
+
+    base = ["timestamp", "symbol"]
+    fieldnames = bo.resolve_csv_fieldnames(rows, base)
+
+    assert fieldnames[:2] == base
+    assert fieldnames[2:] == sorted(["event_flags", "tp", "entry", "s1", "spread_pct", "liquidity_score", "volatility_score"])
+
+
 def test_entry_zone_waits_and_triggers():
     c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 12, 2, "BACKTEST", "R", "X", 1, "LIMIT")
     candles = [bo.Candle(1, 11, 11, 10.5, 11, 1), bo.Candle(2, 10, 10.2, 9.8, 10.1, 1), bo.Candle(3, 10, 12.5, 9.9, 12, 1)]

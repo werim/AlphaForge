@@ -88,6 +88,13 @@
 - **Known critical risks:** exchange-side active remediation remains limited; qualification snapshots rely on operator-provided observability signals.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY by default**; LIVE allowed only when all gates pass and operator acknowledgement is explicit.
 
+## Generation 6 Status (2026-05-17)
+- **Generation:** 6 — Backtest CSV schema-drift hardening.
+- **Runtime maturity:** improved export robustness under evolving lifecycle/decision/execution row schemas.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged decision logic; export contract now safer against additive row fields in BACKTEST outputs.
+- **Lifecycle coverage:** unchanged lifecycle semantics; lifecycle/export visibility improved by preventing schema-mismatch export aborts.
+- **Execution realism coverage:** unchanged calculations; execution-context fields are now reliably exportable when present.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
 
 ## Generation 6 Status (2026-05-17)
 - **Generation:** 6 — Exchange-Reconciled Live Control Plane (deterministic supervision layer).

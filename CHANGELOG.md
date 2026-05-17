@@ -83,6 +83,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - Reconciliation checks currently consume deterministic snapshots and do not yet issue active exchange remediation actions.
 
+## Generation 6 - CSV Export Schema Drift Hardening (2026-05-17)
+### Added
+- `resolve_csv_fieldnames(rows, preferred_fieldnames)` helper in `backtest_order.py` to build deterministic union CSV schemas.
+- Regression test for base-column preservation + alphabetically appended discovered columns.
+### Changed
+- Row-list CSV export path now derives headers from all rows (preferred base columns first, extra discovered keys appended alphabetically).
+### Fixed
+- Resolved backtest CSV export failure: `ValueError: dict contains fields not in fieldnames` when later rows include keys missing from the first row.
+### Known Issues
+- Downstream consumers with rigid CSV header expectations may need to tolerate additive columns.
 
 ## Generation 6 - Exchange-Reconciled Live Control Plane (2026-05-17)
 ### Added
