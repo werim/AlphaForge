@@ -261,3 +261,35 @@
 
 ### Push recommendation
 - Merge for safety hardening in research/staging environments; do not claim production LIVE readiness until reconciliation telemetry and remediation automation are integrated.
+
+## Generation 6 — CSV Export Schema-Drift Hardening (2026-05-17)
+
+### Why the change was needed
+- `python3 backtest_order.py --top-n 50` failed during CSV export with `ValueError: dict contains fields not in fieldnames` because row dictionaries now carry richer lifecycle/market/decision fields (for example `event_flags`, `tp`, `entry`, `s1`, `liquidity_score`, `volatility_score`, `expected_slippage_pct`, `spread_pct`) that were not guaranteed to exist in the first row used to seed CSV headers.
+
+### Exact behavior changed
+- `backtest_order.py`
+  - Added `resolve_csv_fieldnames(rows, preferred_fieldnames)` to build a deterministic union schema for CSV export.
+  - Exporters that write row lists now compute fieldnames from:
+    1) preferred/base order from existing first-row keys,
+    2) plus all additional keys discovered across all rows, appended in alphabetical order.
+  - Empty row list behavior remains safe (`""` written, no crash), and unknown fields are no longer dropped or ignored.
+- `tests/test_backtest_order_scanner.py`
+  - Added regression coverage for `resolve_csv_fieldnames` ordering and union behavior.
+
+### Expected runtime/backtest impact
+- Backtest CSV exports are resilient to schema drift introduced by new lifecycle/decision/execution fields.
+- Backtest runs no longer fail when later rows include fields absent from the first row.
+- Export outputs preserve lifecycle and reject observability without silently discarding data.
+
+### Compatibility risks
+- CSV files may include additional columns compared to prior runs when new row keys exist; downstream strict column-order consumers should tolerate appended columns.
+
+### Migration concerns
+- No DB migration required.
+- CSV consumers that hardcode exact schemas may need to allow additive columns.
+
+### Contract/lifecycle/persistence semantics
+- Decision contract changed: **No** (field values/meaning unchanged; only export schema resolution changed).
+- Lifecycle schema changed: **No** (no lifecycle state/field removal).
+- Persistence semantics changed: **No** for DB writes; CSV export semantics strengthened to preserve complete row keys.

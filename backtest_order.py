@@ -20,6 +20,21 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from urllib.parse import urlencode
 from urllib.request import urlopen
+
+
+def resolve_csv_fieldnames(rows: List[Mapping[str, Any]], preferred_fieldnames: List[str]) -> List[str]:
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for name in preferred_fieldnames:
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+
+    extra_keys = sorted({key for row in rows for key in row.keys() if key not in seen})
+    ordered.extend(extra_keys)
+    return ordered
+
+
 @dataclass
 class Candle:
     timestamp: int
@@ -1495,7 +1510,9 @@ def main():
             if not rows:
                 f.write("")
                 continue
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            preferred_fieldnames = list(rows[0].keys())
+            fieldnames = resolve_csv_fieldnames(rows, preferred_fieldnames)
+            w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows(rows)
     summary = {
