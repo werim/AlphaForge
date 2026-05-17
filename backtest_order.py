@@ -1529,6 +1529,7 @@ def main():
         "performance_by_setup_type": {},
         "rejection_counts": json.dumps(rejection_counts, sort_keys=True),
         "cancel_counts": {},
+        "event_flags":{},
     }
     with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))
