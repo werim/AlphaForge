@@ -200,3 +200,64 @@
 ### 10) Architectural risk assessment
 - Patch is surgical and contained to contracts/runtime/persistence/test/docs without introducing duplicate packages or replacing core architecture.
 - Risk is moderate-low for existing flow; main integration risk is consumer adaptation to extended lifecycle vocabulary.
+
+
+## Generation 5 — Live Readiness Qualification & Controlled Enablement (2026-05-17)
+
+### Why the patch was needed
+- LIVE path existed but lacked deterministic, persisted pre-deployment qualification and explicit operator-controlled enablement gates.
+
+### Root cause
+- Prior runtime safety logic protected per-trade flow but did not provide a holistic deployment qualification barrier across lifecycle integrity, persistence integrity, reconciliation confidence, and operational rollback observability.
+
+### Files changed
+- `src/alphaforge/live_readiness.py`
+- `src/alphaforge/runtime.py`
+- `tests/test_live_readiness.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added deterministic LIVE readiness evaluation with fail-closed gating.
+- LIVE startup now requires: qualification pass, shadow-mode enabled, canary enabled, and explicit operator acknowledgement.
+- Qualification status is persisted (`live_readiness_reports`) and logged for deployment-state visibility.
+
+### Lifecycle changes
+- No lifecycle schema rewrite; added lifecycle integrity checks for orphan states, illegal transitions, missing reject reasons, and missing exit completion after entry trigger.
+
+### Persistence changes
+- Added compatibility-safe table `live_readiness_reports` for audit persistence of qualification reports.
+- Added forensic snapshot export utility (`qualification_snapshot_<timestamp>.json`) for incident rollback diagnostics.
+
+### Export/schema changes
+- Additive schema only (`live_readiness_reports`), no destructive migration behavior.
+
+### Reconciliation guarantees
+- Qualification enforces zero orphan positions/orders and zero duplicate fills in provided reconciliation snapshot inputs before LIVE enablement.
+
+### Shadow/canary controlled workflow
+- LIVE remains blocked unless shadow-mode and canary flags are enabled, and operator acknowledgement is explicit.
+
+### Tests added
+- `test_live_readiness_pass_and_persistence`
+- `test_live_readiness_detects_lifecycle_orphan`
+- `test_runtime_live_mode_blocked_without_acknowledgement`
+- `test_forensic_snapshot_written`
+
+### Tests executed
+- `pytest -q tests/test_live_readiness.py tests/test_runtime.py` -> 12 passed
+
+### Compatibility / migration concerns
+- New table is additive and lazily created by evaluator persistence call.
+- Existing runtime entrypoints preserved; LIVE mode now requires explicit readiness inputs, which may require operator config updates.
+
+### Remaining LIVE deployment risks
+- Reconciliation snapshot inputs are currently static defaults inside orchestrator and should be wired to real exchange/account telemetry before any production usage.
+- Alert coverage checks currently validate declared readiness flags, not external alert transport health.
+
+### Rollback limitations
+- Qualification snapshots aid forensics but do not automate execution rollback actions.
+
+### Push recommendation
+- Merge for safety hardening in research/staging environments; do not claim production LIVE readiness until reconciliation telemetry and remediation automation are integrated.

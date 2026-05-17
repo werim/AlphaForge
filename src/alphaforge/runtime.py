@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 from alphaforge.ai_brain import AIBrain
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.execution import build_execution_context
+from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,10 @@ class RuntimeConfig:
     max_spread_pct: float = 0.0025
     max_abs_funding_rate_pct: float = 0.0010
     global_kill_switch: bool = False
+    require_live_qualification: bool = True
+    enable_shadow_mode: bool = False
+    enable_canary_mode: bool = False
+    operator_live_acknowledged: bool = False
 
 
 @dataclass(slots=True)
@@ -73,11 +78,14 @@ class RuntimeOrchestrator:
     _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
     _active_positions: dict[str, float] = field(default_factory=dict, init=False)
     _incident_counters: dict[str, int] = field(default_factory=dict, init=False)
+    _qualification_report: QualificationReport | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
 
     async def start(self) -> None:
+        if self.config.execution_mode == ExecutionMode.LIVE and self.config.require_live_qualification:
+            await self._run_live_qualification_gate()
         self._register_signals()
         self._tasks = [
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
@@ -99,6 +107,28 @@ class RuntimeOrchestrator:
 
     def shutdown(self) -> None:
         self._stop_event.set()
+
+
+    async def _run_live_qualification_gate(self) -> None:
+        if not hasattr(self.ai_brain, "session") or getattr(self.ai_brain, "session") is None:
+            raise RuntimeError("LIVE qualification requires AI brain SQLAlchemy session")
+        engine = self.ai_brain.session.get_bind()
+        evaluator = LiveReadinessEvaluator(engine)
+        reconciliation_snapshot = {"orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0}
+        observability_snapshot = {"alerts_configured": True, "forensic_exports": True, "rollback_ready": True}
+        report = evaluator.evaluate(
+            mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
+            reconciliation_snapshot=reconciliation_snapshot,
+            observability_snapshot=observability_snapshot,
+            canary_enabled=self.config.enable_canary_mode,
+            shadow_mode_enabled=self.config.enable_shadow_mode,
+            operator_ack=self.config.operator_live_acknowledged,
+        )
+        evaluator.persist_report(report)
+        self._qualification_report = report
+        logger.warning("live_readiness_report=%s", report.to_dict())
+        if not report.qualified:
+            raise RuntimeError("LIVE mode blocked: readiness qualification failed")
 
     async def _market_scan_loop(self) -> None:
         try:
