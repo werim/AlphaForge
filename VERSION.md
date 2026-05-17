@@ -124,3 +124,12 @@
 - `SYMBOL_REJECTED` lifecycle rows are persisted as rejected decisions.
 - Backtest summary accounting now uses per-signal terminal decisions and counts orders from `ORDER_PLACED` events only.
 - Live readiness verdict remains unchanged: **NOT LIVE-READY**.
+
+## Generation 8 Status (2026-05-17)
+- **Generation:** 8 — Setup Quality Diagnostics & Gate Traceability.
+- **Runtime maturity:** improved observability for candidate setup quality and gate-failure provenance.
+- **BACKTEST/PAPER/LIVE alignment:** reject gate logic remains shared; diagnostics now expose first/all failed gates for better parity debugging.
+- **Lifecycle coverage:** unchanged lifecycle transitions; export-level diagnostic completeness improved for rejected and accepted candidate rows.
+- **Execution realism coverage:** improved measurement/reporting (effective-vs-raw RR percentiles and context-driven rejection slicing).
+- **Known critical risks:** setup generation remains heuristic/breakout-biased; diagnostics illuminate but do not yet remediate structural setup weakness.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
