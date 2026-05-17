@@ -118,3 +118,9 @@
 - **Lifecycle coverage:** unchanged lifecycle semantics; safer operator guidance reduces accidental LIVE misuse.
 - **Execution realism coverage:** env template now includes explicit spread/slippage/liquidity/effective-RR gate controls.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY by default** (explicitly enforced by default env posture).
+
+## 2026-05-17 Audit Update (Backtest lifecycle accounting)
+- Backtest lifecycle decision labeling no longer classifies `SIGNAL_CREATED` as accepted; it is persisted as `PENDING` until a terminal outcome exists.
+- `SYMBOL_REJECTED` lifecycle rows are persisted as rejected decisions.
+- Backtest summary accounting now uses per-signal terminal decisions and counts orders from `ORDER_PLACED` events only.
+- Live readiness verdict remains unchanged: **NOT LIVE-READY**.
