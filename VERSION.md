@@ -104,3 +104,11 @@
 - **Execution realism coverage:** detection for orphan orders/positions, stale orders, and lifecycle divergence with deterministic repair recommendations.
 - **Known critical risks:** exchange snapshot source currently uses adapter-provided/persisted runtime state; full venue-native fill lineage ingestion remains a Gen7 blocker.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** without production exchange telemetry wiring, operator repair approvals, and extended soak validation.
+
+## Generation 7 Status (2026-05-17)
+- **Generation:** 7 — Production-grade Environment Template & Safety Defaults.
+- **Runtime maturity:** operational configuration posture improved; no core execution-flow rewrite.
+- **BACKTEST/PAPER/LIVE alignment:** documentation and env mode controls now explicitly separated with conservative defaults.
+- **Lifecycle coverage:** unchanged lifecycle semantics; safer operator guidance reduces accidental LIVE misuse.
+- **Execution realism coverage:** env template now includes explicit spread/slippage/liquidity/effective-RR gate controls.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY by default** (explicitly enforced by default env posture).

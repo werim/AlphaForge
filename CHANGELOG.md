@@ -104,3 +104,13 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Runtime orchestration now tracks pending orders and emits reconciliation lifecycle repair events from deterministic findings.
 ### Known Issues
 - Exchange/account snapshots are currently runtime-fed abstractions and require deeper live adapter telemetry lineage for full venue-truth supervision.
+
+## Generation 7 - Production-grade Environment Template & Safety Configuration (2026-05-17)
+### Added
+- Rebuilt `.env.example` as a grouped, execution-aware template with conservative safety defaults and inline operational comments.
+- Added explicit mode-separation variables for BACKTEST/PAPER/LIVE, plus live-readiness, reconciliation, reject-quality, and execution-risk controls.
+- Added placeholders for Binance/Hyperliquid/API/notifications/redis/queue integrations expected by the runtime architecture roadmap.
+### Changed
+- README now documents safe `.env` bootstrap, mode switching, and live-trading risk warnings.
+### Known Issues
+- Some template variables are forward-compatible operational toggles and are not yet wired by direct `os.getenv` reads in current modules.
