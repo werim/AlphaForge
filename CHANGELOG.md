@@ -135,3 +135,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Added
 - Regression tests for symbol-level reject decision integrity and per-signal terminal decision deduplication in backtest summary accounting.
+
+## [Unreleased] - 2026-05-17 (Setup quality diagnostics)
+
+### Added
+- Rejected/accepted candidate export diagnostics: `raw_rr`, `effective_rr`, `min_required_score`, `trend_strength`, `volatility_pct`, `range_position`, `slippage_pct`, `first_blocking_gate`, `all_failed_gates`.
+- Quality summary percentiles for score/raw RR/effective RR and slice distributions by setup type/regime reject reason.
+- Near-threshold LOW_SCORE rejection counter for calibration analysis.
+
+### Changed
+- Trade-quality diagnostics now record `all_failed_gates` in addition to first blocking gate.
+
+### Known Issues
+- Setup generation heuristics remain simplistic and may still overproduce weak breakout-style candidates in choppy regimes.

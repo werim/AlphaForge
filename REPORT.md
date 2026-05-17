@@ -469,3 +469,53 @@
 
 ### Tests executed
 - `pytest -q tests/test_backtest_order_scanner.py -k "lifecycle_export_reads_persisted_sql_events or symbol_rejected_rows_are_persisted_as_rejected_decision or derive_backtest_counts_uses_terminal_per_signal_and_order_placed_only or signal_id_cannot_end_with_both_terminal_accepted_and_rejected"`
+
+## Generation 8 - Setup Quality Diagnostics & Gate Traceability (2026-05-17)
+
+### Why this patch was needed
+- Backtest showed 100% rejection with LOW_SCORE dominance, but exported candidate/rejection rows did not expose enough setup-level diagnostics to distinguish threshold strictness from weak setup construction.
+- Quality summary lacked percentile-style distribution and cross-slices (reason by setup/regime) required for structural root-cause analysis.
+
+### Root-cause findings from code audit
+- Setup generation is currently heuristic and single-pattern biased in backtest (`_build_market_ctx`): fixed `setup_type=BREAKOUT_UP`, `side=LONG`, simple `entry/sl/tp` from current/previous candle, and synthetic `rr`/`score` formulas. This can create structurally weak candidates in chop/range periods.
+- Symbol regime/chop filtering is upstream and can reject before order flow (`select_symbol`), yielding large `TOO_CHOPPY` counts that never become executable-quality setups.
+- Runtime/PAPER and BACKTEST share the same order quality gate implementation (`evaluate_trade_quality`), so LOW_SCORE pressure can propagate across modes when setup quality is poor.
+- BACKTEST uses estimated/derived context fields when unavailable, while runtime can have richer live microstructure fields; this context gap can alter effective quality and execution penalties.
+
+### Exact code locations (trace map)
+- Setup generation (candles -> market context): `backtest_order.py::_build_market_ctx`, `backtest_order.py::_build_symbol_market_data`.
+- Candidate materialization: `src/alphaforge/order.py::build_order_candidate`.
+- Score/reject gate: `src/alphaforge/order.py::evaluate_trade_quality`.
+- Regime/chop prefilter: `src/alphaforge/symbol_selector.py::select_symbol`.
+- Effective RR / execution penalties: `backtest_order.py::_execution_reject_flags`, `src/alphaforge/execution.py::build_execution_context`.
+- Backtest lifecycle->candidate/rejected export path: `backtest_order.py::process_backtest_result` and CSV write section in `main()`.
+
+### Behavior changed in this patch
+- Rejected candidate export rows now include setup-quality diagnostics fields: `raw_rr`, `effective_rr`, `min_required_score`, `trend_strength`, `volatility_pct`, `range_position`, `slippage_pct`, `first_blocking_gate`, `all_failed_gates`.
+- Accepted candidate export rows now include the same diagnostic schema columns (empty/default where not applicable) to keep CSV contracts aligned for analysis tooling.
+- Trade-quality diagnostics now compute `all_failed_gates` in addition to the first blocking gate to support full gate-failure visibility.
+- Backtest quality summary now includes:
+  - score percentiles (p10/p25/p50/p75/p90)
+  - raw RR percentiles
+  - effective RR percentiles
+  - rejection reason by setup type
+  - rejection reason by regime
+  - near-threshold low-score rejection count
+
+### Runtime impact
+- No threshold loosening was introduced.
+- No architecture rewrite; patch is additive diagnostics and analysis-safety focused.
+- Runtime/PAPER decision behavior is unchanged except richer diagnostics payload keys.
+
+### Tests executed
+- `pytest -q tests/test_backtest_order_scanner.py::test_process_backtest_result_writes_rejection_rows_and_skips_sim tests/test_backtest_order_scanner.py::test_backtest_quality_summary_includes_effective_rr_distribution tests/test_symbol_selector.py`
+
+### Remaining risks
+- Setup generation logic remains simplistic and breakout-biased; diagnostics now expose the issue but do not yet redesign setup construction.
+- Backtest context still contains estimated fields when venue-native data is unavailable.
+
+### Minimal safe next patch plan
+1. Add bounded pre-candidate setup validation (trend/range edge + structure confidence) before scoring.
+2. Add multi-setup generator variants (trend continuation / range mean reversion) with explicit regime binding.
+3. Add regression tests for setup-type diversity and RR realism under choppy inputs.
+4. Keep thresholds unchanged until post-diagnostic distributions confirm setup-quality uplift.

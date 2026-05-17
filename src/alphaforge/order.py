@@ -194,6 +194,26 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     min_trade_score = float(cfg["MIN_TRADE_SCORE"])
     score_eval = score if min_trade_score <= 1.0 else (score * 10.0 if 0.0 <= score < 1.0 else score)
     pattern_flags = [str(f).upper() for f in (market_ctx.get("pattern_flags", []) or [])]
+    all_failed_gates: list[str] = []
+    def _check(cond: bool, gate: str) -> bool:
+        if not cond:
+            all_failed_gates.append(gate)
+            return False
+        return True
+
+    _check(score_eval >= min_trade_score, "score")
+    _check(rr >= float(cfg["MIN_RR"]), "rr")
+    _check((not cfg["BLOCK_UNKNOWN_EXPECTANCY"]) or expectancy_val is not None, "expectancy_present")
+    _check(expectancy_val is None or expectancy_val >= float(cfg["MIN_EXPECTANCY"]), "expectancy_non_negative")
+    _check((not cfg["BLOCK_CHOP_MARKET"]) or (not any("CHOP" in f for f in pattern_flags)), "pattern_flags")
+    _check((not cfg["REQUIRE_REGIME_ALIGNMENT"]) or regime_ok, "regime")
+    _check(sl_pct >= float(cfg["MIN_SL_PCT"]), "min_sl")
+    _check(sl_pct <= float(cfg["MAX_SL_PCT"]), "max_sl")
+    _check(spread_pct <= float(cfg["MAX_SPREAD_PCT"]), "spread")
+    _check(expected_slippage_pct <= float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]), "slippage")
+    _check(atr_pct is None or atr_pct >= float(cfg["MIN_ATR_PCT"]), "min_atr")
+    _check(atr_pct is None or atr_pct <= float(cfg["MAX_ATR_PCT"]), "max_atr")
+
     # compute quality score first
     score_comp = max(0.0, min(1.0, score_eval / min_trade_score)) * 25
     exp_comp = 0.0 if expectancy_val is None else max(0.0, min(1.0, (expectancy_val - float(cfg["MIN_EXPECTANCY"])) / 0.5)) * 25
@@ -250,7 +270,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             reject_reason, failed_filter = "SYMBOL_LOSS_STREAK_BLOCK", "symbol_block"
         elif int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
             reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
-    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive}
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates}
     return TradeQualityDecision(accepted=(reject_reason == ""), reject_reason=reject_reason, quality_score=quality_score, diagnostics=diagnostics)
 
 

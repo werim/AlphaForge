@@ -878,6 +878,17 @@ def process_backtest_result(
                 "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")),
                 "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "raw_rr": rr,
+                "effective_rr": diagnostics.get("effective_rr", rr),
+                "min_required_score": ((diagnostics.get("adaptive_thresholds") or {}).get("min_score") if isinstance(diagnostics, dict) else None),
+                "trend_strength": mctx.get("trend_strength", "UNAVAILABLE_BACKTEST"),
+                "volatility_pct": mctx.get("volatility_pct", "UNAVAILABLE_BACKTEST"),
+                "range_position": mctx.get("range_position", "UNAVAILABLE_BACKTEST"),
+                "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+                "slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+                "first_blocking_gate": diagnostics.get("failed_filter", ""),
+                "all_failed_gates": json.dumps(diagnostics.get("all_failed_gates", []), sort_keys=True) if isinstance(diagnostics, dict) else "[]",
             }
         )
         return None
@@ -954,6 +965,15 @@ def process_backtest_result(
                 "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")),
                 "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "raw_rr": cand.rr,
+                "effective_rr": effective_rr,
+                "min_required_score": ((diagnostics.get("adaptive_thresholds") or {}).get("min_score") if isinstance(diagnostics, dict) else None),
+                "trend_strength": mctx.get("trend_strength", "UNAVAILABLE_BACKTEST"),
+                "volatility_pct": mctx.get("volatility_pct", "UNAVAILABLE_BACKTEST"),
+                "range_position": mctx.get("range_position", "UNAVAILABLE_BACKTEST"),
+                "slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "first_blocking_gate": "execution",
+                "all_failed_gates": json.dumps(execution_flags, sort_keys=True),
             }
         )
         return None
@@ -1059,6 +1079,25 @@ def _distribution(values: List[Any]) -> Dict[str, int]:
     return dict(sorted(out.items(), key=lambda item: item[0]))
 
 
+
+
+def _percentiles(values: List[float], points: List[int]) -> Dict[str, float]:
+    if not values:
+        return {f"p{pt}": 0.0 for pt in points}
+    vals = sorted(float(v) for v in values)
+    n = len(vals)
+    out: Dict[str, float] = {}
+    for pt in points:
+        if n == 1:
+            out[f"p{pt}"] = round(vals[0], 6)
+            continue
+        rank = (pt / 100.0) * (n - 1)
+        lo = int(rank)
+        hi = min(lo + 1, n - 1)
+        w = rank - lo
+        out[f"p{pt}"] = round(vals[lo] * (1.0 - w) + vals[hi] * w, 6)
+    return out
+
 def _value_unavailable(value: Any) -> bool:
     return value is None or value == "" or value == "UNAVAILABLE_BACKTEST"
 
@@ -1101,6 +1140,14 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         if "latency_ms" in ctx and _value_unavailable(ctx.get("latency_ms")):
             unavailable_counts["latency_ms"] += 1
 
+    score_vals = [_safe_float(r.get("score"), 0.0) for r in rows]
+    raw_rr_vals = [_safe_float(r.get("rr"), 0.0) for r in rows]
+    effective_rr_vals = [_safe_float(r.get("effective_rr"), 0.0) for r in rows]
+    near_threshold = [
+        r for r in rejected_rows
+        if str(r.get("reject_reason", "")).upper() == "LOW_SCORE" and abs(_safe_float(r.get("score"), 0.0) - 7.5) <= 0.5
+    ]
+
     return {
         "total_candidates": total,
         "accepted_count": len(accepted_rows),
@@ -1117,6 +1164,12 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
             "false": total - execution_ctx_missing_true,
         },
         "unavailable_execution_context_field_counts": unavailable_counts,
+        "score_percentiles": _percentiles(score_vals, [10, 25, 50, 75, 90]),
+        "raw_rr_percentiles": _percentiles(raw_rr_vals, [10, 25, 50, 75, 90]),
+        "effective_rr_percentiles": _percentiles(effective_rr_vals, [10, 25, 50, 75, 90]),
+        "rejection_reason_by_setup_type": _distribution([f"{r.get('setup_type','UNKNOWN')}::{r.get('reject_reason','UNKNOWN')}" for r in rejected_rows]),
+        "rejection_reason_by_regime": _distribution([f"{r.get('regime','UNKNOWN')}::{r.get('reject_reason','UNKNOWN')}" for r in rejected_rows]),
+        "acceptance_candidates_near_threshold_count": len(near_threshold),
     }
 
 
@@ -1517,7 +1570,7 @@ def main():
                 expected_slippage_pct=0.001,
             )
         )
-    candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]
+    candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": "", "raw_rr": x.rr, "effective_rr": x.rr, "min_required_score": "", "trend_strength": "", "volatility_pct": "", "range_position": "", "spread_pct": "", "slippage_pct": "", "liquidity_score": "", "first_blocking_gate": "", "all_failed_gates": "[]"} for x in candidates]
     rejected_shadow: List[RejectedShadowEvaluation] = []
     for row in rejected:
         if not _is_actionable_rejected_order(row):
