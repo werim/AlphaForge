@@ -14,6 +14,7 @@ from alphaforge.ai_brain import AIBrain
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
+from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ class RuntimeConfig:
     enable_shadow_mode: bool = False
     enable_canary_mode: bool = False
     operator_live_acknowledged: bool = False
+    reconciliation_interval_sec: float = 5.0
+    reconciliation_timeout_sec: float = 2.0
 
 
 @dataclass(slots=True)
@@ -59,6 +62,8 @@ class RuntimeMetrics:
     executions: int = 0
     lifecycle_events: int = 0
     last_heartbeat_ts: float = 0.0
+    reconciliation_runs: int = 0
+    reconciliation_fail_closed: int = 0
 
 
 @dataclass(slots=True)
@@ -79,6 +84,9 @@ class RuntimeOrchestrator:
     _active_positions: dict[str, float] = field(default_factory=dict, init=False)
     _incident_counters: dict[str, int] = field(default_factory=dict, init=False)
     _qualification_report: QualificationReport | None = field(default=None, init=False)
+    _reconciliation_engine: ReconciliationEngine = field(default_factory=ReconciliationEngine, init=False)
+    _pending_orders: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
+    _last_repair_signature: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
@@ -90,6 +98,7 @@ class RuntimeOrchestrator:
         self._tasks = [
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
             asyncio.create_task(self._heartbeat_loop(), name="metrics_heartbeat"),
+            asyncio.create_task(self._reconciliation_loop(), name="reconciliation_loop"),
         ]
         for task in self._tasks:
             task.add_done_callback(self._on_task_done)
@@ -205,6 +214,8 @@ class RuntimeOrchestrator:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
         self.metrics.executions += 1
+        order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
+        self._pending_orders[symbol] = {"order_id": order_id, "symbol": symbol, "status": result.get("status", "UNKNOWN"), "created_at": canonical_utc_timestamp()}
         await self._emit_lifecycle_event(LifecycleEventType.ENTRY_ACKNOWLEDGED.value, symbol, {"decision": decision, "result": dict(result)})
         result_status = str(result.get("status", "")).lower()
         if result_status == "partial_fill":
@@ -305,6 +316,57 @@ class RuntimeOrchestrator:
                 await asyncio.sleep(self.config.heartbeat_interval_sec)
         except asyncio.CancelledError:
             raise
+
+    async def _reconciliation_loop(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                started = time.time()
+                await self._run_reconciliation_once()
+                elapsed = time.time() - started
+                await asyncio.sleep(max(0.0, self.config.reconciliation_interval_sec - elapsed))
+        except asyncio.CancelledError:
+            raise
+
+    async def _run_reconciliation_once(self) -> None:
+        self.metrics.reconciliation_runs += 1
+        try:
+            await asyncio.wait_for(self._reconcile_runtime_state(), timeout=self.config.reconciliation_timeout_sec)
+        except asyncio.TimeoutError:
+            await self._record_incident("GLOBAL", LifecycleEventType.RECONCILIATION_REPAIR.value, "reconciliation_timeout")
+            self.metrics.reconciliation_fail_closed += 1
+            self.shutdown()
+
+    async def _reconcile_runtime_state(self) -> None:
+        snapshot_source = {
+            "orders": list(self._pending_orders.values()),
+            "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()],
+            "fills": [],
+        }
+        snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
+        findings, recommendations, _metrics = self._reconciliation_engine.reconcile(
+            intended_orders=list(self._pending_orders.values()),
+            lifecycle_state_by_symbol=self._last_lifecycle_state_by_symbol,
+            snapshot=snapshot,
+            mode=self.config.execution_mode.value,
+        )
+        if hasattr(self.ai_brain, "session") and getattr(self.ai_brain, "session") is not None:
+            engine = self.ai_brain.session.get_bind()
+            persist_findings(engine, findings)
+        for finding in findings:
+            signature = f"{finding.finding_type}:{finding.symbol}:{finding.lifecycle_ref}"
+            if signature in self._last_repair_signature:
+                continue
+            self._last_repair_signature.add(signature)
+            await self._emit_lifecycle_event(
+                LifecycleEventType.RECONCILIATION_REPAIR.value,
+                finding.symbol,
+                {"reason": finding.finding_type, "incident_payload": finding.evidence},
+            )
+            if finding.fail_closed:
+                self.metrics.reconciliation_fail_closed += 1
+                self.shutdown()
+        if recommendations:
+            logger.warning("reconciliation_repair_recommendations=%s", [r.category for r in recommendations])
 
     async def _shutdown_tasks(self) -> None:
         for task in self._tasks:
