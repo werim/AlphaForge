@@ -133,3 +133,10 @@
 - **Execution realism coverage:** improved measurement/reporting (effective-vs-raw RR percentiles and context-driven rejection slicing).
 - **Known critical risks:** setup generation remains heuristic/breakout-biased; diagnostics illuminate but do not yet remediate structural setup weakness.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
+
+## 2026-05-17 Hotfix Status (Regime gate initialization)
+- Trade-quality regime gate now initializes deterministically before first use across shared decision flow.
+- BACKTEST/PAPER/LIVE contract alignment unchanged; fix removes crash-only divergence in candidate evaluation.
+- Lifecycle coverage unchanged.
+- Persistence semantics unchanged.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.

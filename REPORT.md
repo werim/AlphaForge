@@ -1,5 +1,35 @@
 # AlphaForge Phase 2/3 Lifecycle Export + Contract Parity Patch Report
 
+## Hotfix — `regime_ok` UnboundLocalError deterministic gate repair (2026-05-17)
+
+### Why this change was needed
+- Post-merge CI failures (`UnboundLocalError`) showed `regime_ok` was read by the gate collector before initialization in trade quality evaluation, crashing shared decision paths.
+
+### Exact behavior changed
+- `src/alphaforge/order.py`
+  - Moved regime-compatibility derivation (`regime_ok`) before gate checks so all branches initialize deterministically before use.
+  - Preserved regime semantics: setup/regime compatibility still drives `REGIME_MISMATCH` when required and incompatible.
+- `tests/test_trade_quality.py`
+  - Added regressions to prove missing candidate regime (`None`) does not crash.
+  - Added regressions confirming missing candidate regime falls back to market regime and still rejects incompatible regimes with `REGIME_MISMATCH`.
+
+### Expected BACKTEST / PAPER / LIVE impact
+- Shared quality gate path no longer crashes on candidate regime-null cases.
+- Reject determinism is preserved across modes because the same `evaluate_trade_quality(...)` gate order still applies.
+- No live endpoint behavior was introduced in BACKTEST; mode routing remains unchanged by this fix.
+
+### Compatibility risks
+- Low risk; no schema/API field removals and no threshold value changes.
+- Gate outcomes remain equivalent except crash cases now resolve to normal accept/reject decisions.
+
+### Migration concerns
+- None. No DB migration required.
+
+### Contract / lifecycle / persistence impact
+- Decision contract: unchanged required fields; fixed runtime safety (no unbound local crash).
+- Lifecycle schema: unchanged.
+- Persistence semantics: unchanged.
+
 ## Why this patch was needed
 - Backtest lifecycle export was list/dataclass-driven and not proven against persisted SQL lifecycle events.
 - BACKTEST/PAPER contract parity coverage relied on a handcrafted dict key check.
