@@ -106,6 +106,12 @@
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** without production exchange telemetry wiring, operator repair approvals, and extended soak validation.
 
 ## Generation 7 Status (2026-05-17)
+- **Generation:** 7 — Runtime Bootstrap Entrypoint & Safe Startup Loop.
+- **Runtime maturity:** module-level runtime is now directly executable with async bootstrap and graceful shutdown path.
+- **BACKTEST/PAPER/LIVE alignment:** shared orchestrator path preserved; mode parsing now env-driven at runtime bootstrap.
+- **Lifecycle coverage:** unchanged lifecycle semantics; runtime liveness now ensures lifecycle emission loops can run continuously once scanner/feed is provided.
+- **Execution realism coverage:** unchanged decision economics; RR wiring confirmed to preserve dynamic upstream RR when provided, with 2.0 fallback only for missing/invalid input.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged; bootstrap does not alter readiness gate requirements).
 - **Generation:** 7 — Production-grade Environment Template & Safety Defaults.
 - **Runtime maturity:** operational configuration posture improved; no core execution-flow rewrite.
 - **BACKTEST/PAPER/LIVE alignment:** documentation and env mode controls now explicitly separated with conservative defaults.

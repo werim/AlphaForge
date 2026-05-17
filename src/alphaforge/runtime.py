@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import deque
+import os
 import logging
 import signal
 import time
@@ -16,6 +17,8 @@ from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
+from alphaforge.persistence import init_db
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -404,3 +407,52 @@ def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
         return ExecutionMode(mode)
     except ValueError as exc:
         raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE") from exc
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return float(raw)
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return int(raw)
+
+
+def _build_runtime_from_env() -> RuntimeOrchestrator:
+    mode = execution_mode_from_env(os.getenv("EXECUTION_MODE"))
+    database_url = os.getenv("ALPHAFORGE_DB_URL", "sqlite+pysqlite:///:memory:")
+    engine = init_db(database_url)
+    brain = AIBrain(Session(engine), min_accept_score=float(os.getenv("ALPHAFORGE_MIN_ACCEPT_SCORE", "0.62")))
+    config = RuntimeConfig(
+        execution_mode=mode,
+        scan_interval_sec=_float_env("ALPHAFORGE_SCAN_INTERVAL_SEC", 1.0),
+        heartbeat_interval_sec=_float_env("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", 30.0),
+        max_symbols_per_scan=_int_env("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", 5),
+    )
+
+    async def _safe_market_scanner() -> list[dict[str, Any]]:
+        return []
+
+    return RuntimeOrchestrator(config=config, ai_brain=brain, market_scanner=_safe_market_scanner)
+
+
+async def main() -> None:
+    logging.basicConfig(level=os.getenv("ALPHAFORGE_LOG_LEVEL", "INFO"))
+    orchestrator = _build_runtime_from_env()
+    logger.info("runtime_starting mode=%s scan_interval_sec=%.3f", orchestrator.config.execution_mode.value, orchestrator.config.scan_interval_sec)
+    try:
+        await orchestrator.start()
+    except Exception:
+        logger.exception("runtime_fatal_error")
+        raise
+    finally:
+        logger.info("runtime_shutdown mode=%s metrics=%s", orchestrator.config.execution_mode.value, orchestrator.metrics)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
