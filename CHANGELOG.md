@@ -117,3 +117,12 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Resolved immediate process exit when invoking `python -m alphaforge.runtime` by adding executable bootstrap path.
 ### Known Issues
 - Default bootstrap scanner is intentionally no-op; production feed/adapters must still be wired externally.
+## Generation 7 - Production-grade Environment Template & Safety Configuration (2026-05-17)
+### Added
+- Rebuilt `.env.example` as a grouped, execution-aware template with conservative safety defaults and inline operational comments.
+- Added explicit mode-separation variables for BACKTEST/PAPER/LIVE, plus live-readiness, reconciliation, reject-quality, and execution-risk controls.
+- Added placeholders for Binance/Hyperliquid/API/notifications/redis/queue integrations expected by the runtime architecture roadmap.
+### Changed
+- README now documents safe `.env` bootstrap, mode switching, and live-trading risk warnings.
+### Known Issues
+- Some template variables are forward-compatible operational toggles and are not yet wired by direct `os.getenv` reads in current modules.
