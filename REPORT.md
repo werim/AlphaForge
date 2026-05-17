@@ -159,3 +159,44 @@
 - Tests executed: targeted execution-layer and trade-quality suites.
 - Remaining limitations: regime/volatility/liquidity band reject calibration is still rule-based and should be tuned with market-specific data.
 - Push recommendation: safe to merge for research/backtest hardening; schedule follow-up for full band calibration framework across broader modules.
+
+## Generation 4 — Runtime Safety Controls & Reconciliation Layer (2026-05-16)
+
+### 1) Why changes were needed
+- Runtime flow had limited fail-closed controls before order submission and weak explicit handling for timeout/error/ack-loss drift scenarios.
+
+### 2) Exact runtime behaviors changed
+- Added deterministic risk-gate checks before AI order acceptance progression (kill switch, stale data, spread/funding sanity, cooldown, duplicate position, concurrency guard).
+- Accepted signal lifecycle progression now uses explicit entry submission/ack/fill semantics.
+
+### 3) Reconciliation semantics added
+- Execution timeout/error/missing-ack style outcomes emit `EXECUTION_ERROR` plus `RECONCILIATION_REPAIR` with state snapshot payload (`intended_state`, `exchange_state`, `persisted_state`).
+- Reconciliation routine is idempotent at event-level via deterministic lifecycle callbacks and existing persistence upsert strategy.
+
+### 4) Lifecycle changes introduced
+- Added extended runtime lifecycle taxonomy for entry, failure, protective, and reconciliation states.
+- Transition map updated to reject illegal transitions and keep invalid flow explicit as `ERROR`.
+
+### 5) Persistence changes introduced
+- Added additive migration columns on `trade_lifecycle_events`: `failure_reason`, `reconciliation_reason`, `incident_payload`.
+- Lifecycle write path now accepts and persists these explicit failure/reconciliation fields.
+
+### 6) Backward compatibility concerns
+- New lifecycle states may require downstream parsers/analytics allowlist updates.
+- Schema changes are additive; old readers should ignore unknown columns, but strict column selectors may need updates.
+
+### 7) Runtime safety improvements
+- Runtime now fails closed on key pre-trade hazard conditions.
+- Uncertain execution outcomes are no longer silent: they are lifecycle-persisted and incident-counted.
+
+### 8) Remaining operational risks
+- Concentration/correlation exposure gates currently rely on limited runtime context and should be tied to richer portfolio state.
+- Reconciliation currently journals and classifies but does not yet perform full venue-side corrective workflows.
+
+### 9) PAPER vs LIVE parity impact
+- PAPER and LIVE now share the same pre-trade risk gate path and failure-state lifecycle semantics in orchestrator.
+- LIVE still requires deeper adapter-side failure/retry standardization for production safety.
+
+### 10) Architectural risk assessment
+- Patch is surgical and contained to contracts/runtime/persistence/test/docs without introducing duplicate packages or replacing core architecture.
+- Risk is moderate-low for existing flow; main integration risk is consumer adaptation to extended lifecycle vocabulary.

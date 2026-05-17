@@ -71,3 +71,9 @@
 - Execution realism coverage: explicit cost penalties + context completeness classification added.
 - Known critical risks: threshold calibration by regime/volatility/liquidity bands is still conservative-default.
 - Live readiness verdict: NOT LIVE READY pending broader calibration and integration validation.
+
+## Generation 4 Status (2026-05-16)
+- **Generation:** 4 — Runtime Safety Controls & Reconciliation Layer (initial deterministic implementation).
+- **Runtime maturity:** Improved from prototype-only orchestration to guarded orchestration with fail-closed pre-trade gates and explicit execution failure lifecycles.
+- **Reconciliation readiness:** Partial; deterministic reconciliation journaling is implemented for timeout/error/missing-ack states with snapshot payloads, but active order remediation remains limited.
+- **Operational readiness notes:** PAPER safety posture improved materially; LIVE remains **not ready** pending richer exposure/correlation datasets, exchange remediation completeness, and soak testing.
