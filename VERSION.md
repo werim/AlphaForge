@@ -95,3 +95,12 @@
 - **Lifecycle coverage:** unchanged lifecycle semantics; lifecycle/export visibility improved by preventing schema-mismatch export aborts.
 - **Execution realism coverage:** unchanged calculations; execution-context fields are now reliably exportable when present.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
+
+## Generation 6 Status (2026-05-17)
+- **Generation:** 6 — Exchange-Reconciled Live Control Plane (deterministic supervision layer).
+- **Runtime maturity:** added continuous reconciliation loop with bounded interval/timeout and fail-closed escalation path.
+- **BACKTEST/PAPER/LIVE alignment:** same orchestration path can run reconciliation in PAPER/LIVE without forcing exchange calls in tests.
+- **Lifecycle coverage:** reconciliation findings now emit explicit `RECONCILIATION_REPAIR` lifecycle events with incident evidence payloads.
+- **Execution realism coverage:** detection for orphan orders/positions, stale orders, and lifecycle divergence with deterministic repair recommendations.
+- **Known critical risks:** exchange snapshot source currently uses adapter-provided/persisted runtime state; full venue-native fill lineage ingestion remains a Gen7 blocker.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** without production exchange telemetry wiring, operator repair approvals, and extended soak validation.
