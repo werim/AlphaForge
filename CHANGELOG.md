@@ -69,3 +69,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - Exposure/concentration gate inputs are presently inference-light and depend on market context quality.
 - Reconciliation currently journals snapshots but does not yet perform active exchange order amendment/cancel calls.
+
+
+## Generation 5 - Live Readiness Qualification & Controlled Enablement (2026-05-17)
+### Added
+- `src/alphaforge/live_readiness.py` deterministic qualification engine with lifecycle/persistence/runtime/statistical/operational gates.
+- Qualification report persistence table `live_readiness_reports` and forensic qualification snapshot export helper.
+- Runtime LIVE gating config flags for shadow mode, canary mode, and explicit operator acknowledgement.
+- Focused tests covering qualification pass/fail, lifecycle orphan detection, runtime live-block behavior, and forensic snapshot integrity.
+### Changed
+- `RuntimeOrchestrator.start()` now fail-closes LIVE startup when readiness qualification fails.
+- LIVE startup now logs readiness report payload for deployment-state visibility and audits.
+### Known Issues
+- Reconciliation checks currently consume deterministic snapshots and do not yet issue active exchange remediation actions.

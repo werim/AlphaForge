@@ -1,7 +1,7 @@
 # AlphaForge Version Status
 
 ## Current Version
-- **Version:** `0.3.7-dev`
+- **Version:** `0.3.8-dev`
 - **Date:** `2026-05-16`
 - **Basis:** Consolidated from current README and REPORT documentation.
 
@@ -77,3 +77,13 @@
 - **Runtime maturity:** Improved from prototype-only orchestration to guarded orchestration with fail-closed pre-trade gates and explicit execution failure lifecycles.
 - **Reconciliation readiness:** Partial; deterministic reconciliation journaling is implemented for timeout/error/missing-ack states with snapshot payloads, but active order remediation remains limited.
 - **Operational readiness notes:** PAPER safety posture improved materially; LIVE remains **not ready** pending richer exposure/correlation datasets, exchange remediation completeness, and soak testing.
+
+
+## Generation 5 Status (2026-05-17)
+- **Generation:** 5 — Live Readiness Qualification & Controlled Enablement.
+- **Runtime maturity:** deterministic LIVE qualification gate introduced with fail-closed behavior.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged decision semantics; LIVE adds explicit readiness gate before orchestration start.
+- **Lifecycle coverage:** qualification checks enforce orphan/transition/reject/exit completeness validations on persisted lifecycle rows.
+- **Execution realism coverage:** statistical sanity checks now detect constant RR/score placeholder-like behavior before LIVE enablement.
+- **Known critical risks:** exchange-side active remediation remains limited; qualification snapshots rely on operator-provided observability signals.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY by default**; LIVE allowed only when all gates pass and operator acknowledgement is explicit.
