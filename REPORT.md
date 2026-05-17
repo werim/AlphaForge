@@ -351,3 +351,44 @@
 - Wire reconciliation snapshot inputs to authoritative exchange/account endpoints with deterministic retry/backoff.
 - Persist fill lineage and cancellation lineage tables with replay IDs and duplicate-fill protection constraints.
 - Add operator acknowledgement workflow persistence for repair plans and escalation runbooks.
+
+## Generation 7 — Runtime Bootstrap Entrypoint & RR Wiring Audit (2026-05-17)
+
+### Why the patch was needed
+- `src/alphaforge/runtime.py` contained orchestration internals but no executable bootstrap path, so `python -m alphaforge.runtime` exited immediately.
+
+### Root cause
+- Missing module entrypoint (`if __name__ == "__main__": asyncio.run(main())`) and missing async runtime bootstrap that constructs `RuntimeOrchestrator` from environment configuration.
+
+### Exact missing runtime bootstrap components added
+- Added environment-driven bootstrap helpers:
+  - `execution_mode_from_env(...)` is now used by `_build_runtime_from_env()`.
+  - `_build_runtime_from_env()` initializes DB/session/`AIBrain`, parses runtime intervals from env, and wires a safe no-op async market scanner.
+- Added async `main()` that:
+  - configures logging level from env,
+  - logs deterministic startup/shutdown messages,
+  - starts orchestrator and preserves graceful shutdown via existing signal handlers in `RuntimeOrchestrator.start()`.
+- Added module launch hook: `if __name__ == "__main__": asyncio.run(main())`.
+
+### Architecture impact
+- Minimal and surgical: no new runtime package, no alternate orchestration flow, no lifecycle rewrite.
+- Existing `RuntimeOrchestrator` task loops, lifecycle emission, reject persistence, and reconciliation flow remain unchanged.
+
+### Runtime safety considerations
+- Startup is safe in environments without feeds/adapters because default bootstrap scanner is a no-op that yields no symbols.
+- BACKTEST/PAPER startup requires no exchange connectivity.
+- LIVE still remains fail-closed by existing qualification and adapter requirements.
+
+### RR fallback analysis
+- Runtime signal build path still computes `rr = float(market_ctx.get("rr", 2.0) or 2.0)`.
+- Adaptive/dynamic RR already exists upstream in selection/backtest pipelines where `market_ctx["rr"]` is supplied; runtime previously used that value when present and only fell back for missing/invalid input.
+- No evidence that runtime forces 2.0 when dynamic RR exists; added regression test to ensure provided dynamic RR is preserved in runtime signal payload.
+- This patch intentionally avoids aggressive RR derivation rewrites to preserve lifecycle/decision architecture; fallback remains a defensive null-safety path.
+
+### Tests added
+- Runtime bootstrap env parsing and initialization smoke test.
+- Runtime start loop liveness test (verifies loop remains active until explicit shutdown).
+- Dynamic RR propagation test (runtime signal risk_reward uses provided RR instead of fallback).
+
+### Tests executed
+- `pytest -q tests/test_runtime.py` -> `11 passed`

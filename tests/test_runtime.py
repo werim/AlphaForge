@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.persistence import init_db
-from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, execution_mode_from_env
+from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
 
 
 def _brain() -> AIBrain:
@@ -165,3 +165,41 @@ def test_reconciliation_event_on_timeout_like_execution_state() -> None:
     )
     asyncio.run(orchestrator._scan_once())
     assert any(evt["lifecycle_event_type"] == "RECONCILIATION_REPAIR" for evt in events)
+
+
+def test_runtime_module_bootstrap_builds_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ALPHAFORGE_SCAN_INTERVAL_SEC", "0.01")
+    monkeypatch.setenv("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", "0.02")
+    rt = _build_runtime_from_env()
+    assert rt.config.execution_mode == ExecutionMode.PAPER
+    assert rt.config.scan_interval_sec == pytest.approx(0.01)
+    assert rt.config.heartbeat_interval_sec == pytest.approx(0.02)
+
+
+def test_runtime_start_loop_does_not_exit_until_shutdown() -> None:
+    async def scanner() -> list[dict]:
+        await asyncio.sleep(0)
+        return []
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST, scan_interval_sec=0.01, heartbeat_interval_sec=0.01),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+    )
+
+    async def _run() -> bool:
+        task = asyncio.create_task(orchestrator.start())
+        await asyncio.sleep(0.03)
+        still_running = not task.done()
+        orchestrator.shutdown()
+        await asyncio.wait_for(task, timeout=1)
+        return still_running
+
+    assert asyncio.run(_run())
+
+
+def test_runtime_signal_uses_dynamic_rr_not_fallback_when_present() -> None:
+    selection = type("Sel", (), {"symbol": "BTCUSDT"})()
+    payload = RuntimeOrchestrator._build_signal(selection, {"entry": 100.0, "rr": 3.25})
+    assert payload["risk_reward"] == pytest.approx(3.25)

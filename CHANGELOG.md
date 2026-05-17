@@ -104,3 +104,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Runtime orchestration now tracks pending orders and emits reconciliation lifecycle repair events from deterministic findings.
 ### Known Issues
 - Exchange/account snapshots are currently runtime-fed abstractions and require deeper live adapter telemetry lineage for full venue-truth supervision.
+
+## Generation 7 - Runtime Bootstrap Entrypoint & Safe Startup Loop (2026-05-17)
+### Added
+- Runtime module async bootstrap (`main`) with environment-driven orchestrator construction.
+- Executable module entrypoint (`asyncio.run(main())`) for `python -m alphaforge.runtime`.
+- Safe default no-op market scanner for bootstrap startup without feed wiring.
+- Runtime tests for bootstrap env parsing, loop liveness-until-shutdown, and dynamic RR propagation.
+### Changed
+- Runtime startup now emits explicit startup/shutdown logs and uses env-configured execution mode/intervals.
+### Fixed
+- Resolved immediate process exit when invoking `python -m alphaforge.runtime` by adding executable bootstrap path.
+### Known Issues
+- Default bootstrap scanner is intentionally no-op; production feed/adapters must still be wired externally.
