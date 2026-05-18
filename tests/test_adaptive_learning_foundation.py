@@ -8,6 +8,7 @@ from alphaforge.adaptive_learning import (
     record_closed_trade_review,
     record_rejected_signal_review,
     update_adaptive_stats,
+    update_adaptive_stats_by_scope,
 )
 from alphaforge.persistence import init_db
 
@@ -65,3 +66,31 @@ def test_adaptive_stats_and_shadow_thresholds() -> None:
         adaptive = compute_shadow_thresholds({"min_score": 0.62, "min_effective_rr": 1.1, "max_spread_pct": 0.0025, "max_expected_slippage_pct": 0.003, "min_liquidity_score": 0.2}, {"sample_size": 60, "expectancy": -0.01, "avg_spread_pct": 0.0015, "confidence": 0.4}, {"ADAPTIVE_MIN_SAMPLE_SIZE": 50, "ADAPTIVE_MAX_SCORE_ADJUSTMENT": 0.05, "ADAPTIVE_MAX_EFFECTIVE_RR_ADJUSTMENT": 0.15, "ADAPTIVE_ALLOW_LOOSENING_GATES": False})
         assert adaptive["source"] == "SHADOW_ADAPTIVE"
         assert adaptive["min_score"] <= 0.62 and adaptive["min_effective_rr"] >= 1.1
+
+
+def test_adaptive_stats_by_scope_rejection_reason() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        record_rejected_signal_review(session, signal_id="s1", symbol="BTCUSDT", reject_reason="LOW_SCORE", reject_correct=1, payload_json={"execution_quality_bucket": "HIGH"})
+        record_rejected_signal_review(session, signal_id="s2", symbol="ETHUSDT", reject_reason="LOW_SCORE", reject_correct=0, payload_json={"execution_quality_bucket": "LOW"})
+        assert update_adaptive_stats_by_scope(session, "REJECTION_REASON", "LOW_SCORE")
+        row = session.execute(text("SELECT sample_size, reject_accuracy FROM adaptive_stats WHERE scope_type='REJECTION_REASON' AND scope_key='LOW_SCORE'")).fetchone()
+        assert row.sample_size == 2
+        assert float(row.reject_accuracy) == 0.5
+
+
+def test_adaptive_stats_by_scope_bucket_keys() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        payload = {
+            "timeframe": "1m",
+            "session": "LONDON",
+            "volatility_bucket": "HIGH",
+            "spread_bucket": "WIDE",
+            "liquidity_bucket": "LOW",
+            "trend_strength_bucket": "STRONG",
+            "execution_quality_bucket": "MEDIUM",
+        }
+        record_rejected_signal_review(session, signal_id="s1", symbol="BTCUSDT", regime="TREND", setup_type="BREAKOUT", reject_reason="LOW_SCORE", reject_correct=1, payload_json=payload)
+        for scope, key in [("REGIME", "TREND"), ("SETUP", "BREAKOUT"), ("TIMEFRAME", "1m"), ("SESSION", "LONDON"), ("VOLATILITY_BUCKET", "HIGH"), ("SPREAD_BUCKET", "WIDE"), ("LIQUIDITY_BUCKET", "LOW"), ("TREND_STRENGTH_BUCKET", "STRONG"), ("EXECUTION_QUALITY_BUCKET", "MEDIUM"), ("REJECTION_REASON", "LOW_SCORE")]:
+            assert update_adaptive_stats_by_scope(session, scope, key)
