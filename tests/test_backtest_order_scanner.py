@@ -779,6 +779,8 @@ def test_derive_backtest_counts_uses_terminal_per_signal_and_order_placed_only()
     assert counts["total_orders"] == 1
     assert counts["triggered_orders"] == 1
     assert counts["not_triggered_orders"] == 0
+    assert counts["tp_hits"] == 0
+    assert counts["sl_hits"] == 0
 
 
 def test_signal_id_cannot_end_with_both_terminal_accepted_and_rejected():
@@ -790,3 +792,17 @@ def test_signal_id_cannot_end_with_both_terminal_accepted_and_rejected():
     counts = bo._derive_backtest_counts(lifecycle)
     assert counts["accepted_count"] == 0
     assert counts["rejected_count"] == 1
+
+
+def test_backtest_quality_summary_uses_signal_created_as_candidate_denominator():
+    rows = [
+        {"signal_id": "BTCUSDT:1", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 7.0, "rr": 2.0, "effective_rr": 2.0, "expectancy_bucket": "MEDIUM", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "BTCUSDT:1", "lifecycle_state": "WAITING_ENTRY_ZONE", "decision": "ACCEPTED", "reject_reason": "", "score": 7.0, "rr": 2.0, "effective_rr": 2.0, "expectancy_bucket": "MEDIUM", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "ETHUSDT:2", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 2.0, "rr": 1.0, "effective_rr": 1.0, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "ETHUSDT:2", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "LOW_SCORE", "score": 2.0, "rr": 1.0, "effective_rr": 1.0, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+    ]
+    summary = bo.build_backtest_quality_summary(rows)
+    assert summary["total_candidates"] == 2
+    assert summary["accepted_count"] == 1
+    assert summary["rejected_count"] == 1
+    assert summary["reject_reason_distribution"]["LOW_SCORE"] == 1

@@ -550,6 +550,43 @@
 3. Add regression tests for setup-type diversity and RR realism under choppy inputs.
 4. Keep thresholds unchanged until post-diagnostic distributions confirm setup-quality uplift.
 
+## Hotfix — Backtest lifecycle summary mismatch reconciliation (2026-05-18)
+
+### Why this patch was needed
+- Backtest quality and order summaries were mixing candidate-level and lifecycle-event-level denominators, producing contradictory counts.
+
+### Root cause
+- Candidate and rejection counts in quality summary were derived from all persisted lifecycle rows instead of per-signal candidates.
+- Main summary `total_orders` semantics drifted from accepted order objects and lifecycle buckets could not reconcile against accepted counts.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- `_derive_backtest_counts(...)` now computes:
+  - `total_candidates` from signal-level identities (`SIGNAL_CREATED` + `SYMBOL_REJECTED`)
+  - `rejected_count` from terminal reject lifecycle states
+  - `accepted_count` as `total_candidates - rejected_count`
+  - `total_orders` as accepted pending-order lifecycle objects (`WAITING_ENTRY_ZONE`)
+  - lifecycle outcome buckets (`triggered`, `not_triggered`, `tp`, `sl`, `open_at_end`) from lifecycle terminal states
+- `order_backtest_summary.csv` now includes explicit `rejected_count` and keeps `total_rejected` as compatibility alias.
+- `build_backtest_quality_summary(...)` now uses signal-level candidates (`SIGNAL_CREATED`) as denominator and signal-scoped reject accounting.
+
+### Lifecycle / persistence / export impact
+- No schema change.
+- Lifecycle semantics preserved; only summary aggregation logic changed to use a consistent source-of-truth.
+- Export consistency improved: quality summary and order summary now reconcile to shared candidate/reject semantics.
+
+### Tests added/updated
+- Added regression: `test_backtest_quality_summary_uses_signal_created_as_candidate_denominator`.
+- Extended derive-count assertions for TP/SL buckets.
+
+### Risks / limitations
+- `python backtest_order.py --top-n {5,50}` still depends on Binance network access; blocked in restricted environments unless offline fixture mode is used.
 
 ## Generation 9: Adaptive Learning Data Foundation
 - Why needed: rejects are alpha only when auditable; prior system lacked structured review datasets across executed and rejected outcomes.
