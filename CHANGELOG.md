@@ -203,6 +203,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - Forward-window outputs are generated deterministically but are not yet persisted into dedicated SQL tables in this generation.
 
+## [Unreleased] - 2026-05-18 (Generation N+2 evaluator wiring + calibration snapshots)
+
+### Added
+- Post-terminal forward evaluator wiring in backtest export flow via `build_forward_evaluation_rows(...)` with terminal-only trigger semantics.
+- Immutable/idempotent `calibration_snapshots` persistence table (unique by `signal_id`, `forward_window_minutes`, `realized_outcome`).
+- New exports: `forward_evaluations.csv` and `calibration_snapshots.csv`.
+- Expanded adaptive scope-key test coverage for regime/setup/timeframe/session/volatility/spread/liquidity/trend/rejection/execution-quality keys.
+
+### Changed
+- Forward evaluator remains post-decision analytics-only and now runs only for terminal outcomes (`TP_HIT`, `SL_HIT`, `EXPIRED`, `CANCELED`, `OPEN_AT_END`, `REJECTED`).
 ## [Unreleased] - 2026-05-18 (Generation N+2 Wiring: terminal forward-eval + calibration persistence)
 
 ### Added

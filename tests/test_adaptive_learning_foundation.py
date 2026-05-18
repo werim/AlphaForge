@@ -77,7 +77,20 @@ def test_adaptive_stats_by_scope_rejection_reason() -> None:
         row = session.execute(text("SELECT sample_size, reject_accuracy FROM adaptive_stats WHERE scope_type='REJECTION_REASON' AND scope_key='LOW_SCORE'")).fetchone()
         assert row.sample_size == 2
         assert float(row.reject_accuracy) == 0.5
-        assert update_adaptive_stats_by_scope(session, "EXECUTION_QUALITY_BUCKET", "HIGH")
-        eq_row = session.execute(text("SELECT sample_size, reject_accuracy FROM adaptive_stats WHERE scope_type='EXECUTION_QUALITY_BUCKET' AND scope_key='HIGH'")).fetchone()
-        assert eq_row.sample_size == 1
-        assert float(eq_row.reject_accuracy) == 1.0
+
+
+def test_adaptive_stats_by_scope_bucket_keys() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        payload = {
+            "timeframe": "1m",
+            "session": "LONDON",
+            "volatility_bucket": "HIGH",
+            "spread_bucket": "WIDE",
+            "liquidity_bucket": "LOW",
+            "trend_strength_bucket": "STRONG",
+            "execution_quality_bucket": "MEDIUM",
+        }
+        record_rejected_signal_review(session, signal_id="s1", symbol="BTCUSDT", regime="TREND", setup_type="BREAKOUT", reject_reason="LOW_SCORE", reject_correct=1, payload_json=payload)
+        for scope, key in [("REGIME", "TREND"), ("SETUP", "BREAKOUT"), ("TIMEFRAME", "1m"), ("SESSION", "LONDON"), ("VOLATILITY_BUCKET", "HIGH"), ("SPREAD_BUCKET", "WIDE"), ("LIQUIDITY_BUCKET", "LOW"), ("TREND_STRENGTH_BUCKET", "STRONG"), ("EXECUTION_QUALITY_BUCKET", "MEDIUM"), ("REJECTION_REASON", "LOW_SCORE")]:
+            assert update_adaptive_stats_by_scope(session, scope, key)

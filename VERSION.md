@@ -174,6 +174,10 @@
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
 
 ## Generation N+2 Wiring Status (2026-05-18)
+- Deterministic terminal-trigger forward evaluator is now wired into backtest output generation.
+- Immutable calibration snapshot persistence contract is introduced with idempotent insert semantics.
+- Adaptive scope ingestion keys are validated across all requested bucket dimensions.
+- Adaptive/live threshold mutation remains disabled.
 - **Generation:** N+2 wiring — terminal forward evaluator trigger + immutable calibration snapshot persistence.
 - **Determinism posture:** forward evaluation triggered post-terminal lifecycle only; bounded lookahead retained; no decision-path feedback.
 - **Persistence posture:** additive `calibration_snapshots` table with idempotent uniqueness guard.

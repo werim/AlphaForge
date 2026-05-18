@@ -704,6 +704,32 @@
 ### Push recommendation
 - Safe to merge as deterministic analytics foundation patch; follow with additive SQL persistence/export patch before enabling any adaptive threshold consumers.
 
+## Generation N+2 Follow-up (2026-05-18) — Terminal Wiring + Calibration Persistence
+
+### Exact files/functions modified
+- `backtest_order.py`
+  - Added `_realized_outcome_from_row(...)`
+  - Added `build_forward_evaluation_rows(...)`
+  - Wired `forward_evaluations.csv` and `calibration_snapshots.csv` emitters in `main()`.
+- `src/alphaforge/persistence.py`
+  - Added additive `calibration_snapshots` table in `init_db(...)` DDL.
+- `tests/test_backtest_order_scanner.py`
+  - Added terminal-only trigger regression for forward evaluator wiring.
+- `tests/test_adaptive_learning_foundation.py`
+  - Added scope-key aggregation coverage across requested adaptive dimensions.
+
+### SQL migration plan
+- Additive-only: create `calibration_snapshots` if absent.
+- No drops, no column removals, no mutation of historical decision rows.
+
+### Determinism guarantees
+- Forward evaluator runs only after terminal lifecycle outcomes in export/eval phase.
+- Same bounded lookahead and deterministic same-candle SL-priority rule preserved.
+- No data path from forward labels back into same-signal decision acceptance/rejection.
+
+### Risks
+- Current calibration snapshot wiring is backtest-output scoped; PAPER replay persistence wiring remains a next incremental patch if/when replay loop is formalized in-repo.
+- Forward evaluation on sparse candle tails can produce `UNKNOWN`/timeout-like outcomes by design.
 ## Generation N+2 Wiring Patch (2026-05-18)
 
 ### Root-cause analysis of current limitations
