@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from alphaforge.adaptive_learning import record_closed_trade_review, record_rejected_signal_review
 
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,31 @@ class AIBrain:
                 "created_at": _now(),
             },
         )
+        record_closed_trade_review(
+            self.session,
+            trade_id=str(closed_trade.get("trade_id", "")),
+            symbol=symbol,
+            setup_type=setup,
+            regime=regime,
+            side=str(closed_trade.get("side", "UNKNOWN")),
+            entry_price=closed_trade.get("entry_price"),
+            exit_price=closed_trade.get("exit_price"),
+            raw_rr=closed_trade.get("raw_rr"),
+            effective_rr=closed_trade.get("effective_rr"),
+            score=closed_trade.get("score"),
+            net_pnl_pct=closed_trade.get("net_pnl_pct", pnl),
+            fee_pct=closed_trade.get("fee_pct"),
+            spread_pct=closed_trade.get("spread_pct"),
+            expected_slippage_pct=closed_trade.get("expected_slippage_pct"),
+            actual_slippage_pct=execution_metrics.get("realized_slippage_pct"),
+            liquidity_score=closed_trade.get("liquidity_score"),
+            volatility_regime=closed_trade.get("volatility_regime"),
+            close_reason=closed_trade.get("close_reason"),
+            tp_hit=closed_trade.get("tp_hit"),
+            sl_hit=closed_trade.get("sl_hit"),
+            hold_minutes=closed_trade.get("hold_minutes"),
+            payload_json={"closed_trade": dict(closed_trade), "replay_ctx": dict(replay_ctx)},
+        )
         self.session.commit()
 
     # ---- Hooks for order.py integration ---------------------------------
@@ -317,6 +343,32 @@ class AIBrain:
                 "created_at": _now(),
             },
         )
+        if order_plan.decision != "ACCEPTED":
+            record_rejected_signal_review(
+                self.session,
+                signal_id=str(signal_id),
+                symbol=str(signal.get("symbol", "UNKNOWN")),
+                setup_type=str(signal.get("setup", "unknown")),
+                regime=str(signal.get("regime", "unknown")),
+                side=str(signal.get("side", "UNKNOWN")),
+                reject_reason="LOW_SCORE",
+                score=score_ctx.total_score,
+                raw_rr=signal.get("risk_reward"),
+                effective_rr=decision_payload["effective_rr"],
+                expectancy_bucket=signal.get("expectancy_bucket"),
+                volume_24h_usdt=market_ctx.get("volume_24h_usdt"),
+                spread_pct=market_ctx.get("spread_pct"),
+                expected_slippage_pct=market_ctx.get("expected_slippage_pct"),
+                funding_rate_pct=market_ctx.get("funding_rate_pct"),
+                liquidity_score=market_ctx.get("liquidity_score"),
+                volatility_regime=market_ctx.get("volatility_regime"),
+                forward_window_bars=None,
+                would_have_hit_tp=None,
+                would_have_hit_sl=None,
+                max_favorable_excursion_pct=None,
+                max_adverse_excursion_pct=None,
+                reject_correct=None,
+            )
 
         self.session.execute(
             text(

@@ -96,3 +96,9 @@ cp .env.example .env
 4. Live-risk warning:
 - LIVE trading can lose capital quickly from slippage, spread expansion, latency, and exchange-side failures.
 - Do not enable LIVE unless lifecycle integrity, rejection persistence, reconciliation checks, and execution-risk thresholds are validated in your environment.
+
+
+## Adaptive Learning Foundation (Generation 9)
+- AlphaForge now includes a deterministic, SQL-first adaptive learning foundation in `src/alphaforge/adaptive_learning.py`.
+- This patch adds passive review persistence/analytics only (closed trade + rejected signal reviews, adaptive stats, shadow threshold recommendations).
+- No unconstrained ML behavior is introduced; no active threshold application is enabled by default.
