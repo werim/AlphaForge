@@ -141,6 +141,60 @@ def update_adaptive_stats(session: Any, scope_type: str, scope_key: str) -> bool
         return False
 
 
+def update_adaptive_stats_by_scope(session: Any, scope_type: str, scope_key: str) -> bool:
+    """
+    Deterministic aggregation entrypoint for current generation.
+    Supports both existing scope dimensions and next-generation bucket scopes.
+    """
+    normalized_scope = (scope_type or "").strip().upper()
+    if normalized_scope in {"GLOBAL", "SYMBOL", "REGIME", "SETUP"}:
+        return update_adaptive_stats(session, normalized_scope, scope_key)
+    scope_filters = {
+        "TIMEFRAME": "json_extract(payload_json, '$.timeframe') = :scope_key",
+        "SESSION": "json_extract(payload_json, '$.session') = :scope_key",
+        "VOLATILITY_BUCKET": "json_extract(payload_json, '$.volatility_bucket') = :scope_key",
+        "SPREAD_BUCKET": "json_extract(payload_json, '$.spread_bucket') = :scope_key",
+        "LIQUIDITY_BUCKET": "json_extract(payload_json, '$.liquidity_bucket') = :scope_key",
+        "TREND_STRENGTH_BUCKET": "json_extract(payload_json, '$.trend_strength_bucket') = :scope_key",
+        "REJECTION_REASON": "reject_reason = :scope_key",
+        "EXECUTION_QUALITY_BUCKET": "json_extract(payload_json, '$.execution_quality_bucket') = :scope_key",
+    }
+    predicate = scope_filters.get(normalized_scope)
+    if predicate is None:
+        logger.warning("update_adaptive_stats_by_scope_unsupported_scope: %s", scope_type)
+        return False
+    try:
+        row = session.execute(text(f"""
+            SELECT COUNT(*) AS sample_size, AVG(reject_correct) AS reject_accuracy
+            FROM rejected_signal_reviews
+            WHERE {predicate}
+        """), {"scope_key": scope_key}).mappings().one()
+        session.execute(text("""
+            INSERT INTO adaptive_stats (
+              scope_type, scope_key, sample_size, reject_accuracy, expectancy, confidence, updated_at, payload_json
+            ) VALUES (
+              :scope_type, :scope_key, :sample_size, :reject_accuracy, :expectancy, :confidence, :updated_at, :payload_json
+            )
+            ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+              sample_size=excluded.sample_size, reject_accuracy=excluded.reject_accuracy,
+              expectancy=excluded.expectancy, confidence=excluded.confidence,
+              updated_at=excluded.updated_at, payload_json=excluded.payload_json
+        """), {
+            "scope_type": normalized_scope,
+            "scope_key": scope_key,
+            "sample_size": int(row["sample_size"] or 0),
+            "reject_accuracy": row["reject_accuracy"],
+            "expectancy": None,
+            "confidence": min(1.0, int(row["sample_size"] or 0) / 200.0),
+            "updated_at": _now(),
+            "payload_json": _dump({"scope_type": normalized_scope, "scope_key": scope_key, "aggregation": "reject_review_only"}),
+        })
+        return True
+    except Exception as exc:
+        logger.warning("update_adaptive_stats_by_scope_failed: %s", exc)
+        return False
+
+
 def get_adaptive_stats(session: Any, scope_type: str, scope_key: str) -> Mapping[str, Any] | None:
     return session.execute(text("SELECT * FROM adaptive_stats WHERE scope_type=:scope_type AND scope_key=:scope_key"), {"scope_type": scope_type, "scope_key": scope_key}).mappings().first()
 
