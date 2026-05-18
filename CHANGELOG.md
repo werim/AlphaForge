@@ -157,3 +157,14 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Added
 - Regression tests covering missing-candidate-regime non-crash behavior and incompatible market-regime rejection behavior.
+
+## [Unreleased] - 2026-05-18 (Backtest lifecycle summary reconciliation)
+
+### Fixed
+- Reconciled backtest summary counting semantics so `total_candidates = accepted_count + rejected_count` using signal-level lifecycle identities.
+- Corrected `total_orders` meaning to accepted order objects (`WAITING_ENTRY_ZONE`) rather than candidate-level/event-level drift.
+- Added explicit `rejected_count` in main order summary while preserving `total_rejected` alias for compatibility.
+- Aligned quality summary denominator/reject accounting to signal-level candidates (`SIGNAL_CREATED`) to prevent candidate-vs-event mismatch.
+
+### Added
+- Regression test proving quality summary candidate denominator uses signal-level rows and matches reject distribution semantics.

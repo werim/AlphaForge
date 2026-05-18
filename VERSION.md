@@ -140,3 +140,10 @@
 - Lifecycle coverage unchanged.
 - Persistence semantics unchanged.
 - Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## 2026-05-18 Audit Update (Backtest lifecycle summary reconciliation)
+- Main backtest summary counters now treat `total_candidates` as signal-level candidates (`SIGNAL_CREATED` + `SYMBOL_REJECTED`) and compute `accepted_count`/`rejected_count` from terminal reject states.
+- `total_orders` now represents accepted pending order objects (`WAITING_ENTRY_ZONE`) instead of candidate-level totals.
+- Lifecycle outcome buckets (`triggered_orders`, `not_triggered_orders`, `tp_hits`, `sl_hits`, `open_at_end`) are reconciled from lifecycle terminal states for accepted orders.
+- Backtest quality summary now uses signal-level candidate denominator (from `SIGNAL_CREATED`) and signal-scoped reject accounting for consistency with order summary.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
