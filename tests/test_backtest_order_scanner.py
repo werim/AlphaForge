@@ -400,16 +400,29 @@ def test_forward_window_evaluator_labels_reject_correctness_deterministically():
     assert eval1 == eval2
 
 
-def test_forward_evaluator_triggers_only_on_terminal_rows():
-    candles = [bo.Candle(1, 10.0, 10.5, 9.8, 10.1, 1), bo.Candle(2, 10.1, 11.2, 10.0, 11.0, 1)]
-    rows = [
-        {"symbol": "AAAUSDT", "event_ts": "1", "lifecycle_state": "SIGNAL_CREATED", "entry": 10, "sl": 9, "tp": 11, "rr": 1.5},
-        {"symbol": "AAAUSDT", "event_ts": "1", "lifecycle_state": "WAITING_ENTRY_ZONE", "entry": 10, "sl": 9, "tp": 11, "rr": 1.5},
-        {"symbol": "AAAUSDT", "event_ts": "1", "lifecycle_state": "SIGNAL_REJECTED", "reject_reason": "LOW_SCORE", "entry": 10, "sl": 9, "tp": 11, "rr": 1.5},
+def test_forward_evaluator_triggers_only_for_terminal_closed_states():
+    lifecycle = [
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 5.0, 1.2, 10.0, 9.0, 11.0, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(2, "BTCUSDT", "LONG", "S", "R", "TREND", 5.0, 1.2, 10.0, 9.0, 11.0, "ENTRY_TRIGGERED", "POSITION_CLOSED", close_reason="TP_HIT"),
     ]
-    out = bo.build_forward_evaluation_rows(rows, {"AAAUSDT": candles}, forward_window_minutes=2)
-    assert len(out) == 1
-    assert out[0]["realized_outcome"] == "REJECTED"
+    candles = {"BTCUSDT": [bo.Candle(2, 10.0, 11.2, 9.8, 10.5, 1)]}
+    evals = bo.build_forward_evaluations_from_lifecycle(lifecycle, candles, forward_window_minutes=5)
+    assert len(evals) == 1
+    assert evals[0].signal_id == "BTCUSDT:2"
+
+
+def test_calibration_snapshots_are_idempotent():
+    ev = bo.ForwardWindowEvaluation(
+        signal_id="BTCUSDT:1", symbol="BTCUSDT", decision="ACCEPTED", lifecycle_state="POSITION_CLOSED", reject_reason="",
+        forward_window_minutes=10, would_have_hit_tp=True, would_have_hit_sl=False, mfe_pct=1.0, mae_pct=0.2,
+        max_forward_return=1.0, max_adverse_return=-0.2, reject_correct=None, reject_missed_winner=False,
+        reject_saved_from_loss=False, forward_window_regime="TREND", execution_quality_bucket="HIGH",
+    )
+    lifecycle_index = {"BTCUSDT:1": bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 7.0, 1.5, 10.0, 9.0, 11.5, "ENTRY_TRIGGERED", "POSITION_CLOSED", close_reason="TP_HIT")}
+    rows1 = bo.persist_calibration_snapshots([ev, ev], lifecycle_index)
+    rows2 = bo.persist_calibration_snapshots([ev], lifecycle_index)
+    assert len(rows1) == 1
+    assert len(rows2) == 1
 
 
 def test_shadow_summary_zero_rejects_and_unknown_supported():
