@@ -148,3 +148,15 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Setup generation heuristics remain simplistic and may still overproduce weak breakout-style candidates in choppy regimes.
+
+
+## Generation 9 - Adaptive Learning Data Foundation (2026-05-17)
+### Added
+- Deterministic SQL-first adaptive learning module `src/alphaforge/adaptive_learning.py` with closed/rejected review persistence, adaptive stats aggregation, reject-accuracy computation, expectancy bucket classification, and shadow-threshold recommendation logic.
+- New persistence tables: `rejected_signal_reviews`, `adaptive_stats`, `adaptive_threshold_snapshots`; expanded `closed_trade_reviews` schema for execution-aware review fields.
+- Config safety flags for adaptive foundation (disabled learning by default, shadow mode default on, clamp and sample controls).
+- Adaptive learning foundation tests in `tests/test_adaptive_learning_foundation.py`.
+### Changed
+- `AIBrain` now records adaptive review rows for closed trades and rejected decisions without changing acceptance/execution behavior.
+### Known Issues
+- Forward-labeling for rejected-signal outcome quality remains null until Generation 2 outcome-label jobs are added.

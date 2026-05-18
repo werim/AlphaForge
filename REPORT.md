@@ -519,3 +519,13 @@
 2. Add multi-setup generator variants (trend continuation / range mean reversion) with explicit regime binding.
 3. Add regression tests for setup-type diversity and RR realism under choppy inputs.
 4. Keep thresholds unchanged until post-diagnostic distributions confirm setup-quality uplift.
+
+
+## Generation 9: Adaptive Learning Data Foundation
+- Why needed: rejects are alpha only when auditable; prior system lacked structured review datasets across executed and rejected outcomes.
+- Behavior changed: added deterministic review persistence and SQL aggregation/shadow-threshold computation; no live decision gates were activated by default.
+- Runtime impact: passive write-path enrichment only; decision contract remains backward-compatible.
+- Lifecycle/schema impact: persistence schema expanded with adaptive learning tables and richer closed-trade review columns.
+- Migration/compatibility risks: legacy consumers of `closed_trade_reviews` should tolerate additive columns; no destructive schema rewrites were introduced.
+- Shadow mode: recommendation-only threshold output (`STATIC` vs `SHADOW_ADAPTIVE`) with insufficient-sample fail-safe and clamp constraints.
+- Remaining work: forward-outcome labeling for rejected signals, scoped aggregation jobs, export CSV writers, and guarded opt-in active threshold application.

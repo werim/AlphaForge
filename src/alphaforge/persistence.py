@@ -85,7 +85,43 @@ def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
             created_at TEXT
         )
         """,
-        "CREATE TABLE IF NOT EXISTS closed_trade_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, trade_id TEXT, symbol TEXT, review_payload TEXT, execution_metrics TEXT, created_at TEXT)",
+        """
+        CREATE TABLE IF NOT EXISTS closed_trade_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id TEXT, symbol TEXT, setup_type TEXT, regime TEXT, side TEXT, entry_price REAL, exit_price REAL,
+            raw_rr REAL, effective_rr REAL, score REAL, net_pnl_pct REAL, fee_pct REAL, spread_pct REAL,
+            expected_slippage_pct REAL, actual_slippage_pct REAL, liquidity_score REAL, volatility_regime TEXT,
+            close_reason TEXT, tp_hit INTEGER, sl_hit INTEGER, hold_minutes REAL, created_at TEXT, payload_json TEXT,
+            review_payload TEXT, execution_metrics TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS rejected_signal_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT, symbol TEXT, setup_type TEXT, regime TEXT, side TEXT, reject_reason TEXT, score REAL,
+            raw_rr REAL, effective_rr REAL, expectancy_bucket TEXT, volume_24h_usdt REAL, spread_pct REAL,
+            expected_slippage_pct REAL, funding_rate_pct REAL, liquidity_score REAL, volatility_regime TEXT,
+            forward_window_bars INTEGER, would_have_hit_tp INTEGER, would_have_hit_sl INTEGER,
+            max_favorable_excursion_pct REAL, max_adverse_excursion_pct REAL, reject_correct INTEGER,
+            created_at TEXT, payload_json TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS adaptive_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT NOT NULL, scope_key TEXT NOT NULL, sample_size INTEGER, win_rate REAL, avg_net_pnl_pct REAL,
+            avg_effective_rr REAL, avg_spread_pct REAL, avg_slippage_pct REAL, reject_accuracy REAL, expectancy REAL,
+            confidence REAL, updated_at TEXT, payload_json TEXT,
+            UNIQUE(scope_type, scope_key)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS adaptive_threshold_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT, scope_key TEXT, min_score REAL, min_effective_rr REAL, max_spread_pct REAL,
+            max_expected_slippage_pct REAL, min_liquidity_score REAL, reason TEXT, source TEXT, created_at TEXT, payload_json TEXT
+        )
+        """,
         "CREATE TABLE IF NOT EXISTS setup_expectancy_stats (setup TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
