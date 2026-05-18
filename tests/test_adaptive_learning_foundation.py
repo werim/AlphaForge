@@ -77,3 +77,7 @@ def test_adaptive_stats_by_scope_rejection_reason() -> None:
         row = session.execute(text("SELECT sample_size, reject_accuracy FROM adaptive_stats WHERE scope_type='REJECTION_REASON' AND scope_key='LOW_SCORE'")).fetchone()
         assert row.sample_size == 2
         assert float(row.reject_accuracy) == 0.5
+        assert update_adaptive_stats_by_scope(session, "EXECUTION_QUALITY_BUCKET", "HIGH")
+        eq_row = session.execute(text("SELECT sample_size, reject_accuracy FROM adaptive_stats WHERE scope_type='EXECUTION_QUALITY_BUCKET' AND scope_key='HIGH'")).fetchone()
+        assert eq_row.sample_size == 1
+        assert float(eq_row.reject_accuracy) == 1.0

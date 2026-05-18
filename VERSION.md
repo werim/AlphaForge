@@ -172,3 +172,10 @@
 - **Known critical risks:** forward-eval SQL persistence/export wiring remains partial; adaptive stats breadth currently reject-review centric for advanced scopes.
 - **Last audit date:** 2026-05-18.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
+
+## Generation N+2 Wiring Status (2026-05-18)
+- **Generation:** N+2 wiring — terminal forward evaluator trigger + immutable calibration snapshot persistence.
+- **Determinism posture:** forward evaluation triggered post-terminal lifecycle only; bounded lookahead retained; no decision-path feedback.
+- **Persistence posture:** additive `calibration_snapshots` table with idempotent uniqueness guard.
+- **Export posture:** forward labels, adaptive scope stats, and calibration rows emitted as additive CSV outputs.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (adaptive thresholds remain non-live).
