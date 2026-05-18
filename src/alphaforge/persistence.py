@@ -182,6 +182,9 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN reconciliation_reason TEXT"))
     if "incident_payload" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN incident_payload TEXT"))
+    closed_trade_cols = _table_columns(conn, "closed_trade_reviews")
+    if "execution_metrics" not in closed_trade_cols:
+        conn.execute(text("ALTER TABLE closed_trade_reviews ADD COLUMN execution_metrics TEXT"))
     conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
     for version, notes in migrations:
         if version not in existing:
@@ -325,10 +328,10 @@ def save_closed_trade_review(session: Any, trade_id: str, symbol: str, review_pa
         return False
     try:
         if hasattr(session, "execute"):
-            session.execute("""
+            session.execute(text("""
                 INSERT INTO closed_trade_reviews (trade_id, symbol, review_payload, execution_metrics)
                 VALUES (:trade_id, :symbol, :review_payload, :execution_metrics)
-                """, {
+                """), {
                     "trade_id": trade_id,
                     "symbol": symbol,
                     "review_payload": json.dumps(dict(review_payload or {})),

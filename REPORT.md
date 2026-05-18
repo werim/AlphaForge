@@ -596,3 +596,44 @@
 - Migration/compatibility risks: legacy consumers of `closed_trade_reviews` should tolerate additive columns; no destructive schema rewrites were introduced.
 - Shadow mode: recommendation-only threshold output (`STATIC` vs `SHADOW_ADAPTIVE`) with insufficient-sample fail-safe and clamp constraints.
 - Remaining work: forward-outcome labeling for rejected signals, scoped aggregation jobs, export CSV writers, and guarded opt-in active threshold application.
+
+## 2026-05-18 Hotfix — Backtest quality summary compatibility + execution_metrics persistence restoration
+
+### Why this patch was needed
+- Regression after adaptive-foundation changes caused backtest quality summary to ignore direct decision rows in tests and set candidate/reject counts to zero.
+- Closed-trade persistence wrote a later `closed_trade_reviews` row with `execution_metrics = NULL`, breaking legacy execution-layer readers that load JSON from this column.
+
+### Root cause
+- `build_backtest_quality_summary(...)` only used `SIGNAL_CREATED` lifecycle rows as the candidate source and did not robustly normalize mixed row contracts.
+- Adaptive path inserted detailed closed-trade rows without populating legacy `execution_metrics`, and latest-row queries returned that NULL payload.
+
+### Files changed
+- `backtest_order.py`
+- `src/alphaforge/adaptive_learning.py`
+- `src/alphaforge/persistence.py`
+- `CHANGELOG.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+- Quality summary now supports mixed row inputs:
+  - Uses `decision` first; falls back to `status/status_after/status_before/lifecycle_state`.
+  - Counts candidates from `SIGNAL_CREATED` rows when present, otherwise counts direct candidate rows.
+  - Preserves reject/accept distributions for both lifecycle and direct test-row inputs.
+
+### Persistence changes
+- Adaptive closed-trade inserts now populate `execution_metrics` JSON (non-null; `{}` fallback).
+- SQLite migration/init now ensures `closed_trade_reviews.execution_metrics` exists if missing.
+- `save_closed_trade_review` now uses SQLAlchemy `text(...)` for reliable parameterized insert execution.
+
+### Backward compatibility
+- No columns removed, no table drops, no adaptive columns removed.
+- Legacy readers selecting `execution_metrics` remain functional.
+- Existing lifecycle-summary semantics for signal-denominator mode remain intact.
+
+### Tests executed
+- Targeted failing tests: all pass.
+- Full suite: `161 passed`.
+
+### Remaining risks
+- Quality summary metadata-row detection is conservative (`metric/value`, `row_type` markers). Future non-candidate row formats may need explicit markers if introduced.
+- Existing duplicate insertion strategy in `after_position_close` remains unchanged by design (minimal patch scope).

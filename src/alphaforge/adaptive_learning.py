@@ -38,18 +38,27 @@ def record_closed_trade_review(session: Any, **payload: Any) -> bool:
         "close_reason": None, "tp_hit": None, "sl_hit": None, "hold_minutes": None,
     }
     fields.update(payload)
+    execution_metrics = payload.get("execution_metrics")
+    if not isinstance(execution_metrics, Mapping):
+        execution_metrics = {
+            "expected_slippage_pct": fields.get("expected_slippage_pct"),
+            "actual_slippage_pct": fields.get("actual_slippage_pct"),
+            "entry_price": fields.get("entry_price"),
+            "filled_entry_price": payload.get("filled_entry_price", fields.get("entry_price")),
+            "fill_quality_score": payload.get("fill_quality_score"),
+        }
     try:
         session.execute(text("""
             INSERT INTO closed_trade_reviews (
                 trade_id, symbol, setup_type, regime, side, entry_price, exit_price, raw_rr, effective_rr, score,
                 net_pnl_pct, fee_pct, spread_pct, expected_slippage_pct, actual_slippage_pct, liquidity_score,
-                volatility_regime, close_reason, tp_hit, sl_hit, hold_minutes, created_at, payload_json
+                volatility_regime, close_reason, tp_hit, sl_hit, hold_minutes, created_at, payload_json, execution_metrics
             ) VALUES (
                 :trade_id, :symbol, :setup_type, :regime, :side, :entry_price, :exit_price, :raw_rr, :effective_rr, :score,
                 :net_pnl_pct, :fee_pct, :spread_pct, :expected_slippage_pct, :actual_slippage_pct, :liquidity_score,
-                :volatility_regime, :close_reason, :tp_hit, :sl_hit, :hold_minutes, :created_at, :payload_json
+                :volatility_regime, :close_reason, :tp_hit, :sl_hit, :hold_minutes, :created_at, :payload_json, :execution_metrics
             )
-        """), {**fields, "created_at": _now(), "payload_json": _dump(payload.get("payload_json", payload))})
+        """), {**fields, "created_at": _now(), "payload_json": _dump(payload.get("payload_json", payload)), "execution_metrics": _dump(execution_metrics or {})})
         return True
     except Exception as exc:
         logger.warning("record_closed_trade_review_failed: %s", exc)
