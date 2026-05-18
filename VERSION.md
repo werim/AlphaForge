@@ -134,6 +134,15 @@
 - **Known critical risks:** setup generation remains heuristic/breakout-biased; diagnostics illuminate but do not yet remediate structural setup weakness.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
 
+
+## Generation 9 Status (2026-05-17)
+- **Generation:** 9 — Adaptive Learning Data Foundation (deterministic, SQL-first, shadow-only).
+- **Runtime maturity:** adaptive persistence/analytics groundwork added without enabling autonomous behavior changes.
+- **BACKTEST/PAPER/LIVE alignment:** review data model shared; no mode-specific live-call dependencies introduced.
+- **Lifecycle coverage:** rejected and closed outcomes are now persistable as explicit learning review rows.
+- **Execution realism coverage:** review schema includes spread/slippage/liquidity/volatility/effective-RR context for survivability analysis.
+- **Known critical risks:** rejected-signal forward outcome labels are still mostly null until dedicated post-window evaluator is implemented.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged; adaptive remains non-active by default).
 ## 2026-05-17 Hotfix Status (Regime gate initialization)
 - Trade-quality regime gate now initializes deterministically before first use across shared decision flow.
 - BACKTEST/PAPER/LIVE contract alignment unchanged; fix removes crash-only divergence in candidate evaluation.
