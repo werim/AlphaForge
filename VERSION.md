@@ -162,3 +162,13 @@
 - Adaptive closed-trade persistence now writes legacy `execution_metrics` JSON alongside structured review payload fields.
 - SQLite init/migration now ensures `closed_trade_reviews.execution_metrics` exists for backward-compatible read paths.
 - Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## Generation N+2 Foundation Status (2026-05-18)
+- **Generation:** N+2 foundation — deterministic forward-window reject telemetry and scoped adaptive reject-learning aggregation.
+- **Runtime maturity:** telemetry layer improved; no autonomous threshold tuning enabled.
+- **BACKTEST/PAPER/LIVE alignment:** deterministic evaluator logic is replay-safe and side-effect free for decision path (post-decision analytics only).
+- **Lifecycle coverage:** rejected/accepted lifecycle rows can now be evaluated with deterministic forward labels for later persistence/export wiring.
+- **Execution realism coverage:** execution quality bucket classification added for forward-eval telemetry slicing.
+- **Known critical risks:** forward-eval SQL persistence/export wiring remains partial; adaptive stats breadth currently reject-review centric for advanced scopes.
+- **Last audit date:** 2026-05-18.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
