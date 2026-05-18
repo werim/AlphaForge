@@ -160,3 +160,11 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - `AIBrain` now records adaptive review rows for closed trades and rejected decisions without changing acceptance/execution behavior.
 ### Known Issues
 - Forward-labeling for rejected-signal outcome quality remains null until Generation 2 outcome-label jobs are added.
+## [Unreleased] - 2026-05-17 (Regime gate initialization hotfix)
+
+### Fixed
+- Resolved `UnboundLocalError` in trade-quality evaluation by initializing `regime_ok` before gate checks.
+- Preserved deterministic regime reject behavior (`REGIME_MISMATCH`) while preventing crashes for candidates with missing regime values.
+
+### Added
+- Regression tests covering missing-candidate-regime non-crash behavior and incompatible market-regime rejection behavior.

@@ -30,6 +30,16 @@ def test_regime_mismatch_rejected():
     c=base_candidate(); c.regime="RANGE"
     assert evaluate_trade_quality(c, base_market(), {}, {}).reject_reason=="REGIME_MISMATCH"
 
+def test_missing_regime_uses_market_context_without_crash():
+    c=base_candidate(); c.regime=None
+    d=evaluate_trade_quality(c, base_market(), {}, {})
+    assert d.accepted is True
+
+def test_missing_regime_and_market_regime_rejects_when_incompatible():
+    c=base_candidate(); c.regime=None
+    d=evaluate_trade_quality(c, {**base_market(), "regime":"RANGE"}, {}, {})
+    assert d.reject_reason=="REGIME_MISMATCH"
+
 def test_chop_market_rejected():
     d=evaluate_trade_quality(base_candidate(), {**base_market(), "pattern_flags":["chop_zone"]}, {}, {})
     assert d.reject_reason=="CHOP_MARKET_BLOCK"

@@ -143,3 +143,9 @@
 - **Execution realism coverage:** review schema includes spread/slippage/liquidity/volatility/effective-RR context for survivability analysis.
 - **Known critical risks:** rejected-signal forward outcome labels are still mostly null until dedicated post-window evaluator is implemented.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged; adaptive remains non-active by default).
+## 2026-05-17 Hotfix Status (Regime gate initialization)
+- Trade-quality regime gate now initializes deterministically before first use across shared decision flow.
+- BACKTEST/PAPER/LIVE contract alignment unchanged; fix removes crash-only divergence in candidate evaluation.
+- Lifecycle coverage unchanged.
+- Persistence semantics unchanged.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
