@@ -124,3 +124,51 @@
 - `SYMBOL_REJECTED` lifecycle rows are persisted as rejected decisions.
 - Backtest summary accounting now uses per-signal terminal decisions and counts orders from `ORDER_PLACED` events only.
 - Live readiness verdict remains unchanged: **NOT LIVE-READY**.
+
+## Generation 8 Status (2026-05-17)
+- **Generation:** 8 — Setup Quality Diagnostics & Gate Traceability.
+- **Runtime maturity:** improved observability for candidate setup quality and gate-failure provenance.
+- **BACKTEST/PAPER/LIVE alignment:** reject gate logic remains shared; diagnostics now expose first/all failed gates for better parity debugging.
+- **Lifecycle coverage:** unchanged lifecycle transitions; export-level diagnostic completeness improved for rejected and accepted candidate rows.
+- **Execution realism coverage:** improved measurement/reporting (effective-vs-raw RR percentiles and context-driven rejection slicing).
+- **Known critical risks:** setup generation remains heuristic/breakout-biased; diagnostics illuminate but do not yet remediate structural setup weakness.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
+
+
+## Generation 9 Status (2026-05-17)
+- **Generation:** 9 — Adaptive Learning Data Foundation (deterministic, SQL-first, shadow-only).
+- **Runtime maturity:** adaptive persistence/analytics groundwork added without enabling autonomous behavior changes.
+- **BACKTEST/PAPER/LIVE alignment:** review data model shared; no mode-specific live-call dependencies introduced.
+- **Lifecycle coverage:** rejected and closed outcomes are now persistable as explicit learning review rows.
+- **Execution realism coverage:** review schema includes spread/slippage/liquidity/volatility/effective-RR context for survivability analysis.
+- **Known critical risks:** rejected-signal forward outcome labels are still mostly null until dedicated post-window evaluator is implemented.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged; adaptive remains non-active by default).
+## 2026-05-17 Hotfix Status (Regime gate initialization)
+- Trade-quality regime gate now initializes deterministically before first use across shared decision flow.
+- BACKTEST/PAPER/LIVE contract alignment unchanged; fix removes crash-only divergence in candidate evaluation.
+- Lifecycle coverage unchanged.
+- Persistence semantics unchanged.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## 2026-05-18 Audit Update (Backtest lifecycle summary reconciliation)
+- Main backtest summary counters now treat `total_candidates` as signal-level candidates (`SIGNAL_CREATED` + `SYMBOL_REJECTED`) and compute `accepted_count`/`rejected_count` from terminal reject states.
+- `total_orders` now represents accepted pending order objects (`WAITING_ENTRY_ZONE`) instead of candidate-level totals.
+- Lifecycle outcome buckets (`triggered_orders`, `not_triggered_orders`, `tp_hits`, `sl_hits`, `open_at_end`) are reconciled from lifecycle terminal states for accepted orders.
+- Backtest quality summary now uses signal-level candidate denominator (from `SIGNAL_CREATED`) and signal-scoped reject accounting for consistency with order summary.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## 2026-05-18 Hotfix Status (Backtest quality summary + execution metrics persistence)
+- Backtest quality summary now counts plain candidate decision rows directly when lifecycle `SIGNAL_CREATED` rows are absent, while preserving signal-scoped denominator behavior when lifecycle rows are present.
+- Adaptive closed-trade persistence now writes legacy `execution_metrics` JSON alongside structured review payload fields.
+- SQLite init/migration now ensures `closed_trade_reviews.execution_metrics` exists for backward-compatible read paths.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## Generation N+2 Foundation Status (2026-05-18)
+- **Generation:** N+2 foundation — deterministic forward-window reject telemetry and scoped adaptive reject-learning aggregation.
+- **Runtime maturity:** telemetry layer improved; no autonomous threshold tuning enabled.
+- **BACKTEST/PAPER/LIVE alignment:** deterministic evaluator logic is replay-safe and side-effect free for decision path (post-decision analytics only).
+- **Lifecycle coverage:** rejected/accepted lifecycle rows can now be evaluated with deterministic forward labels for later persistence/export wiring.
+- **Execution realism coverage:** execution quality bucket classification added for forward-eval telemetry slicing.
+- **Known critical risks:** forward-eval SQL persistence/export wiring remains partial; adaptive stats breadth currently reject-review centric for advanced scopes.
+- **Last audit date:** 2026-05-18.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).

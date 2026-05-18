@@ -1,5 +1,35 @@
 # AlphaForge Phase 2/3 Lifecycle Export + Contract Parity Patch Report
 
+## Hotfix — `regime_ok` UnboundLocalError deterministic gate repair (2026-05-17)
+
+### Why this change was needed
+- Post-merge CI failures (`UnboundLocalError`) showed `regime_ok` was read by the gate collector before initialization in trade quality evaluation, crashing shared decision paths.
+
+### Exact behavior changed
+- `src/alphaforge/order.py`
+  - Moved regime-compatibility derivation (`regime_ok`) before gate checks so all branches initialize deterministically before use.
+  - Preserved regime semantics: setup/regime compatibility still drives `REGIME_MISMATCH` when required and incompatible.
+- `tests/test_trade_quality.py`
+  - Added regressions to prove missing candidate regime (`None`) does not crash.
+  - Added regressions confirming missing candidate regime falls back to market regime and still rejects incompatible regimes with `REGIME_MISMATCH`.
+
+### Expected BACKTEST / PAPER / LIVE impact
+- Shared quality gate path no longer crashes on candidate regime-null cases.
+- Reject determinism is preserved across modes because the same `evaluate_trade_quality(...)` gate order still applies.
+- No live endpoint behavior was introduced in BACKTEST; mode routing remains unchanged by this fix.
+
+### Compatibility risks
+- Low risk; no schema/API field removals and no threshold value changes.
+- Gate outcomes remain equivalent except crash cases now resolve to normal accept/reject decisions.
+
+### Migration concerns
+- None. No DB migration required.
+
+### Contract / lifecycle / persistence impact
+- Decision contract: unchanged required fields; fixed runtime safety (no unbound local crash).
+- Lifecycle schema: unchanged.
+- Persistence semantics: unchanged.
+
 ## Why this patch was needed
 - Backtest lifecycle export was list/dataclass-driven and not proven against persisted SQL lifecycle events.
 - BACKTEST/PAPER contract parity coverage relied on a handcrafted dict key check.
@@ -469,3 +499,207 @@
 
 ### Tests executed
 - `pytest -q tests/test_backtest_order_scanner.py -k "lifecycle_export_reads_persisted_sql_events or symbol_rejected_rows_are_persisted_as_rejected_decision or derive_backtest_counts_uses_terminal_per_signal_and_order_placed_only or signal_id_cannot_end_with_both_terminal_accepted_and_rejected"`
+
+## Generation 8 - Setup Quality Diagnostics & Gate Traceability (2026-05-17)
+
+### Why this patch was needed
+- Backtest showed 100% rejection with LOW_SCORE dominance, but exported candidate/rejection rows did not expose enough setup-level diagnostics to distinguish threshold strictness from weak setup construction.
+- Quality summary lacked percentile-style distribution and cross-slices (reason by setup/regime) required for structural root-cause analysis.
+
+### Root-cause findings from code audit
+- Setup generation is currently heuristic and single-pattern biased in backtest (`_build_market_ctx`): fixed `setup_type=BREAKOUT_UP`, `side=LONG`, simple `entry/sl/tp` from current/previous candle, and synthetic `rr`/`score` formulas. This can create structurally weak candidates in chop/range periods.
+- Symbol regime/chop filtering is upstream and can reject before order flow (`select_symbol`), yielding large `TOO_CHOPPY` counts that never become executable-quality setups.
+- Runtime/PAPER and BACKTEST share the same order quality gate implementation (`evaluate_trade_quality`), so LOW_SCORE pressure can propagate across modes when setup quality is poor.
+- BACKTEST uses estimated/derived context fields when unavailable, while runtime can have richer live microstructure fields; this context gap can alter effective quality and execution penalties.
+
+### Exact code locations (trace map)
+- Setup generation (candles -> market context): `backtest_order.py::_build_market_ctx`, `backtest_order.py::_build_symbol_market_data`.
+- Candidate materialization: `src/alphaforge/order.py::build_order_candidate`.
+- Score/reject gate: `src/alphaforge/order.py::evaluate_trade_quality`.
+- Regime/chop prefilter: `src/alphaforge/symbol_selector.py::select_symbol`.
+- Effective RR / execution penalties: `backtest_order.py::_execution_reject_flags`, `src/alphaforge/execution.py::build_execution_context`.
+- Backtest lifecycle->candidate/rejected export path: `backtest_order.py::process_backtest_result` and CSV write section in `main()`.
+
+### Behavior changed in this patch
+- Rejected candidate export rows now include setup-quality diagnostics fields: `raw_rr`, `effective_rr`, `min_required_score`, `trend_strength`, `volatility_pct`, `range_position`, `slippage_pct`, `first_blocking_gate`, `all_failed_gates`.
+- Accepted candidate export rows now include the same diagnostic schema columns (empty/default where not applicable) to keep CSV contracts aligned for analysis tooling.
+- Trade-quality diagnostics now compute `all_failed_gates` in addition to the first blocking gate to support full gate-failure visibility.
+- Backtest quality summary now includes:
+  - score percentiles (p10/p25/p50/p75/p90)
+  - raw RR percentiles
+  - effective RR percentiles
+  - rejection reason by setup type
+  - rejection reason by regime
+  - near-threshold low-score rejection count
+
+### Runtime impact
+- No threshold loosening was introduced.
+- No architecture rewrite; patch is additive diagnostics and analysis-safety focused.
+- Runtime/PAPER decision behavior is unchanged except richer diagnostics payload keys.
+
+### Tests executed
+- `pytest -q tests/test_backtest_order_scanner.py::test_process_backtest_result_writes_rejection_rows_and_skips_sim tests/test_backtest_order_scanner.py::test_backtest_quality_summary_includes_effective_rr_distribution tests/test_symbol_selector.py`
+
+### Remaining risks
+- Setup generation logic remains simplistic and breakout-biased; diagnostics now expose the issue but do not yet redesign setup construction.
+- Backtest context still contains estimated fields when venue-native data is unavailable.
+
+### Minimal safe next patch plan
+1. Add bounded pre-candidate setup validation (trend/range edge + structure confidence) before scoring.
+2. Add multi-setup generator variants (trend continuation / range mean reversion) with explicit regime binding.
+3. Add regression tests for setup-type diversity and RR realism under choppy inputs.
+4. Keep thresholds unchanged until post-diagnostic distributions confirm setup-quality uplift.
+
+## Hotfix — Backtest lifecycle summary mismatch reconciliation (2026-05-18)
+
+### Why this patch was needed
+- Backtest quality and order summaries were mixing candidate-level and lifecycle-event-level denominators, producing contradictory counts.
+
+### Root cause
+- Candidate and rejection counts in quality summary were derived from all persisted lifecycle rows instead of per-signal candidates.
+- Main summary `total_orders` semantics drifted from accepted order objects and lifecycle buckets could not reconcile against accepted counts.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- `_derive_backtest_counts(...)` now computes:
+  - `total_candidates` from signal-level identities (`SIGNAL_CREATED` + `SYMBOL_REJECTED`)
+  - `rejected_count` from terminal reject lifecycle states
+  - `accepted_count` as `total_candidates - rejected_count`
+  - `total_orders` as accepted pending-order lifecycle objects (`WAITING_ENTRY_ZONE`)
+  - lifecycle outcome buckets (`triggered`, `not_triggered`, `tp`, `sl`, `open_at_end`) from lifecycle terminal states
+- `order_backtest_summary.csv` now includes explicit `rejected_count` and keeps `total_rejected` as compatibility alias.
+- `build_backtest_quality_summary(...)` now uses signal-level candidates (`SIGNAL_CREATED`) as denominator and signal-scoped reject accounting.
+
+### Lifecycle / persistence / export impact
+- No schema change.
+- Lifecycle semantics preserved; only summary aggregation logic changed to use a consistent source-of-truth.
+- Export consistency improved: quality summary and order summary now reconcile to shared candidate/reject semantics.
+
+### Tests added/updated
+- Added regression: `test_backtest_quality_summary_uses_signal_created_as_candidate_denominator`.
+- Extended derive-count assertions for TP/SL buckets.
+
+### Risks / limitations
+- `python backtest_order.py --top-n {5,50}` still depends on Binance network access; blocked in restricted environments unless offline fixture mode is used.
+
+## Generation 9: Adaptive Learning Data Foundation
+- Why needed: rejects are alpha only when auditable; prior system lacked structured review datasets across executed and rejected outcomes.
+- Behavior changed: added deterministic review persistence and SQL aggregation/shadow-threshold computation; no live decision gates were activated by default.
+- Runtime impact: passive write-path enrichment only; decision contract remains backward-compatible.
+- Lifecycle/schema impact: persistence schema expanded with adaptive learning tables and richer closed-trade review columns.
+- Migration/compatibility risks: legacy consumers of `closed_trade_reviews` should tolerate additive columns; no destructive schema rewrites were introduced.
+- Shadow mode: recommendation-only threshold output (`STATIC` vs `SHADOW_ADAPTIVE`) with insufficient-sample fail-safe and clamp constraints.
+- Remaining work: forward-outcome labeling for rejected signals, scoped aggregation jobs, export CSV writers, and guarded opt-in active threshold application.
+
+## 2026-05-18 Hotfix — Backtest quality summary compatibility + execution_metrics persistence restoration
+
+### Why this patch was needed
+- Regression after adaptive-foundation changes caused backtest quality summary to ignore direct decision rows in tests and set candidate/reject counts to zero.
+- Closed-trade persistence wrote a later `closed_trade_reviews` row with `execution_metrics = NULL`, breaking legacy execution-layer readers that load JSON from this column.
+
+### Root cause
+- `build_backtest_quality_summary(...)` only used `SIGNAL_CREATED` lifecycle rows as the candidate source and did not robustly normalize mixed row contracts.
+- Adaptive path inserted detailed closed-trade rows without populating legacy `execution_metrics`, and latest-row queries returned that NULL payload.
+
+### Files changed
+- `backtest_order.py`
+- `src/alphaforge/adaptive_learning.py`
+- `src/alphaforge/persistence.py`
+- `CHANGELOG.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+- Quality summary now supports mixed row inputs:
+  - Uses `decision` first; falls back to `status/status_after/status_before/lifecycle_state`.
+  - Counts candidates from `SIGNAL_CREATED` rows when present, otherwise counts direct candidate rows.
+  - Preserves reject/accept distributions for both lifecycle and direct test-row inputs.
+
+### Persistence changes
+- Adaptive closed-trade inserts now populate `execution_metrics` JSON (non-null; `{}` fallback).
+- SQLite migration/init now ensures `closed_trade_reviews.execution_metrics` exists if missing.
+- `save_closed_trade_review` now uses SQLAlchemy `text(...)` for reliable parameterized insert execution.
+
+### Backward compatibility
+- No columns removed, no table drops, no adaptive columns removed.
+- Legacy readers selecting `execution_metrics` remain functional.
+- Existing lifecycle-summary semantics for signal-denominator mode remain intact.
+
+### Tests executed
+- Targeted failing tests: all pass.
+- Full suite: `161 passed`.
+
+### Remaining risks
+- Quality summary metadata-row detection is conservative (`metric/value`, `row_type` markers). Future non-candidate row formats may need explicit markers if introduced.
+- Existing duplicate insertion strategy in `after_position_close` remains unchanged by design (minimal patch scope).
+
+## Generation N+1 → N+2 Safe Evolution Patch (2026-05-18)
+
+### Why the patch was needed
+- Existing reject analysis had deterministic counterfactual helpers, but lacked a unified forward-window labeling contract for accepted/rejected lifecycle analytics and lacked scope-rich adaptive aggregation hooks for next-generation learning.
+
+### Root cause
+- Forward analysis logic existed as fragmented shadow helpers and was not exposed as a reusable deterministic evaluator contract.
+- Adaptive aggregation centered on broad scopes (`GLOBAL/SYMBOL/REGIME/SETUP`) and did not provide a normalized entrypoint for reject-learning scopes such as rejection reason and execution-quality buckets.
+
+### Files changed
+- `backtest_order.py`
+- `src/alphaforge/adaptive_learning.py`
+- `tests/test_backtest_order_scanner.py`
+- `tests/test_adaptive_learning_foundation.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- Added deterministic `evaluate_forward_window(...)` post-decision evaluator producing replay-safe forward labels and reject-quality outcomes.
+- Added deterministic execution-quality bucket classification for forward telemetry slicing.
+- Added `update_adaptive_stats_by_scope(...)` as additive aggregation interface for next-generation adaptive engines.
+
+### Lifecycle impact
+- No lifecycle transition rewrites.
+- Lifecycle rows now have a deterministic forward-evaluation interface for post-lifecycle analytics.
+
+### Persistence / schema impact
+- No destructive schema changes.
+- No existing table/column removals.
+- SQL migration risk: none in this patch (additive interface-only evolution).
+
+### Determinism guarantees
+- Forward evaluator uses bounded lookahead windows (`forward_window_minutes`), deterministic same-candle SL-priority, and no randomness.
+- Evaluator is post-decision analytics only and does not mutate same-candle decisions.
+- Added replay determinism regression asserting repeated evaluations are identical.
+
+### Tests added
+- `test_forward_window_evaluator_labels_reject_correctness_deterministically`
+- `test_adaptive_stats_by_scope_rejection_reason`
+
+### Tests executed
+- `pytest -q tests/test_adaptive_learning_foundation.py tests/test_backtest_order_scanner.py -q`
+
+### Risks introduced
+- Scope filters for advanced adaptive scopes rely on `payload_json` keys being populated by upstream writers; missing keys reduce sample coverage.
+- Forward evaluator labels are currently produced in-memory and require future persistence wiring for full SQL export parity.
+
+### Next-generation hooks enabled
+- Forward label contract ready for:
+  - confidence calibration (`predicted_quality` vs realized forward labels)
+  - reject quality scoring
+  - regime-aware expectancy attribution
+  - execution degradation attribution
+- Scoped adaptive aggregation entrypoint ready for future threshold and weighting engines without architecture rewrite.
+
+### Suggested Generation N+2 roadmap
+1. Persist forward-window evaluations into additive SQL table (`forward_signal_evaluations`) keyed by `signal_id + window + evaluator_version`.
+2. Add export surface (`forward_evaluations.csv`, adaptive scope snapshots) and integrity verifier hooks.
+3. Wire evaluator invocation after terminal lifecycle state emission in both BACKTEST and PAPER replay paths.
+4. Extend scoped aggregation to accepted-path expectancy and calibration error metrics.
+5. Add restart/reload invariance tests for persisted rolling scope stats and immutable historical rows.
+
+### Push recommendation
+- Safe to merge as deterministic analytics foundation patch; follow with additive SQL persistence/export patch before enabling any adaptive threshold consumers.

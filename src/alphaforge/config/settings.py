@@ -14,6 +14,14 @@ class Settings(BaseModel):
     ai_aggressive_score: int = 90
     ai_normal_score: int = 75
     ai_reduced_score: int = 60
+    adaptive_learning_enabled: bool = False
+    adaptive_shadow_mode: bool = True
+    adaptive_min_sample_size: int = 50
+    adaptive_max_score_adjustment: float = 0.05
+    adaptive_max_effective_rr_adjustment: float = 0.15
+    adaptive_allow_loosening_gates: bool = False
+    adaptive_record_rejected_signals: bool = True
+    adaptive_record_closed_trades: bool = True
 
     @property
     def database_url(self) -> str:

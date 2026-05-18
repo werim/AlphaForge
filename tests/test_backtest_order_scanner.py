@@ -389,6 +389,17 @@ def test_rejected_counterfactual_uses_bounded_lookahead_timeout():
     assert sim["outcome"] == "WOULD_TIMEOUT"
 
 
+def test_forward_window_evaluator_labels_reject_correctness_deterministically():
+    row = {"timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 11, "rr": 1.5, "reject_reason": "LOW_SCORE", "regime": "TREND", "spread_pct": 0.02, "expected_slippage_pct": 0.01, "liquidity_score": 0.9}
+    candles = [bo.Candle(1, 10.0, 10.2, 9.8, 10.1, 1), bo.Candle(2, 10.1, 10.3, 8.9, 9.2, 1)]
+    eval1 = bo.evaluate_forward_window(row, candles, 0, forward_window_minutes=2)
+    eval2 = bo.evaluate_forward_window(row, candles, 0, forward_window_minutes=2)
+    assert eval1.reject_correct is True
+    assert eval1.reject_saved_from_loss is True
+    assert eval1.reject_missed_winner is False
+    assert eval1 == eval2
+
+
 def test_shadow_summary_zero_rejects_and_unknown_supported():
     empty = bo.build_rejected_shadow_summary([])
     assert empty["total_rejected"] == 0
@@ -779,6 +790,8 @@ def test_derive_backtest_counts_uses_terminal_per_signal_and_order_placed_only()
     assert counts["total_orders"] == 1
     assert counts["triggered_orders"] == 1
     assert counts["not_triggered_orders"] == 0
+    assert counts["tp_hits"] == 0
+    assert counts["sl_hits"] == 0
 
 
 def test_signal_id_cannot_end_with_both_terminal_accepted_and_rejected():
@@ -790,3 +803,17 @@ def test_signal_id_cannot_end_with_both_terminal_accepted_and_rejected():
     counts = bo._derive_backtest_counts(lifecycle)
     assert counts["accepted_count"] == 0
     assert counts["rejected_count"] == 1
+
+
+def test_backtest_quality_summary_uses_signal_created_as_candidate_denominator():
+    rows = [
+        {"signal_id": "BTCUSDT:1", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 7.0, "rr": 2.0, "effective_rr": 2.0, "expectancy_bucket": "MEDIUM", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "BTCUSDT:1", "lifecycle_state": "WAITING_ENTRY_ZONE", "decision": "ACCEPTED", "reject_reason": "", "score": 7.0, "rr": 2.0, "effective_rr": 2.0, "expectancy_bucket": "MEDIUM", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "ETHUSDT:2", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 2.0, "rr": 1.0, "effective_rr": 1.0, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "ETHUSDT:2", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "LOW_SCORE", "score": 2.0, "rr": 1.0, "effective_rr": 1.0, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+    ]
+    summary = bo.build_backtest_quality_summary(rows)
+    assert summary["total_candidates"] == 2
+    assert summary["accepted_count"] == 1
+    assert summary["rejected_count"] == 1
+    assert summary["reject_reason_distribution"]["LOW_SCORE"] == 1

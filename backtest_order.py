@@ -80,6 +80,25 @@ class RejectedShadowEvaluation:
     liquidity_ok: bool
     volatility_ok: bool
 @dataclass
+class ForwardWindowEvaluation:
+    signal_id: str
+    symbol: str
+    decision: str
+    lifecycle_state: str
+    reject_reason: str
+    forward_window_minutes: int
+    would_have_hit_tp: bool
+    would_have_hit_sl: bool
+    mfe_pct: float
+    mae_pct: float
+    max_forward_return: float
+    max_adverse_return: float
+    reject_correct: Optional[bool]
+    reject_missed_winner: bool
+    reject_saved_from_loss: bool
+    forward_window_regime: str
+    execution_quality_bucket: str
+@dataclass
 class LifecycleRow:
     timestamp: int
     symbol: str
@@ -878,6 +897,17 @@ def process_backtest_result(
                 "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")),
                 "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "raw_rr": rr,
+                "effective_rr": diagnostics.get("effective_rr", rr),
+                "min_required_score": ((diagnostics.get("adaptive_thresholds") or {}).get("min_score") if isinstance(diagnostics, dict) else None),
+                "trend_strength": mctx.get("trend_strength", "UNAVAILABLE_BACKTEST"),
+                "volatility_pct": mctx.get("volatility_pct", "UNAVAILABLE_BACKTEST"),
+                "range_position": mctx.get("range_position", "UNAVAILABLE_BACKTEST"),
+                "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+                "slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+                "first_blocking_gate": diagnostics.get("failed_filter", ""),
+                "all_failed_gates": json.dumps(diagnostics.get("all_failed_gates", []), sort_keys=True) if isinstance(diagnostics, dict) else "[]",
             }
         )
         return None
@@ -954,6 +984,15 @@ def process_backtest_result(
                 "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")),
                 "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "raw_rr": cand.rr,
+                "effective_rr": effective_rr,
+                "min_required_score": ((diagnostics.get("adaptive_thresholds") or {}).get("min_score") if isinstance(diagnostics, dict) else None),
+                "trend_strength": mctx.get("trend_strength", "UNAVAILABLE_BACKTEST"),
+                "volatility_pct": mctx.get("volatility_pct", "UNAVAILABLE_BACKTEST"),
+                "range_position": mctx.get("range_position", "UNAVAILABLE_BACKTEST"),
+                "slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "first_blocking_gate": "execution",
+                "all_failed_gates": json.dumps(execution_flags, sort_keys=True),
             }
         )
         return None
@@ -1029,25 +1068,30 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
 
 
 def _derive_backtest_counts(lifecycle: List[LifecycleRow]) -> Dict[str, int]:
-    final_decision_by_signal: Dict[str, str] = {}
-    for row in lifecycle:
-        signal_id = f"{row.symbol}:{row.timestamp}"
-        if row.status_after in {"SYMBOL_REJECTED", "SIGNAL_REJECTED", "ORDER_REJECTED"}:
-            final_decision_by_signal[signal_id] = "REJECTED"
-        elif row.status_after in {"ENTRY_TIMEOUT", "ORDER_PLACED", "POSITION_CLOSED", "ENTRY_TRIGGERED", "WAITING_ENTRY_ZONE"}:
-            final_decision_by_signal.setdefault(signal_id, "ACCEPTED")
-    accepted_count = sum(1 for v in final_decision_by_signal.values() if v == "ACCEPTED")
-    rejected_count = sum(1 for v in final_decision_by_signal.values() if v == "REJECTED")
-    total_orders = sum(1 for row in lifecycle if row.status_after == "ORDER_PLACED")
+    signal_ids = {
+        f"{row.symbol}:{row.timestamp}"
+        for row in lifecycle
+        if row.status_after in {"SIGNAL_CREATED", "SYMBOL_REJECTED"}
+    }
+    total_candidates = len(signal_ids)
+    rejected_count = sum(1 for row in lifecycle if row.status_after in {"SYMBOL_REJECTED", "SIGNAL_REJECTED", "ORDER_REJECTED"})
+    accepted_count = total_candidates - rejected_count
+    total_orders = sum(1 for row in lifecycle if row.status_after == "WAITING_ENTRY_ZONE")
     triggered_orders = sum(1 for row in lifecycle if row.status_after == "ENTRY_TRIGGERED")
     not_triggered_orders = sum(1 for row in lifecycle if row.status_after == "ENTRY_TIMEOUT")
+    open_at_end_orders = sum(1 for row in lifecycle if row.status_after == "POSITION_CLOSED" and row.close_reason == "TIMEOUT")
+    tp_hits = sum(1 for row in lifecycle if row.status_after == "POSITION_CLOSED" and row.close_reason == "TP_HIT")
+    sl_hits = sum(1 for row in lifecycle if row.status_after == "POSITION_CLOSED" and row.close_reason == "SL_HIT")
     return {
-        "total_candidates": accepted_count + rejected_count,
+        "total_candidates": total_candidates,
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
         "total_orders": total_orders,
         "triggered_orders": triggered_orders,
         "not_triggered_orders": not_triggered_orders,
+        "open_at_end_orders": open_at_end_orders,
+        "tp_hits": tp_hits,
+        "sl_hits": sl_hits,
     }
 
 
@@ -1059,18 +1103,73 @@ def _distribution(values: List[Any]) -> Dict[str, int]:
     return dict(sorted(out.items(), key=lambda item: item[0]))
 
 
+
+
+def _percentiles(values: List[float], points: List[int]) -> Dict[str, float]:
+    if not values:
+        return {f"p{pt}": 0.0 for pt in points}
+    vals = sorted(float(v) for v in values)
+    n = len(vals)
+    out: Dict[str, float] = {}
+    for pt in points:
+        if n == 1:
+            out[f"p{pt}"] = round(vals[0], 6)
+            continue
+        rank = (pt / 100.0) * (n - 1)
+        lo = int(rank)
+        hi = min(lo + 1, n - 1)
+        w = rank - lo
+        out[f"p{pt}"] = round(vals[lo] * (1.0 - w) + vals[hi] * w, 6)
+    return out
+
 def _value_unavailable(value: Any) -> bool:
     return value is None or value == "" or value == "UNAVAILABLE_BACKTEST"
 
 
 def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
-    total = len(rows)
-    rejected_rows = [r for r in rows if str(r.get("decision", "")).upper() == "REJECTED"]
-    accepted_rows = [r for r in rows if str(r.get("decision", "")).upper() == "ACCEPTED"]
-    execution_ctx_missing_true = sum(1 for r in rows if bool(r.get("execution_ctx_missing")))
+    def _normalized_decision(row: Mapping[str, Any]) -> str:
+        decision = str(row.get("decision", "") or "").strip().upper()
+        if decision:
+            return decision
+        for key in ("status", "status_after", "status_before", "lifecycle_state"):
+            value = str(row.get(key, "") or "").strip().upper()
+            if value:
+                return value
+        return ""
+
+    def _is_metadata_row(row: Mapping[str, Any]) -> bool:
+        # Skip only explicit aggregate rows. Plain decision dictionaries are candidates.
+        if row.get("metric") is not None and row.get("value") is not None:
+            return True
+        marker = str(row.get("row_type", "") or "").strip().lower()
+        return marker in {"summary", "metadata"}
+
+    candidate_rows = [r for r in rows if not _is_metadata_row(r)]
+    signal_created_rows = [r for r in candidate_rows if str(r.get("lifecycle_state", "")).strip().upper() == "SIGNAL_CREATED"]
+    if signal_created_rows:
+        candidate_rows_for_counts = signal_created_rows
+    else:
+        candidate_rows_for_counts = candidate_rows
+    total = len(candidate_rows_for_counts)
+
+    rejected_tokens = {"REJECTED", "SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}
+    accepted_tokens = {"ACCEPTED", "EXECUTED", "ENTRY_TRIGGERED", "ORDER_PLACED", "PARTIAL_FILL", "FILLED", "TP_HIT", "SL_HIT", "OPEN_AT_END"}
+
+    candidate_signal_ids = {str(r.get("signal_id", "")).strip() for r in candidate_rows_for_counts if str(r.get("signal_id", "")).strip()}
+    rejected_rows = [
+        r for r in candidate_rows
+        if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
+        and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
+    ]
+    accepted_rows = [
+        r for r in candidate_rows
+        if _normalized_decision(r) in accepted_tokens
+        and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
+    ]
+    execution_ctx_missing_true = sum(1 for r in candidate_rows if bool(r.get("execution_ctx_missing")))
     effective_rr_diff_count = sum(
         1
-        for r in rows
+        for r in candidate_rows
         if abs(_safe_float(r.get("effective_rr"), 0.0) - _safe_float(r.get("rr"), 0.0)) > 1e-12
     )
 
@@ -1081,7 +1180,7 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         "slippage_pct": 0,
         "latency_ms": 0,
     }
-    for row in rows:
+    for row in candidate_rows:
         ctx = row.get("execution_ctx")
         if isinstance(ctx, str):
             try:
@@ -1101,22 +1200,36 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         if "latency_ms" in ctx and _value_unavailable(ctx.get("latency_ms")):
             unavailable_counts["latency_ms"] += 1
 
+    score_vals = [_safe_float(r.get("score"), 0.0) for r in candidate_rows]
+    raw_rr_vals = [_safe_float(r.get("rr"), 0.0) for r in candidate_rows]
+    effective_rr_vals = [_safe_float(r.get("effective_rr"), 0.0) for r in candidate_rows]
+    near_threshold = [
+        r for r in rejected_rows
+        if str(r.get("reject_reason", "")).upper() == "LOW_SCORE" and abs(_safe_float(r.get("score"), 0.0) - 7.5) <= 0.5
+    ]
+
     return {
         "total_candidates": total,
         "accepted_count": len(accepted_rows),
         "rejected_count": len(rejected_rows),
         "reject_rate": (len(rejected_rows) / total) if total else 0.0,
         "reject_reason_distribution": _distribution([r.get("reject_reason", "") or "" for r in rejected_rows]),
-        "score_distribution": _distribution([r.get("score") for r in rows]),
-        "rr_distribution": _distribution([r.get("rr") for r in rows]),
-        "effective_rr_distribution": _distribution([r.get("effective_rr") for r in rows]),
+        "score_distribution": _distribution([r.get("score") for r in candidate_rows]),
+        "rr_distribution": _distribution([r.get("rr") for r in candidate_rows]),
+        "effective_rr_distribution": _distribution([r.get("effective_rr") for r in candidate_rows]),
         "effective_rr_differs_from_rr_count": effective_rr_diff_count,
-        "expectancy_bucket_distribution": _distribution([r.get("expectancy_bucket", "UNKNOWN") for r in rows]),
+        "expectancy_bucket_distribution": _distribution([r.get("expectancy_bucket", "UNKNOWN") for r in candidate_rows]),
         "execution_ctx_missing_distribution": {
             "true": execution_ctx_missing_true,
             "false": total - execution_ctx_missing_true,
         },
         "unavailable_execution_context_field_counts": unavailable_counts,
+        "score_percentiles": _percentiles(score_vals, [10, 25, 50, 75, 90]),
+        "raw_rr_percentiles": _percentiles(raw_rr_vals, [10, 25, 50, 75, 90]),
+        "effective_rr_percentiles": _percentiles(effective_rr_vals, [10, 25, 50, 75, 90]),
+        "rejection_reason_by_setup_type": _distribution([f"{r.get('setup_type','UNKNOWN')}::{r.get('reject_reason','UNKNOWN')}" for r in rejected_rows]),
+        "rejection_reason_by_regime": _distribution([f"{r.get('regime','UNKNOWN')}::{r.get('reject_reason','UNKNOWN')}" for r in rejected_rows]),
+        "acceptance_candidates_near_threshold_count": len(near_threshold),
     }
 
 
@@ -1155,6 +1268,81 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+def _bucket_execution_quality(spread_pct: Any, slippage_pct: Any, liquidity_score: Any) -> str:
+    spread = _safe_float(spread_pct, -1.0)
+    slippage = _safe_float(slippage_pct, -1.0)
+    liquidity = _safe_float(liquidity_score, -1.0)
+    if spread < 0.0 or slippage < 0.0 or liquidity < 0.0:
+        return "UNAVAILABLE"
+    if spread <= 0.03 and slippage <= 0.02 and liquidity >= 0.7:
+        return "HIGH"
+    if spread <= 0.08 and slippage <= 0.05 and liquidity >= 0.4:
+        return "MEDIUM"
+    return "LOW"
+
+
+def evaluate_forward_window(
+    candidate_row: Mapping[str, Any],
+    candles: List[Candle],
+    idx: int,
+    forward_window_minutes: int = 240,
+) -> ForwardWindowEvaluation:
+    outcome = simulate_rejected_counterfactual(
+        CandidateOrder(
+            timestamp=int(candidate_row.get("timestamp", 0)),
+            symbol=str(candidate_row.get("symbol", "")),
+            side=str(candidate_row.get("side", "LONG")),
+            entry=_safe_float(candidate_row.get("entry"), 0.0),
+            sl=_safe_float(candidate_row.get("sl"), 0.0),
+            tp=_safe_float(candidate_row.get("tp"), 0.0),
+            rr=_safe_float(candidate_row.get("rr"), 0.0),
+            setup_type=str(candidate_row.get("setup_type", "")),
+            setup_reason=str(candidate_row.get("setup_reason", "")),
+            regime=str(candidate_row.get("regime", "")),
+            score=_safe_float(candidate_row.get("score"), 0.0),
+            order_type=str(candidate_row.get("order_type", "LIMIT")),
+        ),
+        candles,
+        idx,
+        timeout_bars=forward_window_minutes,
+    )
+    entry = max(_safe_float(candidate_row.get("entry"), 0.0), 1e-9)
+    mfe_pct = (float(outcome["max_favorable_excursion"]) / entry) * 100.0
+    mae_pct = (float(outcome["max_adverse_excursion"]) / entry) * 100.0
+    decision = str(candidate_row.get("decision", "") or "").upper()
+    lifecycle_state = str(candidate_row.get("status_after", candidate_row.get("lifecycle_state", "")) or "").upper()
+    reject_reason = str(candidate_row.get("reject_reason", "") or "")
+    is_rejected = decision == "REJECTED" or lifecycle_state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"} or reject_reason != ""
+    reject_correct = None
+    reject_missed_winner = False
+    reject_saved_from_loss = False
+    if is_rejected:
+        reject_missed_winner = bool(outcome["would_tp_hit"]) and not bool(outcome["would_sl_hit"])
+        reject_saved_from_loss = bool(outcome["would_sl_hit"]) and not bool(outcome["would_tp_hit"])
+        reject_correct = reject_saved_from_loss
+    return ForwardWindowEvaluation(
+        signal_id=str(candidate_row.get("signal_id", f"{candidate_row.get('symbol','')}:{candidate_row.get('timestamp','')}")),
+        symbol=str(candidate_row.get("symbol", "")),
+        decision=("REJECTED" if is_rejected else ("ACCEPTED" if decision == "ACCEPTED" else decision)),
+        lifecycle_state=lifecycle_state,
+        reject_reason=reject_reason,
+        forward_window_minutes=forward_window_minutes,
+        would_have_hit_tp=bool(outcome["would_tp_hit"]),
+        would_have_hit_sl=bool(outcome["would_sl_hit"]),
+        mfe_pct=round(mfe_pct, 8),
+        mae_pct=round(mae_pct, 8),
+        max_forward_return=round(mfe_pct, 8),
+        max_adverse_return=round(-mae_pct, 8),
+        reject_correct=reject_correct,
+        reject_missed_winner=reject_missed_winner,
+        reject_saved_from_loss=reject_saved_from_loss,
+        forward_window_regime=str(candidate_row.get("regime", "UNKNOWN")),
+        execution_quality_bucket=_bucket_execution_quality(
+            candidate_row.get("spread_pct"),
+            candidate_row.get("slippage_pct", candidate_row.get("expected_slippage_pct")),
+            candidate_row.get("liquidity_score"),
+        ),
+    )
 def _is_actionable_rejected_order(row: Mapping[str, Any]) -> bool:
     if row.get("setup_reason") == "SYMBOL_SELECTOR":
         return False
@@ -1517,7 +1705,7 @@ def main():
                 expected_slippage_pct=0.001,
             )
         )
-    candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": ""} for x in candidates]
+    candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": "", "raw_rr": x.rr, "effective_rr": x.rr, "min_required_score": "", "trend_strength": "", "volatility_pct": "", "range_position": "", "spread_pct": "", "slippage_pct": "", "liquidity_score": "", "first_blocking_gate": "", "all_failed_gates": "[]"} for x in candidates]
     rejected_shadow: List[RejectedShadowEvaluation] = []
     for row in rejected:
         if not _is_actionable_rejected_order(row):
@@ -1550,6 +1738,7 @@ def main():
         "selected_symbols": len(universe),
         "total_candidates": counts["total_candidates"],
         "accepted_count": counts["accepted_count"],
+        "rejected_count": counts["rejected_count"],
         "total_rejected": counts["rejected_count"],
         "rejection_rate": (
             0.0
@@ -1559,9 +1748,9 @@ def main():
         "total_orders": counts["total_orders"],
         "triggered_orders": counts["triggered_orders"],
         "not_triggered_orders": counts["not_triggered_orders"],
-        "tp_hits": sum(1 for r in lifecycle if r.close_reason == "TP_HIT"),
-        "sl_hits": sum(1 for r in lifecycle if r.close_reason == "SL_HIT"),
-        "open_at_end": len(open_rows),
+        "tp_hits": counts["tp_hits"],
+        "sl_hits": counts["sl_hits"],
+        "open_at_end": counts["open_at_end_orders"],
         "win_rate": (
             0.0
             if not lifecycle

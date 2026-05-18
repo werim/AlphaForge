@@ -135,3 +135,70 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Added
 - Regression tests for symbol-level reject decision integrity and per-signal terminal decision deduplication in backtest summary accounting.
+
+## [Unreleased] - 2026-05-17 (Setup quality diagnostics)
+
+### Added
+- Rejected/accepted candidate export diagnostics: `raw_rr`, `effective_rr`, `min_required_score`, `trend_strength`, `volatility_pct`, `range_position`, `slippage_pct`, `first_blocking_gate`, `all_failed_gates`.
+- Quality summary percentiles for score/raw RR/effective RR and slice distributions by setup type/regime reject reason.
+- Near-threshold LOW_SCORE rejection counter for calibration analysis.
+
+### Changed
+- Trade-quality diagnostics now record `all_failed_gates` in addition to first blocking gate.
+
+### Known Issues
+- Setup generation heuristics remain simplistic and may still overproduce weak breakout-style candidates in choppy regimes.
+
+
+## Generation 9 - Adaptive Learning Data Foundation (2026-05-17)
+### Added
+- Deterministic SQL-first adaptive learning module `src/alphaforge/adaptive_learning.py` with closed/rejected review persistence, adaptive stats aggregation, reject-accuracy computation, expectancy bucket classification, and shadow-threshold recommendation logic.
+- New persistence tables: `rejected_signal_reviews`, `adaptive_stats`, `adaptive_threshold_snapshots`; expanded `closed_trade_reviews` schema for execution-aware review fields.
+- Config safety flags for adaptive foundation (disabled learning by default, shadow mode default on, clamp and sample controls).
+- Adaptive learning foundation tests in `tests/test_adaptive_learning_foundation.py`.
+### Changed
+- `AIBrain` now records adaptive review rows for closed trades and rejected decisions without changing acceptance/execution behavior.
+### Known Issues
+- Forward-labeling for rejected-signal outcome quality remains null until Generation 2 outcome-label jobs are added.
+## [Unreleased] - 2026-05-17 (Regime gate initialization hotfix)
+
+### Fixed
+- Resolved `UnboundLocalError` in trade-quality evaluation by initializing `regime_ok` before gate checks.
+- Preserved deterministic regime reject behavior (`REGIME_MISMATCH`) while preventing crashes for candidates with missing regime values.
+
+### Added
+- Regression tests covering missing-candidate-regime non-crash behavior and incompatible market-regime rejection behavior.
+
+## [Unreleased] - 2026-05-18 (Backtest lifecycle summary reconciliation)
+
+### Fixed
+- Reconciled backtest summary counting semantics so `total_candidates = accepted_count + rejected_count` using signal-level lifecycle identities.
+- Corrected `total_orders` meaning to accepted order objects (`WAITING_ENTRY_ZONE`) rather than candidate-level/event-level drift.
+- Added explicit `rejected_count` in main order summary while preserving `total_rejected` alias for compatibility.
+- Aligned quality summary denominator/reject accounting to signal-level candidates (`SIGNAL_CREATED`) to prevent candidate-vs-event mismatch.
+
+### Added
+- Regression test proving quality summary candidate denominator uses signal-level rows and matches reject distribution semantics.
+
+## [Unreleased] - 2026-05-18 (Adaptive persistence compatibility hotfix)
+
+### Fixed
+- `build_backtest_quality_summary(...)` now supports both plain decision-row inputs and lifecycle-row inputs, with candidate counting based on `SIGNAL_CREATED` when present and direct-row counting fallback when absent.
+- Restored legacy `closed_trade_reviews.execution_metrics` population in adaptive closed-trade persistence path to prevent NULL JSON in execution-layer review queries.
+- Ensured SQLite migration/bootstrapping adds `execution_metrics` column when absent and uses SQLAlchemy `text(...)` for robust inserts in `save_closed_trade_review`.
+
+### Added
+- No architectural changes; patch is compatibility-focused and regression-safe.
+
+## [Unreleased] - 2026-05-18 (Generation N+2 Forward Reject Telemetry Foundation)
+
+### Added
+- Deterministic forward-window evaluator (`evaluate_forward_window`) for lifecycle/reject rows with labels: `would_have_hit_tp`, `would_have_hit_sl`, `mfe_pct`, `mae_pct`, `max_forward_return`, `max_adverse_return`, `reject_correct`, `reject_missed_winner`, `reject_saved_from_loss`, `forward_window_minutes`, `forward_window_regime`, `execution_quality_bucket`.
+- Adaptive stats scope entrypoint `update_adaptive_stats_by_scope(...)` supporting additive reject-learning scopes (`REJECTION_REASON`, execution/volatility/spread/liquidity/trend/session/timeframe buckets).
+- Determinism regressions for forward-window replay stability and scoped reject-accuracy aggregation.
+
+### Changed
+- Reject quality telemetry can now be aggregated by richer scopes without enabling autonomous threshold mutation.
+
+### Known Issues
+- Forward-window outputs are generated deterministically but are not yet persisted into dedicated SQL tables in this generation.
