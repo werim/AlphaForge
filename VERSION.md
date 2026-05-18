@@ -156,3 +156,9 @@
 - Lifecycle outcome buckets (`triggered_orders`, `not_triggered_orders`, `tp_hits`, `sl_hits`, `open_at_end`) are reconciled from lifecycle terminal states for accepted orders.
 - Backtest quality summary now uses signal-level candidate denominator (from `SIGNAL_CREATED`) and signal-scoped reject accounting for consistency with order summary.
 - Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## 2026-05-18 Hotfix Status (Backtest quality summary + execution metrics persistence)
+- Backtest quality summary now counts plain candidate decision rows directly when lifecycle `SIGNAL_CREATED` rows are absent, while preserving signal-scoped denominator behavior when lifecycle rows are present.
+- Adaptive closed-trade persistence now writes legacy `execution_metrics` JSON alongside structured review payload fields.
+- SQLite init/migration now ensures `closed_trade_reviews.execution_metrics` exists for backward-compatible read paths.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.

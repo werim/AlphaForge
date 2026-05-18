@@ -1108,16 +1108,49 @@ def _value_unavailable(value: Any) -> bool:
 
 
 def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
-    signal_rows = [r for r in rows if str(r.get("lifecycle_state", "")) == "SIGNAL_CREATED"]
-    total = len(signal_rows)
-    signal_ids = {str(r.get("signal_id", "")) for r in signal_rows}
-    rejected_rows = [r for r in rows if str(r.get("decision", "")).upper() == "REJECTED" and str(r.get("signal_id", "")) in signal_ids]
-    rejected_signal_ids = {str(r.get("signal_id", "")) for r in rejected_rows}
-    accepted_rows = [r for r in signal_rows if str(r.get("signal_id", "")) not in rejected_signal_ids]
-    execution_ctx_missing_true = sum(1 for r in rows if bool(r.get("execution_ctx_missing")))
+    def _normalized_decision(row: Mapping[str, Any]) -> str:
+        decision = str(row.get("decision", "") or "").strip().upper()
+        if decision:
+            return decision
+        for key in ("status", "status_after", "status_before", "lifecycle_state"):
+            value = str(row.get(key, "") or "").strip().upper()
+            if value:
+                return value
+        return ""
+
+    def _is_metadata_row(row: Mapping[str, Any]) -> bool:
+        # Skip only explicit aggregate rows. Plain decision dictionaries are candidates.
+        if row.get("metric") is not None and row.get("value") is not None:
+            return True
+        marker = str(row.get("row_type", "") or "").strip().lower()
+        return marker in {"summary", "metadata"}
+
+    candidate_rows = [r for r in rows if not _is_metadata_row(r)]
+    signal_created_rows = [r for r in candidate_rows if str(r.get("lifecycle_state", "")).strip().upper() == "SIGNAL_CREATED"]
+    if signal_created_rows:
+        candidate_rows_for_counts = signal_created_rows
+    else:
+        candidate_rows_for_counts = candidate_rows
+    total = len(candidate_rows_for_counts)
+
+    rejected_tokens = {"REJECTED", "SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}
+    accepted_tokens = {"ACCEPTED", "EXECUTED", "ENTRY_TRIGGERED", "ORDER_PLACED", "PARTIAL_FILL", "FILLED", "TP_HIT", "SL_HIT", "OPEN_AT_END"}
+
+    candidate_signal_ids = {str(r.get("signal_id", "")).strip() for r in candidate_rows_for_counts if str(r.get("signal_id", "")).strip()}
+    rejected_rows = [
+        r for r in candidate_rows
+        if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
+        and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
+    ]
+    accepted_rows = [
+        r for r in candidate_rows
+        if _normalized_decision(r) in accepted_tokens
+        and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
+    ]
+    execution_ctx_missing_true = sum(1 for r in candidate_rows if bool(r.get("execution_ctx_missing")))
     effective_rr_diff_count = sum(
         1
-        for r in rows
+        for r in candidate_rows
         if abs(_safe_float(r.get("effective_rr"), 0.0) - _safe_float(r.get("rr"), 0.0)) > 1e-12
     )
 
@@ -1128,7 +1161,7 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         "slippage_pct": 0,
         "latency_ms": 0,
     }
-    for row in rows:
+    for row in candidate_rows:
         ctx = row.get("execution_ctx")
         if isinstance(ctx, str):
             try:
@@ -1148,9 +1181,9 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         if "latency_ms" in ctx and _value_unavailable(ctx.get("latency_ms")):
             unavailable_counts["latency_ms"] += 1
 
-    score_vals = [_safe_float(r.get("score"), 0.0) for r in rows]
-    raw_rr_vals = [_safe_float(r.get("rr"), 0.0) for r in rows]
-    effective_rr_vals = [_safe_float(r.get("effective_rr"), 0.0) for r in rows]
+    score_vals = [_safe_float(r.get("score"), 0.0) for r in candidate_rows]
+    raw_rr_vals = [_safe_float(r.get("rr"), 0.0) for r in candidate_rows]
+    effective_rr_vals = [_safe_float(r.get("effective_rr"), 0.0) for r in candidate_rows]
     near_threshold = [
         r for r in rejected_rows
         if str(r.get("reject_reason", "")).upper() == "LOW_SCORE" and abs(_safe_float(r.get("score"), 0.0) - 7.5) <= 0.5
@@ -1162,11 +1195,11 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         "rejected_count": len(rejected_rows),
         "reject_rate": (len(rejected_rows) / total) if total else 0.0,
         "reject_reason_distribution": _distribution([r.get("reject_reason", "") or "" for r in rejected_rows]),
-        "score_distribution": _distribution([r.get("score") for r in rows]),
-        "rr_distribution": _distribution([r.get("rr") for r in rows]),
-        "effective_rr_distribution": _distribution([r.get("effective_rr") for r in rows]),
+        "score_distribution": _distribution([r.get("score") for r in candidate_rows]),
+        "rr_distribution": _distribution([r.get("rr") for r in candidate_rows]),
+        "effective_rr_distribution": _distribution([r.get("effective_rr") for r in candidate_rows]),
         "effective_rr_differs_from_rr_count": effective_rr_diff_count,
-        "expectancy_bucket_distribution": _distribution([r.get("expectancy_bucket", "UNKNOWN") for r in rows]),
+        "expectancy_bucket_distribution": _distribution([r.get("expectancy_bucket", "UNKNOWN") for r in candidate_rows]),
         "execution_ctx_missing_distribution": {
             "true": execution_ctx_missing_true,
             "false": total - execution_ctx_missing_true,

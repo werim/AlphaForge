@@ -179,3 +179,13 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Added
 - Regression test proving quality summary candidate denominator uses signal-level rows and matches reject distribution semantics.
+
+## [Unreleased] - 2026-05-18 (Adaptive persistence compatibility hotfix)
+
+### Fixed
+- `build_backtest_quality_summary(...)` now supports both plain decision-row inputs and lifecycle-row inputs, with candidate counting based on `SIGNAL_CREATED` when present and direct-row counting fallback when absent.
+- Restored legacy `closed_trade_reviews.execution_metrics` population in adaptive closed-trade persistence path to prevent NULL JSON in execution-layer review queries.
+- Ensured SQLite migration/bootstrapping adds `execution_metrics` column when absent and uses SQLAlchemy `text(...)` for robust inserts in `save_closed_trade_review`.
+
+### Added
+- No architectural changes; patch is compatibility-focused and regression-safe.
