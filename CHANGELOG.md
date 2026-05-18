@@ -189,3 +189,26 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Added
 - No architectural changes; patch is compatibility-focused and regression-safe.
+
+## [Unreleased] - 2026-05-18 (Generation N+2 Forward Reject Telemetry Foundation)
+
+### Added
+- Deterministic forward-window evaluator (`evaluate_forward_window`) for lifecycle/reject rows with labels: `would_have_hit_tp`, `would_have_hit_sl`, `mfe_pct`, `mae_pct`, `max_forward_return`, `max_adverse_return`, `reject_correct`, `reject_missed_winner`, `reject_saved_from_loss`, `forward_window_minutes`, `forward_window_regime`, `execution_quality_bucket`.
+- Adaptive stats scope entrypoint `update_adaptive_stats_by_scope(...)` supporting additive reject-learning scopes (`REJECTION_REASON`, execution/volatility/spread/liquidity/trend/session/timeframe buckets).
+- Determinism regressions for forward-window replay stability and scoped reject-accuracy aggregation.
+
+### Changed
+- Reject quality telemetry can now be aggregated by richer scopes without enabling autonomous threshold mutation.
+
+### Known Issues
+- Forward-window outputs are generated deterministically but are not yet persisted into dedicated SQL tables in this generation.
+
+## [Unreleased] - 2026-05-18 (Generation N+2 Wiring: terminal forward-eval + calibration persistence)
+
+### Added
+- Terminal-state forward evaluator trigger wiring in backtest flow (post-lifecycle only) with CSV exports: `forward_evaluations.csv`, `adaptive_scope_stats.csv`, `calibration_snapshots.csv`.
+- Immutable/idempotent `calibration_snapshots` persistence table (`UNIQUE(signal_id, forward_window_minutes)`, insert-do-nothing).
+- Adaptive scope export payload covering regime/setup/timeframe/session/volatility/spread/liquidity/trend/rejection_reason/execution_quality dimensions.
+
+### Fixed
+- Forward evaluator remains isolated from same-signal decision path and now executes only on terminal closed lifecycle outcomes.
