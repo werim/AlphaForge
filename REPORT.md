@@ -265,3 +265,75 @@ AlphaForge’s current backtest underperformance is a **combination problem**:
 - Score is **not sufficiently calibrated** to executable post-cost expectancy.
 
 So the dominant failure mode is not a single bug; it is: **long-only candidate construction + scoring/calibration mismatch + strict execution/geometry gating, with potential penalty unit inconsistency amplifying final rejection.**
+
+
+# PAPER Runtime Persistence and SQLite Bootstrap Investigation (2026-05-19)
+
+## Root Cause Summary
+- Tables were not visible primarily because PAPER runtime can point at an unexpected SQLite target (`:memory:` default or non-resolved relative path) while SQLTools inspected a different file.
+- Runtime bootstrap already called `init_db(...)` (which issues `CREATE TABLE IF NOT EXISTS`), but startup lacked fail-fast logging to prove path/schema/table state.
+- Runtime heartbeat counters stayed at zero because the default runtime scanner returns an empty candidate list, so symbol selection and decision generation never progressed.
+- Prior runtime bootstrap did not wire reject/lifecycle callbacks to persistence, so runtime-generated reject/lifecycle data was not persisted by default even if events occurred.
+
+## Exact Files / Functions Investigated
+- `src/alphaforge/runtime.py`
+  - `_build_runtime_from_env()`
+  - `_scan_once()`
+  - `_heartbeat_loop()`
+- `src/alphaforge/persistence.py`
+  - `init_db()`
+  - `_apply_sqlite_migrations()`
+  - `save_order_decision()`
+  - `save_trade_lifecycle_event()`
+- `src/alphaforge/symbol_selector.py`
+  - `select_symbols()` / `select_symbol()`
+
+## Why No Tables Appeared
+- Schema creation function exists and is mode-agnostic: `init_db(...)` always executes DDL list with `CREATE TABLE IF NOT EXISTS`.
+- It is invoked during runtime bootstrap (`_build_runtime_from_env`) before orchestrator starts.
+- Empty decision flow does NOT skip schema init.
+- Practical failure mode was observability/path mismatch: no explicit absolute DB path and no post-init table logging, making SQLTools likely pointed at a different DB file.
+
+## Why PAPER Decisions Were Not Generated
+- Runtime env bootstrap scanner currently returns `[]` in `_safe_market_scanner`; therefore:
+  - `symbols_selected=0`
+  - `decisions_generated=0`
+  - `rejects_persisted=0`
+  - `lifecycle_events=0`
+- This is fail-closed and expected with no market candidates; not a permissiveness bug.
+
+## Determination (a–e)
+- (a) **Yes**: PAPER was not selecting symbols (`symbols_selected=0`) due to empty candidate list.
+- (b) N/A in observed env bootstrap path (no symbols selected).
+- (c) Previously possible in runtime path because callbacks were not wired by default; now fixed in bootstrap wiring.
+- (d) SQL persistence was partially skipped for runtime events pre-patch (no default reject/lifecycle callbacks); now enabled when `ALPHAFORGE_PERSISTENCE_ENABLED=true`.
+- (e) **Likely contributing factor**: SQLite path mismatch (relative/in-memory vs SQLTools target) due to missing absolute-path diagnostics; now fixed with explicit resolved path logging.
+
+## BACKTEST vs PAPER/LIVE Persistence Comparison
+- Table creation: all modes via shared `init_db(...)` when bootstrapped through runtime env path.
+- Lifecycle writes: available via runtime `on_lifecycle_event` callback; now wired in bootstrap for runtime modes.
+- Reject writes: available via runtime `on_reject_persist` callback; now wired in bootstrap for runtime modes.
+- Orders/executions: execution counters/lifecycle emit in runtime; order decision persistence is callback-dependent and now wired in bootstrap path.
+- Rejected decision consistency: improved by default callback wiring; remains dependent on runtime producing rejections.
+
+## Patch Plan Executed
+1. Add deterministic startup diagnostics for DB URL/path/schema/tables and persistence flag.
+2. Ensure runtime bootstrap wires lifecycle/reject callbacks to SQLite persistence functions.
+3. Add zero-selection diagnostics and gate blockers in scan + heartbeat.
+4. Add tests for bootstrap schema/path/zero-selection diagnostics.
+
+## Code Changes Made
+- Implemented runtime bootstrap logging: configured DB URL, resolved absolute DB URL, schema init success, discovered table names.
+- Added `persistence_enabled` metric and heartbeat surfacing.
+- Added scan-time reject reason aggregation and explicit gate blockers for `NO_MARKET_CANDIDATES` and `NO_TRADABLE_SYMBOLS_AFTER_SELECTION`.
+- Wired runtime bootstrap callbacks to `save_trade_lifecycle_event(...)` and `save_order_decision(...)`, guarded by `ALPHAFORGE_PERSISTENCE_ENABLED`.
+
+## Tests Added
+- PAPER bootstrap creates key schema tables even with empty decision cycle.
+- Runtime bootstrap logs absolute SQLite DB path.
+- Zero-selected-symbol scan records explicit gate blocker + rejection summary.
+
+## Remaining Risks
+- Default env scanner still returns no candidates; runtime remains inert unless real scanner/universe feed is wired.
+- Persistence callbacks now wired, but successful rows still depend on runtime generating lifecycle/reject events.
+- SQLTools/operator must verify they open the same resolved DB path logged by runtime.

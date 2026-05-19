@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
@@ -175,6 +178,44 @@ def test_runtime_module_bootstrap_builds_from_env(monkeypatch: pytest.MonkeyPatc
     assert rt.config.execution_mode == ExecutionMode.PAPER
     assert rt.config.scan_interval_sec == pytest.approx(0.01)
     assert rt.config.heartbeat_interval_sec == pytest.approx(0.02)
+    assert rt.metrics.persistence_enabled is True
+
+
+def test_paper_bootstrap_initializes_schema_with_empty_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "paper.sqlite3"
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
+    rt = _build_runtime_from_env()
+    assert rt.metrics.persistence_enabled is True
+    assert rt.metrics.decisions_generated == 0
+    with rt.ai_brain.session.get_bind().connect() as conn:
+        tables = {str(row[0]) for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+    assert "signals" in tables
+    assert "order_decisions" in tables
+    assert "trade_lifecycle_events" in tables
+
+
+def test_runtime_logs_absolute_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    db_path = tmp_path / "paper_runtime.sqlite3"
+    monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
+    caplog.set_level(logging.INFO)
+    _build_runtime_from_env()
+    assert any("resolved_db_url=sqlite+pysqlite:///" in rec.message and str(db_path.resolve()) in rec.message for rec in caplog.records)
+
+
+def test_symbols_selected_zero_records_gate_reasons() -> None:
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "spread_pct": 999.0, "volume_24h_usdt": 0.0}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert orchestrator.metrics.symbols_selected == 0
+    assert orchestrator._last_scan_gate_blockers == ["NO_TRADABLE_SYMBOLS_AFTER_SELECTION"]
+    assert orchestrator._last_scan_rejection_summary
 
 
 def test_runtime_start_loop_does_not_exit_until_shutdown() -> None:
