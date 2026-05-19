@@ -13,7 +13,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-from alphaforge.execution import build_execution_context
+from alphaforge.execution import build_execution_context, build_execution_cost_model, normalize_pct_input
 from alphaforge.persistence import init_db, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
 from sqlalchemy import text
@@ -154,20 +154,28 @@ def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy < 0.2:
         return "MEDIUM"
     return "HIGH"
-def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[float, list[str]]:
-    slippage = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-    spread = float(market_ctx.get("spread_pct", 0.0) or 0.0)
+def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[float, list[str], dict[str, float]]:
+    model = build_execution_cost_model(market_ctx, include_missing_penalty=False)
+    effective = round(max(float(rr) - model.total_penalty, 0.0), 6)
     liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
-    execution_penalty = (slippage + spread) * 50.0
-    effective = round(max(float(rr) * (1.0 - execution_penalty), 0.0), 6)
     flags: list[str] = []
-    if slippage >= 0.02:
+    if model.slippage_penalty >= 0.20:
         flags.append("HIGH_SLIPPAGE")
+    if model.spread_penalty >= 0.20:
+        flags.append("HIGH_SPREAD")
     if liquidity_score < 0.3:
         flags.append("LOW_LIQUIDITY")
     if effective < 1.1:
         flags.append("LOW_EFFECTIVE_RR")
-    return effective, flags
+    breakdown = {
+        "cost_penalty_total": model.total_penalty,
+        "spread_penalty": model.spread_penalty,
+        "slippage_penalty": model.slippage_penalty,
+        "latency_penalty": model.latency_penalty,
+        "liquidity_penalty": model.liquidity_penalty,
+        "funding_penalty": model.funding_penalty,
+    }
+    return effective, flags, breakdown
 def _estimate_backtest_spread_pct(liquidity_score: float, volatility_pct: float) -> float:
     base_spread_pct = 0.015 + (1.0 - liquidity_score) * 0.09
     volatility_widening = min(0.04, max(0.0, (volatility_pct - 2.0) * 0.0015))
@@ -178,14 +186,18 @@ def _build_market_ctx(
     symbol_meta: Mapping[str, Any],
     recent: Optional[List[Candle]] = None,
 ) -> Dict[str, Any]:
+    bullish_breakout = now.close >= prev.close
+    side = "LONG" if bullish_breakout else "SHORT"
     entry = now.close
-    sl = min(now.low, prev.low)
+    sl = min(now.low, prev.low) if side == "LONG" else max(now.high, prev.high)
     risk = max(entry - sl, 1e-9)
+    if side == "SHORT":
+        risk = max(sl - entry, 1e-9)
     body = abs(now.close - now.open)
-    breakout_strength = max(0.0, (now.close - prev.high) / max(prev.high, 1e-9))
+    breakout_strength = max(0.0, (now.close - prev.high) / max(prev.high, 1e-9)) if side == "LONG" else max(0.0, (prev.low - now.close) / max(prev.low, 1e-9))
     range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
     rr = max(1.1, min(3.5, 1.2 + breakout_strength * 25.0 + body / max(now.open, 1e-9) * 8.0))
-    tp = entry + rr * risk
+    tp = entry + rr * risk if side == "LONG" else entry - rr * risk
     score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
     expectancy = ((score / 10.0) - 0.5) * (rr - 1.0)
     quote_volume = symbol_meta.get("quoteVolume")
@@ -194,21 +206,23 @@ def _build_market_ctx(
     candle_range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
     liq = min(1.0, max(0.05, float(symbol_meta.get("quoteVolume", 0.0) or 0.0) / 100000000.0))
     spread_source = "ACTUAL" if symbol_meta.get("actual_spread_pct") not in (None, "") else "ESTIMATED_BACKTEST"
-    spread_pct = float(symbol_meta.get("actual_spread_pct") or symbol_meta.get("estimated_spread_pct") or _estimate_backtest_spread_pct(liq, candle_range_pct))
+    raw_spread = symbol_meta.get("actual_spread_pct") or symbol_meta.get("estimated_spread_pct") or _estimate_backtest_spread_pct(liq, candle_range_pct)
+    spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
     base = {
         "entry": entry,
         "sl": sl,
         "tp": tp,
         "rr": rr,
         "score": score,
-        "setup_type": "BREAKOUT_UP",
-        "setup_reason": "CLOSE_ABOVE_PREV_HIGH",
+        "setup_type": "BREAKOUT_UP" if side == "LONG" else "BREAKDOWN_DOWN",
+        "setup_reason": "CLOSE_ABOVE_PREV_HIGH" if side == "LONG" else "CLOSE_BELOW_PREV_LOW",
         "regime": "BREAKOUT" if breakout_strength > 0.002 else "TREND",
         "expectancy": expectancy,
         "expectancy_bucket": _bucket_expectancy(expectancy),
-        "side": "LONG",
+        "side": side,
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
+        "spread_unit_assumed": spread_unit_assumed,
         "spread_source": spread_source,
         "candle_range_pct": candle_range_pct,
         "volatility_pct": candle_range_pct,
@@ -218,6 +232,7 @@ def _build_market_ctx(
     exec_ctx = build_execution_context(
         {
             **base,
+            "raw_spread_pct_input": raw_spread,
             "recent_klines": klines,
             "liquidity_score": min(
                 1.0,
@@ -226,6 +241,7 @@ def _build_market_ctx(
         }
     )
     base.update(exec_ctx)
+    base["spread_unit_assumed"] = spread_unit_assumed
     return base
 def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Candle], idx: int) -> Dict[str, Any]:
     now = candles[idx]
@@ -937,7 +953,7 @@ def process_backtest_result(
         c.order_type,
         expectancy_bucket=expectancy_bucket,
     )
-    effective_rr, execution_flags = _execution_reject_flags(cand.rr, mctx)
+    effective_rr, execution_flags, penalty_breakdown = _execution_reject_flags(cand.rr, mctx)
     if execution_flags:
         reason = execution_flags[0]
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
@@ -982,7 +998,7 @@ def process_backtest_result(
                 "quality_score": diagnostics.get("quality_score", ""),
                 "reject_reason": reason,
                 "diagnostics": json.dumps(
-                    {"effective_rr": effective_rr, "execution_flags": execution_flags},
+                    {"effective_rr": effective_rr, "execution_flags": execution_flags, **penalty_breakdown},
                     sort_keys=True,
                 ),
                 "entry": cand.entry,
@@ -994,6 +1010,7 @@ def process_backtest_result(
                 "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
                 "raw_rr": cand.rr,
                 "effective_rr": effective_rr,
+                **penalty_breakdown,
                 "min_required_score": ((diagnostics.get("adaptive_thresholds") or {}).get("min_score") if isinstance(diagnostics, dict) else None),
                 "trend_strength": mctx.get("trend_strength", "UNAVAILABLE_BACKTEST"),
                 "volatility_pct": mctx.get("volatility_pct", "UNAVAILABLE_BACKTEST"),
@@ -1536,7 +1553,7 @@ def evaluate_rejected_shadow(
     spread_pct = _safe_float(candidate_row.get("spread_pct"), 0.0)
     liquidity_score = _safe_float(candidate_row.get("liquidity_score"), 1.0)
     volatility_score = _safe_float(candidate_row.get("volatility_score"), spread_pct)
-    effective_rr, _ = _execution_reject_flags(
+    effective_rr, _, penalty_breakdown = _execution_reject_flags(
         rr,
         {
             "spread_pct": spread_pct,
@@ -1564,7 +1581,7 @@ def evaluate_rejected_shadow(
     )
     liquidity_ok = liquidity_score >= 0.3
     volatility_ok = volatility_score <= 5.0
-    cost_penalty = max(rr - effective_rr, 0.0)
+    cost_penalty = _safe_float(penalty_breakdown.get("cost_penalty_total"), max(rr - effective_rr, 0.0))
     effective_tp_hit = (
         counterfactual["outcome"] == "WOULD_TP"
         and effective_rr >= 1.1

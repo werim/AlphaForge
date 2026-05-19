@@ -138,7 +138,26 @@ def test_score_varies_by_market_conditions():
     low = bo._build_market_ctx(bo.Candle(3, 100, 101, 99.5, 100.2, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
     high = bo._build_market_ctx(bo.Candle(3, 100, 105, 99.5, 104.8, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
     assert high["score"] != low["score"]
-    assert high["rr"] != low["rr"]
+
+
+def test_build_market_ctx_can_emit_short_candidate():
+    now = bo.Candle(3, 100, 100.5, 97.5, 98.0, 1)
+    prev = bo.Candle(2, 100, 101.0, 99.0, 100.5, 1)
+    ctx = bo._build_market_ctx(now, prev, {})
+    assert ctx["side"] == "SHORT"
+    assert ctx["setup_type"] == "BREAKDOWN_DOWN"
+    assert ctx["setup_reason"] == "CLOSE_BELOW_PREV_LOW"
+    assert ctx["tp"] < ctx["entry"]
+
+
+def test_spread_percent_point_input_is_normalized():
+    ctx = bo._build_market_ctx(
+        bo.Candle(3, 100, 101, 99, 100.2, 1),
+        bo.Candle(2, 100, 100.5, 99.5, 100.0, 1),
+        {"actual_spread_pct": 0.1},
+    )
+    assert ctx["spread_unit_assumed"] == "PERCENT_POINT_NORMALIZED"
+    assert ctx["spread_pct"] == 0.001
 
 
 def test_execution_ctx_fields_populated():

@@ -247,3 +247,18 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Backtest candidate generation remains long-only in current builder path.
 - Effective-RR formulation divergence exists between backtest-local helper and shared runtime cost model.
 - Score-to-expectancy calibration remains weak for executable post-cost edge.
+
+## [Unreleased] - 2026-05-19 (Backtest lifecycle calibration parity hardening)
+
+### Added
+- Backtest candidate generation now supports mirrored SHORT breakdown candidates (`BREAKDOWN_DOWN` / `CLOSE_BELOW_PREV_LOW`) alongside LONG breakout candidates.
+- Execution diagnostics now include decomposed penalty fields (`cost_penalty_total`, `spread_penalty`, `slippage_penalty`, `latency_penalty`, `liquidity_penalty`, `funding_penalty`).
+- Unit-assumption visibility fields (`spread_unit_assumed`, `slippage_unit_assumed`) now flow from execution-context construction.
+
+### Changed
+- Backtest effective-RR rejection helper now uses additive shared execution-cost-model semantics to align with runtime/PAPER/LIVE evaluation behavior.
+- Spread/slippage inputs now normalize percent-point inputs into fractional-rate contract values before penalty modeling.
+
+### Fixed
+- Removed backtest-only multiplicative effective-RR divergence for order-level reject diagnostics.
+- Reduced silent unit ambiguity risk where values like `0.1` could be interpreted inconsistently across callers.
