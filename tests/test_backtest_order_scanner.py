@@ -1,5 +1,6 @@
 import csv
 from pathlib import Path
+import pytest
 
 import importlib.util
 from pathlib import Path as _P
@@ -357,7 +358,8 @@ def test_rejected_candidates_saved_with_shadow_fields():
     shadow = bo.evaluate_rejected_shadow(row, candles, 0)
     assert shadow.symbol == "AAAUSDT"
     assert shadow.raw_rr == 1.2
-    assert shadow.spread_pct == 0.1
+    assert shadow.spread_pct == pytest.approx(0.001, rel=1e-9)
+    assert shadow.low_score_gate_score == 2.0
 
 
 def test_shadow_outcome_calculated_for_low_score_reject():
@@ -392,6 +394,26 @@ def test_false_positive_reject_rate_reported():
     summary = bo.build_rejected_shadow_summary([s1, s2])
     assert "reject_false_positive_rate" in summary
     assert summary["reject_false_positive_rate"] == 0.5
+    assert "reject_reason_diagnostics" in summary
+
+
+def test_stop_too_wide_rescue_attempt_reduces_size_and_keeps_risk_limits():
+    row = {
+        "timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 100, "sl": 97, "tp": 106, "rr": 2.0,
+        "reject_reason": "STOP_TOO_WIDE", "score": 8.4, "regime": "BREAKOUT", "setup_type": "BREAKOUT_UP",
+        "spread_pct": 0.02, "liquidity_score": 0.9, "volatility_score": 0.8, "expected_slippage_pct": 0.001,
+    }
+    shadow = bo.evaluate_rejected_shadow(row, [bo.Candle(1, 100, 106.5, 99, 105.0, 1)], 0)
+    assert shadow.rescue_attempted is True
+    assert shadow.rescued_size_multiplier <= 0.5
+    assert abs((row["entry"] - shadow.rescued_stop_loss) / row["entry"] * 100.0) <= 1.5 + 1e-9
+
+
+def test_spread_pct_normalization_is_consistent_between_1p5_and_0p015():
+    candles = [bo.Candle(1, 10, 10.2, 9.8, 10, 1), bo.Candle(2, 10, 10.2, 9.8, 10, 1), bo.Candle(3, 10, 10.2, 9.8, 10, 1)]
+    normalized = bo._build_symbol_market_data({"quoteVolume": 80_000_000.0, "actual_spread_pct": 1.5}, candles, 2)["spread_pct"]
+    already_pct = bo._build_symbol_market_data({"quoteVolume": 80_000_000.0, "actual_spread_pct": 0.015}, candles, 2)["spread_pct"]
+    assert normalized == pytest.approx(already_pct, rel=1e-6)
 
 
 def test_rejected_counterfactual_same_candle_sl_priority():
