@@ -262,3 +262,17 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Fixed
 - Removed backtest-only multiplicative effective-RR divergence for order-level reject diagnostics.
 - Reduced silent unit ambiguity risk where values like `0.1` could be interpreted inconsistently across callers.
+
+## [Unreleased] - 2026-05-19 (PAPER SQLite bootstrap + diagnostics hardening)
+
+### Added
+- Runtime bootstrap diagnostics for SQLite path resolution, schema init confirmation, and discovered table names.
+- Heartbeat diagnostics for persistence enabled state and selection/decision gate blockers.
+- Tests covering PAPER schema bootstrap with empty cycles and absolute DB path logging.
+
+### Changed
+- Runtime scanner now captures top symbol selection reject reasons even when no symbols are selected.
+- Runtime env bootstrap now wires reject/lifecycle callbacks to SQL persistence in PAPER/BACKTEST/LIVE runtime path (when enabled).
+
+### Fixed
+- PAPER runtime persistence observability gaps that obscured whether SQL schema initialization and persistence callbacks were active.
