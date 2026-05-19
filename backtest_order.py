@@ -86,6 +86,11 @@ class ForwardWindowEvaluation:
     decision: str
     lifecycle_state: str
     reject_reason: str
+    setup_type: str
+    score: float
+    rr: float
+    effective_rr: float
+    predicted_quality: float
     forward_window_minutes: int
     would_have_hit_tp: bool
     would_have_hit_sl: bool
@@ -98,6 +103,9 @@ class ForwardWindowEvaluation:
     reject_saved_from_loss: bool
     forward_window_regime: str
     execution_quality_bucket: str
+
+
+TERMINAL_FORWARD_CLOSE_REASONS = {"TP_HIT", "SL_HIT", "TIMEOUT", "EXPIRED", "CANCELED"}
 @dataclass
 class LifecycleRow:
     timestamp: int
@@ -1326,6 +1334,169 @@ def evaluate_forward_window(
         decision=("REJECTED" if is_rejected else ("ACCEPTED" if decision == "ACCEPTED" else decision)),
         lifecycle_state=lifecycle_state,
         reject_reason=reject_reason,
+        setup_type=str(candidate_row.get("setup_type", "UNKNOWN")),
+        score=_safe_float(candidate_row.get("score"), 0.0),
+        rr=_safe_float(candidate_row.get("rr"), 0.0),
+        effective_rr=_safe_float(candidate_row.get("effective_rr"), _safe_float(candidate_row.get("rr"), 0.0)),
+        predicted_quality=1.0 if _bucket_execution_quality(
+            candidate_row.get("spread_pct"),
+            candidate_row.get("slippage_pct", candidate_row.get("expected_slippage_pct")),
+            candidate_row.get("liquidity_score"),
+        ) == "HIGH" else 0.0,
+        forward_window_minutes=forward_window_minutes,
+        would_have_hit_tp=bool(outcome["would_tp_hit"]),
+        would_have_hit_sl=bool(outcome["would_sl_hit"]),
+        mfe_pct=round(mfe_pct, 8),
+        mae_pct=round(mae_pct, 8),
+        max_forward_return=round(mfe_pct, 8),
+        max_adverse_return=round(-mae_pct, 8),
+        reject_correct=reject_correct,
+        reject_missed_winner=reject_missed_winner,
+        reject_saved_from_loss=reject_saved_from_loss,
+        forward_window_regime=str(candidate_row.get("regime", "UNKNOWN")),
+        execution_quality_bucket=_bucket_execution_quality(
+            candidate_row.get("spread_pct"),
+            candidate_row.get("slippage_pct", candidate_row.get("expected_slippage_pct")),
+            candidate_row.get("liquidity_score"),
+        ),
+    )
+def _realized_outcome_from_row(row: Mapping[str, Any]) -> str:
+    state = str(row.get("lifecycle_state", row.get("status_after", "")) or "").upper()
+    if state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}:
+        return "REJECTED"
+    if state in {"EXPIRED", "CANCELED", "CANCELLED"}:
+        return "CANCELED" if state != "EXPIRED" else "EXPIRED"
+    close_reason = str(row.get("close_reason", "") or "").upper()
+    if close_reason in {"TP_HIT", "SL_HIT"}:
+        return close_reason
+    if close_reason in {"TIMEOUT", "OPEN_AT_END"}:
+        return "OPEN_AT_END"
+    return "NON_TERMINAL"
+
+
+def build_forward_evaluation_rows(
+    lifecycle_rows: List[Mapping[str, Any]],
+    candles_by_symbol: Mapping[str, List[Candle]],
+    forward_window_minutes: int = 240,
+) -> List[dict[str, Any]]:
+    out: List[dict[str, Any]] = []
+    terminal = {"TP_HIT", "SL_HIT", "EXPIRED", "CANCELED", "OPEN_AT_END", "REJECTED"}
+    for row in lifecycle_rows:
+        realized = _realized_outcome_from_row(row)
+        if realized not in terminal:
+            continue
+        symbol = str(row.get("symbol", ""))
+        ts = int(_safe_float(row.get("timestamp", row.get("event_ts")), 0.0))
+        candles = candles_by_symbol.get(symbol, [])
+        idx = next((i for i, c in enumerate(candles) if c.timestamp >= ts), len(candles))
+        evaluation = evaluate_forward_window(row, candles, idx, forward_window_minutes=forward_window_minutes)
+        out.append({**asdict(evaluation), "realized_outcome": realized})
+    return out
+
+
+def _bucket_numeric(value: float, bounds: list[float], labels: list[str]) -> str:
+    for idx, bound in enumerate(bounds):
+        if value <= bound:
+            return labels[idx]
+    return labels[-1]
+
+
+def build_forward_evaluations_from_lifecycle(
+    lifecycle: List[LifecycleRow],
+    candles_by_symbol: Mapping[str, List[Candle]],
+    forward_window_minutes: int = 240,
+) -> List[ForwardWindowEvaluation]:
+    out: List[ForwardWindowEvaluation] = []
+    for row in lifecycle:
+        if row.status_after != "POSITION_CLOSED":
+            continue
+        if row.close_reason not in TERMINAL_FORWARD_CLOSE_REASONS:
+            continue
+        candles = candles_by_symbol.get(row.symbol, [])
+        idx = next((i for i, c in enumerate(candles) if c.timestamp >= row.timestamp), len(candles))
+        out.append(
+            evaluate_forward_window(
+                {
+                    "signal_id": f"{row.symbol}:{row.timestamp}",
+                    "timestamp": row.timestamp,
+                    "symbol": row.symbol,
+                    "side": row.side,
+                    "entry": row.entry,
+                    "sl": row.sl,
+                    "tp": row.tp,
+                    "rr": row.rr,
+                    "score": row.score,
+                    "regime": row.regime,
+                    "setup_type": row.setup_type,
+                    "reject_reason": row.reject_reason,
+                    "decision": "ACCEPTED",
+                    "lifecycle_state": row.status_after,
+                    "spread_pct": row.spread_pct,
+                    "expected_slippage_pct": row.expected_slippage_pct,
+                    "liquidity_score": row.liquidity_score,
+                },
+                candles,
+                idx,
+                forward_window_minutes=forward_window_minutes,
+            )
+        )
+    return out
+
+
+def persist_calibration_snapshots(evals: List[ForwardWindowEvaluation], lifecycle_index: Mapping[str, LifecycleRow]) -> List[dict[str, Any]]:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        for ev in evals:
+            src = lifecycle_index.get(ev.signal_id)
+            session.execute(text("""
+                INSERT INTO calibration_snapshots (
+                    signal_id,predicted_quality,realized_outcome,score,rr,effective_rr,regime,setup_type,rejection_reason,
+                    forward_window_minutes,mfe_pct,mae_pct,would_have_hit_tp,would_have_hit_sl,reject_correct,created_at
+                ) VALUES (
+                    :signal_id,:predicted_quality,:realized_outcome,:score,:rr,:effective_rr,:regime,:setup_type,:rejection_reason,
+                    :forward_window_minutes,:mfe_pct,:mae_pct,:would_have_hit_tp,:would_have_hit_sl,:reject_correct,:created_at
+                )
+                ON CONFLICT(signal_id, forward_window_minutes) DO NOTHING
+            """), {
+                "signal_id": ev.signal_id,
+                "predicted_quality": (src.score if src is not None else None),
+                "realized_outcome": ("WOULD_TP" if ev.would_have_hit_tp else ("WOULD_SL" if ev.would_have_hit_sl else "NEUTRAL")),
+                "score": (src.score if src is not None else None),
+                "rr": (src.rr if src is not None else None),
+                "effective_rr": (src.effective_rr if src is not None else (src.rr if src is not None else None)),
+                "regime": ev.forward_window_regime,
+                "setup_type": (src.setup_type if src is not None else None),
+                "rejection_reason": ev.reject_reason,
+                "forward_window_minutes": ev.forward_window_minutes,
+                "mfe_pct": ev.mfe_pct,
+                "mae_pct": ev.mae_pct,
+                "would_have_hit_tp": int(ev.would_have_hit_tp),
+                "would_have_hit_sl": int(ev.would_have_hit_sl),
+                "reject_correct": (None if ev.reject_correct is None else int(ev.reject_correct)),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        rows = session.execute(text("SELECT * FROM calibration_snapshots ORDER BY signal_id, forward_window_minutes")).mappings().all()
+    return [dict(r) for r in rows]
+    entry = max(_safe_float(candidate_row.get("entry"), 0.0), 1e-9)
+    mfe_pct = (float(outcome["max_favorable_excursion"]) / entry) * 100.0
+    mae_pct = (float(outcome["max_adverse_excursion"]) / entry) * 100.0
+    decision = str(candidate_row.get("decision", "") or "").upper()
+    lifecycle_state = str(candidate_row.get("status_after", candidate_row.get("lifecycle_state", "")) or "").upper()
+    reject_reason = str(candidate_row.get("reject_reason", "") or "")
+    is_rejected = decision == "REJECTED" or lifecycle_state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"} or reject_reason != ""
+    reject_correct = None
+    reject_missed_winner = False
+    reject_saved_from_loss = False
+    if is_rejected:
+        reject_missed_winner = bool(outcome["would_tp_hit"]) and not bool(outcome["would_sl_hit"])
+        reject_saved_from_loss = bool(outcome["would_sl_hit"]) and not bool(outcome["would_tp_hit"])
+        reject_correct = reject_saved_from_loss
+    return ForwardWindowEvaluation(
+        signal_id=str(candidate_row.get("signal_id", f"{candidate_row.get('symbol','')}:{candidate_row.get('timestamp','')}")),
+        symbol=str(candidate_row.get("symbol", "")),
+        decision=("REJECTED" if is_rejected else ("ACCEPTED" if decision == "ACCEPTED" else decision)),
+        lifecycle_state=lifecycle_state,
+        reject_reason=reject_reason,
         forward_window_minutes=forward_window_minutes,
         would_have_hit_tp=bool(outcome["would_tp_hit"]),
         would_have_hit_sl=bool(outcome["would_sl_hit"]),
@@ -1715,7 +1886,32 @@ def main():
         candles = candles_by_symbol.get(symbol, [])
         idx = next((i for i, c in enumerate(candles) if c.timestamp >= ts), len(candles))
         rejected_shadow.append(evaluate_rejected_shadow(row, candles, idx))
+    forward_evaluations = build_forward_evaluations_from_lifecycle(lifecycle, candles_by_symbol)
+    lifecycle_index = {f"{row.symbol}:{row.timestamp}": row for row in lifecycle}
+    calibration_snapshots = persist_calibration_snapshots(forward_evaluations, lifecycle_index)
+    adaptive_scope_stats: List[dict[str, Any]] = []
+    for ev in forward_evaluations:
+        scope_payload = {
+            "signal_id": ev.signal_id,
+            "regime": ev.forward_window_regime,
+            "setup_type": lifecycle_index.get(ev.signal_id).setup_type if lifecycle_index.get(ev.signal_id) else "UNKNOWN",
+            "timeframe": args.interval,
+            "session": "BACKTEST",
+            "volatility_bucket": _bucket_numeric(abs(ev.max_forward_return), [0.2, 0.5], ["LOW", "MEDIUM", "HIGH"]),
+            "spread_bucket": _bucket_numeric(_safe_float(lifecycle_index.get(ev.signal_id).spread_pct if lifecycle_index.get(ev.signal_id) else 0.0), [0.03, 0.08], ["TIGHT", "NORMAL", "WIDE"]),
+            "liquidity_bucket": _bucket_numeric(_safe_float(lifecycle_index.get(ev.signal_id).liquidity_score if lifecycle_index.get(ev.signal_id) else 0.0), [0.3, 0.7], ["THIN", "NORMAL", "DEEP"]),
+            "trend_strength_bucket": _bucket_numeric(_safe_float(lifecycle_index.get(ev.signal_id).score if lifecycle_index.get(ev.signal_id) else 0.0), [3.0, 7.0], ["WEAK", "MID", "STRONG"]),
+            "rejection_reason": ev.reject_reason,
+            "execution_quality_bucket": ev.execution_quality_bucket,
+            "reject_correct": ev.reject_correct,
+        }
+        adaptive_scope_stats.append(scope_payload)
     persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle)
+    forward_eval_rows = build_forward_evaluation_rows(
+        [{**row, "timestamp": _safe_float(row.get("event_ts"), 0.0)} for row in persisted_lifecycle_rows],
+        candles_by_symbol,
+        forward_window_minutes=240,
+    )
     for name, rows in [
         ("order_lifecycle.csv", persisted_lifecycle_rows),
         ("order_candidates.csv", candidate_rows),
@@ -1723,6 +1919,9 @@ def main():
         ("rejected_orders.csv", rejected),
         ("rejected_shadow.csv", [asdict(x) for x in rejected_shadow]),
         ("open_at_end.csv", [asdict(x) for x in open_rows]),
+        ("forward_evaluations.csv", [asdict(x) for x in forward_evaluations]),
+        ("adaptive_scope_stats.csv", adaptive_scope_stats),
+        ("calibration_snapshots.csv", calibration_snapshots),
     ]:
         with open(os.path.join(args.output_dir, name), "w", newline="") as f:
             if not rows:
@@ -1783,6 +1982,50 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))
         w.writeheader()
         w.writerow(rejected_shadow_summary)
+    with Session(init_db("sqlite+pysqlite:///:memory:")) as session:
+        for row in forward_eval_rows:
+            session.execute(
+                text(
+                    """
+                    INSERT INTO calibration_snapshots (
+                        signal_id, predicted_quality, realized_outcome, score, rr, effective_rr, regime, setup_type,
+                        rejection_reason, forward_window_minutes, mfe_pct, mae_pct, would_have_hit_tp, would_have_hit_sl,
+                        reject_correct, created_at, payload_json
+                    ) VALUES (
+                        :signal_id, :predicted_quality, :realized_outcome, :score, :rr, :effective_rr, :regime, :setup_type,
+                        :rejection_reason, :forward_window_minutes, :mfe_pct, :mae_pct, :would_have_hit_tp, :would_have_hit_sl,
+                        :reject_correct, :created_at, :payload_json
+                    )
+                    ON CONFLICT(signal_id, forward_window_minutes, realized_outcome) DO NOTHING
+                    """
+                ),
+                {
+                    "signal_id": row.get("signal_id"),
+                    "predicted_quality": _safe_float(row.get("execution_quality_bucket") == "HIGH", 0.0),
+                    "realized_outcome": row.get("realized_outcome"),
+                    "score": _safe_float(row.get("score"), 0.0),
+                    "rr": _safe_float(row.get("rr"), 0.0),
+                    "effective_rr": _safe_float(row.get("max_forward_return"), 0.0),
+                    "regime": row.get("forward_window_regime"),
+                    "setup_type": row.get("setup_type"),
+                    "rejection_reason": row.get("reject_reason"),
+                    "forward_window_minutes": int(row.get("forward_window_minutes", 240)),
+                    "mfe_pct": _safe_float(row.get("mfe_pct"), 0.0),
+                    "mae_pct": _safe_float(row.get("mae_pct"), 0.0),
+                    "would_have_hit_tp": int(bool(row.get("would_have_hit_tp"))),
+                    "would_have_hit_sl": int(bool(row.get("would_have_hit_sl"))),
+                    "reject_correct": None if row.get("reject_correct") is None else int(bool(row.get("reject_correct"))),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "payload_json": json.dumps(row, sort_keys=True),
+                },
+            )
+        snapshot_rows = session.execute(text("SELECT * FROM calibration_snapshots ORDER BY id")).mappings().all()
+    with open(os.path.join(args.output_dir, "calibration_snapshots.csv"), "w", newline="") as f:
+        if snapshot_rows:
+            fieldnames = resolve_csv_fieldnames([dict(r) for r in snapshot_rows], list(dict(snapshot_rows[0]).keys()))
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows([dict(r) for r in snapshot_rows])
     with open(os.path.join(args.output_dir, "order_lifecycle.csv"), newline="") as f:
         lifecycle_csv_rows = list(csv.DictReader(f))
     with open(os.path.join(args.output_dir, "rejected_orders.csv"), newline="") as f:

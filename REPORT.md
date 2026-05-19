@@ -703,3 +703,78 @@
 
 ### Push recommendation
 - Safe to merge as deterministic analytics foundation patch; follow with additive SQL persistence/export patch before enabling any adaptive threshold consumers.
+
+## Generation N+2 Follow-up (2026-05-18) — Terminal Wiring + Calibration Persistence
+
+### Exact files/functions modified
+- `backtest_order.py`
+  - Added `_realized_outcome_from_row(...)`
+  - Added `build_forward_evaluation_rows(...)`
+  - Wired `forward_evaluations.csv` and `calibration_snapshots.csv` emitters in `main()`.
+- `src/alphaforge/persistence.py`
+  - Added additive `calibration_snapshots` table in `init_db(...)` DDL.
+- `tests/test_backtest_order_scanner.py`
+  - Added terminal-only trigger regression for forward evaluator wiring.
+- `tests/test_adaptive_learning_foundation.py`
+  - Added scope-key aggregation coverage across requested adaptive dimensions.
+
+### SQL migration plan
+- Additive-only: create `calibration_snapshots` if absent.
+- No drops, no column removals, no mutation of historical decision rows.
+
+### Determinism guarantees
+- Forward evaluator runs only after terminal lifecycle outcomes in export/eval phase.
+- Same bounded lookahead and deterministic same-candle SL-priority rule preserved.
+- No data path from forward labels back into same-signal decision acceptance/rejection.
+
+### Risks
+- Current calibration snapshot wiring is backtest-output scoped; PAPER replay persistence wiring remains a next incremental patch if/when replay loop is formalized in-repo.
+- Forward evaluation on sparse candle tails can produce `UNKNOWN`/timeout-like outcomes by design.
+## Generation N+2 Wiring Patch (2026-05-18)
+
+### Root-cause analysis of current limitations
+- Generation N+2 foundation introduced forward-eval primitives but did not wire deterministic trigger timing to terminal lifecycle completion and did not persist immutable calibration snapshots.
+
+### Exact files/functions modified
+- `backtest_order.py`
+  - Added terminal forward trigger set and `build_forward_evaluations_from_lifecycle(...)`.
+  - Added calibration persistence helper `persist_calibration_snapshots(...)`.
+  - Wired additive CSV exports: forward evaluations, adaptive scope stats, calibration snapshots.
+- `src/alphaforge/persistence.py`
+  - Added additive table `calibration_snapshots` with unique idempotency key.
+- `tests/test_backtest_order_scanner.py`
+  - Added terminal-trigger and calibration-idempotency tests.
+- `tests/test_adaptive_learning_foundation.py`
+  - Extended scoped aggregation coverage for execution-quality bucket scope.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md` updated.
+
+### Minimal safe patch plan executed
+1. Additive schema only.
+2. Post-terminal trigger wiring only; no decision-path feedback.
+3. Export additions only; legacy export names preserved.
+4. Deterministic/idempotent tests for trigger timing and calibration inserts.
+
+### SQL migration plan
+- Additive DDL in `init_db`: `calibration_snapshots`.
+- Unique guard `(signal_id, forward_window_minutes)` + `ON CONFLICT DO NOTHING` ensures append-only/idempotent semantics.
+- No destructive migration, no historical mutation.
+
+### Determinism guarantees
+- Forward eval runs only after `POSITION_CLOSED` rows with terminal close reasons.
+- Same bounded lookahead deterministic evaluator and same-candle SL-priority retained.
+- No forward label data is consumed by same-signal acceptance/rejection path.
+
+### Risks introduced
+- Scope buckets in exported adaptive rows are currently deterministic heuristics from available row context; further calibration may be needed for venue-specific bucket boundaries.
+- Calibration persistence currently runs in backtest export pipeline; paper replay wiring still depends on where replay loop is integrated.
+
+### Future-generation readiness analysis
+- Calibration snapshots now provide immutable predicted-vs-realized substrate for confidence calibration.
+- Scope exports provide direct feed surface for regime/setup/execution degradation learning.
+- No architecture rewrite required for future adaptive threshold consumer layer.
+
+### Suggested Generation N+3 roadmap
+1. Wire identical terminal forward-eval trigger inside paper replay export path.
+2. Persist forward evaluations into dedicated SQL table with evaluator versioning.
+3. Add adaptive scope SQL aggregation snapshots (not only CSV surface).
+4. Add restart/reload invariance test over persisted calibration rows and scope snapshots.

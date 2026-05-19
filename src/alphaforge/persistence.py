@@ -122,6 +122,28 @@ def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
             max_expected_slippage_pct REAL, min_liquidity_score REAL, reason TEXT, source TEXT, created_at TEXT, payload_json TEXT
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS calibration_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT NOT NULL,
+            predicted_quality REAL,
+            realized_outcome TEXT,
+            score REAL,
+            rr REAL,
+            effective_rr REAL,
+            regime TEXT,
+            setup_type TEXT,
+            rejection_reason TEXT,
+            forward_window_minutes INTEGER NOT NULL,
+            mfe_pct REAL,
+            mae_pct REAL,
+            would_have_hit_tp INTEGER,
+            would_have_hit_sl INTEGER,
+            reject_correct INTEGER,
+            created_at TEXT,
+            UNIQUE(signal_id, forward_window_minutes)
+        )
+        """,
         "CREATE TABLE IF NOT EXISTS setup_expectancy_stats (setup TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
