@@ -222,3 +222,14 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Fixed
 - Forward evaluator remains isolated from same-signal decision path and now executes only on terminal closed lifecycle outcomes.
+
+
+## [Unreleased] - 2026-05-19
+### Added
+- Probabilistic score payload in `AIBrain` scoring output and persisted execution feature metadata (`probabilistic_score`).
+- Conservative prior warning (`CONSERVATIVE_PRIOR_NO_HISTORY`) when sample history is absent.
+### Changed
+- Score acceptance now requires probabilistic constraints (minimum `p_win`, execution success, confidence, positive expectancy-after-costs, fakeout cap) in addition to aggregate score.
+- Rejected-signal review reason assignment now maps from probabilistic failure flags before falling back to `LOW_SCORE`.
+### Fixed
+- Reduced static scalar-score dependence by blending weighted legacy score with calibrated probabilistic score.

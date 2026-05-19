@@ -778,3 +778,32 @@
 2. Persist forward evaluations into dedicated SQL table with evaluator versioning.
 3. Add adaptive scope SQL aggregation snapshots (not only CSV surface).
 4. Add restart/reload invariance test over persisted calibration rows and scope snapshots.
+
+
+## 2026-05-19 Probabilistic Scoring Patch
+
+### Why the patch was needed
+- Shared decision flow still leaned on scalar score acceptance; probabilistic execution/fit/confidence checks were not first-class in `AIBrain`.
+
+### Files changed
+- `src/alphaforge/ai_brain.py`
+- `tests/test_phase2_integration.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added a probabilistic score model and calibrated score blend inside shared `AIBrain.score_signal(...)`.
+- Added conservative prior behavior when historical sample size is missing (`sample_size=0` impacts confidence and warnings).
+- Rejections now surface probabilistic failure reasons for auditability.
+
+### Lifecycle/persistence/export impact
+- Persisted decision execution features now include `probabilistic_score` JSON payload (additive, backward-compatible JSON extension).
+- No table/column migration required in this patch.
+
+### Tests added
+- Probabilistic score varies with market-condition quality.
+- Probabilistic fields exist and are deterministic for identical inputs.
+- Low-quality candidate emits low-probability rejection signals.
+
+### Risks
+- Threshold calibration may require further tuning across symbols/regimes to avoid over-rejection in sparse-history contexts.

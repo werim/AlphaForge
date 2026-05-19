@@ -25,6 +25,7 @@ class ScoreContext:
     penalties: dict[str, float]
     accepted: bool
     reason_flags: list[str]
+    probabilistic: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,10 @@ class AIBrain:
     def __init__(self, session: Session, *, min_accept_score: float = 0.62) -> None:
         self.session = session
         self.min_accept_score = min_accept_score
+        self.min_confidence = 0.35
+        self.min_p_win = 0.45
+        self.max_p_fakeout = 0.60
+        self.min_execution_success = 0.50
 
     # ---- Scoring ---------------------------------------------------------
     def score_signal(
@@ -73,6 +78,38 @@ class AIBrain:
         latency_penalty = self._clip01(_num(market_ctx, "latency_ms", 50.0) / max(_num(signal, "max_latency_ms", 300.0), 1.0))
         funding_exec_penalty = self._clip01(abs(_num(market_ctx, "funding_rate_pct", 0.0)) / max(_num(signal, "max_funding_rate_pct", 0.05), 1e-8))
 
+        execution_success_probability = self._clip01(
+            0.55 * liquidity_quality + 0.20 * (1.0 - spread_penalty) + 0.15 * (1.0 - slippage_penalty) + 0.10 * (1.0 - latency_penalty)
+        )
+        sample_size = int(max(0.0, _num(stats_ctx, "sample_size", 0.0)))
+        sample_confidence = self._clip01(sample_size / 100.0)
+        p_entry_trigger = self._clip01(0.50 * momentum_confirmation + 0.30 * volatility_fit + 0.20 * setup_quality)
+        p_regime_fit = regime_alignment
+        p_fakeout = self._clip01(0.60 * fakeout_risk + 0.25 * (1.0 - momentum_confirmation) + 0.15 * (1.0 - volatility_fit))
+        p_win = self._clip01(
+            0.26 * setup_quality
+            + 0.16 * regime_alignment
+            + 0.13 * liquidity_quality
+            + 0.10 * volatility_fit
+            + 0.16 * execution_success_probability
+            + 0.12 * expectancy_edge
+            + 0.07 * risk_reward_quality
+            - 0.12 * p_fakeout
+        )
+        p_tp_hit = self._clip01(p_win * self._clip01(0.55 + 0.45 * risk_reward_quality))
+        p_sl_hit = self._clip01(1.0 - p_win + 0.25 * p_fakeout)
+        confidence = self._clip01(
+            0.45 * sample_confidence + 0.25 * setup_quality + 0.20 * regime_alignment + 0.10 * liquidity_quality
+        )
+        expectancy_after_costs = (
+            p_tp_hit * max(_num(signal, "risk_reward", 1.0), 0.0)
+            - p_sl_hit
+            - (spread_penalty * 0.35 + slippage_penalty * 0.35 + latency_penalty * 0.30)
+        )
+        calibrated_score = self._clip01(
+            (0.45 * p_win + 0.20 * p_entry_trigger + 0.15 * p_regime_fit + 0.20 * execution_success_probability) * confidence
+            - 0.20 * p_fakeout
+        )
         components = {
             "setup_quality": setup_quality,
             "regime_alignment": regime_alignment,
@@ -108,7 +145,24 @@ class AIBrain:
             - latency_penalty * 0.04
             - funding_exec_penalty * 0.04
         )
-        total_score = self._clip01(weighted)
+        total_score = self._clip01((weighted * 0.4) + (calibrated_score * 0.6))
+        probabilistic = {
+            "p_win": p_win,
+            "p_tp_hit": p_tp_hit,
+            "p_sl_hit": p_sl_hit,
+            "p_entry_trigger": p_entry_trigger,
+            "p_fakeout": p_fakeout,
+            "p_regime_fit": p_regime_fit,
+            "p_execution_success": execution_success_probability,
+            "confidence": confidence,
+            "calibrated_score": calibrated_score,
+            "expectancy_after_costs": expectancy_after_costs,
+            "sample_size": sample_size,
+            "source": "ai_brain_v2_probabilistic",
+            "warnings": [],
+        }
+        if sample_size <= 0:
+            probabilistic["warnings"].append("CONSERVATIVE_PRIOR_NO_HISTORY")
 
         reason_flags: list[str] = []
         if expectancy_edge < 0.5:
@@ -118,8 +172,28 @@ class AIBrain:
         if fakeout_risk > 0.75:
             reason_flags.append("high_fakeout_risk")
 
-        accepted = total_score >= self.min_accept_score and expectancy_edge >= 0.5
-        return ScoreContext(total_score, expectancy_edge, components, penalties, accepted, reason_flags)
+        if p_win < self.min_p_win:
+            reason_flags.append("low_p_win")
+        if execution_success_probability < self.min_execution_success:
+            reason_flags.append("low_execution_probability")
+        if confidence < self.min_confidence:
+            reason_flags.append("low_confidence")
+        if expectancy_after_costs <= 0.0:
+            reason_flags.append("negative_expectancy_after_costs")
+        if p_fakeout > self.max_p_fakeout:
+            reason_flags.append("high_fakeout_probability")
+        if p_regime_fit < 0.45:
+            reason_flags.append("low_regime_fit_probability")
+        accepted = (
+            total_score >= self.min_accept_score
+            and expectancy_edge >= 0.5
+            and p_win >= self.min_p_win
+            and execution_success_probability >= self.min_execution_success
+            and confidence >= self.min_confidence
+            and expectancy_after_costs > 0.0
+            and p_fakeout <= self.max_p_fakeout
+        )
+        return ScoreContext(total_score, expectancy_edge, components, penalties, accepted, reason_flags, probabilistic)
 
     # ---- Order plan ------------------------------------------------------
     def choose_order_plan(
@@ -339,11 +413,25 @@ class AIBrain:
                     "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0),
                     "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
                     "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
+                    "probabilistic_score": score_ctx.probabilistic,
                 }),
                 "created_at": _now(),
             },
         )
         if order_plan.decision != "ACCEPTED":
+            reject_reason = "LOW_SCORE"
+            if "low_p_win" in score_ctx.reason_flags:
+                reject_reason = "LOW_P_WIN"
+            elif "low_execution_probability" in score_ctx.reason_flags:
+                reject_reason = "LOW_EXECUTION_PROBABILITY"
+            elif "low_confidence" in score_ctx.reason_flags:
+                reject_reason = "LOW_CONFIDENCE"
+            elif "negative_expectancy_after_costs" in score_ctx.reason_flags:
+                reject_reason = "NEGATIVE_EXPECTANCY_AFTER_COSTS"
+            elif "high_fakeout_probability" in score_ctx.reason_flags:
+                reject_reason = "HIGH_FAKEOUT_PROBABILITY"
+            elif "low_regime_fit_probability" in score_ctx.reason_flags:
+                reject_reason = "LOW_REGIME_FIT_PROBABILITY"
             record_rejected_signal_review(
                 self.session,
                 signal_id=str(signal_id),
@@ -351,7 +439,7 @@ class AIBrain:
                 setup_type=str(signal.get("setup", "unknown")),
                 regime=str(signal.get("regime", "unknown")),
                 side=str(signal.get("side", "UNKNOWN")),
-                reject_reason="LOW_SCORE",
+                reject_reason=reject_reason,
                 score=score_ctx.total_score,
                 raw_rr=signal.get("risk_reward"),
                 effective_rr=decision_payload["effective_rr"],
