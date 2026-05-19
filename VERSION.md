@@ -196,3 +196,10 @@
 - Confirmed base score threshold is intentionally high (`MIN_SCORE_BASE=7.5`) relative to observed low-mid score distribution.
 - Identified dual effective-RR formulations (backtest-local multiplicative vs runtime additive penalty model) as alignment/calibration risk.
 - Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+
+## 2026-05-19 PAPER Persistence Bootstrap Audit Update
+- PAPER/LIVE runtime bootstrap now logs configured and resolved absolute SQLite DB URL, persistence enabled state, and discovered table names after init.
+- Runtime heartbeat now surfaces persistence status and last scan gate blockers/rejection summaries when `symbols_selected=0`.
+- Default env bootstrap now wires lifecycle/reject persistence callbacks so PAPER mode can persist lifecycle/reject rows when generated.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.

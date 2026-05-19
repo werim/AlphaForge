@@ -7,6 +7,7 @@ import os
 import logging
 import signal
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
@@ -18,6 +19,7 @@ from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationRepor
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,7 @@ class RuntimeMetrics:
     last_heartbeat_ts: float = 0.0
     reconciliation_runs: int = 0
     reconciliation_fail_closed: int = 0
+    persistence_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -90,6 +93,8 @@ class RuntimeOrchestrator:
     _reconciliation_engine: ReconciliationEngine = field(default_factory=ReconciliationEngine, init=False)
     _pending_orders: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     _last_repair_signature: set[str] = field(default_factory=set, init=False)
+    _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
+    _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
@@ -158,7 +163,19 @@ class RuntimeOrchestrator:
     async def _scan_once(self) -> None:
         self.metrics.scans += 1
         candidates = await self.market_scanner()
-        selected = select_symbols(candidates)[: self.config.max_symbols_per_scan]
+        pre_selection = select_symbols(candidates, {"include_rejected": True})
+        selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
+        reject_reasons: dict[str, int] = {}
+        for row in pre_selection:
+            for reason in row.reject_reasons:
+                reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+        self._last_scan_rejection_summary = reject_reasons
+        if not candidates:
+            self._last_scan_gate_blockers = ["NO_MARKET_CANDIDATES"]
+        elif not selected:
+            self._last_scan_gate_blockers = ["NO_TRADABLE_SYMBOLS_AFTER_SELECTION"]
+        else:
+            self._last_scan_gate_blockers = []
         self.metrics.symbols_selected += len(selected)
 
         for symbol_result in selected:
@@ -315,7 +332,13 @@ class RuntimeOrchestrator:
         try:
             while not self._stop_event.is_set():
                 self.metrics.last_heartbeat_ts = time.time()
-                logger.info("runtime_heartbeat=%s", self.metrics)
+                logger.info(
+                    "runtime_heartbeat=%s persistence_enabled=%s top_selection_reject_reasons=%s decision_gate_blockers=%s",
+                    self.metrics,
+                    self.metrics.persistence_enabled,
+                    dict(sorted(self._last_scan_rejection_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
+                    self._last_scan_gate_blockers,
+                )
                 await asyncio.sleep(self.config.heartbeat_interval_sec)
         except asyncio.CancelledError:
             raise
@@ -426,7 +449,24 @@ def _int_env(name: str, default: int) -> int:
 def _build_runtime_from_env() -> RuntimeOrchestrator:
     mode = execution_mode_from_env(os.getenv("EXECUTION_MODE"))
     database_url = os.getenv("ALPHAFORGE_DB_URL", "sqlite+pysqlite:///:memory:")
-    engine = init_db(database_url)
+    persistence_enabled = os.getenv("ALPHAFORGE_PERSISTENCE_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
+    resolved_database_url = database_url
+    if database_url.startswith("sqlite+pysqlite:///"):
+        raw_path = database_url.removeprefix("sqlite+pysqlite:///")
+        resolved_database_url = f"sqlite+pysqlite:///{Path(raw_path).expanduser().resolve()}"
+    engine = init_db(resolved_database_url)
+    table_names: list[str] = []
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
+        table_names = [str(row[0]) for row in rows]
+    logger.info(
+        "runtime_db_bootstrap persistence_enabled=%s configured_db_url=%s resolved_db_url=%s schema_initialized=%s tables=%s",
+        persistence_enabled,
+        database_url,
+        resolved_database_url,
+        True,
+        table_names,
+    )
     brain = AIBrain(Session(engine), min_accept_score=float(os.getenv("ALPHAFORGE_MIN_ACCEPT_SCORE", "0.62")))
     config = RuntimeConfig(
         execution_mode=mode,
@@ -438,7 +478,27 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         return []
 
-    return RuntimeOrchestrator(config=config, ai_brain=brain, market_scanner=_safe_market_scanner)
+    def _persist_lifecycle(payload: dict[str, Any]) -> None:
+        if not persistence_enabled:
+            return
+        from alphaforge.persistence import save_trade_lifecycle_event
+        save_trade_lifecycle_event(brain.session, **payload)
+
+    def _persist_reject(payload: dict[str, Any]) -> None:
+        if not persistence_enabled:
+            return
+        from alphaforge.persistence import save_order_decision
+        save_order_decision(brain.session, mode=mode.value, **payload)
+
+    orchestrator = RuntimeOrchestrator(
+        config=config,
+        ai_brain=brain,
+        market_scanner=_safe_market_scanner,
+        on_lifecycle_event=_persist_lifecycle,
+        on_reject_persist=_persist_reject,
+    )
+    orchestrator.metrics.persistence_enabled = persistence_enabled
+    return orchestrator
 
 
 async def main() -> None:

@@ -247,3 +247,18 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Backtest candidate generation remains long-only in current builder path.
 - Effective-RR formulation divergence exists between backtest-local helper and shared runtime cost model.
 - Score-to-expectancy calibration remains weak for executable post-cost edge.
+
+
+## [Unreleased] - 2026-05-19 (PAPER SQLite bootstrap + diagnostics hardening)
+
+### Added
+- Runtime bootstrap diagnostics for SQLite path resolution, schema init confirmation, and discovered table names.
+- Heartbeat diagnostics for persistence enabled state and selection/decision gate blockers.
+- Tests covering PAPER schema bootstrap with empty cycles and absolute DB path logging.
+
+### Changed
+- Runtime scanner now captures top symbol selection reject reasons even when no symbols are selected.
+- Runtime env bootstrap now wires reject/lifecycle callbacks to SQL persistence in PAPER/BACKTEST/LIVE runtime path (when enabled).
+
+### Fixed
+- PAPER runtime persistence observability gaps that obscured whether SQL schema initialization and persistence callbacks were active.
