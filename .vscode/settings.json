@@ -1,0 +1,16 @@
+{
+    "sqltools.useNodeRuntime": true,
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "SQLite",
+            "name": "alphadb",
+            "database": "${workspaceFolder:AlphaForge}/alphaforge.db"
+        }
+    ]
+}

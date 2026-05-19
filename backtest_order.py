@@ -282,10 +282,16 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
         "panic_score": panic_score,
         "selector_diagnostics": diagnostics,
     }
-def parse_ts(value: str) -> int:
-    if value.isdigit():
-        return int(value)
-    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+def parse_ts(value: Any) -> int:
+    raw = "" if value is None else str(value).strip()
+
+    if raw == "" or raw.lower() in {"none", "null", "nan"}:
+        raise ValueError("missing timestamp")
+
+    if raw.isdigit():
+        return int(raw)
+
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     return int(dt.timestamp() * 1000)
 def fetch_json(url: str) -> Any:
     with urlopen(url) as resp:  # nosec - public market data
@@ -314,7 +320,7 @@ def select_symbol_universe(top_n: int, quote: str = "USDT") -> List[Dict[str, An
     return selected[:top_n]
 def save_symbol_universe(path: str, universe: List[Dict[str, Any]]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=["symbol", "quoteVolume"])
         w.writeheader()
         w.writerows(universe)
@@ -342,33 +348,66 @@ def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> List
     ]
 def load_or_fetch_candles(symbol: str, interval: str, start_ms: int, end_ms: int, output_dir: str) -> List[Candle]:
     path = os.path.join(output_dir, "candles", f"{symbol}_{interval}.csv")
+
     if os.path.exists(path):
-        return load_candles(path, start_ms, end_ms)
+        candles = load_candles(path, start_ms, end_ms)
+        if candles:
+            return candles
+
+        print(f"[WARN] candle cache empty or invalid, refetching: {path}")
+
     candles = fetch_klines(symbol, interval, start_ms, end_ms)
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=["timestamp", "open", "high", "low", "close", "volume"])
         w.writeheader()
         for c in candles:
             w.writerow(asdict(c))
+
     return candles
 def load_candles(path: str, start_ms: int, end_ms: int) -> List[Candle]:
     out = []
-    with open(path, newline="") as f:
-        for row in csv.DictReader(f):
-            ts = parse_ts(str(row.get("timestamp") or row.get("open_time") or row.get("time") or row.get("date")))
-            if start_ms <= ts <= end_ms:
+    skipped_rows = 0
+
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for line_no, row in enumerate(csv.DictReader(f), start=2):
+            raw_ts = (
+                row.get("timestamp")
+                or row.get("open_time")
+                or row.get("time")
+                or row.get("date")
+            )
+
+            try:
+                ts = parse_ts(raw_ts)
+            except Exception:
+                skipped_rows += 1
+                continue
+
+            if not (start_ms <= ts <= end_ms):
+                continue
+
+            try:
                 out.append(
                     Candle(
-                        ts,
-                        float(row["open"]),
-                        float(row["high"]),
-                        float(row["low"]),
-                        float(row["close"]),
-                        float(row.get("volume", 0.0)),
+                        timestamp=ts,
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=float(row.get("volume", 0.0) or 0.0),
                     )
                 )
+            except (KeyError, TypeError, ValueError):
+                skipped_rows += 1
+                continue
+
     out.sort(key=lambda x: x.timestamp)
+
+    if skipped_rows:
+        print(f"[WARN] skipped {skipped_rows} invalid candle rows from {path}")
+
     return out
 def scan_symbol_backtest(
     symbol: str,
@@ -1242,7 +1281,7 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
 
 
 def write_backtest_quality_summary(path: str, summary: Mapping[str, Any]) -> None:
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=["metric", "value"])
         w.writeheader()
         for key, value in summary.items():
@@ -1645,6 +1684,63 @@ def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Di
         "reject_precision": reject_precision,
         "reject_false_positive_rate": false_positive_rate,
     }
+def ensure_calibration_snapshots_schema(session) -> None:
+    session.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS calibration_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                predicted_quality REAL,
+                realized_outcome TEXT NOT NULL,
+                score REAL,
+                rr REAL,
+                effective_rr REAL,
+                regime TEXT,
+                setup_type TEXT,
+                rejection_reason TEXT,
+                forward_window_minutes INTEGER NOT NULL,
+                mfe_pct REAL,
+                mae_pct REAL,
+                would_have_hit_tp INTEGER,
+                would_have_hit_sl INTEGER,
+                reject_correct INTEGER,
+                created_at TEXT,
+                payload_json TEXT,
+                UNIQUE(signal_id, forward_window_minutes, realized_outcome)
+            )
+            """
+        )
+    )
+
+    cols = {
+        row[1]
+        for row in session.execute(text("PRAGMA table_info(calibration_snapshots)")).fetchall()
+    }
+
+    if "payload_json" not in cols:
+        session.execute(
+            text(
+                """
+                ALTER TABLE calibration_snapshots
+                ADD COLUMN payload_json TEXT
+                """
+            )
+        )
+        session.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_calibration_snapshots_signal_window_outcome
+            ON calibration_snapshots (
+                signal_id,
+                forward_window_minutes,
+                realized_outcome
+            )
+            """
+        )
+    )
+
+    session.commit()
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--start")
@@ -1923,7 +2019,7 @@ def main():
         ("adaptive_scope_stats.csv", adaptive_scope_stats),
         ("calibration_snapshots.csv", calibration_snapshots),
     ]:
-        with open(os.path.join(args.output_dir, name), "w", newline="") as f:
+        with open(os.path.join(args.output_dir, name), "w", newline="", encoding="utf-8-sig") as f:
             if not rows:
                 f.write("")
                 continue
@@ -1968,7 +2064,7 @@ def main():
         "cancel_counts": {},
         "event_flags":{},
     }
-    with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
+    with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))
         w.writeheader()
         w.writerow(summary)
@@ -1978,11 +2074,12 @@ def main():
         quality_summary,
     )
     rejected_shadow_summary = build_rejected_shadow_summary(rejected_shadow)
-    with open(os.path.join(args.output_dir, "rejected_shadow_summary.csv"), "w", newline="") as f:
+    with open(os.path.join(args.output_dir, "rejected_shadow_summary.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))
         w.writeheader()
         w.writerow(rejected_shadow_summary)
     with Session(init_db("sqlite+pysqlite:///:memory:")) as session:
+        ensure_calibration_snapshots_schema(session)
         for row in forward_eval_rows:
             session.execute(
                 text(
@@ -2020,15 +2117,15 @@ def main():
                 },
             )
         snapshot_rows = session.execute(text("SELECT * FROM calibration_snapshots ORDER BY id")).mappings().all()
-    with open(os.path.join(args.output_dir, "calibration_snapshots.csv"), "w", newline="") as f:
+    with open(os.path.join(args.output_dir, "calibration_snapshots.csv"), "w", newline="", encoding="utf-8-sig") as f:
         if snapshot_rows:
             fieldnames = resolve_csv_fieldnames([dict(r) for r in snapshot_rows], list(dict(snapshot_rows[0]).keys()))
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows([dict(r) for r in snapshot_rows])
-    with open(os.path.join(args.output_dir, "order_lifecycle.csv"), newline="") as f:
+    with open(os.path.join(args.output_dir, "order_lifecycle.csv"), newline="", encoding="utf-8-sig") as f:
         lifecycle_csv_rows = list(csv.DictReader(f))
-    with open(os.path.join(args.output_dir, "rejected_orders.csv"), newline="") as f:
+    with open(os.path.join(args.output_dir, "rejected_orders.csv"), newline="", encoding="utf-8-sig") as f:
         rejected_csv_rows = list(csv.DictReader(f))
     export_errors = verify_export_integrity(
         persisted_lifecycle_rows=persisted_lifecycle_rows,
