@@ -183,3 +183,9 @@
 - **Persistence posture:** additive `calibration_snapshots` table with idempotent uniqueness guard.
 - **Export posture:** forward labels, adaptive scope stats, and calibration rows emitted as additive CSV outputs.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** (adaptive thresholds remain non-live).
+
+## 2026-05-19 Probabilistic Scoring Update
+- **Version:** `0.3.9-dev`
+- Added probability-weighted decision semantics (`p_win`, `p_tp_hit`, `p_sl_hit`, `p_entry_trigger`, `p_fakeout`, `p_regime_fit`, `p_execution_success`, `confidence`, `calibrated_score`) in the shared AIBrain path for runtime phases.
+- Reject semantics now include probability-based reasons (`LOW_P_WIN`, `LOW_EXECUTION_PROBABILITY`, `LOW_CONFIDENCE`, `NEGATIVE_EXPECTANCY_AFTER_COSTS`, `HIGH_FAKEOUT_PROBABILITY`, `LOW_REGIME_FIT_PROBABILITY`).
+- Live readiness verdict remains **NOT LIVE READY**.
