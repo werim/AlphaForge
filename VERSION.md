@@ -1,5 +1,14 @@
 # AlphaForge Version Status
 
+## 2026-05-19 Test-Stability Patch (Execution-aware, no gate loosening)
+- **Version:** `0.3.10-dev+testfix1`
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST spread-unit handling is now explicitly fractional in symbol selection and diagnostics, matching execution context normalization behavior.
+- **Lifecycle coverage:** lifecycle persistence path remains intact; event-id uniqueness and effective-RR precedence behavior are preserved.
+- **Execution realism coverage:** spread reject threshold is now unit-consistent (`0.25%` as `0.0025`) and continues to reject high-spread symbols defensively.
+- **Known critical risks:** LIVE remains not production-ready; this patch is a test-stability and unit-consistency hotfix only.
+- **Last audit date:** `2026-05-19`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## Current Version
 - **Version:** `0.3.8-dev`
 - **Date:** `2026-05-19`

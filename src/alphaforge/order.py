@@ -410,10 +410,11 @@ def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_
         save_trade_lifecycle_event(session, signal_id=signal_id, event_type=f"before_virtual_{plan.decision.lower()}", payload={"order_type": plan.order_type})
     except Exception as exc:
         logger.warning("Persist failed: %s", exc)
-    if plan.decision == "REJECTED":
-        return None
     order = dict(candidate)
     order.update({"ai_score": score.total_score, "confidence_band": _band(score.total_score), "position_size_mult": _position_mult(score.total_score), "ai_reason": explanation, "ai_flags": score.reason_flags, "ai_order_type": plan.order_type})
+    if plan.decision == "REJECTED":
+        order["ai_rejected"] = True
+        order["reject_reason"] = explanation
     return order
 
 # (rest unchanged omitted for brevity in this rewrite)
@@ -437,6 +438,8 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         effective_rr, execution_flags = _effective_rr(order, execution_ctx)
         if missing_execution_ctx:
             execution_flags.append("EXECUTION_CTX_MISSING")
+            execution_flags.append("UNKNOWN_EXECUTION_CONTEXT")
+            effective_rr = round(max(float(order.get("risk_reward", 1.0) or 1.0) - 0.6, 0.0), 6)
         blocked = _is_blocked(score, regime_ctx, stats_ctx) or effective_rr < MIN_RR_THRESHOLD
 
         qty = float(order.get("quantity", 0.0)) * _position_mult(score.total_score)
@@ -493,7 +496,9 @@ def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any
     if isinstance(raw, Mapping):
         if len(raw) == 0:
             return normalize_execution_ctx(neutral_execution_context()), True
-        return normalize_execution_ctx(raw), False
+        required = ("spread_pct", "expected_slippage_pct", "latency_ms", "funding_rate_pct", "liquidity_score")
+        missing_raw = any(raw.get(k) in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST") for k in required)
+        return normalize_execution_ctx(raw), missing_raw
     if market_ctx:
         return normalize_execution_ctx(build_execution_context(market_ctx)), False
     return normalize_execution_ctx(neutral_execution_context()), True

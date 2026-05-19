@@ -328,22 +328,35 @@ class AIBrain:
         return score_ctx, order_plan, explanation
 
     def _persist_decision(self, signal: Mapping[str, Any], market_ctx: Mapping[str, Any], score_ctx: ScoreContext, order_plan: OrderPlan, explanation: str, phase: str) -> None:
-        signal_id = self.session.execute(
+        signal_id = str(signal.get("signal_id", f"{signal.get('symbol', 'UNKNOWN')}:{_now()}"))
+        self.session.execute(
             text(
                 """
-                INSERT INTO signals (symbol, side, timeframe, payload, created_at)
-                VALUES (:symbol, :side, :timeframe, :payload, :created_at)
-                RETURNING id
+                INSERT INTO signals (
+                    signal_id, symbol, side, timeframe, mode, score, rr, effective_rr, expectancy_bucket, created_at, updated_at
+                ) VALUES (
+                    :signal_id, :symbol, :side, :timeframe, :mode, :score, :rr, :effective_rr, :expectancy_bucket, :created_at, :updated_at
+                )
+                ON CONFLICT(signal_id) DO UPDATE SET
+                    symbol=excluded.symbol, side=excluded.side, timeframe=excluded.timeframe, mode=excluded.mode,
+                    score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
+                    updated_at=excluded.updated_at
                 """
             ),
             {
+                "signal_id": signal_id,
                 "symbol": str(signal.get("symbol", "UNKNOWN")),
                 "side": str(signal.get("side", "N/A")),
                 "timeframe": str(signal.get("timeframe", "NA")),
-                "payload": _json_dumps(dict(signal)),
+                "mode": "BACKTEST",
+                "score": float(score_ctx.total_score),
+                "rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
+                "effective_rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
+                "expectancy_bucket": "UNKNOWN",
                 "created_at": _now(),
+                "updated_at": _now(),
             },
-        ).scalar_one()
+        )
 
         decision_payload = {
             "signal_id": signal_id,
