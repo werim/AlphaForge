@@ -276,3 +276,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Fixed
 - PAPER runtime persistence observability gaps that obscured whether SQL schema initialization and persistence callbacks were active.
+
+## [Unreleased] - 2026-05-19 (Rejected shadow gate diagnostics + STOP_TOO_WIDE rescue simulation)
+
+### Added
+- Rejected shadow export fields for gate score provenance (`gate_score`, `low_score_gate_score`) and STOP_TOO_WIDE rescue simulation outputs.
+- Reject-reason diagnostics aggregation including row count, TP opportunity rates, effective TP rates, mean score/RR/cost-penalty, and top symbols/regimes.
+
+### Changed
+- Rejected shadow evaluation now normalizes `spread_pct` units before execution-penalty evaluation.
+- Symbol market-data builder now normalizes `actual_spread_pct` to the same unit contract used by gate thresholds.
+
+### Fixed
+- Low-score gate/CSV observability gap by exporting the actual gate score used by rejection logic.

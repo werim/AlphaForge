@@ -79,6 +79,13 @@ class RejectedShadowEvaluation:
     cost_penalty: float
     liquidity_ok: bool
     volatility_ok: bool
+    low_score_gate_score: float = 0.0
+    rescue_attempted: bool = False
+    rescue_passed: bool = False
+    rescued_stop_loss: float = 0.0
+    rescued_effective_rr: float = 0.0
+    rescued_size_multiplier: float = 0.0
+    rescue_reject_reason: str = ""
 @dataclass
 class ForwardWindowEvaluation:
     signal_id: str
@@ -262,7 +269,7 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     actual_spread_pct = symbol_meta.get("actual_spread_pct")
     spread_source = "ACTUAL" if actual_spread_pct not in (None, "") else "ESTIMATED_BACKTEST"
     if actual_spread_pct not in (None, ""):
-        spread_pct = float(actual_spread_pct)
+        spread_pct, _ = normalize_pct_input(actual_spread_pct, field="spread_pct")
     else:
         # Conservative offline estimate: wider for lower liquidity and high volatility.
         spread_pct = _estimate_backtest_spread_pct(liquidity_score, volatility_pct)
@@ -287,7 +294,7 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
         "spread_source": spread_source,
-        "actual_spread_pct": float(actual_spread_pct) if actual_spread_pct not in (None, "") else None,
+        "actual_spread_pct": spread_pct if actual_spread_pct not in (None, "") else None,
         "estimated_spread_pct": spread_pct if spread_source == "ESTIMATED_BACKTEST" else None,
         "candle_range_pct": candle_range_pct,
         "volatility_pct": volatility_pct,
@@ -909,6 +916,7 @@ def process_backtest_result(
                 "setup_reason": setup_reason,
                 "regime": regime,
                 "score": score,
+                "gate_score": _safe_float(diagnostics.get("score"), score),
                 "rr": rr,
                 "expectancy": expectancy,
                 "quality_score": diagnostics.get("quality_score", 0.0),
@@ -993,6 +1001,7 @@ def process_backtest_result(
                 "setup_reason": cand.setup_reason,
                 "regime": cand.regime,
                 "score": cand.score,
+                "gate_score": _safe_float(diagnostics.get("score"), cand.score),
                 "rr": cand.rr,
                 "expectancy": expectancy,
                 "quality_score": diagnostics.get("quality_score", ""),
@@ -1550,7 +1559,7 @@ def evaluate_rejected_shadow(
     idx: int,
 ) -> RejectedShadowEvaluation:
     rr = _safe_float(candidate_row.get("rr"), 0.0)
-    spread_pct = _safe_float(candidate_row.get("spread_pct"), 0.0)
+    spread_pct, _ = normalize_pct_input(candidate_row.get("spread_pct"), field="spread_pct")
     liquidity_score = _safe_float(candidate_row.get("liquidity_score"), 1.0)
     volatility_score = _safe_float(candidate_row.get("volatility_score"), spread_pct)
     effective_rr, _, penalty_breakdown = _execution_reject_flags(
@@ -1588,6 +1597,39 @@ def evaluate_rejected_shadow(
         and liquidity_ok
         and volatility_ok
     )
+    low_score_gate_score = _safe_float(candidate_row.get("gate_score"), _safe_float(candidate_row.get("score"), 0.0))
+    min_required_score = _safe_float(candidate_row.get("min_required_score"), 7.5)
+    rescue_attempted = False
+    rescue_passed = False
+    rescued_stop_loss = _safe_float(candidate_row.get("sl"), 0.0)
+    rescued_effective_rr = 0.0
+    rescued_size_multiplier = 0.0
+    rescue_reject_reason = ""
+    if str(candidate_row.get("reject_reason", "")).upper() == "STOP_TOO_WIDE":
+        setup_type = str(candidate_row.get("setup_type", "")).upper()
+        regime = str(candidate_row.get("regime", "")).upper()
+        score_val = _safe_float(candidate_row.get("score"), 0.0)
+        spread_ok = spread_pct <= 0.05
+        if ("BREAKOUT" in setup_type or regime == "BREAKOUT") and score_val >= 8.0 and effective_rr >= 1.2 and liquidity_ok and spread_ok:
+            rescue_attempted = True
+            entry = _safe_float(candidate_row.get("entry"), 0.0)
+            sl = _safe_float(candidate_row.get("sl"), 0.0)
+            risk = abs(entry - sl)
+            max_risk = entry * 0.015
+            reduced_risk = min(risk, max_risk)
+            if risk > 0.0 and reduced_risk > 0.0:
+                rescued_stop_loss = (entry - reduced_risk) if str(candidate_row.get("side", "LONG")).upper() == "LONG" else (entry + reduced_risk)
+                rescued_rr = abs(_safe_float(candidate_row.get("tp"), entry) - entry) / reduced_risk
+                rescued_effective_rr, _, _ = _execution_reject_flags(rescued_rr, {"spread_pct": spread_pct, "expected_slippage_pct": _safe_float(candidate_row.get("expected_slippage_pct"), 0.0), "liquidity_score": liquidity_score})
+                stop_width_pct = (reduced_risk / max(entry, 1e-9)) * 100.0
+                rescued_size_multiplier = min(0.5, max_risk / max(risk, 1e-9))
+                if rescued_effective_rr >= 1.2 and stop_width_pct <= 1.5 and rescued_size_multiplier < 1.0:
+                    rescue_passed = True
+                else:
+                    rescue_reject_reason = "LOW_RESCUED_EFFECTIVE_RR" if rescued_effective_rr < 1.2 else "RESCUED_STOP_STILL_WIDE"
+            else:
+                rescue_reject_reason = "INVALID_RESCUE_GEOMETRY"
+
     return RejectedShadowEvaluation(
         symbol=str(candidate_row.get("symbol", "")),
         timestamp=int(candidate_row.get("timestamp", 0)),
@@ -1608,6 +1650,13 @@ def evaluate_rejected_shadow(
         cost_penalty=cost_penalty,
         liquidity_ok=liquidity_ok,
         volatility_ok=volatility_ok,
+        low_score_gate_score=low_score_gate_score,
+        rescue_attempted=rescue_attempted,
+        rescue_passed=rescue_passed,
+        rescued_stop_loss=rescued_stop_loss,
+        rescued_effective_rr=rescued_effective_rr,
+        rescued_size_multiplier=rescued_size_multiplier,
+        rescue_reject_reason=rescue_reject_reason,
     )
 def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Dict[str, Any]:
     total = len(shadows)
@@ -1644,6 +1693,37 @@ def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Di
             bucket["would_sl"] += int(s.shadow_outcome == "WOULD_SL")
             bucket["effective_tp"] += int(s.effective_tp_hit)
         return out
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for s in shadows:
+        reason = str(s.reject_reasons or "UNKNOWN")
+        bucket = grouped.setdefault(reason, {"rows": 0, "would_tp": 0, "effective_tp": 0, "score_sum": 0.0, "raw_rr_sum": 0.0, "effective_rr_sum": 0.0, "cost_penalty_sum": 0.0, "symbols": {}, "regimes": {}})
+        bucket["rows"] += 1
+        bucket["would_tp"] += int(s.shadow_outcome == "WOULD_TP")
+        bucket["effective_tp"] += int(bool(s.effective_tp_hit))
+        bucket["score_sum"] += s.score
+        bucket["raw_rr_sum"] += s.raw_rr
+        bucket["effective_rr_sum"] += s.effective_rr
+        bucket["cost_penalty_sum"] += s.cost_penalty
+        bucket["symbols"][s.symbol] = bucket["symbols"].get(s.symbol, 0) + 1
+        bucket["regimes"][s.regime] = bucket["regimes"].get(s.regime, 0) + 1
+    reason_diagnostics = {}
+    for reason, b in grouped.items():
+        rows = max(1, b["rows"])
+        top_symbols = sorted(b["symbols"].items(), key=lambda x: (-x[1], x[0]))[:3]
+        top_regimes = sorted(b["regimes"].items(), key=lambda x: (-x[1], x[0]))[:3]
+        reason_diagnostics[reason] = {
+            "rows": b["rows"],
+            "would_tp_count": b["would_tp"],
+            "would_tp_rate": b["would_tp"] / rows,
+            "effective_tp_hit_count": b["effective_tp"],
+            "effective_tp_hit_rate": b["effective_tp"] / rows,
+            "avg_score": b["score_sum"] / rows,
+            "avg_raw_rr": b["raw_rr_sum"] / rows,
+            "avg_effective_rr": b["effective_rr_sum"] / rows,
+            "avg_cost_penalty": b["cost_penalty_sum"] / rows,
+            "top_symbols": top_symbols,
+            "top_regimes": top_regimes,
+        }
     return {
         "total_rejected": total,
         "would_tp": counts["WOULD_TP"],
@@ -1661,6 +1741,7 @@ def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Di
         "missed_profit_count": missed_profit,
         "reject_precision": reject_precision,
         "reject_false_positive_rate": false_positive_rate,
+        "reject_reason_diagnostics": json.dumps(reason_diagnostics, sort_keys=True),
     }
 def main():
     p = argparse.ArgumentParser()

@@ -343,3 +343,35 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 - Default env scanner still returns no candidates; runtime remains inert unless real scanner/universe feed is wired.
 - Persistence callbacks now wired, but successful rows still depend on runtime generating lifecycle/reject events.
 - SQLTools/operator must verify they open the same resolved DB path logged by runtime.
+
+## 2026-05-19 Rejected Shadow + Reject Gate Audit Patch
+
+### Why this patch was needed
+- Rejected-shadow analysis surfaced potential LOW_SCORE score-scale confusion and limited visibility into reason-level missed-opportunity structure.
+- STOP_TOO_WIDE rejects showed non-trivial hypothetical TP opportunities that required bounded rescue diagnostics rather than global gate loosening.
+
+### Root cause
+- Exported reject rows lacked explicit gate-score provenance fields.
+- Rejected-shadow summary was aggregate-only and not grouped with per-reason profitability/cost structure.
+- Spread unit normalization was not consistently enforced for all market-data ingestion paths.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `CHANGELOG.md`
+- `VERSION.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- Added gate-score observability fields to rejected exports and shadow exports.
+- Added STOP_TOO_WIDE rescue simulation diagnostics with bounded size reduction and post-cost effective-RR recomputation.
+- Added grouped reject-reason shadow diagnostics.
+
+### Persistence / export changes
+- `rejected_orders.csv`: adds `gate_score`.
+- `rejected_shadow.csv`: adds `low_score_gate_score` and rescue telemetry fields.
+- `rejected_shadow_summary.csv`: adds `reject_reason_diagnostics` JSON payload.
+
+### Risks / limitations
+- Rescue path is diagnostic-only and intentionally conservative; it does not auto-accept trades.
+- Top symbol/regime outputs are frequency-based and do not imply production allocation guidance.

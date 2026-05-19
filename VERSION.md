@@ -203,3 +203,10 @@
 - Runtime heartbeat now surfaces persistence status and last scan gate blockers/rejection summaries when `symbols_selected=0`.
 - Default env bootstrap now wires lifecycle/reject persistence callbacks so PAPER mode can persist lifecycle/reject rows when generated.
 - Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## 2026-05-19 Rejected Shadow / Gate Consistency Update
+- **Version:** `0.3.10-dev`
+- LOW_SCORE diagnostic provenance now exported with dedicated gate-score fields for reject-audit consistency.
+- Rejected-shadow now includes reject-reason grouped diagnostics and STOP_TOO_WIDE rescue simulation telemetry (bounded, non-bypass).
+- Spread unit handling (`spread_pct`) is normalized consistently before gate/penalty decisions.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
