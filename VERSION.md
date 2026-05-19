@@ -189,3 +189,10 @@
 - Added probability-weighted decision semantics (`p_win`, `p_tp_hit`, `p_sl_hit`, `p_entry_trigger`, `p_fakeout`, `p_regime_fit`, `p_execution_success`, `confidence`, `calibrated_score`) in the shared AIBrain path for runtime phases.
 - Reject semantics now include probability-based reasons (`LOW_P_WIN`, `LOW_EXECUTION_PROBABILITY`, `LOW_CONFIDENCE`, `NEGATIVE_EXPECTANCY_AFTER_COSTS`, `HIGH_FAKEOUT_PROBABILITY`, `LOW_REGIME_FIT_PROBABILITY`).
 - Live readiness verdict remains **NOT LIVE READY**.
+
+## 2026-05-19 Forensic Backtest Lifecycle Audit Update
+- Completed deep code-level forensic audit against externally extracted lifecycle/reject findings.
+- Confirmed backtest candidate generation is currently long-only in `_build_market_ctx(...)` and strongly breakout-up biased.
+- Confirmed base score threshold is intentionally high (`MIN_SCORE_BASE=7.5`) relative to observed low-mid score distribution.
+- Identified dual effective-RR formulations (backtest-local multiplicative vs runtime additive penalty model) as alignment/calibration risk.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
