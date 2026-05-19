@@ -233,3 +233,17 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Rejected-signal review reason assignment now maps from probabilistic failure flags before falling back to `LOW_SCORE`.
 ### Fixed
 - Reduced static scalar-score dependence by blending weighted legacy score with calibrated probabilistic score.
+
+
+## [Unreleased] - 2026-05-19 (Forensic lifecycle audit documentation)
+
+### Added
+- Production-grade forensic lifecycle audit report in `REPORT.md` covering signal generation, scoring, regime gating, execution-penalty formulas, lifecycle path analysis, and root-cause matrix.
+
+### Changed
+- Updated `VERSION.md` with forensic audit status notes and explicit architecture-level findings summary.
+
+### Known Issues
+- Backtest candidate generation remains long-only in current builder path.
+- Effective-RR formulation divergence exists between backtest-local helper and shared runtime cost model.
+- Score-to-expectancy calibration remains weak for executable post-cost edge.
