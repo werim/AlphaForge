@@ -1,5 +1,42 @@
 # AlphaForge Forensic Audit Report — Backtest Lifecycle Behavior (2026-05-19)
 
+## 2026-05-19 Patch Addendum — Remaining pytest failures (targeted hotfix)
+
+### Why the patch was needed
+- Remaining backtest scanner failures showed spread-unit inconsistency in symbol gating and calibration snapshot insert schema mismatch (`payload_json` absent on current SQLite table).
+- A constructor compatibility regression required optional defaults for `ForwardWindowEvaluation` in idempotency tests.
+
+### Root cause
+- `select_symbol(...)` treated spread thresholds with stale percent-point configuration (`0.12`) and scoring shape that let `0.0035` pass as strong spread.
+- Backtest summary calibration insert expected `payload_json` column although in-memory initialized schema did not guarantee it.
+- `ForwardWindowEvaluation` required fields not always supplied by test fixtures intended to validate persistence/idempotency semantics.
+
+### Files changed
+- `src/alphaforge/symbol_selector.py`
+- `backtest_order.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- No production risk filter loosening: spread gate is stricter and unit-correct (`max_spread_pct=0.0025` as fraction).
+- Calibration snapshot export insert is schema-compatible across current table variants (no hard dependency on `payload_json`).
+
+### Lifecycle/persistence impact
+- Lifecycle persistence remains SQL-backed and deterministic; event ID uniqueness behavior is unchanged.
+- Effective RR precedence in lifecycle persistence remains `row.effective_rr` fallback to `row.rr`.
+
+### Tests executed
+- `python -m pytest tests/test_backtest_order_scanner.py -q`
+- `python -m pytest -q`
+
+### Risks / limitations
+- This is a localized fix; no architectural rewrite.
+- LIVE readiness remains unchanged and not recommended.
+
+### Push recommendation
+- Safe to merge as a defensive consistency fix with preserved reject rigor.
+
 ## Executive Summary
 
 AlphaForge is **not failing because it generates zero signals**; it is failing because the current backtest signal stream is mostly low-quality, heavily long-biased, and then aggressively filtered by intentionally strict quality/execution gates. The observed lifecycle pattern (`SYMBOL_REJECTED` + `SIGNAL_REJECTED` + a very small `ORDER_REJECTED`, zero placed trades) is consistent with code behavior.

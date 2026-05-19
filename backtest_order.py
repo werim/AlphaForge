@@ -93,23 +93,23 @@ class ForwardWindowEvaluation:
     decision: str
     lifecycle_state: str
     reject_reason: str
-    setup_type: str
-    score: float
-    rr: float
-    effective_rr: float
-    predicted_quality: float
-    forward_window_minutes: int
-    would_have_hit_tp: bool
-    would_have_hit_sl: bool
-    mfe_pct: float
-    mae_pct: float
-    max_forward_return: float
-    max_adverse_return: float
-    reject_correct: Optional[bool]
-    reject_missed_winner: bool
-    reject_saved_from_loss: bool
-    forward_window_regime: str
-    execution_quality_bucket: str
+    setup_type: str = "UNKNOWN"
+    score: float = 0.0
+    rr: float = 0.0
+    effective_rr: float = 0.0
+    predicted_quality: float = 0.0
+    forward_window_minutes: int = 0
+    would_have_hit_tp: bool = False
+    would_have_hit_sl: bool = False
+    mfe_pct: float = 0.0
+    mae_pct: float = 0.0
+    max_forward_return: float = 0.0
+    max_adverse_return: float = 0.0
+    reject_correct: Optional[bool] = None
+    reject_missed_winner: bool = False
+    reject_saved_from_loss: bool = False
+    forward_window_regime: str = "UNKNOWN"
+    execution_quality_bucket: str = "UNKNOWN"
 
 
 TERMINAL_FORWARD_CLOSE_REASONS = {"TP_HIT", "SL_HIT", "TIMEOUT", "EXPIRED", "CANCELED"}
@@ -184,9 +184,9 @@ def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[f
     }
     return effective, flags, breakdown
 def _estimate_backtest_spread_pct(liquidity_score: float, volatility_pct: float) -> float:
-    base_spread_pct = 0.015 + (1.0 - liquidity_score) * 0.09
-    volatility_widening = min(0.04, max(0.0, (volatility_pct - 2.0) * 0.0015))
-    return max(0.005, min(0.22, base_spread_pct + volatility_widening))
+    base_spread_pct = 0.0008 + (1.0 - liquidity_score) * 0.0012
+    volatility_widening = min(0.0004, max(0.0, (volatility_pct - 2.0) * 0.00002))
+    return max(0.0005, min(0.0024, base_spread_pct + volatility_widening))
 def _build_market_ctx(
     now: Candle,
     prev: Candle,
@@ -268,8 +268,9 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     liquidity_score = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
     actual_spread_pct = symbol_meta.get("actual_spread_pct")
     spread_source = "ACTUAL" if actual_spread_pct not in (None, "") else "ESTIMATED_BACKTEST"
+    spread_unit_assumed = "fraction"
     if actual_spread_pct not in (None, ""):
-        spread_pct, _ = normalize_pct_input(actual_spread_pct, field="spread_pct")
+        spread_pct, spread_unit_assumed = normalize_pct_input(actual_spread_pct, field="spread_pct")
     else:
         # Conservative offline estimate: wider for lower liquidity and high volatility.
         spread_pct = _estimate_backtest_spread_pct(liquidity_score, volatility_pct)
@@ -294,6 +295,7 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
         "volume_24h_usdt": float(quote_volume),
         "spread_pct": spread_pct,
         "spread_source": spread_source,
+        "spread_unit_assumed": spread_unit_assumed,
         "actual_spread_pct": spread_pct if actual_spread_pct not in (None, "") else None,
         "estimated_spread_pct": spread_pct if spread_source == "ESTIMATED_BACKTEST" else None,
         "candle_range_pct": candle_range_pct,
@@ -1094,6 +1096,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                        score, rr, effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing,
                        event_ts, created_at
                 FROM trade_lifecycle_events
+                WHERE mode = 'BACKTEST'
                 ORDER BY event_ts, event_id
                 """
             )
@@ -2088,13 +2091,13 @@ def main():
                     INSERT INTO calibration_snapshots (
                         signal_id, predicted_quality, realized_outcome, score, rr, effective_rr, regime, setup_type,
                         rejection_reason, forward_window_minutes, mfe_pct, mae_pct, would_have_hit_tp, would_have_hit_sl,
-                        reject_correct, created_at, payload_json
+                        reject_correct, created_at
                     ) VALUES (
                         :signal_id, :predicted_quality, :realized_outcome, :score, :rr, :effective_rr, :regime, :setup_type,
                         :rejection_reason, :forward_window_minutes, :mfe_pct, :mae_pct, :would_have_hit_tp, :would_have_hit_sl,
-                        :reject_correct, :created_at, :payload_json
+                        :reject_correct, :created_at
                     )
-                    ON CONFLICT(signal_id, forward_window_minutes, realized_outcome) DO NOTHING
+                    ON CONFLICT(signal_id, forward_window_minutes) DO NOTHING
                     """
                 ),
                 {
@@ -2114,7 +2117,6 @@ def main():
                     "would_have_hit_sl": int(bool(row.get("would_have_hit_sl"))),
                     "reject_correct": None if row.get("reject_correct") is None else int(bool(row.get("reject_correct"))),
                     "created_at": datetime.now(timezone.utc).isoformat(),
-                    "payload_json": json.dumps(row, sort_keys=True),
                 },
             )
         snapshot_rows = session.execute(text("SELECT * FROM calibration_snapshots ORDER BY id")).mappings().all()

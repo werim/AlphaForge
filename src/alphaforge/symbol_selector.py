@@ -22,7 +22,7 @@ class SymbolSelectionResult:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "min_volume_24h_usdt": 2_000_000.0,
-    "max_spread_pct": 0.12,
+    "max_spread_pct": 0.0025,
     "min_liquidity_score": 0.45,
     "max_volatility_pct": 8.0,
     "max_chop_score": 0.72,
@@ -56,6 +56,9 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
 
     volume_24h_usdt = _safe_float(market_data, "volume_24h_usdt", cfg["min_volume_24h_usdt"] * 0.5, diagnostics, warnings)
     spread_pct = _safe_float(market_data, "spread_pct", cfg["max_spread_pct"] * 1.1, diagnostics, warnings)
+    if spread_pct > max(cfg["max_spread_pct"] * 2.0, 0.005):
+        spread_pct = spread_pct / 100.0
+        diagnostics["spread_normalized_from_percent_points"] = True
     volatility_pct = _safe_float(market_data, "volatility_pct", cfg["max_volatility_pct"] * 0.7, diagnostics, warnings)
     trend_strength = _safe_float(market_data, "trend_strength", 0.2, diagnostics, warnings)
     liquidity_score_raw = _safe_float(market_data, "liquidity_score", cfg["min_liquidity_score"] * 0.9, diagnostics, warnings)
@@ -82,7 +85,8 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
         reject_reasons.append("WEAK_TREND_AND_NO_RANGE_EDGE")
 
     volume_score = max(0.0, min(10.0, (volume_24h_usdt / cfg["min_volume_24h_usdt"]) * 5.0))
-    spread_score = max(0.0, min(10.0, (cfg["max_spread_pct"] / max(spread_pct, 1e-9)) * 5.0))
+    spread_ratio = spread_pct / max(cfg["max_spread_pct"], 1e-9)
+    spread_score = max(0.0, min(10.0, 10.0 * (1.0 - spread_ratio)))
     liquidity_score = max(0.0, min(10.0, liquidity_score_raw * 10.0))
     volatility_score = max(0.0, min(10.0, 10.0 - max(0.0, volatility_pct - 1.0) * 1.2))
     trend_score = max(0.0, min(10.0, trend_strength * 10.0))

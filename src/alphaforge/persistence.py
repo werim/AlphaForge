@@ -233,7 +233,7 @@ def fetch_expectancy_stat(session: Any, table_name: str, key_column: str, key_va
     }
 
 
-def save_ai_decision_features(execution_features=None, *args, **kwargs):
+def save_ai_decision_features(*args, execution_features=None, **kwargs):
     payload = execution_features
     if payload is None and kwargs:
         payload = kwargs.get("execution_features", kwargs)

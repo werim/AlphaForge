@@ -2,6 +2,14 @@
 
 All notable documented repository-level changes are summarized from `REPORT.md`.
 
+## [Unreleased] - 2026-05-19 (Spread-unit + calibration/lifecycle persistence fixes)
+
+### Fixed
+- Symbol selector spread gating now uses fractional spread semantics (`max_spread_pct=0.0025`) so `0.0035` (0.35%) correctly triggers `WIDE_SPREAD` without weakening other reject gates.
+- Backtest symbol market-data builder now propagates `spread_unit_assumed` diagnostics for explicit spread normalization audits.
+- Backtest calibration snapshot export insert path no longer assumes an optional `payload_json` column, preventing SQLite runtime failures on existing schemas.
+- `ForwardWindowEvaluation` construction is now backward-compatible in tests/callers that omit setup/score/RR quality fields.
+
 ## [Unreleased] - 2026-05-16
 
 
