@@ -267,6 +267,12 @@ AlphaForge’s current backtest underperformance is a **combination problem**:
 So the dominant failure mode is not a single bug; it is: **long-only candidate construction + scoring/calibration mismatch + strict execution/geometry gating, with potential penalty unit inconsistency amplifying final rejection.**
 
 
+## Patch Update — 2026-05-19
+
+- Implemented minimal mirrored SHORT candidate construction in backtest market-context builder.
+- Aligned backtest execution reject effective-RR calculation to shared additive execution-cost model.
+- Added spread/slippage unit normalization and explicit unit-assumption fields for diagnostics/export.
+- Added regression tests for SHORT candidate emission and percent-point spread normalization behavior.
 # PAPER Runtime Persistence and SQLite Bootstrap Investigation (2026-05-19)
 
 ## Root Cause Summary

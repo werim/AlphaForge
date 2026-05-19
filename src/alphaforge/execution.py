@@ -6,8 +6,14 @@ from typing import Any, Mapping
 
 def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: float | None = None) -> dict[str, Any]:
     klines = list(market_ctx.get("recent_klines", []) or [])
-    expected_slippage_pct = _expected_slippage_pct(klines, market_ctx)
-    spread_pct = float(market_ctx.get("spread_pct", _spread_pct_from_prices(market_ctx)) or 0.0)
+    expected_slippage_pct, slippage_unit_assumed = normalize_pct_input(
+        market_ctx.get("expected_slippage_pct", _expected_slippage_pct(klines, market_ctx)),
+        field="expected_slippage_pct",
+    )
+    spread_pct, spread_unit_assumed = normalize_pct_input(
+        market_ctx.get("spread_pct", _spread_pct_from_prices(market_ctx)),
+        field="spread_pct",
+    )
     latency_ms = float(market_ctx.get("latency_ms", 50.0) or 50.0)
     orderbook_imbalance = float(market_ctx.get("orderbook_imbalance", 0.0) or 0.0)
     liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
@@ -20,6 +26,8 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "latency_ms": max(latency_ms, 0.0),
         "spread_pct": max(spread_pct, 0.0),
         "spread_source": str(market_ctx.get("spread_source", "UNKNOWN") or "UNKNOWN"),
+        "spread_unit_assumed": spread_unit_assumed,
+        "slippage_unit_assumed": slippage_unit_assumed,
         "orderbook_imbalance": max(min(orderbook_imbalance, 1.0), -1.0),
         "liquidity_score": max(min(liquidity_score, 1.0), 0.0),
         "funding_rate_pct": funding_rate_pct_val,
@@ -128,3 +136,18 @@ def build_execution_cost_model(execution_ctx: Mapping[str, Any], *, include_miss
     if include_missing_penalty and missing:
         total += min(0.5, 0.1*len(missing))
     return ExecutionCostModel(spread_penalty,slippage_penalty,latency_penalty,funding_penalty,liquidity_penalty,round(total,6),tuple(missing),completeness)
+def normalize_pct_input(value: Any, *, field: str) -> tuple[float, str]:
+    """
+    Normalize spread/slippage inputs into fractional rate units.
+    Contract:
+      - 0.001 means 0.1%
+      - 0.1 is treated as percent-point 0.1% and normalized to 0.001
+    """
+    try:
+        raw = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0, "UNAVAILABLE"
+    v = abs(raw)
+    if v > 0.05:
+        return v / 100.0, "PERCENT_POINT_NORMALIZED"
+    return v, "FRACTIONAL_RATE"

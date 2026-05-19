@@ -2,7 +2,7 @@
 
 ## Current Version
 - **Version:** `0.3.8-dev`
-- **Date:** `2026-05-16`
+- **Date:** `2026-05-19`
 - **Basis:** Consolidated from current README and REPORT documentation.
 
 ## Phase Estimate
