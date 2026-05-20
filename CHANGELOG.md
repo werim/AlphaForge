@@ -305,3 +305,17 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Changed
 - Added explicit dev-branch design compliance audit section to `REPORT.md` with truthful status and remaining architecture gaps.
+
+## [Unreleased] - 2026-05-20 (Backtest lifecycle/persistence/reporting defects)
+
+### Fixed
+- Lifecycle persistence upsert now supports composite lifecycle uniqueness `(signal_id,event_ts,lifecycle_state)` with compatibility fallback to `event_id` conflict handling.
+- Backtest summary `total_orders` now counts unique `ORDER_PLACED` lifecycle keys (no longer reports zero when placed rows exist).
+- Backtest summary `triggered_orders` now counts unique `ENTRY_TRIGGERED` keys; `not_triggered_orders` now uses accepted WAITING paths that never triggered/placed.
+- Lifecycle SQL export ordering now uses deterministic lifecycle-aware sort keys (`event_ts,symbol,signal_id,lifecycle_seq,lifecycle_state,event_id`).
+
+### Added
+- Regression tests for lifecycle composite-key idempotency, not-triggered counting semantics, lifecycle sequence monotonicity, and LOW_SCORE rescue/watch diagnostic-only field semantics.
+
+### Changed
+- LOW_SCORE rescue/watch outputs are explicitly diagnostics-only and remain excluded from accepted/order/win-rate/realized-PnL aggregates.

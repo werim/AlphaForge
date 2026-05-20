@@ -460,3 +460,45 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 1. Introduce explicit shared contract types (`SignalCandidate`, `ProbabilityDecision`) and a canonical `evaluate_signal_to_order(...)` API in `src/alphaforge/order.py`.
 2. Route runtime `_process_symbol` through that shared evaluator pre-AI execution planning, preserving execution-mode-specific adapters.
 3. Add parity tests proving BACKTEST and PAPER/LIVE use the same evaluator and reject-reason taxonomy.
+
+## 2026-05-20 Patch Addendum — Backtest lifecycle/persistence/reporting defect fix
+
+### Why the patch was needed
+- Backtest lifecycle persistence could violate a deployed unique key `(signal_id,event_ts,lifecycle_state)`.
+- Summary counters under-reported orders despite `ORDER_PLACED` lifecycle rows.
+- Lifecycle CSV ordering could be nondeterministic under timestamp ties.
+
+### Root cause
+- Upsert conflict target was tied to `event_id` only.
+- Summary counters used WAITING/timeout counts rather than unique triggered/placed lifecycle keys.
+- Export query sorted only by timestamp/event id.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `backtest_order.py`
+- `tests/test_phase123_foundations.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- `save_trade_lifecycle_event(...)` now prefers upsert by `(signal_id,event_ts,lifecycle_state)` and falls back to `event_id` compatibility path.
+- Backtest summary now computes:
+  - `total_orders` from unique `ORDER_PLACED` keys
+  - `triggered_orders` from unique `ENTRY_TRIGGERED` keys
+  - `not_triggered_orders` from WAITING keys that never trigger/place
+- Lifecycle export ordering is stable by `event_ts, symbol, signal_id, lifecycle_seq, lifecycle_state, event_id`.
+- LOW_SCORE rescue/watch fields are exported as diagnostics-only and do not alter accepted/order/PnL metrics.
+
+### Lifecycle / persistence / schema impact
+- No schema loosening and no constraint removal.
+- Idempotent lifecycle replay now supports both uniqueness layouts (`event_id` and composite lifecycle key).
+
+### Tests executed
+- `pytest -q` (pass).
+- Offline backtest smoke + CSV assertions for duplicate IDs, ordering semantics, WAITING-before-trigger, and summary count reconciliation.
+
+### Threshold stance
+- Global score threshold and scoring model were **not loosened or changed**.
+
