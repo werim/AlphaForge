@@ -126,3 +126,10 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - README now documents safe `.env` bootstrap, mode switching, and live-trading risk warnings.
 ### Known Issues
 - Some template variables are forward-compatible operational toggles and are not yet wired by direct `os.getenv` reads in current modules.
+
+### Fixed
+- Backtest TP/SL evaluator now uses explicit side-aware hit logic (LONG: high/low, SHORT: low/high) with conservative same-candle SL classification.
+- Backtest accepted lifecycle now emits deterministic `lifecycle_id`, `order_id`, `position_id`, and monotonic `lifecycle_seq` for auditable identity integrity.
+
+### Added
+- Regression tests for LONG/SHORT TP-SL ordering, same-candle ambiguity handling, accepted lifecycle identity fields, and sequence ordering.
