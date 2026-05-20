@@ -3,9 +3,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 from alphaforge.contracts import canonical_reject_reason, canonical_utc_timestamp, validate_transition
 
 __all__ = [
@@ -24,8 +28,37 @@ def _utc_now_iso() -> str:
     return canonical_utc_timestamp()
 
 
-def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
-    engine = create_engine(database_url, future=True)
+def _ensure_sqlite_parent_dir(database_url: str) -> None:
+    """Create the parent directory for file-backed SQLite URLs.
+
+    SQLAlchemy/SQLite will create the database file, but it will not create
+    missing parent directories. Runtime can pass either an explicit DB URL or
+    call init_db() with no arguments, so this helper keeps both paths safe.
+    """
+    url = make_url(database_url)
+    if not url.get_backend_name().startswith("sqlite"):
+        return
+
+    database = url.database
+    if not database or database == ":memory:":
+        return
+
+    db_path = Path(database).expanduser()
+    if not db_path.is_absolute():
+        db_path = Path.cwd() / db_path
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def init_db(database_url: str | None = None) -> Engine:
+    resolved_database_url = (
+        database_url
+        or os.getenv("ALPHAFORGE_DATABASE_URL")
+        or os.getenv("ALPHAFORGE_DB_URL")
+        or "sqlite+pysqlite:///:memory:"
+    )
+    _ensure_sqlite_parent_dir(resolved_database_url)
+    engine = create_engine(resolved_database_url, future=True)
     ddl = [
         """
         CREATE TABLE IF NOT EXISTS signals (
