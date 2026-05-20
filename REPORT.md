@@ -412,3 +412,51 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 ### Risks / limitations
 - Rescue path is diagnostic-only and intentionally conservative; it does not auto-accept trades.
 - Top symbol/regime outputs are frequency-based and do not imply production allocation guidance.
+
+## Dev Branch Design Compliance Audit (2026-05-20)
+
+### Current status
+- **Overall:** PARTIAL compliance. Core execution-aware components and persistence exist, but full shared signal-to-order contract parity across BACKTEST/PAPER/LIVE is incomplete.
+
+### What works
+- BACKTEST uses shared `run_order_cycle(...)` for candidate quality gating before simulation/execution lifecycle expansion.
+- Execution-cost model computes additive penalties (spread, slippage, latency, funding, liquidity) and effective RR, with explicit missing-field handling.
+- Rejected decisions/lifecycle events persist with reject reasons and execution-context flags/sentinels.
+- Runtime has explicit pre-trade risk gates and lifecycle persistence paths.
+
+### What failed / gaps found
+- Runtime path still primarily uses `ai_brain.before_real_order(...)` and does not exclusively use the same `run_order_cycle(...)` decision path used in backtest.
+- Naming/contract mismatch versus target contract (`SignalCandidate`, `ProbabilityDecision`, `evaluate_signal_to_order(...)`) remains partially semantic rather than exact API parity.
+- Regime vocabulary support is partial; not all requested regime labels are first-class states in decision gates.
+
+### Exact files/functions inspected
+- `backtest_order.py`: `scan_symbol_backtest`, `simulate_candidate`, `process_backtest_result`, `_execution_reject_flags`.
+- `src/alphaforge/order.py`: `run_order_cycle`, `build_order_candidate`, `evaluate_trade_quality`, `_effective_rr`.
+- `src/alphaforge/runtime.py`: `_scan_once`, `_process_symbol`, `_execute`.
+- `src/alphaforge/execution.py`: `build_execution_context`, `build_execution_cost_model`, `normalize_pct_input`.
+- `src/alphaforge/persistence.py`: order/lifecycle persistence helpers and schema fields used by tests.
+
+### Patches applied
+- Fixed backtest lifecycle progression regression in `simulate_candidate(...)` that removed `WAITING_ENTRY_ZONE` from emitted state sequence.
+  - Removed accidental overwrite forcing first lifecycle row from `SIGNAL_CREATED -> WAITING_ENTRY_ZONE` back to `SIGNAL_CREATED -> SIGNAL_CREATED`.
+
+### Remaining risks
+- Shared decision API parity is still architectural-partial across runtime vs backtest.
+- Probabilistic fields exist in AI decision flow, but order-runtime gate remains primarily heuristic-threshold based.
+- Regime mapping breadth is limited relative to requested taxonomy.
+
+### Tests run
+- `pytest -q`
+
+### Test results
+- **Before patch:** 1 failing test (`test_backtest_lifecycle_does_not_start_directly_at_created`).
+- **After patch:** full suite passing.
+
+### Known limitations
+- This patch intentionally avoids large architecture rewrites to preserve safety and existing runtime behavior.
+- No live-exchange dependency was added to backtest paths.
+
+### Next recommended generation
+1. Introduce explicit shared contract types (`SignalCandidate`, `ProbabilityDecision`) and a canonical `evaluate_signal_to_order(...)` API in `src/alphaforge/order.py`.
+2. Route runtime `_process_symbol` through that shared evaluator pre-AI execution planning, preserving execution-mode-specific adapters.
+3. Add parity tests proving BACKTEST and PAPER/LIVE use the same evaluator and reject-reason taxonomy.

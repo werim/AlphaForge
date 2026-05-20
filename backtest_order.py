@@ -480,8 +480,8 @@ def simulate_candidate(
             candidate.entry,
             candidate.sl,
             candidate.tp,
+            "NONE",
             "SIGNAL_CREATED",
-            "WAITING_ENTRY_ZONE",
             order_type=candidate.order_type,
             expectancy_bucket=candidate.expectancy_bucket,
             volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
@@ -508,8 +508,32 @@ def simulate_candidate(
             signal_id=signal_id, lifecycle_id=lifecycle_id,
         )
     )
-    rows[0].status_after = "SIGNAL_CREATED"
-    rows[0].status_before = "NONE"
+    rows.append(
+        LifecycleRow(
+            candidate.timestamp,
+            candidate.symbol,
+            candidate.side,
+            candidate.setup_type,
+            candidate.setup_reason,
+            candidate.regime,
+            candidate.score,
+            candidate.rr,
+            candidate.entry,
+            candidate.sl,
+            candidate.tp,
+            "SIGNAL_ACCEPTED",
+            "WAITING_ENTRY_ZONE",
+            order_type=candidate.order_type,
+            expectancy_bucket=candidate.expectancy_bucket,
+            volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
+            spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+            funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
+            expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+            volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
+            liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+            signal_id=signal_id, lifecycle_id=lifecycle_id,
+        )
+    )
     triggered_ts = None
     trigger_price = 0.0
     if candidate.order_type in {"MARKET", "BREAKOUT", "IMMEDIATE"}:

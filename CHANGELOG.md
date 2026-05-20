@@ -297,3 +297,11 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Fixed
 - Low-score gate/CSV observability gap by exporting the actual gate score used by rejection logic.
+
+## [Unreleased] - 2026-05-20 (Lifecycle ordering audit hotfix)
+
+### Fixed
+- Restored backtest lifecycle ordering so `WAITING_ENTRY_ZONE` is emitted instead of being overwritten to `SIGNAL_CREATED` in `simulate_candidate(...)`.
+
+### Changed
+- Added explicit dev-branch design compliance audit section to `REPORT.md` with truthful status and remaining architecture gaps.
