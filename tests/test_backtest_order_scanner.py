@@ -96,7 +96,7 @@ def test_entry_zone_waits_and_triggers():
     rows = bo.simulate_candidate(c, candles, 0, 1000, 1)
     assert rows[-1].status_after == "POSITION_CLOSED"
     assert rows[-1].close_reason == "TP_HIT"
-    assert rows[0].status_before == "SIGNAL_CREATED"
+    assert [r.status_after for r in rows[:3]] == ["SIGNAL_CREATED", "SIGNAL_ACCEPTED", "ENTRY_TRIGGERED"]
 
 
 def test_immediate_breakout_triggers_immediately():
@@ -133,6 +133,24 @@ def test_rejected_counterfactual_simulation():
     sim = bo.simulate_rejected_counterfactual(c, candles, 0)
     assert sim["would_trigger"] is True
     assert sim["would_tp_hit"] is True
+
+
+def test_short_tp_before_sl():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "MARKET")
+    rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 10.2, 8.9, 9.1, 1)], 0, 1000, 1)
+    assert rows[-1].close_reason == "TP_HIT"
+
+
+def test_short_sl_before_tp():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "MARKET")
+    rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 11.2, 9.7, 10.8, 1)], 0, 1000, 1)
+    assert rows[-1].close_reason == "SL_HIT"
+
+
+def test_same_candle_ambiguity_is_conservative_sl():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "MARKET")
+    rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 11.2, 8.9, 10.0, 1)], 0, 1000, 1)
+    assert rows[-1].close_reason == "SL_HIT"
 
 
 def test_score_varies_by_market_conditions():
@@ -772,6 +790,18 @@ def test_lifecycle_export_has_no_duplicate_event_ids():
     persisted = bo._persist_lifecycle_rows(rows)
     event_ids = [r["event_id"] for r in persisted]
     assert len(event_ids) == len(set(event_ids))
+
+
+def test_accepted_lifecycle_ids_and_sequence_present():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "BACKTEST", "R", "X", 1, "MARKET")
+    rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 11.2, 9.9, 11, 1)], 0, 1000, 1)
+    placed = next(r for r in rows if r.status_after == "ORDER_PLACED")
+    closed = next(r for r in rows if r.status_after == "POSITION_CLOSED")
+    assert placed.order_id
+    assert closed.position_id
+    assert rows == sorted(rows, key=lambda r: r.lifecycle_seq)
+    assert "SIGNAL_CREATED" in [r.status_after for r in rows]
+    assert "SIGNAL_ACCEPTED" in [r.status_after for r in rows]
 
 def test_backtest_quality_summary_includes_effective_rr_distribution():
     rows = [
