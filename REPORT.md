@@ -432,3 +432,15 @@
 
 ### Remaining limitations
 - Current repository has limited direct `os.getenv` wiring; central env loader integration can be expanded in future patch without changing runtime architecture.
+
+## 2026-05-20 Patch - Backtest shadow evaluator + lifecycle identity integrity
+- Why needed: rejected shadow analysis showed SHORT candidates with valid TP/SL geometry but zero WOULD_TP outcomes; accepted lifecycle exports lacked stable identity IDs across events.
+- Root cause: TP/SL evaluation logic in backtest simulation was LONG-only and lifecycle rows did not carry deterministic accepted-trade identifiers.
+- Files changed: `backtest_order.py`, `tests/test_backtest_order_scanner.py`, docs.
+- Runtime behavior changes: side-aware TP/SL checks now explicit for LONG+SHORT; same-candle TP+SL remains conservative (SL).
+- Lifecycle changes: accepted flow now includes `SIGNAL_CREATED -> SIGNAL_ACCEPTED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED -> POSITION_OPENED -> POSITION_CLOSED` with deterministic `lifecycle_id/order_id/position_id/lifecycle_seq`.
+- Persistence changes: `_persist_lifecycle_rows` now persists row-level signal/order/lifecycle identity and lifecycle sequence.
+- Tests executed: targeted scanner tests for evaluator and lifecycle identity regression coverage.
+- Risks/limitations: same-candle ambiguity still modeled conservatively as SL (intentional), and IDs are deterministic UUIDv5 based on signal/trade geometry assumptions.
+
+- Added shared probabilistic signal-to-order contract module and integrated call sites in backtest/runtime paths for contract parity scaffolding.

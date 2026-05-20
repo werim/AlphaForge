@@ -17,6 +17,7 @@ from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
+from alphaforge.signal_contract import SignalCandidate, evaluate_signal_to_order
 from alphaforge.persistence import init_db
 from sqlalchemy.orm import Session
 
@@ -175,6 +176,22 @@ class RuntimeOrchestrator:
         signal_payload = self._build_signal(selection, market_ctx)
         regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
         stats_ctx: dict[str, Any] = {}
+        contract_candidate = SignalCandidate(
+            signal_id=f"{selection.symbol}:{int(time.time()*1000)}",
+            symbol=selection.symbol,
+            side=str(signal_payload.get("side", "LONG")),
+            setup_type=str(signal_payload.get("setup_type", "GENERIC")),
+            setup_reason=str(signal_payload.get("setup_reason", "runtime")),
+            regime=str(selection.regime_hint),
+            timestamp=int(time.time() * 1000),
+            entry=float(market_ctx.get("entry", 0.0) or 0.0),
+            stop_loss=float(market_ctx.get("sl", 0.0) or 0.0),
+            take_profit=float(market_ctx.get("tp", 0.0) or 0.0),
+            raw_rr=float(market_ctx.get("rr", 0.0) or 0.0),
+            heuristic_score=float(market_ctx.get("score", 0.0) or 0.0),
+            features={"heuristic_score": float(market_ctx.get("score", 0.0) or 0.0), "order_type": "LIMIT"},
+        )
+        _, _ = evaluate_signal_to_order(contract_candidate, market_ctx, regime_ctx, stats_ctx)
 
         score_ctx, order_plan, explanation = await asyncio.to_thread(
             self.ai_brain.before_real_order,
