@@ -118,3 +118,11 @@
 - **Lifecycle coverage:** unchanged lifecycle semantics; safer operator guidance reduces accidental LIVE misuse.
 - **Execution realism coverage:** env template now includes explicit spread/slippage/liquidity/effective-RR gate controls.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY by default** (explicitly enforced by default env posture).
+
+
+## Generation 8 Status (2026-05-20)
+- **Generation:** 8 — Backtest Shadow Evaluator + Lifecycle Identity Integrity.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST lifecycle semantics tightened to include explicit accepted transition and position-open event; no strategy-threshold changes.
+- **Lifecycle coverage:** accepted backtest lifecycle events now carry stable deterministic lifecycle identity (`lifecycle_id`) and ordering (`lifecycle_seq`), with deterministic order/position identity propagation.
+- **Execution realism coverage:** LONG/SHORT TP/SL hit logic is explicitly side-aware; same-candle ambiguity is explicit and conservative.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).

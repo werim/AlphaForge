@@ -432,3 +432,51 @@
 
 ### Remaining limitations
 - Current repository has limited direct `os.getenv` wiring; central env loader integration can be expanded in future patch without changing runtime architecture.
+
+
+
+## Generation 8 — Backtest Shadow Evaluator + Lifecycle Identity Integrity (2026-05-20)
+
+### Why this patch was needed
+- Rejected shadow analysis indicated SHORT counterfactual TP hit detection drift due to long-only hit rules.
+- Accepted backtest lifecycle exports lacked stable order/position identity fields and deterministic per-lifecycle sequencing.
+
+### Root cause
+- TP/SL candle checks were hardcoded to LONG semantics in both accepted simulation and rejected counterfactual paths.
+- Accepted lifecycle rows were persisted without deterministic lifecycle/order/position IDs in backtest flow.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- Implemented side-aware hit rules:
+  - LONG TP `high >= tp`, LONG SL `low <= sl`
+  - SHORT TP `low <= tp`, SHORT SL `high >= sl`
+- Same-candle TP+SL behavior is explicit:
+  - accepted simulation: conservative SL classification
+  - rejected counterfactual: `WOULD_AMBIGUOUS` outcome
+
+### Lifecycle changes
+- Accepted flow now includes explicit `SIGNAL_ACCEPTED` and `POSITION_OPENED` states.
+- Deterministic IDs are generated before accepted simulation: `lifecycle_id`, `order_id`, `position_id`.
+- Accepted lifecycle rows now carry monotonic `lifecycle_seq` within `lifecycle_id`.
+
+### Persistence/export changes
+- Backtest lifecycle persistence now forwards `order_id`, `lifecycle_id`, `lifecycle_seq`.
+- `position_id` is persisted inside `execution_ctx` for accepted lifecycle rows.
+
+### Tests added/updated
+- Added regressions for SHORT TP-before-SL and SHORT SL-before-TP.
+- Added explicit ambiguity regression (`WOULD_AMBIGUOUS`).
+- Added lifecycle identity/sequence regression checks including required accepted states and non-empty order/position IDs.
+
+### Tests executed
+- `pytest -q tests/test_backtest_order_scanner.py -q`
+
+### Risks / limitations
+- `position_id` is carried through execution context rather than top-level lifecycle schema column, to avoid non-minimal schema changes in this patch.
+- Ambiguity behavior differs by path intentionally (accepted conservative close vs rejected shadow explicit ambiguity) and should remain documented for analytics consumers.

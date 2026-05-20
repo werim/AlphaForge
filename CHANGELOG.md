@@ -126,3 +126,15 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - README now documents safe `.env` bootstrap, mode switching, and live-trading risk warnings.
 ### Known Issues
 - Some template variables are forward-compatible operational toggles and are not yet wired by direct `os.getenv` reads in current modules.
+
+
+## Generation 8 - Backtest Shadow Evaluator + Lifecycle Identity Integrity (2026-05-20)
+### Added
+- Deterministic backtest IDs for accepted lifecycle flow: `lifecycle_id`, `order_id`, `position_id`, and monotonic `lifecycle_seq`.
+- Accepted-flow lifecycle now explicitly includes `SIGNAL_ACCEPTED` and `POSITION_OPENED` states before close.
+- Regression tests for LONG/SHORT TP-SL evaluation, same-candle ambiguity handling, and lifecycle identity sequencing.
+### Changed
+- Backtest candle TP/SL evaluator is now side-aware for both LONG and SHORT in simulation and rejected-shadow counterfactual analysis.
+- Same-candle TP+SL touch behavior is explicit: accepted simulation is conservative (SL priority); rejected-shadow counterfactual emits `WOULD_AMBIGUOUS`.
+### Fixed
+- Fixed SHORT rejected-shadow TP detection bug where valid short TP touches could be missed by long-only hit rules.

@@ -134,6 +134,36 @@ def test_rejected_counterfactual_simulation():
     assert sim["would_tp_hit"] is True
 
 
+def test_short_tp_before_sl():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "MARKET")
+    rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 10.3, 8.9, 9.2, 1)], 0, 1000, 1)
+    assert rows[-1].close_reason == "TP_HIT"
+
+
+def test_short_sl_before_tp():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "MARKET")
+    rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 11.2, 9.7, 10.8, 1)], 0, 1000, 1)
+    assert rows[-1].close_reason == "SL_HIT"
+
+
+def test_same_candle_ambiguity_counterfactual_is_explicit():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "MARKET")
+    sim = bo.simulate_rejected_counterfactual(c, [bo.Candle(1, 10, 11.2, 8.8, 10, 1)], 0)
+    assert sim["outcome"] == "WOULD_AMBIGUOUS"
+
+
+def test_lifecycle_identity_fields_for_accepted_rows():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "BACKTEST", "R", "X", 1, "MARKET")
+    rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 11.2, 9.9, 11, 1)], 0, 1000, 1)
+    by_state = {r.status_after: r for r in rows}
+    assert any(r.status_before == "SIGNAL_CREATED" and r.status_after == "SIGNAL_ACCEPTED" for r in rows)
+    assert "SIGNAL_ACCEPTED" in by_state
+    assert by_state["ORDER_PLACED"].order_id
+    assert by_state["POSITION_CLOSED"].position_id
+    seqs = [r.lifecycle_seq for r in rows if r.lifecycle_id]
+    assert seqs == sorted(seqs)
+
+
 def test_score_varies_by_market_conditions():
     low = bo._build_market_ctx(bo.Candle(3, 100, 101, 99.5, 100.2, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
     high = bo._build_market_ctx(bo.Candle(3, 100, 105, 99.5, 104.8, 1), bo.Candle(2, 100, 100.1, 99.8, 100, 1), {})
@@ -379,7 +409,7 @@ def test_rejected_counterfactual_same_candle_sl_priority():
     c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "BACKTEST", "R", "X", 1, "LIMIT")
     candles = [bo.Candle(1, 10, 11.2, 8.8, 10.5, 1)]
     sim = bo.simulate_rejected_counterfactual(c, candles, 0)
-    assert sim["outcome"] == "WOULD_SL"
+    assert sim["outcome"] == "WOULD_AMBIGUOUS"
 
 
 def test_rejected_counterfactual_uses_bounded_lookahead_timeout():
