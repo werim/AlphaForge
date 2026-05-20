@@ -1,3 +1,51 @@
+## 2026-05-20 Patch Addendum — Runtime bootstrap smoke scanner + execution mode default
+
+### Why the patch was needed
+- Runtime bootstrap scanner returned `[]`, so startup wiring could not exercise symbol selection, AI decisioning, lifecycle emission, or persistence callbacks.
+- Runtime startup defaulted to BACKTEST when `EXECUTION_MODE` was absent, which is unsafe for expected operator posture.
+
+### Root cause
+- `_safe_market_scanner` was implemented as an empty no-op list.
+- `execution_mode_from_env(None)` and `RuntimeConfig.execution_mode` defaulted to `BACKTEST`.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Bootstrap scanner now returns one deterministic local-only smoke-test candidate with required selector/risk/AI fields.
+- Runtime mode resolution now uses `EXECUTION_MODE` with default PAPER semantics.
+- No exchange connectivity added; no real order submission path added.
+
+### Lifecycle/persistence impact
+- Startup smoke flow now can generate lifecycle/reject persistence artifacts via existing callbacks.
+- Lifecycle contract and transition logic unchanged.
+
+### Export/schema impact
+- None.
+
+### Tests added
+- None.
+
+### Tests executed
+- `python -m compileall src/alphaforge/runtime.py`
+- `python -m pytest tests -q`
+
+### Risks
+- Minimal: deterministic smoke candidate could be unexpectedly accepted/rejected depending on environment thresholds, but remains local-only and non-exchange.
+
+### Remaining limitations
+- Scanner is explicitly bootstrap smoke-only, not a live market scanner.
+
+### Migration concerns
+- None.
+
+### Push recommendation
+- Safe to merge as runtime bootstrap safety/alignment fix.
+
 # AlphaForge Forensic Audit Report — Backtest Lifecycle Behavior (2026-05-19)
 
 ## 2026-05-19 Patch Addendum — Remaining pytest failures (targeted hotfix)

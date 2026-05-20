@@ -1,5 +1,14 @@
 # AlphaForge Version Status
 
+## 2026-05-20 Runtime bootstrap smoke-scanner + PAPER default safety patch
+- **Version:** `0.3.13-dev`
+- **BACKTEST/PAPER/LIVE alignment:** bootstrap mode resolution now defaults to PAPER unless `EXECUTION_MODE` is explicitly set; valid modes unchanged (`BACKTEST/PAPER/LIVE`).
+- **Lifecycle coverage:** bootstrap scanner now emits one deterministic local smoke candidate so `market_scanner -> select_symbols -> ai_brain -> lifecycle -> persistence` can be exercised at startup.
+- **Execution realism coverage:** no gate/threshold loosening, no AI scoring changes, no live adapter behavior changes.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-20`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-20 Backtest lifecycle/persistence/reporting hotfix
 - **Version:** `0.3.12-dev`
 - **BACKTEST/PAPER/LIVE alignment:** preserved decision thresholds/scoring model; backtest lifecycle sequencing and counting corrected without gate loosening.

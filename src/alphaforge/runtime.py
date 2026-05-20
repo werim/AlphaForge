@@ -37,7 +37,7 @@ class RealExecutionAdapter(Protocol):
 
 @dataclass(slots=True)
 class RuntimeConfig:
-    execution_mode: ExecutionMode = ExecutionMode.BACKTEST
+    execution_mode: ExecutionMode = ExecutionMode.PAPER
     scan_interval_sec: float = 1.0
     heartbeat_interval_sec: float = 30.0
     max_symbols_per_scan: int = 5
@@ -425,7 +425,7 @@ class RuntimeOrchestrator:
 
 
 def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
-    mode = str(raw_mode or "BACKTEST").upper().strip()
+    mode = str(raw_mode or "PAPER").upper().strip()
     try:
         return ExecutionMode(mode)
     except ValueError as exc:
@@ -489,7 +489,40 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     )
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
-        return []
+        """Return a deterministic smoke-test candidate for runtime bootstrap wiring.
+
+        This scanner is intentionally local-only and does not connect to Binance or
+        any exchange. It exists solely to exercise:
+        market_scanner -> select_symbols -> ai_brain -> lifecycle -> persistence.
+        """
+        now_ts = time.time()
+        return [{
+            "symbol": "BTCUSDT",
+            "volume_24h_usdt": 125_000_000.0,
+            "spread_pct": 0.0009,
+            "funding_rate_pct": 0.00005,
+            "liquidity_score": 0.86,
+            "liquidity_quality": "HIGH",
+            "volatility_pct": 0.011,
+            "volatility_fit": "GOOD",
+            "volatility_regime": "MODERATE",
+            "trend_strength": 0.64,
+            "momentum_confirmation": 0.7,
+            "recent_volume_change_pct": 0.085,
+            "chop_score": 0.27,
+            "panic_score": 0.06,
+            "fakeout_risk": 0.22,
+            "spread_bps": 9.0,
+            "expected_slippage_pct": 0.0006,
+            "latency_ms": 55.0,
+            "orderbook_imbalance": 0.12,
+            "market_ts": now_ts,
+            "entry": 67_250.0,
+            "side": "LONG",
+            "rr": 2.15,
+            "timeframe": "5m",
+            "tick_size": 0.1,
+        }]
 
     def _persist_lifecycle(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
