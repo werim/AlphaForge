@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] - 2026-05-20 (SQLite schema bootstrap compatibility)
+
+### Added
+- Idempotent SQLite schema bootstrap helper using `PRAGMA table_info(...)` + additive `ALTER TABLE ... ADD COLUMN` for legacy runtime/backtest DBs.
+- Coverage tests for legacy `order_decisions` / `ai_decision_features` migration repair and repeated `init_db()` idempotency.
+
+### Fixed
+- Runtime/backtest persistence crashes on existing SQLite files missing additive columns such as `order_decisions.phase` and `ai_decision_features.decision_id`.
+- Addeditive schema compatibility checks for write paths that persist lifecycle and closed-trade review payload fields.
+
 ## [Unreleased] - 2026-05-20 (Runtime bootstrap smoke scanner + PAPER default)
 
 ### Added
