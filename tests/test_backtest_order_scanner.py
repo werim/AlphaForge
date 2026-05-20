@@ -96,7 +96,7 @@ def test_entry_zone_waits_and_triggers():
     rows = bo.simulate_candidate(c, candles, 0, 1000, 1)
     assert rows[-1].status_after == "POSITION_CLOSED"
     assert rows[-1].close_reason == "TP_HIT"
-    assert [r.status_after for r in rows[:3]] == ["SIGNAL_CREATED", "SIGNAL_ACCEPTED", "ENTRY_TRIGGERED"]
+    assert [r.status_after for r in rows[:4]] == ["SIGNAL_CREATED", "SIGNAL_ACCEPTED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED"]
 
 
 def test_immediate_breakout_triggers_immediately():

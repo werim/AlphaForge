@@ -219,3 +219,9 @@
 - Rejected-shadow now includes reject-reason grouped diagnostics and STOP_TOO_WIDE rescue simulation telemetry (bounded, non-bypass).
 - Spread unit handling (`spread_pct`) is normalized consistently before gate/penalty decisions.
 - Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## 2026-05-20 Lifecycle Audit Hotfix
+- **Version:** `0.3.11-dev`
+- Backtest lifecycle ordering bug fixed so `WAITING_ENTRY_ZONE` is preserved when lifecycle states are available.
+- Dev-branch architecture compliance audit added to `REPORT.md` with explicit PASS/PARTIAL/FAIL posture and remaining gaps.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
