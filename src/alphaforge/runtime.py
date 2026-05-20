@@ -446,6 +446,37 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _float_env_alias(name: str, default: float, *aliases: str) -> float:
+    for key in (name, *aliases):
+        raw = os.getenv(key)
+        if raw is not None:
+            return float(raw)
+    return default
+
+
+def _int_env_alias(name: str, default: int, *aliases: str) -> int:
+    for key in (name, *aliases):
+        raw = os.getenv(key)
+        if raw is not None:
+            return int(raw)
+    return default
+
+
+def _bool_env_alias(name: str, default: bool, *aliases: str) -> bool:
+    for key in (name, *aliases):
+        raw = os.getenv(key)
+        if raw is not None:
+            return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+    return default
+
+
 def _resolve_runtime_database_url() -> str | None:
     database_url = os.getenv("ALPHAFORGE_DATABASE_URL") or os.getenv("ALPHAFORGE_DB_URL")
     if not database_url:
@@ -465,8 +496,10 @@ def _resolve_runtime_database_url() -> str | None:
 
 
 def _build_runtime_from_env() -> RuntimeOrchestrator:
-    mode = execution_mode_from_env(os.getenv("EXECUTION_MODE"))
-    persistence_enabled = os.getenv("ALPHAFORGE_PERSISTENCE_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
+    mode = execution_mode_from_env(
+        os.getenv("ALPHAFORGE_EXECUTION_MODE") or os.getenv("EXECUTION_MODE")
+    )
+    persistence_enabled = _bool_env("ALPHAFORGE_PERSISTENCE_ENABLED", True)
     resolved_database_url = _resolve_runtime_database_url()
     engine = init_db(resolved_database_url)
     table_names: list[str] = []
@@ -480,12 +513,38 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         True,
         table_names,
     )
-    brain = AIBrain(Session(engine), min_accept_score=float(os.getenv("ALPHAFORGE_MIN_ACCEPT_SCORE", "0.62")))
+    brain = AIBrain(
+        Session(engine),
+        min_accept_score=_float_env_alias(
+            "ALPHAFORGE_MIN_SIGNAL_SCORE",
+            0.62,
+            "ALPHAFORGE_MIN_ACCEPT_SCORE",
+        ),
+    )
     config = RuntimeConfig(
         execution_mode=mode,
         scan_interval_sec=_float_env("ALPHAFORGE_SCAN_INTERVAL_SEC", 1.0),
         heartbeat_interval_sec=_float_env("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", 30.0),
         max_symbols_per_scan=_int_env("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", 5),
+        max_reject_log_entries=_int_env("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", 1000),
+        max_concurrent_positions=_int_env_alias(
+            "ALPHAFORGE_MAX_CONCURRENT_POSITIONS",
+            3,
+            "ALPHAFORGE_MAX_OPEN_POSITIONS",
+        ),
+        symbol_cooldown_sec=_float_env("ALPHAFORGE_SYMBOL_COOLDOWN_SEC", 120.0),
+        max_notional_exposure=_float_env("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", 100_000.0),
+        max_symbol_notional=_float_env("ALPHAFORGE_MAX_SYMBOL_NOTIONAL", 50_000.0),
+        stale_market_data_sec=_float_env("ALPHAFORGE_STALE_MARKET_DATA_SEC", 15.0),
+        max_spread_pct=_float_env("ALPHAFORGE_MAX_SPREAD_PCT", 0.0025),
+        max_abs_funding_rate_pct=_float_env("ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT", 0.0010),
+        global_kill_switch=_bool_env("ALPHAFORGE_GLOBAL_KILL_SWITCH", False),
+        require_live_qualification=_bool_env("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION", True),
+        enable_shadow_mode=_bool_env("ALPHAFORGE_ENABLE_SHADOW_MODE", False),
+        enable_canary_mode=_bool_env("ALPHAFORGE_ENABLE_CANARY_MODE", False),
+        operator_live_acknowledged=_bool_env("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", False),
+        reconciliation_interval_sec=_float_env("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", 5.0),
+        reconciliation_timeout_sec=_float_env("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", 2.0),
     )
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
