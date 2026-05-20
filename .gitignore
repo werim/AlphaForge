@@ -4,3 +4,9 @@ __pycache__/
 alphaforge.db
 .env
 data/
+# Local/editor/runtime artifacts
+.vscode/
+venv/
+:memory:
+__memory__/
+.pytest_cache/
