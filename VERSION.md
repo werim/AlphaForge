@@ -1,5 +1,14 @@
 # AlphaForge Version Status
 
+## 2026-05-20 Backtest lifecycle/persistence/reporting hotfix
+- **Version:** `0.3.12-dev`
+- **BACKTEST/PAPER/LIVE alignment:** preserved decision thresholds/scoring model; backtest lifecycle sequencing and counting corrected without gate loosening.
+- **Lifecycle coverage:** accepted path explicitly includes `WAITING_ENTRY_ZONE` before trigger/placement; export ordering now lifecycle-aware and deterministic.
+- **Execution realism coverage:** unchanged thresholds; LOW_SCORE rescue/watch remains diagnostics-only and does not enter accepted/order metrics.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-20`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-19 Test-Stability Patch (Execution-aware, no gate loosening)
 - **Version:** `0.3.10-dev+testfix1`
 - **BACKTEST/PAPER/LIVE alignment:** BACKTEST spread-unit handling is now explicitly fractional in symbol selection and diagnostics, matching execution context normalization behavior.

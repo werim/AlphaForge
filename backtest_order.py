@@ -1045,6 +1045,7 @@ def process_backtest_result(
                 "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 "first_blocking_gate": diagnostics.get("failed_filter", ""),
                 "all_failed_gates": json.dumps(diagnostics.get("all_failed_gates", []), sort_keys=True) if isinstance(diagnostics, dict) else "[]",
+                **_low_score_rescue_watch_fields(reason, diagnostics if isinstance(diagnostics, dict) else {}),
             }
         )
         return None
@@ -1132,6 +1133,7 @@ def process_backtest_result(
                 "slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
                 "first_blocking_gate": "execution",
                 "all_failed_gates": json.dumps(execution_flags, sort_keys=True),
+                **_low_score_rescue_watch_fields(reason, {}),
             }
         )
         return None
@@ -1202,7 +1204,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                        event_ts, created_at, lifecycle_seq, lifecycle_id
                 FROM trade_lifecycle_events
                 WHERE mode = 'BACKTEST'
-                ORDER BY event_ts, event_id
+                ORDER BY event_ts, symbol, signal_id, COALESCE(lifecycle_seq, 0), lifecycle_state, event_id
                 """
             )
         ).mappings().all()
@@ -1218,9 +1220,24 @@ def _derive_backtest_counts(lifecycle: List[LifecycleRow]) -> Dict[str, int]:
     total_candidates = len(signal_ids)
     rejected_count = sum(1 for row in lifecycle if row.status_after in {"SYMBOL_REJECTED", "SIGNAL_REJECTED", "ORDER_REJECTED"})
     accepted_count = total_candidates - rejected_count
-    total_orders = sum(1 for row in lifecycle if row.status_after == "WAITING_ENTRY_ZONE")
-    triggered_orders = sum(1 for row in lifecycle if row.status_after == "ENTRY_TRIGGERED")
-    not_triggered_orders = sum(1 for row in lifecycle if row.status_after == "ENTRY_TIMEOUT")
+    waiting_keys = {
+        (row.order_id or f"{row.symbol}:{row.timestamp}", row.signal_id or f"{row.symbol}:{row.timestamp}")
+        for row in lifecycle
+        if row.status_after == "WAITING_ENTRY_ZONE"
+    }
+    triggered_keys = {
+        (row.order_id or f"{row.symbol}:{row.timestamp}", row.signal_id or f"{row.symbol}:{row.timestamp}")
+        for row in lifecycle
+        if row.status_after == "ENTRY_TRIGGERED"
+    }
+    placed_keys = {
+        (row.order_id or f"{row.symbol}:{row.timestamp}", row.signal_id or f"{row.symbol}:{row.timestamp}")
+        for row in lifecycle
+        if row.status_after == "ORDER_PLACED"
+    }
+    total_orders = len(placed_keys)
+    triggered_orders = len(triggered_keys)
+    not_triggered_orders = len(waiting_keys - (triggered_keys | placed_keys))
     open_at_end_orders = sum(1 for row in lifecycle if row.status_after == "POSITION_CLOSED" and row.close_reason == "TIMEOUT")
     tp_hits = sum(1 for row in lifecycle if row.status_after == "POSITION_CLOSED" and row.close_reason == "TP_HIT")
     sl_hits = sum(1 for row in lifecycle if row.status_after == "POSITION_CLOSED" and row.close_reason == "SL_HIT")
@@ -1266,6 +1283,17 @@ def _percentiles(values: List[float], points: List[int]) -> Dict[str, float]:
 
 def _value_unavailable(value: Any) -> bool:
     return value is None or value == "" or value == "UNAVAILABLE_BACKTEST"
+
+
+def _low_score_rescue_watch_fields(reject_reason: str, row: Mapping[str, Any]) -> Dict[str, Any]:
+    is_low_score = str(reject_reason or "").upper() == "LOW_SCORE"
+    return {
+        "rescue_watch_eligible": bool(is_low_score),
+        "rescue_watch_reason": ("LOW_SCORE_DIAGNOSTIC_ONLY" if is_low_score else ""),
+        "rescued_size_multiplier": (_safe_float(row.get("rescued_size_multiplier"), 0.0) if is_low_score else 0.0),
+        "rescue_effective_rr": (_safe_float(row.get("rescued_effective_rr"), 0.0) if is_low_score else 0.0),
+        "rescue_reject_reason": (str(row.get("rescue_reject_reason", "")) if is_low_score else ""),
+    }
 
 
 def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -1960,6 +1988,7 @@ def main():
                                 sort_keys=True,
                             ),
                             "event_flags": "SYMBOL_SELECTOR",
+                            **_low_score_rescue_watch_fields(reason, {}),
                         }
                     )
                     continue
@@ -2057,6 +2086,7 @@ def main():
                 "liquidity_score": 0.8,
                 "volatility_score": 0.2,
                 "expected_slippage_pct": 0.001,
+                **_low_score_rescue_watch_fields("LOW_EFFECTIVE_RR", {}),
             }
         )
         lifecycle.append(

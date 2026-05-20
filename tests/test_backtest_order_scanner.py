@@ -890,6 +890,35 @@ def test_derive_backtest_counts_uses_terminal_per_signal_and_order_placed_only()
     assert counts["sl_hits"] == 0
 
 
+def test_derive_backtest_counts_tracks_not_triggered_from_waiting_state():
+    lifecycle = [
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "SIGNAL_CREATED", "WAITING_ENTRY_ZONE"),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "WAITING_ENTRY_ZONE", "ENTRY_TIMEOUT", cancel_reason="TIMEOUT"),
+    ]
+    counts = bo._derive_backtest_counts(lifecycle)
+    assert counts["total_orders"] == 0
+    assert counts["triggered_orders"] == 0
+    assert counts["not_triggered_orders"] == 1
+
+
+def test_lifecycle_sequence_is_monotonic_per_signal():
+    rows = [
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "NONE", "SIGNAL_CREATED", signal_id="BTCUSDT:1", lifecycle_seq=1),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "SIGNAL_CREATED", "WAITING_ENTRY_ZONE", signal_id="BTCUSDT:1", lifecycle_seq=2),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", signal_id="BTCUSDT:1", lifecycle_seq=3),
+    ]
+    seqs = [r.lifecycle_seq for r in rows if r.signal_id == "BTCUSDT:1"]
+    assert seqs == sorted(seqs)
+
+
+def test_low_score_rejection_rescue_watch_fields_are_diagnostics_only():
+    fields = bo._low_score_rescue_watch_fields("LOW_SCORE", {})
+    assert fields["rescue_watch_eligible"] is True
+    assert fields["rescue_watch_reason"] == "LOW_SCORE_DIAGNOSTIC_ONLY"
+    assert fields["rescued_size_multiplier"] == 0.0
+
+
 def test_signal_id_cannot_end_with_both_terminal_accepted_and_rejected():
     lifecycle = [
         bo.LifecycleRow(10, "XRPUSDT", "LONG", "S", "R", "TREND", 7.0, 2.0, 1.0, 0.9, 1.2, "NONE", "SIGNAL_CREATED"),

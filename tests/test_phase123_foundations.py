@@ -134,6 +134,17 @@ def test_trade_lifecycle_event_upsert_is_idempotent() -> None:
         assert rows[0].execution_ctx_missing == 0
 
 
+def test_trade_lifecycle_event_upsert_is_idempotent_for_lifecycle_unique_key() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        s.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_trade_lifecycle_signal_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
+        save_trade_lifecycle_event(s, event_id="e1", signal_id="s1", symbol="BTCUSDT", mode="BACKTEST", lifecycle_state="WAITING_ENTRY_ZONE", event_ts="2026-01-01T00:00:00Z")
+        save_trade_lifecycle_event(s, event_id="e2", signal_id="s1", symbol="BTCUSDT", mode="BACKTEST", lifecycle_state="WAITING_ENTRY_ZONE", event_ts="2026-01-01T00:00:00Z")
+        rows = s.execute(text("SELECT event_id, signal_id, event_ts, lifecycle_state FROM trade_lifecycle_events")).all()
+        assert len(rows) == 1
+        assert rows[0].signal_id == "s1"
+
+
 def test_backtest_and_paper_real_outputs_share_required_contract_fields() -> None:
     backtest_ctx = OrderExecutionContext(
         mode=TradingMode.BACKTEST,
