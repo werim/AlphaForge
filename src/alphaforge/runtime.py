@@ -446,24 +446,37 @@ def _int_env(name: str, default: int) -> int:
     return int(raw)
 
 
+def _resolve_runtime_database_url() -> str | None:
+    database_url = os.getenv("ALPHAFORGE_DATABASE_URL") or os.getenv("ALPHAFORGE_DB_URL")
+    if not database_url:
+        return None
+    if not database_url.startswith("sqlite"):
+        return database_url
+    if ":memory:" in database_url:
+        return database_url
+    if database_url.startswith("sqlite+pysqlite:///"):
+        prefix = "sqlite+pysqlite:///"
+    elif database_url.startswith("sqlite:///"):
+        prefix = "sqlite:///"
+    else:
+        return database_url
+    raw_path = database_url.removeprefix(prefix)
+    return f"{prefix}{Path(raw_path).expanduser().resolve()}"
+
+
 def _build_runtime_from_env() -> RuntimeOrchestrator:
     mode = execution_mode_from_env(os.getenv("EXECUTION_MODE"))
-    database_url = os.getenv("ALPHAFORGE_DB_URL", "sqlite+pysqlite:///:memory:")
     persistence_enabled = os.getenv("ALPHAFORGE_PERSISTENCE_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
-    resolved_database_url = database_url
-    if database_url.startswith("sqlite+pysqlite:///"):
-        raw_path = database_url.removeprefix("sqlite+pysqlite:///")
-        resolved_database_url = f"sqlite+pysqlite:///{Path(raw_path).expanduser().resolve()}"
+    resolved_database_url = _resolve_runtime_database_url()
     engine = init_db(resolved_database_url)
     table_names: list[str] = []
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
         table_names = [str(row[0]) for row in rows]
     logger.info(
-        "runtime_db_bootstrap persistence_enabled=%s configured_db_url=%s resolved_db_url=%s schema_initialized=%s tables=%s",
+        "runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s",
         persistence_enabled,
-        database_url,
-        resolved_database_url,
+        resolved_database_url or "env/default",
         True,
         table_names,
     )
