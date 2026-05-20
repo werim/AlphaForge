@@ -1,3 +1,45 @@
+## 2026-05-20 Patch Addendum — SQLite additive schema bootstrap hardening
+
+### Why the patch was needed
+- Runtime/backtest persistence on existing SQLite files failed because table schemas lagged behind current write paths.
+- `CREATE TABLE IF NOT EXISTS` did not modify existing tables, so additive columns (`order_decisions.phase`, `ai_decision_features.decision_id`, etc.) remained missing.
+
+### Root cause
+- Schema evolution introduced new columns without an idempotent additive migration pass for pre-existing SQLite DB files.
+
+### Affected tables
+- `order_decisions`
+- `ai_decision_features`
+- `trade_lifecycle_events`
+- `closed_trade_reviews`
+- `schema_migrations`
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Added migrations/bootstrap behavior
+- Added SQLite helpers for table-existence checks, column introspection, and additive per-column migration.
+- `init_db()` now runs idempotent SQLite runtime schema repair after base table creation.
+- Migration logs emitted when columns are added.
+
+### Why create_all()/CREATE TABLE IF NOT EXISTS was insufficient
+- SQLite `CREATE TABLE IF NOT EXISTS` only creates missing tables; it does not reconcile missing columns on existing tables.
+
+### Test coverage
+- Legacy `order_decisions` schema repaired and write-path verified.
+- Legacy `ai_decision_features` schema repaired and write-path verified.
+- Double `init_db()` idempotency and data preservation verified.
+
+### Threshold/regression confirmation
+- No changes to score thresholds, RR gates, spread/slippage limits, reject logic, or AI decision semantics.
+
+### Push recommendation
+- Safe to merge as additive, SQL-first backward-compatibility hardening for persistence stability.
+
 ## 2026-05-20 Patch Addendum — Runtime bootstrap smoke scanner + execution mode default
 
 ### Why the patch was needed

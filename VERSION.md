@@ -1,5 +1,14 @@
 # AlphaForge Version Status
 
+## 2026-05-20 SQLite schema bootstrap/migration hardening patch
+- **Version:** `0.3.14-dev`
+- **BACKTEST/PAPER/LIVE alignment:** unchanged decision/reject thresholds and shared runtime persistence behavior preserved.
+- **Lifecycle coverage:** unchanged lifecycle semantics; legacy SQLite schemas are now auto-repaired so lifecycle writes no longer crash on missing additive columns.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-20`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-20 Runtime bootstrap smoke-scanner + PAPER default safety patch
 - **Version:** `0.3.13-dev`
 - **BACKTEST/PAPER/LIVE alignment:** bootstrap mode resolution now defaults to PAPER unless `EXECUTION_MODE` is explicitly set; valid modes unchanged (`BACKTEST/PAPER/LIVE`).
