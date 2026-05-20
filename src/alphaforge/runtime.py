@@ -424,8 +424,17 @@ class RuntimeOrchestrator:
         }
 
 
+def _clean_env_value(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if "#" in value:
+        value = value.split("#", 1)[0].strip()
+    return value
+
+
 def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
-    mode = str(raw_mode or "PAPER").upper().strip()
+    mode = (_clean_env_value(raw_mode) or "PAPER").upper()
     try:
         return ExecutionMode(mode)
     except ValueError as exc:
@@ -433,29 +442,29 @@ def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
 
 
 def _float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
+    raw = _clean_env_value(os.getenv(name))
     if raw is None:
         return default
     return float(raw)
 
 
 def _int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
+    raw = _clean_env_value(os.getenv(name))
     if raw is None:
         return default
     return int(raw)
 
 
 def _bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
+    raw = _clean_env_value(os.getenv(name))
     if raw is None:
         return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+    return raw.lower() not in {"0", "false", "no", "off", ""}
 
 
 def _float_env_alias(name: str, default: float, *aliases: str) -> float:
     for key in (name, *aliases):
-        raw = os.getenv(key)
+        raw = _clean_env_value(os.getenv(key))
         if raw is not None:
             return float(raw)
     return default
@@ -463,7 +472,7 @@ def _float_env_alias(name: str, default: float, *aliases: str) -> float:
 
 def _int_env_alias(name: str, default: int, *aliases: str) -> int:
     for key in (name, *aliases):
-        raw = os.getenv(key)
+        raw = _clean_env_value(os.getenv(key))
         if raw is not None:
             return int(raw)
     return default
@@ -471,9 +480,9 @@ def _int_env_alias(name: str, default: int, *aliases: str) -> int:
 
 def _bool_env_alias(name: str, default: bool, *aliases: str) -> bool:
     for key in (name, *aliases):
-        raw = os.getenv(key)
+        raw = _clean_env_value(os.getenv(key))
         if raw is not None:
-            return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+            return raw.lower() not in {"0", "false", "no", "off", ""}
     return default
 
 
