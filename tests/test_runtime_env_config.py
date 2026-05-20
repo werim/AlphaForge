@@ -14,6 +14,19 @@ def test_runtime_env_prefers_canonical_execution_mode(monkeypatch: pytest.Monkey
     assert rt.config.execution_mode == ExecutionMode.LIVE
 
 
+
+def test_runtime_env_strips_inline_comments(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER # BACKTEST | PAPER | LIVE")
+    monkeypatch.setenv("ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "3 # safe cap")
+    monkeypatch.setenv("ALPHAFORGE_MAX_SPREAD_PCT", "0.0025 # 0.25 percent")
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_SHADOW_MODE", "true # enabled")
+
+    rt = _build_runtime_from_env()
+    assert rt.config.execution_mode == ExecutionMode.PAPER
+    assert rt.config.max_concurrent_positions == 3
+    assert rt.config.max_spread_pct == pytest.approx(0.0025)
+    assert rt.config.enable_shadow_mode is True
+
 def test_runtime_env_aliases_for_threshold_and_positions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPHAFORGE_MIN_ACCEPT_SCORE", "0.77")
     monkeypatch.setenv("ALPHAFORGE_MAX_OPEN_POSITIONS", "7")
