@@ -133,3 +133,5 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Added
 - Regression tests for LONG/SHORT TP-SL ordering, same-candle ambiguity handling, accepted lifecycle identity fields, and sequence ordering.
+
+- Added shared signal-to-order decision contract dataclasses/evaluator and regression tests for probabilistic reject/accept pathways.

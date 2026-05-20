@@ -442,3 +442,5 @@
 - Persistence changes: `_persist_lifecycle_rows` now persists row-level signal/order/lifecycle identity and lifecycle sequence.
 - Tests executed: targeted scanner tests for evaluator and lifecycle identity regression coverage.
 - Risks/limitations: same-candle ambiguity still modeled conservatively as SL (intentional), and IDs are deterministic UUIDv5 based on signal/trade geometry assumptions.
+
+- Added shared probabilistic signal-to-order contract module and integrated call sites in backtest/runtime paths for contract parity scaffolding.

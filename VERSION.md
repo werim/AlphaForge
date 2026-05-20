@@ -123,3 +123,5 @@
 - BACKTEST evaluator now has explicit side-aware TP/SL hit rules for LONG and SHORT, with conservative same-candle ambiguity classification.
 - Lifecycle integrity in BACKTEST accepted flows now includes deterministic lifecycle/order/position identities and ordered lifecycle sequence persistence.
 - Live readiness verdict remains: ❌ NOT LIVE-READY.
+
+- Shared signal-to-order decision contract added for BACKTEST/PAPER/LIVE parity scaffolding (`SignalCandidate`, `ProbabilityDecision`, `OrderPlan`, `evaluate_signal_to_order`).

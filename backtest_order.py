@@ -15,6 +15,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 from alphaforge.execution import build_execution_context
 from alphaforge.persistence import init_db, save_trade_lifecycle_event
+from alphaforge.signal_contract import SignalCandidate, evaluate_signal_to_order
 from alphaforge.symbol_selector import select_symbol
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -375,6 +376,23 @@ def scan_symbol_backtest(
     if result.get("status") != "executed":
         return None
     c = result["candidate"]
+    contract_candidate = SignalCandidate(
+        signal_id=f"{symbol}:{now.timestamp}",
+        symbol=symbol,
+        side=c.side,
+        setup_type=c.setup_type,
+        setup_reason=c.setup_reason,
+        regime=c.regime,
+        timestamp=now.timestamp,
+        entry=c.entry,
+        stop_loss=c.sl,
+        take_profit=c.tp,
+        raw_rr=c.rr,
+        heuristic_score=float(mctx.get("score", 0.0) or 0.0),
+        features={"order_type": c.order_type, "heuristic_score": float(mctx.get("score", 0.0) or 0.0)},
+    )
+    prob_decision, _ = evaluate_signal_to_order(contract_candidate, mctx, {"alignment": 0.8}, context.get("recent_stats", {}))
+    context["probability_decision"] = prob_decision
     return CandidateOrder(
         now.timestamp,
         symbol,
