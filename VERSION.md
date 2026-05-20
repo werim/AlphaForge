@@ -118,3 +118,8 @@
 - **Lifecycle coverage:** unchanged lifecycle semantics; safer operator guidance reduces accidental LIVE misuse.
 - **Execution realism coverage:** env template now includes explicit spread/slippage/liquidity/effective-RR gate controls.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY by default** (explicitly enforced by default env posture).
+
+## 2026-05-20 Audit Update
+- BACKTEST evaluator now has explicit side-aware TP/SL hit rules for LONG and SHORT, with conservative same-candle ambiguity classification.
+- Lifecycle integrity in BACKTEST accepted flows now includes deterministic lifecycle/order/position identities and ordered lifecycle sequence persistence.
+- Live readiness verdict remains: ❌ NOT LIVE-READY.
