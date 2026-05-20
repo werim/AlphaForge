@@ -749,3 +749,35 @@ def test_export_integrity_verifier_catches_row_count_mismatch():
         rejected_csv_rows=[],
     )
     assert any("lifecycle row count mismatch" in e for e in errors)
+def _mk(side: str, entry: float, sl: float, tp: float):
+    return bo.CandidateOrder(1, "S", side, entry, sl, tp, 1, "BACKTEST", "R", "X", 1, "MARKET")
+
+
+def test_short_tp_before_sl():
+    rows = bo.simulate_candidate(_mk("SHORT", 10, 11, 9), [bo.Candle(1, 10, 10.2, 8.9, 9.1, 1)], 0, 1000, 1)
+    assert rows[-1].close_reason == "TP_HIT"
+
+
+def test_short_sl_before_tp():
+    rows = bo.simulate_candidate(_mk("SHORT", 10, 11, 9), [bo.Candle(1, 10, 11.1, 9.8, 10.8, 1)], 0, 1000, 1)
+    assert rows[-1].close_reason == "SL_HIT"
+
+
+def test_same_candle_ambiguity_conservative_sl():
+    rows = bo.simulate_candidate(_mk("SHORT", 10, 11, 9), [bo.Candle(1, 10, 11.2, 8.8, 10.0, 1)], 0, 1000, 1)
+    assert rows[-1].close_reason == "SL_HIT"
+
+
+def test_accepted_lifecycle_identity_and_sequence():
+    rows = bo.simulate_candidate(_mk("LONG", 10, 9, 11), [bo.Candle(1, 10, 11.2, 9.8, 10.9, 1)], 0, 1000, 1)
+    accepted = [r for r in rows if r.status_after in {"SIGNAL_CREATED", "SIGNAL_ACCEPTED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED", "POSITION_OPENED", "POSITION_CLOSED"}]
+    assert any(r.status_after == "SIGNAL_CREATED" for r in accepted)
+    assert any(r.status_after == "SIGNAL_ACCEPTED" for r in accepted)
+    placed = next(r for r in accepted if r.status_after == "ORDER_PLACED")
+    closed = next(r for r in accepted if r.status_after == "POSITION_CLOSED")
+    assert placed.order_id
+    assert closed.position_id
+    seq = [r.lifecycle_seq for r in accepted]
+    assert seq == sorted(seq)
+    lifecycle_ids = {r.lifecycle_id for r in accepted}
+    assert len(lifecycle_ids) == 1

@@ -1,3 +1,11 @@
+
+## [Unreleased] - 2026-05-20
+### Fixed
+- Corrected backtest TP/SL evaluator semantics for SHORT and LONG (including rejected shadow counterfactual parity), with explicit conservative same-candle SL precedence.
+- Accepted backtest lifecycle events now carry deterministic `signal_id`, `lifecycle_id`, `order_id`, `position_id`, and ordered `lifecycle_seq`.
+
+### Added
+- Regression tests for LONG/SHORT TP-SL ordering, same-candle ambiguity behavior, lifecycle identity fields, and accepted lifecycle sequence coverage.
 # Changelog
 
 All notable documented repository-level changes are summarized from `REPORT.md`.

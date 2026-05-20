@@ -7,6 +7,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Mapping
+from uuid import uuid5, NAMESPACE_URL
 # Allow running this script directly from the repo root without requiring
 # prior editable install.
 ROOT_DIR = Path(__file__).resolve().parent
@@ -117,6 +118,11 @@ class LifecycleRow:
     would_tp_hit: bool = False
     would_sl_hit: bool = False
     would_trigger: bool = False
+    signal_id: str = ""
+    lifecycle_id: str = ""
+    order_id: str = ""
+    position_id: str = ""
+    lifecycle_seq: int = 0
 def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy is None:
         return "UNKNOWN"
@@ -393,89 +399,34 @@ def simulate_candidate(
     market_ctx: Optional[Mapping[str, Any]] = None,
 ) -> List[LifecycleRow]:
     market_ctx = market_ctx or {}
-    rows: List[LifecycleRow] = [
-        LifecycleRow(
-            candidate.timestamp,
-            candidate.symbol,
-            candidate.side,
-            candidate.setup_type,
-            candidate.setup_reason,
-            candidate.regime,
-            candidate.score,
-            candidate.rr,
-            candidate.entry,
-            candidate.sl,
-            candidate.tp,
-            "SIGNAL_CREATED",
-            "WAITING_ENTRY_ZONE",
-            order_type=candidate.order_type,
-            expectancy_bucket=candidate.expectancy_bucket,
+    signal_id = f"{candidate.symbol}:{candidate.timestamp}"
+    lifecycle_id = f"lc-{uuid5(NAMESPACE_URL, f'{signal_id}:{candidate.side}:{candidate.entry}:{candidate.sl}:{candidate.tp}') }"
+    order_id = f"ord-{uuid5(NAMESPACE_URL, f'{lifecycle_id}:order')}"
+    position_id = f"pos-{uuid5(NAMESPACE_URL, f'{lifecycle_id}:position')}"
+
+    def mk(before: str, after: str, seq: int, **kwargs: Any) -> LifecycleRow:
+        return LifecycleRow(
+            candidate.timestamp, candidate.symbol, candidate.side, candidate.setup_type, candidate.setup_reason,
+            candidate.regime, candidate.score, candidate.rr, candidate.entry, candidate.sl, candidate.tp,
+            before, after, order_type=candidate.order_type, expectancy_bucket=candidate.expectancy_bucket,
             volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
             spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
             funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
             expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
             volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
             liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+            signal_id=signal_id, lifecycle_id=lifecycle_id, order_id=order_id, position_id=position_id, lifecycle_seq=seq,
+            **kwargs,
         )
-    ]
+
+    rows: List[LifecycleRow] = [mk("NONE", "SIGNAL_CREATED", 1), mk("SIGNAL_CREATED", "SIGNAL_ACCEPTED", 2), mk("SIGNAL_ACCEPTED", "WAITING_ENTRY_ZONE", 3)]
     triggered_ts = None
     trigger_price = 0.0
     if candidate.order_type in {"MARKET", "BREAKOUT", "IMMEDIATE"}:
         triggered_ts = candles[idx].timestamp
         trigger_price = candidate.entry
         start_idx = idx
-        rows.append(
-            LifecycleRow(
-                candidate.timestamp,
-                candidate.symbol,
-                candidate.side,
-                candidate.setup_type,
-                candidate.setup_reason,
-                candidate.regime,
-                candidate.score,
-                candidate.rr,
-                candidate.entry,
-                candidate.sl,
-                candidate.tp,
-                "WAITING_ENTRY_ZONE",
-                "ENTRY_TRIGGERED",
-                trigger_price=trigger_price,
-                order_type=candidate.order_type,
-                expectancy_bucket=candidate.expectancy_bucket,
-                volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
-                spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
-                funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
-                expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
-                volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
-                liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
-            )
-        )
-        rows.append(
-            LifecycleRow(
-                candidate.timestamp,
-                candidate.symbol,
-                candidate.side,
-                candidate.setup_type,
-                candidate.setup_reason,
-                candidate.regime,
-                candidate.score,
-                candidate.rr,
-                candidate.entry,
-                candidate.sl,
-                candidate.tp,
-                "ENTRY_TRIGGERED",
-                "ORDER_PLACED",
-                trigger_price=trigger_price,
-                order_type=candidate.order_type,
-                expectancy_bucket=candidate.expectancy_bucket,
-                volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
-                spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
-                funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
-                expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
-                volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
-                liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
-            )
-        )
+        rows.extend([mk("WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", 4, trigger_price=trigger_price), mk("ENTRY_TRIGGERED", "ORDER_PLACED", 5, trigger_price=trigger_price), mk("ORDER_PLACED", "POSITION_OPENED", 6, trigger_price=trigger_price)])
     else:
         start_idx = idx
         for j in range(idx, len(candles)):
@@ -484,164 +435,41 @@ def simulate_candidate(
                 triggered_ts = c.timestamp
                 trigger_price = candidate.entry
                 start_idx = j
-                rows.append(
-                    LifecycleRow(
-                        candidate.timestamp,
-                        candidate.symbol,
-                        candidate.side,
-                        candidate.setup_type,
-                        candidate.setup_reason,
-                        candidate.regime,
-                        candidate.score,
-                        candidate.rr,
-                        candidate.entry,
-                        candidate.sl,
-                        candidate.tp,
-                        "WAITING_ENTRY_ZONE",
-                        "ENTRY_TRIGGERED",
-                        trigger_price=trigger_price,
-                        order_type=candidate.order_type,
-                        expectancy_bucket=candidate.expectancy_bucket,
-                        volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
-                        spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
-                        funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
-                        expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
-                        volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
-                        liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
-                    )
-                )
-                rows.append(
-                    LifecycleRow(
-                        candidate.timestamp,
-                        candidate.symbol,
-                        candidate.side,
-                        candidate.setup_type,
-                        candidate.setup_reason,
-                        candidate.regime,
-                        candidate.score,
-                        candidate.rr,
-                        candidate.entry,
-                        candidate.sl,
-                        candidate.tp,
-                        "ENTRY_TRIGGERED",
-                        "ORDER_PLACED",
-                        trigger_price=trigger_price,
-                        order_type=candidate.order_type,
-                        expectancy_bucket=candidate.expectancy_bucket,
-                        volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
-                        spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
-                        funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
-                        expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
-                        volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
-                        liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
-                    )
-                )
+                rows.extend([mk("WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", 4, trigger_price=trigger_price), mk("ENTRY_TRIGGERED", "ORDER_PLACED", 5, trigger_price=trigger_price), mk("ORDER_PLACED", "POSITION_OPENED", 6, trigger_price=trigger_price)])
                 break
         if triggered_ts is None:
-            rows.append(
-                LifecycleRow(
-                    candidate.timestamp,
-                    candidate.symbol,
-                    candidate.side,
-                    candidate.setup_type,
-                    candidate.setup_reason,
-                    candidate.regime,
-                    candidate.score,
-                    candidate.rr,
-                    candidate.entry,
-                    candidate.sl,
-                    candidate.tp,
-                    "WAITING_ENTRY_ZONE",
-                    "ENTRY_TIMEOUT",
-                    cancel_reason="TIMEOUT",
-                    order_type=candidate.order_type,
-                    expectancy_bucket=candidate.expectancy_bucket,
-                    volume_24h_usdt=market_ctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
-                    spread_pct=market_ctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
-                    funding_rate_pct=market_ctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
-                    expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
-                    volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
-                    liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
-                )
-            )
+            rows.append(mk("WAITING_ENTRY_ZONE", "ENTRY_TIMEOUT", 4, cancel_reason="TIMEOUT"))
             return rows
+
     mfe = 0.0
     mae = 0.0
-    tp_distance = max(candidate.tp - candidate.entry, 1e-9)
-    sl_distance = max(candidate.entry - candidate.sl, 1e-9)
+    tp_distance = max(abs(candidate.tp - candidate.entry), 1e-9)
+    sl_distance = max(abs(candidate.entry - candidate.sl), 1e-9)
     for j in range(start_idx, len(candles)):
         c = candles[j]
         mfe = max(mfe, c.high - candidate.entry)
         mae = max(mae, candidate.entry - c.low)
-        hit_sl = c.low <= candidate.sl
-        hit_tp = c.high >= candidate.tp
-        # Conservative same-candle rule:
-        # if both TP and SL touch inside the same candle, count SL first.
+        if candidate.side.upper() == "SHORT":
+            hit_tp = c.low <= candidate.tp
+            hit_sl = c.high >= candidate.sl
+        else:
+            hit_tp = c.high >= candidate.tp
+            hit_sl = c.low <= candidate.sl
         if hit_sl and hit_tp:
             hit_tp = False
         if hit_sl:
-            pnl_pct = ((candidate.sl - candidate.entry) / candidate.entry) * 100
-            rows.append(
-                finalize(
-                    candidate,
-                    "ORDER_PLACED",
-                    "POSITION_CLOSED",
-                    trigger_price,
-                    candidate.sl,
-                    "SL_HIT",
-                    pnl_pct,
-                    balance,
-                    risk_pct,
-                    triggered_ts,
-                    c.timestamp,
-                    market_ctx,
-                    mfe / tp_distance,
-                    mae / sl_distance,
-                )
-            )
+            pnl_pct = ((candidate.entry - candidate.sl) / candidate.entry) * 100 if candidate.side.upper() == "SHORT" else ((candidate.sl - candidate.entry) / candidate.entry) * 100
+            rows.append(finalize(candidate, "POSITION_OPENED", "POSITION_CLOSED", trigger_price, candidate.sl, "SL_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx, mfe / tp_distance, mae / sl_distance, signal_id=signal_id, lifecycle_id=lifecycle_id, order_id=order_id, position_id=position_id, lifecycle_seq=7))
             return rows
         if hit_tp:
-            pnl_pct = ((candidate.tp - candidate.entry) / candidate.entry) * 100
-            rows.append(
-                finalize(
-                    candidate,
-                    "ORDER_PLACED",
-                    "POSITION_CLOSED",
-                    trigger_price,
-                    candidate.tp,
-                    "TP_HIT",
-                    pnl_pct,
-                    balance,
-                    risk_pct,
-                    triggered_ts,
-                    c.timestamp,
-                    market_ctx,
-                    mfe / tp_distance,
-                    mae / sl_distance,
-                )
-            )
+            pnl_pct = ((candidate.entry - candidate.tp) / candidate.entry) * 100 if candidate.side.upper() == "SHORT" else ((candidate.tp - candidate.entry) / candidate.entry) * 100
+            rows.append(finalize(candidate, "POSITION_OPENED", "POSITION_CLOSED", trigger_price, candidate.tp, "TP_HIT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx, mfe / tp_distance, mae / sl_distance, signal_id=signal_id, lifecycle_id=lifecycle_id, order_id=order_id, position_id=position_id, lifecycle_seq=7))
             return rows
     c = candles[-1]
-    pnl_pct = ((c.close - candidate.entry) / candidate.entry) * 100
-    rows.append(
-        finalize(
-            candidate,
-            "ORDER_PLACED",
-            "POSITION_CLOSED",
-            trigger_price,
-            c.close,
-            "TIMEOUT",
-            pnl_pct,
-            balance,
-            risk_pct,
-            triggered_ts,
-            c.timestamp,
-            market_ctx,
-            mfe / tp_distance,
-            mae / sl_distance,
-        )
-    )
+    pnl_pct = ((candidate.entry - c.close) / candidate.entry) * 100 if candidate.side.upper() == "SHORT" else ((c.close - candidate.entry) / candidate.entry) * 100
+    rows.append(finalize(candidate, "POSITION_OPENED", "POSITION_CLOSED", trigger_price, c.close, "TIMEOUT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx, mfe / tp_distance, mae / sl_distance, signal_id=signal_id, lifecycle_id=lifecycle_id, order_id=order_id, position_id=position_id, lifecycle_seq=7))
     return rows
+
 def finalize(
     candidate,
     before,
@@ -657,6 +485,11 @@ def finalize(
     market_ctx: Optional[Mapping[str, Any]] = None,
     mfe: float = 0.0,
     mae: float = 0.0,
+    signal_id: str = "",
+    lifecycle_id: str = "",
+    order_id: str = "",
+    position_id: str = "",
+    lifecycle_seq: int = 0,
 ):
     market_ctx = market_ctx or {}
     risk_usdt = balance * (risk_pct / 100)
@@ -692,6 +525,11 @@ def finalize(
         liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
         mfe=mfe,
         mae=mae,
+        signal_id=signal_id,
+        lifecycle_id=lifecycle_id,
+        order_id=order_id,
+        position_id=position_id,
+        lifecycle_seq=lifecycle_seq,
     )
 def simulate_rejected_counterfactual(
     candidate: CandidateOrder,
@@ -720,8 +558,12 @@ def simulate_rejected_counterfactual(
         if would_trigger:
             mfe = max(mfe, c.high - candidate.entry)
             mae = max(mae, candidate.entry - c.low)
-            hit_sl = c.low <= candidate.sl
-            hit_tp = c.high >= candidate.tp
+            if candidate.side.upper() == "SHORT":
+                hit_tp = c.low <= candidate.tp
+                hit_sl = c.high >= candidate.sl
+            else:
+                hit_sl = c.low <= candidate.sl
+                hit_tp = c.high >= candidate.tp
             # Deterministic same-candle rule for diagnostics parity:
             # if both touch, count stop loss first.
             if hit_sl and hit_tp:
@@ -984,8 +826,8 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
             save_trade_lifecycle_event(
                 session,
                 event_id=_lifecycle_event_id(row, idx),
-                signal_id=f"{row.symbol}:{row.timestamp}",
-                order_id=None,
+                signal_id=row.signal_id or f"{row.symbol}:{row.timestamp}",
+                order_id=(row.order_id or None),
                 symbol=row.symbol,
                 mode="BACKTEST",
                 lifecycle_state=row.status_after,
@@ -1006,6 +848,9 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 },
                 execution_ctx_missing=execution_ctx_missing,
                 event_ts=str(row.timestamp),
+                lifecycle_id=(row.lifecycle_id or None),
+                position_id=(row.position_id or None),
+                lifecycle_seq=(row.lifecycle_seq or None),
             )
         persisted = session.execute(
             text(

@@ -1,3 +1,14 @@
+
+## 2026-05-20 Backtest Shadow Evaluator + Lifecycle Identity Integrity Patch
+
+- Why needed: rejected-shadow diagnostics showed SHORT setups with valid TP/SL geometry but no WOULD_TP outcomes; accepted lifecycle rows also lacked stable identity fields.
+- Root cause: hit evaluation assumed LONG semantics (`high>=tp`, `low<=sl`) for all sides; accepted lifecycle flow did not assign deterministic lifecycle/order/position identifiers.
+- Files changed: `backtest_order.py`, `tests/test_backtest_order_scanner.py`, `VERSION.md`, `REPORT.md`, `CHANGELOG.md`.
+- Runtime behavior changes: side-aware TP/SL checks now enforce LONG/SHORT rules and explicit conservative same-candle SL precedence.
+- Lifecycle changes: accepted flow now emits `SIGNAL_CREATED -> SIGNAL_ACCEPTED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED -> POSITION_OPENED -> POSITION_CLOSED` with deterministic IDs and sequence numbers.
+- Persistence changes: SQL lifecycle persistence now writes accepted `signal_id`, `order_id`, `position_id`, `lifecycle_id`, and `lifecycle_seq` from lifecycle rows.
+- Tests added: LONG/SHORT TP-SL ordering, same-candle ambiguity, order_id/position_id presence, lifecycle_seq ordering, SIGNAL_CREATED/SIGNAL_ACCEPTED presence.
+
 # AlphaForge Phase 2/3 Lifecycle Export + Contract Parity Patch Report
 
 ## Why this patch was needed
