@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased] - 2026-05-20 (Runtime bootstrap smoke scanner + PAPER default)
+
+### Added
+- Runtime bootstrap `_safe_market_scanner` now emits one deterministic local smoke-test market candidate with full selector/risk/AI-required fields to exercise scanner→selection→AI→lifecycle→persistence wiring.
+
+### Changed
+- Runtime execution mode defaults now resolve to `PAPER` when `EXECUTION_MODE` is absent (`execution_mode_from_env` and `RuntimeConfig.execution_mode`).
+
+### Fixed
+- Removed bootstrap behavior that silently defaulted to BACKTEST on missing `EXECUTION_MODE`.
+
+### Known Issues
+- Bootstrap scanner remains intentionally synthetic and must not be treated as a live market feed.
+
 All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ## [Unreleased] - 2026-05-19 (Spread-unit + calibration/lifecycle persistence fixes)

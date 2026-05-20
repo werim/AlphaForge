@@ -33,7 +33,7 @@ class _AlwaysAcceptBrain:
 
 def test_execution_mode_from_env_parses_and_validates() -> None:
     assert execution_mode_from_env("paper") == ExecutionMode.PAPER
-    assert execution_mode_from_env(None) == ExecutionMode.BACKTEST
+    assert execution_mode_from_env(None) == ExecutionMode.PAPER
     with pytest.raises(ValueError):
         execution_mode_from_env("sandbox")
 
