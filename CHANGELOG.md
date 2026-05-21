@@ -343,3 +343,14 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Changed
 - LOW_SCORE rescue/watch outputs are explicitly diagnostics-only and remain excluded from accepted/order/win-rate/realized-PnL aggregates.
+
+## [Unreleased] - 2026-05-21 (Phase 6.1 audit-trail canonicalization merge conflict resolution)
+
+### Changed
+- PAPER accepted lifecycle path is canonicalized to emit `SIGNAL_CREATED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED` before execution simulation.
+- Runtime lifecycle persistence callback is now fail-closed and raises when lifecycle SQL persistence reports failure.
+
+### Fixed
+- `save_order_decision(...)` now returns an explicit failure indicator (`None`) on SQL exceptions instead of silently pretending success.
+- `save_trade_lifecycle_event(...)` now returns explicit `False` when both lifecycle upsert strategies or commit fail.
+- Added regression coverage for canonical PAPER ordering and lifecycle persistence failure detectability.
