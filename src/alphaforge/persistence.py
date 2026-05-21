@@ -111,6 +111,8 @@ def init_db(database_url: str | None = None) -> Engine:
             symbol TEXT,
             mode TEXT,
             lifecycle_state TEXT,
+            event_type TEXT,
+            payload TEXT,
             decision TEXT,
             reject_reason TEXT,
             score REAL,
@@ -257,6 +259,8 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("created_at", "created_at TEXT"),
         ],
         "trade_lifecycle_events": [
+            ("event_type", "event_type TEXT"),
+            ("payload", "payload TEXT"),
             ("lifecycle_seq", "lifecycle_seq INTEGER"),
             ("cancel_reason", "cancel_reason TEXT"),
             ("lifecycle_id", "lifecycle_id TEXT"),
@@ -308,6 +312,10 @@ def _apply_sqlite_migrations(conn: Any) -> None:
                 END
             WHERE execution_ctx_missing IS NOT NULL
         """))
+    if "event_type" not in lifecycle_cols:
+        conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN event_type TEXT"))
+    if "payload" not in lifecycle_cols:
+        conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN payload TEXT"))
     if "lifecycle_seq" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN lifecycle_seq INTEGER"))
     if "cancel_reason" not in lifecycle_cols:
