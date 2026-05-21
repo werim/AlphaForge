@@ -1,4 +1,17 @@
 
+## [Unreleased] - 2026-05-21 (Runtime SQLite thread-safety fix)
+
+### Changed
+- Runtime decision path no longer dispatches `AIBrain.before_real_order` through `asyncio.to_thread`, preventing cross-thread SQLite session use during persistence.
+- `AIBrain` now supports `session_factory` for session-per-operation persistence while preserving injected `session` compatibility.
+
+### Fixed
+- Resolved `sqlite3.ProgrammingError` caused by reusing a SQLAlchemy `Session` across worker threads in decision persistence flow.
+
+### Added
+- Regression test validating `AIBrain` persistence succeeds when `before_real_order` is invoked via `asyncio.to_thread` concurrently using short-lived sessions.
+
+
 
 ## [Unreleased] - 2026-05-20 (Phase 6.1 audit-trail canonicalization)
 

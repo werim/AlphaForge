@@ -554,7 +554,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
         text("SELECT id FROM trade_lifecycle_events WHERE event_id = :event_id LIMIT 1"),
         {"event_id": event_id},
     ).scalar()
-    return persisted_id or row_id
+    return bool(persisted_id or row_id)
 
 # keep remaining functions as-is
 

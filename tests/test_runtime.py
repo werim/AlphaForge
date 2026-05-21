@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.persistence import init_db
@@ -18,6 +18,33 @@ def _brain() -> AIBrain:
     engine = init_db("sqlite+pysqlite:///:memory:")
     return AIBrain(Session(engine), min_accept_score=0.62)
 
+
+
+
+def test_ai_brain_persistence_uses_short_lived_sessions_across_to_thread(tmp_path: Path) -> None:
+    db_path = tmp_path / "threadsafe.sqlite3"
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
+    factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    shared_session = factory()
+    brain = AIBrain(shared_session, session_factory=factory, min_accept_score=0.62)
+
+    signal = {"symbol": "BTCUSDT", "side": "LONG", "timeframe": "1m", "entry_price": 100.0, "risk_reward": 2.0, "setup_quality": 0.9}
+    market_ctx = {"momentum_confirmation": 0.9, "liquidity_quality": 0.9, "volatility_fit": 0.8, "spread_bps": 1.0}
+    regime_ctx = {"alignment": 0.9}
+    stats_ctx = {"sample_size": 200}
+
+    async def _run_calls() -> None:
+        await asyncio.gather(*[
+            asyncio.to_thread(brain.before_real_order, {**signal, "signal_id": f"sig-{idx}"}, market_ctx, regime_ctx, stats_ctx)
+            for idx in range(6)
+        ])
+
+    asyncio.run(_run_calls())
+
+    with factory() as verify_session:
+        decisions = verify_session.execute(text("SELECT COUNT(*) FROM order_decisions WHERE signal_id LIKE 'sig-%'")) .scalar_one()
+    assert decisions == 6
+    shared_session.close()
 
 class _AlwaysAcceptBrain:
     def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):

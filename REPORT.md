@@ -1,5 +1,42 @@
 
 
+## 2026-05-21 Patch Addendum — Runtime/AIBrain SQLite thread-safety
+
+### Why the patch was needed
+Runtime dispatched AI decisioning via `asyncio.to_thread`, but decision persistence used a shared SQLAlchemy `Session`, triggering SQLite thread-affinity failures.
+
+### Root cause
+AIBrain `_persist_decision` wrote using `self.session` regardless of calling thread, violating SQLite constraint that connection-bound objects stay on creating thread.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/ai_brain.py`
+- `src/alphaforge/persistence.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- Removed `asyncio.to_thread` wrapping around runtime decision call (`before_real_order`).
+- Added session-per-operation persistence path in AIBrain when `session_factory` is supplied.
+
+### Persistence impact
+- `_persist_decision` now opens a short-lived session, commits/rolls back, and closes it when using `session_factory`.
+- Backward compatibility preserved for existing injected-session usage.
+
+### Tests added
+- `test_ai_brain_persistence_uses_short_lived_sessions_across_to_thread`
+
+### Tests executed
+- `pytest -q`
+
+### Risks / limitations
+- No threshold, scoring, or reject-gate logic changes.
+- LIVE readiness unchanged; this is a thread-safety and persistence-correctness patch.
+
+
+
 ## 2026-05-20 Phase 6.1 Audit-trail canonicalization
 
 ### Why changes were needed
