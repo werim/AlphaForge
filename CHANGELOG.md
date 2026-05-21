@@ -1,3 +1,15 @@
+## [Unreleased] - 2026-05-21 (Read-only exchange scanner bootstrap alignment)
+
+### Added
+- `src/alphaforge/exchange_market_scanner.py` with read-only public Binance/Hyperliquid market scanning (no private API keys, no order submission).
+- Tests in `tests/test_exchange_market_scanner.py` for deterministic mocked scanner behavior and exchange-failure fallback.
+
+### Changed
+- Runtime bootstrap now uses shared exchange scanner for PAPER/LIVE and reserves `_safe_market_scanner` for BACKTEST/offline override (`ALPHAFORGE_RUNTIME_SAFE_SCANNER=1`).
+
+### Fixed
+- Removed placeholder single BTC runtime scanner from default PAPER/LIVE path so runtime rehearsal uses real market-data shape.
+
 ## [Unreleased] - 2026-05-21 (LIVE connectivity default fail-closed + startup consistency)
 
 ### Changed
