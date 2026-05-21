@@ -51,7 +51,7 @@ def test_runtime_env_db_url_prefers_alphaforge_database_url(tmp_path: Path, monk
     monkeypatch.setenv("ALPHAFORGE_DATABASE_URL", f"sqlite+pysqlite:///{canonical}")
     monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{legacy}")
     rt = _build_runtime_from_env()
-    db_url = str(rt.ai_brain.session.get_bind().url)
+    db_url = str(rt.ai_brain.session_factory().get_bind().url)
     assert str(canonical.resolve()) in db_url
     assert str(legacy.resolve()) not in db_url
 

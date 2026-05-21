@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -341,7 +342,7 @@ class AIBrain:
         owns_session = self.session_factory is not None
         try:
             signal_id = str(signal.get("signal_id") or _stable_signal_id(signal, market_ctx))
-            decision_id = str(signal.get("decision_id") or f"{signal_id}:{phase}")
+            decision_id = str(signal.get("decision_id") or _stable_decision_id(signal_id, phase, market_ctx))
             now = _now()
             session.execute(
                 text(
@@ -464,8 +465,16 @@ def _stable_signal_id(signal: Mapping[str, Any], market_ctx: Mapping[str, Any]) 
         "timeframe": str(signal.get("timeframe", market_ctx.get("timeframe", "NA"))),
         "entry_price": float(signal.get("entry_price", market_ctx.get("entry", 0.0)) or 0.0),
         "risk_reward": float(signal.get("risk_reward", signal.get("rr", market_ctx.get("rr", 0.0))) or 0.0),
+        "market_ts": market_ctx.get("market_ts"),
     }
-    return "signal:" + _json_dumps(fingerprint)
+    digest = hashlib.sha256(_json_dumps(fingerprint).encode("utf-8")).hexdigest()[:24]
+    return f"signal:{digest}"
+
+
+def _stable_decision_id(signal_id: str, phase: str, market_ctx: Mapping[str, Any]) -> str:
+    stamp = str(market_ctx.get("market_ts") or _now().isoformat())
+    digest = hashlib.sha256(f"{signal_id}|{phase}|{stamp}".encode("utf-8")).hexdigest()[:16]
+    return f"{signal_id}:{phase}:{digest}"
 
 
 def _now() -> datetime:

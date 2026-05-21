@@ -1,3 +1,14 @@
+## 2026-05-21 Runtime decision identity + error diagnostics integrity patch
+- **Version:** `0.3.18-dev`
+- **Current phase:** Phase 6.1 runtime/persistence integrity hardening.
+- **Runtime maturity:** improved signal/decision identity propagation and lifecycle diagnostics under runtime rejects/errors.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged thresholds/scoring; persistence contracts tightened consistently for runtime reject/error events.
+- **Lifecycle coverage:** ERROR lifecycle rows now include explicit failure_reason and incident payload diagnostics when runtime decision path raises exceptions.
+- **Execution realism coverage:** unchanged acceptance/reject thresholds and cost scoring logic.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 Phase 6.1 SQLite Thread-Safety Hotfix
 - **Version:** `0.3.16-dev`
 - **Current phase:** Phase 6.1 runtime/persistence hardening.

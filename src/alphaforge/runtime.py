@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import deque
+import hashlib
 import os
 import logging
 import signal
@@ -193,33 +194,40 @@ class RuntimeOrchestrator:
 
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
+        signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
-        await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
+        await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if risk_reject is not None:
-            await self._persist_reject({"symbol": selection.symbol, "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "explanation": "runtime_risk_gate"})
-            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject})
+            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "explanation": "runtime_risk_gate", "execution_ctx": {"phase": "runtime_risk_gate", "market_ts": market_ctx.get("market_ts"), "risk_reject": risk_reject}})
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject, "signal_id": signal_id})
             return
-        signal_payload = self._build_signal(selection, market_ctx)
+        signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
         regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
         stats_ctx: dict[str, Any] = {}
-
-        score_ctx, order_plan, explanation = self.ai_brain.before_real_order(
-            signal_payload,
-            market_ctx,
-            regime_ctx,
-            stats_ctx,
-        )
+        try:
+            score_ctx, order_plan, explanation = self.ai_brain.before_real_order(
+                signal_payload,
+                market_ctx,
+                regime_ctx,
+                stats_ctx,
+            )
+        except Exception as exc:
+            await self._emit_runtime_error(selection.symbol, signal_id, "before_real_order", exc)
+            return
         self.metrics.decisions_generated += 1
 
         if order_plan.decision != "ACCEPTED":
+            reject_reason = canonical_reject_reason(order_plan.reason)
             await self._persist_reject({
+                "signal_id": signal_id,
                 "symbol": selection.symbol,
                 "decision": order_plan.decision,
-                "reason": canonical_reject_reason(order_plan.reason),
+                "reason": reject_reason,
                 "confidence": order_plan.confidence,
                 "explanation": explanation,
+                "execution_ctx": {"phase": "before_real_order", "market_ts": market_ctx.get("market_ts"), "reject_reason_raw": order_plan.reason},
             })
-            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": canonical_reject_reason(order_plan.reason)})
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": reject_reason, "signal_id": signal_id})
             return
 
         if self.config.execution_mode == ExecutionMode.PAPER:
@@ -310,14 +318,17 @@ class RuntimeOrchestrator:
     async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any] | None = None) -> None:
         previous_state = self._last_lifecycle_state_by_symbol.get(symbol)
         lifecycle_state = event if validate_transition(previous_state, event) else LifecycleState.ERROR.value
+        detail_payload = dict(details or {})
+        signal_id = detail_payload.get("signal_id") or self._resolve_signal_id(symbol, detail_payload)
         event_payload = {
             "lifecycle_event_type": lifecycle_state,
             "lifecycle_state": lifecycle_state,
+            "signal_id": signal_id,
             "symbol": symbol,
             "timestamp": canonical_utc_timestamp(),
             "mode": self.config.execution_mode.value,
             "previous_lifecycle_state": previous_state,
-            "details": dict(details or {}),
+            "details": detail_payload,
         }
         self._last_lifecycle_state_by_symbol[symbol] = lifecycle_state
         self.metrics.lifecycle_events += 1
@@ -328,6 +339,38 @@ class RuntimeOrchestrator:
     async def _record_incident(self, symbol: str, lifecycle_event: str, reason: str) -> None:
         self._incident_counters[reason] = self._incident_counters.get(reason, 0) + 1
         await self._emit_lifecycle_event(lifecycle_event, symbol, {"reason": reason, "incident_count": self._incident_counters[reason]})
+
+    async def _emit_runtime_error(self, symbol: str, signal_id: str, phase: str, exc: Exception) -> None:
+        failure_reason = f"{exc.__class__.__name__}: {str(exc)[:220]}".strip()
+        await self._emit_lifecycle_event(
+            LifecycleState.ERROR.value,
+            symbol,
+            {
+                "signal_id": signal_id,
+                "failure_reason": failure_reason,
+                "incident_payload": {
+                    "exception_type": exc.__class__.__name__,
+                    "exception_message": str(exc),
+                    "symbol": symbol,
+                    "signal_id": signal_id,
+                    "decision_id": None,
+                    "phase": phase,
+                },
+            },
+        )
+
+    @staticmethod
+    def _resolve_signal_id(symbol: str, payload: Mapping[str, Any]) -> str:
+        if payload.get("signal_id"):
+            return str(payload["signal_id"])
+        fingerprint = "|".join([
+            str(symbol),
+            str(payload.get("side", "UNKNOWN")),
+            str(payload.get("timeframe", "NA")),
+            str(payload.get("entry") or payload.get("entry_price") or 0.0),
+            str(payload.get("market_ts") or payload.get("timestamp") or canonical_utc_timestamp()),
+        ])
+        return f"runtime:{hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:24]}"
 
     def _evaluate_runtime_risk(self, symbol: str, market_ctx: Mapping[str, Any]) -> str | None:
         now = time.time()
@@ -440,11 +483,12 @@ class RuntimeOrchestrator:
                 loop.add_signal_handler(sig, self.shutdown)
 
     @staticmethod
-    def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any]) -> dict[str, Any]:
+    def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any], *, signal_id: str | None = None) -> dict[str, Any]:
         execution_ctx = build_execution_context(market_ctx)
         rr = float(market_ctx.get("rr", 2.0) or 2.0)
         return {
             "symbol": selection.symbol,
+            "signal_id": signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
             "side": market_ctx.get("side", "LONG"),
             "timeframe": market_ctx.get("timeframe", "1m"),
             "entry_price": float(market_ctx.get("entry", 0.0) or 0.0),
@@ -636,8 +680,22 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_trade_lifecycle_event
+        details = dict(payload.get("details") or {})
         with SessionLocal() as session:
-            if not save_trade_lifecycle_event(session, **payload):
+            if not save_trade_lifecycle_event(
+                session,
+                signal_id=payload.get("signal_id"),
+                symbol=payload.get("symbol"),
+                mode=payload.get("mode"),
+                lifecycle_state=payload.get("lifecycle_state"),
+                previous_lifecycle_state=payload.get("previous_lifecycle_state"),
+                event_ts=payload.get("timestamp"),
+                event_type=payload.get("lifecycle_event_type"),
+                payload=details,
+                failure_reason=details.get("failure_reason"),
+                incident_payload=details.get("incident_payload"),
+                reject_reason=details.get("reason"),
+            ):
                 raise RuntimeError("trade_lifecycle_event_persistence_failed")
             session.commit()
 
@@ -646,7 +704,17 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
             return
         from alphaforge.persistence import save_order_decision
         with SessionLocal() as session:
-            decision_id = save_order_decision(session, mode=mode.value, **payload)
+            decision_id = save_order_decision(
+                session,
+                mode=mode.value,
+                signal_id=payload.get("signal_id"),
+                symbol=payload.get("symbol"),
+                decision=payload.get("decision"),
+                reject_reason=payload.get("reason"),
+                confidence=payload.get("confidence"),
+                explanation=payload.get("explanation"),
+                execution_ctx=payload.get("execution_ctx", {}),
+            )
             if decision_id is None:
                 raise RuntimeError("order_decision_persistence_failed")
             session.commit()
