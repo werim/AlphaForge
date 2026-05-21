@@ -274,7 +274,17 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
     now = _utc_now_iso()
     decision_id = decision.get("decision_id") or decision.get("id") or f"{decision.get('signal_id', 'UNKNOWN')}:{now}:{decision.get('decision', 'UNKNOWN')}"
     execution_ctx = decision.get("execution_ctx", {})
-    row = session.execute(text("""
+    payload = {
+        "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
+        "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
+        "reject_reason": canonical_reject_reason(decision.get("reject_reason")) if str(decision.get("decision", "")).upper() == "REJECTED" else decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
+        "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
+        "execution_ctx": json.dumps(execution_ctx),
+        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
+        "created_at": now, "updated_at": now,
+    }
+    try:
+        row = session.execute(text("""
         INSERT INTO order_decisions (
             decision_id, signal_id, order_id, symbol, mode, decision, reject_reason, score, rr, effective_rr,
             expectancy_bucket, execution_ctx, execution_ctx_missing, created_at, updated_at
@@ -287,15 +297,9 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
             decision=excluded.decision, reject_reason=excluded.reject_reason, score=excluded.score, rr=excluded.rr,
             effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, updated_at=excluded.updated_at
-    """), {
-        "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
-        "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
-        "reject_reason": canonical_reject_reason(decision.get("reject_reason")) if str(decision.get("decision", "")).upper() == "REJECTED" else decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
-        "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
-        "execution_ctx": json.dumps(execution_ctx),
-        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
-        "created_at": now, "updated_at": now,
-    })
+    """), payload)
+    except Exception:
+        return None
     if hasattr(session, "commit"):
         session.commit()
     return decision_id or row.lastrowid
@@ -312,7 +316,21 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
     is_valid = validate_transition(prev_state, lifecycle_state) if lifecycle_state else False
     if not is_valid and prev_state is not None:
         lifecycle_state = "ERROR"
-    session.execute(text("""
+    payload = {
+        "event_id": event_id, "signal_id": signal_id, "order_id": event.get("order_id"), "symbol": event.get("symbol"),
+        "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),
+        "reject_reason": canonical_reject_reason(event.get("reject_reason")), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
+        "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
+        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", False)) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
+        "lifecycle_seq": event.get("lifecycle_seq"),
+        "cancel_reason": event.get("cancel_reason"),
+        "lifecycle_id": event.get("lifecycle_id") or f"{signal_id}:{canonical_utc_timestamp(event.get('event_ts'))}:{lifecycle_state}",
+        "failure_reason": event.get("failure_reason"),
+        "reconciliation_reason": event.get("reconciliation_reason"),
+        "incident_payload": json.dumps(event.get("incident_payload", {})),
+    }
+    try:
+        session.execute(text("""
         INSERT INTO trade_lifecycle_events (
             event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
             effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id, failure_reason, reconciliation_reason, incident_payload
@@ -326,19 +344,9 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
             score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, event_ts=excluded.event_ts,
             lifecycle_seq=excluded.lifecycle_seq, cancel_reason=excluded.cancel_reason, lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason, incident_payload=excluded.incident_payload
-    """), {
-        "event_id": event_id, "signal_id": signal_id, "order_id": event.get("order_id"), "symbol": event.get("symbol"),
-        "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),
-        "reject_reason": canonical_reject_reason(event.get("reject_reason")), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
-        "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
-        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", False)) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
-        "lifecycle_seq": event.get("lifecycle_seq"),
-        "cancel_reason": event.get("cancel_reason"),
-        "lifecycle_id": event.get("lifecycle_id") or f"{signal_id}:{canonical_utc_timestamp(event.get('event_ts'))}:{lifecycle_state}",
-        "failure_reason": event.get("failure_reason"),
-        "reconciliation_reason": event.get("reconciliation_reason"),
-        "incident_payload": json.dumps(event.get("incident_payload", {})),
-    })
+    """), payload)
+    except Exception:
+        return False
     if hasattr(session, "commit"):
         session.commit()
     return True

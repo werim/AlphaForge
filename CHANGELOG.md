@@ -1,3 +1,19 @@
+
+
+## [Unreleased] - 2026-05-20 (Phase 6.1 audit-trail canonicalization)
+
+### Changed
+- Runtime PAPER/backtest-facing lifecycle emissions now prefer canonical lifecycle vocabulary (`SIGNAL_CREATED`, `WAITING_ENTRY_ZONE`, `ENTRY_TRIGGERED`, `ORDER_PLACED`, `SIGNAL_REJECTED`, `POSITION_OPENED`).
+- Runtime reject path now guarantees `SIGNAL_REJECTED` emission after `SIGNAL_CREATED` before returning.
+
+### Fixed
+- Persistence helpers `save_order_decision` / `save_trade_lifecycle_event` now attempt real durable inserts and return explicit failure on SQL exceptions for fail-detectable behavior.
+- Runtime lifecycle persistence callback now fail-detects unsuccessful lifecycle inserts instead of silently continuing.
+
+### Added
+- Runtime tests for canonical PAPER lifecycle ordering and reject ordering guarantees.
+- Contract transition support for canonical `ENTRY_TIMEOUT` state used in timeout/reconciliation path.
+
 # Changelog
 
 All notable documented repository-level changes are summarized from `REPORT.md`.

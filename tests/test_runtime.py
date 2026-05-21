@@ -244,3 +244,41 @@ def test_runtime_signal_uses_dynamic_rr_not_fallback_when_present() -> None:
     selection = type("Sel", (), {"symbol": "BTCUSDT"})()
     payload = RuntimeOrchestrator._build_signal(selection, {"entry": 100.0, "rr": 3.25})
     assert payload["risk_reward"] == pytest.approx(3.25)
+
+
+def test_paper_lifecycle_emits_canonical_sequence_for_accept() -> None:
+    events: list[dict] = []
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 2.5, "side": "LONG", "market_ts": 9999999999.0, "spread_pct": 0.0001, "funding_rate_pct": 0.0, "volume_24h_usdt": 90_000_000, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=scanner,
+        on_lifecycle_event=lambda e: events.append(e),
+    )
+    asyncio.run(orchestrator._scan_once())
+    lifecycle = [e["lifecycle_event_type"] for e in events]
+    assert lifecycle[0] == "SIGNAL_CREATED"
+    assert "ORDER_PLACED" in lifecycle
+    assert lifecycle[:4] == ["SIGNAL_CREATED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED"]
+
+
+def test_paper_reject_emits_signal_rejected_after_signal_created() -> None:
+    events: list[dict] = []
+    rejects: list[dict] = []
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 101.0, "rr": 1.1, "side": "LONG", "market_ts": 9999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0001, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+        on_lifecycle_event=lambda e: events.append(e),
+        on_reject_persist=lambda p: rejects.append(p),
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert rejects
+    assert [events[0]["lifecycle_event_type"], events[1]["lifecycle_event_type"]] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]

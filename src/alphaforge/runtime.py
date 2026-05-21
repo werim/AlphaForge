@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
+from alphaforge.order import LifecycleState
 from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings
@@ -184,10 +185,10 @@ class RuntimeOrchestrator:
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
-        await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
+        await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": ""})
         if risk_reject is not None:
             await self._persist_reject({"symbol": selection.symbol, "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "explanation": "runtime_risk_gate"})
-            await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject})
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject})
             return
         signal_payload = self._build_signal(selection, market_ctx)
         regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
@@ -210,11 +211,11 @@ class RuntimeOrchestrator:
                 "confidence": order_plan.confidence,
                 "explanation": explanation,
             })
-            await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_REJECTED.value, selection.symbol, {"reason": canonical_reject_reason(order_plan.reason)})
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": canonical_reject_reason(order_plan.reason)})
             return
 
-        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
-        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
+        await self._emit_lifecycle_event(LifecycleState.WAITING_ENTRY_ZONE.value, selection.symbol, {})
+        await self._emit_lifecycle_event(LifecycleState.ENTRY_TRIGGERED.value, selection.symbol, {})
         await self._execute(symbol=selection.symbol, decision={
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
@@ -236,20 +237,18 @@ class RuntimeOrchestrator:
         self.metrics.executions += 1
         order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
         self._pending_orders[symbol] = {"order_id": order_id, "symbol": symbol, "status": result.get("status", "UNKNOWN"), "created_at": canonical_utc_timestamp()}
-        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_ACKNOWLEDGED.value, symbol, {"decision": decision, "result": dict(result)})
+        await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
         result_status = str(result.get("status", "")).lower()
         if result_status == "partial_fill":
-            await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PARTIAL.value, symbol, {"result": dict(result)})
+            await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result), "fill_state": "partial"})
         elif result_status in {"rejected", "exchange_reject"}:
-            await self._record_incident(symbol, LifecycleEventType.EXCHANGE_REJECT.value, "exchange_rejected_order")
+            await self._emit_lifecycle_event(LifecycleState.ORDER_REJECTED.value, symbol, {"reason": "exchange_rejected_order", "result": dict(result)})
             return
         elif result_status in {"timeout", "error", "missing_ack"}:
-            await self._record_incident(symbol, LifecycleEventType.EXECUTION_ERROR.value, "execution_uncertain_state")
+            await self._record_incident(symbol, LifecycleState.ENTRY_TIMEOUT.value, "execution_uncertain_state")
             await self._reconcile_symbol_state(symbol, result, market_ctx)
             return
-        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_FILLED.value, symbol, {"result": dict(result)})
-        await self._emit_lifecycle_event(LifecycleEventType.STOP_SUBMITTED.value, symbol, {})
-        await self._emit_lifecycle_event(LifecycleEventType.TAKE_PROFIT_SUBMITTED.value, symbol, {})
+        await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
         self._active_positions[symbol] = float(market_ctx.get("entry", 0.0) or 0.0)
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
@@ -277,7 +276,7 @@ class RuntimeOrchestrator:
 
     async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any] | None = None) -> None:
         previous_state = self._last_lifecycle_state_by_symbol.get(symbol)
-        lifecycle_state = event if validate_transition(previous_state, event) else LifecycleEventType.ERROR.value
+        lifecycle_state = event if validate_transition(previous_state, event) else LifecycleState.ERROR.value
         event_payload = {
             "lifecycle_event_type": lifecycle_state,
             "lifecycle_state": lifecycle_state,
@@ -482,7 +481,8 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_trade_lifecycle_event
-        save_trade_lifecycle_event(brain.session, **payload)
+        if not save_trade_lifecycle_event(brain.session, **payload):
+            raise RuntimeError("lifecycle persistence failed")
 
     def _persist_reject(payload: dict[str, Any]) -> None:
         if not persistence_enabled:

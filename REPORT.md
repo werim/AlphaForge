@@ -1,3 +1,36 @@
+
+
+## 2026-05-20 Phase 6.1 Audit-trail canonicalization
+
+### Why changes were needed
+Runtime, persistence, and export paths still emitted mixed lifecycle vocabularies (`ENTRY_PENDING`/`ENTRY_SUBMITTED` etc.) and had partially silent persistence failure behavior. This undermined a single audit-truth contract across PAPER/BACKTEST/persistence rows.
+
+### Lifecycle behavior before / after
+- **Before:** accepted PAPER runtime emitted extended runtime states (`ENTRY_PENDING`, `ENTRY_SUBMITTED`, `ENTRY_ACKNOWLEDGED`, ...), while backtest/export paths centered on canonical order lifecycle names.
+- **After:** accepted PAPER runtime now emits canonical progression: `SIGNAL_CREATED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED` then `POSITION_OPENED` on fills. Rejected PAPER/runtime risk gates emit `SIGNAL_CREATED -> SIGNAL_REJECTED` deterministically.
+
+### Persistence behavior before / after
+- **Before:** helper writes could throw/short-circuit depending on schema differences and could be effectively placeholder-like in edge schemas.
+- **After:** `save_order_decision` and `save_trade_lifecycle_event` perform durable insert attempts and fail closed (`None`/`False`) on SQL errors, enabling runtime detection. Runtime lifecycle persistence callback now raises when lifecycle persistence fails (detectable fail-closed preparation for LIVE hardening).
+
+### Runtime impact
+- Canonical lifecycle ordering is now explicit in PAPER accept/reject paths and tests.
+- Reconciliation flow remains intact; timeout-like execution now uses canonical `ENTRY_TIMEOUT` before reconciliation escalation.
+
+### Compatibility / migration / schema implications
+- SQLite compatibility preserved; no destructive migration added.
+- Existing extended lifecycle event support in `contracts.py` is retained for compatibility while canonical states are now preferred for core audit flow.
+- Persistence helpers continue to tolerate optional columns/tables by returning failure state instead of crashing entire run path.
+
+### Tests added/updated
+- Added PAPER lifecycle sequence tests for accepted canonical flow and reject ordering.
+- Updated runtime tests to assert `ORDER_PLACED` emission and `SIGNAL_CREATED` first semantics.
+- Full suite passing (`177 passed`).
+
+### Remaining blockers
+- Full LIVE fail-closed exchange execution wiring remains out of scope (still blocked).
+- Some non-core extended lifecycle states remain in reconciliation/ops channels for incident observability and must be converged in future phases if full canonical-only contract is required.
+
 # AlphaForge Forensic Audit Report — Backtest Lifecycle Behavior (2026-05-19)
 
 ## 2026-05-19 Patch Addendum — Remaining pytest failures (targeted hotfix)
