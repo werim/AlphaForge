@@ -3,10 +3,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine, text
+import logging
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 from alphaforge.contracts import canonical_reject_reason, canonical_utc_timestamp, validate_transition
+
+
+
+LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "init_db",
@@ -24,8 +33,37 @@ def _utc_now_iso() -> str:
     return canonical_utc_timestamp()
 
 
-def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
-    engine = create_engine(database_url, future=True)
+def _ensure_sqlite_parent_dir(database_url: str) -> None:
+    """Create the parent directory for file-backed SQLite URLs.
+
+    SQLAlchemy/SQLite will create the database file, but it will not create
+    missing parent directories. Runtime can pass either an explicit DB URL or
+    call init_db() with no arguments, so this helper keeps both paths safe.
+    """
+    url = make_url(database_url)
+    if not url.get_backend_name().startswith("sqlite"):
+        return
+
+    database = url.database
+    if not database or database == ":memory:":
+        return
+
+    db_path = Path(database).expanduser()
+    if not db_path.is_absolute():
+        db_path = Path.cwd() / db_path
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def init_db(database_url: str | None = None) -> Engine:
+    resolved_database_url = (
+        database_url
+        or os.getenv("ALPHAFORGE_DATABASE_URL")
+        or os.getenv("ALPHAFORGE_DB_URL")
+        or "sqlite+pysqlite:///:memory:"
+    )
+    _ensure_sqlite_parent_dir(resolved_database_url)
+    engine = create_engine(resolved_database_url, future=True)
     ddl = [
         """
         CREATE TABLE IF NOT EXISTS signals (
@@ -156,9 +194,86 @@ def init_db(database_url: str = "sqlite+pysqlite:///:memory:"):
     return engine
 
 
-def _table_columns(conn: Any, table_name: str) -> set[str]:
+def _sqlite_table_exists(conn: Any, table_name: str) -> bool:
+    row = conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type='table' AND name = :table_name"),
+        {"table_name": table_name},
+    ).first()
+    return row is not None
+
+
+def _sqlite_columns(conn: Any, table_name: str) -> set[str]:
+    if not _sqlite_table_exists(conn, table_name):
+        return set()
     rows = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
     return {str(r.get("name")) for r in rows}
+
+
+def _add_column_if_missing(conn: Any, table_name: str, column_name: str, ddl: str) -> None:
+    cols = _sqlite_columns(conn, table_name)
+    if column_name in cols:
+        return
+    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
+    LOGGER.info("sqlite_schema_migration added column table=%s column=%s", table_name, column_name)
+
+
+def _ensure_sqlite_runtime_schema(conn: Any) -> None:
+    required_columns: dict[str, list[tuple[str, str]]] = {
+        "order_decisions": [
+            ("decision_id", "decision_id TEXT"),
+            ("signal_id", "signal_id TEXT"),
+            ("order_id", "order_id TEXT"),
+            ("symbol", "symbol TEXT"),
+            ("mode", "mode TEXT"),
+            ("phase", "phase TEXT"),
+            ("decision", "decision TEXT"),
+            ("order_type", "order_type TEXT"),
+            ("confidence", "confidence REAL"),
+            ("explanation", "explanation TEXT"),
+            ("reject_reason", "reject_reason TEXT"),
+            ("score", "score REAL"),
+            ("rr", "rr REAL"),
+            ("effective_rr", "effective_rr REAL DEFAULT 0.0"),
+            ("expectancy_bucket", "expectancy_bucket TEXT"),
+            ("order_payload", "order_payload TEXT"),
+            ("execution_ctx", "execution_ctx TEXT"),
+            ("execution_ctx_missing", "execution_ctx_missing INTEGER"),
+            ("expected_slippage_pct", "expected_slippage_pct REAL DEFAULT 0.0"),
+            ("spread_pct", "spread_pct REAL DEFAULT 0.0"),
+            ("latency_ms", "latency_ms REAL DEFAULT 0.0"),
+            ("orderbook_imbalance", "orderbook_imbalance REAL DEFAULT 0.0"),
+            ("funding_rate_pct", "funding_rate_pct REAL DEFAULT 0.0"),
+            ("execution_regime", "execution_regime TEXT"),
+            ("volatility_regime", "volatility_regime TEXT"),
+            ("created_at", "created_at TEXT"),
+            ("updated_at", "updated_at TEXT"),
+        ],
+        "ai_decision_features": [
+            ("decision_id", "decision_id TEXT"),
+            ("features", "features TEXT"),
+            ("penalties", "penalties TEXT"),
+            ("reason_flags", "reason_flags TEXT"),
+            ("execution_features", "execution_features TEXT"),
+            ("created_at", "created_at TEXT"),
+        ],
+        "trade_lifecycle_events": [
+            ("lifecycle_seq", "lifecycle_seq INTEGER"),
+            ("cancel_reason", "cancel_reason TEXT"),
+            ("lifecycle_id", "lifecycle_id TEXT"),
+            ("failure_reason", "failure_reason TEXT"),
+            ("reconciliation_reason", "reconciliation_reason TEXT"),
+            ("incident_payload", "incident_payload TEXT"),
+        ],
+        "closed_trade_reviews": [
+            ("execution_metrics", "execution_metrics TEXT"),
+            ("review_payload", "review_payload TEXT"),
+        ],
+    }
+    for table_name, columns in required_columns.items():
+        if not _sqlite_table_exists(conn, table_name):
+            continue
+        for column_name, ddl in columns:
+            _add_column_if_missing(conn, table_name, column_name, ddl)
 
 
 def _apply_sqlite_migrations(conn: Any) -> None:
@@ -167,10 +282,11 @@ def _apply_sqlite_migrations(conn: Any) -> None:
     migrations: list[tuple[str, str]] = [
         ("2026_05_16_persistence_integrity_v1", "Backfill missing persistence columns and normalize legacy execution_ctx_missing semantics."),
     ]
-    signal_cols = _table_columns(conn, "signals")
+    _ensure_sqlite_runtime_schema(conn)
+    signal_cols = _sqlite_columns(conn, "signals")
     if "signal_id" in signal_cols and "uq_signals_signal_id_not_null" not in existing:
         conn.execute(text("UPDATE signals SET signal_id = 'legacy-signal-' || id WHERE signal_id IS NULL OR TRIM(signal_id) = ''"))
-    decision_cols = _table_columns(conn, "order_decisions")
+    decision_cols = _sqlite_columns(conn, "order_decisions")
     if "execution_ctx_missing" in decision_cols:
         conn.execute(text("""
             UPDATE order_decisions
@@ -181,7 +297,7 @@ def _apply_sqlite_migrations(conn: Any) -> None:
                 END
             WHERE execution_ctx_missing IS NOT NULL
         """))
-    lifecycle_cols = _table_columns(conn, "trade_lifecycle_events")
+    lifecycle_cols = _sqlite_columns(conn, "trade_lifecycle_events")
     if "execution_ctx_missing" in lifecycle_cols:
         conn.execute(text("""
             UPDATE trade_lifecycle_events
@@ -204,7 +320,7 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN reconciliation_reason TEXT"))
     if "incident_payload" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN incident_payload TEXT"))
-    closed_trade_cols = _table_columns(conn, "closed_trade_reviews")
+    closed_trade_cols = _sqlite_columns(conn, "closed_trade_reviews")
     if "execution_metrics" not in closed_trade_cols:
         conn.execute(text("ALTER TABLE closed_trade_reviews ADD COLUMN execution_metrics TEXT"))
     conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
@@ -286,23 +402,45 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
     try:
         row = session.execute(text("""
         INSERT INTO order_decisions (
-            decision_id, signal_id, order_id, symbol, mode, decision, reject_reason, score, rr, effective_rr,
-            expectancy_bucket, execution_ctx, execution_ctx_missing, created_at, updated_at
+            decision_id, signal_id, order_id, symbol, mode, phase, decision, order_type, confidence, explanation,
+            reject_reason, score, rr, effective_rr, expectancy_bucket, order_payload, execution_ctx,
+            execution_ctx_missing, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance,
+            funding_rate_pct, execution_regime, volatility_regime, created_at, updated_at
         ) VALUES (
-            :decision_id, :signal_id, :order_id, :symbol, :mode, :decision, :reject_reason, :score, :rr, :effective_rr,
-            :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :created_at, :updated_at
+            :decision_id, :signal_id, :order_id, :symbol, :mode, :phase, :decision, :order_type, :confidence, :explanation,
+            :reject_reason, :score, :rr, :effective_rr, :expectancy_bucket, :order_payload, :execution_ctx,
+            :execution_ctx_missing, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance,
+            :funding_rate_pct, :execution_regime, :volatility_regime, :created_at, :updated_at
         )
         ON CONFLICT(decision_id) DO UPDATE SET
             signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
-            decision=excluded.decision, reject_reason=excluded.reject_reason, score=excluded.score, rr=excluded.rr,
-            effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
-            execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, updated_at=excluded.updated_at
-    """), payload)
+            phase=excluded.phase, decision=excluded.decision, order_type=excluded.order_type, confidence=excluded.confidence,
+            explanation=excluded.explanation, reject_reason=excluded.reject_reason, score=excluded.score, rr=excluded.rr,
+            effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket, order_payload=excluded.order_payload,
+            execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing,
+            expected_slippage_pct=excluded.expected_slippage_pct, spread_pct=excluded.spread_pct, latency_ms=excluded.latency_ms,
+            orderbook_imbalance=excluded.orderbook_imbalance, funding_rate_pct=excluded.funding_rate_pct,
+            execution_regime=excluded.execution_regime, volatility_regime=excluded.volatility_regime, updated_at=excluded.updated_at
+    """), {
+        "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
+        "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
+        "reject_reason": canonical_reject_reason(decision.get("reject_reason")) if str(decision.get("decision", "")).upper() == "REJECTED" else decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
+        "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
+        "phase": decision.get("phase"), "order_type": decision.get("order_type"), "confidence": decision.get("confidence") or decision.get("score"),
+        "explanation": decision.get("explanation"), "order_payload": json.dumps(decision.get("order_payload", {})),
+        "execution_ctx": json.dumps(execution_ctx),
+        "expected_slippage_pct": decision.get("expected_slippage_pct", 0.0), "spread_pct": decision.get("spread_pct", 0.0),
+        "latency_ms": decision.get("latency_ms", 0.0), "orderbook_imbalance": decision.get("orderbook_imbalance", 0.0),
+        "funding_rate_pct": decision.get("funding_rate_pct", 0.0), "execution_regime": decision.get("execution_regime"),
+        "volatility_regime": decision.get("volatility_regime"),
+        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
+        "created_at": now, "updated_at": now,
+    })
+        if hasattr(session, "commit"):
+            session.commit()
+        return decision_id or row.lastrowid
     except Exception:
         return None
-    if hasattr(session, "commit"):
-        session.commit()
-    return decision_id or row.lastrowid
 
 
 def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
@@ -329,8 +467,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
         "reconciliation_reason": event.get("reconciliation_reason"),
         "incident_payload": json.dumps(event.get("incident_payload", {})),
     }
-    try:
-        session.execute(text("""
+    statement_by_event_id = text("""
         INSERT INTO trade_lifecycle_events (
             event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
             effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id, failure_reason, reconciliation_reason, incident_payload
@@ -344,11 +481,35 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
             score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, event_ts=excluded.event_ts,
             lifecycle_seq=excluded.lifecycle_seq, cancel_reason=excluded.cancel_reason, lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason, incident_payload=excluded.incident_payload
-    """), payload)
+    """)
+    statement_by_lifecycle_key = text("""
+        INSERT INTO trade_lifecycle_events (
+            event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
+            effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id, failure_reason, reconciliation_reason, incident_payload
+        ) VALUES (
+            :event_id, :signal_id, :order_id, :symbol, :mode, :lifecycle_state, :decision, :reject_reason, :score, :rr,
+            :effective_rr, :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :event_ts, :created_at, :lifecycle_seq, :cancel_reason, :lifecycle_id, :failure_reason, :reconciliation_reason, :incident_payload
+        )
+        ON CONFLICT(signal_id, event_ts, lifecycle_state) DO UPDATE SET
+            event_id=excluded.event_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
+            decision=excluded.decision, reject_reason=excluded.reject_reason, score=excluded.score, rr=excluded.rr,
+            effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket, execution_ctx=excluded.execution_ctx,
+            execution_ctx_missing=excluded.execution_ctx_missing, lifecycle_seq=excluded.lifecycle_seq, cancel_reason=excluded.cancel_reason,
+            lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason,
+            incident_payload=excluded.incident_payload
+    """)
+    try:
+        session.execute(statement_by_lifecycle_key, payload)
     except Exception:
-        return False
+        try:
+            session.execute(statement_by_event_id, payload)
+        except Exception:
+            return False
     if hasattr(session, "commit"):
-        session.commit()
+        try:
+            session.commit()
+        except Exception:
+            return False
     return True
 
 # keep remaining functions as-is

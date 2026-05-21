@@ -30,6 +30,95 @@ Runtime, persistence, and export paths still emitted mixed lifecycle vocabularie
 ### Remaining blockers
 - Full LIVE fail-closed exchange execution wiring remains out of scope (still blocked).
 - Some non-core extended lifecycle states remain in reconciliation/ops channels for incident observability and must be converged in future phases if full canonical-only contract is required.
+## 2026-05-20 Patch Addendum — SQLite additive schema bootstrap hardening
+
+### Why the patch was needed
+- Runtime/backtest persistence on existing SQLite files failed because table schemas lagged behind current write paths.
+- `CREATE TABLE IF NOT EXISTS` did not modify existing tables, so additive columns (`order_decisions.phase`, `ai_decision_features.decision_id`, etc.) remained missing.
+
+### Root cause
+- Schema evolution introduced new columns without an idempotent additive migration pass for pre-existing SQLite DB files.
+
+### Affected tables
+- `order_decisions`
+- `ai_decision_features`
+- `trade_lifecycle_events`
+- `closed_trade_reviews`
+- `schema_migrations`
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Added migrations/bootstrap behavior
+- Added SQLite helpers for table-existence checks, column introspection, and additive per-column migration.
+- `init_db()` now runs idempotent SQLite runtime schema repair after base table creation.
+- Migration logs emitted when columns are added.
+
+### Why create_all()/CREATE TABLE IF NOT EXISTS was insufficient
+- SQLite `CREATE TABLE IF NOT EXISTS` only creates missing tables; it does not reconcile missing columns on existing tables.
+
+### Test coverage
+- Legacy `order_decisions` schema repaired and write-path verified.
+- Legacy `ai_decision_features` schema repaired and write-path verified.
+- Double `init_db()` idempotency and data preservation verified.
+
+### Threshold/regression confirmation
+- No changes to score thresholds, RR gates, spread/slippage limits, reject logic, or AI decision semantics.
+
+### Push recommendation
+- Safe to merge as additive, SQL-first backward-compatibility hardening for persistence stability.
+
+## 2026-05-20 Patch Addendum — Runtime bootstrap smoke scanner + execution mode default
+
+### Why the patch was needed
+- Runtime bootstrap scanner returned `[]`, so startup wiring could not exercise symbol selection, AI decisioning, lifecycle emission, or persistence callbacks.
+- Runtime startup defaulted to BACKTEST when `EXECUTION_MODE` was absent, which is unsafe for expected operator posture.
+
+### Root cause
+- `_safe_market_scanner` was implemented as an empty no-op list.
+- `execution_mode_from_env(None)` and `RuntimeConfig.execution_mode` defaulted to `BACKTEST`.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Bootstrap scanner now returns one deterministic local-only smoke-test candidate with required selector/risk/AI fields.
+- Runtime mode resolution now uses `EXECUTION_MODE` with default PAPER semantics.
+- No exchange connectivity added; no real order submission path added.
+
+### Lifecycle/persistence impact
+- Startup smoke flow now can generate lifecycle/reject persistence artifacts via existing callbacks.
+- Lifecycle contract and transition logic unchanged.
+
+### Export/schema impact
+- None.
+
+### Tests added
+- None.
+
+### Tests executed
+- `python -m compileall src/alphaforge/runtime.py`
+- `python -m pytest tests -q`
+
+### Risks
+- Minimal: deterministic smoke candidate could be unexpectedly accepted/rejected depending on environment thresholds, but remains local-only and non-exchange.
+
+### Remaining limitations
+- Scanner is explicitly bootstrap smoke-only, not a live market scanner.
+
+### Migration concerns
+- None.
+
+### Push recommendation
+- Safe to merge as runtime bootstrap safety/alignment fix.
 
 # AlphaForge Forensic Audit Report — Backtest Lifecycle Behavior (2026-05-19)
 
@@ -445,3 +534,122 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 ### Risks / limitations
 - Rescue path is diagnostic-only and intentionally conservative; it does not auto-accept trades.
 - Top symbol/regime outputs are frequency-based and do not imply production allocation guidance.
+
+## Dev Branch Design Compliance Audit (2026-05-20)
+
+### Current status
+- **Overall:** PARTIAL compliance. Core execution-aware components and persistence exist, but full shared signal-to-order contract parity across BACKTEST/PAPER/LIVE is incomplete.
+
+### What works
+- BACKTEST uses shared `run_order_cycle(...)` for candidate quality gating before simulation/execution lifecycle expansion.
+- Execution-cost model computes additive penalties (spread, slippage, latency, funding, liquidity) and effective RR, with explicit missing-field handling.
+- Rejected decisions/lifecycle events persist with reject reasons and execution-context flags/sentinels.
+- Runtime has explicit pre-trade risk gates and lifecycle persistence paths.
+
+### What failed / gaps found
+- Runtime path still primarily uses `ai_brain.before_real_order(...)` and does not exclusively use the same `run_order_cycle(...)` decision path used in backtest.
+- Naming/contract mismatch versus target contract (`SignalCandidate`, `ProbabilityDecision`, `evaluate_signal_to_order(...)`) remains partially semantic rather than exact API parity.
+- Regime vocabulary support is partial; not all requested regime labels are first-class states in decision gates.
+
+### Exact files/functions inspected
+- `backtest_order.py`: `scan_symbol_backtest`, `simulate_candidate`, `process_backtest_result`, `_execution_reject_flags`.
+- `src/alphaforge/order.py`: `run_order_cycle`, `build_order_candidate`, `evaluate_trade_quality`, `_effective_rr`.
+- `src/alphaforge/runtime.py`: `_scan_once`, `_process_symbol`, `_execute`.
+- `src/alphaforge/execution.py`: `build_execution_context`, `build_execution_cost_model`, `normalize_pct_input`.
+- `src/alphaforge/persistence.py`: order/lifecycle persistence helpers and schema fields used by tests.
+
+### Patches applied
+- Fixed backtest lifecycle progression regression in `simulate_candidate(...)` that removed `WAITING_ENTRY_ZONE` from emitted state sequence.
+  - Removed accidental overwrite forcing first lifecycle row from `SIGNAL_CREATED -> WAITING_ENTRY_ZONE` back to `SIGNAL_CREATED -> SIGNAL_CREATED`.
+
+### Remaining risks
+- Shared decision API parity is still architectural-partial across runtime vs backtest.
+- Probabilistic fields exist in AI decision flow, but order-runtime gate remains primarily heuristic-threshold based.
+- Regime mapping breadth is limited relative to requested taxonomy.
+
+### Tests run
+- `pytest -q`
+
+### Test results
+- **Before patch:** 1 failing test (`test_backtest_lifecycle_does_not_start_directly_at_created`).
+- **After patch:** full suite passing.
+
+### Known limitations
+- This patch intentionally avoids large architecture rewrites to preserve safety and existing runtime behavior.
+- No live-exchange dependency was added to backtest paths.
+
+### Next recommended generation
+1. Introduce explicit shared contract types (`SignalCandidate`, `ProbabilityDecision`) and a canonical `evaluate_signal_to_order(...)` API in `src/alphaforge/order.py`.
+2. Route runtime `_process_symbol` through that shared evaluator pre-AI execution planning, preserving execution-mode-specific adapters.
+3. Add parity tests proving BACKTEST and PAPER/LIVE use the same evaluator and reject-reason taxonomy.
+
+## 2026-05-20 Patch Addendum — Backtest lifecycle/persistence/reporting defect fix
+
+### Why the patch was needed
+- Backtest lifecycle persistence could violate a deployed unique key `(signal_id,event_ts,lifecycle_state)`.
+- Summary counters under-reported orders despite `ORDER_PLACED` lifecycle rows.
+- Lifecycle CSV ordering could be nondeterministic under timestamp ties.
+
+### Root cause
+- Upsert conflict target was tied to `event_id` only.
+- Summary counters used WAITING/timeout counts rather than unique triggered/placed lifecycle keys.
+- Export query sorted only by timestamp/event id.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `backtest_order.py`
+- `tests/test_phase123_foundations.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- `save_trade_lifecycle_event(...)` now prefers upsert by `(signal_id,event_ts,lifecycle_state)` and falls back to `event_id` compatibility path.
+- Backtest summary now computes:
+  - `total_orders` from unique `ORDER_PLACED` keys
+  - `triggered_orders` from unique `ENTRY_TRIGGERED` keys
+  - `not_triggered_orders` from WAITING keys that never trigger/place
+- Lifecycle export ordering is stable by `event_ts, symbol, signal_id, lifecycle_seq, lifecycle_state, event_id`.
+- LOW_SCORE rescue/watch fields are exported as diagnostics-only and do not alter accepted/order/PnL metrics.
+
+### Lifecycle / persistence / schema impact
+- No schema loosening and no constraint removal.
+- Idempotent lifecycle replay now supports both uniqueness layouts (`event_id` and composite lifecycle key).
+
+### Tests executed
+- `pytest -q` (pass).
+- Offline backtest smoke + CSV assertions for duplicate IDs, ordering semantics, WAITING-before-trigger, and summary count reconciliation.
+
+### Threshold stance
+- Global score threshold and scoring model were **not loosened or changed**.
+
+---
+
+## 2026-05-21 Patch Addendum — PR #114 merge conflict resolution (Phase 6.1 canonicalization)
+
+### Why the patch was needed
+- PR #114 required conflict-focused reconciliation with current dev behavior while preserving the Phase 6.1 lifecycle/persistence contract.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/persistence.py`
+- `tests/test_runtime.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime/lifecycle changes
+- PAPER accepted flow now emits canonical pre-execution states: `SIGNAL_CREATED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED`.
+- Rejected path remains `SIGNAL_CREATED -> SIGNAL_REJECTED`.
+- Runtime lifecycle persistence callback now fails closed if lifecycle SQL persistence returns failure.
+
+### Persistence changes
+- `save_order_decision(...)` now catches SQL/commit failures and returns explicit failure (`None`).
+- `save_trade_lifecycle_event(...)` now returns explicit `False` if both upsert strategies fail or commit fails.
+
+### Tests added/executed
+- Added runtime tests for PAPER canonical lifecycle sequence and lifecycle persistence failure detectability.
+- Executed:
+  - `python -m py_compile src/alphaforge/runtime.py src/alphaforge/order.py src/alphaforge/ai_brain.py src/alphaforge/persistence.py backtest_order.py`
+  - `pytest -q`

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.persistence import init_db
+from alphaforge import persistence as persistence_module
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
 
 
@@ -33,7 +34,7 @@ class _AlwaysAcceptBrain:
 
 def test_execution_mode_from_env_parses_and_validates() -> None:
     assert execution_mode_from_env("paper") == ExecutionMode.PAPER
-    assert execution_mode_from_env(None) == ExecutionMode.BACKTEST
+    assert execution_mode_from_env(None) == ExecutionMode.PAPER
     with pytest.raises(ValueError):
         execution_mode_from_env("sandbox")
 
@@ -246,11 +247,11 @@ def test_runtime_signal_uses_dynamic_rr_not_fallback_when_present() -> None:
     assert payload["risk_reward"] == pytest.approx(3.25)
 
 
-def test_paper_lifecycle_emits_canonical_sequence_for_accept() -> None:
+def test_paper_accept_path_uses_canonical_lifecycle_sequence() -> None:
     events: list[dict] = []
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 2.5, "side": "LONG", "market_ts": 9999999999.0, "spread_pct": 0.0001, "funding_rate_pct": 0.0, "volume_24h_usdt": 90_000_000, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -282,3 +283,17 @@ def test_paper_reject_emits_signal_rejected_after_signal_created() -> None:
     asyncio.run(orchestrator._scan_once())
     assert rejects
     assert [events[0]["lifecycle_event_type"], events[1]["lifecycle_event_type"]] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
+    lifecycle = [evt["lifecycle_event_type"] for evt in events]
+    assert lifecycle[0] == "SIGNAL_CREATED"
+    assert "WAITING_ENTRY_ZONE" in lifecycle
+    assert "ENTRY_TRIGGERED" in lifecycle
+    assert "ORDER_PLACED" in lifecycle
+
+
+def test_runtime_persistence_callback_fails_closed_on_lifecycle_write_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_PERSISTENCE_ENABLED", "1")
+    monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setattr(persistence_module, "save_trade_lifecycle_event", lambda *args, **kwargs: False)
+    orchestrator = _build_runtime_from_env()
+    with pytest.raises(RuntimeError, match="trade_lifecycle_event_persistence_failed"):
+        asyncio.run(orchestrator._emit_lifecycle_event("SIGNAL_CREATED", "BTCUSDT", {}))

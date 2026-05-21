@@ -12,6 +12,44 @@
 
 # AlphaForge Version Status
 
+## 2026-05-21 Phase 6.1 Canonicalization Merge Resolution
+- **Version:** `0.3.15-dev`
+- **Current phase:** Phase 6.1 audit-trail canonicalization conflict reconciliation.
+- **Runtime maturity:** improved fail-closed persistence detectability for lifecycle writes.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER canonical pre-execution lifecycle ordering restored while preserving dev runtime compatibility for non-PAPER execution paths.
+- **Lifecycle coverage:** canonical rejected/accepted PAPER ordering enforced with explicit `SIGNAL_CREATED` first emission.
+- **Execution realism coverage:** unchanged thresholds/gates; no trade-quality loosening.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-20 SQLite schema bootstrap/migration hardening patch
+- **Version:** `0.3.14-dev`
+- **BACKTEST/PAPER/LIVE alignment:** unchanged decision/reject thresholds and shared runtime persistence behavior preserved.
+- **Lifecycle coverage:** unchanged lifecycle semantics; legacy SQLite schemas are now auto-repaired so lifecycle writes no longer crash on missing additive columns.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-20`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-20 Runtime bootstrap smoke-scanner + PAPER default safety patch
+- **Version:** `0.3.13-dev`
+- **BACKTEST/PAPER/LIVE alignment:** bootstrap mode resolution now defaults to PAPER unless `EXECUTION_MODE` is explicitly set; valid modes unchanged (`BACKTEST/PAPER/LIVE`).
+- **Lifecycle coverage:** bootstrap scanner now emits one deterministic local smoke candidate so `market_scanner -> select_symbols -> ai_brain -> lifecycle -> persistence` can be exercised at startup.
+- **Execution realism coverage:** no gate/threshold loosening, no AI scoring changes, no live adapter behavior changes.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-20`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-20 Backtest lifecycle/persistence/reporting hotfix
+- **Version:** `0.3.12-dev`
+- **BACKTEST/PAPER/LIVE alignment:** preserved decision thresholds/scoring model; backtest lifecycle sequencing and counting corrected without gate loosening.
+- **Lifecycle coverage:** accepted path explicitly includes `WAITING_ENTRY_ZONE` before trigger/placement; export ordering now lifecycle-aware and deterministic.
+- **Execution realism coverage:** unchanged thresholds; LOW_SCORE rescue/watch remains diagnostics-only and does not enter accepted/order metrics.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-20`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-19 Test-Stability Patch (Execution-aware, no gate loosening)
 - **Version:** `0.3.10-dev+testfix1`
 - **BACKTEST/PAPER/LIVE alignment:** BACKTEST spread-unit handling is now explicitly fractional in symbol selection and diagnostics, matching execution context normalization behavior.
@@ -230,4 +268,10 @@
 - LOW_SCORE diagnostic provenance now exported with dedicated gate-score fields for reject-audit consistency.
 - Rejected-shadow now includes reject-reason grouped diagnostics and STOP_TOO_WIDE rescue simulation telemetry (bounded, non-bypass).
 - Spread unit handling (`spread_pct`) is normalized consistently before gate/penalty decisions.
+- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+## 2026-05-20 Lifecycle Audit Hotfix
+- **Version:** `0.3.11-dev`
+- Backtest lifecycle ordering bug fixed so `WAITING_ENTRY_ZONE` is preserved when lifecycle states are available.
+- Dev-branch architecture compliance audit added to `REPORT.md` with explicit PASS/PARTIAL/FAIL posture and remaining gaps.
 - Live readiness verdict remains: ❌ **NOT LIVE-READY**.

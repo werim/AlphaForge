@@ -16,6 +16,30 @@
 
 # Changelog
 
+## [Unreleased] - 2026-05-20 (SQLite schema bootstrap compatibility)
+
+### Added
+- Idempotent SQLite schema bootstrap helper using `PRAGMA table_info(...)` + additive `ALTER TABLE ... ADD COLUMN` for legacy runtime/backtest DBs.
+- Coverage tests for legacy `order_decisions` / `ai_decision_features` migration repair and repeated `init_db()` idempotency.
+
+### Fixed
+- Runtime/backtest persistence crashes on existing SQLite files missing additive columns such as `order_decisions.phase` and `ai_decision_features.decision_id`.
+- Addeditive schema compatibility checks for write paths that persist lifecycle and closed-trade review payload fields.
+
+## [Unreleased] - 2026-05-20 (Runtime bootstrap smoke scanner + PAPER default)
+
+### Added
+- Runtime bootstrap `_safe_market_scanner` now emits one deterministic local smoke-test market candidate with full selector/risk/AI-required fields to exercise scanner→selection→AI→lifecycle→persistence wiring.
+
+### Changed
+- Runtime execution mode defaults now resolve to `PAPER` when `EXECUTION_MODE` is absent (`execution_mode_from_env` and `RuntimeConfig.execution_mode`).
+
+### Fixed
+- Removed bootstrap behavior that silently defaulted to BACKTEST on missing `EXECUTION_MODE`.
+
+### Known Issues
+- Bootstrap scanner remains intentionally synthetic and must not be treated as a live market feed.
+
 All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ## [Unreleased] - 2026-05-19 (Spread-unit + calibration/lifecycle persistence fixes)
@@ -313,3 +337,36 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Fixed
 - Low-score gate/CSV observability gap by exporting the actual gate score used by rejection logic.
+
+## [Unreleased] - 2026-05-20 (Lifecycle ordering audit hotfix)
+
+### Fixed
+- Restored backtest lifecycle ordering so `WAITING_ENTRY_ZONE` is emitted instead of being overwritten to `SIGNAL_CREATED` in `simulate_candidate(...)`.
+
+### Changed
+- Added explicit dev-branch design compliance audit section to `REPORT.md` with truthful status and remaining architecture gaps.
+
+## [Unreleased] - 2026-05-20 (Backtest lifecycle/persistence/reporting defects)
+
+### Fixed
+- Lifecycle persistence upsert now supports composite lifecycle uniqueness `(signal_id,event_ts,lifecycle_state)` with compatibility fallback to `event_id` conflict handling.
+- Backtest summary `total_orders` now counts unique `ORDER_PLACED` lifecycle keys (no longer reports zero when placed rows exist).
+- Backtest summary `triggered_orders` now counts unique `ENTRY_TRIGGERED` keys; `not_triggered_orders` now uses accepted WAITING paths that never triggered/placed.
+- Lifecycle SQL export ordering now uses deterministic lifecycle-aware sort keys (`event_ts,symbol,signal_id,lifecycle_seq,lifecycle_state,event_id`).
+
+### Added
+- Regression tests for lifecycle composite-key idempotency, not-triggered counting semantics, lifecycle sequence monotonicity, and LOW_SCORE rescue/watch diagnostic-only field semantics.
+
+### Changed
+- LOW_SCORE rescue/watch outputs are explicitly diagnostics-only and remain excluded from accepted/order/win-rate/realized-PnL aggregates.
+
+## [Unreleased] - 2026-05-21 (Phase 6.1 audit-trail canonicalization merge conflict resolution)
+
+### Changed
+- PAPER accepted lifecycle path is canonicalized to emit `SIGNAL_CREATED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED` before execution simulation.
+- Runtime lifecycle persistence callback is now fail-closed and raises when lifecycle SQL persistence reports failure.
+
+### Fixed
+- `save_order_decision(...)` now returns an explicit failure indicator (`None`) on SQL exceptions instead of silently pretending success.
+- `save_trade_lifecycle_event(...)` now returns explicit `False` when both lifecycle upsert strategies or commit fail.
+- Added regression coverage for canonical PAPER ordering and lifecycle persistence failure detectability.
