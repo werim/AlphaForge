@@ -370,3 +370,18 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - `save_order_decision(...)` now returns an explicit failure indicator (`None`) on SQL exceptions instead of silently pretending success.
 - `save_trade_lifecycle_event(...)` now returns explicit `False` when both lifecycle upsert strategies or commit fail.
 - Added regression coverage for canonical PAPER ordering and lifecycle persistence failure detectability.
+
+
+## [Unreleased] - 2026-05-21 (Persistence API compatibility + lifecycle sequencing)
+
+### Added
+- New `fetch_expectancy_stat_detail(...)` helper for metadata consumers while preserving legacy scalar expectancy API behavior.
+- Legacy compatibility columns auto-repair in SQLite bootstrap: `order_decisions.payload`, `trade_lifecycle_events.trade_id`, `trade_lifecycle_events.state`, `trade_lifecycle_events.payload`.
+
+### Changed
+- `fetch_expectancy_stat(...)` contract restored to return `float | None` for backward compatibility.
+- `save_trade_lifecycle_event(...)` now returns inserted/upserted row id and backfills legacy `trade_id/state/payload` fields.
+
+### Fixed
+- `save_order_decision(...)` now persists legacy `payload` JSON consistently, including rejected decision context.
+- Backtest accepted lifecycle now includes `WAITING_ENTRY_ZONE` before `ENTRY_TRIGGERED`.
