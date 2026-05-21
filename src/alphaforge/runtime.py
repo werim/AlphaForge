@@ -596,13 +596,17 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_trade_lifecycle_event
-        save_trade_lifecycle_event(brain.session, **payload)
+        ok = save_trade_lifecycle_event(brain.session, **payload)
+        if ok is False:
+            raise RuntimeError("save_trade_lifecycle_event failed")
 
     def _persist_reject(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_order_decision
-        save_order_decision(brain.session, mode=mode.value, **payload)
+        saved = save_order_decision(brain.session, mode=mode.value, **payload)
+        if saved is False:
+            raise RuntimeError("save_order_decision failed")
 
     orchestrator = RuntimeOrchestrator(
         config=config,

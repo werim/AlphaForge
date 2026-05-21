@@ -1,4 +1,38 @@
-## 2026-05-20 Patch Addendum — SQLite additive schema bootstrap hardening
+### 2026-05-21 Patch Addendum — PR #114 conflict resolution (Phase 6.1 canonicalization)
+
+### Why the patch was needed
+- PR #114 needed conflict-focused integration with latest `dev` behavior while preserving Phase 6.1 audit-trail canonical lifecycle intent.
+- Persistence helper failures needed explicit runtime detectability for auditability and operator safety.
+
+### Root cause
+- Persistence helper functions had paths that could swallow SQL exceptions or not expose clear failure signals to runtime callbacks.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `src/alphaforge/runtime.py`
+- `tests/test_runtime.py`
+- `CHANGELOG.md`
+- `VERSION.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- Runtime bootstrap lifecycle/reject persistence callbacks now raise when persistence helpers report `False`, preventing silent data-loss behavior.
+
+### Lifecycle/persistence impact
+- Canonical lifecycle contract/order remains preserved.
+- SQL failure paths for decision/lifecycle persistence are now explicitly detectable.
+
+### Tests added
+- Runtime bootstrap lifecycle persistence failure detectability test.
+- Runtime bootstrap reject persistence failure detectability test.
+
+### Risks
+- Low: failure behavior is stricter (intentional fail-fast) when DB writes fail.
+
+### Push recommendation
+- Mergeable once CI passes; patch is minimal and conflict-focused with no architecture rewrite.
+
+# 2026-05-20 Patch Addendum — SQLite additive schema bootstrap hardening
 
 ### Why the patch was needed
 - Runtime/backtest persistence on existing SQLite files failed because table schemas lagged behind current write paths.
