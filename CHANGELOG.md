@@ -4,6 +4,17 @@
 ### Fixed
 - `save_trade_lifecycle_event(...)` now returns literal `True` after successful insert/update + commit instead of returning integer-like row identifiers/rowcount values.
 - Preserved existing lifecycle persistence SQL/upsert behavior, event-id generation, and failure semantics.
+## [Unreleased] - 2026-05-21 (Runtime SQLite thread-safety fix)
+
+### Changed
+- Runtime decision path no longer dispatches `AIBrain.before_real_order` through `asyncio.to_thread`, preventing cross-thread SQLite session use during persistence.
+- `AIBrain` now supports `session_factory` for session-per-operation persistence while preserving injected `session` compatibility.
+
+### Fixed
+- Resolved `sqlite3.ProgrammingError` caused by reusing a SQLAlchemy `Session` across worker threads in decision persistence flow.
+
+### Added
+- Regression test validating `AIBrain` persistence succeeds when `before_real_order` is invoked via `asyncio.to_thread` concurrently using short-lived sessions.
 
 
 

@@ -542,11 +542,13 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
             session.execute(statement_by_event_id, payload)
         except Exception:
             return None
+
     if hasattr(session, "commit"):
         try:
             session.commit()
         except Exception:
             return None
+
     return True
 
 # keep remaining functions as-is

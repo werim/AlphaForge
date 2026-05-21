@@ -21,7 +21,8 @@ from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class RuntimeOrchestrator:
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     paper_slippage_bps: float = 2.0
+    persistence_engine: Engine | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
@@ -99,6 +101,14 @@ class RuntimeOrchestrator:
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
+
+    def _resolve_persistence_engine(self) -> Engine | None:
+        if self.persistence_engine is not None:
+            return self.persistence_engine
+        session = getattr(self.ai_brain, "session", None)
+        if session is not None:
+            return session.get_bind()
+        return None
 
     async def start(self) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE and self.config.require_live_qualification:
@@ -126,11 +136,10 @@ class RuntimeOrchestrator:
     def shutdown(self) -> None:
         self._stop_event.set()
 
-
     async def _run_live_qualification_gate(self) -> None:
-        if not hasattr(self.ai_brain, "session") or getattr(self.ai_brain, "session") is None:
-            raise RuntimeError("LIVE qualification requires AI brain SQLAlchemy session")
-        engine = self.ai_brain.session.get_bind()
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            raise RuntimeError("LIVE qualification requires runtime persistence engine")
         evaluator = LiveReadinessEvaluator(engine)
         reconciliation_snapshot = {"orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0}
         observability_snapshot = {"alerts_configured": True, "forensic_exports": True, "rollback_ready": True}
@@ -194,8 +203,7 @@ class RuntimeOrchestrator:
         regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
         stats_ctx: dict[str, Any] = {}
 
-        score_ctx, order_plan, explanation = await asyncio.to_thread(
-            self.ai_brain.before_real_order,
+        score_ctx, order_plan, explanation = self.ai_brain.before_real_order(
             signal_payload,
             market_ctx,
             regime_ctx,
@@ -399,8 +407,8 @@ class RuntimeOrchestrator:
             snapshot=snapshot,
             mode=self.config.execution_mode.value,
         )
-        if hasattr(self.ai_brain, "session") and getattr(self.ai_brain, "session") is not None:
-            engine = self.ai_brain.session.get_bind()
+        engine = self._resolve_persistence_engine()
+        if engine is not None:
             persist_findings(engine, findings)
         for finding in findings:
             signature = f"{finding.finding_type}:{finding.symbol}:{finding.lifecycle_ref}"
@@ -510,10 +518,17 @@ def _bool_env_alias(name: str, default: bool, *aliases: str) -> bool:
     return default
 
 
-def _resolve_runtime_database_url() -> str | None:
-    database_url = os.getenv("ALPHAFORGE_DATABASE_URL") or os.getenv("ALPHAFORGE_DB_URL")
-    if not database_url:
-        return None
+def _default_runtime_database_url() -> str:
+    return f"sqlite+pysqlite:///{(Path.cwd() / 'data' / 'runtime' / 'alphaforge_runtime.db').resolve()}"
+
+
+def _resolve_runtime_database_url() -> str:
+    database_url = (
+        os.getenv("ALPHAFORGE_DATABASE_URL")
+        or os.getenv("ALPHAFORGE_DB_URL")
+        or os.getenv("DATABASE_URL")
+        or _default_runtime_database_url()
+    )
     if not database_url.startswith("sqlite"):
         return database_url
     if ":memory:" in database_url:
@@ -535,6 +550,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     persistence_enabled = _bool_env("ALPHAFORGE_PERSISTENCE_ENABLED", True)
     resolved_database_url = _resolve_runtime_database_url()
     engine = init_db(resolved_database_url)
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     table_names: list[str] = []
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
@@ -542,12 +558,12 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     logger.info(
         "runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s",
         persistence_enabled,
-        resolved_database_url or "env/default",
+        resolved_database_url,
         True,
         table_names,
     )
     brain = AIBrain(
-        Session(engine),
+        session_factory=SessionLocal,
         min_accept_score=_float_env_alias(
             "ALPHAFORGE_MIN_SIGNAL_SCORE",
             0.62,
@@ -620,14 +636,20 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_trade_lifecycle_event
-        if not save_trade_lifecycle_event(brain.session, **payload):
-            raise RuntimeError("trade_lifecycle_event_persistence_failed")
+        with SessionLocal() as session:
+            if not save_trade_lifecycle_event(session, **payload):
+                raise RuntimeError("trade_lifecycle_event_persistence_failed")
+            session.commit()
 
     def _persist_reject(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_order_decision
-        save_order_decision(brain.session, mode=mode.value, **payload)
+        with SessionLocal() as session:
+            decision_id = save_order_decision(session, mode=mode.value, **payload)
+            if decision_id is None:
+                raise RuntimeError("order_decision_persistence_failed")
+            session.commit()
 
     orchestrator = RuntimeOrchestrator(
         config=config,
@@ -635,6 +657,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         market_scanner=_safe_market_scanner,
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
+        persistence_engine=engine,
     )
     orchestrator.metrics.persistence_enabled = persistence_enabled
     return orchestrator

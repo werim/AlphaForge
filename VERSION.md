@@ -1,3 +1,14 @@
+## 2026-05-21 Phase 6.1 SQLite Thread-Safety Hotfix
+- **Version:** `0.3.16-dev`
+- **Current phase:** Phase 6.1 runtime/persistence hardening.
+- **Runtime maturity:** decision persistence path made thread-safe for SQLite usage patterns.
+- **BACKTEST/PAPER/LIVE alignment:** decision pipeline unchanged functionally; execution path now avoids cross-thread SQLite session hazards.
+- **Lifecycle coverage:** unchanged lifecycle semantics and ordering.
+- **Execution realism coverage:** unchanged thresholds, gates, and scoring logic.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 
 ## 2026-05-21 Lifecycle persistence bool-contract fix
 - **Version:** `0.3.17-dev`
