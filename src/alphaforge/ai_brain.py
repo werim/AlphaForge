@@ -328,7 +328,9 @@ class AIBrain:
         return score_ctx, order_plan, explanation
 
     def _persist_decision(self, signal: Mapping[str, Any], market_ctx: Mapping[str, Any], score_ctx: ScoreContext, order_plan: OrderPlan, explanation: str, phase: str) -> None:
-        signal_id = str(signal.get("signal_id", f"{signal.get('symbol', 'UNKNOWN')}:{_now()}"))
+        signal_id = str(signal.get("signal_id") or _stable_signal_id(signal, market_ctx))
+        decision_id = str(signal.get("decision_id") or f"{signal_id}:{phase}")
+        now = _now()
         self.session.execute(
             text(
                 """
@@ -353,12 +355,13 @@ class AIBrain:
                 "rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
                 "effective_rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
                 "expectancy_bucket": "UNKNOWN",
-                "created_at": _now(),
-                "updated_at": _now(),
+                "created_at": now,
+                "updated_at": now,
             },
         )
 
         decision_payload = {
+            "decision_id": decision_id,
             "signal_id": signal_id,
             "phase": phase,
             "decision": order_plan.decision,
@@ -377,15 +380,33 @@ class AIBrain:
             "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
             "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
             "effective_rr": float(signal.get("risk_reward", 0.0) or 0.0),
-            "created_at": _now(),
+            "created_at": now,
+            "updated_at": now,
         }
         try:
-            decision_id = self.session.execute(
+            self.session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_decision_features_decision_id ON ai_decision_features(decision_id)"))
+            order_row_id = self.session.execute(
                 text(
                     """
                     INSERT INTO order_decisions
-                    (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, volatility_regime, effective_rr, created_at)
-                    VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance, :funding_rate_pct, :volatility_regime, :effective_rr, :created_at)
+                    (decision_id, signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, volatility_regime, effective_rr, created_at, updated_at)
+                    VALUES (:decision_id, :signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance, :funding_rate_pct, :volatility_regime, :effective_rr, :created_at, :updated_at)
+                    ON CONFLICT(decision_id) DO UPDATE SET
+                        signal_id=excluded.signal_id,
+                        phase=excluded.phase,
+                        decision=excluded.decision,
+                        order_type=excluded.order_type,
+                        confidence=excluded.confidence,
+                        explanation=excluded.explanation,
+                        order_payload=excluded.order_payload,
+                        expected_slippage_pct=excluded.expected_slippage_pct,
+                        spread_pct=excluded.spread_pct,
+                        latency_ms=excluded.latency_ms,
+                        orderbook_imbalance=excluded.orderbook_imbalance,
+                        funding_rate_pct=excluded.funding_rate_pct,
+                        volatility_regime=excluded.volatility_regime,
+                        effective_rr=excluded.effective_rr,
+                        updated_at=excluded.updated_at
                     RETURNING id
                     """
                 ),
@@ -394,12 +415,23 @@ class AIBrain:
         except OperationalError as exc:
             if "no column named spread_pct" not in str(exc):
                 raise
-            decision_id = self.session.execute(
+            order_row_id = self.session.execute(
                 text(
                     """
                     INSERT INTO order_decisions
-                    (signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, effective_rr, created_at)
-                    VALUES (:signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :effective_rr, :created_at)
+                    (decision_id, signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, effective_rr, created_at, updated_at)
+                    VALUES (:decision_id, :signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :effective_rr, :created_at, :updated_at)
+                    ON CONFLICT(decision_id) DO UPDATE SET
+                        signal_id=excluded.signal_id,
+                        phase=excluded.phase,
+                        decision=excluded.decision,
+                        order_type=excluded.order_type,
+                        confidence=excluded.confidence,
+                        explanation=excluded.explanation,
+                        order_payload=excluded.order_payload,
+                        expected_slippage_pct=excluded.expected_slippage_pct,
+                        effective_rr=excluded.effective_rr,
+                        updated_at=excluded.updated_at
                     RETURNING id
                     """
                 ),
@@ -412,6 +444,12 @@ class AIBrain:
                 INSERT INTO ai_decision_features
                 (decision_id, features, penalties, reason_flags, execution_features, created_at)
                 VALUES (:decision_id, :features, :penalties, :reason_flags, :execution_features, :created_at)
+                ON CONFLICT(decision_id) DO UPDATE SET
+                    features=excluded.features,
+                    penalties=excluded.penalties,
+                    reason_flags=excluded.reason_flags,
+                    execution_features=excluded.execution_features,
+                    created_at=excluded.created_at
                 """
             ),
             {
@@ -427,8 +465,9 @@ class AIBrain:
                     "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
                     "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
                     "probabilistic_score": score_ctx.probabilistic,
+                    "order_row_id": order_row_id,
                 }),
-                "created_at": _now(),
+                "created_at": now,
             },
         )
         if order_plan.decision != "ACCEPTED":
@@ -482,7 +521,7 @@ class AIBrain:
                 "signal_id": signal_id,
                 "event_type": f"decision_{order_plan.decision.lower()}",
                 "payload": _json_dumps({"phase": phase, "order_type": order_plan.order_type, "explanation": explanation}),
-                "created_at": _now(),
+                "created_at": now,
             },
         )
 
@@ -541,6 +580,17 @@ def _num(data: Mapping[str, Any], key: str, default: float) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     return default
+
+
+def _stable_signal_id(signal: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> str:
+    fingerprint = {
+        "symbol": str(signal.get("symbol", "UNKNOWN")),
+        "side": str(signal.get("side", market_ctx.get("side", "UNKNOWN"))),
+        "timeframe": str(signal.get("timeframe", market_ctx.get("timeframe", "NA"))),
+        "entry_price": float(signal.get("entry_price", market_ctx.get("entry", 0.0)) or 0.0),
+        "risk_reward": float(signal.get("risk_reward", signal.get("rr", market_ctx.get("rr", 0.0))) or 0.0),
+    }
+    return "signal:" + _json_dumps(fingerprint)
 
 
 def _now() -> datetime:
