@@ -392,3 +392,18 @@ def test_runtime_persistence_callback_fails_closed_on_lifecycle_write_error(monk
     orchestrator = _build_runtime_from_env()
     with pytest.raises(RuntimeError, match="trade_lifecycle_event_persistence_failed"):
         asyncio.run(orchestrator._emit_lifecycle_event("SIGNAL_CREATED", "BTCUSDT", {}))
+
+
+def test_build_runtime_uses_exchange_scanner_for_paper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setattr("alphaforge.runtime.scan_exchange_markets", lambda cfg: asyncio.sleep(0, result=[]))
+    orchestrator = _build_runtime_from_env()
+    assert orchestrator.market_scanner.__name__ == "_runtime_market_scanner"
+
+
+def test_build_runtime_keeps_safe_scanner_for_backtest(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "BACKTEST")
+    monkeypatch.setattr("alphaforge.runtime.scan_exchange_markets", lambda cfg: asyncio.sleep(0, result=[]))
+    orchestrator = _build_runtime_from_env()
+    asyncio.run(orchestrator._scan_once())
+    assert orchestrator.metrics.scans == 1
