@@ -118,6 +118,9 @@ class RuntimeOrchestrator:
 
     async def start(self) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE:
+            scanner_name = getattr(self.market_scanner, "__name__", "")
+            if scanner_name == "_safe_market_scanner":
+                raise RuntimeError("LIVE mode blocked: placeholder/mock scanner is not allowed")
             await self._run_live_exchange_connectivity_gate()
             if self.config.require_live_qualification:
                 await self._run_live_qualification_gate()

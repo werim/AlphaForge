@@ -1,3 +1,37 @@
+## 2026-05-21 Patch Addendum — LIVE placeholder scanner fail-closed gate
+
+### Why the patch was needed
+- LIVE bootstrap could be started with `_safe_market_scanner`, a deterministic local placeholder feed intended only for offline wiring checks.
+
+### Root cause
+- Runtime LIVE startup gates validated readiness/connectivity (when enabled) but did not explicitly forbid placeholder/mock scanner wiring.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- `RuntimeOrchestrator.start()` now blocks LIVE startup with: `LIVE mode blocked: placeholder/mock scanner is not allowed` when scanner function resolves to `_safe_market_scanner`.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle schema changes.
+- No persistence schema changes.
+
+### Tests added
+- `test_live_start_blocks_placeholder_bootstrap_scanner` in `tests/test_runtime.py`.
+
+### Tests executed
+- `pytest tests/test_runtime.py -q`
+
+### Risks / limitations
+- Name-based guard targets known placeholder bootstrap scanner and does not yet classify all possible custom mock scanners.
+
+### Push recommendation
+- Recommended to merge as a minimal fail-closed LIVE safety patch.
+
 ## 2026-05-21 Patch Addendum — Exchange connectivity safety + offline deterministic tests
 
 ### Why the patch was needed

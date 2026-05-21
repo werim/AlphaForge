@@ -1,3 +1,11 @@
+## [Unreleased] - 2026-05-21 (LIVE placeholder scanner fail-closed gate)
+
+### Fixed
+- LIVE startup now blocks when runtime is wired to the bootstrap placeholder scanner (`_safe_market_scanner`) to prevent synthetic local feed use in LIVE mode.
+
+### Added
+- Runtime regression test ensuring LIVE cannot start with placeholder/mock bootstrap scanner wiring.
+
 ## [Unreleased] - 2026-05-21 (Exchange connectivity safety + opt-in integration checks)
 
 ### Added
