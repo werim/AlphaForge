@@ -1,4 +1,11 @@
 
+## [Unreleased] - 2026-05-21 (Lifecycle persistence strict-boolean return fix)
+
+### Fixed
+- `save_trade_lifecycle_event(...)` now returns literal `True` after successful insert/update + commit instead of returning integer-like row identifiers/rowcount values.
+- Preserved existing lifecycle persistence SQL/upsert behavior, event-id generation, and failure semantics.
+
+
 
 ## [Unreleased] - 2026-05-20 (Phase 6.1 audit-trail canonicalization)
 
