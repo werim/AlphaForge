@@ -390,8 +390,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
     now = _utc_now_iso()
     decision_id = decision.get("decision_id") or decision.get("id") or f"{decision.get('signal_id', 'UNKNOWN')}:{now}:{decision.get('decision', 'UNKNOWN')}"
     execution_ctx = decision.get("execution_ctx", {})
-    try:
-        row = session.execute(text("""
+    row = session.execute(text("""
         INSERT INTO order_decisions (
             decision_id, signal_id, order_id, symbol, mode, phase, decision, order_type, confidence, explanation,
             reject_reason, score, rr, effective_rr, expectancy_bucket, order_payload, execution_ctx,
@@ -427,11 +426,9 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
         "created_at": now, "updated_at": now,
     })
-        if hasattr(session, "commit"):
-            session.commit()
-        return decision_id or row.lastrowid
-    except Exception:
-        return False
+    if hasattr(session, "commit"):
+        session.commit()
+    return decision_id or row.lastrowid
 
 
 def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
@@ -490,15 +487,12 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
             incident_payload=excluded.incident_payload
     """)
     try:
-        try:
-            session.execute(statement_by_lifecycle_key, payload)
-        except Exception:
-            session.execute(statement_by_event_id, payload)
-        if hasattr(session, "commit"):
-            session.commit()
-        return True
+        session.execute(statement_by_lifecycle_key, payload)
     except Exception:
-        return False
+        session.execute(statement_by_event_id, payload)
+    if hasattr(session, "commit"):
+        session.commit()
+    return True
 
 # keep remaining functions as-is
 
