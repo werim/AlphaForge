@@ -140,6 +140,8 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN cancel_reason TEXT"))
     if "lifecycle_id" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN lifecycle_id TEXT"))
+    if "position_id" not in lifecycle_cols:
+        conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN position_id TEXT"))
     if "failure_reason" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN failure_reason TEXT"))
     if "reconciliation_reason" not in lifecycle_cols:
@@ -254,17 +256,17 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
     session.execute(text("""
         INSERT INTO trade_lifecycle_events (
             event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
-            effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id, failure_reason, reconciliation_reason, incident_payload
+            effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id, position_id, failure_reason, reconciliation_reason, incident_payload
         ) VALUES (
             :event_id, :signal_id, :order_id, :symbol, :mode, :lifecycle_state, :decision, :reject_reason, :score, :rr,
-            :effective_rr, :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :event_ts, :created_at, :lifecycle_seq, :cancel_reason, :lifecycle_id, :failure_reason, :reconciliation_reason, :incident_payload
+            :effective_rr, :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :event_ts, :created_at, :lifecycle_seq, :cancel_reason, :lifecycle_id, :position_id, :failure_reason, :reconciliation_reason, :incident_payload
         )
         ON CONFLICT(event_id) DO UPDATE SET
             signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
             lifecycle_state=excluded.lifecycle_state, decision=excluded.decision, reject_reason=excluded.reject_reason,
             score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, event_ts=excluded.event_ts,
-            lifecycle_seq=excluded.lifecycle_seq, cancel_reason=excluded.cancel_reason, lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason, incident_payload=excluded.incident_payload
+            lifecycle_seq=excluded.lifecycle_seq, cancel_reason=excluded.cancel_reason, lifecycle_id=excluded.lifecycle_id, position_id=excluded.position_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason, incident_payload=excluded.incident_payload
     """), {
         "event_id": event_id, "signal_id": signal_id, "order_id": event.get("order_id"), "symbol": event.get("symbol"),
         "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),
@@ -274,6 +276,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
         "lifecycle_seq": event.get("lifecycle_seq"),
         "cancel_reason": event.get("cancel_reason"),
         "lifecycle_id": event.get("lifecycle_id") or f"{signal_id}:{canonical_utc_timestamp(event.get('event_ts'))}:{lifecycle_state}",
+        "position_id": event.get("position_id"),
         "failure_reason": event.get("failure_reason"),
         "reconciliation_reason": event.get("reconciliation_reason"),
         "incident_payload": json.dumps(event.get("incident_payload", {})),

@@ -779,3 +779,38 @@ def test_export_integrity_verifier_catches_row_count_mismatch():
         rejected_csv_rows=[],
     )
     assert any("lifecycle row count mismatch" in e for e in errors)
+
+
+def test_probability_calibration_has_p_tp_and_realized_tp_rate_and_long_short():
+    rows = [
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "A", "R", "TREND", 8.0, 2.0, 10, 9, 12, "ORDER_PLACED", "POSITION_CLOSED", close_reason="TP_HIT", p_tp_before_sl=0.8, p_timeout=0.1, expected_r=0.5, expected_hold_minutes=30, hold_minutes=20, forward_label="TP_BEFORE_SL"),
+        bo.LifecycleRow(2, "BTCUSDT", "SHORT", "A", "R", "TREND", 6.0, 2.0, 10, 11, 8, "ORDER_PLACED", "POSITION_CLOSED", close_reason="SL_HIT", p_tp_before_sl=0.2, p_timeout=0.2, expected_r=-0.2, expected_hold_minutes=30, hold_minutes=40, forward_label="SL_BEFORE_TP"),
+    ]
+    cal = bo.build_probability_calibration(rows)
+    assert any(r["metric"] == "p_tp" and "realized_tp_rate" in r for r in cal)
+    assert any(r["segment"] == "SIDE:LONG" for r in cal)
+    assert any(r["segment"] == "SIDE:SHORT" for r in cal)
+
+
+def test_timeout_labels_and_mfe_mae_exported():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "A", "R", "X", 1, "MARKET")
+    rows = bo.simulate_candidate(c, [bo.Candle(1, 10, 10.5, 9.8, 10.1, 1), bo.Candle(2, 10.1, 10.4, 9.9, 10.2, 1)], 0, 1000, 1, market_ctx={"probability_decision": {}})
+    closed = rows[-1]
+    assert closed.forward_label in {"TIMEOUT", "TP_BEFORE_SL", "SL_BEFORE_TP", "AMBIGUOUS"}
+    assert hasattr(closed, "mfe_r")
+    assert hasattr(closed, "mae_r")
+
+
+def test_time_stop_exit_emitted_when_setup_max_hold_exceeded():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 20, 2, "SETUP_X", "R", "X", 1, "MARKET")
+    candles = [bo.Candle(1, 10, 10.2, 9.9, 10.0, 1), bo.Candle(61_000, 10.0, 10.2, 9.9, 10.0, 1)]
+    rows = bo.simulate_candidate(c, candles, 0, 1000, 1, market_ctx={"probability_decision": {}, "setup_max_hold_minutes": {"SETUP_X": 0.5}})
+    assert any(r.status_after == "TIME_STOP_EXIT" for r in rows)
+
+
+def test_position_management_events_keep_ids_in_persistence():
+    rows = [bo.LifecycleRow(1, "BTC", "LONG", "A", "R", "T", 1, 1, 10, 9, 11, "ORDER_PLACED", "PARTIAL_TP_FILLED", signal_id="s", lifecycle_id="l", order_id="o", position_id="p")]
+    persisted = bo._persist_lifecycle_rows(rows)
+    assert persisted[0]["lifecycle_id"] == "l"
+    assert persisted[0]["order_id"] == "o"
+    assert persisted[0]["position_id"] == "p"
