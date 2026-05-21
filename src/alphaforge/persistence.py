@@ -390,6 +390,15 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
     now = _utc_now_iso()
     decision_id = decision.get("decision_id") or decision.get("id") or f"{decision.get('signal_id', 'UNKNOWN')}:{now}:{decision.get('decision', 'UNKNOWN')}"
     execution_ctx = decision.get("execution_ctx", {})
+    payload = {
+        "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
+        "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
+        "reject_reason": canonical_reject_reason(decision.get("reject_reason")) if str(decision.get("decision", "")).upper() == "REJECTED" else decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
+        "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
+        "execution_ctx": json.dumps(execution_ctx),
+        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
+        "created_at": now, "updated_at": now,
+    }
     try:
         row = session.execute(text("""
         INSERT INTO order_decisions (

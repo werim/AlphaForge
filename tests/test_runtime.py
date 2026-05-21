@@ -260,11 +260,29 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence() -> None:
         on_lifecycle_event=lambda e: events.append(e),
     )
     asyncio.run(orchestrator._scan_once())
-    lifecycle = [evt["lifecycle_event_type"] for evt in events]
+    lifecycle = [e["lifecycle_event_type"] for e in events]
     assert lifecycle[0] == "SIGNAL_CREATED"
-    assert "WAITING_ENTRY_ZONE" in lifecycle
-    assert "ENTRY_TRIGGERED" in lifecycle
     assert "ORDER_PLACED" in lifecycle
+    assert lifecycle[:4] == ["SIGNAL_CREATED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED"]
+
+
+def test_paper_reject_emits_signal_rejected_after_signal_created() -> None:
+    events: list[dict] = []
+    rejects: list[dict] = []
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 101.0, "rr": 1.1, "side": "LONG", "market_ts": 9999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0001, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+        on_lifecycle_event=lambda e: events.append(e),
+        on_reject_persist=lambda p: rejects.append(p),
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert rejects
+    assert [events[0]["lifecycle_event_type"], events[1]["lifecycle_event_type"]] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
 
 
 def test_runtime_persistence_callback_fails_closed_on_lifecycle_write_error(monkeypatch: pytest.MonkeyPatch) -> None:

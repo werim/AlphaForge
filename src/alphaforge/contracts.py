@@ -45,13 +45,14 @@ class LifecycleEventType(str, Enum):
     EXECUTION_ERROR = "EXECUTION_ERROR"
     EXCHANGE_REJECT = "EXCHANGE_REJECT"
     RUNTIME_PROTECTIVE_EXIT = "RUNTIME_PROTECTIVE_EXIT"
+    ENTRY_TIMEOUT = "ENTRY_TIMEOUT"
 
 
 ALLOWED_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
     LifecycleEventType.SIGNAL_CREATED.value: {LifecycleEventType.SIGNAL_REJECTED.value, LifecycleEventType.WAITING_ENTRY_ZONE.value, LifecycleEventType.ENTRY_PENDING.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.WAITING_ENTRY_ZONE.value: {LifecycleEventType.ENTRY_TRIGGERED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.ENTRY_TRIGGERED.value: {LifecycleEventType.ORDER_PLACED.value, LifecycleEventType.ORDER_REJECTED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.ORDER_PLACED.value: {LifecycleEventType.POSITION_OPENED.value, LifecycleEventType.ORDER_REJECTED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
+    LifecycleEventType.ORDER_PLACED.value: {LifecycleEventType.POSITION_OPENED.value, LifecycleEventType.ORDER_REJECTED.value, LifecycleEventType.ENTRY_TIMEOUT.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.POSITION_OPENED.value: {LifecycleEventType.TP_HIT.value, LifecycleEventType.SL_HIT.value, LifecycleEventType.OPEN_AT_END.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.SIGNAL_REJECTED.value: set(),
     LifecycleEventType.ENTRY_PENDING.value: {LifecycleEventType.ENTRY_SUBMITTED.value, LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.EXECUTION_ERROR.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value, LifecycleEventType.ERROR.value},
@@ -67,6 +68,7 @@ ALLOWED_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
     LifecycleEventType.EXECUTION_ERROR.value: {LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.EXCHANGE_REJECT.value: {LifecycleEventType.CANCELLED.value, LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value: {LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
+    LifecycleEventType.ENTRY_TIMEOUT.value: {LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
 }
 
 

@@ -1,3 +1,15 @@
+
+## 2026-05-20 Phase 6.1 Audit-Trail Canonicalization
+- **Version:** `0.3.11-dev+phase6_1_audittrail`
+- **Phase:** 6.1 (audit-truth contract canonicalization)
+- **Runtime maturity:** PAPER/BACKTEST lifecycle emission contract aligned to canonical `LifecycleState` vocabulary for signal creation, rejection, entry, and placement states.
+- **BACKTEST/PAPER/LIVE alignment:** improved lifecycle naming parity; persistence callbacks now fail-detect lifecycle insert failures instead of silently proceeding.
+- **Lifecycle coverage:** canonical states now emitted in runtime accepted/rejected PAPER flow: `SIGNAL_CREATED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED` or `SIGNAL_CREATED -> SIGNAL_REJECTED`.
+- **Execution realism coverage:** unchanged execution-cost logic; this patch is semantics/persistence-correctness focused.
+- **Known critical risks:** LIVE exchange implementation remains intentionally incomplete; reconciliation/lifecycle bridge still carries some non-canonical extended events by design.
+- **Last audit date:** `2026-05-20`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 # AlphaForge Version Status
 
 ## 2026-05-21 Phase 6.1 Canonicalization Merge Resolution
