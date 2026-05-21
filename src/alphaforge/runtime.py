@@ -60,7 +60,7 @@ class RuntimeConfig:
     operator_live_acknowledged: bool = False
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
-    require_exchange_connectivity_for_live: bool = False
+    require_exchange_connectivity_for_live: bool = True
     required_live_exchanges: tuple[str, ...] = ("binance",)
     exchange_connectivity_timeout_sec: float = 2.0
 
@@ -666,6 +666,13 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         operator_live_acknowledged=_bool_env("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", False),
         reconciliation_interval_sec=_float_env("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", 5.0),
         reconciliation_timeout_sec=_float_env("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", 2.0),
+        require_exchange_connectivity_for_live=_bool_env("ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", True),
+        required_live_exchanges=tuple(
+            e.strip()
+            for e in os.getenv("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES", "binance").split(",")
+            if e.strip()
+        ) or ("binance",),
+        exchange_connectivity_timeout_sec=_float_env("ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
     )
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:

@@ -1,3 +1,14 @@
+## [Unreleased] - 2026-05-21 (LIVE connectivity default fail-closed + startup consistency)
+
+### Changed
+- LIVE startup now requires exchange connectivity by default (`RuntimeConfig.require_exchange_connectivity_for_live=True`).
+- Runtime env bootstrap now wires `ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE`, `ALPHAFORGE_REQUIRED_LIVE_EXCHANGES`, and `ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC`.
+
+### Added
+- Regression test proving LIVE startup fails closed on exchange connectivity by default.
+- Regression test proving LIVE connectivity gate can only be skipped via explicit override.
+- Regression assertion covering default non-impact for PAPER mode configuration path.
+
 ## [Unreleased] - 2026-05-21 (LIVE placeholder scanner fail-closed gate)
 
 ### Fixed

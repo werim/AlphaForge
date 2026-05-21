@@ -1,3 +1,14 @@
+## 2026-05-21 LIVE connectivity default fail-closed + contradiction cleanup
+- **Version:** `0.3.23-dev`
+- **Current phase:** Phase 6.1 live startup safety hardening.
+- **Runtime maturity:** LIVE startup fail-closes on placeholder scanner wiring and now requires exchange connectivity by default.
+- **BACKTEST/PAPER/LIVE alignment:** LIVE-only startup safety gates tightened; PAPER/BACKTEST runtime decision behavior unchanged.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** prevents synthetic placeholder market feed in LIVE and blocks startup when required live exchange connectivity is unavailable.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 LIVE placeholder scanner fail-closed startup gate
 - **Version:** `0.3.22-dev`
 - **Current phase:** Phase 6.1 live startup safety hardening.
