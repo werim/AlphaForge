@@ -1,3 +1,14 @@
+## [Unreleased] - 2026-05-21 (Runtime/env regression triage verification)
+
+### Changed
+- Documented targeted re-validation for runtime/env/persistence regressions on current HEAD.
+
+### Fixed
+- No code fixes required on current branch; reported failures were not reproducible after pull.
+
+### Known Issues
+- Originally reported node id `tests/test_runtime.py::test_runtime_rejected_decisions_do_not_persist_incomplete_rows` is not present in current test module naming.
+
 ## [Unreleased] - 2026-05-21 (LIVE connectivity default fail-closed + startup consistency)
 
 ### Changed

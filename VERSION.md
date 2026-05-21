@@ -1,3 +1,14 @@
+## 2026-05-21 Runtime/env isolation regression verification (no logic changes)
+- **Version:** `0.3.24-dev`
+- **Current phase:** Phase 6.1 runtime/persistence integrity verification.
+- **Runtime maturity:** Targeted runtime/env/persistence regressions were re-run and currently pass without code-path changes.
+- **BACKTEST/PAPER/LIVE alignment:** Verified runtime bootstrap/env alias mapping and PAPER rejected-row mode semantics through focused tests; no behavior drift introduced.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** unchanged thresholds/scoring/reject behavior.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 LIVE connectivity default fail-closed + contradiction cleanup
 - **Version:** `0.3.23-dev`
 - **Current phase:** Phase 6.1 live startup safety hardening.

@@ -1,3 +1,45 @@
+
+## 2026-05-21 Patch Addendum — Runtime/env regression triage verification (no code patch required)
+
+### Why this triage was needed
+- CI/user report flagged targeted failures across adaptive-learning DB counts, runtime env aliases, runtime bootstrap-from-env, runtime DB path logging, and PAPER rejected-row persistence invariants.
+
+### Root cause
+- Not reproducible on current branch/HEAD after pull.
+- Focused per-test and suite-level reruns indicate the previously observed failures were likely caused by stale state/older commit context, not by current code behavior.
+
+### Files changed
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- None. No scoring/reject threshold or acceptance logic changes.
+- No env parsing logic changes.
+- No persistence logic changes.
+
+### Lifecycle/persistence/schema impact
+- None.
+
+### Tests executed
+- `pytest tests/test_adaptive_learning_foundation.py::test_adaptive_stats_and_shadow_thresholds -vv --tb=long`
+- `pytest tests/test_runtime.py::test_runtime_rejected_decisions_do_not_persist_incomplete_rows -vv --tb=long` *(test id not present in current module)*
+- `pytest tests/test_runtime.py::test_runtime_module_bootstrap_builds_from_env -vv --tb=long`
+- `pytest tests/test_runtime.py::test_runtime_logs_absolute_db_path -vv --tb=long`
+- `pytest tests/test_runtime.py::test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count -vv --tb=long`
+- `pytest tests/test_runtime_env_config.py::test_runtime_env_aliases_for_threshold_and_positions -vv --tb=long`
+- `pytest tests/test_runtime_env_config.py -q`
+- `pytest tests/test_adaptive_learning_foundation.py -q`
+- `pytest tests/test_runtime.py -q`
+- `pytest -q`
+
+### Risks / limitations
+- One originally listed test node id does not exist in current tree, suggesting test rename/removal since report capture.
+- This patch documents verification status only; it does not alter runtime behavior.
+
+### Push recommendation
+- Safe to merge as documentation-only triage record.
+
 ## 2026-05-21 Patch Addendum — LIVE connectivity default fail-closed + startup contradiction resolution
 
 ### Why the patch was needed
