@@ -125,3 +125,11 @@
 - Live readiness verdict remains: ❌ NOT LIVE-READY.
 
 - Shared signal-to-order decision contract added for BACKTEST/PAPER/LIVE parity scaffolding (`SignalCandidate`, `ProbabilityDecision`, `OrderPlan`, `evaluate_signal_to_order`).
+
+## Generation 8 Status (2026-05-20)
+- **Generation:** 8 — Probability calibration export and position-management lifecycle instrumentation.
+- **Runtime maturity:** improved backtest observability for probability quality and hold-time controls.
+- **BACKTEST/PAPER/LIVE alignment:** lifecycle semantics extended with management/time-stop events in backtest export path; PAPER/LIVE integration pending broader runtime hooks.
+- **Lifecycle coverage:** includes `POSITION_REEVALUATED` and `TIME_STOP_EXIT` emission path and persistence of lifecycle/order/position identities.
+- **Execution realism coverage:** timeout/hold calibration and excursion metrics exported for forward-quality auditing.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).

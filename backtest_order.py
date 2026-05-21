@@ -124,6 +124,20 @@ class LifecycleRow:
     order_id: str = ""
     position_id: str = ""
     lifecycle_seq: int = 0
+    p_fill: Optional[float] = None
+    p_tp_before_sl: Optional[float] = None
+    p_sl_before_tp: Optional[float] = None
+    p_timeout: Optional[float] = None
+    p_ambiguous: Optional[float] = None
+    expected_hold_minutes: Optional[float] = None
+    expected_mfe_r: Optional[float] = None
+    expected_mae_r: Optional[float] = None
+    expected_r: Optional[float] = None
+    forward_label: str = ""
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
+    max_favorable_excursion_pct: float = 0.0
+    max_adverse_excursion_pct: float = 0.0
 def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy is None:
         return "UNKNOWN"
@@ -433,6 +447,10 @@ def simulate_candidate(
             if row.status_after in {"POSITION_OPENED", "POSITION_CLOSED"} and row.position_id == "":
                 row.position_id = position_id
         return out_rows
+    probability = market_ctx.get("probability_decision", {}) if isinstance(market_ctx.get("probability_decision", {}), Mapping) else {}
+    setup_max_hold_minutes = market_ctx.get("setup_max_hold_minutes", {}) if isinstance(market_ctx.get("setup_max_hold_minutes", {}), Mapping) else {}
+    max_hold_minutes = float(setup_max_hold_minutes.get(candidate.setup_type, probability.get("max_hold_minutes", 240.0)) or 240.0)
+
     rows: List[LifecycleRow] = [
         LifecycleRow(
             candidate.timestamp,
@@ -662,6 +680,7 @@ def simulate_candidate(
     sl_distance = max(abs(candidate.entry - candidate.sl), 1e-9)
     for j in range(start_idx, len(candles)):
         c = candles[j]
+        hold_minutes = ((c.timestamp - (triggered_ts or c.timestamp)) / 60000.0) if triggered_ts else 0.0
         if long_side:
             mfe = max(mfe, c.high - candidate.entry)
             mae = max(mae, candidate.entry - c.low)
@@ -716,6 +735,15 @@ def simulate_candidate(
                     mfe / tp_distance,
                     mae / sl_distance,
                 )
+            )
+            return _finalize_rows(rows)
+        if hold_minutes >= max_hold_minutes:
+            pnl_pct = ((c.close - candidate.entry) / candidate.entry) * 100 if long_side else ((candidate.entry - c.close) / candidate.entry) * 100
+            rows.append(
+                finalize(candidate, "ORDER_PLACED", "POSITION_REEVALUATED", trigger_price, c.close, "", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx, mfe / tp_distance, mae / sl_distance)
+            )
+            rows.append(
+                finalize(candidate, "POSITION_REEVALUATED", "TIME_STOP_EXIT", trigger_price, c.close, "TIMEOUT", pnl_pct, balance, risk_pct, triggered_ts, c.timestamp, market_ctx, mfe / tp_distance, mae / sl_distance)
             )
             return _finalize_rows(rows)
     c = candles[-1]
@@ -789,6 +817,20 @@ def finalize(
         liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
         mfe=mfe,
         mae=mae,
+        mfe_r=mfe,
+        mae_r=mae,
+        max_favorable_excursion_pct=((mfe * abs(candidate.tp - candidate.entry)) / max(candidate.entry, 1e-9)) * 100.0,
+        max_adverse_excursion_pct=((mae * abs(candidate.entry - candidate.sl)) / max(candidate.entry, 1e-9)) * 100.0,
+        p_fill=market_ctx.get("probability_decision", {}).get("p_fill") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        p_tp_before_sl=market_ctx.get("probability_decision", {}).get("p_tp_before_sl") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        p_sl_before_tp=market_ctx.get("probability_decision", {}).get("p_sl_before_tp") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        p_timeout=market_ctx.get("probability_decision", {}).get("p_timeout") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        p_ambiguous=market_ctx.get("probability_decision", {}).get("p_ambiguous") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        expected_hold_minutes=market_ctx.get("probability_decision", {}).get("expected_hold_minutes") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        expected_mfe_r=market_ctx.get("probability_decision", {}).get("expected_mfe_r") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        expected_mae_r=market_ctx.get("probability_decision", {}).get("expected_mae_r") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        expected_r=market_ctx.get("probability_decision", {}).get("expected_r") if isinstance(market_ctx.get("probability_decision", {}), Mapping) else None,
+        forward_label="TP_BEFORE_SL" if close_reason == "TP_HIT" else ("SL_BEFORE_TP" if close_reason == "SL_HIT" else ("TIMEOUT" if close_reason == "TIMEOUT" else "AMBIGUOUS")),
     )
 def simulate_rejected_counterfactual(
     candidate: CandidateOrder,
@@ -1105,13 +1147,14 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 event_ts=str(row.timestamp),
                 lifecycle_seq=row.lifecycle_seq or (idx + 1),
                 lifecycle_id=row.lifecycle_id or f"{row.symbol}:{row.timestamp}",
+                position_id=row.position_id or None,
             )
         persisted = session.execute(
             text(
                 """
                 SELECT event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason,
                        score, rr, effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing,
-                       event_ts, created_at, lifecycle_seq, lifecycle_id
+                       event_ts, created_at, lifecycle_seq, lifecycle_id, position_id
                 FROM trade_lifecycle_events
                 ORDER BY event_ts, event_id
                 """
@@ -1218,6 +1261,40 @@ def verify_export_integrity(
         if expectancy_bucket == "":
             errors.append(f"lifecycle row index={idx} missing expectancy_bucket")
     return errors
+
+
+def _bucket_numeric(value: Any, width: float = 0.1) -> str:
+    val = _safe_float(value, float("nan"))
+    if val != val:
+        return "UNKNOWN"
+    lo = int(val / width) * width
+    hi = lo + width
+    return f"{lo:.2f}-{hi:.2f}"
+
+
+def build_probability_calibration(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
+    closed = [r for r in rows if r.status_after in {"POSITION_CLOSED", "TIME_STOP_EXIT"}]
+    out: List[dict[str, Any]] = []
+    groups: dict[tuple[str, str, str], list[LifecycleRow]] = {}
+    for r in closed:
+        groups.setdefault(("score", _bucket_numeric(r.score, 1.0), "ALL"), []).append(r)
+        groups.setdefault(("p_tp", _bucket_numeric(r.p_tp_before_sl, 0.1), "ALL"), []).append(r)
+        groups.setdefault(("p_timeout", _bucket_numeric(r.p_timeout, 0.1), "ALL"), []).append(r)
+        groups.setdefault(("expected_r", _bucket_numeric(r.expected_r, 0.2), "ALL"), []).append(r)
+        groups.setdefault(("expected_hold_minutes", _bucket_numeric(r.expected_hold_minutes, 30.0), "ALL"), []).append(r)
+        groups.setdefault(("p_tp", _bucket_numeric(r.p_tp_before_sl, 0.1), f"SIDE:{r.side}"), []).append(r)
+        groups.setdefault(("p_tp", _bucket_numeric(r.p_tp_before_sl, 0.1), f"SETUP:{r.setup_type}"), []).append(r)
+        groups.setdefault(("p_tp", _bucket_numeric(r.p_tp_before_sl, 0.1), f"REGIME:{r.regime}"), []).append(r)
+    for (metric, bucket, segment), bucket_rows in sorted(groups.items()):
+        n = len(bucket_rows)
+        tp_rate = sum(1 for r in bucket_rows if r.forward_label == "TP_BEFORE_SL") / n
+        timeout_rate = sum(1 for r in bucket_rows if r.forward_label == "TIMEOUT") / n
+        avg_expected_r = sum(_safe_float(r.expected_r) for r in bucket_rows) / n
+        avg_net = sum(_safe_float(r.net_pnl_pct) for r in bucket_rows) / n
+        avg_expected_hold = sum(_safe_float(r.expected_hold_minutes) for r in bucket_rows) / n
+        avg_hold = sum(_safe_float(r.hold_minutes) for r in bucket_rows) / n
+        out.append({"metric": metric, "bucket": bucket, "segment": segment, "sample_size": n, "realized_tp_rate": tp_rate, "actual_timeout_rate": timeout_rate, "avg_expected_r": avg_expected_r, "avg_realized_net_pnl_pct": avg_net, "avg_expected_hold_minutes": avg_expected_hold, "avg_actual_hold_minutes": avg_hold})
+    return out
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -1597,6 +1674,7 @@ def main():
         idx = next((i for i, c in enumerate(candles) if c.timestamp >= ts), len(candles))
         rejected_shadow.append(evaluate_rejected_shadow(row, candles, idx))
     persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle)
+    calibration_rows = build_probability_calibration(lifecycle)
     for name, rows in [
         ("order_lifecycle.csv", persisted_lifecycle_rows),
         ("order_candidates.csv", candidate_rows),
@@ -1604,6 +1682,7 @@ def main():
         ("rejected_orders.csv", rejected),
         ("rejected_shadow.csv", [asdict(x) for x in rejected_shadow]),
         ("open_at_end.csv", [asdict(x) for x in open_rows]),
+        ("probability_calibration.csv", calibration_rows),
     ]:
         with open(os.path.join(args.output_dir, name), "w", newline="") as f:
             if not rows:

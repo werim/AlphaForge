@@ -444,3 +444,13 @@
 - Risks/limitations: same-candle ambiguity still modeled conservatively as SL (intentional), and IDs are deterministic UUIDv5 based on signal/trade geometry assumptions.
 
 - Added shared probabilistic signal-to-order contract module and integrated call sites in backtest/runtime paths for contract parity scaffolding.
+
+## 2026-05-20 Patch - Probability calibration exports and position-management lifecycle events
+- Why needed: probabilistic decision outputs (p_fill/p_tp/p_timeout/expected_r/hold) were not exported, reducing calibration visibility and position-management auditability.
+- Root cause: backtest lifecycle export schema focused on entry/close events without forward labels, excursion metrics, or calibration rollups.
+- Files changed: `backtest_order.py`, `src/alphaforge/persistence.py`, `tests/test_backtest_order_scanner.py`, docs.
+- Runtime behavior changes: setup-specific max hold now triggers lifecycle `POSITION_REEVALUATED` then `TIME_STOP_EXIT`; close rows now emit forward labels and probability/expectation snapshots when available.
+- Lifecycle changes: added explicit management events in simulated path and preserved lifecycle/order/position IDs through persistence.
+- Persistence/export/schema changes: lifecycle persistence adds `position_id`; backtest outputs include `probability_calibration.csv` and MFE/MAE R-unit fields.
+- Tests added/executed: targeted scanner tests for calibration exports, LONG/SHORT split, timeout labels, MFE/MAE fields, time-stop emission, and identity continuity.
+- Remaining risks: calibration quality depends on upstream probability signal quality; current management-event simulation is minimal and intentionally conservative.

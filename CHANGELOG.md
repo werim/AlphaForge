@@ -135,3 +135,13 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Regression tests for LONG/SHORT TP-SL ordering, same-candle ambiguity handling, accepted lifecycle identity fields, and sequence ordering.
 
 - Added shared signal-to-order decision contract dataclasses/evaluator and regression tests for probabilistic reject/accept pathways.
+
+## Generation 8 - Probability calibration exports + position management lifecycle (2026-05-20)
+### Added
+- Export `probability_calibration.csv` with score/p_tp/p_timeout/expected_r/expected_hold calibration buckets and segment splits (LONG/SHORT, setup_type, regime).
+- Lifecycle row forward labels (`TP_BEFORE_SL`,`SL_BEFORE_TP`,`TIMEOUT`,`AMBIGUOUS`) and excursion fields (`mfe_r`,`mae_r`,`max_favorable_excursion_pct`,`max_adverse_excursion_pct`).
+- Time-based lifecycle management events including `POSITION_REEVALUATED` and `TIME_STOP_EXIT` under setup-specific max-hold policy.
+### Changed
+- Persistence now stores `position_id` on lifecycle events for position-management audit continuity.
+### Fixed
+- Backtest persistence/export path now carries position-management identity fields across emitted lifecycle events.
