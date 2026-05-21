@@ -1,3 +1,14 @@
+## 2026-05-21 Runtime rejected-decision row completeness hardening
+- **Version:** `0.3.19-dev`
+- **Current phase:** Phase 6.1 runtime/persistence integrity hardening.
+- **Runtime maturity:** runtime AI persistence rows now carry full rejected-decision audit fields instead of sparse duplicates.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged thresholds/scoring and reject logic; persistence field completeness aligned for runtime decision paths.
+- **Lifecycle coverage:** unchanged lifecycle semantics/transitions.
+- **Execution realism coverage:** unchanged execution/cost modeling.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 Runtime decision identity + error diagnostics integrity patch
 - **Version:** `0.3.18-dev`
 - **Current phase:** Phase 6.1 runtime/persistence integrity hardening.
