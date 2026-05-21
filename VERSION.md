@@ -1,3 +1,14 @@
+## 2026-05-21 Runtime order_decision audit-layer contract + mode correctness patch
+- **Version:** `0.3.20-dev`
+- **Current phase:** Phase 6.1 runtime/persistence integrity hardening.
+- **Runtime maturity:** runtime rejected decision persistence now distinguishes internal AI audit rows vs canonical final decision rows.
+- **BACKTEST/PAPER/LIVE alignment:** runtime AI internal rows now persist the actual runtime mode instead of hardcoded BACKTEST; final runtime reject row remains mode-aligned.
+- **Lifecycle coverage:** unchanged transitions; rejected persistence semantics clarified (`phase=final` for canonical runtime decision row, `phase=ai_internal_*` for internal audit row).
+- **Execution realism coverage:** unchanged scoring/reject thresholds and execution modeling.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 Runtime rejected-decision row completeness hardening
 - **Version:** `0.3.19-dev`
 - **Current phase:** Phase 6.1 runtime/persistence integrity hardening.

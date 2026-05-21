@@ -194,11 +194,12 @@ class RuntimeOrchestrator:
 
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
+        market_ctx.setdefault("mode", self.config.execution_mode.value)
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if risk_reject is not None:
-            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "explanation": "runtime_risk_gate", "execution_ctx": {"phase": "runtime_risk_gate", "market_ts": market_ctx.get("market_ts"), "risk_reject": risk_reject}})
+            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": market_ctx.get("rr"), "effective_rr": market_ctx.get("rr"), "explanation": "runtime_risk_gate", "execution_ctx": {"phase": "runtime_risk_gate", "market_ts": market_ctx.get("market_ts"), "risk_reject": risk_reject}})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject, "signal_id": signal_id})
             return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
@@ -221,9 +222,14 @@ class RuntimeOrchestrator:
             await self._persist_reject({
                 "signal_id": signal_id,
                 "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
                 "decision": order_plan.decision,
                 "reason": reject_reason,
                 "confidence": order_plan.confidence,
+                "score": getattr(score_ctx, "total_score", None),
+                "rr": signal_payload.get("risk_reward"),
+                "effective_rr": signal_payload.get("risk_reward"),
                 "explanation": explanation,
                 "execution_ctx": {"phase": "before_real_order", "market_ts": market_ctx.get("market_ts"), "reject_reason_raw": order_plan.reason},
             })
@@ -489,6 +495,7 @@ class RuntimeOrchestrator:
         return {
             "symbol": selection.symbol,
             "signal_id": signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
+            "mode": str(market_ctx.get("mode", "PAPER")).upper(),
             "side": market_ctx.get("side", "LONG"),
             "timeframe": market_ctx.get("timeframe", "1m"),
             "entry_price": float(market_ctx.get("entry", 0.0) or 0.0),
@@ -707,11 +714,15 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
             decision_id = save_order_decision(
                 session,
                 mode=mode.value,
+                phase=payload.get("phase", "final"),
                 signal_id=payload.get("signal_id"),
                 symbol=payload.get("symbol"),
                 decision=payload.get("decision"),
                 reject_reason=payload.get("reason"),
                 confidence=payload.get("confidence"),
+                score=payload.get("score"),
+                rr=payload.get("rr"),
+                effective_rr=payload.get("effective_rr"),
                 explanation=payload.get("explanation"),
                 execution_ctx=payload.get("execution_ctx", {}),
             )
