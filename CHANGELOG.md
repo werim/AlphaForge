@@ -1,3 +1,14 @@
+## [Unreleased] - 2026-05-21 (Runtime/env failing-test triage audit)
+
+### Changed
+- Added audit documentation for reported runtime/env failures after git pull; current branch reproduces all targeted tests as passing under isolated execution.
+
+### Fixed
+- No runtime code fix required on current branch; issue characterized as likely stale DB/env-state contamination outside deterministic test isolation.
+
+### Known Issues
+- Historical failure reference includes a now-missing test node name (`test_runtime_rejected_decisions_do_not_persist_incomplete_rows`), suggesting rename/removal drift across branches/CI runs.
+
 ## [Unreleased] - 2026-05-21 (LIVE connectivity default fail-closed + startup consistency)
 
 ### Changed

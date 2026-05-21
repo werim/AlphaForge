@@ -1051,3 +1051,43 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 Root cause: runtime/exchange/backtest parsed env independently with hardcoded defaults.
 Changes: introduced centralized config loading and rewired runtime/exchange/backtest defaults.
 Tests: pytest -q tests/test_config_layer.py tests/test_runtime_env_config.py tests/test_exchange_connectivity.py
+
+
+## 2026-05-21 Patch Addendum — Runtime/env failing-test triage (stability verification only)
+
+### Why the patch was needed
+- Reported post-pull failures targeted runtime env aliasing, runtime DB path/bootstrap behavior, PAPER rejected-row persistence semantics, and adaptive-learning stats counts.
+
+### Root cause
+- No deterministic code defect reproduced on current branch.
+- The previously observed `assert 941 == 60` symptom in adaptive stats is consistent with non-isolated/stale DB data contamination rather than scoring/threshold logic drift.
+- Current runtime env alias + DB resolution tests pass and indicate canonical/alias precedence and absolute path logging behavior are intact.
+
+### Files changed
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- None (verification-only documentation update).
+
+### Lifecycle/persistence/schema impact
+- None.
+
+### Tests executed
+- `pytest tests/test_adaptive_learning_foundation.py::test_adaptive_stats_and_shadow_thresholds -vv --tb=long`
+- `pytest tests/test_runtime.py::test_runtime_module_bootstrap_builds_from_env -vv --tb=long`
+- `pytest tests/test_runtime.py::test_runtime_logs_absolute_db_path -vv --tb=long`
+- `pytest tests/test_runtime.py::test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count -vv --tb=long`
+- `pytest tests/test_runtime_env_config.py::test_runtime_env_aliases_for_threshold_and_positions -vv --tb=long`
+- `pytest tests/test_runtime_env_config.py -q`
+- `pytest tests/test_adaptive_learning_foundation.py -q`
+- `pytest tests/test_runtime.py -q`
+- `pytest -q`
+
+### Risks / limitations
+- The specific missing test node (`test_runtime_rejected_decisions_do_not_persist_incomplete_rows`) no longer exists under that name, implying test rename/removal drift between failure report and current branch.
+- Intermittent failures can still recur if external env vars or persistent sqlite files leak across test runs in non-isolated environments.
+
+### Push recommendation
+- Safe to merge as audit/traceability documentation update; no behavioral/runtime code change included.
