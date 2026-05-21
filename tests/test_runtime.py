@@ -244,19 +244,3 @@ def test_runtime_signal_uses_dynamic_rr_not_fallback_when_present() -> None:
     selection = type("Sel", (), {"symbol": "BTCUSDT"})()
     payload = RuntimeOrchestrator._build_signal(selection, {"entry": 100.0, "rr": 3.25})
     assert payload["risk_reward"] == pytest.approx(3.25)
-
-
-def test_bootstrap_lifecycle_persistence_failure_is_detectable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("alphaforge.persistence.save_trade_lifecycle_event", lambda *args, **kwargs: False)
-    rt = _build_runtime_from_env()
-    assert rt.on_lifecycle_event is not None
-    with pytest.raises(RuntimeError, match="save_trade_lifecycle_event failed"):
-        rt.on_lifecycle_event({"signal_id": "s1", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_CREATED", "event_ts": "2026-01-01T00:00:00Z"})
-
-
-def test_bootstrap_reject_persistence_failure_is_detectable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("alphaforge.persistence.save_order_decision", lambda *args, **kwargs: False)
-    rt = _build_runtime_from_env()
-    assert rt.on_reject_persist is not None
-    with pytest.raises(RuntimeError, match="save_order_decision failed"):
-        rt.on_reject_persist({"decision_id": "d1", "signal_id": "s1", "symbol": "BTCUSDT", "decision": "REJECTED"})

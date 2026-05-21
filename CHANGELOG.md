@@ -1,16 +1,5 @@
 # Changelog
 
-## [Unreleased] - 2026-05-21 (PR #114 merge conflict resolution: Phase 6.1 canonicalization)
-
-### Changed
-- Preserved canonical PAPER/runtime lifecycle vocabulary and transition ordering (`SIGNAL_CREATED` emitted first; accepted flow continues through `WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED`; rejected flow stays `SIGNAL_CREATED -> SIGNAL_REJECTED`).
-- Runtime bootstrap persistence callbacks now fail fast when persistence helpers explicitly report failure.
-
-### Fixed
-- `save_order_decision(...)` now returns an explicit failure indicator (`False`) on SQL exceptions instead of failing silently.
-- `save_trade_lifecycle_event(...)` now returns `False` when both lifecycle upsert paths fail, making DB write failures detectable to runtime.
-
-
 ## [Unreleased] - 2026-05-20 (SQLite schema bootstrap compatibility)
 
 ### Added

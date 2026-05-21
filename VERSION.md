@@ -1,14 +1,5 @@
 # AlphaForge Version Status
 
-## 2026-05-21 PR #114 conflict resolution — Phase 6.1 audit-trail canonicalization guardrails
-- **Version:** `0.3.15-dev`
-- **BACKTEST/PAPER/LIVE alignment:** preserved canonical lifecycle vocabulary/ordering in PAPER/runtime flow with no threshold loosening.
-- **Lifecycle coverage:** `SIGNAL_CREATED` remains first event; accepted PAPER path preserves `WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED`; rejected path preserves `SIGNAL_REJECTED`.
-- **Execution realism coverage:** unchanged gate thresholds and reject semantics.
-- **Known critical risks:** LIVE remains not production-ready.
-- **Last audit date:** `2026-05-21`
-- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
-
 ## 2026-05-20 SQLite schema bootstrap/migration hardening patch
 - **Version:** `0.3.14-dev`
 - **BACKTEST/PAPER/LIVE alignment:** unchanged decision/reject thresholds and shared runtime persistence behavior preserved.
