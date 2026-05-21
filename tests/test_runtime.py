@@ -263,6 +263,14 @@ def test_reconciliation_event_on_timeout_like_execution_state() -> None:
     assert any(evt["lifecycle_event_type"] == "RECONCILIATION_REPAIR" for evt in events)
 
 
+def test_live_start_blocks_placeholder_bootstrap_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION", "0")
+    monkeypatch.setenv("ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", "0")
+    orchestrator = _build_runtime_from_env()
+    with pytest.raises(RuntimeError, match="placeholder/mock scanner"):
+        asyncio.run(orchestrator.start())
+
 def test_runtime_module_bootstrap_builds_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "paper")
     monkeypatch.setenv("ALPHAFORGE_SCAN_INTERVAL_SEC", "0.01")

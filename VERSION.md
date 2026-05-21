@@ -1,3 +1,14 @@
+## 2026-05-21 LIVE placeholder scanner fail-closed startup gate
+- **Version:** `0.3.22-dev`
+- **Current phase:** Phase 6.1 live startup safety hardening.
+- **Runtime maturity:** LIVE startup now fail-closes if bootstrap placeholder/mock scanner wiring is detected.
+- **BACKTEST/PAPER/LIVE alignment:** no decision-threshold changes; safety gate applies only to LIVE startup path.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** prevents synthetic bootstrap feed from being treated as live-executable market input.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 Exchange connectivity safety checks + offline/opt-in integration test harness
 - **Version:** `0.3.21-dev`
 - **Current phase:** Phase 6.1 runtime safety hardening.
