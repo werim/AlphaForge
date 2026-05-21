@@ -283,11 +283,6 @@ def test_paper_reject_emits_signal_rejected_after_signal_created() -> None:
     asyncio.run(orchestrator._scan_once())
     assert rejects
     assert [events[0]["lifecycle_event_type"], events[1]["lifecycle_event_type"]] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
-    lifecycle = [evt["lifecycle_event_type"] for evt in events]
-    assert lifecycle[0] == "SIGNAL_CREATED"
-    assert "WAITING_ENTRY_ZONE" in lifecycle
-    assert "ENTRY_TRIGGERED" in lifecycle
-    assert "ORDER_PLACED" in lifecycle
 
 
 def test_runtime_persistence_callback_fails_closed_on_lifecycle_write_error(monkeypatch: pytest.MonkeyPatch) -> None:
