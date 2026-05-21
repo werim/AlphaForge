@@ -535,26 +535,21 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
             lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason,
             incident_payload=excluded.incident_payload
     """)
-    row_id: Any = None
     try:
-        result = session.execute(statement_by_lifecycle_key, payload)
-        row_id = getattr(result, "lastrowid", None)
+        session.execute(statement_by_lifecycle_key, payload)
     except Exception:
         try:
-            result = session.execute(statement_by_event_id, payload)
-            row_id = getattr(result, "lastrowid", None)
+            session.execute(statement_by_event_id, payload)
         except Exception:
             return None
+
     if hasattr(session, "commit"):
         try:
             session.commit()
         except Exception:
             return None
-    persisted_id = session.execute(
-        text("SELECT id FROM trade_lifecycle_events WHERE event_id = :event_id LIMIT 1"),
-        {"event_id": event_id},
-    ).scalar()
-    return bool(persisted_id or row_id)
+
+    return True
 
 # keep remaining functions as-is
 

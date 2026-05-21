@@ -10,6 +10,18 @@
 - **Live readiness verdict:** ❌ **NOT LIVE-READY**.
 
 
+## 2026-05-21 Lifecycle persistence bool-contract fix
+- **Version:** `0.3.17-dev`
+- **Current phase:** Phase 6.1 persistence contract hardening.
+- **Runtime maturity:** unchanged runtime flow; lifecycle persistence success contract now returns strict bool `True` after committed writes.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged behavior across modes; only return-contract normalization for lifecycle persistence helper.
+- **Lifecycle coverage:** unchanged lifecycle states/transitions; persisted `lifecycle_state` and `reject_reason` fields remain queryable.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+
 ## 2026-05-20 Phase 6.1 Audit-Trail Canonicalization
 - **Version:** `0.3.11-dev+phase6_1_audittrail`
 - **Phase:** 6.1 (audit-truth contract canonicalization)

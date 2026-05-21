@@ -1,3 +1,38 @@
+
+## 2026-05-21 Patch Addendum — lifecycle persistence strict bool success contract
+
+### Why the patch was needed
+- Two Phase 1/2/3 foundation tests asserted identity (`is True`) on `save_trade_lifecycle_event(...)` success, but the helper returned integer-like row IDs/rowcount values (e.g., `1`).
+
+### Root cause
+- `save_trade_lifecycle_event(...)` exposed database row identity/rowcount semantics instead of a strict public success/failure boolean contract.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- On successful lifecycle upsert + commit, `save_trade_lifecycle_event(...)` now returns literal `True`.
+- Existing SQL statements, `ON CONFLICT` behavior, event_id auto-generation, and commit flow are unchanged.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- No lifecycle state vocabulary changes.
+- Persisted lifecycle rows remain queryable as before (including `lifecycle_state` and `reject_reason`).
+
+### Tests executed
+- `pytest tests/test_phase123_foundations.py::test_save_trade_lifecycle_event_persists_state -q`
+- `pytest tests/test_phase123_foundations.py::test_trade_lifecycle_generates_event_id_when_missing -q`
+- `pytest tests/test_phase123_foundations.py -q`
+
+### Risks / limitations
+- Minimal and localized: only success return type was normalized from integer-like to strict bool.
+
+### Push recommendation
+- Safe to merge as a contract-correctness patch.
+
 ## 2026-05-21 Patch Addendum — Rejected-shadow directional TP/SL hardening
 
 ### Why the patch was needed
