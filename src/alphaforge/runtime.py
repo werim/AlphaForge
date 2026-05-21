@@ -5,6 +5,7 @@ import contextlib
 from collections import deque
 import hashlib
 import logging
+import os
 import signal
 import time
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from alphaforge.order import LifecycleState
 from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
+from alphaforge.exchange_market_scanner import scan_exchange_markets
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
@@ -553,6 +555,13 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         now_ts = time.time()
         return [{"symbol": "BTCUSDT", "volume_24h_usdt": 125_000_000.0, "spread_pct": 0.0009, "funding_rate_pct": 0.00005, "liquidity_score": 0.86, "liquidity_quality": "HIGH", "volatility_pct": 0.011, "volatility_fit": "GOOD", "volatility_regime": "MODERATE", "trend_strength": 0.64, "momentum_confirmation": 0.7, "recent_volume_change_pct": 0.085, "chop_score": 0.27, "panic_score": 0.06, "fakeout_risk": 0.22, "spread_bps": 9.0, "expected_slippage_pct": 0.0006, "latency_ms": 55.0, "market_ts": now_ts, "entry": 67_250.0, "side": "LONG", "rr": 2.15, "timeframe": "5m", "tick_size": 0.1}]
 
+    use_safe_scanner = mode == ExecutionMode.BACKTEST or str(os.getenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+    async def _runtime_market_scanner() -> list[dict[str, Any]]:
+        if use_safe_scanner:
+            return await _safe_market_scanner()
+        return await scan_exchange_markets(cfg)
+
     def _persist_lifecycle(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
             return
@@ -603,7 +612,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     orchestrator = RuntimeOrchestrator(
         config=config,
         ai_brain=brain,
-        market_scanner=_safe_market_scanner,
+        market_scanner=_runtime_market_scanner,
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
         persistence_engine=engine,

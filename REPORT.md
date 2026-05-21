@@ -1,3 +1,44 @@
+## 2026-05-21 Patch Addendum — PAPER/LIVE read-only exchange scanner alignment
+
+### Why the patch was needed
+- Runtime PAPER/LIVE bootstrap scanner used deterministic placeholder BTC input, preventing real exchange market-data rehearsal.
+
+### Root cause
+- `_build_runtime_from_env()` always wired `_safe_market_scanner` regardless of execution mode.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/exchange_market_scanner.py`
+- `tests/test_runtime.py`
+- `tests/test_exchange_market_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- PAPER and LIVE now share `scan_exchange_markets(config)` read-only scanner path using public endpoints.
+- BACKTEST continues to use `_safe_market_scanner` by default to avoid live dependency.
+- Offline smoke override available via `ALPHAFORGE_RUNTIME_SAFE_SCANNER=1`.
+- LIVE fail-closed protections remain: placeholder scanner block, exchange-connectivity gate, qualification gate, and required real execution adapter.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle schema changes.
+- No persistence schema changes.
+
+### Tests added/updated
+- Added `tests/test_exchange_market_scanner.py`.
+- Added runtime bootstrap scanner wiring tests for PAPER and BACKTEST.
+
+### Tests executed
+- `pytest -q tests/test_exchange_market_scanner.py tests/test_runtime.py::test_build_runtime_uses_exchange_scanner_for_paper tests/test_runtime.py::test_build_runtime_keeps_safe_scanner_for_backtest`
+
+### Risks / limitations
+- Hyperliquid public scan currently provides mids-only (limited spread/volume detail), so selection may naturally reject more symbols; this is fail-safe.
+- Public endpoint shape changes upstream could reduce candidate availability, which intentionally fail-closes to fewer/no trades.
+
+### Push recommendation
+- Recommended to merge as a minimal execution-rehearsal alignment patch without threshold loosening.
+
 ## 2026-05-21 Patch Addendum — LIVE connectivity default fail-closed + startup contradiction resolution
 
 ### Why the patch was needed
