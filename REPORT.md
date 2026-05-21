@@ -1,3 +1,49 @@
+## 2026-05-21 Patch Addendum — Exchange connectivity safety + offline deterministic tests
+
+### Why the patch was needed
+- Exchange adapter wiring checks were missing from deterministic tests, leaving LIVE startup safety under-validated.
+
+### Root cause
+- No shared exchange connectivity contract existed for Binance/Hyperliquid health checks, and no opt-in integration marker boundary was defined.
+
+### Files changed
+- `src/alphaforge/exchange_connectivity.py`
+- `src/alphaforge/runtime.py`
+- `tests/test_exchange_connectivity.py`
+- `pyproject.toml`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added `check_exchange_connectivity(exchange_name)` returning explicit `ExchangeHealth` contract fields.
+- Added optional LIVE connectivity gate (`require_exchange_connectivity_for_live`) that fail-closes runtime startup when required exchange checks fail.
+- Exchange failures are explicit and never replaced with fake zeros.
+
+### Persistence/schema impact
+- No schema migration required.
+
+### Tests added
+- Offline mocked Binance success/failure connectivity tests.
+- Offline mocked Hyperliquid success/failure connectivity tests.
+- Runtime LIVE block regression when exchange connectivity is unhealthy.
+- Secret-leak guard assertion for exchange health payloads.
+- Opt-in integration tests (`@pytest.mark.integration`) for live public endpoint checks.
+
+### Tests executed
+- `pytest tests/test_exchange_connectivity.py -q`
+- `pytest tests/test_runtime.py -q`
+- `pytest tests/test_sqlite_schema_bootstrap.py -q`
+- `pytest -q`
+
+### Risks / limitations
+- LIVE connectivity gate is config-controlled (`False` by default) to preserve existing deterministic startup behavior.
+- Integration checks remain network-dependent and are skipped unless explicitly enabled.
+
+### Push recommendation
+- Recommended to merge; adds deterministic coverage and optional live safety checks without loosening trade logic.
+
+
 ## 2026-05-21 Patch Addendum — Runtime order_decisions audit semantics + mode correction
 
 ### Why the patch was needed

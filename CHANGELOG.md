@@ -1,3 +1,20 @@
+## [Unreleased] - 2026-05-21 (Exchange connectivity safety + opt-in integration checks)
+
+### Added
+- New `ExchangeHealth` contract and `check_exchange_connectivity(exchange_name)` for Binance/Hyperliquid public connectivity checks.
+- New offline deterministic test module `tests/test_exchange_connectivity.py` with mocked success/failure coverage for Binance and Hyperliquid.
+- Optional live integration tests marked `integration`, gated behind `ALPHAFORGE_RUN_EXCHANGE_INTEGRATION=1`.
+
+### Changed
+- Runtime LIVE startup can now optionally enforce exchange connectivity via `RuntimeConfig.require_exchange_connectivity_for_live` and `required_live_exchanges`.
+- Pytest marker configuration now includes `integration: tests requiring live external services`.
+
+### Fixed
+- Missing connectivity failure path coverage for LIVE runtime startup safety.
+
+### Known Issues
+- Connectivity checks are public endpoint-only and do not place/cancel orders.
+
 ## [Unreleased] - 2026-05-21 (Runtime order_decisions audit semantics hardening)
 
 ### Fixed
