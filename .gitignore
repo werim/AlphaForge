@@ -10,3 +10,9 @@ venv/
 :memory:
 __memory__/
 .pytest_cache/
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite
+data/*.sqlite3
