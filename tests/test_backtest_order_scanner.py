@@ -380,6 +380,32 @@ def test_rejected_candidates_saved_with_shadow_fields():
     assert shadow.low_score_gate_score == 2.0
 
 
+def test_rejected_shadow_short_can_be_would_tp_when_effective_rr_passes():
+    row = {
+        "timestamp": 1,
+        "symbol": "AAAUSDT",
+        "side": "SHORT",
+        "entry": 10.0,
+        "sl": 11.0,
+        "tp": 9.0,
+        "rr": 2.0,
+        "setup_type": "BREAKDOWN_DOWN",
+        "setup_reason": "X",
+        "regime": "TREND",
+        "score": 8.0,
+        "order_type": "LIMIT",
+        "reject_reason": "LOW_SCORE",
+        "spread_pct": 0.01,
+        "expected_slippage_pct": 0.002,
+        "liquidity_score": 0.9,
+        "volatility_score": 1.2,
+    }
+    candles = [bo.Candle(1, 10.0, 10.2, 8.8, 9.1, 1)]
+    shadow = bo.evaluate_rejected_shadow(row, candles, 0)
+    assert shadow.shadow_outcome == "WOULD_TP"
+    assert shadow.effective_tp_hit is True
+
+
 def test_shadow_outcome_calculated_for_low_score_reject():
     row = {"timestamp": 1, "symbol": "AAAUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 11, "rr": 1.5, "reject_reason": "LOW_SCORE", "score": 1.5, "regime": "RANGE", "spread_pct": 0.01, "liquidity_score": 0.9, "volatility_score": 0.5}
     candles = [bo.Candle(1, 10, 10.2, 9.9, 10, 1), bo.Candle(2, 10, 11.1, 9.9, 11, 1)]
@@ -441,6 +467,34 @@ def test_rejected_counterfactual_same_candle_sl_priority():
     assert sim["outcome"] == "WOULD_SL"
 
 
+
+
+def test_rejected_counterfactual_long_sl_only():
+    c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 11, 1, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(1, 10, 10.4, 8.9, 9.1, 1)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0)
+    assert sim["outcome"] == "WOULD_SL"
+
+
+def test_rejected_counterfactual_short_tp_only():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(1, 10, 10.2, 8.8, 9.2, 1)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0)
+    assert sim["outcome"] == "WOULD_TP"
+
+
+def test_rejected_counterfactual_short_sl_only():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(1, 10, 11.2, 9.7, 10.9, 1)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0)
+    assert sim["outcome"] == "WOULD_SL"
+
+
+def test_rejected_counterfactual_same_candle_sl_priority_short():
+    c = bo.CandidateOrder(1, "S", "SHORT", 10, 11, 9, 1, "BACKTEST", "R", "X", 1, "LIMIT")
+    candles = [bo.Candle(1, 10, 11.2, 8.8, 10.0, 1)]
+    sim = bo.simulate_rejected_counterfactual(c, candles, 0)
+    assert sim["outcome"] == "WOULD_SL"
 def test_rejected_counterfactual_uses_bounded_lookahead_timeout():
     c = bo.CandidateOrder(1, "S", "LONG", 10, 9, 12, 2, "BACKTEST", "R", "X", 1, "LIMIT")
     candles = [bo.Candle(i, 10, 10.1, 9.9, 10, 1) for i in range(1, 8)]
