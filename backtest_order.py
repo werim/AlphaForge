@@ -14,6 +14,7 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 from alphaforge.execution import build_execution_context, build_execution_cost_model, normalize_pct_input
+from alphaforge.config import load_config_from_env
 from alphaforge.persistence import init_db, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
 from sqlalchemy import text
@@ -1888,17 +1889,18 @@ def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Di
         "reject_reason_diagnostics": json.dumps(reason_diagnostics, sort_keys=True),
     }
 def main():
+    cfg = load_config_from_env()
     p = argparse.ArgumentParser()
     p.add_argument("--start")
     p.add_argument("--end")
     p.add_argument("--last-n-days", type=int, default=7)
-    p.add_argument("--top-n", type=int, default=100)
+    p.add_argument("--top-n", type=int, default=cfg.backtest.top_n)
     p.add_argument("--quote", default="USDT")
-    p.add_argument("--interval", default="1m")
-    p.add_argument("--output-dir", default="data/backtest")
+    p.add_argument("--interval", default=cfg.backtest.timeframe)
+    p.add_argument("--output-dir", default=cfg.backtest.output_dir)
     p.add_argument("--mode", default="BACKTEST")
-    p.add_argument("--balance", type=float, default=1000)
-    p.add_argument("--risk-pct", type=float, default=1.0)
+    p.add_argument("--balance", type=float, default=cfg.backtest.initial_balance)
+    p.add_argument("--risk-pct", type=float, default=cfg.backtest.risk_pct)
     p.add_argument("--telegram", action="store_true")
     p.add_argument("--offline", action="store_true", help="Run without network APIs using deterministic fixture data")
     p.add_argument("--ci", action="store_true", help="CI-safe mode; implies --offline")

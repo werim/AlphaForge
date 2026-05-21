@@ -1046,3 +1046,8 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 - `pytest -q tests/test_persistence_patch1.py`
 - `pytest -q tests/test_phase123_foundations.py::test_backtest_lifecycle_does_not_start_directly_at_created`
 - `pytest -q`
+
+## 2026-05-21 Patch
+Root cause: runtime/exchange/backtest parsed env independently with hardcoded defaults.
+Changes: introduced centralized config loading and rewired runtime/exchange/backtest defaults.
+Tests: pytest -q tests/test_config_layer.py tests/test_runtime_env_config.py tests/test_exchange_connectivity.py
