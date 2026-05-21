@@ -869,16 +869,24 @@ def simulate_rejected_counterfactual(
     mfe = 0.0
     mae = 0.0
     scan = candles[idx:idx + timeout_bars]
+    side = str(candidate.side).upper()
     for c in scan:
         if c.low <= candidate.entry <= c.high:
             would_trigger = True
         if would_trigger:
-            mfe = max(mfe, c.high - candidate.entry)
-            mae = max(mae, candidate.entry - c.low)
-            hit_sl = c.low <= candidate.sl
-            hit_tp = c.high >= candidate.tp
-            # Deterministic same-candle rule for diagnostics parity:
-            # if both touch, count stop loss first.
+            if side == "SHORT":
+                mfe = max(mfe, candidate.entry - c.low)
+                mae = max(mae, c.high - candidate.entry)
+                hit_tp = c.low <= candidate.tp
+                hit_sl = c.high >= candidate.sl
+            else:
+                mfe = max(mfe, c.high - candidate.entry)
+                mae = max(mae, candidate.entry - c.low)
+                hit_tp = c.high >= candidate.tp
+                hit_sl = c.low <= candidate.sl
+            # Conservative same-candle tie-breaker for both LONG and SHORT.
+            # We cannot infer intrabar path from OHLC, so if both TP and SL touch,
+            # count it as a stop loss to avoid optimistic bias.
             if hit_sl and hit_tp:
                 hit_tp = False
             if hit_sl:

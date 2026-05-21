@@ -12,6 +12,17 @@
 
 # AlphaForge Version Status
 
+## 2026-05-21 Rejected-shadow SHORT directional TP/SL hardening
+- **Version:** `0.3.16-dev`
+- **Current phase:** Phase 6.1 rejected-shadow counterfactual correctness hardening.
+- **Runtime maturity:** unchanged runtime execution flow; rejected-shadow evaluation now side-correct for LONG/SHORT.
+- **BACKTEST/PAPER/LIVE alignment:** preserved; no accepted-order generation or threshold changes.
+- **Lifecycle coverage:** unchanged lifecycle schema/states; shadow diagnostics now explicitly conservative on same-candle TP/SL ties for both LONG and SHORT.
+- **Execution realism coverage:** improved directional realism in rejected counterfactual TP/SL hit simulation.
+- **Known critical risks:** intrabar path remains unavailable from OHLC; conservative SL-priority tie-break retained by design.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 Phase 6.1 Canonicalization Merge Resolution
 - **Version:** `0.3.15-dev`
 - **Current phase:** Phase 6.1 audit-trail canonicalization conflict reconciliation.

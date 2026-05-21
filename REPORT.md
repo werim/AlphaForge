@@ -1,3 +1,40 @@
+## 2026-05-21 Patch Addendum — Rejected-shadow directional TP/SL hardening
+
+### Why the patch was needed
+- Rejected-shadow analytics showed asymmetric behavior: LONG rejected rows produced normal WOULD_TP/WOULD_SL distribution while SHORT rows were near-zero WOULD_TP despite accepted SHORT trades reaching `TP_HIT`.
+
+### Root cause
+- `simulate_rejected_counterfactual(...)` used LONG-style TP/SL checks for all sides (`high>=tp`, `low<=sl`) and did not branch on `candidate.side`.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Behavior changes
+- Rejected-shadow TP/SL touch logic is now side-aware:
+  - LONG: TP on `high>=tp`, SL on `low<=sl`.
+  - SHORT: TP on `low<=tp`, SL on `high>=sl`.
+- Conservative same-candle ambiguity convention is now explicit in-code and identical across both sides: if both TP and SL are touched within a candle, classify as SL to avoid optimistic bias.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle state/schema changes.
+- No CSV schema changes.
+- No score threshold, RR gate, or accepted-order generation logic changes.
+
+### Tests added/updated
+- Added rejected-counterfactual tests for LONG/SHORT TP/SL directionality and same-candle ambiguity.
+- Added SHORT regression test for `evaluate_rejected_shadow(...)` validating `WOULD_TP` + `effective_tp_hit=True` under passing filters.
+- `tests/test_backtest_order_scanner.py` passes fully.
+
+### Risks / limitations
+- Intrabar order is still unavailable from OHLC alone; conservative SL-priority tie-break remains a designed approximation.
+
+### Push recommendation
+- Safe and recommended: minimal, focused correctness patch for rejected-shadow SHORT outcome evaluation without gate loosening.
+
 
 
 ## 2026-05-20 Phase 6.1 Audit-trail canonicalization

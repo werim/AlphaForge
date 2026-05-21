@@ -16,6 +16,16 @@
 
 # Changelog
 
+## [Unreleased] - 2026-05-21 (Rejected-shadow SHORT TP/SL fix)
+
+### Fixed
+- Rejected-shadow counterfactual simulation now applies directional TP/SL touch rules by side (`LONG`: high>=tp/low<=sl, `SHORT`: low<=tp/high>=sl), fixing SHORT false-negative WOULD_TP outcomes.
+- Same-candle TP+SL ambiguity handling is now explicitly documented and conserved as SL-priority for both LONG and SHORT to avoid optimistic bias when intrabar path is unknown.
+
+### Added
+- Unit coverage for rejected counterfactual LONG/SHORT TP-only, SL-only, and same-candle TP/SL ambiguity scenarios.
+- Regression coverage asserting a valid SHORT rejected setup can produce `shadow_outcome=WOULD_TP` with `effective_tp_hit=True` when effective RR and cost/liquidity/volatility filters pass.
+
 ## [Unreleased] - 2026-05-20 (SQLite schema bootstrap compatibility)
 
 ### Added
