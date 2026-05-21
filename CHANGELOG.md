@@ -1,3 +1,14 @@
+## [Unreleased] - 2026-05-21 (Runtime rejected decision row completeness)
+
+### Fixed
+- `order_decisions` AI persistence rows for runtime `phase=real` rejections now persist non-empty `symbol` and canonical `reject_reason` instead of sparse incomplete duplicates.
+
+### Changed
+- Decision persistence upsert payload now includes `symbol`, `mode`, `score`, and `rr` for improved rejected-decision audit completeness.
+
+### Added
+- Regression coverage asserting rejected runtime rows do not include incomplete `:real:` paired rows with empty `symbol`/`reject_reason`.
+
 ## [Unreleased] - 2026-05-21 (Runtime signal identity + diagnostics hardening)
 
 ### Changed

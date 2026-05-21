@@ -1,3 +1,36 @@
+
+## 2026-05-21 Patch Addendum — runtime duplicate rejected-row completeness fix
+
+### Why the patch was needed
+- Runtime rejected candidates were producing a second `order_decisions` row (`decision_id` containing `:real:`) with missing `symbol` and missing `reject_reason`, creating inconsistent duplicate audit rows.
+
+### Root cause
+- `AIBrain._persist_decision(...)` inserted into `order_decisions` without populating key rejected-row fields (`symbol`, `reject_reason`, plus score/RR audit context), while runtime reject persistence already wrote a fully-populated reject row.
+
+### Files changed
+- `src/alphaforge/ai_brain.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- AI decision persistence now writes `symbol`, `mode`, `score`, `rr`, and canonical `reject_reason` into `order_decisions` rows, including `phase=real` rejected rows.
+- Existing runtime `signal_id` propagation remains preserved.
+- Thresholds/scoring/reject logic are unchanged.
+
+### Persistence/schema impact
+- No schema migration required.
+- Existing `:real:` rows remain valid decision records, now complete for audit usage rather than sparse duplicates.
+
+### Tests added/updated
+- Added regression test ensuring rejected runtime decision rows never persist empty `symbol`/`reject_reason`, and specifically guarding against incomplete `:real:` paired rows.
+
+### Risks
+- Low: localized persistence payload enrichment only.
+
+### Push recommendation
+- Safe to merge as runtime audit-integrity hardening.
 ## 2026-05-21 Patch Addendum — Runtime identity propagation + diagnostic lifecycle hardening
 
 ### Why the patch was needed
