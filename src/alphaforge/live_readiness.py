@@ -156,14 +156,14 @@ class LiveReadinessEvaluator:
             null_row = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE " + " OR ".join([f"{f} IS NULL" for f in fields]))).scalar_one()
             checks.append(CheckResult(f"critical_not_null_{table}", int(null_row) == 0, f"null_rows={null_row}"))
 
-        rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED'" )).scalar_one()
+        rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'" )).scalar_one()
         rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE lifecycle_state='SIGNAL_REJECTED'" )).scalar_one()
         checks.append(CheckResult("reject_persistence_parity", int(rejected_decisions) <= int(rejected_events), f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
         return checks
 
     def _check_stats(self, conn: Any) -> list[CheckResult]:
-        total = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions")).scalar_one())
-        rejected = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED'" )).scalar_one())
+        total = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE COALESCE(phase,'final')='final'")).scalar_one())
+        rejected = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'" )).scalar_one())
         reject_rate = (rejected / total) if total else 0.0
         min_rr, max_rr = conn.execute(text("SELECT MIN(rr), MAX(rr) FROM order_decisions")).one()
         min_score, max_score = conn.execute(text("SELECT MIN(score), MAX(score) FROM order_decisions")).one()

@@ -345,6 +345,7 @@ class AIBrain:
             signal_id = str(signal.get("signal_id") or _stable_signal_id(signal, market_ctx))
             decision_id = str(signal.get("decision_id") or _stable_decision_id(signal_id, phase, market_ctx))
             now = _now()
+            runtime_mode = str(signal.get("mode") or market_ctx.get("mode") or "BACKTEST").upper()
             session.execute(
                 text(
                     """
@@ -361,14 +362,14 @@ class AIBrain:
                 ),
                 {
                     "signal_id": signal_id, "symbol": str(signal.get("symbol", "UNKNOWN")), "side": str(signal.get("side", "N/A")),
-                    "timeframe": str(signal.get("timeframe", "NA")), "mode": "BACKTEST", "score": float(score_ctx.total_score),
+                    "timeframe": str(signal.get("timeframe", "NA")), "mode": runtime_mode, "score": float(score_ctx.total_score),
                     "rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
                     "effective_rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
                     "expectancy_bucket": "UNKNOWN", "created_at": now, "updated_at": now,
                 },
             )
             reject_reason = canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else ""
-            decision_payload = {"decision_id": decision_id, "signal_id": signal_id, "symbol": str(signal.get("symbol", "UNKNOWN") or "UNKNOWN"), "mode": "BACKTEST", "phase": phase, "decision": order_plan.decision, "order_type": order_plan.order_type, "confidence": score_ctx.total_score, "score": score_ctx.total_score, "rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0), "reject_reason": reject_reason, "explanation": explanation, "order_payload": _json_dumps({"limit_price": order_plan.limit_price, "stop_price": order_plan.stop_price, "reason": order_plan.reason}), "expected_slippage_pct": float(_num(market_ctx, "expected_slippage_pct", 0.0) or 0.0), "spread_pct": _num(market_ctx, "spread_pct", 0.0), "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)), "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0), "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0), "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"), "effective_rr": float(signal.get("risk_reward", 0.0) or 0.0), "created_at": now, "updated_at": now}
+            decision_payload = {"decision_id": decision_id, "signal_id": signal_id, "symbol": str(signal.get("symbol", "UNKNOWN") or "UNKNOWN"), "mode": runtime_mode, "phase": f"ai_internal_{phase}", "decision": order_plan.decision, "order_type": order_plan.order_type, "confidence": score_ctx.total_score, "score": score_ctx.total_score, "rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0), "reject_reason": reject_reason, "explanation": explanation, "order_payload": _json_dumps({"limit_price": order_plan.limit_price, "stop_price": order_plan.stop_price, "reason": order_plan.reason}), "expected_slippage_pct": float(_num(market_ctx, "expected_slippage_pct", 0.0) or 0.0), "spread_pct": _num(market_ctx, "spread_pct", 0.0), "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)), "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0), "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0), "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"), "effective_rr": float(signal.get("risk_reward", 0.0) or 0.0), "created_at": now, "updated_at": now}
             try:
                 session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_decision_features_decision_id ON ai_decision_features(decision_id)"))
                 order_row_id = session.execute(text("""

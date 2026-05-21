@@ -1,3 +1,16 @@
+## [Unreleased] - 2026-05-21 (Runtime order_decisions audit semantics hardening)
+
+### Fixed
+- Runtime AI/internal `:real:` persistence no longer writes `mode=BACKTEST` during PAPER runtime; mode now reflects the actual runtime mode.
+- Canonical runtime rejected decision rows now persist `phase=final` plus score/RR fields so final reject audits are not sparse.
+
+### Changed
+- `AIBrain` internal audit rows are now explicitly marked as `phase=ai_internal_real|ai_internal_virtual` to distinguish them from canonical runtime final decisions.
+- Live-readiness reject-rate and persistence parity checks now count only canonical final order decisions (`COALESCE(phase,'final')='final'`) to prevent internal-audit double-count inflation.
+
+### Added
+- Regression test for PAPER runtime rejected persistence path asserting: no runtime-created row uses `mode=BACKTEST`, canonical final rejected row is populated and counted once, and AI/internal row is explicitly marked non-final.
+
 ## [Unreleased] - 2026-05-21 (Runtime rejected decision row completeness)
 
 ### Fixed

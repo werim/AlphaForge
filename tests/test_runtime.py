@@ -223,6 +223,25 @@ def test_runtime_rejected_decisions_do_not_persist_incomplete_real_rows(tmp_path
     assert not any(":real:" in str(row.decision_id) and (not str(row.symbol or "").strip() or not str(row.reject_reason or "").strip()) for row in rows)
 
 
+def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "runtime_paper_rejects.sqlite3"
+    monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
+    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    orchestrator = _build_runtime_from_env()
+    asyncio.run(orchestrator._scan_once())
+
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
+    with Session(engine) as verify_session:
+        runtime_rows = verify_session.execute(text("SELECT decision_id, mode, phase, signal_id, symbol, reject_reason, score, rr FROM order_decisions WHERE signal_id LIKE 'runtime:%' AND UPPER(decision)='REJECTED'")).all()
+        final_count = verify_session.execute(text("SELECT COUNT(*) FROM order_decisions WHERE signal_id LIKE 'runtime:%' AND UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
+    assert runtime_rows
+    assert all(row.mode == "PAPER" for row in runtime_rows)
+    assert all(str(row.signal_id or "").strip() and str(row.symbol or "").strip() and str(row.reject_reason or "").strip() for row in runtime_rows)
+    assert any(row.phase == "final" and row.score is not None and row.rr is not None for row in runtime_rows)
+    assert final_count == 1
+    assert any((str(row.phase).startswith("ai_internal_")) for row in runtime_rows)
+
+
 def test_reconciliation_event_on_timeout_like_execution_state() -> None:
     events: list[dict] = []
 

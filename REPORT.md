@@ -1,3 +1,56 @@
+## 2026-05-21 Patch Addendum — Runtime order_decisions audit semantics + mode correction
+
+### Why the patch was needed
+- Runtime rejected signals were being persisted twice into `order_decisions` without explicit semantic separation, and the AI/internal `:real:` row used `mode=BACKTEST` even during PAPER runtime.
+- This made rejected-decision reporting ambiguous and vulnerable to double-counting.
+
+### Root cause
+- `AIBrain._persist_decision(...)` hardcoded mode to `BACKTEST` and used `phase=real` for internal AI audit writes, which looked like canonical final runtime rows.
+- Runtime final reject persistence did not explicitly mark canonical finality and often omitted score/RR enrichment fields.
+- Reporting checks counted all rejected rows in `order_decisions`, including internal AI audit rows.
+
+### Files changed
+- `src/alphaforge/ai_brain.py`
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- AI/internal decision persistence now uses runtime-resolved mode from signal/market context and marks internal rows as `phase=ai_internal_real`/`phase=ai_internal_virtual`.
+- Runtime canonical rejected persistence is explicitly marked `phase=final` and enriched with score/RR/effective_RR when available.
+- Runtime signal payload now propagates runtime mode into AI decision persistence context.
+
+### Persistence/schema impact
+- No schema migration required.
+- Contract clarified inside existing `order_decisions` structure:
+  - canonical runtime final decision rows: `phase=final` (or null legacy)
+  - AI/internal audit rows: `phase` prefixed with `ai_internal_`
+
+### Reporting/counting impact
+- Live-readiness persistence and reject-rate checks now count only canonical final decision rows (`COALESCE(phase,'final')='final'`), preventing internal AI audit rows from inflating rejected totals.
+
+### Tests added/updated
+- Added PAPER runtime regression test validating:
+  - runtime-created rejected rows are never persisted with `mode=BACKTEST`
+  - canonical final PAPER rejected row has populated key fields (`signal_id`, `symbol`, `reject_reason`, `score`, `rr` where available)
+  - final rejected count remains exactly one per runtime signal despite AI/internal audit row persistence
+  - AI/internal row remains present but explicitly non-final via `phase=ai_internal_*`
+
+### Risks
+- Low-to-moderate: behaviorally safe and backward-compatible, but downstream queries that assumed all `phase=real` rows are final should migrate to canonical-final filtering.
+
+### Remaining limitations
+- Historical rows created before this patch may still carry ambiguous `phase` semantics.
+
+### Migration concerns
+- Consumers/reports that aggregate `order_decisions` should prefer canonical-final filter (`COALESCE(phase,'final')='final'`) to avoid legacy internal-row double counts.
+
+### Push recommendation
+- Recommended to merge; this patch hardens audit semantics without dropping internal AI audit information.
+
 
 ## 2026-05-21 Patch Addendum — runtime duplicate rejected-row completeness fix
 
