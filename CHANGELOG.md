@@ -1,3 +1,22 @@
+## [Unreleased] - 2026-05-21 (LIVE connectivity default fail-closed + startup consistency)
+
+### Changed
+- LIVE startup now requires exchange connectivity by default (`RuntimeConfig.require_exchange_connectivity_for_live=True`).
+- Runtime env bootstrap now wires `ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE`, `ALPHAFORGE_REQUIRED_LIVE_EXCHANGES`, and `ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC`.
+
+### Added
+- Regression test proving LIVE startup fails closed on exchange connectivity by default.
+- Regression test proving LIVE connectivity gate can only be skipped via explicit override.
+- Regression assertion covering default non-impact for PAPER mode configuration path.
+
+## [Unreleased] - 2026-05-21 (LIVE placeholder scanner fail-closed gate)
+
+### Fixed
+- LIVE startup now blocks when runtime is wired to the bootstrap placeholder scanner (`_safe_market_scanner`) to prevent synthetic local feed use in LIVE mode.
+
+### Added
+- Runtime regression test ensuring LIVE cannot start with placeholder/mock bootstrap scanner wiring.
+
 ## [Unreleased] - 2026-05-21 (Exchange connectivity safety + opt-in integration checks)
 
 ### Added
@@ -468,3 +487,6 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Fixed
 - `save_order_decision(...)` now persists legacy `payload` JSON consistently, including rejected decision context.
 - Backtest accepted lifecycle now includes `WAITING_ENTRY_ZONE` before `ENTRY_TRIGGERED`.
+
+## 2026-05-21 config centralization
+- Added centralized env config loading and runtime/exchange/backtest wiring updates.

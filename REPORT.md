@@ -1,3 +1,77 @@
+## 2026-05-21 Patch Addendum — LIVE connectivity default fail-closed + startup contradiction resolution
+
+### Why the patch was needed
+- LIVE startup safety messaging and behavior were inconsistent across recent summaries.
+- LIVE connectivity gating existed but was optional-by-default, which is not fail-closed for production startup.
+
+### Root cause
+- `RuntimeConfig.require_exchange_connectivity_for_live` defaulted to `False`.
+- `_build_runtime_from_env()` did not wire exchange connectivity env config into `RuntimeConfig`.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `tests/test_exchange_connectivity.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Confirmed existing LIVE fail-closed guard remains in `RuntimeOrchestrator.start()` for `_safe_market_scanner`.
+- LIVE exchange connectivity gate now defaults to required (`require_exchange_connectivity_for_live=True`).
+- LIVE connectivity gate can still be explicitly bypassed for tests/overrides via config/env.
+- PAPER and BACKTEST behavior remain unchanged.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle changes.
+- No persistence schema changes.
+
+### Tests added/updated
+- Added `test_live_startup_requires_exchange_connectivity_by_default`.
+- Added `test_paper_start_does_not_require_exchange_connectivity_by_default`.
+- Added `test_live_can_only_skip_connectivity_when_explicitly_configured_for_test_or_override`.
+- Existing `test_live_start_blocks_placeholder_bootstrap_scanner` remains as guard proof.
+
+### Risks / limitations
+- Connectivity gate quality depends on upstream exchange health probe coverage/quality.
+- Explicit override can still disable gate; this is intentional for deterministic tests.
+
+### Push recommendation
+- Recommended to merge as minimal fail-closed LIVE startup safety patch.
+
+## 2026-05-21 Patch Addendum — LIVE placeholder scanner fail-closed gate
+
+### Why the patch was needed
+- LIVE bootstrap could be started with `_safe_market_scanner`, a deterministic local placeholder feed intended only for offline wiring checks.
+
+### Root cause
+- Runtime LIVE startup gates validated readiness/connectivity (when enabled) but did not explicitly forbid placeholder/mock scanner wiring.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- `RuntimeOrchestrator.start()` now blocks LIVE startup with: `LIVE mode blocked: placeholder/mock scanner is not allowed` when scanner function resolves to `_safe_market_scanner`.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle schema changes.
+- No persistence schema changes.
+
+### Tests added
+- `test_live_start_blocks_placeholder_bootstrap_scanner` in `tests/test_runtime.py`.
+
+### Tests executed
+- `pytest tests/test_runtime.py -q`
+
+### Risks / limitations
+- Name-based guard targets known placeholder bootstrap scanner and does not yet classify all possible custom mock scanners.
+
+### Push recommendation
+- Recommended to merge as a minimal fail-closed LIVE safety patch.
+
 ## 2026-05-21 Patch Addendum — Exchange connectivity safety + offline deterministic tests
 
 ### Why the patch was needed
@@ -972,3 +1046,8 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 - `pytest -q tests/test_persistence_patch1.py`
 - `pytest -q tests/test_phase123_foundations.py::test_backtest_lifecycle_does_not_start_directly_at_created`
 - `pytest -q`
+
+## 2026-05-21 Patch
+Root cause: runtime/exchange/backtest parsed env independently with hardcoded defaults.
+Changes: introduced centralized config loading and rewired runtime/exchange/backtest defaults.
+Tests: pytest -q tests/test_config_layer.py tests/test_runtime_env_config.py tests/test_exchange_connectivity.py

@@ -4,11 +4,9 @@ import asyncio
 import contextlib
 from collections import deque
 import hashlib
-import os
 import logging
 import signal
 import time
-from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
@@ -22,6 +20,7 @@ from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exch
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
+from alphaforge.config import load_config_from_env
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
@@ -60,7 +59,7 @@ class RuntimeConfig:
     operator_live_acknowledged: bool = False
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
-    require_exchange_connectivity_for_live: bool = False
+    require_exchange_connectivity_for_live: bool = True
     required_live_exchanges: tuple[str, ...] = ("binance",)
     exchange_connectivity_timeout_sec: float = 2.0
 
@@ -118,6 +117,9 @@ class RuntimeOrchestrator:
 
     async def start(self) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE:
+            scanner_name = getattr(self.market_scanner, "__name__", "")
+            if scanner_name == "_safe_market_scanner":
+                raise RuntimeError("LIVE mode blocked: placeholder/mock scanner is not allowed")
             await self._run_live_exchange_connectivity_gate()
             if self.config.require_live_qualification:
                 await self._run_live_qualification_gate()
@@ -525,181 +527,31 @@ class RuntimeOrchestrator:
         }
 
 
-def _clean_env_value(raw: str | None) -> str | None:
-    if raw is None:
-        return None
-    value = str(raw).strip()
-    if "#" in value:
-        value = value.split("#", 1)[0].strip()
-    return value
-
-
 def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
-    mode = (_clean_env_value(raw_mode) or "PAPER").upper()
+    mode = (str(raw_mode or "PAPER").strip() or "PAPER").upper()
     try:
         return ExecutionMode(mode)
     except ValueError as exc:
         raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE") from exc
 
 
-def _float_env(name: str, default: float) -> float:
-    raw = _clean_env_value(os.getenv(name))
-    if raw is None:
-        return default
-    return float(raw)
-
-
-def _int_env(name: str, default: int) -> int:
-    raw = _clean_env_value(os.getenv(name))
-    if raw is None:
-        return default
-    return int(raw)
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    raw = _clean_env_value(os.getenv(name))
-    if raw is None:
-        return default
-    return raw.lower() not in {"0", "false", "no", "off", ""}
-
-
-def _float_env_alias(name: str, default: float, *aliases: str) -> float:
-    for key in (name, *aliases):
-        raw = _clean_env_value(os.getenv(key))
-        if raw is not None:
-            return float(raw)
-    return default
-
-
-def _int_env_alias(name: str, default: int, *aliases: str) -> int:
-    for key in (name, *aliases):
-        raw = _clean_env_value(os.getenv(key))
-        if raw is not None:
-            return int(raw)
-    return default
-
-
-def _bool_env_alias(name: str, default: bool, *aliases: str) -> bool:
-    for key in (name, *aliases):
-        raw = _clean_env_value(os.getenv(key))
-        if raw is not None:
-            return raw.lower() not in {"0", "false", "no", "off", ""}
-    return default
-
-
-def _default_runtime_database_url() -> str:
-    return f"sqlite+pysqlite:///{(Path.cwd() / 'data' / 'runtime' / 'alphaforge_runtime.db').resolve()}"
-
-
-def _resolve_runtime_database_url() -> str:
-    database_url = (
-        os.getenv("ALPHAFORGE_DATABASE_URL")
-        or os.getenv("ALPHAFORGE_DB_URL")
-        or os.getenv("DATABASE_URL")
-        or _default_runtime_database_url()
-    )
-    if not database_url.startswith("sqlite"):
-        return database_url
-    if ":memory:" in database_url:
-        return database_url
-    if database_url.startswith("sqlite+pysqlite:///"):
-        prefix = "sqlite+pysqlite:///"
-    elif database_url.startswith("sqlite:///"):
-        prefix = "sqlite:///"
-    else:
-        return database_url
-    raw_path = database_url.removeprefix(prefix)
-    return f"{prefix}{Path(raw_path).expanduser().resolve()}"
-
-
 def _build_runtime_from_env() -> RuntimeOrchestrator:
-    mode = execution_mode_from_env(
-        os.getenv("ALPHAFORGE_EXECUTION_MODE") or os.getenv("EXECUTION_MODE")
-    )
-    persistence_enabled = _bool_env("ALPHAFORGE_PERSISTENCE_ENABLED", True)
-    resolved_database_url = _resolve_runtime_database_url()
+    cfg = load_config_from_env()
+    mode = execution_mode_from_env(cfg.runtime.execution_mode)
+    persistence_enabled = cfg.persistence.enabled
+    resolved_database_url = cfg.persistence.database_url
     engine = init_db(resolved_database_url)
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
-    table_names: list[str] = []
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
         table_names = [str(row[0]) for row in rows]
-    logger.info(
-        "runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s",
-        persistence_enabled,
-        resolved_database_url,
-        True,
-        table_names,
-    )
-    brain = AIBrain(
-        session_factory=SessionLocal,
-        min_accept_score=_float_env_alias(
-            "ALPHAFORGE_MIN_SIGNAL_SCORE",
-            0.62,
-            "ALPHAFORGE_MIN_ACCEPT_SCORE",
-        ),
-    )
-    config = RuntimeConfig(
-        execution_mode=mode,
-        scan_interval_sec=_float_env("ALPHAFORGE_SCAN_INTERVAL_SEC", 1.0),
-        heartbeat_interval_sec=_float_env("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", 30.0),
-        max_symbols_per_scan=_int_env("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", 5),
-        max_reject_log_entries=_int_env("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", 1000),
-        max_concurrent_positions=_int_env_alias(
-            "ALPHAFORGE_MAX_CONCURRENT_POSITIONS",
-            3,
-            "ALPHAFORGE_MAX_OPEN_POSITIONS",
-        ),
-        symbol_cooldown_sec=_float_env("ALPHAFORGE_SYMBOL_COOLDOWN_SEC", 120.0),
-        max_notional_exposure=_float_env("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", 100_000.0),
-        max_symbol_notional=_float_env("ALPHAFORGE_MAX_SYMBOL_NOTIONAL", 50_000.0),
-        stale_market_data_sec=_float_env("ALPHAFORGE_STALE_MARKET_DATA_SEC", 15.0),
-        max_spread_pct=_float_env("ALPHAFORGE_MAX_SPREAD_PCT", 0.0025),
-        max_abs_funding_rate_pct=_float_env("ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT", 0.0010),
-        global_kill_switch=_bool_env("ALPHAFORGE_GLOBAL_KILL_SWITCH", False),
-        require_live_qualification=_bool_env("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION", True),
-        enable_shadow_mode=_bool_env("ALPHAFORGE_ENABLE_SHADOW_MODE", False),
-        enable_canary_mode=_bool_env("ALPHAFORGE_ENABLE_CANARY_MODE", False),
-        operator_live_acknowledged=_bool_env("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", False),
-        reconciliation_interval_sec=_float_env("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", 5.0),
-        reconciliation_timeout_sec=_float_env("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", 2.0),
-    )
+    logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
+    brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
+    config = RuntimeConfig(execution_mode=mode, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec)
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
-        """Return a deterministic smoke-test candidate for runtime bootstrap wiring.
-
-        This scanner is intentionally local-only and does not connect to Binance or
-        any exchange. It exists solely to exercise:
-        market_scanner -> select_symbols -> ai_brain -> lifecycle -> persistence.
-        """
         now_ts = time.time()
-        return [{
-            "symbol": "BTCUSDT",
-            "volume_24h_usdt": 125_000_000.0,
-            "spread_pct": 0.0009,
-            "funding_rate_pct": 0.00005,
-            "liquidity_score": 0.86,
-            "liquidity_quality": "HIGH",
-            "volatility_pct": 0.011,
-            "volatility_fit": "GOOD",
-            "volatility_regime": "MODERATE",
-            "trend_strength": 0.64,
-            "momentum_confirmation": 0.7,
-            "recent_volume_change_pct": 0.085,
-            "chop_score": 0.27,
-            "panic_score": 0.06,
-            "fakeout_risk": 0.22,
-            "spread_bps": 9.0,
-            "expected_slippage_pct": 0.0006,
-            "latency_ms": 55.0,
-            "orderbook_imbalance": 0.12,
-            "market_ts": now_ts,
-            "entry": 67_250.0,
-            "side": "LONG",
-            "rr": 2.15,
-            "timeframe": "5m",
-            "tick_size": 0.1,
-        }]
+        return [{"symbol": "BTCUSDT", "volume_24h_usdt": 125_000_000.0, "spread_pct": 0.0009, "funding_rate_pct": 0.00005, "liquidity_score": 0.86, "liquidity_quality": "HIGH", "volatility_pct": 0.011, "volatility_fit": "GOOD", "volatility_regime": "MODERATE", "trend_strength": 0.64, "momentum_confirmation": 0.7, "recent_volume_change_pct": 0.085, "chop_score": 0.27, "panic_score": 0.06, "fakeout_risk": 0.22, "spread_bps": 9.0, "expected_slippage_pct": 0.0006, "latency_ms": 55.0, "market_ts": now_ts, "entry": 67_250.0, "side": "LONG", "rr": 2.15, "timeframe": "5m", "tick_size": 0.1}]
 
     def _persist_lifecycle(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
@@ -760,8 +612,10 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     return orchestrator
 
 
+
 async def main() -> None:
-    logging.basicConfig(level=os.getenv("ALPHAFORGE_LOG_LEVEL", "INFO"))
+    cfg = load_config_from_env()
+    logging.basicConfig(level=cfg.logging.level)
     orchestrator = _build_runtime_from_env()
     logger.info("runtime_starting mode=%s scan_interval_sec=%.3f", orchestrator.config.execution_mode.value, orchestrator.config.scan_interval_sec)
     try:

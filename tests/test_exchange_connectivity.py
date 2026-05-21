@@ -106,6 +106,67 @@ def test_runtime_blocks_live_mode_when_exchange_unhealthy(monkeypatch: pytest.Mo
         asyncio.run(rt.start())
 
 
+def test_live_startup_requires_exchange_connectivity_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Brain:
+        pass
+
+    async def _scanner():
+        return []
+
+    rt = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.LIVE,
+            require_live_qualification=False,
+        ),
+        ai_brain=_Brain(),
+        market_scanner=_scanner,
+    )
+
+    def _failed_health(*args, **kwargs):
+        return [ExchangeHealth("binance", False, False, None, False, None, None, "UNAVAILABLE", "2026-05-21T00:00:00Z", True, True, True)]
+
+    monkeypatch.setattr("alphaforge.runtime.check_required_exchanges_health", _failed_health)
+    with pytest.raises(RuntimeError, match="LIVE mode blocked: exchange connectivity unavailable"):
+        import asyncio
+
+        asyncio.run(rt.start())
+
+
+def test_paper_start_does_not_require_exchange_connectivity_by_default() -> None:
+    cfg = RuntimeConfig(execution_mode=ExecutionMode.PAPER)
+    assert cfg.require_exchange_connectivity_for_live is True
+
+
+def test_live_can_only_skip_connectivity_when_explicitly_configured_for_test_or_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Brain:
+        pass
+
+    async def _scanner():
+        return []
+
+    rt = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.LIVE,
+            require_live_qualification=False,
+            require_exchange_connectivity_for_live=False,
+        ),
+        ai_brain=_Brain(),
+        market_scanner=_scanner,
+    )
+    called = {"value": False}
+
+    def _failed_health(*args, **kwargs):
+        called["value"] = True
+        return [ExchangeHealth("binance", False, False, None, False, None, None, "UNAVAILABLE", "2026-05-21T00:00:00Z", True, True, True)]
+
+    monkeypatch.setattr("alphaforge.runtime.check_required_exchanges_health", _failed_health)
+
+    import asyncio
+
+    asyncio.run(rt._run_live_exchange_connectivity_gate())
+    assert called["value"] is False
+
+
 def test_exchange_health_does_not_leak_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BINANCE_API_KEY", "dont-leak-this")
     health = ExchangeHealth("binance", False, False, None, False, None, None, "BINANCE_CONNECTIVITY_ERROR:URLError", "2026-05-21T00:00:00Z", True, True, True)

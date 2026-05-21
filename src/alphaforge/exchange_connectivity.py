@@ -6,6 +6,7 @@ import os
 import time
 from typing import Any
 from urllib import error, request
+from alphaforge.config import load_config_from_env
 
 
 @dataclass(frozen=True)
@@ -28,12 +29,14 @@ class ExchangeHealth:
 
 
 def check_exchange_connectivity(exchange_name: str, timeout_sec: float = 2.0) -> ExchangeHealth:
+    cfg = load_config_from_env()
+    timeout_sec = cfg.exchange.timeout_sec if timeout_sec == 2.0 else timeout_sec
     exchange = str(exchange_name or "").strip().lower()
     checked_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     if exchange == "binance":
-        return _check_binance(timeout_sec=timeout_sec, checked_at=checked_at)
+        return _check_binance(timeout_sec=timeout_sec, checked_at=checked_at, base_url=cfg.exchange.binance.base_url)
     if exchange == "hyperliquid":
-        return _check_hyperliquid(timeout_sec=timeout_sec, checked_at=checked_at)
+        return _check_hyperliquid(timeout_sec=timeout_sec, checked_at=checked_at, api_url=cfg.exchange.hyperliquid.api_url)
     return ExchangeHealth(
         exchange=exchange_name,
         connected=False,
@@ -64,9 +67,9 @@ def health_has_secret_leak(health: ExchangeHealth) -> bool:
     return False
 
 
-def _check_binance(*, timeout_sec: float, checked_at: str) -> ExchangeHealth:
+def _check_binance(*, timeout_sec: float, checked_at: str, base_url: str) -> ExchangeHealth:
     start = time.perf_counter()
-    url = "https://api.binance.com/api/v3/ticker/bookTicker?symbol=BTCUSDT"
+    url = f"{base_url.rstrip('/')}/api/v3/ticker/bookTicker?symbol=BTCUSDT"
     try:
         payload = _fetch_json(url, timeout_sec=timeout_sec)
         bid = float(payload.get("bidPrice", 0.0) or 0.0)
@@ -104,9 +107,9 @@ def _check_binance(*, timeout_sec: float, checked_at: str) -> ExchangeHealth:
         )
 
 
-def _check_hyperliquid(*, timeout_sec: float, checked_at: str) -> ExchangeHealth:
+def _check_hyperliquid(*, timeout_sec: float, checked_at: str, api_url: str) -> ExchangeHealth:
     start = time.perf_counter()
-    url = "https://api.hyperliquid.xyz/info"
+    url = f"{api_url.rstrip('/')}/info"
     body = b'{"type":"allMids"}'
     req = request.Request(url, method="POST", data=body, headers={"Content-Type": "application/json"})
     try:
