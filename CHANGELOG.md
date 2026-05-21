@@ -487,3 +487,6 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Fixed
 - `save_order_decision(...)` now persists legacy `payload` JSON consistently, including rejected decision context.
 - Backtest accepted lifecycle now includes `WAITING_ENTRY_ZONE` before `ENTRY_TRIGGERED`.
+
+## 2026-05-21 config centralization
+- Added centralized env config loading and runtime/exchange/backtest wiring updates.
