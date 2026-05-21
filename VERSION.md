@@ -1,3 +1,11 @@
+## 2026-05-21 Runtime/env regression audit (no code delta required)
+- **Version:** `0.3.24-dev`
+- **Current phase:** Phase 6.1 runtime/env stability verification.
+- **Runtime maturity:** targeted failing tests were reproduced individually and in-suite; all now pass on current branch without threshold/scoring changes.
+- **BACKTEST/PAPER/LIVE alignment:** verified env alias/runtime bootstrap paths remain mode-consistent for tested coverage.
+- **Lifecycle coverage:** rejected-row persistence and final-count invariants validated for PAPER runtime tests.
+- **Execution realism coverage:** unchanged (no score threshold or model behavior modifications).
+- **Known critical risks:** historical intermittent CI failures were likely caused by stale/non-isolated local DB/env state; keep deterministic test DB env overrides in place.
 ## 2026-05-21 Runtime read-only exchange scanner for PAPER/LIVE parity
 - **Version:** `0.3.24-dev`
 - **Current phase:** Phase 6.1 runtime market-data path hardening.
