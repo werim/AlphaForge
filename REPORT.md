@@ -653,3 +653,40 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 - Executed:
   - `python -m py_compile src/alphaforge/runtime.py src/alphaforge/order.py src/alphaforge/ai_brain.py src/alphaforge/persistence.py backtest_order.py`
   - `pytest -q`
+
+
+## 2026-05-21 Patch Addendum — pytest compatibility fixes (persistence + lifecycle)
+
+### Why the patch was needed
+- Current persistence helper/API behavior diverged from legacy tests/contracts (`fetch_expectancy_stat` shape and legacy compatibility columns).
+- Backtest accepted lifecycle progression could transition from `SIGNAL_ACCEPTED` directly to `ENTRY_TRIGGERED`.
+
+### Root cause
+- `fetch_expectancy_stat` had been broadened to metadata dict output rather than preserving scalar legacy return contract.
+- SQLite bootstrap did not consistently guarantee all legacy compatibility columns across existing DBs.
+- `simulate_candidate(...)` emitted `ENTRY_TRIGGERED` with `status_before='SIGNAL_ACCEPTED'` instead of waiting-state continuity.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `backtest_order.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Behavior changes
+- Restored `fetch_expectancy_stat(...) -> float | None` semantics and added `fetch_expectancy_stat_detail(...)` for detailed exports/metadata callers.
+- Added idempotent schema repair coverage for legacy compatibility columns in `order_decisions` and `trade_lifecycle_events`.
+- `save_order_decision(...)` now mirrors serialized payload into compatibility `payload` column and preserves rejected payload details.
+- `save_trade_lifecycle_event(...)` now populates compatibility `trade_id/state/payload` and returns inserted/upserted row id.
+- Backtest accepted lifecycle now emits `WAITING_ENTRY_ZONE` before `ENTRY_TRIGGERED` in market/limit trigger paths.
+
+### Threshold/regression confirmation
+- No score thresholds changed.
+- No reject/accept logic changed.
+- No scoring logic changes.
+
+### Tests executed
+- `pytest -q tests/test_persistence_fetch_expectancy.py`
+- `pytest -q tests/test_persistence_patch1.py`
+- `pytest -q tests/test_phase123_foundations.py::test_backtest_lifecycle_does_not_start_directly_at_created`
+- `pytest -q`

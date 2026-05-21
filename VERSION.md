@@ -275,3 +275,15 @@
 - Backtest lifecycle ordering bug fixed so `WAITING_ENTRY_ZONE` is preserved when lifecycle states are available.
 - Dev-branch architecture compliance audit added to `REPORT.md` with explicit PASS/PARTIAL/FAIL posture and remaining gaps.
 - Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+
+
+## 2026-05-21 Persistence backward-compatibility + lifecycle sequencing hotfix
+- **Version:** `0.3.16-dev`
+- **Current phase:** Phase 6.1 persistence contract compatibility hardening.
+- **Runtime maturity:** improved persistence/write compatibility for legacy schemas and deterministic backtest accepted lifecycle pre-entry sequencing.
+- **BACKTEST/PAPER/LIVE alignment:** preserved reject/accept thresholds and scoring logic; compatibility-only persistence contract restoration.
+- **Lifecycle coverage:** accepted backtest path now always emits `SIGNAL_CREATED -> SIGNAL_ACCEPTED -> WAITING_ENTRY_ZONE` before entry trigger/placement/open states.
+- **Execution realism coverage:** unchanged (no TP/SL fabrication and no threshold loosening).
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.

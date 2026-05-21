@@ -20,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 __all__ = [
     "init_db",
     "fetch_expectancy_stat",
+    "fetch_expectancy_stat_detail",
     "save_ai_decision_features",
     "save_signal",
     "save_order_decision",
@@ -95,6 +96,7 @@ def init_db(database_url: str | None = None) -> Engine:
             rr REAL,
             effective_rr REAL,
             expectancy_bucket TEXT,
+            payload TEXT,
             execution_ctx TEXT,
             execution_ctx_missing INTEGER,
             created_at TEXT,
@@ -110,7 +112,9 @@ def init_db(database_url: str | None = None) -> Engine:
             order_id TEXT,
             symbol TEXT,
             mode TEXT,
+            trade_id TEXT,
             lifecycle_state TEXT,
+            state TEXT,
             event_type TEXT,
             payload TEXT,
             decision TEXT,
@@ -237,6 +241,7 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("rr", "rr REAL"),
             ("effective_rr", "effective_rr REAL DEFAULT 0.0"),
             ("expectancy_bucket", "expectancy_bucket TEXT"),
+            ("payload", "payload TEXT"),
             ("order_payload", "order_payload TEXT"),
             ("execution_ctx", "execution_ctx TEXT"),
             ("execution_ctx_missing", "execution_ctx_missing INTEGER"),
@@ -259,6 +264,8 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("created_at", "created_at TEXT"),
         ],
         "trade_lifecycle_events": [
+            ("trade_id", "trade_id TEXT"),
+            ("state", "state TEXT"),
             ("event_type", "event_type TEXT"),
             ("payload", "payload TEXT"),
             ("lifecycle_seq", "lifecycle_seq INTEGER"),
@@ -337,24 +344,39 @@ def _apply_sqlite_migrations(conn: Any) -> None:
             conn.execute(text("INSERT INTO schema_migrations(version, applied_at, notes) VALUES (:v, :at, :n)"), {"v": version, "at": _utc_now_iso(), "n": notes})
 
 
-def fetch_expectancy_stat(session: Any, table_name: str, key_column: str, key_value: str) -> dict[str, Any]:
+def fetch_expectancy_stat_detail(session: Any, table_name: str, key_column: str, key_value: str) -> dict[str, Any] | None:
     default = {"expectancy_bucket": "UNKNOWN", "sample_size": 0, "win_rate": None, "avg_rr": None, "expectancy": None}
     if session is None:
-        return dict(default)
+        return None
     try:
         row = session.execute(f"SELECT * FROM {table_name} WHERE {key_column} = :key_value LIMIT 1", {"key_value": key_value}).fetchone()
     except Exception:
-        return dict(default)
+        return None
     if not row:
-        return dict(default)
+        return None
     row_data = dict(row) if isinstance(row, Mapping) else dict(row._mapping)
-    return {
+    detail = {
         "expectancy_bucket": row_data.get("expectancy_bucket") or "UNKNOWN",
-        "sample_size": int(row_data.get("sample_size") or 0),
+        "sample_size": int(row_data.get("sample_size") or row_data.get("samples") or 0),
         "win_rate": row_data.get("win_rate"),
         "avg_rr": row_data.get("avg_rr"),
-        "expectancy": row_data.get("expectancy"),
+        "expectancy": row_data.get("expectancy") if row_data.get("expectancy") is not None else row_data.get("total_pnl"),
     }
+    detail["expectancy"] = row_data.get("expectancy")
+    return detail
+
+
+def fetch_expectancy_stat(session: Any, table_name: str, key_column: str, key_value: str) -> float | None:
+    detail = fetch_expectancy_stat_detail(session, table_name, key_column, key_value)
+    if detail is None:
+        return None
+    expectancy = detail.get("expectancy")
+    if expectancy is None:
+        return None
+    try:
+        return float(expectancy)
+    except (TypeError, ValueError):
+        return None
 
 
 def save_ai_decision_features(*args, execution_features=None, **kwargs):
@@ -407,16 +429,19 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
         "created_at": now, "updated_at": now,
     }
+    payload_obj = decision.get("order_payload")
+    if payload_obj is None:
+        payload_obj = {"reject_reason": payload["reject_reason"]} if str(decision.get("decision", "")).upper() == "REJECTED" else {}
     try:
         row = session.execute(text("""
         INSERT INTO order_decisions (
             decision_id, signal_id, order_id, symbol, mode, phase, decision, order_type, confidence, explanation,
-            reject_reason, score, rr, effective_rr, expectancy_bucket, order_payload, execution_ctx,
+            reject_reason, score, rr, effective_rr, expectancy_bucket, order_payload, payload, execution_ctx,
             execution_ctx_missing, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance,
             funding_rate_pct, execution_regime, volatility_regime, created_at, updated_at
         ) VALUES (
             :decision_id, :signal_id, :order_id, :symbol, :mode, :phase, :decision, :order_type, :confidence, :explanation,
-            :reject_reason, :score, :rr, :effective_rr, :expectancy_bucket, :order_payload, :execution_ctx,
+            :reject_reason, :score, :rr, :effective_rr, :expectancy_bucket, :order_payload, :payload, :execution_ctx,
             :execution_ctx_missing, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance,
             :funding_rate_pct, :execution_regime, :volatility_regime, :created_at, :updated_at
         )
@@ -424,7 +449,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
             signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
             phase=excluded.phase, decision=excluded.decision, order_type=excluded.order_type, confidence=excluded.confidence,
             explanation=excluded.explanation, reject_reason=excluded.reject_reason, score=excluded.score, rr=excluded.rr,
-            effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket, order_payload=excluded.order_payload,
+            effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket, order_payload=excluded.order_payload, payload=excluded.payload,
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing,
             expected_slippage_pct=excluded.expected_slippage_pct, spread_pct=excluded.spread_pct, latency_ms=excluded.latency_ms,
             orderbook_imbalance=excluded.orderbook_imbalance, funding_rate_pct=excluded.funding_rate_pct,
@@ -435,7 +460,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "reject_reason": canonical_reject_reason(decision.get("reject_reason")) if str(decision.get("decision", "")).upper() == "REJECTED" else decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
         "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
         "phase": decision.get("phase"), "order_type": decision.get("order_type"), "confidence": decision.get("confidence") or decision.get("score"),
-        "explanation": decision.get("explanation"), "order_payload": json.dumps(decision.get("order_payload", {})),
+        "explanation": decision.get("explanation"), "order_payload": json.dumps(payload_obj), "payload": json.dumps(payload_obj),
         "execution_ctx": json.dumps(execution_ctx),
         "expected_slippage_pct": decision.get("expected_slippage_pct", 0.0), "spread_pct": decision.get("spread_pct", 0.0),
         "latency_ms": decision.get("latency_ms", 0.0), "orderbook_imbalance": decision.get("orderbook_imbalance", 0.0),
@@ -451,7 +476,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         return None
 
 
-def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
+def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
     if session is None:
         return False
     now = _utc_now_iso()
@@ -474,51 +499,62 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> bool:
         "failure_reason": event.get("failure_reason"),
         "reconciliation_reason": event.get("reconciliation_reason"),
         "incident_payload": json.dumps(event.get("incident_payload", {})),
+        "trade_id": event.get("trade_id") or signal_id,
+        "state": lifecycle_state or event.get("event_type"),
+        "event_type": event.get("event_type") or lifecycle_state,
+        "payload": json.dumps(event.get("payload", {})),
     }
     statement_by_event_id = text("""
         INSERT INTO trade_lifecycle_events (
-            event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
+            event_id, signal_id, trade_id, order_id, symbol, mode, lifecycle_state, state, event_type, payload, decision, reject_reason, score, rr,
             effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id, failure_reason, reconciliation_reason, incident_payload
         ) VALUES (
-            :event_id, :signal_id, :order_id, :symbol, :mode, :lifecycle_state, :decision, :reject_reason, :score, :rr,
+            :event_id, :signal_id, :trade_id, :order_id, :symbol, :mode, :lifecycle_state, :state, :event_type, :payload, :decision, :reject_reason, :score, :rr,
             :effective_rr, :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :event_ts, :created_at, :lifecycle_seq, :cancel_reason, :lifecycle_id, :failure_reason, :reconciliation_reason, :incident_payload
         )
         ON CONFLICT(event_id) DO UPDATE SET
             signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
-            lifecycle_state=excluded.lifecycle_state, decision=excluded.decision, reject_reason=excluded.reject_reason,
+            lifecycle_state=excluded.lifecycle_state, state=excluded.state, event_type=excluded.event_type, payload=excluded.payload, decision=excluded.decision, reject_reason=excluded.reject_reason,
             score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing, event_ts=excluded.event_ts,
             lifecycle_seq=excluded.lifecycle_seq, cancel_reason=excluded.cancel_reason, lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason, incident_payload=excluded.incident_payload
     """)
     statement_by_lifecycle_key = text("""
         INSERT INTO trade_lifecycle_events (
-            event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason, score, rr,
+            event_id, signal_id, trade_id, order_id, symbol, mode, lifecycle_state, state, event_type, payload, decision, reject_reason, score, rr,
             effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing, event_ts, created_at, lifecycle_seq, cancel_reason, lifecycle_id, failure_reason, reconciliation_reason, incident_payload
         ) VALUES (
-            :event_id, :signal_id, :order_id, :symbol, :mode, :lifecycle_state, :decision, :reject_reason, :score, :rr,
+            :event_id, :signal_id, :trade_id, :order_id, :symbol, :mode, :lifecycle_state, :state, :event_type, :payload, :decision, :reject_reason, :score, :rr,
             :effective_rr, :expectancy_bucket, :execution_ctx, :execution_ctx_missing, :event_ts, :created_at, :lifecycle_seq, :cancel_reason, :lifecycle_id, :failure_reason, :reconciliation_reason, :incident_payload
         )
         ON CONFLICT(signal_id, event_ts, lifecycle_state) DO UPDATE SET
             event_id=excluded.event_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
-            decision=excluded.decision, reject_reason=excluded.reject_reason, score=excluded.score, rr=excluded.rr,
+            state=excluded.state, event_type=excluded.event_type, payload=excluded.payload, decision=excluded.decision, reject_reason=excluded.reject_reason, score=excluded.score, rr=excluded.rr,
             effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket, execution_ctx=excluded.execution_ctx,
             execution_ctx_missing=excluded.execution_ctx_missing, lifecycle_seq=excluded.lifecycle_seq, cancel_reason=excluded.cancel_reason,
             lifecycle_id=excluded.lifecycle_id, failure_reason=excluded.failure_reason, reconciliation_reason=excluded.reconciliation_reason,
             incident_payload=excluded.incident_payload
     """)
+    row_id: Any = None
     try:
-        session.execute(statement_by_lifecycle_key, payload)
+        result = session.execute(statement_by_lifecycle_key, payload)
+        row_id = getattr(result, "lastrowid", None)
     except Exception:
         try:
-            session.execute(statement_by_event_id, payload)
+            result = session.execute(statement_by_event_id, payload)
+            row_id = getattr(result, "lastrowid", None)
         except Exception:
-            return False
+            return None
     if hasattr(session, "commit"):
         try:
             session.commit()
         except Exception:
-            return False
-    return True
+            return None
+    persisted_id = session.execute(
+        text("SELECT id FROM trade_lifecycle_events WHERE event_id = :event_id LIMIT 1"),
+        {"event_id": event_id},
+    ).scalar()
+    return persisted_id or row_id
 
 # keep remaining functions as-is
 
