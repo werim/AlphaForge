@@ -213,8 +213,13 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.SIGNAL_REJECTED.value, selection.symbol, {"reason": canonical_reject_reason(order_plan.reason)})
             return
 
-        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
-        await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
+        if self.config.execution_mode == ExecutionMode.PAPER:
+            await self._emit_lifecycle_event(LifecycleEventType.WAITING_ENTRY_ZONE.value, selection.symbol, {})
+            await self._emit_lifecycle_event(LifecycleEventType.ENTRY_TRIGGERED.value, selection.symbol, {})
+            await self._emit_lifecycle_event(LifecycleEventType.ORDER_PLACED.value, selection.symbol, {})
+        else:
+            await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
+            await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         await self._execute(symbol=selection.symbol, decision={
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
@@ -596,7 +601,8 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         if not persistence_enabled:
             return
         from alphaforge.persistence import save_trade_lifecycle_event
-        save_trade_lifecycle_event(brain.session, **payload)
+        if not save_trade_lifecycle_event(brain.session, **payload):
+            raise RuntimeError("trade_lifecycle_event_persistence_failed")
 
     def _persist_reject(payload: dict[str, Any]) -> None:
         if not persistence_enabled:

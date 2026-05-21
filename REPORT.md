@@ -592,3 +592,32 @@ So the dominant failure mode is not a single bug; it is: **long-only candidate c
 ### Threshold stance
 - Global score threshold and scoring model were **not loosened or changed**.
 
+---
+
+## 2026-05-21 Patch Addendum — PR #114 merge conflict resolution (Phase 6.1 canonicalization)
+
+### Why the patch was needed
+- PR #114 required conflict-focused reconciliation with current dev behavior while preserving the Phase 6.1 lifecycle/persistence contract.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/persistence.py`
+- `tests/test_runtime.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime/lifecycle changes
+- PAPER accepted flow now emits canonical pre-execution states: `SIGNAL_CREATED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED`.
+- Rejected path remains `SIGNAL_CREATED -> SIGNAL_REJECTED`.
+- Runtime lifecycle persistence callback now fails closed if lifecycle SQL persistence returns failure.
+
+### Persistence changes
+- `save_order_decision(...)` now catches SQL/commit failures and returns explicit failure (`None`).
+- `save_trade_lifecycle_event(...)` now returns explicit `False` if both upsert strategies fail or commit fails.
+
+### Tests added/executed
+- Added runtime tests for PAPER canonical lifecycle sequence and lifecycle persistence failure detectability.
+- Executed:
+  - `python -m py_compile src/alphaforge/runtime.py src/alphaforge/order.py src/alphaforge/ai_brain.py src/alphaforge/persistence.py backtest_order.py`
+  - `pytest -q`

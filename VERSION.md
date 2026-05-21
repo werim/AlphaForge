@@ -1,5 +1,16 @@
 # AlphaForge Version Status
 
+## 2026-05-21 Phase 6.1 Canonicalization Merge Resolution
+- **Version:** `0.3.15-dev`
+- **Current phase:** Phase 6.1 audit-trail canonicalization conflict reconciliation.
+- **Runtime maturity:** improved fail-closed persistence detectability for lifecycle writes.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER canonical pre-execution lifecycle ordering restored while preserving dev runtime compatibility for non-PAPER execution paths.
+- **Lifecycle coverage:** canonical rejected/accepted PAPER ordering enforced with explicit `SIGNAL_CREATED` first emission.
+- **Execution realism coverage:** unchanged thresholds/gates; no trade-quality loosening.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-20 SQLite schema bootstrap/migration hardening patch
 - **Version:** `0.3.14-dev`
 - **BACKTEST/PAPER/LIVE alignment:** unchanged decision/reject thresholds and shared runtime persistence behavior preserved.
