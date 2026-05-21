@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from alphaforge.adaptive_learning import record_closed_trade_review, record_rejected_signal_review
 
 
@@ -46,8 +46,11 @@ class AIBrain:
     persisted features, and expectancy statistics.
     """
 
-    def __init__(self, session: Session, *, min_accept_score: float = 0.62) -> None:
+    def __init__(self, session: Session | None = None, *, session_factory: sessionmaker[Session] | None = None, min_accept_score: float = 0.62) -> None:
+        if session is None and session_factory is None:
+            raise ValueError("AIBrain requires session or session_factory")
         self.session = session
+        self.session_factory = session_factory
         self.min_accept_score = min_accept_score
         self.min_confidence = 0.35
         self.min_p_win = 0.45
@@ -321,209 +324,81 @@ class AIBrain:
         explanation = self.explain_decision(signal, score_ctx, order_plan)
         try:
             self._persist_decision(signal, market_ctx, score_ctx, order_plan, explanation, phase)
-            self.session.commit()
         except Exception as exc:
-            self.session.rollback()
             logger.warning("Persist failed: %s", exc)
         return score_ctx, order_plan, explanation
 
+
+    def _open_persistence_session(self) -> Session:
+        if self.session_factory is not None:
+            return self.session_factory()
+        if self.session is None:
+            raise RuntimeError("AIBrain persistence session is unavailable")
+        return self.session
+
     def _persist_decision(self, signal: Mapping[str, Any], market_ctx: Mapping[str, Any], score_ctx: ScoreContext, order_plan: OrderPlan, explanation: str, phase: str) -> None:
-        signal_id = str(signal.get("signal_id") or _stable_signal_id(signal, market_ctx))
-        decision_id = str(signal.get("decision_id") or f"{signal_id}:{phase}")
-        now = _now()
-        self.session.execute(
-            text(
-                """
-                INSERT INTO signals (
-                    signal_id, symbol, side, timeframe, mode, score, rr, effective_rr, expectancy_bucket, created_at, updated_at
-                ) VALUES (
-                    :signal_id, :symbol, :side, :timeframe, :mode, :score, :rr, :effective_rr, :expectancy_bucket, :created_at, :updated_at
-                )
-                ON CONFLICT(signal_id) DO UPDATE SET
-                    symbol=excluded.symbol, side=excluded.side, timeframe=excluded.timeframe, mode=excluded.mode,
-                    score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
-                    updated_at=excluded.updated_at
-                """
-            ),
-            {
-                "signal_id": signal_id,
-                "symbol": str(signal.get("symbol", "UNKNOWN")),
-                "side": str(signal.get("side", "N/A")),
-                "timeframe": str(signal.get("timeframe", "NA")),
-                "mode": "BACKTEST",
-                "score": float(score_ctx.total_score),
-                "rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
-                "effective_rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
-                "expectancy_bucket": "UNKNOWN",
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
-
-        decision_payload = {
-            "decision_id": decision_id,
-            "signal_id": signal_id,
-            "phase": phase,
-            "decision": order_plan.decision,
-            "order_type": order_plan.order_type,
-            "confidence": score_ctx.total_score,
-            "explanation": explanation,
-            "order_payload": _json_dumps({
-                "limit_price": order_plan.limit_price,
-                "stop_price": order_plan.stop_price,
-                "reason": order_plan.reason,
-            }),
-            "expected_slippage_pct": float(_num(market_ctx, "expected_slippage_pct", 0.0) or 0.0),
-            "spread_pct": _num(market_ctx, "spread_pct", 0.0),
-            "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)),
-            "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0),
-            "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
-            "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
-            "effective_rr": float(signal.get("risk_reward", 0.0) or 0.0),
-            "created_at": now,
-            "updated_at": now,
-        }
+        session = self._open_persistence_session()
+        owns_session = self.session_factory is not None
         try:
-            self.session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_decision_features_decision_id ON ai_decision_features(decision_id)"))
-            order_row_id = self.session.execute(
+            signal_id = str(signal.get("signal_id") or _stable_signal_id(signal, market_ctx))
+            decision_id = str(signal.get("decision_id") or f"{signal_id}:{phase}")
+            now = _now()
+            session.execute(
                 text(
                     """
-                    INSERT INTO order_decisions
-                    (decision_id, signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, volatility_regime, effective_rr, created_at, updated_at)
-                    VALUES (:decision_id, :signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance, :funding_rate_pct, :volatility_regime, :effective_rr, :created_at, :updated_at)
-                    ON CONFLICT(decision_id) DO UPDATE SET
-                        signal_id=excluded.signal_id,
-                        phase=excluded.phase,
-                        decision=excluded.decision,
-                        order_type=excluded.order_type,
-                        confidence=excluded.confidence,
-                        explanation=excluded.explanation,
-                        order_payload=excluded.order_payload,
-                        expected_slippage_pct=excluded.expected_slippage_pct,
-                        spread_pct=excluded.spread_pct,
-                        latency_ms=excluded.latency_ms,
-                        orderbook_imbalance=excluded.orderbook_imbalance,
-                        funding_rate_pct=excluded.funding_rate_pct,
-                        volatility_regime=excluded.volatility_regime,
-                        effective_rr=excluded.effective_rr,
+                    INSERT INTO signals (
+                        signal_id, symbol, side, timeframe, mode, score, rr, effective_rr, expectancy_bucket, created_at, updated_at
+                    ) VALUES (
+                        :signal_id, :symbol, :side, :timeframe, :mode, :score, :rr, :effective_rr, :expectancy_bucket, :created_at, :updated_at
+                    )
+                    ON CONFLICT(signal_id) DO UPDATE SET
+                        symbol=excluded.symbol, side=excluded.side, timeframe=excluded.timeframe, mode=excluded.mode,
+                        score=excluded.score, rr=excluded.rr, effective_rr=excluded.effective_rr, expectancy_bucket=excluded.expectancy_bucket,
                         updated_at=excluded.updated_at
-                    RETURNING id
                     """
                 ),
-                decision_payload,
-            ).scalar_one()
-        except OperationalError as exc:
-            if "no column named spread_pct" not in str(exc):
-                raise
-            order_row_id = self.session.execute(
-                text(
-                    """
-                    INSERT INTO order_decisions
-                    (decision_id, signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, effective_rr, created_at, updated_at)
-                    VALUES (:decision_id, :signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :effective_rr, :created_at, :updated_at)
-                    ON CONFLICT(decision_id) DO UPDATE SET
-                        signal_id=excluded.signal_id,
-                        phase=excluded.phase,
-                        decision=excluded.decision,
-                        order_type=excluded.order_type,
-                        confidence=excluded.confidence,
-                        explanation=excluded.explanation,
-                        order_payload=excluded.order_payload,
-                        expected_slippage_pct=excluded.expected_slippage_pct,
-                        effective_rr=excluded.effective_rr,
-                        updated_at=excluded.updated_at
-                    RETURNING id
-                    """
-                ),
-                decision_payload,
-            ).scalar_one()
-
-        self.session.execute(
-            text(
-                """
-                INSERT INTO ai_decision_features
-                (decision_id, features, penalties, reason_flags, execution_features, created_at)
-                VALUES (:decision_id, :features, :penalties, :reason_flags, :execution_features, :created_at)
-                ON CONFLICT(decision_id) DO UPDATE SET
-                    features=excluded.features,
-                    penalties=excluded.penalties,
-                    reason_flags=excluded.reason_flags,
-                    execution_features=excluded.execution_features,
-                    created_at=excluded.created_at
-                """
-            ),
-            {
-                "decision_id": decision_id,
-                "features": _json_dumps(score_ctx.components),
-                "penalties": _json_dumps(score_ctx.penalties),
-                "reason_flags": _json_dumps(score_ctx.reason_flags),
-                "execution_features": _json_dumps({
-                    "expected_slippage_pct": _num(market_ctx, "expected_slippage_pct", 0.0),
-                    "spread_pct": _num(market_ctx, "spread_pct", 0.0),
-                    "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)),
-                    "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0),
-                    "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0),
-                    "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"),
-                    "probabilistic_score": score_ctx.probabilistic,
-                    "order_row_id": order_row_id,
-                }),
-                "created_at": now,
-            },
-        )
-        if order_plan.decision != "ACCEPTED":
-            reject_reason = "LOW_SCORE"
-            if "low_p_win" in score_ctx.reason_flags:
-                reject_reason = "LOW_P_WIN"
-            elif "low_execution_probability" in score_ctx.reason_flags:
-                reject_reason = "LOW_EXECUTION_PROBABILITY"
-            elif "low_confidence" in score_ctx.reason_flags:
-                reject_reason = "LOW_CONFIDENCE"
-            elif "negative_expectancy_after_costs" in score_ctx.reason_flags:
-                reject_reason = "NEGATIVE_EXPECTANCY_AFTER_COSTS"
-            elif "high_fakeout_probability" in score_ctx.reason_flags:
-                reject_reason = "HIGH_FAKEOUT_PROBABILITY"
-            elif "low_regime_fit_probability" in score_ctx.reason_flags:
-                reject_reason = "LOW_REGIME_FIT_PROBABILITY"
-            record_rejected_signal_review(
-                self.session,
-                signal_id=str(signal_id),
-                symbol=str(signal.get("symbol", "UNKNOWN")),
-                setup_type=str(signal.get("setup", "unknown")),
-                regime=str(signal.get("regime", "unknown")),
-                side=str(signal.get("side", "UNKNOWN")),
-                reject_reason=reject_reason,
-                score=score_ctx.total_score,
-                raw_rr=signal.get("risk_reward"),
-                effective_rr=decision_payload["effective_rr"],
-                expectancy_bucket=signal.get("expectancy_bucket"),
-                volume_24h_usdt=market_ctx.get("volume_24h_usdt"),
-                spread_pct=market_ctx.get("spread_pct"),
-                expected_slippage_pct=market_ctx.get("expected_slippage_pct"),
-                funding_rate_pct=market_ctx.get("funding_rate_pct"),
-                liquidity_score=market_ctx.get("liquidity_score"),
-                volatility_regime=market_ctx.get("volatility_regime"),
-                forward_window_bars=None,
-                would_have_hit_tp=None,
-                would_have_hit_sl=None,
-                max_favorable_excursion_pct=None,
-                max_adverse_excursion_pct=None,
-                reject_correct=None,
+                {
+                    "signal_id": signal_id, "symbol": str(signal.get("symbol", "UNKNOWN")), "side": str(signal.get("side", "N/A")),
+                    "timeframe": str(signal.get("timeframe", "NA")), "mode": "BACKTEST", "score": float(score_ctx.total_score),
+                    "rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
+                    "effective_rr": float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0),
+                    "expectancy_bucket": "UNKNOWN", "created_at": now, "updated_at": now,
+                },
             )
-
-        self.session.execute(
-            text(
-                """
-                INSERT INTO trade_lifecycle_events (signal_id, event_type, payload, created_at)
-                VALUES (:signal_id, :event_type, :payload, :created_at)
-                """
-            ),
-            {
-                "signal_id": signal_id,
-                "event_type": f"decision_{order_plan.decision.lower()}",
-                "payload": _json_dumps({"phase": phase, "order_type": order_plan.order_type, "explanation": explanation}),
-                "created_at": now,
-            },
-        )
+            decision_payload = {"decision_id": decision_id, "signal_id": signal_id, "phase": phase, "decision": order_plan.decision, "order_type": order_plan.order_type, "confidence": score_ctx.total_score, "explanation": explanation, "order_payload": _json_dumps({"limit_price": order_plan.limit_price, "stop_price": order_plan.stop_price, "reason": order_plan.reason}), "expected_slippage_pct": float(_num(market_ctx, "expected_slippage_pct", 0.0) or 0.0), "spread_pct": _num(market_ctx, "spread_pct", 0.0), "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)), "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0), "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0), "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"), "effective_rr": float(signal.get("risk_reward", 0.0) or 0.0), "created_at": now, "updated_at": now}
+            try:
+                session.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_ai_decision_features_decision_id ON ai_decision_features(decision_id)"))
+                order_row_id = session.execute(text("""
+                        INSERT INTO order_decisions
+                        (decision_id, signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance, funding_rate_pct, volatility_regime, effective_rr, created_at, updated_at)
+                        VALUES (:decision_id, :signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance, :funding_rate_pct, :volatility_regime, :effective_rr, :created_at, :updated_at)
+                        ON CONFLICT(decision_id) DO UPDATE SET signal_id=excluded.signal_id, phase=excluded.phase, decision=excluded.decision, order_type=excluded.order_type, confidence=excluded.confidence, explanation=excluded.explanation, order_payload=excluded.order_payload, expected_slippage_pct=excluded.expected_slippage_pct, spread_pct=excluded.spread_pct, latency_ms=excluded.latency_ms, orderbook_imbalance=excluded.orderbook_imbalance, funding_rate_pct=excluded.funding_rate_pct, volatility_regime=excluded.volatility_regime, effective_rr=excluded.effective_rr, updated_at=excluded.updated_at RETURNING id"""), decision_payload).scalar_one()
+            except OperationalError as exc:
+                if "no column named spread_pct" not in str(exc):
+                    raise
+                order_row_id = session.execute(text("""
+                        INSERT INTO order_decisions
+                        (decision_id, signal_id, phase, decision, order_type, confidence, explanation, order_payload, expected_slippage_pct, effective_rr, created_at, updated_at)
+                        VALUES (:decision_id, :signal_id, :phase, :decision, :order_type, :confidence, :explanation, :order_payload, :expected_slippage_pct, :effective_rr, :created_at, :updated_at)
+                        ON CONFLICT(decision_id) DO UPDATE SET signal_id=excluded.signal_id, phase=excluded.phase, decision=excluded.decision, order_type=excluded.order_type, confidence=excluded.confidence, explanation=excluded.explanation, order_payload=excluded.order_payload, expected_slippage_pct=excluded.expected_slippage_pct, effective_rr=excluded.effective_rr, updated_at=excluded.updated_at RETURNING id"""), decision_payload).scalar_one()
+            session.execute(text("INSERT INTO ai_decision_features (decision_id, features, penalties, reason_flags, execution_features, created_at) VALUES (:decision_id, :features, :penalties, :reason_flags, :execution_features, :created_at) ON CONFLICT(decision_id) DO UPDATE SET features=excluded.features, penalties=excluded.penalties, reason_flags=excluded.reason_flags, execution_features=excluded.execution_features, created_at=excluded.created_at"), {"decision_id": decision_id, "features": _json_dumps(score_ctx.components), "penalties": _json_dumps(score_ctx.penalties), "reason_flags": _json_dumps(score_ctx.reason_flags), "execution_features": _json_dumps({"expected_slippage_pct": _num(market_ctx, "expected_slippage_pct", 0.0), "spread_pct": _num(market_ctx, "spread_pct", 0.0), "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)), "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0), "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0), "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"), "probabilistic_score": score_ctx.probabilistic, "order_row_id": order_row_id}), "created_at": now})
+            if order_plan.decision != "ACCEPTED":
+                reject_reason = "LOW_SCORE"
+                if "low_p_win" in score_ctx.reason_flags: reject_reason = "LOW_P_WIN"
+                elif "low_execution_probability" in score_ctx.reason_flags: reject_reason = "LOW_EXECUTION_PROBABILITY"
+                elif "low_confidence" in score_ctx.reason_flags: reject_reason = "LOW_CONFIDENCE"
+                elif "negative_expectancy_after_costs" in score_ctx.reason_flags: reject_reason = "NEGATIVE_EXPECTANCY_AFTER_COSTS"
+                elif "high_fakeout_probability" in score_ctx.reason_flags: reject_reason = "HIGH_FAKEOUT_PROBABILITY"
+                elif "low_regime_fit_probability" in score_ctx.reason_flags: reject_reason = "LOW_REGIME_FIT_PROBABILITY"
+                record_rejected_signal_review(session, signal_id=str(signal_id), symbol=str(signal.get("symbol", "UNKNOWN")), setup_type=str(signal.get("setup", "unknown")), regime=str(signal.get("regime", "unknown")), side=str(signal.get("side", "UNKNOWN")), reject_reason=reject_reason, score=score_ctx.total_score, raw_rr=signal.get("risk_reward"), effective_rr=decision_payload["effective_rr"], expectancy_bucket=signal.get("expectancy_bucket"), volume_24h_usdt=market_ctx.get("volume_24h_usdt"), spread_pct=market_ctx.get("spread_pct"), expected_slippage_pct=market_ctx.get("expected_slippage_pct"), funding_rate_pct=market_ctx.get("funding_rate_pct"), liquidity_score=market_ctx.get("liquidity_score"), volatility_regime=market_ctx.get("volatility_regime"), forward_window_bars=None, would_have_hit_tp=None, would_have_hit_sl=None, max_favorable_excursion_pct=None, max_adverse_excursion_pct=None, reject_correct=None)
+            session.execute(text("INSERT INTO trade_lifecycle_events (signal_id, event_type, payload, created_at) VALUES (:signal_id, :event_type, :payload, :created_at)"), {"signal_id": signal_id, "event_type": f"decision_{order_plan.decision.lower()}", "payload": _json_dumps({"phase": phase, "order_type": order_plan.order_type, "explanation": explanation}), "created_at": now})
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            if owns_session:
+                session.close()
 
     # ---- Stats helpers ---------------------------------------------------
     def _expectancy_edge(self, signal: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> float:

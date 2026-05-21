@@ -194,8 +194,7 @@ class RuntimeOrchestrator:
         regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
         stats_ctx: dict[str, Any] = {}
 
-        score_ctx, order_plan, explanation = await asyncio.to_thread(
-            self.ai_brain.before_real_order,
+        score_ctx, order_plan, explanation = self.ai_brain.before_real_order(
             signal_payload,
             market_ctx,
             regime_ctx,
