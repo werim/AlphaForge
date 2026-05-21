@@ -1,3 +1,14 @@
+## 2026-05-21 Exchange connectivity safety checks + offline/opt-in integration test harness
+- **Version:** `0.3.21-dev`
+- **Current phase:** Phase 6.1 runtime safety hardening.
+- **Runtime maturity:** LIVE startup can now optionally fail-closed on exchange connectivity gate checks before runtime loops begin.
+- **BACKTEST/PAPER/LIVE alignment:** default test/runtime behavior remains offline-safe; LIVE connectivity validation is explicit and opt-in via config.
+- **Lifecycle coverage:** unchanged lifecycle transitions.
+- **Execution realism coverage:** exchange unavailability is explicit (`UNAVAILABLE`/connectivity error) and never treated as zero-cost market context.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 Runtime order_decision audit-layer contract + mode correctness patch
 - **Version:** `0.3.20-dev`
 - **Current phase:** Phase 6.1 runtime/persistence integrity hardening.

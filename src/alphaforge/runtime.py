@@ -18,6 +18,7 @@ from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, ca
 from alphaforge.order import LifecycleState
 from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
+from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
@@ -59,6 +60,9 @@ class RuntimeConfig:
     operator_live_acknowledged: bool = False
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
+    require_exchange_connectivity_for_live: bool = False
+    required_live_exchanges: tuple[str, ...] = ("binance",)
+    exchange_connectivity_timeout_sec: float = 2.0
 
 
 @dataclass(slots=True)
@@ -99,6 +103,7 @@ class RuntimeOrchestrator:
     _last_repair_signature: set[str] = field(default_factory=set, init=False)
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
+    _exchange_health: list[ExchangeHealth] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
@@ -112,8 +117,10 @@ class RuntimeOrchestrator:
         return None
 
     async def start(self) -> None:
-        if self.config.execution_mode == ExecutionMode.LIVE and self.config.require_live_qualification:
-            await self._run_live_qualification_gate()
+        if self.config.execution_mode == ExecutionMode.LIVE:
+            await self._run_live_exchange_connectivity_gate()
+            if self.config.require_live_qualification:
+                await self._run_live_qualification_gate()
         self._register_signals()
         self._tasks = [
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
@@ -136,6 +143,17 @@ class RuntimeOrchestrator:
 
     def shutdown(self) -> None:
         self._stop_event.set()
+
+
+    async def _run_live_exchange_connectivity_gate(self) -> None:
+        if not self.config.require_exchange_connectivity_for_live:
+            return
+        health = check_required_exchanges_health(list(self.config.required_live_exchanges), timeout_sec=self.config.exchange_connectivity_timeout_sec)
+        self._exchange_health = health
+        failures = [h for h in health if not h.connected]
+        if failures:
+            summary = ",".join(f"{h.exchange}:{h.error or 'UNAVAILABLE'}" for h in failures)
+            raise RuntimeError(f"LIVE mode blocked: exchange connectivity unavailable ({summary})")
 
     async def _run_live_qualification_gate(self) -> None:
         engine = self._resolve_persistence_engine()
