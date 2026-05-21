@@ -1,3 +1,17 @@
+## [Unreleased] - 2026-05-21 (Runtime signal identity + diagnostics hardening)
+
+### Changed
+- Runtime now generates/propagates non-empty `signal_id` before reject/lifecycle persistence, including fallback deterministic identity when absent in candidate payload.
+- AI decision persistence now derives decision ids with market timestamp entropy to prevent repeated runtime decisions from collapsing into a single upsert row.
+
+### Fixed
+- Runtime reject persistence now maps concrete reject reasons into `reject_reason` so known reasons are no longer downgraded to `UNKNOWN`.
+- Runtime decision exceptions now emit diagnostic-rich `ERROR` lifecycle events with non-empty `failure_reason` and structured `incident_payload`.
+- Runtime lifecycle persistence callback now forwards failure/incident fields explicitly into `trade_lifecycle_events` persistence.
+
+### Added
+- Regression tests covering runtime reject signal_id propagation, reject reason preservation, runtime exception lifecycle diagnostics, and decision/features persistence consistency across repeated runtime decisions.
+
 
 ## [Unreleased] - 2026-05-21 (Lifecycle persistence strict-boolean return fix)
 

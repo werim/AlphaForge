@@ -1,3 +1,44 @@
+## 2026-05-21 Patch Addendum — Runtime identity propagation + diagnostic lifecycle hardening
+
+### Why the patch was needed
+- Runtime persistence showed repeated `REJECTED/UNKNOWN` decisions with missing `signal_id`, and repeated `ERROR` lifecycle rows with empty diagnostics, making incident auditing unreliable.
+
+### Root cause
+- Runtime reject callback persisted `reason` without mapping it to `reject_reason`, so canonical reject reason collapsed to `UNKNOWN`.
+- Runtime candidate identity (`signal_id`) was not guaranteed before reject/lifecycle persistence callbacks.
+- Runtime decision pipeline exceptions were not converted into diagnostic-rich lifecycle error payloads.
+- AI decision persistence used a low-entropy decision id (`{signal_id}:{phase}`), causing row upserts to collapse repeated runtime decisions.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/ai_brain.py`
+- `tests/test_runtime.py`
+- `tests/test_ai_feature_dedupe.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Runtime now resolves a stable non-empty `signal_id` before persistence/lifecycle emission for each candidate and propagates it through reject and lifecycle callbacks.
+- Runtime reject persistence now writes explicit `reject_reason` from concrete gate/decision reason instead of dropping to `UNKNOWN`.
+- Runtime decision exceptions now emit `ERROR` lifecycle events with `failure_reason` and structured `incident_payload` (exception type/message, symbol, signal_id, phase).
+
+### Persistence/schema impact
+- No schema changes.
+- Decision-id generation now uses a stable hash over `(signal_id, phase, market_ts|timestamp)` so repeated runtime decisions persist as distinct rows when market timestamp changes.
+
+### Tests added/updated
+- Added runtime regression checks for non-empty reject `signal_id` and preserved reject reason semantics.
+- Added runtime regression check for exception-to-ERROR lifecycle diagnostics persistence fields.
+- Updated AI dedupe test to use fixed `market_ts` for deterministic same-decision upsert.
+- Added AI regression check verifying repeated runtime decisions persist consistently in both `order_decisions` and `ai_decision_features`.
+
+### Risks
+- Moderate, localized persistence-identity behavior change: decision row cardinality increases for distinct runtime timestamps by design (improves auditability).
+
+### Push recommendation
+- Safe to merge as an auditability and persistence-integrity hardening patch.
+
 
 ## 2026-05-21 Patch Addendum — lifecycle persistence strict bool success contract
 

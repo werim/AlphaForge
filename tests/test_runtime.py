@@ -109,6 +109,8 @@ def test_reject_lifecycle_persistence_increments_metrics() -> None:
     assert rejects and events
     assert all("lifecycle_event_type" in evt for evt in events)
     assert any(evt["lifecycle_event_type"] == "SIGNAL_REJECTED" for evt in events)
+    assert rejects[0].get("signal_id")
+    assert rejects[0].get("reason") not in {"", "UNKNOWN"}
 
 
 def test_rejected_signal_never_executes() -> None:
@@ -174,7 +176,34 @@ def test_runtime_risk_gate_rejects_stale_market_data() -> None:
     )
     asyncio.run(orchestrator._scan_once())
     assert rejects
+    assert rejects[0].get("signal_id")
+    assert rejects[0].get("reason") == "STALE_MARKET_DATA"
     assert any(evt["lifecycle_event_type"] == "SIGNAL_REJECTED" for evt in events)
+
+
+def test_runtime_exception_persists_diagnostic_error_lifecycle() -> None:
+    events: list[dict] = []
+
+    class _ExplodingBrain:
+        def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
+            raise ValueError("decision pipeline blew up")
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "side": "LONG", "spread_pct": 0.0001, "funding_rate_pct": 0.0, "volume_24h_usdt": 95_000_000, "volatility_pct": 0.3, "trend_strength": 0.85, "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_ExplodingBrain(),
+        market_scanner=scanner,
+        on_lifecycle_event=lambda e: events.append(e),
+    )
+    asyncio.run(orchestrator._scan_once())
+    error_events = [evt for evt in events if evt["lifecycle_event_type"] == "ERROR"]
+    assert error_events
+    details = error_events[-1]["details"]
+    assert "ValueError" in details.get("failure_reason", "")
+    assert details.get("incident_payload", {}).get("exception_type") == "ValueError"
+    assert details.get("incident_payload", {}).get("signal_id")
 
 
 def test_reconciliation_event_on_timeout_like_execution_state() -> None:
@@ -216,7 +245,7 @@ def test_paper_bootstrap_initializes_schema_with_empty_cycle(tmp_path: Path, mon
     rt = _build_runtime_from_env()
     assert rt.metrics.persistence_enabled is True
     assert rt.metrics.decisions_generated == 0
-    with rt.ai_brain.session.get_bind().connect() as conn:
+    with rt.ai_brain.session_factory().get_bind().connect() as conn:
         tables = {str(row[0]) for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
     assert "signals" in tables
     assert "order_decisions" in tables
