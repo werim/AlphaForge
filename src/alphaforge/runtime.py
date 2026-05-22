@@ -292,20 +292,20 @@ class RuntimeOrchestrator:
         for row in samples:
             sample = dict(row)
             sample_id = str(sample["sample_id"])
-            sample["mode"] = "LIVE_PRECHECK"
-            signal_payload = {
+            paper_signal_payload = {
                 "signal_id": f"precheck:{sample_id}",
                 "symbol": sample["symbol"],
-                "mode": "LIVE_PRECHECK",
+                "mode": "PAPER",
                 "side": sample.get("side", "LONG"),
                 "timeframe": sample.get("timeframe", "5m"),
                 "entry_price": float(sample.get("entry", 0.0) or 0.0),
                 "risk_reward": float(sample.get("rr", 0.0) or 0.0),
             }
+            live_precheck_signal_payload = {**paper_signal_payload, "mode": "LIVE_PRECHECK"}
             regime_ctx = {"alignment": 0.8}
             stats_ctx: dict[str, Any] = {}
-            paper_eval = self._evaluate_pre_submit(signal_payload, {**sample, "mode": "PAPER"}, regime_ctx, stats_ctx)
-            live_eval = self._evaluate_pre_submit(signal_payload, {**sample, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
+            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**sample, "mode": "PAPER"}, regime_ctx, stats_ctx)
+            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**sample, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
             missing = [field for field in compare_fields if field not in paper_eval or field not in live_eval]
             mismatch = [field for field in compare_fields if field in paper_eval and field in live_eval and paper_eval[field] != live_eval[field]]
             missing_field_count += len(missing)

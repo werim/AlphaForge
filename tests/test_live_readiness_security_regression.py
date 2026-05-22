@@ -195,3 +195,33 @@ def test_mode_parity_evidence_does_not_mutate_persistence_and_is_deterministic()
     second_no_time = {k: v for k, v in second.items() if k != "generated_at"}
     assert first_no_time == second_no_time
     assert [s["sample_id"] for s in first_no_time["samples"]] == [s["sample_id"] for s in second_no_time["samples"]]
+
+
+def test_mode_parity_evidence_uses_expected_mode_labels_for_paper_and_live_precheck() -> None:
+    class _ProbeBrain(_AcceptBrain):
+        def __init__(self, session: Session):
+            super().__init__(session)
+            self.calls: list[tuple[str, str]] = []
+
+        def score_signal(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
+            self.calls.append((str(signal_payload.get("mode")), str(market_ctx.get("mode"))))
+            return super().score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)
+
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    brain = _ProbeBrain(Session(engine))
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        ai_brain=brain,
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        live_reconciliation_provider=_CleanProvider(),
+    )
+
+    evidence = runtime._build_mode_parity_evidence(min_sample_count=3)
+    assert evidence["sample_count"] == 3
+    paper_calls = [call for call in brain.calls if call == ("PAPER", "PAPER")]
+    live_precheck_calls = [call for call in brain.calls if call == ("LIVE_PRECHECK", "LIVE_PRECHECK")]
+    assert len(paper_calls) == 3
+    assert len(live_precheck_calls) == 3
