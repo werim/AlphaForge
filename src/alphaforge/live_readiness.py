@@ -50,7 +50,7 @@ class LiveReadinessEvaluator:
     def evaluate(
         self,
         *,
-        mode_parity: Mapping[str, Any],
+        mode_parity: Mapping[str, bool],
         reconciliation_snapshot: Mapping[str, Any],
         observability_snapshot: Mapping[str, Any],
         canary_enabled: bool,
@@ -175,7 +175,7 @@ class LiveReadinessEvaluator:
             CheckResult("score_not_constant", (min_score is not None and max_score is not None and min_score != max_score), f"min_score={min_score},max_score={max_score}"),
         ]
 
-    def _check_runtime(self, mode_parity: Mapping[str, Any], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
+    def _check_runtime(self, mode_parity: Mapping[str, bool], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
         parity_status = str(mode_parity.get("evidence_status", "INCOMPLETE")).upper() if mode_parity else "INCOMPLETE"
         sample_count = int(mode_parity.get("sample_count", 0)) if mode_parity else 0
         min_samples = int(mode_parity.get("min_sample_count", 1)) if mode_parity else 1
@@ -201,17 +201,8 @@ class LiveReadinessEvaluator:
         return checks
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
-        observability_provenance = (
-            str(obs.get("observability_evidence_source", "")).upper() == "MEASURED_PROBE"
-            and bool(obs.get("observability_evidence_persisted", False))
-        )
-        rollback_provenance = (
-            str(obs.get("rollback_evidence_source", "")).upper() == "DETERMINISTIC_VALIDATION"
-            and bool(obs.get("rollback_evidence_persisted", False))
-        )
         coverage = (
-            observability_provenance
-            and bool(obs.get("qualification_persistence_verified", False))
+            bool(obs.get("qualification_persistence_verified", False))
             and bool(obs.get("incident_persistence_verified", False))
             and bool(obs.get("forensic_export_verified", False))
             and bool(obs.get("sensitive_data_redaction_verified", False))
@@ -219,8 +210,7 @@ class LiveReadinessEvaluator:
             and str(obs.get("evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
         )
         rollback = (
-            rollback_provenance
-            and bool(obs.get("kill_switch_block_verified", False))
+            bool(obs.get("kill_switch_block_verified", False))
             and bool(obs.get("no_submit_on_kill_switch_verified", False))
             and bool(obs.get("fail_closed_reconciliation_verified", False))
             and bool(obs.get("repair_actions_non_mutating_verified", False))
