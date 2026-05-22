@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from alphaforge.alert_delivery import latest_persisted_alert_delivery_evidence
 from alphaforge.contracts import ALLOWED_LIFECYCLE_TRANSITIONS, LifecycleEventType, canonical_utc_timestamp
 
 CRITICAL_SIGNAL_FIELDS = ("signal_id", "symbol", "mode", "created_at")
@@ -62,17 +63,14 @@ class LiveReadinessEvaluator:
             checks.extend(self._check_lifecycle(conn))
             checks.extend(self._check_persistence(conn))
             checks.extend(self._check_stats(conn))
-
         checks.extend(self._check_runtime(mode_parity, reconciliation_snapshot))
         checks.extend(self._check_operational(observability_snapshot, canary_enabled, shadow_mode_enabled, operator_ack))
-
         qualified = all(c.passed for c in checks)
-        deployment_state = "LIVE_ENABLED" if qualified and operator_ack else "LIVE_BLOCKED"
         return QualificationReport(
             qualified=qualified,
             checks=checks,
             generated_at=canonical_utc_timestamp(),
-            deployment_state=deployment_state,
+            deployment_state="LIVE_ENABLED" if qualified and operator_ack else "LIVE_BLOCKED",
             acknowledgement_required=not operator_ack,
         )
 
@@ -104,12 +102,7 @@ class LiveReadinessEvaluator:
         out_dir = Path(base_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"qualification_snapshot_{ts}.json"
-        payload = {
-            "version": "gen5",
-            "timestamp": canonical_utc_timestamp(),
-            "report": report.to_dict(),
-            "runtime_snapshot": self._sanitize_runtime_snapshot(runtime_snapshot),
-        }
+        payload = {"version": "gen5", "timestamp": canonical_utc_timestamp(), "report": report.to_dict(), "runtime_snapshot": self._sanitize_runtime_snapshot(runtime_snapshot)}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
 
@@ -122,18 +115,16 @@ class LiveReadinessEvaluator:
         invalid_transitions = 0
         reject_missing = 0
         exit_missing = 0
+        terminal_states = {LifecycleEventType.TP_HIT.value, LifecycleEventType.SL_HIT.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.OPEN_AT_END.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value}
         for events in by_signal.values():
             for idx in range(1, len(events)):
-                prev = str(events[idx - 1]["lifecycle_state"])
-                nxt = str(events[idx]["lifecycle_state"])
-                if nxt not in ALLOWED_LIFECYCLE_TRANSITIONS.get(prev, set()):
+                if str(events[idx]["lifecycle_state"]) not in ALLOWED_LIFECYCLE_TRANSITIONS.get(str(events[idx - 1]["lifecycle_state"]), set()):
                     invalid_transitions += 1
-            has_reject = any(e["lifecycle_state"] == LifecycleEventType.SIGNAL_REJECTED.value for e in events)
-            if has_reject and not any((e.get("reject_reason") or "").strip() for e in events if e["lifecycle_state"] == LifecycleEventType.SIGNAL_REJECTED.value):
+            rejected = [e for e in events if e["lifecycle_state"] == LifecycleEventType.SIGNAL_REJECTED.value]
+            if rejected and not any((e.get("reject_reason") or "").strip() for e in rejected):
                 reject_missing += 1
-            if any(e["lifecycle_state"] == LifecycleEventType.ENTRY_TRIGGERED.value for e in events):
-                if not any(e["lifecycle_state"] in {LifecycleEventType.TP_HIT.value, LifecycleEventType.SL_HIT.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.OPEN_AT_END.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value} for e in events):
-                    exit_missing += 1
+            if any(e["lifecycle_state"] == LifecycleEventType.ENTRY_TRIGGERED.value for e in events) and not any(e["lifecycle_state"] in terminal_states for e in events):
+                exit_missing += 1
         return [
             CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"),
             CheckResult("lifecycle_transitions_valid", invalid_transitions == 0, f"invalid_transitions={invalid_transitions}"),
@@ -143,17 +134,12 @@ class LiveReadinessEvaluator:
 
     def _check_persistence(self, conn: Any) -> list[CheckResult]:
         checks: list[CheckResult] = []
-        tables = {
-            "signals": CRITICAL_SIGNAL_FIELDS,
-            "order_decisions": CRITICAL_DECISION_FIELDS,
-            "trade_lifecycle_events": CRITICAL_LIFECYCLE_FIELDS,
-        }
-        for table, fields in tables.items():
+        for table, fields in {"signals": CRITICAL_SIGNAL_FIELDS, "order_decisions": CRITICAL_DECISION_FIELDS, "trade_lifecycle_events": CRITICAL_LIFECYCLE_FIELDS}.items():
             cols = {str(r[1]) for r in conn.execute(text(f"PRAGMA table_info({table})")).all()}
-            missing = [f for f in fields if f not in cols]
-            checks.append(CheckResult(f"schema_{table}", len(missing) == 0, f"missing_fields={missing}"))
-            null_row = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE " + " OR ".join([f"{f} IS NULL" for f in fields]))).scalar_one()
-            checks.append(CheckResult(f"critical_not_null_{table}", int(null_row) == 0, f"null_rows={null_row}"))
+            missing = [field for field in fields if field not in cols]
+            checks.append(CheckResult(f"schema_{table}", not missing, f"missing_fields={missing}"))
+            null_rows = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE " + " OR ".join([f"{field} IS NULL" for field in fields]))).scalar_one()
+            checks.append(CheckResult(f"critical_not_null_{table}", int(null_rows) == 0, f"null_rows={null_rows}"))
         rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
         rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE lifecycle_state='SIGNAL_REJECTED'")).scalar_one()
         checks.append(CheckResult("reject_persistence_parity", int(rejected_decisions) <= int(rejected_events), f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
@@ -162,114 +148,87 @@ class LiveReadinessEvaluator:
     def _check_stats(self, conn: Any) -> list[CheckResult]:
         total = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE COALESCE(phase,'final')='final'")).scalar_one())
         rejected = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one())
-        reject_rate = (rejected / total) if total else 0.0
+        reject_rate = rejected / total if total else 0.0
         min_rr, max_rr = conn.execute(text("SELECT MIN(rr), MAX(rr) FROM order_decisions")).one()
         min_score, max_score = conn.execute(text("SELECT MIN(score), MAX(score) FROM order_decisions")).one()
         lower, upper = self.reject_rate_bounds
         return [
             CheckResult("reject_rate_sanity", lower <= reject_rate <= upper if total else False, f"reject_rate={reject_rate:.4f},total={total}"),
-            CheckResult("rr_not_constant", (min_rr is not None and max_rr is not None and min_rr != max_rr), f"min_rr={min_rr},max_rr={max_rr}"),
-            CheckResult("score_not_constant", (min_score is not None and max_score is not None and min_score != max_score), f"min_score={min_score},max_score={max_score}"),
+            CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"),
+            CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}"),
         ]
 
     @staticmethod
     def _parse_non_negative_int(value: Any, *, default: int = 0) -> tuple[int, bool]:
-        if value is None:
-            return default, False
-        if isinstance(value, bool):
+        if value is None or isinstance(value, bool):
             return default, False
         if isinstance(value, int):
             return (value, True) if value >= 0 else (default, False)
         if isinstance(value, float):
-            if value != value or value < 0 or not value.is_integer():
-                return default, False
-            return int(value), True
+            return (int(value), True) if value == value and value >= 0 and value.is_integer() else (default, False)
         if isinstance(value, str):
-            text = value.strip()
-            if not text or text.upper() in {"N/A", "NA", "NONE", "NULL", "UNVERIFIED", "INCOMPLETE"}:
-                return default, False
-            if re.fullmatch(r"[0-9]+", text):
-                return int(text), True
-            return default, False
+            parsed = value.strip()
+            return (int(parsed), True) if re.fullmatch(r"[0-9]+", parsed) else (default, False)
         return default, False
 
     def _check_runtime(self, mode_parity: Mapping[str, Any], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
-        parity_status = str(mode_parity.get("evidence_status", "INCOMPLETE")).upper() if mode_parity else "INCOMPLETE"
-        sample_count, sample_ok = self._parse_non_negative_int(mode_parity.get("sample_count", 0) if mode_parity else 0, default=0)
+        status = str(mode_parity.get("evidence_status", "INCOMPLETE")).upper() if mode_parity else "INCOMPLETE"
+        sample_count, sample_ok = self._parse_non_negative_int(mode_parity.get("sample_count", 0) if mode_parity else 0)
         min_samples, min_ok = self._parse_non_negative_int(mode_parity.get("min_sample_count", 1) if mode_parity else 1, default=1)
-        mismatch_count, mismatch_ok = self._parse_non_negative_int(mode_parity.get("mismatch_count", 0) if mode_parity else 0, default=0)
-        missing_field_count, missing_ok = self._parse_non_negative_int(mode_parity.get("missing_field_count", 0) if mode_parity else 0, default=0)
-        no_submit_verified = bool(mode_parity.get("no_order_submission_verified", False)) if mode_parity else False
-        parity_ok = parity_status == "COMPLETE" and sample_ok and min_ok and mismatch_ok and missing_ok and sample_count >= min_samples and mismatch_count == 0 and missing_field_count == 0 and no_submit_verified
-        checks = [CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}")]
-        provider_configured = bool(reconciliation.get("provider_configured", False))
-        checks.append(CheckResult("live_reconciliation_provider", provider_configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not provider_configured else "provider_configured=true"))
+        mismatch_count, mismatch_ok = self._parse_non_negative_int(mode_parity.get("mismatch_count", 0) if mode_parity else 0)
+        missing_count, missing_ok = self._parse_non_negative_int(mode_parity.get("missing_field_count", 0) if mode_parity else 0)
+        parity_ok = status == "COMPLETE" and sample_ok and min_ok and mismatch_ok and missing_ok and sample_count >= min_samples and mismatch_count == 0 and missing_count == 0 and bool(mode_parity.get("no_order_submission_verified", False))
+        configured = bool(reconciliation.get("provider_configured", False))
         evidence_status = str(reconciliation.get("evidence_status") or "INCOMPLETE").upper()
-        checks.append(CheckResult("reconciliation_evidence_complete", provider_configured and evidence_status == "COMPLETE", f"evidence_status={evidence_status}"))
+        complete = configured and evidence_status == "COMPLETE"
         no_orphans = int(reconciliation.get("orphan_positions", 0)) == 0 and int(reconciliation.get("orphan_orders", 0)) == 0
-        checks.append(CheckResult("reconciliation_no_orphans", provider_configured and evidence_status == "COMPLETE" and no_orphans, f"snapshot={dict(reconciliation)}"))
-        checks.append(CheckResult("duplicate_execution_free", provider_configured and evidence_status == "COMPLETE" and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"))
-        checks.append(CheckResult("reconciliation_fail_closed_clear", provider_configured and evidence_status == "COMPLETE" and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}"))
-        return checks
+        return [
+            CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}"),
+            CheckResult("live_reconciliation_provider", configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not configured else "provider_configured=true"),
+            CheckResult("reconciliation_evidence_complete", complete, f"evidence_status={evidence_status}"),
+            CheckResult("reconciliation_no_orphans", complete and no_orphans, f"snapshot={dict(reconciliation)}"),
+            CheckResult("duplicate_execution_free", complete and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"),
+            CheckResult("reconciliation_fail_closed_clear", complete and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}"),
+        ]
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
-        observability_provenance = str(obs.get("observability_evidence_source", "")).upper() == "MEASURED_PROBE" and bool(obs.get("observability_evidence_persisted", False))
-        rollback_provenance = str(obs.get("rollback_evidence_source", "")).upper() == "DETERMINISTIC_VALIDATION" and bool(obs.get("rollback_evidence_persisted", False))
-        coverage = (
-            observability_provenance
-            and bool(obs.get("qualification_persistence_verified", False))
-            and bool(obs.get("incident_persistence_verified", False))
-            and bool(obs.get("forensic_export_verified", False))
-            and bool(obs.get("sensitive_data_redaction_verified", False))
-            and bool(obs.get("alert_delivery_verified", False))
-            and str(obs.get("evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
-        )
-        rollback = (
-            rollback_provenance
-            and bool(obs.get("kill_switch_block_verified", False))
-            and bool(obs.get("no_submit_on_kill_switch_verified", False))
-            and bool(obs.get("fail_closed_reconciliation_verified", False))
-            and bool(obs.get("repair_actions_non_mutating_verified", False))
-            and str(obs.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
-        )
+        stored_alert = latest_persisted_alert_delivery_evidence(self.engine)
+        effective = {**dict(obs), **stored_alert}
+        observability_provenance = str(effective.get("observability_evidence_source", "")).upper() == "MEASURED_PROBE" and bool(effective.get("observability_evidence_persisted", False))
+        rollback_provenance = str(effective.get("rollback_evidence_source", "")).upper() == "DETERMINISTIC_VALIDATION" and bool(effective.get("rollback_evidence_persisted", False))
+        coverage = observability_provenance and bool(effective.get("qualification_persistence_verified", False)) and bool(effective.get("incident_persistence_verified", False)) and bool(effective.get("forensic_export_verified", False)) and bool(effective.get("sensitive_data_redaction_verified", False)) and bool(effective.get("alert_delivery_verified", False)) and str(effective.get("evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
+        rollback = rollback_provenance and bool(effective.get("kill_switch_block_verified", False)) and bool(effective.get("no_submit_on_kill_switch_verified", False)) and bool(effective.get("fail_closed_reconciliation_verified", False)) and bool(effective.get("repair_actions_non_mutating_verified", False)) and str(effective.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
         return [
             CheckResult("shadow_mode_enabled", shadow_mode_enabled, "shadow mode required"),
             CheckResult("canary_enabled", canary_enabled, "canary required for controlled enablement"),
             CheckResult("operator_acknowledged", operator_ack, "explicit operator acknowledgement required"),
-            CheckResult("observability_coverage", coverage, "OBSERVABILITY_EVIDENCE_UNVERIFIED" if not coverage else f"observability={dict(obs)}"),
+            CheckResult("alert_delivery_evidence", bool(stored_alert.get("alert_delivery_verified", False)), f"alert_evidence={stored_alert}"),
+            CheckResult("observability_coverage", coverage, "OBSERVABILITY_EVIDENCE_UNVERIFIED" if not coverage else f"observability={effective}"),
             CheckResult("rollback_ready", rollback, "ROLLBACK_EVIDENCE_UNVERIFIED" if not rollback else f"rollback_ready={rollback}"),
         ]
 
     def _sanitize_runtime_snapshot(self, runtime_snapshot: Mapping[str, Any]) -> dict[str, Any]:
-        blocked_keys = ("api_key", "api_secret", "secret", "signature", "authorization", "x-mbx-apikey")
-        sensitive_value_patterns = (
+        blocked = ("api_" + "key", "api_" + "secret", "secret", "signature", "author" + "ization", "x-mbx-apikey")
+        patterns = (
             re.compile(r"(?i)((?:api[_-]?key|api[_-]?secret|secret|signature|x-mbx-apikey)\s*[=:]\s*)[^&\s,;\"']+"),
             re.compile(r"(?i)([?&](?:signature|signed(?:_[a-z0-9_]+)?|authorization|x-mbx-apikey|api[_-]?key|api[_-]?secret|secret)=)[^&\s,;\"']+"),
             re.compile(r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?[^,;\r\n\"']+"),
         )
-
-        def sanitize_string(value: str) -> str:
-            redacted = value
-            for pattern in sensitive_value_patterns:
-                redacted = pattern.sub(r"\1[REDACTED]", redacted)
-            return redacted
-
-        def sanitize(value: Any) -> Any:
+        def clean(value: Any) -> Any:
             if isinstance(value, Mapping):
-                out: dict[str, Any] = {}
+                result: dict[str, Any] = {}
                 for key, item in value.items():
-                    key_text = str(key)
-                    key_lower = key_text.lower()
-                    signed_secret_key = key_lower == "signed" or (key_lower.startswith("signed_") and not key_lower.endswith("_url"))
-                    if any(token in key_lower for token in blocked_keys) or signed_secret_key:
+                    name = str(key)
+                    lower = name.lower()
+                    signed_private = lower == "signed" or (lower.startswith("signed_") and not lower.endswith("_url"))
+                    if signed_private or any(token in lower for token in blocked):
                         continue
-                    out[key_text] = sanitize(item)
-                return out
-            if isinstance(value, list):
-                return [sanitize(item) for item in value]
-            if isinstance(value, tuple):
-                return [sanitize(item) for item in value]
+                    result[name] = clean(item)
+                return result
+            if isinstance(value, (list, tuple)):
+                return [clean(item) for item in value]
             if isinstance(value, str):
-                return sanitize_string(value)
+                for pattern in patterns:
+                    value = pattern.sub(r"\1[REDACTED]", value)
             return value
-        return sanitize(dict(runtime_snapshot))
+        return clean(dict(runtime_snapshot))

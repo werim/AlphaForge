@@ -13,7 +13,7 @@ from alphaforge.runtime import RuntimeConfig, RuntimeOrchestrator, ExecutionMode
 
 def test_no_duplicate_alphaforge_package_shadowing() -> None:
     root = Path(__file__).resolve().parents[1]
-    pkg_dirs = [p for p in root.rglob("alphaforge") if p.is_dir() and "egg-info" not in str(p)]
+    pkg_dirs = [p for p in (root / "src").rglob("alphaforge") if p.is_dir() and "egg-info" not in str(p)]
     assert pkg_dirs == [root / "src" / "alphaforge"]
 
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 
@@ -32,10 +34,24 @@ def _operational() -> dict[str, object]:
     return {"evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "observability_evidence_persisted": True, "qualification_persistence_verified": True, "incident_persistence_verified": True, "forensic_export_verified": True, "sensitive_data_redaction_verified": True, "alert_delivery_verified": True, "rollback_evidence_status": "COMPLETE", "rollback_evidence_source": "DETERMINISTIC_VALIDATION", "rollback_evidence_persisted": True, "kill_switch_block_verified": True, "no_submit_on_kill_switch_verified": True, "fail_closed_reconciliation_verified": True, "repair_actions_non_mutating_verified": True}
 
 
-def _engine():
+class _StaticProvider:
+    def __init__(self, result: dict[str, object]):
+        self.result = result
+
+    def snapshot(self):
+        return self.result
+
+
+def _verified_alert() -> dict[str, object]:
+    return {"provider_configured": True, "evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "alert_delivery_verified": True, "delivery_attempted": True, "delivery_acknowledged": True, "non_trading_probe_verified": True, "probe_id": "probe-verified", "endpoint_origin": "https://alerts.example.test", "blocking_reasons": []}
+
+
+def _engine(*, persist_alert: bool = True):
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
+    if persist_alert:
+        capture_alert_delivery_evidence(engine, _StaticProvider(_verified_alert()))
     return engine
 
 
@@ -53,14 +69,71 @@ def test_live_readiness_pass_and_persistence() -> None:
         assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1
 
 
-def test_static_operational_flags_without_provenance_do_not_qualify() -> None:
-    observations = _operational()
-    for key in ("observability_evidence_source", "observability_evidence_persisted", "rollback_evidence_source", "rollback_evidence_persisted"):
-        observations.pop(key)
-    report = _evaluate(_engine(), observations)
+def test_in_memory_alert_delivery_flag_without_persisted_ack_does_not_qualify() -> None:
+    report = _evaluate(_engine(persist_alert=False), _operational())
+    results = {check.name: check for check in report.checks}
+    assert report.qualified is False
+    assert results["alert_delivery_evidence"].passed is False
+    assert results["observability_coverage"].passed is False
+
+
+def test_persisted_incomplete_alert_overrides_optimistic_operational_flag() -> None:
+    engine = _engine(persist_alert=False)
+    incomplete = {"evidence_status": "INCOMPLETE", "alert_delivery_verified": False, "delivery_attempted": True, "delivery_acknowledged": False, "non_trading_probe_verified": True, "endpoint_origin": "https://alerts.example.test", "blocking_reasons": ["ACKNOWLEDGEMENT_NOT_VERIFIED"]}
+    capture_alert_delivery_evidence(engine, _StaticProvider(incomplete))
+    report = _evaluate(engine, _operational())
     failed = {check.name for check in report.checks if not check.passed}
     assert report.qualified is False
-    assert {"observability_coverage", "rollback_ready"} <= failed
+    assert {"alert_delivery_evidence", "observability_coverage"} <= failed
+
+
+def test_matching_diagnostic_probe_ack_is_persisted_and_accepted() -> None:
+    def transport(url: str, payload: bytes, headers, timeout: float):
+        request = json.loads(payload.decode("utf-8"))
+        return {"status": "ACKNOWLEDGED", "acknowledged": True, "probe_id": request["probe_id"]}
+
+    engine = _engine(persist_alert=False)
+    provider = WebhookAlertDeliveryEvidenceProvider(AlertDeliveryProbeConfig(endpoint_url="https://alerts.example.test/probe"), transport=transport, probe_id_factory=lambda: "probe-measured")
+    saved = capture_alert_delivery_evidence(engine, provider)
+    loaded = latest_persisted_alert_delivery_evidence(engine)
+    assert saved["alert_delivery_verified"] is True
+    assert loaded["alert_delivery_verified"] is True
+    assert loaded["observability_evidence_persisted"] is True
+
+
+def test_nonmatching_probe_ack_is_persisted_but_keeps_readiness_blocked() -> None:
+    provider = WebhookAlertDeliveryEvidenceProvider(AlertDeliveryProbeConfig(endpoint_url="https://alerts.example.test/probe"), transport=lambda url, payload, headers, timeout: {"status": "ACKNOWLEDGED", "acknowledged": True, "probe_id": "different"}, probe_id_factory=lambda: "probe-measured")
+    engine = _engine(persist_alert=False)
+    saved = capture_alert_delivery_evidence(engine, provider)
+    assert saved["alert_delivery_verified"] is False
+    assert _evaluate(engine).qualified is False
+
+
+def test_insecure_probe_destination_is_not_called() -> None:
+    invoked: list[bool] = []
+    provider = WebhookAlertDeliveryEvidenceProvider(AlertDeliveryProbeConfig(endpoint_url="http://alerts.example.test/probe"), transport=lambda url, payload, headers, timeout: invoked.append(True) or {}, probe_id_factory=lambda: "probe-measured")
+    result = provider.snapshot()
+    assert invoked == []
+    assert result["alert_delivery_verified"] is False
+
+
+def test_stale_persisted_alert_evidence_is_rejected() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE live_alert_delivery_evidence SET recorded_at='2026-01-01T00:00:00+00:00'"))
+    evidence = latest_persisted_alert_delivery_evidence(engine, now=datetime(2026, 5, 22, tzinfo=timezone.utc))
+    assert evidence["alert_delivery_verified"] is False
+    assert evidence["alert_delivery_blocking_reasons"] == ["ALERT_DELIVERY_EVIDENCE_STALE"]
+
+
+def test_static_operational_flags_without_persisted_alert_or_rollback_provenance_do_not_qualify() -> None:
+    observations = _operational()
+    observations.pop("rollback_evidence_source")
+    observations.pop("rollback_evidence_persisted")
+    report = _evaluate(_engine(persist_alert=False), observations)
+    failed = {check.name for check in report.checks if not check.passed}
+    assert report.qualified is False
+    assert {"alert_delivery_evidence", "observability_coverage", "rollback_ready"} <= failed
 
 
 def test_live_readiness_detects_lifecycle_orphan() -> None:
@@ -92,14 +165,7 @@ def test_invalid_numeric_parity_evidence_fails_closed_and_persists_report() -> N
     engine = _engine()
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
-        mode_parity={
-            "evidence_status": "COMPLETE",
-            "sample_count": "N/A",
-            "min_sample_count": None,
-            "mismatch_count": "",
-            "missing_field_count": "bad-value",
-            "no_order_submission_verified": True,
-        },
+        mode_parity={"evidence_status": "COMPLETE", "sample_count": "N/A", "min_sample_count": None, "mismatch_count": "", "missing_field_count": "bad-value", "no_order_submission_verified": True},
         reconciliation_snapshot=_reconciliation(),
         observability_snapshot=_operational(),
         canary_enabled=True,
