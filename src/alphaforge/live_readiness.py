@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 from sqlalchemy import text
@@ -224,19 +225,33 @@ class LiveReadinessEvaluator:
         ]
 
     def _sanitize_runtime_snapshot(self, runtime_snapshot: Mapping[str, Any]) -> dict[str, Any]:
-        blocked = ("api_key", "api_secret", "signature", "signed", "authorization", "x-mbx")
+        blocked_keys = ("api_key", "api_secret", "secret", "signature", "signed", "authorization", "x-mbx")
+        sensitive_value_patterns = (
+            re.compile(r"(?i)((?:api[_-]?key|api[_-]?secret|secret|signature|x-mbx-apikey)\s*[=:]\s*)[^&\s,;\"']+"),
+            re.compile(r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?[^,;\r\n\"']+"),
+        )
+
+        def sanitize_string(value: str) -> str:
+            redacted = value
+            for pattern in sensitive_value_patterns:
+                redacted = pattern.sub(r"\1[REDACTED]", redacted)
+            return redacted
 
         def sanitize(value: Any) -> Any:
             if isinstance(value, Mapping):
                 out: dict[str, Any] = {}
                 for key, item in value.items():
-                    k = str(key)
-                    if any(tok in k.lower() for tok in blocked):
+                    key_text = str(key)
+                    if any(token in key_text.lower() for token in blocked_keys):
                         continue
-                    out[k] = sanitize(item)
+                    out[key_text] = sanitize(item)
                 return out
             if isinstance(value, list):
-                return [sanitize(v) for v in value]
+                return [sanitize(item) for item in value]
+            if isinstance(value, tuple):
+                return [sanitize(item) for item in value]
+            if isinstance(value, str):
+                return sanitize_string(value)
             return value
 
         return sanitize(dict(runtime_snapshot))
