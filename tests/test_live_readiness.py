@@ -47,7 +47,7 @@ def test_live_readiness_pass_and_persistence() -> None:
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
         mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
-        reconciliation_snapshot={"provider_configured": True, "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0},
+        reconciliation_snapshot={"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0},
         observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
         canary_enabled=True,
         shadow_mode_enabled=True,
@@ -69,7 +69,7 @@ def test_live_readiness_detects_lifecycle_orphan() -> None:
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
         mode_parity={"paper_live_decision_path": True},
-        reconciliation_snapshot={"provider_configured": True, "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0},
+        reconciliation_snapshot={"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0},
         observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
         canary_enabled=True,
         shadow_mode_enabled=True,
@@ -105,7 +105,7 @@ def test_forensic_snapshot_written(tmp_path) -> None:
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
         mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
-        reconciliation_snapshot={"provider_configured": True, "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0},
+        reconciliation_snapshot={"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0},
         observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
         canary_enabled=True,
         shadow_mode_enabled=True,
@@ -159,3 +159,46 @@ def test_runtime_live_qualification_persists_fail_closed_details() -> None:
     failed = {c["name"]: c["details"] for c in data["checks"] if not c["passed"]}
     assert failed["mode_parity"] == "MODE_PARITY_UNVERIFIED"
     assert failed["live_reconciliation_provider"] == "LIVE_RECONCILIATION_PROVIDER_MISSING"
+
+class _Provider:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def snapshot(self):
+        return dict(self.payload)
+
+
+def test_runtime_live_qualification_ignores_provider_optimistic_orphan_order_counter() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        _seed_valid(s)
+    rt = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        ai_brain=_AcceptBrain(Session(engine)),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        live_reconciliation_provider=_Provider({"evidence_status": "COMPLETE", "orphan_orders": 0, "orphan_positions": 0, "duplicate_fills": 0, "orders": [{"order_id": "x", "symbol": "BTCUSDT", "status": "OPEN"}], "positions": [], "fills": []}),
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(rt._run_live_qualification_gate())
+    assert any(c.name == "reconciliation_no_orphans" and not c.passed for c in rt._qualification_report.checks)
+
+
+def test_runtime_live_qualification_ignores_provider_optimistic_orphan_position_counter() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        _seed_valid(s)
+    rt = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        ai_brain=_AcceptBrain(Session(engine)),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        live_reconciliation_provider=_Provider({"evidence_status": "COMPLETE", "orphan_orders": 0, "orphan_positions": 0, "duplicate_fills": 0, "orders": [], "positions": [{"symbol": "XRPUSDT", "qty": 1.0}], "fills": []}),
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(rt._run_live_qualification_gate())
+    assert any(c.name == "reconciliation_no_orphans" and not c.passed for c in rt._qualification_report.checks)

@@ -1,3 +1,14 @@
+## 2026-05-22 LIVE canonical reconciliation evidence-chain hardening
+- **Version:** `0.3.29-dev`
+- **Current phase:** Phase 6.1 LIVE fail-closed reconciliation safety patch.
+- **Runtime maturity:** authenticated provider is exchange evidence source only; canonical `ReconciliationEngine` is reconciliation authority.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST deterministic in-memory reconciliation unchanged; LIVE now evaluates provider snapshots through canonical reconciliation engine.
+- **Lifecycle coverage:** reconciliation findings (`ORPHAN_ORDER`, `ORPHAN_POSITION`, `LIFECYCLE_DIVERGENCE`, `DUPLICATE_FILL`) are persisted as incidents.
+- **Execution realism coverage:** provider-supplied orphan/duplicate counters are non-authoritative and ignored for readiness decisions.
+- **Known critical risks:** no real execution adapter/observability parity evidence; remediation remains dry-run only.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 Authenticated Binance read-only reconciliation evidence patch
 - **Version:** `0.3.28-dev`
 - **Current phase:** Phase 6.1 reconciliation evidence hardening.

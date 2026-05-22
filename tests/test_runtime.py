@@ -475,3 +475,22 @@ def test_live_reconciliation_requires_provider() -> None:
     )
     with pytest.raises(RuntimeError, match="reconciliation provider is not configured"):
         asyncio.run(orchestrator._reconcile_runtime_state())
+
+class _StaticProvider:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def snapshot(self):
+        return dict(self._payload)
+
+
+def test_live_reconciliation_loop_fails_closed_on_incomplete_evidence() -> None:
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, reconciliation_timeout_sec=1.0),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        live_reconciliation_provider=_StaticProvider({"evidence_status": "INCOMPLETE", "orders": [], "positions": [], "fills": []}),
+    )
+    with pytest.raises(RuntimeError, match="evidence incomplete"):
+        asyncio.run(orchestrator._reconcile_runtime_state())

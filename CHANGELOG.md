@@ -1,3 +1,20 @@
+## [Unreleased] - 2026-05-22 (LIVE canonical reconciliation evidence-chain hardening)
+
+### Added
+- Duplicate-fill detection in canonical reconciliation (`DUPLICATE_FILL`) using exchange `trade_id` with documented fallback compound key.
+- Canonical reconciliation finding summary adapter for readiness counters (`orphan_orders`, `orphan_positions`, `duplicate_fills`, `lifecycle_divergences`, `fail_closed_findings`, `stale_orders`).
+- LIVE qualification tests proving provider optimistic counters cannot bypass canonical orphan/position detection.
+
+### Changed
+- LIVE qualification now passes provider raw `orders`/`positions`/`fills` through `ReconciliationEngine.reconcile(...)` and ignores provider orphan/duplicate summary claims.
+- LIVE runtime/readiness fails closed on incomplete reconciliation evidence and on any fail-closed canonical finding.
+
+### Fixed
+- Closed false-qualification gap where provider-supplied zero orphan/duplicate counters could be trusted without runtime-intent comparison.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; no real order submission/cancellation/modification is introduced.
+
 ## [Unreleased] - 2026-05-22 (Authenticated Binance read-only LIVE reconciliation evidence)
 
 ### Added
