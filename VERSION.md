@@ -489,3 +489,14 @@ Last audit date: 2026-05-21
 
 - Last audit date: 2026-05-22
 - Historical backtest data source: deterministic Binance USD-M Futures replay (klines + historical funding joins).
+
+## 2026-05-22 PR #148 follow-up
+- **Version:** `0.3.17-dev`
+- **Current phase:** Phase 6.1 live qualification hardening.
+- **Runtime maturity:** qualification parity path is now explicitly side-effect-free and deterministic for replay.
+- **BACKTEST/PAPER/LIVE alignment:** parity evidence compares PAPER vs LIVE_PRECHECK using canonical decision functions without persistence.
+- **Lifecycle coverage:** unchanged runtime lifecycle progression; qualification probes no longer inject lifecycle rows.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** unresolved alert delivery proof, rollback evidence proof, real execution readiness, protective-order lifecycle proof.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.

@@ -634,3 +634,13 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ## 2026-05-22
 - Added deterministic historical Binance Futures replay provider with paginated kline fetching, gap checks, and funding joins.
 - Backtest runtime now treats synthetic scanner as smoke-test only and labels market_data_source=SYNTHETIC_SMOKE_TEST when enabled.
+
+## 2026-05-22 PR #148 follow-up (LIVE qualification non-mutating parity fix)
+
+### Changed
+- LIVE qualification mode parity evidence now runs through side-effect-free scoring/planning/explanation calls and no longer calls persistence-capable `before_real_order(...)`.
+- Qualification parity samples now use stable fixture sample IDs and stable fixture market timestamps to keep parity inputs deterministic across repeated runs.
+
+### Fixed
+- Removed synthetic LIVE qualification probe mutation of `signals`, `order_decisions`, `ai_decision_features`, `trade_lifecycle_events`, and rejected-review tables during parity evaluation.
+- Added regression coverage for non-mutating parity evidence and deterministic replay parity output (excluding `generated_at`).

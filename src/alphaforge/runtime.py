@@ -113,6 +113,44 @@ class RuntimeOrchestrator:
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
     _exchange_health: list[ExchangeHealth] = field(default_factory=list, init=False)
+    _qualification_samples: tuple[dict[str, Any], ...] = field(default_factory=lambda: (
+        {
+            "sample_id": "qp-001-btc-long",
+            "symbol": "BTCUSDT",
+            "entry": 67250.0,
+            "market_ts": 1716200000.0,
+            "side": "LONG",
+            "rr": 2.15,
+            "spread_pct": 0.0009,
+            "funding_rate_pct": 0.00005,
+            "liquidity_score": 0.86,
+            "timeframe": "5m",
+        },
+        {
+            "sample_id": "qp-002-eth-short",
+            "symbol": "ETHUSDT",
+            "entry": 3450.0,
+            "market_ts": 1716200060.0,
+            "side": "SHORT",
+            "rr": 1.95,
+            "spread_pct": 0.0008,
+            "funding_rate_pct": 0.00004,
+            "liquidity_score": 0.82,
+            "timeframe": "5m",
+        },
+        {
+            "sample_id": "qp-003-sol-long",
+            "symbol": "SOLUSDT",
+            "entry": 155.0,
+            "market_ts": 1716200120.0,
+            "side": "LONG",
+            "rr": 2.05,
+            "spread_pct": 0.0011,
+            "funding_rate_pct": 0.00003,
+            "liquidity_score": 0.78,
+            "timeframe": "5m",
+        },
+    ), init=False)
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
@@ -177,14 +215,7 @@ class RuntimeOrchestrator:
         if engine is None:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
         evaluator = LiveReadinessEvaluator(engine)
-        mode_parity = {
-            "evidence_status": "INCOMPLETE",
-            "sample_count": 0,
-            "min_sample_count": 3,
-            "mismatch_count": 0,
-            "missing_field_count": 1,
-            "no_order_submission_verified": True,
-        }
+        mode_parity = self._build_mode_parity_evidence(min_sample_count=3)
         reconciliation_snapshot = {
             "provider_configured": self.live_reconciliation_provider is not None,
             "evidence_status": "UNVERIFIED",
@@ -237,6 +268,66 @@ class RuntimeOrchestrator:
         logger.warning("live_readiness_report=%s", report.to_dict())
         if not report.qualified:
             raise RuntimeError("LIVE mode blocked: readiness qualification failed")
+
+    def _evaluate_pre_submit(self, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> dict[str, Any]:
+        score_ctx = self.ai_brain.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)
+        order_plan = self.ai_brain.choose_order_plan(signal_payload, market_ctx, score_ctx)
+        explanation = self.ai_brain.explain_decision(signal_payload, score_ctx, order_plan)
+        return {
+            "decision": order_plan.decision,
+            "reason": order_plan.reason,
+            "order_type": order_plan.order_type,
+            "confidence": float(order_plan.confidence),
+            "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
+            "effective_rr": float(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)) or 0.0),
+            "explanation": explanation,
+        }
+
+    def _build_mode_parity_evidence(self, *, min_sample_count: int = 3) -> dict[str, Any]:
+        samples = list(self._qualification_samples[: max(0, int(min_sample_count))])
+        comparisons: list[dict[str, Any]] = []
+        mismatch_count = 0
+        missing_field_count = 0
+        compare_fields = ("decision", "reason", "order_type", "confidence", "score", "effective_rr", "explanation")
+        for row in samples:
+            sample = dict(row)
+            sample_id = str(sample["sample_id"])
+            paper_signal_payload = {
+                "signal_id": f"precheck:{sample_id}",
+                "symbol": sample["symbol"],
+                "mode": "PAPER",
+                "side": sample.get("side", "LONG"),
+                "timeframe": sample.get("timeframe", "5m"),
+                "entry_price": float(sample.get("entry", 0.0) or 0.0),
+                "risk_reward": float(sample.get("rr", 0.0) or 0.0),
+            }
+            live_precheck_signal_payload = {**paper_signal_payload, "mode": "LIVE_PRECHECK"}
+            regime_ctx = {"alignment": 0.8}
+            stats_ctx: dict[str, Any] = {}
+            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**sample, "mode": "PAPER"}, regime_ctx, stats_ctx)
+            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**sample, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
+            missing = [field for field in compare_fields if field not in paper_eval or field not in live_eval]
+            mismatch = [field for field in compare_fields if field in paper_eval and field in live_eval and paper_eval[field] != live_eval[field]]
+            missing_field_count += len(missing)
+            mismatch_count += len(mismatch)
+            comparisons.append({
+                "sample_id": sample_id,
+                "paper": {k: paper_eval.get(k) for k in compare_fields},
+                "live_precheck": {k: live_eval.get(k) for k in compare_fields},
+                "missing_fields": missing,
+                "mismatch_fields": mismatch,
+            })
+        return {
+            "evidence_status": "COMPLETE" if samples and mismatch_count == 0 and missing_field_count == 0 else "INCOMPLETE",
+            "sample_count": len(samples),
+            "min_sample_count": int(min_sample_count),
+            "mismatch_count": mismatch_count,
+            "missing_field_count": missing_field_count,
+            "no_order_submission_verified": True,
+            "comparison_fields": list(compare_fields),
+            "samples": comparisons,
+            "generated_at": canonical_utc_timestamp(),
+        }
 
     async def _market_scan_loop(self) -> None:
         try:
