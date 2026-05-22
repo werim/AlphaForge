@@ -19,6 +19,7 @@ from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import scan_exchange_markets
+from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
@@ -68,6 +69,7 @@ class RuntimeConfig:
     require_exchange_connectivity_for_live: bool = True
     required_live_exchanges: tuple[str, ...] = ("binance",)
     exchange_connectivity_timeout_sec: float = 2.0
+    enable_binance_readonly_reconciliation: bool = False
 
 
 @dataclass(slots=True)
@@ -570,7 +572,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec)
+    config = RuntimeConfig(execution_mode=mode, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation)
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         now_ts = time.time()
@@ -635,11 +637,31 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                 raise RuntimeError("order_decision_persistence_failed")
             session.commit()
 
+    live_reconciliation_provider = None
+    if mode == ExecutionMode.LIVE and cfg.runtime.enable_binance_readonly_reconciliation:
+        api_key = str(os.getenv("BINANCE_API_KEY", "")).strip()
+        api_secret = str(os.getenv("BINANCE_API_SECRET", "")).strip()
+        if bool(api_key) ^ bool(api_secret):
+            raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are partial")
+        if not api_key or not api_secret:
+            raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are missing")
+        live_reconciliation_provider = BinanceReadonlyReconciliationProvider(
+            config=BinanceReadonlyReconciliationConfig(
+                base_url=cfg.exchange.binance.base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms,
+                request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
+                trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
+            )
+        )
+
     orchestrator = RuntimeOrchestrator(
         config=config,
         ai_brain=brain,
         market_scanner=_runtime_market_scanner,
         scanner_source=scanner_source,
+        live_reconciliation_provider=live_reconciliation_provider,
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
         persistence_engine=engine,

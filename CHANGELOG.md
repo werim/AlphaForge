@@ -1,3 +1,20 @@
+## [Unreleased] - 2026-05-22 (Authenticated Binance read-only LIVE reconciliation evidence)
+
+### Added
+- `BinanceReadonlyReconciliationProvider` with signed USER_DATA GET support for `/fapi/v1/openOrders`, `/fapi/v3/positionRisk`, and symbol-scoped `/fapi/v1/userTrades`.
+- Deterministic mocked unit tests for request signing, credential redaction, hedge-mode position normalization, and fail-closed behavior.
+- Runtime env gate test for LIVE fail-closed when read-only reconciliation is enabled without credentials.
+
+### Changed
+- Runtime env bootstrap now supports explicit read-only reconciliation toggles and bounded recvWindow/lookback configuration.
+- LIVE runtime wiring can attach read-only reconciliation provider only when explicitly enabled and full credentials are present.
+
+### Fixed
+- Closed gap where LIVE had no authenticated exchange reconciliation evidence provider implementation.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; no real order submission/execution adapter is implemented.
+
 ## [Unreleased] - 2026-05-22 (LIVE qualification evidence fail-closed + reconciliation provider requirement)
 
 ### Added

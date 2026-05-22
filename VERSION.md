@@ -1,3 +1,14 @@
+## 2026-05-22 Authenticated Binance read-only reconciliation evidence patch
+- **Version:** `0.3.28-dev`
+- **Current phase:** Phase 6.1 reconciliation evidence hardening.
+- **Runtime maturity:** LIVE can now gather authenticated Binance USER_DATA reconciliation evidence in explicit read-only mode when enabled and fully credentialed.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST unchanged and credential-free; LIVE gains optional read-only reconciliation evidence path only.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** reconciliation now uses authenticated exchange truth for open orders, position risk, and bounded fill history.
+- **Known critical risks:** no real execution adapter/order submission path; mode parity/observability/rollback evidence still unverified.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 LIVE qualification evidence fail-closed + reconciliation provider requirement patch
 - **Version:** `0.3.27-dev`
 - **Current phase:** Phase 6.1 live qualification evidence hardening.

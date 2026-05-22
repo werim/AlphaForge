@@ -94,3 +94,12 @@ def test_runtime_env_loads_runtime_config_fields(monkeypatch: pytest.MonkeyPatch
     assert cfg.operator_live_acknowledged is True
     assert cfg.reconciliation_interval_sec == pytest.approx(7)
     assert cfg.reconciliation_timeout_sec == pytest.approx(3)
+
+
+def test_live_reconciliation_enabled_requires_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "true")
+    monkeypatch.delenv("BINANCE_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
+    with pytest.raises(RuntimeError, match="credentials are missing"):
+        _build_runtime_from_env()

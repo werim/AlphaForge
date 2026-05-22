@@ -1,3 +1,51 @@
+## 2026-05-22 Patch Addendum — Authenticated Binance READ-ONLY reconciliation provider
+
+### Why the patch was needed
+- LIVE qualification/readiness required authenticated reconciliation provider evidence, but no provider existed.
+
+### Root cause
+- The runtime had a reconciliation provider contract and fail-closed requirement, but no authenticated Binance USER_DATA implementation.
+
+### Files changed
+- `src/alphaforge/binance_reconciliation_provider.py`
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/config.py`
+- `src/alphaforge/config/__init__.py`
+- `tests/test_binance_reconciliation_provider.py`
+- `tests/test_runtime_env_config.py`
+- `.env.example`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added read-only Binance reconciliation snapshot support with signed GET-only USER_DATA calls.
+- Runtime wires provider only in LIVE when `ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION=true` and complete credentials are configured.
+- LIVE fails closed with explicit missing/partial credential errors when reconciliation is enabled but credentials are incomplete.
+
+### Security/redaction behavior
+- API secret and signature are never persisted in evidence snapshots.
+- Failure payloads are sanitized to class-level redacted errors.
+
+### Orphan coverage strategy
+- Uses global `/fapi/v3/positionRisk` and global `/fapi/v1/openOrders` to preserve orphan discovery capability.
+- Uses bounded symbol-scoped `/fapi/v1/userTrades` only for tracked/open-position symbols.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- No execution-path changes.
+
+### Tests executed
+- `pytest -q tests/test_binance_reconciliation_provider.py tests/test_runtime_env_config.py::test_live_reconciliation_enabled_requires_credentials`
+
+### Remaining limitations / blockers
+- No real order submission adapter exists.
+- Mode parity/observability/rollback readiness evidence remains unverified.
+- LIVE remains blocked/not ready by design.
+
+### Push recommendation
+- Merge as minimal authenticated read-only reconciliation evidence increment.
+
 ## 2026-05-22 Patch Addendum — LIVE qualification evidence fail-closed + scanner/reconciliation provenance hardening
 
 ### Why the patch was needed
