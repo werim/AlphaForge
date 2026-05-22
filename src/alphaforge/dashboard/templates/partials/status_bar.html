@@ -1,0 +1,11 @@
+<section class="status-strip" id="status-bar" data-refresh-url="/partials/status-bar" data-refresh-ms="10000">
+  <div><label>Mode</label><strong>{{ status.configured_execution_mode }}</strong></div>
+  <div><label>Runtime</label><strong class="badge neutral">{{ status.runtime_process_status }}</strong></div>
+  <div><label>LIVE Readiness</label>
+    {% if status.latest_readiness.status == 'PASS' %}<strong class="badge pass">PASS</strong>
+    {% elif status.latest_readiness.status == 'FAIL' %}<strong class="badge fail">BLOCKED</strong>
+    {% else %}<strong class="badge neutral">{{ status.latest_readiness.status }}</strong>{% endif %}
+  </div>
+  <div><label>Kill Switch</label><strong class="badge {% if status.global_kill_switch %}fail{% else %}neutral{% endif %}">{{ 'ON' if status.global_kill_switch else 'OFF' }}</strong></div>
+  <div><label>Shadow / Canary</label><strong>{{ 'ON' if status.enable_shadow_mode else 'OFF' }} / {{ 'ON' if status.enable_canary_mode else 'OFF' }}</strong></div>
+</section>
