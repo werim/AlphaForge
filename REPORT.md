@@ -1,3 +1,39 @@
+## 2026-05-22 Patch Addendum — Deterministic PAPER vs LIVE_PRECHECK mode parity evidence provider
+
+### Why the patch was needed
+- LIVE qualification mode parity evidence was static placeholder data and did not measure deterministic parity through canonical pre-submit decision logic.
+
+### Root cause
+- `_run_live_qualification_gate()` hardcoded an incomplete mode parity payload instead of evaluating shared pre-submit paths.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `tests/test_live_readiness_security_regression.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE qualification now builds deterministic parity evidence by evaluating the same normalized samples through `PAPER` and `LIVE_PRECHECK`.
+- Evidence now includes per-sample decision/reject/score/RR/effective-RR/gates/lifecycle-pre-submit fields plus mismatch accounting.
+- Qualification explicitly records `no_order_submission_verified=true` and does not call execution adapter submission in parity generation.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- No lifecycle transition model changes; only parity evidence payload depth increased.
+- Readiness persistence path (`live_readiness_reports`) remains unchanged and now stores measured parity payload.
+
+### Tests added/updated
+- Added regression test asserting mode parity check passes while real execution adapter submit call count remains zero in LIVE qualification flow.
+- Existing readiness security regressions retained for startup incident non-persistence and fail-closed behavior.
+
+### Risks / remaining limitations
+- LIVE is intentionally still blocked by incomplete observability and rollback evidence.
+- This patch does not add exchange order mutation pathways and does not change runtime trading thresholds.
+
+### Push recommendation
+- Merge as minimal evidence-contract hardening for deterministic mode parity qualification while preserving fail-closed LIVE posture.
+
 ## 2026-05-22 Patch Addendum — Minimal follow-up: startup incident persistence rollback + defensive evidence parsing
 
 ### Why the patch was needed

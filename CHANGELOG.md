@@ -1,3 +1,16 @@
+## [Unreleased] - 2026-05-22 (Deterministic PAPER vs LIVE_PRECHECK mode parity evidence provider)
+
+### Added
+- Deterministic mode parity provider in LIVE qualification that evaluates the same normalized candidate samples through `PAPER` and `LIVE_PRECHECK` pre-submit evaluation paths.
+- Structured parity evidence payload fields: provider metadata, per-sample parity rows, mismatch fields, blocking reasons, and explicit `no_order_submission_verified=true`.
+- Regression test proving LIVE qualification parity evidence is measured while real execution adapter submit calls remain zero.
+
+### Changed
+- LIVE qualification now generates measured mode parity evidence instead of static placeholder parity payload values.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; alert delivery evidence, rollback operations proof, real execution adapter readiness, and protective-order lifecycle proof are still incomplete.
+
 ## [Unreleased] - 2026-05-22 (LIVE qualification startup persistence and forensic redaction precision follow-up)
 
 ### Changed

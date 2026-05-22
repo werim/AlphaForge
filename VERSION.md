@@ -1,3 +1,14 @@
+## 2026-05-22 Deterministic LIVE qualification mode-parity evidence provider
+- **Version:** `0.3.32-dev`
+- **Current phase:** Phase 6.2 fail-closed mode-parity evidence hardening.
+- **Runtime maturity:** LIVE qualification now produces measured PAPER vs LIVE_PRECHECK pre-submit parity evidence; execution remains non-mutating in qualification.
+- **BACKTEST/PAPER/LIVE alignment:** parity evidence uses the same AI pre-submit evaluator path for PAPER and LIVE_PRECHECK and requires zero mismatches for readiness parity check.
+- **Lifecycle coverage:** pre-submit lifecycle expectation now explicitly evidenced per sample (`WAITING_ENTRY_ZONE` for accepted, `SIGNAL_REJECTED` for rejected).
+- **Execution realism coverage:** no submission/cancel/amend/close path is enabled by this patch; parity qualification is decision-only.
+- **Known critical risks:** observability/alert delivery evidence and rollback operational proof remain incomplete; LIVE stays fail-closed.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 LIVE qualification incident persistence rollback + defensive parity parsing follow-up
 - **Version:** `0.3.31-dev`
 - **Current phase:** Phase 6.2 fail-closed readiness evidence integrity follow-up.

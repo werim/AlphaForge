@@ -43,6 +43,15 @@ class _DirtyProvider:
         }
 
 
+class _TrackingAdapter:
+    def __init__(self) -> None:
+        self.submit_calls = 0
+
+    async def submit(self, decision, market_ctx):
+        self.submit_calls += 1
+        return {"status": "blocked"}
+
+
 def test_live_qualification_fail_closed_with_reconciliation_findings_and_no_incident_persistence() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
@@ -139,3 +148,25 @@ def test_live_qualification_clean_provider_does_not_write_incidents() -> None:
             assert conn.execute(text("SELECT COUNT(*) FROM reconciliation_incidents")).scalar_one() == 0
     assert runtime._qualification_report is not None
     assert runtime._qualification_report.qualified is False
+
+
+def test_live_qualification_mode_parity_is_measured_without_order_submission() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        _seed_valid(session)
+    adapter = _TrackingAdapter()
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        ai_brain=_AcceptBrain(Session(engine)),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=adapter,
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        live_reconciliation_provider=_CleanProvider(),
+    )
+    with pytest.raises(RuntimeError, match="readiness qualification failed"):
+        asyncio.run(runtime._run_live_qualification_gate())
+    assert adapter.submit_calls == 0
+    assert runtime._qualification_report is not None
+    mode_parity = next(check for check in runtime._qualification_report.checks if check.name == "mode_parity")
+    assert mode_parity.passed is True
