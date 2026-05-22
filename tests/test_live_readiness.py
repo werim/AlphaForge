@@ -5,7 +5,7 @@ import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from alphaforge.alert_delivery import persist_alert_delivery_evidence
+from alphaforge.alert_delivery import capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence, persist_alert_delivery_evidence
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 
@@ -75,6 +75,29 @@ def test_persisted_incomplete_alert_overrides_optimistic_operational_flag() -> N
     failed = {check.name for check in report.checks if not check.passed}
     assert report.qualified is False
     assert {"alert_delivery_evidence", "observability_coverage"} <= failed
+
+
+def test_capture_alert_delivery_evidence_persists_provider_result() -> None:
+    class _VerifiedProvider:
+        def snapshot(self):
+            return _verified_alert()
+
+    engine = _engine(persist_alert=False)
+    saved = capture_alert_delivery_evidence(engine, _VerifiedProvider())
+    loaded = latest_persisted_alert_delivery_evidence(engine)
+    assert saved["alert_delivery_verified"] is True
+    assert loaded["alert_delivery_verified"] is True
+    assert loaded["observability_evidence_persisted"] is True
+
+
+def test_capture_incomplete_evidence_keeps_readiness_blocked() -> None:
+    class _IncompleteProvider:
+        def snapshot(self):
+            return {"evidence_status": "INCOMPLETE", "alert_delivery_verified": False, "delivery_attempted": True, "delivery_acknowledged": False, "non_trading_probe_verified": True, "endpoint_origin": "UNAVAILABLE", "blocking_reasons": ["NO_ACK"]}
+
+    engine = _engine(persist_alert=False)
+    capture_alert_delivery_evidence(engine, _IncompleteProvider())
+    assert _evaluate(engine).qualified is False
 
 
 def test_static_operational_flags_without_persisted_alert_or_rollback_provenance_do_not_qualify() -> None:
