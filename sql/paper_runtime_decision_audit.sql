@@ -5,9 +5,9 @@
 -- Default scope: all persisted PAPER rows. To audit a single completed run, replace the
 -- NULL parameters below with inclusive ISO-8601 timestamps from that session.
 -- Example: VALUES ('2026-05-21T19:00:00+00:00', '2026-05-21T23:59:59+00:00');
-
-.headers on
-.mode column
+--
+-- This file is SQLTools-compatible plain SQL. In sqlite3 CLI, optionally run `.headers on`
+-- and `.mode column` before loading it.
 
 DROP TABLE IF EXISTS temp.job19_parameters;
 CREATE TEMP TABLE job19_parameters (
