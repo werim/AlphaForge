@@ -1,3 +1,43 @@
+## 2026-05-22 Patch Addendum — LIVE canonical reconciliation evidence-chain hardening
+
+### Why the patch was needed
+- LIVE qualification consumed provider snapshot fields directly and could trust optimistic orphan/duplicate counters without canonical runtime-intent comparison.
+
+### Root cause
+- Canonical reconciliation ownership was split: provider returned summary counters while readiness gate relied on those counters instead of reconciliation findings produced by AlphaForge runtime logic.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/reconciliation.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_reconciliation.py`
+- `tests/test_live_readiness.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE qualification now treats authenticated provider as raw read-only exchange evidence source only.
+- LIVE qualification converts provider snapshot to canonical reconciliation snapshot and runs `ReconciliationEngine.reconcile(...)` against runtime intended orders/lifecycle state.
+- Provider-supplied `orphan_orders` / `orphan_positions` / `duplicate_fills` values are ignored for qualification decisions.
+- LIVE readiness now fails closed when provider evidence is incomplete and when canonical fail-closed findings are present.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- Reconciliation findings continue to persist through existing `reconciliation_incidents` persistence layer, including duplicate-fill incidents.
+
+### Security/redaction impact
+- No API keys/secrets/signatures added to incident payloads; persisted payloads contain only normalized safe reconciliation evidence.
+
+### Remaining limitations / blockers
+- Remediation suggestions remain dry-run/operator-review only.
+- No order create/cancel/modify/close behavior introduced.
+- LIVE remains blocked by broader readiness requirements and missing production execution/operational evidence.
+
+### Push recommendation
+- Merge as minimal fail-closed P0/P1 patch.
+
 ## 2026-05-22 Patch Addendum — Authenticated Binance READ-ONLY reconciliation provider
 
 ### Why the patch was needed

@@ -20,7 +20,7 @@ from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationRepor
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
-from alphaforge.reconciliation import ReconciliationEngine, persist_findings
+from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
 from alphaforge.config import load_config_from_env
@@ -178,11 +178,34 @@ class RuntimeOrchestrator:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
         evaluator = LiveReadinessEvaluator(engine)
         mode_parity = {}
-        if self.live_reconciliation_provider is None:
-            reconciliation_snapshot = {"provider_configured": False}
-        else:
-            reconciliation_snapshot = dict(self.live_reconciliation_provider.snapshot())
-            reconciliation_snapshot["provider_configured"] = True
+        reconciliation_snapshot = {
+            "provider_configured": self.live_reconciliation_provider is not None,
+            "evidence_status": "UNVERIFIED",
+        }
+        if self.live_reconciliation_provider is not None:
+            provider_snapshot = dict(self.live_reconciliation_provider.snapshot())
+            evidence_status = str(provider_snapshot.get("evidence_status") or "INCOMPLETE").upper()
+            reconciliation_snapshot["evidence_status"] = evidence_status
+            if evidence_status == "COMPLETE":
+                snapshot = self._reconciliation_engine.snapshot_from_source(provider_snapshot)
+                findings, _recommendations, _metrics = self._reconciliation_engine.reconcile(
+                    intended_orders=list(self._pending_orders.values()),
+                    lifecycle_state_by_symbol=self._last_lifecycle_state_by_symbol,
+                    snapshot=snapshot,
+                    mode=ExecutionMode.LIVE.value,
+                )
+                counters = summarize_findings(findings)
+                reconciliation_snapshot.update(counters)
+                if self._resolve_persistence_engine() is not None:
+                    persist_findings(self._resolve_persistence_engine(), findings)
+            else:
+                reconciliation_snapshot.update({
+                    "orphan_orders": 0,
+                    "orphan_positions": 0,
+                    "duplicate_fills": 0,
+                    "lifecycle_divergences": 0,
+                    "fail_closed_findings": 1,
+                })
         observability_snapshot = {"alerts_configured": False, "forensic_exports": False, "rollback_ready": False}
         report = evaluator.evaluate(
             mode_parity=mode_parity,
@@ -488,6 +511,8 @@ class RuntimeOrchestrator:
             if self.live_reconciliation_provider is None:
                 raise RuntimeError("LIVE mode blocked: reconciliation provider is not configured")
             snapshot_source = dict(self.live_reconciliation_provider.snapshot())
+            if str(snapshot_source.get("evidence_status") or "INCOMPLETE").upper() != "COMPLETE":
+                raise RuntimeError("LIVE mode blocked: reconciliation evidence incomplete")
         else:
             snapshot_source = {
                 "orders": list(self._pending_orders.values()),

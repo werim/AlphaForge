@@ -179,9 +179,12 @@ class LiveReadinessEvaluator:
         checks = [CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}")]
         provider_configured = bool(reconciliation.get("provider_configured", False))
         checks.append(CheckResult("live_reconciliation_provider", provider_configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not provider_configured else "provider_configured=true"))
+        evidence_status = str(reconciliation.get("evidence_status") or "INCOMPLETE").upper()
+        checks.append(CheckResult("reconciliation_evidence_complete", provider_configured and evidence_status == "COMPLETE", f"evidence_status={evidence_status}"))
         no_orphans = int(reconciliation.get("orphan_positions", 0)) == 0 and int(reconciliation.get("orphan_orders", 0)) == 0
-        checks.append(CheckResult("reconciliation_no_orphans", provider_configured and no_orphans, f"snapshot={dict(reconciliation)}"))
-        checks.append(CheckResult("duplicate_execution_free", provider_configured and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"))
+        checks.append(CheckResult("reconciliation_no_orphans", provider_configured and evidence_status == "COMPLETE" and no_orphans, f"snapshot={dict(reconciliation)}"))
+        checks.append(CheckResult("duplicate_execution_free", provider_configured and evidence_status == "COMPLETE" and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"))
+        checks.append(CheckResult("reconciliation_fail_closed_clear", provider_configured and evidence_status == "COMPLETE" and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}"))
         return checks
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
