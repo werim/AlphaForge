@@ -1,3 +1,45 @@
+## 2026-05-22 Patch Addendum — Binance Futures bookTicker spread derivation hardening
+
+### Why the patch was needed
+- Binance scanner still used Spot `/api/v3/ticker/24hr` and relied on ticker bid/ask fields directly, leaving Futures consistency and spread provenance weaker than intended.
+
+### Root cause
+- Scanner endpoint mix was split between Spot and Futures families and did not explicitly require Futures `bookTicker` for spread derivation.
+
+### Files changed
+- `src/alphaforge/exchange_market_scanner.py`
+- `tests/test_exchange_market_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Binance scan now uses Futures endpoints consistently:
+  - `/fapi/v1/ticker/24hr`
+  - `/fapi/v1/ticker/bookTicker`
+  - `/fapi/v1/premiumIndex`
+- `entry` now uses conservative price selection `min(last_price, mid)` where `mid=(bid+ask)/2`.
+- `spread_pct` and `spread_bps` are now derived from `bookTicker` bid/ask only.
+- If `bookTicker` data is unavailable or malformed for a symbol, that symbol is skipped (fail-closed; no optimistic spread synthesis).
+- PAPER/LIVE runtime wiring remains unchanged from v2.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle changes.
+- No persistence schema changes.
+
+### Tests added/updated
+- Updated scanner tests to cover Futures endpoint family, spread mapping from `bookTicker`, malformed payload fail-closed behavior, and deterministic URL assertions.
+
+### Tests executed
+- `pytest -q tests/test_exchange_market_scanner.py tests/test_runtime.py::test_build_runtime_uses_exchange_scanner_for_paper tests/test_runtime.py::test_build_runtime_keeps_safe_scanner_for_backtest`
+
+### Risks / limitations
+- Binance symbol coverage may decrease temporarily when `bookTicker` is incomplete for some symbols; this is intentional fail-closed behavior.
+- Hyperliquid support remains mids-only as in v2.
+
+### Push recommendation
+- Recommended to merge as a small safe follow-up focused on spread realism and endpoint consistency.
+
 ## 2026-05-21 Patch Addendum — PAPER/LIVE read-only exchange scanner alignment
 
 ### Why the patch was needed

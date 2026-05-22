@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib import request
 
 import pytest
 
@@ -9,7 +10,7 @@ from alphaforge.config import load_config_from_env
 from alphaforge.exchange_market_scanner import scan_exchange_markets
 
 
-def _urlopen_multi(payloads: list[object]):
+def _urlopen_multi(payloads: list[object], captured_urls: list[str] | None = None):
     class _Resp:
         def __init__(self, payload: object):
             self.payload = payload
@@ -25,7 +26,12 @@ def _urlopen_multi(payloads: list[object]):
 
     idx = {"i": 0}
 
-    def _open(*args, **kwargs):
+    def _open(url_or_request, *args, **kwargs):
+        if captured_urls is not None:
+            if isinstance(url_or_request, request.Request):
+                captured_urls.append(url_or_request.full_url)
+            else:
+                captured_urls.append(str(url_or_request))
         payload = payloads[idx["i"]]
         idx["i"] += 1
         return _Resp(payload)
@@ -38,7 +44,8 @@ def test_scan_exchange_markets_uses_public_endpoints_only(monkeypatch: pytest.Mo
         "urllib.request.urlopen",
         _urlopen_multi(
             [
-                [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.1", "lastPrice": "100.05", "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
+                [{"symbol": "BTCUSDT", "lastPrice": "100.05", "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
+                [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.1"}],
                 [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
                 {"ETH": "2500.0"},
             ]
@@ -50,6 +57,67 @@ def test_scan_exchange_markets_uses_public_endpoints_only(monkeypatch: pytest.Mo
     assert any(row.get("source_exchange") == "binance" for row in rows)
     assert any(row.get("source_exchange") == "hyperliquid" for row in rows)
     assert all("symbol" in row and "entry" in row for row in rows)
+
+
+def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi(
+            [
+                [{"symbol": "BTCUSDT", "lastPrice": "100.10", "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
+                [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.2"}],
+                [{"symbol": "BTCUSDT", "lastFundingRate": "0.0003"}],
+                {},
+            ]
+        ),
+    )
+    cfg = load_config_from_env()
+    rows = asyncio.run(scan_exchange_markets(cfg))
+    btc = next(row for row in rows if row.get("source_exchange") == "binance")
+    assert btc["entry"] == pytest.approx(100.1)
+    assert btc["spread_pct"] == pytest.approx((100.2 - 100.0) / 100.1)
+    assert btc["spread_bps"] == pytest.approx(btc["spread_pct"] * 10_000.0)
+    assert btc["funding_rate_pct"] == pytest.approx(0.0003)
+
+
+def test_binance_urls_use_fapi_v1_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_urls: list[str] = []
+    monkeypatch.setenv("BINANCE_BASE_URL", "https://fapi.binance.com")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi(
+            [
+                [],
+                [],
+                [],
+                {},
+            ],
+            captured_urls=captured_urls,
+        ),
+    )
+    cfg = load_config_from_env()
+    asyncio.run(scan_exchange_markets(cfg))
+    assert any(url.endswith("/fapi/v1/ticker/24hr") for url in captured_urls)
+    assert any(url.endswith("/fapi/v1/ticker/bookTicker") for url in captured_urls)
+    assert any(url.endswith("/fapi/v1/premiumIndex") for url in captured_urls)
+    assert not any("/api/v3/" in url for url in captured_urls)
+
+
+def test_scan_exchange_markets_returns_empty_on_malformed_binance_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi(
+            [
+                {"symbol": "BTCUSDT"},
+                [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.1"}],
+                [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
+                {},
+            ]
+        ),
+    )
+    cfg = load_config_from_env()
+    rows = asyncio.run(scan_exchange_markets(cfg))
+    assert rows == []
 
 
 def test_scan_exchange_markets_handles_exchange_failure(monkeypatch: pytest.MonkeyPatch) -> None:

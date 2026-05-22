@@ -1,3 +1,16 @@
+## [Unreleased] - 2026-05-22 (Binance Futures bookTicker spread hardening follow-up)
+
+### Changed
+- Binance scanner now uses Futures-only public endpoint family: `/fapi/v1/ticker/24hr`, `/fapi/v1/ticker/bookTicker`, `/fapi/v1/premiumIndex`.
+- Binance `entry` is now conservative (`min(last_price, mid)`), while `spread_pct`/`spread_bps` are derived from `bookTicker` bid/ask.
+
+### Fixed
+- Removed Spot `/api/v3` dependency from Binance scanner path.
+- Added fail-closed symbol filtering when `bookTicker` spread inputs are unavailable/malformed, avoiding optimistic synthetic spread.
+
+### Added
+- Deterministic tests for Futures endpoint URL usage, spread mapping, and malformed payload behavior.
+
 ## [Unreleased] - 2026-05-21 (Runtime/env failing-test triage audit)
 
 ### Changed
