@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 import uuid
@@ -19,6 +20,11 @@ _ALLOWED_FIELDS = (
     "alert_delivery_verified", "delivery_attempted", "delivery_acknowledged",
     "non_trading_probe_verified", "probe_id", "endpoint_origin", "blocking_reasons",
 )
+_DEFAULT_MAX_AGE_SEC = 900.0
+
+
+class AlertDeliveryEvidenceProvider(Protocol):
+    def snapshot(self) -> Mapping[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +101,7 @@ def _safe_payload(evidence: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def persist_alert_delivery_evidence(engine: Engine, evidence: Mapping[str, Any]) -> dict[str, Any]:
+def _persist_captured_evidence(engine: Engine, evidence: Mapping[str, Any]) -> dict[str, Any]:
     safe = _safe_payload(evidence)
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE IF NOT EXISTS live_alert_delivery_evidence (id INTEGER PRIMARY KEY AUTOINCREMENT, recorded_at TEXT NOT NULL, evidence_status TEXT NOT NULL, alert_delivery_verified INTEGER NOT NULL, evidence_payload TEXT NOT NULL)"))
@@ -103,24 +109,43 @@ def persist_alert_delivery_evidence(engine: Engine, evidence: Mapping[str, Any])
     return safe
 
 
-def capture_alert_delivery_evidence(engine: Engine, provider: WebhookAlertDeliveryEvidenceProvider) -> dict[str, Any]:
-    """Collect exactly one diagnostic probe and persist its sanitized result."""
+def capture_alert_delivery_evidence(engine: Engine, provider: AlertDeliveryEvidenceProvider) -> dict[str, Any]:
+    """Collect one diagnostic provider result and persist only sanitized evidence."""
 
-    return persist_alert_delivery_evidence(engine, provider.snapshot())
+    return _persist_captured_evidence(engine, provider.snapshot())
 
 
-def latest_persisted_alert_delivery_evidence(engine: Engine) -> dict[str, Any]:
+def _parse_timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def latest_persisted_alert_delivery_evidence(engine: Engine, *, max_age_sec: float = _DEFAULT_MAX_AGE_SEC, now: datetime | None = None) -> dict[str, Any]:
     missing = {"observability_evidence_source": "UNVERIFIED", "observability_evidence_persisted": False, "alert_delivery_verified": False, "alert_delivery_evidence_status": "INCOMPLETE", "alert_delivery_blocking_reasons": ["ALERT_DELIVERY_EVIDENCE_MISSING"]}
     with engine.begin() as conn:
         exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='live_alert_delivery_evidence'")).scalar_one()
         if not int(exists):
             return missing
-        row = conn.execute(text("SELECT evidence_status, alert_delivery_verified, evidence_payload FROM live_alert_delivery_evidence ORDER BY id DESC LIMIT 1")).mappings().first()
+        row = conn.execute(text("SELECT recorded_at, evidence_status, alert_delivery_verified, evidence_payload FROM live_alert_delivery_evidence ORDER BY id DESC LIMIT 1")).mappings().first()
     if row is None:
         return missing
+    recorded = _parse_timestamp(row["recorded_at"])
+    if recorded is None:
+        return {**missing, "observability_evidence_persisted": True, "alert_delivery_blocking_reasons": ["ALERT_DELIVERY_EVIDENCE_INVALID_TIMESTAMP"]}
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age = (current - recorded).total_seconds()
+    if age < -5.0:
+        return {**missing, "observability_evidence_persisted": True, "alert_delivery_blocking_reasons": ["ALERT_DELIVERY_EVIDENCE_FUTURE_DATED"]}
+    if age > float(max_age_sec):
+        return {**missing, "observability_evidence_persisted": True, "alert_delivery_blocking_reasons": ["ALERT_DELIVERY_EVIDENCE_STALE"]}
     try:
         payload = json.loads(str(row["evidence_payload"]))
     except (TypeError, ValueError, json.JSONDecodeError):
         return {**missing, "observability_evidence_persisted": True, "alert_delivery_blocking_reasons": ["ALERT_DELIVERY_EVIDENCE_INVALID"]}
-    valid = isinstance(payload, dict) and str(row["evidence_status"]).upper() == "COMPLETE" and int(row["alert_delivery_verified"]) == 1 and str(payload.get("observability_evidence_source") or "").upper() == "MEASURED_PROBE" and bool(payload.get("alert_delivery_verified", False)) and bool(payload.get("delivery_attempted", False)) and bool(payload.get("delivery_acknowledged", False)) and bool(payload.get("non_trading_probe_verified", False))
-    return {"observability_evidence_source": "MEASURED_PROBE" if valid else "UNVERIFIED", "observability_evidence_persisted": True, "alert_delivery_verified": valid, "alert_delivery_evidence_status": "COMPLETE" if valid else "INCOMPLETE", "alert_delivery_blocking_reasons": [] if valid else ["ALERT_DELIVERY_EVIDENCE_INVALID"]}
+    valid = isinstance(payload, dict) and str(row["evidence_status"]).upper() == "COMPLETE" and int(row["alert_delivery_verified"]) == 1 and str(payload.get("evidence_status") or "").upper() == "COMPLETE" and str(payload.get("observability_evidence_source") or "").upper() == "MEASURED_PROBE" and bool(payload.get("alert_delivery_verified", False)) and bool(payload.get("delivery_attempted", False)) and bool(payload.get("delivery_acknowledged", False)) and bool(payload.get("non_trading_probe_verified", False))
+    return {"observability_evidence_source": "MEASURED_PROBE" if valid else "UNVERIFIED", "observability_evidence_persisted": True, "alert_delivery_verified": valid, "alert_delivery_evidence_status": "COMPLETE" if valid else "INCOMPLETE", "alert_delivery_blocking_reasons": [] if valid else ["ALERT_DELIVERY_EVIDENCE_INVALID"], "alert_delivery_age_sec": age}
