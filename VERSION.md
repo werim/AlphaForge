@@ -1,3 +1,14 @@
+## 2026-05-22 LIVE startup and Binance Futures connectivity fail-closed patch
+- **Version:** `0.3.26-dev`
+- **Current phase:** Phase 6.1 live safety gate hardening.
+- **Runtime maturity:** LIVE startup now hard-blocks safe/placeholder scanner provenance and missing real execution adapter before loops/tasks start.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST behavior unchanged; LIVE-only fail-closed guards tightened.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** Binance defaults and connectivity gates now validate Futures public endpoints used by runtime scanning.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 Binance Futures bookTicker spread hardening follow-up
 - **Version:** `0.3.25-dev`
 - **Current phase:** Phase 6.1 runtime market-data quality hardening.

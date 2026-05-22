@@ -69,22 +69,35 @@ def health_has_secret_leak(health: ExchangeHealth) -> bool:
 
 def _check_binance(*, timeout_sec: float, checked_at: str, base_url: str) -> ExchangeHealth:
     start = time.perf_counter()
-    url = f"{base_url.rstrip('/')}/api/v3/ticker/bookTicker?symbol=BTCUSDT"
     try:
-        payload = _fetch_json(url, timeout_sec=timeout_sec)
-        bid = float(payload.get("bidPrice", 0.0) or 0.0)
-        ask = float(payload.get("askPrice", 0.0) or 0.0)
+        root = base_url.rstrip('/')
+        book_payload = _fetch_json(f"{root}/fapi/v1/ticker/bookTicker?symbol=BTCUSDT", timeout_sec=timeout_sec)
+        funding_payload = _fetch_json(f"{root}/fapi/v1/premiumIndex?symbol=BTCUSDT", timeout_sec=timeout_sec)
+        try:
+            _fetch_json(f"{root}/fapi/v1/time", timeout_sec=timeout_sec)
+        except Exception:
+            pass
+        bid = float(book_payload.get("bidPrice", 0.0) or 0.0)
+        ask = float(book_payload.get("askPrice", 0.0) or 0.0)
         orderbook_ok = bid > 0.0 and ask > 0.0 and ask >= bid
-        connected = orderbook_ok
+        funding_rate = float(funding_payload.get("lastFundingRate", 0.0) or 0.0)
+        funding_ok = isinstance(funding_payload, dict) and "lastFundingRate" in funding_payload and abs(funding_rate) < float("inf")
+        connected = orderbook_ok and funding_ok
+        error = None
+        if not connected:
+            if not orderbook_ok:
+                error = "BINANCE_INVALID_FUTURES_BOOK_TICKER"
+            elif not funding_ok:
+                error = "BINANCE_INVALID_FUTURES_FUNDING"
         return ExchangeHealth(
             exchange="binance",
             connected=connected,
             public_market_data_ok=connected,
             private_api_ok=None,
             orderbook_ok=orderbook_ok,
-            funding_ok=None,
+            funding_ok=funding_ok,
             latency_ms=round((time.perf_counter() - start) * 1000.0, 3),
-            error=None if connected else "BINANCE_INVALID_BOOK_TICKER",
+            error=error,
             checked_at=checked_at,
             supports_orderbook=True,
             supports_funding=True,
@@ -97,7 +110,7 @@ def _check_binance(*, timeout_sec: float, checked_at: str, base_url: str) -> Exc
             public_market_data_ok=False,
             private_api_ok=None,
             orderbook_ok=False,
-            funding_ok=None,
+            funding_ok=False,
             latency_ms=round((time.perf_counter() - start) * 1000.0, 3),
             error=f"BINANCE_CONNECTIVITY_ERROR:{type(exc).__name__}",
             checked_at=checked_at,

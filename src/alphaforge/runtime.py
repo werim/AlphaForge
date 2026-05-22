@@ -85,6 +85,7 @@ class RuntimeOrchestrator:
     config: RuntimeConfig
     ai_brain: AIBrain
     market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]]
+    scanner_source: str = "UNKNOWN"
     real_execution_adapter: RealExecutionAdapter | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
@@ -119,9 +120,12 @@ class RuntimeOrchestrator:
 
     async def start(self) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE:
-            scanner_name = getattr(self.market_scanner, "__name__", "")
-            if scanner_name == "_safe_market_scanner":
-                raise RuntimeError("LIVE mode blocked: placeholder/mock scanner is not allowed")
+            blocked_sources = {"SAFE_PLACEHOLDER", "MOCK", "PLACEHOLDER", "OFFLINE", "SYNTHETIC"}
+            scanner_source = str(self.scanner_source or "UNKNOWN").upper()
+            if scanner_source in blocked_sources:
+                raise RuntimeError("LIVE mode blocked: safe/placeholder market scanner is not allowed")
+            if self.real_execution_adapter is None:
+                raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
             await self._run_live_exchange_connectivity_gate()
             if self.config.require_live_qualification:
                 await self._run_live_qualification_gate()
@@ -617,6 +621,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         config=config,
         ai_brain=brain,
         market_scanner=_runtime_market_scanner,
+        scanner_source=scanner_source,
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
         persistence_engine=engine,
