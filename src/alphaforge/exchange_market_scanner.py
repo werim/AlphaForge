@@ -45,7 +45,6 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         for item in (funding if isinstance(funding, list) else [])
         if isinstance(item, dict) and item.get("symbol")
     }
-
     now_ts = time.time()
     candidates: list[dict[str, Any]] = []
     for item in tickers:
