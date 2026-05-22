@@ -8,7 +8,8 @@ from alphaforge.persistence import init_db
 
 
 def test_dashboard_health_and_status_are_read_only_and_honest(tmp_path) -> None:
-    database_url = f"sqlite+pysqlite:///{tmp_path / 'dashboard.db'}"
+    db_path = tmp_path / "dashboard.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
     app = create_app(database_url)
     client = TestClient(app)
 
@@ -18,6 +19,7 @@ def test_dashboard_health_and_status_are_read_only_and_honest(tmp_path) -> None:
     assert status["runtime_process_status_reason"] == "PERSISTED_HEARTBEAT_NOT_IMPLEMENTED"
     assert status["latest_readiness"]["status"] == "NOT_AVAILABLE"
     assert inspect(app.state.engine).get_table_names() == []
+    assert not db_path.exists(), "dashboard must not create a missing runtime SQLite database"
 
 
 def test_reject_summary_surfaces_incomplete_rows(tmp_path) -> None:
