@@ -86,3 +86,28 @@ def test_forensic_snapshot_redacts_nested_fields(tmp_path) -> None:
     payload = json.loads(evaluator.write_forensic_snapshot(tmp_path, report, {private_key: "drop", "headers": {auth_key: "drop"}, "safe": 1}).read_text())
     assert private_key not in payload["runtime_snapshot"]
     assert auth_key not in payload["runtime_snapshot"]["headers"]
+
+
+def test_invalid_numeric_parity_evidence_fails_closed_and_persists_report() -> None:
+    engine = _engine()
+    evaluator = LiveReadinessEvaluator(engine)
+    report = evaluator.evaluate(
+        mode_parity={
+            "evidence_status": "COMPLETE",
+            "sample_count": "N/A",
+            "min_sample_count": None,
+            "mismatch_count": "",
+            "missing_field_count": "bad-value",
+            "no_order_submission_verified": True,
+        },
+        reconciliation_snapshot=_reconciliation(),
+        observability_snapshot=_operational(),
+        canary_enabled=True,
+        shadow_mode_enabled=True,
+        operator_ack=True,
+    )
+    assert report.qualified is False
+    assert any(check.name == "mode_parity" and not check.passed for check in report.checks)
+    evaluator.persist_report(report)
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1

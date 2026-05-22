@@ -1,3 +1,18 @@
+## [Unreleased] - 2026-05-22 (LIVE qualification startup persistence and forensic redaction precision follow-up)
+
+### Changed
+- LIVE qualification startup no longer persists reconciliation findings to `reconciliation_incidents`; fail-closed qualification logic still uses canonical reconciliation counters.
+- Qualification observability snapshot now sets `incident_persistence_verified=false` during startup evidence evaluation.
+- Mode parity numeric evidence parsing is now defensive and fail-closed on invalid/placeholder values without raising exceptions.
+
+### Fixed
+- Forensic runtime snapshot sanitation now preserves benign keys containing `signed` (for example `assigned_symbols`) while still redacting signed/auth/secret payload values and sensitive nested keys.
+
+### Added
+- Regression coverage for fail-closed qualification on canonical orphan/duplicate findings without incident writes.
+- Regression coverage for invalid parity numeric evidence persistence and non-throwing fail-closed behavior.
+- Regression coverage proving `assigned_symbols` survives sanitation while signed/auth/signature values are redacted.
+
 ## [Unreleased] - 2026-05-22 (Evidence-based LIVE readiness qualification hardening)
 
 ### Added
