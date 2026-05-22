@@ -1,3 +1,25 @@
+## 2026-05-22 Binance Futures bookTicker spread hardening follow-up
+- **Version:** `0.3.25-dev`
+- **Current phase:** Phase 6.1 runtime market-data quality hardening.
+- **Runtime maturity:** PAPER/LIVE scanner wiring unchanged; Binance scanner now derives spread from Futures `bookTicker` and funding from Futures `premiumIndex`.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged wiring (`PAPER/LIVE -> _runtime_market_scanner -> scan_exchange_markets`; BACKTEST/offline safe scanner override retained).
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** spread is now bid/ask-derived from Futures public order-book ticker; no optimistic fake spread fallback.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-21 Runtime read-only exchange scanner for PAPER/LIVE parity
+- **Version:** `0.3.24-dev`
+- **Current phase:** Phase 6.1 runtime market-data path hardening.
+- **Runtime maturity:** PAPER and LIVE now share a read-only public exchange scanner path; BACKTEST/offline keeps safe smoke scanner.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/LIVE scanner path aligned without changing acceptance thresholds; LIVE fail-closed gates remain intact.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** removes default hardcoded single-candidate scanner from PAPER/LIVE bootstrap.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-21`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-21 LIVE connectivity default fail-closed + contradiction cleanup
 - **Version:** `0.3.23-dev`
 - **Current phase:** Phase 6.1 live startup safety hardening.
