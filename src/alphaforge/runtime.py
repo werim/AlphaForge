@@ -85,6 +85,7 @@ class RuntimeOrchestrator:
     config: RuntimeConfig
     ai_brain: AIBrain
     market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]]
+    scanner_source: str = "UNKNOWN"
     real_execution_adapter: RealExecutionAdapter | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
@@ -119,9 +120,12 @@ class RuntimeOrchestrator:
 
     async def start(self) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE:
-            scanner_name = getattr(self.market_scanner, "__name__", "")
-            if scanner_name == "_safe_market_scanner":
-                raise RuntimeError("LIVE mode blocked: placeholder/mock scanner is not allowed")
+            blocked_sources = {"SAFE_PLACEHOLDER", "MOCK", "PLACEHOLDER", "OFFLINE", "SYNTHETIC"}
+            scanner_source = str(self.scanner_source or "UNKNOWN").upper()
+            if scanner_source in blocked_sources:
+                raise RuntimeError("LIVE mode blocked: safe/placeholder market scanner is not allowed")
+            if self.real_execution_adapter is None:
+                raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
             await self._run_live_exchange_connectivity_gate()
             if self.config.require_live_qualification:
                 await self._run_live_qualification_gate()
@@ -556,6 +560,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         return [{"symbol": "BTCUSDT", "volume_24h_usdt": 125_000_000.0, "spread_pct": 0.0009, "funding_rate_pct": 0.00005, "liquidity_score": 0.86, "liquidity_quality": "HIGH", "volatility_pct": 0.011, "volatility_fit": "GOOD", "volatility_regime": "MODERATE", "trend_strength": 0.64, "momentum_confirmation": 0.7, "recent_volume_change_pct": 0.085, "chop_score": 0.27, "panic_score": 0.06, "fakeout_risk": 0.22, "spread_bps": 9.0, "expected_slippage_pct": 0.0006, "latency_ms": 55.0, "market_ts": now_ts, "entry": 67_250.0, "side": "LONG", "rr": 2.15, "timeframe": "5m", "tick_size": 0.1}]
 
     use_safe_scanner = mode == ExecutionMode.BACKTEST or str(os.getenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    scanner_source = "SAFE_PLACEHOLDER" if use_safe_scanner else "EXCHANGE_PUBLIC_LIVE"
 
     async def _runtime_market_scanner() -> list[dict[str, Any]]:
         if use_safe_scanner:
@@ -613,6 +618,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         config=config,
         ai_brain=brain,
         market_scanner=_runtime_market_scanner,
+        scanner_source=scanner_source,
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
         persistence_engine=engine,

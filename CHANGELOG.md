@@ -1,3 +1,23 @@
+## [Unreleased] - 2026-05-22 (P0 LIVE startup safety + Binance Futures consistency)
+
+### Added
+- Runtime regression tests for LIVE scanner provenance blocking and early missing-real-adapter startup blocking.
+- Connectivity regression tests asserting Binance Futures endpoint family usage and funding fail-closed behavior.
+- Config regression test for default Binance Futures host when `BINANCE_BASE_URL` is unset.
+
+### Changed
+- Runtime orchestrator now uses explicit scanner provenance (`scanner_source`) for LIVE startup safety gating.
+- Binance connectivity probe now validates Futures orderbook and funding endpoints used by runtime scanner.
+- Binance config default/fallback base URL now defaults to `https://fapi.binance.com`.
+
+### Fixed
+- Closed LIVE startup bypass where safe scanner could be wrapped by `_runtime_market_scanner` and evade name-based detection.
+- Closed delayed LIVE startup failure path by blocking early when `real_execution_adapter` is not configured.
+- Removed Spot endpoint qualification path for Binance Futures runtime readiness.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; no real trading adapter/order placement was enabled.
+
 ## [Unreleased] - 2026-05-22 (Binance Futures bookTicker spread hardening follow-up)
 
 ### Changed

@@ -90,7 +90,7 @@ class RuntimeSettings:
 
 @dataclass(slots=True)
 class BinanceSettings:
-    base_url: str = "https://api.binance.com"
+    base_url: str = "https://fapi.binance.com"
 
 @dataclass(slots=True)
 class HyperliquidSettings:
@@ -170,7 +170,7 @@ def load_config_from_env() -> AlphaForgeConfig:
     )
     exchange = ExchangeSettings(
         timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", runtime.exchange_connectivity_timeout_sec),
-        binance=BinanceSettings(base_url=_string_env(env, "BINANCE_BASE_URL", "https://api.binance.com")),
+        binance=BinanceSettings(base_url=_string_env(env, "BINANCE_BASE_URL", "https://fapi.binance.com")),
         hyperliquid=HyperliquidSettings(api_url=_string_env(env, "HYPERLIQUID_API_URL", "https://api.hyperliquid.xyz")),
     )
     return AlphaForgeConfig(

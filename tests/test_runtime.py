@@ -227,6 +227,7 @@ def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_p
     db_path = tmp_path / "runtime_paper_rejects.sqlite3"
     monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
     monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
     orchestrator = _build_runtime_from_env()
     asyncio.run(orchestrator._scan_once())
 
@@ -267,8 +268,9 @@ def test_live_start_blocks_placeholder_bootstrap_scanner(monkeypatch: pytest.Mon
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION", "0")
     monkeypatch.setenv("ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", "0")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
     orchestrator = _build_runtime_from_env()
-    with pytest.raises(RuntimeError, match="placeholder/mock scanner"):
+    with pytest.raises(RuntimeError, match="safe/placeholder market scanner"):
         asyncio.run(orchestrator.start())
 
 def test_runtime_module_bootstrap_builds_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -407,3 +409,19 @@ def test_build_runtime_keeps_safe_scanner_for_backtest(monkeypatch: pytest.Monke
     orchestrator = _build_runtime_from_env()
     asyncio.run(orchestrator._scan_once())
     assert orchestrator.metrics.scans == 1
+
+
+def test_live_start_blocks_safe_scanner_override_through_runtime_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
+    orchestrator = _build_runtime_from_env()
+    with pytest.raises(RuntimeError, match="LIVE mode blocked: safe/placeholder market scanner is not allowed"):
+        asyncio.run(orchestrator.start())
+
+
+def test_live_start_blocks_when_real_execution_adapter_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")
+    orchestrator = _build_runtime_from_env()
+    with pytest.raises(RuntimeError, match="LIVE mode blocked: real execution adapter is not configured"):
+        asyncio.run(orchestrator.start())

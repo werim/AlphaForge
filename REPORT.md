@@ -1,3 +1,55 @@
+## 2026-05-22 Patch Addendum — P0 LIVE startup scanner/adapter guards + Binance Futures gate consistency
+
+### Why the patch was needed
+- LIVE startup safety checks could be bypassed by runtime scanner wrapper indirection and did not fail early when no real execution adapter existed.
+- Binance runtime scanner used Futures endpoints while config default/connectivity checks could still validate Spot assumptions.
+
+### Root cause
+- LIVE scanner guard relied on function `__name__` rather than resolved scanner provenance.
+- LIVE adapter guard existed only inside execution path, after loops started.
+- Binance default host and connectivity probe endpoint family were inconsistent with Futures runtime scanner endpoints.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/config/__init__.py`
+- `src/alphaforge/exchange_connectivity.py`
+- `tests/test_runtime.py`
+- `tests/test_config_layer.py`
+- `tests/test_exchange_connectivity.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE startup now blocks when resolved scanner source is safe/placeholder/mock/offline/synthetic and raises:
+  - `LIVE mode blocked: safe/placeholder market scanner is not allowed`
+- LIVE startup now blocks pre-loop when `real_execution_adapter` is missing and raises:
+  - `LIVE mode blocked: real execution adapter is not configured`
+- Binance connectivity now validates Futures endpoints (`/fapi/v1/ticker/bookTicker`, `/fapi/v1/premiumIndex`, optional `/fapi/v1/time`) and only marks connected when Futures orderbook+funding checks pass.
+- Binance default base URL now resolves to `https://fapi.binance.com` when `BINANCE_BASE_URL` is unset.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle schema changes.
+- No persistence schema changes.
+
+### Tests added/updated
+- Added/updated regression tests for LIVE scanner-wrapper block, LIVE missing adapter startup block, Binance Futures default host, Futures-only connectivity endpoint checks, funding fail-closed behavior, and Spot-only non-qualification.
+- Updated stale runtime expectation tests to validate effective behavior rather than wrapper function-name assumptions.
+
+### Tests executed
+- `pytest -q tests/test_runtime.py`
+- `pytest -q tests/test_config_layer.py`
+- `pytest -q tests/test_exchange_connectivity.py`
+- `pytest -q tests/test_exchange_market_scanner.py`
+- `pytest -q`
+
+### Risks / limitations
+- This patch does not introduce real order submission and does not change acceptance thresholds.
+- LIVE readiness remains blocked by additional unresolved requirements outside this P0 patch.
+
+### Push recommendation
+- Merge as a minimal fail-closed safety patch before further LIVE transition work.
+
 ## 2026-05-22 Patch Addendum — Binance Futures bookTicker spread derivation hardening
 
 ### Why the patch was needed
