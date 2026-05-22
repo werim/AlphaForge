@@ -33,7 +33,6 @@ class _CleanProvider:
         return {"evidence_status": "COMPLETE", "orders": [], "positions": [], "fills": []}
 
 
-
 class _DirtyProvider:
     def snapshot(self):
         return {
@@ -61,6 +60,7 @@ def test_live_qualification_fail_closed_with_reconciliation_findings_and_no_inci
     assert report_map["reconciliation_no_orphans"].passed is False
     assert report_map["duplicate_execution_free"].passed is False
 
+
 def _seed_valid(session: Session) -> None:
     save_order_decision(session, decision_id="d-1", signal_id="s-1", symbol="BTCUSDT", mode="PAPER", decision="REJECTED", reject_reason="HIGH_SPREAD", score=7.0, rr=1.4)
     save_order_decision(session, decision_id="d-2", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", decision="ACCEPTED", reject_reason="", score=8.2, rr=2.0)
@@ -76,28 +76,54 @@ def test_forensic_snapshot_redacts_nested_keys_and_sensitive_string_values(tmp_p
     engine = init_db("sqlite+pysqlite:///:memory:")
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(mode_parity={}, reconciliation_snapshot={"provider_configured": False, "evidence_status": "INCOMPLETE"}, observability_snapshot={}, canary_enabled=False, shadow_mode_enabled=False, operator_ack=False)
-    signature_marker = "sign" + "ature"
-    key_marker = "api_" + "key"
     snapshot = {
-        "nested": {"api_secret": "remove-this", "safe": "kept"},
-        "request_url": f"https://example.test/order?symbol=BTCUSDT&{signature_marker}=remove-url-value&timestamp=1",
-        "log_line": "Author" + "ization: remove-header-value",
-        "query": f"{key_marker}=remove-query-value&x=1",
-        "safe": 1,
+        "nested": {
+            "api_key": "nested-api-key-value",
+            "api_secret": "nested-api-secret-value",
+            "secret": "nested-secret-value",
+            "signature": "nested-signature-value",
+            "authorization": "Bearer nested-auth-value",
+            "signed_payload": "opaque-signed-payload-value",
+            "safe": "kept",
+        },
+        "values": [
+            "api_key=value-api-key",
+            "api_secret=value-api-secret",
+            "secret=value-secret",
+            "signature=value-signature",
+            "authorization=Bearer value-auth",
+        ],
+        "request_url": "https://example.test/order?symbol=BTCUSDT&signature=url-signature&timestamp=1",
+        "signed_url": "https://example.test/order?symbol=BTCUSDT&signed=value-signed-query&timestamp=1",
         "assigned_symbols": ["BTCUSDT", "ETHUSDT"],
-        "signed_url": "https://example.test/order?symbol=BTCUSDT&signature=remove-signature",
+        "safe": 1,
     }
     out = evaluator.write_forensic_snapshot(tmp_path, report, snapshot)
     payload_text = out.read_text(encoding="utf-8")
     data = json.loads(payload_text)
-    assert data["runtime_snapshot"]["nested"] == {"safe": "kept"}
-    assert data["runtime_snapshot"].get("assigned_symbols") == ["BTCUSDT", "ETHUSDT"]
-    assert "signed_url" in data["runtime_snapshot"]
-    assert "signature=[REDACTED]" in data["runtime_snapshot"]["signed_url"]
-    assert "remove-url-value" not in payload_text
-    assert "remove-header-value" not in payload_text
-    assert "remove-query-value" not in payload_text
-    assert "[REDACTED]" in payload_text
+    runtime_snapshot = data["runtime_snapshot"]
+    assert runtime_snapshot["nested"] == {"safe": "kept"}
+    assert runtime_snapshot["assigned_symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert "signed_url" in runtime_snapshot
+    assert "signed=[REDACTED]" in runtime_snapshot["signed_url"]
+    assert "signature=[REDACTED]" in runtime_snapshot["request_url"]
+    for leaked_value in (
+        "nested-api-key-value",
+        "nested-api-secret-value",
+        "nested-secret-value",
+        "nested-signature-value",
+        "nested-auth-value",
+        "opaque-signed-payload-value",
+        "value-api-key",
+        "value-api-secret",
+        "value-secret",
+        "value-signature",
+        "value-auth",
+        "url-signature",
+        "value-signed-query",
+    ):
+        assert leaked_value not in payload_text
+    assert payload_text.count("[REDACTED]") >= 7
 
 
 def test_live_qualification_clean_provider_does_not_write_incidents() -> None:
