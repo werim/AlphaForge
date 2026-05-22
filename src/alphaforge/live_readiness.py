@@ -173,11 +173,22 @@ class LiveReadinessEvaluator:
         ]
 
     def _check_runtime(self, mode_parity: Mapping[str, Any], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
+        def parse_int(value: Any, default: int = 0) -> int:
+            if value in (None, ""):
+                return default
+            text_value = str(value).strip()
+            if not text_value or text_value.upper() in {"N/A", "NA", "NULL", "NONE", "UNVERIFIED", "INCOMPLETE"}:
+                return default
+            try:
+                return int(float(text_value))
+            except (TypeError, ValueError):
+                return default
+
         parity_status = str(mode_parity.get("evidence_status", "INCOMPLETE")).upper() if mode_parity else "INCOMPLETE"
-        sample_count = int(mode_parity.get("sample_count", 0)) if mode_parity else 0
-        min_samples = int(mode_parity.get("min_sample_count", 1)) if mode_parity else 1
-        mismatch_count = int(mode_parity.get("mismatch_count", 0)) if mode_parity else 0
-        missing_field_count = int(mode_parity.get("missing_field_count", 0)) if mode_parity else 0
+        sample_count = parse_int(mode_parity.get("sample_count", 0), 0) if mode_parity else 0
+        min_samples = parse_int(mode_parity.get("min_sample_count", 1), 1) if mode_parity else 1
+        mismatch_count = parse_int(mode_parity.get("mismatch_count", 0), 0) if mode_parity else 0
+        missing_field_count = parse_int(mode_parity.get("missing_field_count", 0), 0) if mode_parity else 0
         no_submit_verified = bool(mode_parity.get("no_order_submission_verified", False)) if mode_parity else False
         parity_ok = parity_status == "COMPLETE" and sample_count >= min_samples and mismatch_count == 0 and missing_field_count == 0 and no_submit_verified
         checks = [CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}")]
@@ -185,10 +196,10 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("live_reconciliation_provider", provider_configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not provider_configured else "provider_configured=true"))
         evidence_status = str(reconciliation.get("evidence_status") or "INCOMPLETE").upper()
         checks.append(CheckResult("reconciliation_evidence_complete", provider_configured and evidence_status == "COMPLETE", f"evidence_status={evidence_status}"))
-        no_orphans = int(reconciliation.get("orphan_positions", 0)) == 0 and int(reconciliation.get("orphan_orders", 0)) == 0
+        no_orphans = parse_int(reconciliation.get("orphan_positions", 0), 0) == 0 and parse_int(reconciliation.get("orphan_orders", 0), 0) == 0
         checks.append(CheckResult("reconciliation_no_orphans", provider_configured and evidence_status == "COMPLETE" and no_orphans, f"snapshot={dict(reconciliation)}"))
-        checks.append(CheckResult("duplicate_execution_free", provider_configured and evidence_status == "COMPLETE" and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"))
-        checks.append(CheckResult("reconciliation_fail_closed_clear", provider_configured and evidence_status == "COMPLETE" and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}"))
+        checks.append(CheckResult("duplicate_execution_free", provider_configured and evidence_status == "COMPLETE" and parse_int(reconciliation.get("duplicate_fills", 0), 0) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"))
+        checks.append(CheckResult("reconciliation_fail_closed_clear", provider_configured and evidence_status == "COMPLETE" and parse_int(reconciliation.get("fail_closed_findings", 0), 0) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}"))
         return checks
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
@@ -220,16 +231,18 @@ class LiveReadinessEvaluator:
         ]
 
     def _sanitize_runtime_snapshot(self, runtime_snapshot: Mapping[str, Any]) -> dict[str, Any]:
-        blocked_keys = ("api_key", "api_secret", "secret", "signature", "signed", "authorization", "x-mbx")
+        exact_blocked_keys = {"api_key", "api_secret", "secret", "authorization", "x-mbx-apikey"}
+        contains_blocked_tokens = ("signature",)
         sensitive_value_patterns = (
             re.compile(r"(?i)((?:api[_-]?key|api[_-]?secret|secret|signature|x-mbx-apikey)\s*[=:]\s*)[^&\s,;\"']+"),
             re.compile(r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?[^,;\r\n\"']+"),
+            re.compile(r"(?i)([?&](?:signature|signed|authorization|x-mbx-apikey)=[^&\s\"']+)"),
         )
 
         def sanitize_string(value: str) -> str:
             redacted = value
             for pattern in sensitive_value_patterns:
-                redacted = pattern.sub(r"\1[REDACTED]", redacted)
+                redacted = pattern.sub(lambda m: f"{m.group(1).split('=')[0]}=[REDACTED]" if "=" in m.group(1) else f"{m.group(1)}[REDACTED]", redacted)
             return redacted
 
         def sanitize(value: Any) -> Any:
@@ -237,7 +250,12 @@ class LiveReadinessEvaluator:
                 out: dict[str, Any] = {}
                 for key, item in value.items():
                     key_text = str(key)
-                    if any(token in key_text.lower() for token in blocked_keys):
+                    key_lower = key_text.lower()
+                    if (
+                        key_lower in exact_blocked_keys
+                        or any(key_lower.startswith(f"{token}_") for token in exact_blocked_keys)
+                        or any(token in key_lower for token in contains_blocked_tokens)
+                    ):
                         continue
                     out[key_text] = sanitize(item)
                 return out

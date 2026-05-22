@@ -59,6 +59,16 @@ class _AlwaysAcceptBrain:
         return {}, _Plan(), "ok"
 
 
+class _IncidentProvider:
+    def snapshot(self):
+        return {
+            "evidence_status": "COMPLETE",
+            "orders": [{"order_id": "o-orphan", "symbol": "BTCUSDT", "status": "OPEN", "created_at": "2020-01-01T00:00:00Z"}],
+            "positions": [{"symbol": "ETHUSDT", "qty": 0.1}],
+            "fills": [{"trade_id": "dup-1", "symbol": "BTCUSDT"}, {"trade_id": "dup-1", "symbol": "BTCUSDT"}],
+        }
+
+
 def test_execution_mode_from_env_parses_and_validates() -> None:
     assert execution_mode_from_env("paper") == ExecutionMode.PAPER
     assert execution_mode_from_env(None) == ExecutionMode.PAPER
@@ -222,6 +232,25 @@ def test_runtime_rejected_decisions_do_not_persist_incomplete_real_rows(tmp_path
     assert all(str(row.symbol or "").strip() for row in rows)
     assert all(str(row.reject_reason or "").strip() for row in rows)
     assert not any(":real:" in str(row.decision_id) and (not str(row.symbol or "").strip() or not str(row.reject_reason or "").strip()) for row in rows)
+
+
+def test_live_qualification_incident_provider_fails_without_incident_persistence_writes() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        live_reconciliation_provider=_IncidentProvider(),
+    )
+    with pytest.raises(RuntimeError, match="readiness qualification failed"):
+        asyncio.run(orchestrator._run_live_qualification_gate())
+    with engine.begin() as conn:
+        exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reconciliation_incidents'")).scalar_one()
+        if exists:
+            assert conn.execute(text("SELECT COUNT(*) FROM reconciliation_incidents")).scalar_one() == 0
 
 
 def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

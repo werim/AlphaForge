@@ -1,3 +1,41 @@
+## 2026-05-22 Patch Addendum — LIVE startup reconciliation incident persistence follow-up
+
+### Why the patch was needed
+- Qualification startup persisted reconciliation findings (`ORPHAN_ORDER`, `ORPHAN_POSITION`, `DUPLICATE_FILL`) into `reconciliation_incidents`, which polluted incident history during normal startup checks.
+- Numeric parsing for parity/reconciliation evidence could raise on malformed values and interrupt report persistence.
+- Forensic sanitation dropped benign keys containing `signed` (for example `assigned_symbols`).
+
+### Root cause
+- `_run_live_qualification_gate()` invoked `persist_findings(...)` during startup qualification path.
+- Readiness numeric checks used direct `int(...)` conversion without defensive fallbacks.
+- Forensic key filtering used substring matching that treated any key containing `signed` as sensitive.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_live_readiness.py`
+- `tests/test_live_readiness_security_regression.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE qualification startup no longer persists reconciliation findings into `reconciliation_incidents`.
+- Qualification observability evidence now explicitly sets `incident_persistence_verified=False` at startup.
+- Defensive numeric parsing now fail-closes malformed parity/reconciliation counters without raising; readiness report persistence remains available.
+- Forensic sanitation now preserves benign keys like `assigned_symbols` while still redacting signed/auth/signature sensitive fields and query-string values.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- Runtime diagnostic reconciliation behavior outside qualification startup remains unchanged.
+
+### Remaining limitations / blockers
+- LIVE remains blocked by existing evidence requirements and missing production execution readiness.
+
+### Push recommendation
+- Merge as minimal follow-up patch to preserve fail-closed posture while preventing startup incident-log pollution.
+
 ## 2026-05-22 Patch Addendum — Evidence-based parity/operational readiness checks
 
 ### Why the patch was needed

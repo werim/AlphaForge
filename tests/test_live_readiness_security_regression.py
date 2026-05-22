@@ -67,6 +67,24 @@ def test_forensic_snapshot_redacts_nested_keys_and_sensitive_string_values(tmp_p
     assert "[REDACTED]" in payload_text
 
 
+def test_forensic_snapshot_keeps_assigned_symbols_and_redacts_signed_auth_payloads(tmp_path) -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    report = evaluator.evaluate(mode_parity={}, reconciliation_snapshot={"provider_configured": False, "evidence_status": "INCOMPLETE"}, observability_snapshot={}, canary_enabled=False, shadow_mode_enabled=False, operator_ack=False)
+    snapshot = {
+        "assigned_symbols": ["BTCUSDT", "ETHUSDT"],
+        "signed_url": "https://example.test/fapi/v1/order?symbol=BTCUSDT&signed=sensitive-value&timestamp=1",
+        "request": {"payload_signature": "remove-sig", "authorization": "Bearer remove-auth"},
+    }
+    out = evaluator.write_forensic_snapshot(tmp_path, report, snapshot)
+    data = json.loads(out.read_text(encoding="utf-8"))
+    runtime_snapshot = data["runtime_snapshot"]
+    assert runtime_snapshot["assigned_symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert runtime_snapshot["signed_url"].endswith("signed=[REDACTED]&timestamp=1")
+    assert "payload_signature" not in runtime_snapshot["request"]
+    assert "authorization" not in runtime_snapshot["request"]
+
+
 def test_live_qualification_clean_provider_does_not_write_incidents() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
