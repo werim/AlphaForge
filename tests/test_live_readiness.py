@@ -86,3 +86,46 @@ def test_forensic_snapshot_redacts_nested_fields(tmp_path) -> None:
     payload = json.loads(evaluator.write_forensic_snapshot(tmp_path, report, {private_key: "drop", "headers": {auth_key: "drop"}, "safe": 1}).read_text())
     assert private_key not in payload["runtime_snapshot"]
     assert auth_key not in payload["runtime_snapshot"]["headers"]
+
+
+def test_invalid_mode_parity_numbers_fail_closed_without_exception_and_persisted() -> None:
+    engine = _engine()
+    evaluator = LiveReadinessEvaluator(engine)
+    report = evaluator.evaluate(
+        mode_parity={
+            "evidence_status": "COMPLETE",
+            "sample_count": "N/A",
+            "min_sample_count": "",
+            "mismatch_count": None,
+            "missing_field_count": "bad",
+            "no_order_submission_verified": True,
+        },
+        reconciliation_snapshot=_reconciliation(),
+        observability_snapshot=_operational(),
+        canary_enabled=True,
+        shadow_mode_enabled=True,
+        operator_ack=True,
+    )
+    assert report.qualified is False
+    assert any(c.name == "mode_parity" and not c.passed for c in report.checks)
+    evaluator.persist_report(report)
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1
+
+
+def test_forensic_snapshot_keeps_assigned_symbols_and_redacts_signed_auth_fields(tmp_path) -> None:
+    evaluator = LiveReadinessEvaluator(_engine())
+    report = _evaluate(evaluator.engine)
+    payload = json.loads(evaluator.write_forensic_snapshot(tmp_path, report, {
+        "assigned_symbols": ["BTCUSDT", "ETHUSDT"],
+        "signed_url": "https://x.test?signature=abc123&timestamp=1",
+        "signature": "deadbeef",
+        "auth_payload": "authorization=Bearer token123",
+        "headers": {"X-MBX-APIKEY": "secret-key"},
+    }).read_text())
+    snap = payload["runtime_snapshot"]
+    assert snap["assigned_symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert "signed_url" in snap and "abc123" not in snap["signed_url"]
+    assert "signature" not in snap
+    assert "token123" not in json.dumps(snap)
+    assert "X-MBX-APIKEY" not in snap.get("headers", {})

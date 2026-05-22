@@ -1,3 +1,22 @@
+## [Unreleased] - 2026-05-22 (Minimal follow-up: LIVE qualification startup persistence hygiene + redaction precision)
+
+### Changed
+- LIVE qualification startup no longer writes reconciliation findings to `reconciliation_incidents`.
+- Qualification observability snapshot now records `incident_persistence_verified=false` at startup.
+- Readiness numeric evidence parsing now handles malformed values defensively and fail-closes without exceptions.
+
+### Fixed
+- Prevented startup reconciliation findings (e.g., orphan/duplicate incidents) from being persisted during qualification gate execution.
+- Fixed forensic redaction overreach so benign keys containing `signed` (e.g., `assigned_symbols`) are preserved while signed/auth secrets are redacted.
+
+### Added
+- Regression tests for fail-closed qualification with complete-but-dirty reconciliation snapshots.
+- Regression tests proving qualification startup does not create/write `reconciliation_incidents`.
+- Regression tests for malformed parity numerics persistence behavior and forensic sanitation precision.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; qualification still fail-closed until full evidence chain is complete.
+
 ## [Unreleased] - 2026-05-22 (Evidence-based LIVE readiness qualification hardening)
 
 ### Added

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from alphaforge.persistence import init_db
+from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 from alphaforge.reconciliation import ReconciliationEngine, ensure_reconciliation_tables, persist_findings
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
@@ -98,3 +98,45 @@ def test_distinct_fill_ids_no_duplicate_detection() -> None:
     snapshot = engine.snapshot_from_source({"orders": [], "positions": [], "fills": [{"trade_id": "t1", "symbol": "BTCUSDT"}, {"trade_id": "t2", "symbol": "BTCUSDT"}]})
     findings, _, _ = engine.reconcile(intended_orders=[], lifecycle_state_by_symbol={}, snapshot=snapshot, mode="LIVE")
     assert not any(f.finding_type == "DUPLICATE_FILL" for f in findings)
+
+
+def _seed_live_gate_minimum(session: Session) -> None:
+    save_order_decision(session, decision_id="d-1", signal_id="s-1", symbol="BTCUSDT", mode="PAPER", decision="REJECTED", reject_reason="HIGH_SPREAD", score=7.0, rr=1.4)
+    save_order_decision(session, decision_id="d-2", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", decision="ACCEPTED", reject_reason="", score=8.2, rr=2.0)
+    save_trade_lifecycle_event(session, event_id="e-1", signal_id="s-1", symbol="BTCUSDT", mode="PAPER", lifecycle_state="SIGNAL_CREATED", event_ts="2026-01-01T00:00:00Z")
+    save_trade_lifecycle_event(session, event_id="e-2", signal_id="s-1", symbol="BTCUSDT", mode="PAPER", lifecycle_state="SIGNAL_REJECTED", reject_reason="HIGH_SPREAD", event_ts="2026-01-01T00:00:01Z", previous_lifecycle_state="SIGNAL_CREATED")
+    save_trade_lifecycle_event(session, event_id="e-3", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", lifecycle_state="SIGNAL_CREATED", event_ts="2026-01-01T00:00:00Z")
+    save_trade_lifecycle_event(session, event_id="e-4", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", lifecycle_state="WAITING_ENTRY_ZONE", event_ts="2026-01-01T00:00:01Z", previous_lifecycle_state="SIGNAL_CREATED")
+    save_trade_lifecycle_event(session, event_id="e-5", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", lifecycle_state="ENTRY_TRIGGERED", event_ts="2026-01-01T00:00:02Z", previous_lifecycle_state="WAITING_ENTRY_ZONE")
+    save_trade_lifecycle_event(session, event_id="e-6", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", lifecycle_state="CANCELLED", event_ts="2026-01-01T00:00:03Z", previous_lifecycle_state="ENTRY_TRIGGERED")
+
+
+def test_live_qualification_reconciliation_findings_fail_closed() -> None:
+    class _DirtyProvider:
+        def snapshot(self):
+            return {
+                "evidence_status": "COMPLETE",
+                "orders": [{"order_id": "orphan-1", "symbol": "BTCUSDT", "status": "OPEN", "created_at": "2020-01-01T00:00:00Z"}],
+                "positions": [{"symbol": "ETHUSDT", "position_amt": 1}],
+                "fills": [{"trade_id": "dup-1", "symbol": "BTCUSDT"}, {"trade_id": "dup-1", "symbol": "BTCUSDT"}],
+            }
+
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        ai_brain=_AcceptBrain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        persistence_engine=init_db("sqlite+pysqlite:///:memory:"),
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        live_reconciliation_provider=_DirtyProvider(),
+    )
+    with Session(runtime.persistence_engine) as session:
+        _seed_live_gate_minimum(session)
+    with asyncio.Runner() as runner:
+        try:
+            runner.run(runtime._run_live_qualification_gate())
+        except RuntimeError:
+            pass
+    assert runtime._qualification_report is not None
+    failed = {c.name for c in runtime._qualification_report.checks if not c.passed}
+    assert {"reconciliation_no_orphans", "duplicate_execution_free", "reconciliation_fail_closed_clear"} <= failed

@@ -203,8 +203,6 @@ class RuntimeOrchestrator:
                 )
                 counters = summarize_findings(findings)
                 reconciliation_snapshot.update(counters)
-                if self._resolve_persistence_engine() is not None:
-                    persist_findings(self._resolve_persistence_engine(), findings)
             else:
                 reconciliation_snapshot.update({
                     "orphan_orders": 0,
@@ -216,7 +214,7 @@ class RuntimeOrchestrator:
         observability_snapshot = {
             "evidence_status": "INCOMPLETE",
             "qualification_persistence_verified": True,
-            "incident_persistence_verified": self.live_reconciliation_provider is not None,
+            "incident_persistence_verified": False,
             "forensic_export_verified": True,
             "sensitive_data_redaction_verified": True,
             "alert_delivery_verified": False,

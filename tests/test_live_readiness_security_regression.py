@@ -51,6 +51,7 @@ def test_forensic_snapshot_redacts_nested_keys_and_sensitive_string_values(tmp_p
     signature_marker = "sign" + "ature"
     key_marker = "api_" + "key"
     snapshot = {
+        "assigned_symbols": ["BTCUSDT"],
         "nested": {"api_secret": "remove-this", "safe": "kept"},
         "request_url": f"https://example.test/order?symbol=BTCUSDT&{signature_marker}=remove-url-value&timestamp=1",
         "log_line": "Author" + "ization: remove-header-value",
@@ -61,6 +62,7 @@ def test_forensic_snapshot_redacts_nested_keys_and_sensitive_string_values(tmp_p
     payload_text = out.read_text(encoding="utf-8")
     data = json.loads(payload_text)
     assert data["runtime_snapshot"]["nested"] == {"safe": "kept"}
+    assert data["runtime_snapshot"]["assigned_symbols"] == ["BTCUSDT"]
     assert "remove-url-value" not in payload_text
     assert "remove-header-value" not in payload_text
     assert "remove-query-value" not in payload_text

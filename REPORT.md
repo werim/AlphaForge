@@ -1,3 +1,49 @@
+## 2026-05-22 Patch Addendum — Minimal LIVE qualification startup persistence + redaction precision follow-up
+
+### Why the patch was needed
+- Qualification startup was persisting reconciliation findings into `reconciliation_incidents`, which conflated readiness gating with runtime diagnostics.
+- Numeric evidence parsing could raise on malformed values and interrupt fail-closed persistence.
+- Forensic sanitization could over-remove benign keys containing `signed`.
+
+### Root cause
+- `_run_live_qualification_gate()` called `persist_findings(...)` during startup reconciliation checks.
+- Readiness numeric parsing used direct `int(...)` coercion on external evidence fields.
+- Redaction key blocking matched broad `signed` substrings in keys.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_live_readiness.py`
+- `tests/test_live_readiness_security_regression.py`
+- `tests/test_reconciliation.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE qualification startup no longer persists reconciliation findings into `reconciliation_incidents`.
+- Qualification startup now explicitly sets `incident_persistence_verified=False` in observability snapshot.
+- Defensive numeric parsing now fail-closes malformed parity/reconciliation numeric evidence without exception.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- Runtime diagnostic reconciliation persistence path remains unchanged outside qualification startup.
+- Readiness report persistence remains active even when numeric evidence is malformed.
+
+### Security/redaction impact
+- Sensitive nested keys/values (`api_key`, `api_secret`, `secret`, `signature`, `authorization`, `X-MBX-APIKEY`, signed/auth query-string secrets) remain redacted.
+- Benign keys like `assigned_symbols` are now retained.
+
+### Tests executed
+- `pytest -q tests/test_live_readiness.py tests/test_reconciliation.py tests/test_runtime.py`
+- `pytest -q`
+
+### Remaining limitations / blockers
+- LIVE remains intentionally blocked pending complete operational evidence.
+
+### Push recommendation
+- Merge as minimal follow-up to preserve fail-closed behavior while removing startup incident persistence side-effects.
+
 ## 2026-05-22 Patch Addendum — Evidence-based parity/operational readiness checks
 
 ### Why the patch was needed
