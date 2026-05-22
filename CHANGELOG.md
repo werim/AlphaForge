@@ -525,3 +525,7 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ## 2026-05-21 config centralization
 - Added centralized env config loading and runtime/exchange/backtest wiring updates.
+
+## 2026-05-22
+- Added deterministic historical Binance Futures replay provider with paginated kline fetching, gap checks, and funding joins.
+- Backtest runtime now treats synthetic scanner as smoke-test only and labels market_data_source=SYNTHETIC_SMOKE_TEST when enabled.

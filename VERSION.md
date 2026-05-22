@@ -420,3 +420,6 @@
 
 Last audit date: 2026-05-21
 - Updated centralized configuration layer integration status.
+
+- Last audit date: 2026-05-22
+- Historical backtest data source: deterministic Binance USD-M Futures replay (klines + historical funding joins).
