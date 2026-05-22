@@ -210,6 +210,7 @@ def test_runtime_rejected_decisions_do_not_persist_incomplete_real_rows(tmp_path
     db_path = tmp_path / "runtime_rejects.sqlite3"
     monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
     monkeypatch.setenv("EXECUTION_MODE", "BACKTEST")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
     orchestrator = _build_runtime_from_env()
     asyncio.run(orchestrator._scan_once())
 
@@ -227,6 +228,7 @@ def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_p
     db_path = tmp_path / "runtime_paper_rejects.sqlite3"
     monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
     monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
     orchestrator = _build_runtime_from_env()
     asyncio.run(orchestrator._scan_once())
 
