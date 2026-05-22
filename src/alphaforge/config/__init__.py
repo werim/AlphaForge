@@ -87,6 +87,9 @@ class RuntimeSettings:
     require_exchange_connectivity_for_live: bool = True
     required_live_exchanges: tuple[str, ...] = ("binance",)
     exchange_connectivity_timeout_sec: float = 2.0
+    enable_binance_readonly_reconciliation: bool = False
+    binance_reconciliation_recv_window_ms: int = 5000
+    binance_reconciliation_trade_lookback_ms: int = 3_600_000
 
 @dataclass(slots=True)
 class BinanceSettings:
@@ -167,6 +170,9 @@ def load_config_from_env() -> AlphaForgeConfig:
         require_exchange_connectivity_for_live=_bool_env(env, "ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", True),
         required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
         exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
+        enable_binance_readonly_reconciliation=_bool_env(env, "ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", False),
+        binance_reconciliation_recv_window_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECV_WINDOW_MS", 5000),
+        binance_reconciliation_trade_lookback_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", 3_600_000),
     )
     exchange = ExchangeSettings(
         timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", runtime.exchange_connectivity_timeout_sec),
