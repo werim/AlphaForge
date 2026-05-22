@@ -5,7 +5,7 @@ import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from alphaforge.alert_delivery import capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence, persist_alert_delivery_evidence
+from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence, persist_alert_delivery_evidence
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 
@@ -77,27 +77,34 @@ def test_persisted_incomplete_alert_overrides_optimistic_operational_flag() -> N
     assert {"alert_delivery_evidence", "observability_coverage"} <= failed
 
 
-def test_capture_alert_delivery_evidence_persists_provider_result() -> None:
-    class _VerifiedProvider:
-        def snapshot(self):
-            return _verified_alert()
+def test_matching_diagnostic_probe_ack_is_persisted_and_accepted() -> None:
+    def transport(url: str, payload: bytes, headers, timeout: float):
+        request = json.loads(payload.decode("utf-8"))
+        return {"status": "ACKNOWLEDGED", "acknowledged": True, "probe_id": request["probe_id"]}
 
     engine = _engine(persist_alert=False)
-    saved = capture_alert_delivery_evidence(engine, _VerifiedProvider())
+    provider = WebhookAlertDeliveryEvidenceProvider(AlertDeliveryProbeConfig(endpoint_url="https://alerts.example.test/probe"), transport=transport, probe_id_factory=lambda: "probe-measured")
+    saved = capture_alert_delivery_evidence(engine, provider)
     loaded = latest_persisted_alert_delivery_evidence(engine)
     assert saved["alert_delivery_verified"] is True
     assert loaded["alert_delivery_verified"] is True
     assert loaded["observability_evidence_persisted"] is True
 
 
-def test_capture_incomplete_evidence_keeps_readiness_blocked() -> None:
-    class _IncompleteProvider:
-        def snapshot(self):
-            return {"evidence_status": "INCOMPLETE", "alert_delivery_verified": False, "delivery_attempted": True, "delivery_acknowledged": False, "non_trading_probe_verified": True, "endpoint_origin": "UNAVAILABLE", "blocking_reasons": ["NO_ACK"]}
-
+def test_nonmatching_probe_ack_is_persisted_but_keeps_readiness_blocked() -> None:
+    provider = WebhookAlertDeliveryEvidenceProvider(AlertDeliveryProbeConfig(endpoint_url="https://alerts.example.test/probe"), transport=lambda url, payload, headers, timeout: {"status": "ACKNOWLEDGED", "acknowledged": True, "probe_id": "different"}, probe_id_factory=lambda: "probe-measured")
     engine = _engine(persist_alert=False)
-    capture_alert_delivery_evidence(engine, _IncompleteProvider())
+    saved = capture_alert_delivery_evidence(engine, provider)
+    assert saved["alert_delivery_verified"] is False
     assert _evaluate(engine).qualified is False
+
+
+def test_insecure_probe_destination_is_not_called() -> None:
+    invoked: list[bool] = []
+    provider = WebhookAlertDeliveryEvidenceProvider(AlertDeliveryProbeConfig(endpoint_url="http://alerts.example.test/probe"), transport=lambda url, payload, headers, timeout: invoked.append(True) or {}, probe_id_factory=lambda: "probe-measured")
+    result = provider.snapshot()
+    assert invoked == []
+    assert result["alert_delivery_verified"] is False
 
 
 def test_static_operational_flags_without_persisted_alert_or_rollback_provenance_do_not_qualify() -> None:
