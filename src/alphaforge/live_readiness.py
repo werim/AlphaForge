@@ -176,9 +176,12 @@ class LiveReadinessEvaluator:
 
     def _check_runtime(self, mode_parity: Mapping[str, bool], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
         parity_ok = all(bool(v) for v in mode_parity.values()) if mode_parity else False
-        checks = [CheckResult("mode_parity", parity_ok, f"parity={dict(mode_parity)}")]
-        checks.append(CheckResult("reconciliation_no_orphans", int(reconciliation.get("orphan_positions", 0)) == 0 and int(reconciliation.get("orphan_orders", 0)) == 0, f"snapshot={dict(reconciliation)}"))
-        checks.append(CheckResult("duplicate_execution_free", int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 0)}"))
+        checks = [CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}")]
+        provider_configured = bool(reconciliation.get("provider_configured", False))
+        checks.append(CheckResult("live_reconciliation_provider", provider_configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not provider_configured else "provider_configured=true"))
+        no_orphans = int(reconciliation.get("orphan_positions", 0)) == 0 and int(reconciliation.get("orphan_orders", 0)) == 0
+        checks.append(CheckResult("reconciliation_no_orphans", provider_configured and no_orphans, f"snapshot={dict(reconciliation)}"))
+        checks.append(CheckResult("duplicate_execution_free", provider_configured and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"))
         return checks
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
@@ -188,6 +191,6 @@ class LiveReadinessEvaluator:
             CheckResult("shadow_mode_enabled", shadow_mode_enabled, "shadow mode required"),
             CheckResult("canary_enabled", canary_enabled, "canary required for controlled enablement"),
             CheckResult("operator_acknowledged", operator_ack, "explicit operator acknowledgement required"),
-            CheckResult("observability_coverage", coverage, f"observability={dict(obs)}"),
-            CheckResult("rollback_ready", rollback, f"rollback_ready={rollback}"),
+            CheckResult("observability_coverage", coverage, "OBSERVABILITY_EVIDENCE_UNVERIFIED" if not coverage else f"observability={dict(obs)}"),
+            CheckResult("rollback_ready", rollback, "ROLLBACK_EVIDENCE_UNVERIFIED" if not rollback else f"rollback_ready={rollback}"),
         ]

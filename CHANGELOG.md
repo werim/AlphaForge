@@ -1,3 +1,22 @@
+## [Unreleased] - 2026-05-22 (LIVE qualification evidence fail-closed + reconciliation provider requirement)
+
+### Added
+- Runtime tests for deterministic scanner provenance assignment and stricter LIVE provenance allowlist blocking.
+- LIVE readiness tests asserting fail-closed qualification details are persisted with explicit missing-evidence reasons.
+- Runtime reconciliation test asserting LIVE mode blocks when no reconciliation provider is configured.
+
+### Changed
+- LIVE startup scanner provenance gate now requires explicit allowlisted provenance (`EXCHANGE_PUBLIC_MARKET_DATA`) instead of blacklist-only checks.
+- Runtime bootstrap now deterministically assigns scanner provenance (`SAFE_PLACEHOLDER` override vs exchange-backed source).
+- LIVE qualification no longer injects optimistic hardcoded mode parity/reconciliation/observability evidence.
+
+### Fixed
+- `_build_runtime_from_env()` now always assigns `scanner_source` before `RuntimeOrchestrator` construction.
+- LIVE reconciliation now fail-closes when no explicit reconciliation provider exists, preventing in-memory-only snapshots from being treated as exchange truth.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; this patch does not add real order placement or authenticated exchange reconciliation reads.
+
 ## [Unreleased] - 2026-05-22 (P0 LIVE startup safety + Binance Futures consistency)
 
 ### Added

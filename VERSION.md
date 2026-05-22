@@ -1,3 +1,14 @@
+## 2026-05-22 LIVE qualification evidence fail-closed + reconciliation provider requirement patch
+- **Version:** `0.3.27-dev`
+- **Current phase:** Phase 6.1 live qualification evidence hardening.
+- **Runtime maturity:** LIVE startup now requires explicit allowlisted scanner provenance and LIVE qualification no longer uses optimistic hardcoded evidence snapshots.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST behavior unchanged; LIVE fail-closed requirements tightened for scanner provenance and reconciliation evidence provider availability.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** LIVE reconciliation cannot treat in-memory-only runtime state as exchange evidence without an explicit reconciliation provider.
+- **Known critical risks:** LIVE remains not production-ready; real exchange reconciliation provider and real execution/order pathways remain unresolved requirements.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 LIVE startup and Binance Futures connectivity fail-closed patch
 - **Version:** `0.3.26-dev`
 - **Current phase:** Phase 6.1 live safety gate hardening.

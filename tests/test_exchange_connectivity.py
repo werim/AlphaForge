@@ -102,6 +102,7 @@ def test_runtime_blocks_live_mode_when_exchange_unhealthy(monkeypatch: pytest.Mo
         ai_brain=_Brain(),
         market_scanner=_scanner,
         real_execution_adapter=object(),
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
     )
 
     def _failed_health(*args, **kwargs):
@@ -129,6 +130,7 @@ def test_live_startup_requires_exchange_connectivity_by_default(monkeypatch: pyt
         ai_brain=_Brain(),
         market_scanner=_scanner,
         real_execution_adapter=object(),
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
     )
 
     def _failed_health(*args, **kwargs):

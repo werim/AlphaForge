@@ -1,3 +1,53 @@
+## 2026-05-22 Patch Addendum — LIVE qualification evidence fail-closed + scanner/reconciliation provenance hardening
+
+### Why the patch was needed
+- LIVE qualification still used optimistic hardcoded evidence payloads that could pass checks without measured runtime proof.
+- LIVE reconciliation logic used in-memory runtime state snapshots only, which is insufficient as exchange-state evidence.
+- Runtime bootstrap referenced `scanner_source` at construction time without deterministic assignment on all paths.
+
+### Root cause
+- `_run_live_qualification_gate()` supplied static pass-biased snapshots for mode parity, reconciliation, and observability.
+- `_reconcile_runtime_state()` always built snapshots from `_pending_orders`/`_active_positions` regardless of mode.
+- `_build_runtime_from_env()` passed `scanner_source` without guaranteed initialization.
+- LIVE startup scanner checks were blacklist-based; UNKNOWN/unverified provenance could remain ambiguous.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_runtime.py`
+- `tests/test_live_readiness.py`
+- `tests/test_exchange_connectivity.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE startup now requires explicit allowlisted scanner provenance and blocks unverified/unknown sources fail-closed.
+- Runtime bootstrap now assigns deterministic scanner provenance (`SAFE_PLACEHOLDER` for safe override, otherwise `EXCHANGE_PUBLIC_MARKET_DATA`).
+- LIVE qualification now uses fail-closed evidence defaults and records explicit missing evidence reasons:
+  - `MODE_PARITY_UNVERIFIED`
+  - `LIVE_RECONCILIATION_PROVIDER_MISSING`
+  - `OBSERVABILITY_EVIDENCE_UNVERIFIED`
+  - `ROLLBACK_EVIDENCE_UNVERIFIED`
+- LIVE reconciliation now requires an explicit reconciliation provider and blocks when absent.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle schema changes.
+- No persistence schema rewrite; readiness report payload now carries explicit missing-evidence details in existing `live_readiness_reports` table.
+
+### Tests added/updated
+- Added/updated scanner provenance and bootstrap determinism tests.
+- Added fail-closed readiness evidence tests including persisted report detail checks.
+- Updated LIVE connectivity runtime tests to set explicit allowlisted scanner provenance when testing connectivity gate behavior.
+
+### Risks / limitations
+- No authenticated exchange snapshot provider was introduced in this patch.
+- LIVE remains intentionally blocked until real reconciliation provider evidence is available.
+- No order placement capability was added.
+
+### Push recommendation
+- Merge as minimal P0 fail-closed hardening before any further LIVE enablement work.
+
 ## 2026-05-22 Patch Addendum — P0 LIVE startup scanner/adapter guards + Binance Futures gate consistency
 
 ### Why the patch was needed

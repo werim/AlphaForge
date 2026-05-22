@@ -40,6 +40,10 @@ class RealExecutionAdapter(Protocol):
     async def submit(self, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
+class LiveReconciliationProvider(Protocol):
+    def snapshot(self) -> Mapping[str, Any]: ...
+
+
 @dataclass(slots=True)
 class RuntimeConfig:
     execution_mode: ExecutionMode = ExecutionMode.PAPER
@@ -87,6 +91,7 @@ class RuntimeOrchestrator:
     market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]]
     scanner_source: str = "UNKNOWN"
     real_execution_adapter: RealExecutionAdapter | None = None
+    live_reconciliation_provider: LiveReconciliationProvider | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     paper_slippage_bps: float = 2.0
@@ -120,10 +125,12 @@ class RuntimeOrchestrator:
 
     async def start(self) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE:
-            blocked_sources = {"SAFE_PLACEHOLDER", "MOCK", "PLACEHOLDER", "OFFLINE", "SYNTHETIC"}
-            scanner_source = str(self.scanner_source or "UNKNOWN").upper()
-            if scanner_source in blocked_sources:
-                raise RuntimeError("LIVE mode blocked: safe/placeholder market scanner is not allowed")
+            allowed_sources = {"EXCHANGE_PUBLIC_MARKET_DATA"}
+            scanner_source = str(self.scanner_source or "UNKNOWN").strip().upper()
+            if not scanner_source or scanner_source == "UNKNOWN":
+                raise RuntimeError("LIVE mode blocked: market scanner provenance is not verified")
+            if scanner_source not in allowed_sources:
+                raise RuntimeError("LIVE mode blocked: exchange-backed market scanner is required")
             if self.real_execution_adapter is None:
                 raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
             await self._run_live_exchange_connectivity_gate()
@@ -168,10 +175,15 @@ class RuntimeOrchestrator:
         if engine is None:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
         evaluator = LiveReadinessEvaluator(engine)
-        reconciliation_snapshot = {"orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0}
-        observability_snapshot = {"alerts_configured": True, "forensic_exports": True, "rollback_ready": True}
+        mode_parity = {}
+        if self.live_reconciliation_provider is None:
+            reconciliation_snapshot = {"provider_configured": False}
+        else:
+            reconciliation_snapshot = dict(self.live_reconciliation_provider.snapshot())
+            reconciliation_snapshot["provider_configured"] = True
+        observability_snapshot = {"alerts_configured": False, "forensic_exports": False, "rollback_ready": False}
         report = evaluator.evaluate(
-            mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
+            mode_parity=mode_parity,
             reconciliation_snapshot=reconciliation_snapshot,
             observability_snapshot=observability_snapshot,
             canary_enabled=self.config.enable_canary_mode,
@@ -470,11 +482,16 @@ class RuntimeOrchestrator:
             self.shutdown()
 
     async def _reconcile_runtime_state(self) -> None:
-        snapshot_source = {
-            "orders": list(self._pending_orders.values()),
-            "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()],
-            "fills": [],
-        }
+        if self.config.execution_mode == ExecutionMode.LIVE:
+            if self.live_reconciliation_provider is None:
+                raise RuntimeError("LIVE mode blocked: reconciliation provider is not configured")
+            snapshot_source = dict(self.live_reconciliation_provider.snapshot())
+        else:
+            snapshot_source = {
+                "orders": list(self._pending_orders.values()),
+                "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()],
+                "fills": [],
+            }
         snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
         findings, recommendations, _metrics = self._reconciliation_engine.reconcile(
             intended_orders=list(self._pending_orders.values()),
@@ -561,6 +578,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
 
     safe_scanner_requested = str(os.getenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")).strip().lower() in {"1", "true", "yes", "on"}
     use_safe_scanner = safe_scanner_requested
+    scanner_source = "SAFE_PLACEHOLDER" if use_safe_scanner else "EXCHANGE_PUBLIC_MARKET_DATA"
 
     async def _runtime_market_scanner() -> list[dict[str, Any]]:
         if mode == ExecutionMode.BACKTEST and use_safe_scanner:
