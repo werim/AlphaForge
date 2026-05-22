@@ -14,24 +14,29 @@ from alphaforge.contracts import canonical_utc_timestamp
 
 
 Transport = Callable[[str, bytes, Mapping[str, str], float], Mapping[str, Any]]
+_ALLOWED_FIELDS = (
+    "provider_configured",
+    "evidence_status",
+    "observability_evidence_source",
+    "alert_delivery_verified",
+    "delivery_attempted",
+    "delivery_acknowledged",
+    "non_trading_probe_verified",
+    "probe_id",
+    "endpoint_origin",
+    "blocking_reasons",
+)
 
 
 @dataclass(frozen=True, slots=True)
 class AlertDeliveryProbeConfig:
-    """Configuration for an explicit non-trading alert delivery readiness probe."""
-
     endpoint_url: str
     bearer_token: str | None = None
     timeout_sec: float = 2.0
 
 
 class WebhookAlertDeliveryEvidenceProvider:
-    """Produces measured LIVE readiness evidence from an acknowledged diagnostic alert.
-
-    The provider is intentionally narrow: it only emits a diagnostic probe payload and
-    never submits, cancels, or alters exchange orders. A HTTP success alone is not
-    treated as delivery proof. The remote sink must acknowledge the matching probe id.
-    """
+    """Emit a diagnostic alert probe and require acknowledgement of its id."""
 
     def __init__(
         self,
@@ -51,7 +56,6 @@ class WebhookAlertDeliveryEvidenceProvider:
             return self._incomplete("EMPTY_PROBE_ID", endpoint_origin="UNAVAILABLE")
         if endpoint_origin is None:
             return self._incomplete("INVALID_OR_INSECURE_ENDPOINT", endpoint_origin="UNAVAILABLE", probe_id=probe_id)
-
         payload = {
             "event_type": "ALPHAFORGE_LIVE_READINESS_ALERT_PROBE",
             "probe_id": probe_id,
@@ -64,32 +68,16 @@ class WebhookAlertDeliveryEvidenceProvider:
         if token:
             headers["Authorization"] = f"Bearer {token}"
         try:
-            response = dict(
-                self._transport(
-                    self.config.endpoint_url,
-                    json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-                    headers,
-                    float(self.config.timeout_sec),
-                )
-            )
+            response = dict(self._transport(self.config.endpoint_url, json.dumps(payload, separators=(",", ":")).encode("utf-8"), headers, float(self.config.timeout_sec)))
         except Exception as exc:
-            return self._incomplete(
-                f"DELIVERY_EXCEPTION:{exc.__class__.__name__}",
-                endpoint_origin=endpoint_origin,
-                probe_id=probe_id,
-                attempted=True,
-            )
-
-        echoed_probe_id = str(response.get("probe_id") or "")
-        status = str(response.get("status") or "").strip().upper()
-        acknowledged = bool(response.get("acknowledged", False)) and echoed_probe_id == probe_id and status in {"ACKNOWLEDGED", "DELIVERED"}
+            return self._incomplete(f"DELIVERY_EXCEPTION:{exc.__class__.__name__}", endpoint_origin=endpoint_origin, probe_id=probe_id, attempted=True)
+        acknowledged = (
+            bool(response.get("acknowledged", False))
+            and str(response.get("probe_id") or "") == probe_id
+            and str(response.get("status") or "").strip().upper() in {"ACKNOWLEDGED", "DELIVERED"}
+        )
         if not acknowledged:
-            return self._incomplete(
-                "ACKNOWLEDGEMENT_NOT_VERIFIED",
-                endpoint_origin=endpoint_origin,
-                probe_id=probe_id,
-                attempted=True,
-            )
+            return self._incomplete("ACKNOWLEDGEMENT_NOT_VERIFIED", endpoint_origin=endpoint_origin, probe_id=probe_id, attempted=True)
         return {
             "provider_configured": True,
             "evidence_status": "COMPLETE",
@@ -110,14 +98,8 @@ class WebhookAlertDeliveryEvidenceProvider:
         return f"https://{parts.netloc}"
 
     @staticmethod
-    def _incomplete(
-        reason: str,
-        *,
-        endpoint_origin: str,
-        probe_id: str | None = None,
-        attempted: bool = False,
-    ) -> dict[str, Any]:
-        evidence = {
+    def _incomplete(reason: str, *, endpoint_origin: str, probe_id: str | None = None, attempted: bool = False) -> dict[str, Any]:
+        evidence: dict[str, Any] = {
             "provider_configured": True,
             "evidence_status": "INCOMPLETE",
             "observability_evidence_source": "MEASURED_PROBE",
@@ -135,7 +117,7 @@ class WebhookAlertDeliveryEvidenceProvider:
     @staticmethod
     def _post_json(url: str, payload: bytes, headers: Mapping[str, str], timeout_sec: float) -> Mapping[str, Any]:
         request = Request(url, data=payload, headers=dict(headers), method="POST")
-        with urlopen(request, timeout=timeout_sec) as response:  # nosec B310 - URL must be explicit HTTPS.
+        with urlopen(request, timeout=timeout_sec) as response:
             status_code = int(getattr(response, "status", response.getcode()))
             if status_code < 200 or status_code >= 300:
                 return {"status": f"HTTP_{status_code}", "acknowledged": False}
@@ -144,10 +126,27 @@ class WebhookAlertDeliveryEvidenceProvider:
         return parsed if isinstance(parsed, Mapping) else {"acknowledged": False, "status": "INVALID_RESPONSE"}
 
 
-def persist_alert_delivery_evidence(engine: Engine, evidence: Mapping[str, Any]) -> None:
-    """Persist probe evidence after sanitization performed by the provider contract."""
+def _allowed_payload(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    payload = {key: evidence.get(key) for key in _ALLOWED_FIELDS if key in evidence}
+    payload["provider_configured"] = bool(payload.get("provider_configured", False))
+    payload["evidence_status"] = str(payload.get("evidence_status") or "INCOMPLETE").upper()
+    payload["observability_evidence_source"] = str(payload.get("observability_evidence_source") or "UNVERIFIED").upper()
+    payload["alert_delivery_verified"] = bool(payload.get("alert_delivery_verified", False))
+    payload["delivery_attempted"] = bool(payload.get("delivery_attempted", False))
+    payload["delivery_acknowledged"] = bool(payload.get("delivery_acknowledged", False))
+    payload["non_trading_probe_verified"] = bool(payload.get("non_trading_probe_verified", False))
+    payload["endpoint_origin"] = str(payload.get("endpoint_origin") or "UNAVAILABLE")
+    reasons = payload.get("blocking_reasons") or []
+    if isinstance(reasons, str):
+        reasons = [reasons]
+    payload["blocking_reasons"] = [str(reason)[:100] for reason in reasons]
+    if payload.get("probe_id") is not None:
+        payload["probe_id"] = str(payload["probe_id"])[:120]
+    return payload
 
-    payload = dict(evidence)
+
+def persist_alert_delivery_evidence(engine: Engine, evidence: Mapping[str, Any]) -> None:
+    payload = _allowed_payload(evidence)
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS live_alert_delivery_evidence (
@@ -161,18 +160,13 @@ def persist_alert_delivery_evidence(engine: Engine, evidence: Mapping[str, Any])
             )
         """))
         conn.execute(text("""
-            INSERT INTO live_alert_delivery_evidence(
-                recorded_at, probe_id, evidence_status, alert_delivery_verified,
-                endpoint_origin, evidence_payload
-            ) VALUES (
-                :recorded_at, :probe_id, :evidence_status, :verified,
-                :endpoint_origin, :payload
-            )
+            INSERT INTO live_alert_delivery_evidence(recorded_at, probe_id, evidence_status, alert_delivery_verified, endpoint_origin, evidence_payload)
+            VALUES (:recorded_at, :probe_id, :evidence_status, :verified, :endpoint_origin, :payload)
         """), {
             "recorded_at": canonical_utc_timestamp(),
             "probe_id": payload.get("probe_id"),
-            "evidence_status": str(payload.get("evidence_status") or "INCOMPLETE").upper(),
-            "verified": 1 if bool(payload.get("alert_delivery_verified", False)) else 0,
-            "endpoint_origin": str(payload.get("endpoint_origin") or "UNAVAILABLE"),
+            "evidence_status": payload["evidence_status"],
+            "verified": 1 if payload["alert_delivery_verified"] else 0,
+            "endpoint_origin": payload["endpoint_origin"],
             "payload": json.dumps(payload, sort_keys=True),
         })
