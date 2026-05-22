@@ -20,14 +20,26 @@ def _scan_exchange_markets_sync(config: Any) -> list[dict[str, Any]]:
 
 
 def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
-    base_url = str(getattr(getattr(getattr(config, "exchange", object()), "binance", object()), "base_url", "https://api.binance.com"))
+    base_url = str(getattr(getattr(getattr(config, "exchange", object()), "binance", object()), "base_url", "https://fapi.binance.com"))
     try:
-        tickers = _fetch_json(f"{base_url.rstrip('/')}/api/v3/ticker/24hr", timeout_sec=timeout_sec)
+        tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/24hr", timeout_sec=timeout_sec)
+        book_tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/bookTicker", timeout_sec=timeout_sec)
         funding = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/premiumIndex", timeout_sec=timeout_sec)
     except Exception:  # noqa: BLE001
         return []
-    if not isinstance(tickers, list):
+    if not isinstance(tickers, list) or not isinstance(book_tickers, list):
         return []
+
+    book_map: dict[str, tuple[float, float]] = {}
+    for item in book_tickers:
+        if not isinstance(item, dict) or not item.get("symbol"):
+            continue
+        bid = float(item.get("bidPrice", 0.0) or 0.0)
+        ask = float(item.get("askPrice", 0.0) or 0.0)
+        if bid <= 0.0 or ask <= 0.0 or ask < bid:
+            continue
+        book_map[str(item.get("symbol"))] = (bid, ask)
+
     funding_map = {
         str(item.get("symbol")): float(item.get("lastFundingRate", 0.0) or 0.0)
         for item in (funding if isinstance(funding, list) else [])
@@ -41,20 +53,31 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         symbol = str(item.get("symbol") or "")
         if not symbol.endswith("USDT"):
             continue
-        bid = float(item.get("bidPrice", 0.0) or 0.0)
-        ask = float(item.get("askPrice", 0.0) or 0.0)
+
         last_price = float(item.get("lastPrice", 0.0) or 0.0)
-        if bid <= 0.0 or ask <= 0.0 or last_price <= 0.0 or ask < bid:
+        if last_price <= 0.0:
             continue
-        spread_pct = (ask - bid) / max(last_price, 1e-12)
+
+        book = book_map.get(symbol)
+        if book is None:
+            # fail-closed: require valid public bid/ask for spread-aware runtime candidate
+            continue
+        bid, ask = book
+        mid = (bid + ask) / 2.0
+        entry = min(last_price, mid)
+        if entry <= 0.0:
+            continue
+        spread_pct = (ask - bid) / max(entry, 1e-12)
+
         change_pct = abs(float(item.get("priceChangePercent", 0.0) or 0.0)) / 100.0
         volume_quote = float(item.get("quoteVolume", 0.0) or 0.0)
         trend_strength = min(1.0, change_pct / 0.02)
+
         candidates.append(
             {
                 "symbol": symbol,
                 "source_exchange": "binance",
-                "entry": last_price,
+                "entry": entry,
                 "side": "LONG",
                 "market_ts": now_ts,
                 "timeframe": "1m",
