@@ -172,7 +172,6 @@ class LiveReadinessEvaluator:
             CheckResult("score_not_constant", (min_score is not None and max_score is not None and min_score != max_score), f"min_score={min_score},max_score={max_score}"),
         ]
 
-
     @staticmethod
     def _parse_non_negative_int(value: Any, *, default: int = 0) -> tuple[int, bool]:
         if value is None:
@@ -260,7 +259,9 @@ class LiveReadinessEvaluator:
                 out: dict[str, Any] = {}
                 for key, item in value.items():
                     key_text = str(key)
-                    if any(token in key_text.lower() for token in blocked_keys):
+                    key_lower = key_text.lower()
+                    signed_secret_key = key_lower == "signed" or (key_lower.startswith("signed_") and not key_lower.endswith("_url"))
+                    if any(token in key_lower for token in blocked_keys) or signed_secret_key:
                         continue
                     out[key_text] = sanitize(item)
                 return out
