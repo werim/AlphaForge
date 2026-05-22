@@ -8,6 +8,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 
 from alphaforge.config import load_config_from_env
 from alphaforge.contracts import canonical_utc_timestamp
@@ -18,7 +20,24 @@ BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
-def _status_payload(engine: Any) -> dict[str, Any]:
+def _create_dashboard_engine(database_url: str) -> Engine:
+    """Connect without creating or migrating a missing runtime SQLite database."""
+    parsed = make_url(database_url)
+    if not parsed.get_backend_name().startswith("sqlite"):
+        return create_engine(database_url, future=True)
+    database = parsed.database
+    if not database or database == ":memory:":
+        return create_engine("sqlite+pysqlite:///:memory:", future=True)
+    db_path = Path(database).expanduser()
+    if not db_path.is_absolute():
+        db_path = (Path.cwd() / db_path).resolve()
+    if not db_path.exists():
+        return create_engine("sqlite+pysqlite:///:memory:", future=True)
+    read_only_url = f"sqlite+pysqlite:///file:{db_path.as_posix()}?mode=ro&uri=true"
+    return create_engine(read_only_url, future=True)
+
+
+def _status_payload(engine: Engine) -> dict[str, Any]:
     cfg = load_config_from_env().runtime
     return {
         "configured_execution_mode": cfg.execution_mode,
@@ -37,7 +56,7 @@ def _status_payload(engine: Any) -> dict[str, Any]:
 def create_app(database_url: str | None = None) -> FastAPI:
     app = FastAPI(title="AlphaForge Dashboard", version="0.1.0")
     resolved_database_url = database_url or load_config_from_env().persistence.database_url
-    app.state.engine = create_engine(resolved_database_url, future=True)
+    app.state.engine = _create_dashboard_engine(resolved_database_url)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.on_event("shutdown")
