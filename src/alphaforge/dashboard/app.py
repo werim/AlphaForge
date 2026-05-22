@@ -7,10 +7,10 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import create_engine
 
 from alphaforge.config import load_config_from_env
 from alphaforge.contracts import canonical_utc_timestamp
-from alphaforge.persistence import init_db
 
 from .queries import fetch_latest_readiness, fetch_recent_lifecycle, fetch_reject_summary, fetch_signal_timeline
 
@@ -37,8 +37,12 @@ def _status_payload(engine: Any) -> dict[str, Any]:
 def create_app(database_url: str | None = None) -> FastAPI:
     app = FastAPI(title="AlphaForge Dashboard", version="0.1.0")
     resolved_database_url = database_url or load_config_from_env().persistence.database_url
-    app.state.engine = init_db(resolved_database_url)
+    app.state.engine = create_engine(resolved_database_url, future=True)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+    @app.on_event("shutdown")
+    async def dispose_dashboard_engine() -> None:
+        app.state.engine.dispose()
 
     @app.get("/health")
     async def health() -> dict[str, str]:
