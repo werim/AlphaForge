@@ -1,3 +1,14 @@
+## 2026-05-22 LIVE readiness evidence hardening (mode parity + observability + rollback)
+- **Version:** `0.3.30-dev`
+- **Current phase:** Phase 6.2 fail-closed operational-readiness evidence.
+- **Runtime maturity:** readiness checks now require structured measured evidence payloads, not static booleans.
+- **BACKTEST/PAPER/LIVE alignment:** decision-path parity is blocked by default until COMPLETE measured parity evidence (sampled, zero-mismatch, no-submit-verified) is present.
+- **Lifecycle coverage:** unchanged lifecycle transitions; kill-switch/rollback evidence remains explicit blocker unless proven.
+- **Execution realism coverage:** no order submission/cancel/modify/close was added; reconciliation remediation remains dry-run/non-mutating.
+- **Known critical risks:** external alert delivery evidence remains unverified and therefore blocking.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 LIVE canonical reconciliation evidence-chain hardening
 - **Version:** `0.3.29-dev`
 - **Current phase:** Phase 6.1 LIVE fail-closed reconciliation safety patch.
