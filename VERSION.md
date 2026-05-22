@@ -1,3 +1,14 @@
+## 2026-05-22 LIVE qualification incident persistence rollback + defensive parity parsing follow-up
+- **Version:** `0.3.31-dev`
+- **Current phase:** Phase 6.2 fail-closed readiness evidence integrity follow-up.
+- **Runtime maturity:** LIVE qualification still fail-closed, but startup reconciliation findings are no longer persisted as incidents.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST/runtime reconciliation loop behavior unchanged; only LIVE qualification startup persistence side-effect removed.
+- **Lifecycle coverage:** unchanged lifecycle transitions and reject semantics.
+- **Execution realism coverage:** canonical reconciliation findings still determine qualification fail-closed outcomes; no scoring/RR/execution-path changes.
+- **Known critical risks:** observability evidence remains incomplete (`incident_persistence_verified=false` at qualification startup), so LIVE remains blocked.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 LIVE readiness evidence hardening (mode parity + observability + rollback)
 - **Version:** `0.3.30-dev`
 - **Current phase:** Phase 6.2 fail-closed operational-readiness evidence.

@@ -1,3 +1,46 @@
+## 2026-05-22 Patch Addendum — Minimal follow-up: startup incident persistence rollback + defensive evidence parsing
+
+### Why the patch was needed
+- LIVE qualification startup was persisting reconciliation findings into `reconciliation_incidents`, creating false operational history during preflight gating.
+- Mode parity numeric parsing could raise on malformed evidence payloads and risk aborting readiness flow instead of persisting fail-closed reports.
+- Forensic sanitation over-redacted benign keys containing `signed`, including legitimate metadata.
+
+### Root cause
+- `_run_live_qualification_gate()` persisted canonical findings unconditionally when provider evidence was COMPLETE.
+- `_check_runtime()` used direct `int(...)` casts for evidence counters.
+- `_sanitize_runtime_snapshot()` blocked keys using substring `signed` rather than sensitive key semantics/value redaction.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_live_readiness.py`
+- `tests/test_live_readiness_security_regression.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE qualification startup still fails closed on canonical reconciliation findings (orphan/duplicate/fail-closed) but no longer writes startup findings into `reconciliation_incidents`.
+- Qualification startup now explicitly reports `incident_persistence_verified=false`.
+- Invalid parity numeric evidence values (`None`, `''`, `N/A`, malformed strings) now fail closed without exceptions; readiness report persistence continues.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle transition changes.
+- No schema changes.
+- `live_readiness_reports` persistence remains intact even for invalid parity evidence payloads.
+
+### Tests added/updated
+- Added fail-closed parity parsing regression with persisted readiness report.
+- Added LIVE qualification regression using canonical orphan/duplicate snapshot and asserting no incident rows written at startup.
+- Strengthened forensic redaction regression to assert `assigned_symbols` retention and signed/auth/signature redaction.
+
+### Risks / remaining limitations
+- LIVE still not ready; observability evidence remains intentionally blocking without complete measured proof.
+- This patch does not alter scoring, RR, thresholds, trade frequency, adapter behavior, or order submission paths.
+
+### Push recommendation
+- Merge as minimal follow-up patch restoring startup persistence semantics while preserving fail-closed LIVE qualification.
+
 ## 2026-05-22 Patch Addendum — Evidence-based parity/operational readiness checks
 
 ### Why the patch was needed

@@ -172,14 +172,36 @@ class LiveReadinessEvaluator:
             CheckResult("score_not_constant", (min_score is not None and max_score is not None and min_score != max_score), f"min_score={min_score},max_score={max_score}"),
         ]
 
+
+    @staticmethod
+    def _parse_non_negative_int(value: Any, *, default: int = 0) -> tuple[int, bool]:
+        if value is None:
+            return default, False
+        if isinstance(value, bool):
+            return default, False
+        if isinstance(value, int):
+            return (value, True) if value >= 0 else (default, False)
+        if isinstance(value, float):
+            if value != value or value < 0 or not value.is_integer():
+                return default, False
+            return int(value), True
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or text.upper() in {"N/A", "NA", "NONE", "NULL", "UNVERIFIED", "INCOMPLETE"}:
+                return default, False
+            if re.fullmatch(r"[0-9]+", text):
+                return int(text), True
+            return default, False
+        return default, False
+
     def _check_runtime(self, mode_parity: Mapping[str, Any], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
         parity_status = str(mode_parity.get("evidence_status", "INCOMPLETE")).upper() if mode_parity else "INCOMPLETE"
-        sample_count = int(mode_parity.get("sample_count", 0)) if mode_parity else 0
-        min_samples = int(mode_parity.get("min_sample_count", 1)) if mode_parity else 1
-        mismatch_count = int(mode_parity.get("mismatch_count", 0)) if mode_parity else 0
-        missing_field_count = int(mode_parity.get("missing_field_count", 0)) if mode_parity else 0
+        sample_count, sample_ok = self._parse_non_negative_int(mode_parity.get("sample_count", 0) if mode_parity else 0, default=0)
+        min_samples, min_ok = self._parse_non_negative_int(mode_parity.get("min_sample_count", 1) if mode_parity else 1, default=1)
+        mismatch_count, mismatch_ok = self._parse_non_negative_int(mode_parity.get("mismatch_count", 0) if mode_parity else 0, default=0)
+        missing_field_count, missing_ok = self._parse_non_negative_int(mode_parity.get("missing_field_count", 0) if mode_parity else 0, default=0)
         no_submit_verified = bool(mode_parity.get("no_order_submission_verified", False)) if mode_parity else False
-        parity_ok = parity_status == "COMPLETE" and sample_count >= min_samples and mismatch_count == 0 and missing_field_count == 0 and no_submit_verified
+        parity_ok = parity_status == "COMPLETE" and sample_ok and min_ok and mismatch_ok and missing_ok and sample_count >= min_samples and mismatch_count == 0 and missing_field_count == 0 and no_submit_verified
         checks = [CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}")]
         provider_configured = bool(reconciliation.get("provider_configured", False))
         checks.append(CheckResult("live_reconciliation_provider", provider_configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not provider_configured else "provider_configured=true"))
@@ -220,9 +242,10 @@ class LiveReadinessEvaluator:
         ]
 
     def _sanitize_runtime_snapshot(self, runtime_snapshot: Mapping[str, Any]) -> dict[str, Any]:
-        blocked_keys = ("api_key", "api_secret", "secret", "signature", "signed", "authorization", "x-mbx")
+        blocked_keys = ("api_key", "api_secret", "secret", "signature", "authorization", "x-mbx-apikey")
         sensitive_value_patterns = (
             re.compile(r"(?i)((?:api[_-]?key|api[_-]?secret|secret|signature|x-mbx-apikey)\s*[=:]\s*)[^&\s,;\"']+"),
+            re.compile(r"(?i)([?&](?:signature|signed(?:_[a-z0-9_]+)?|authorization|x-mbx-apikey|api[_-]?key|api[_-]?secret|secret)=)[^&\s,;\"']+"),
             re.compile(r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?[^,;\r\n\"']+"),
         )
 
