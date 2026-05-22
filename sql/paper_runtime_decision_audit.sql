@@ -5,6 +5,8 @@
 -- Default scope: all persisted PAPER rows. To audit a single completed run, replace the
 -- NULL parameters below with inclusive ISO-8601 timestamps from that session.
 -- Example: VALUES ('2026-05-21T19:00:00+00:00', '2026-05-21T23:59:59+00:00');
+-- Timestamp comparisons use julianday() so equivalent UTC formats such as Z and +00:00
+-- remain inclusive and do not change session-scoped verdict counts.
 --
 -- This file is SQLTools-compatible plain SQL. In sqlite3 CLI, optionally run `.headers on`
 -- and `.mode column` before loading it.
@@ -22,8 +24,8 @@ SELECT d.*
 FROM order_decisions AS d
 CROSS JOIN job19_parameters AS p
 WHERE UPPER(COALESCE(d.mode, '')) = 'PAPER'
-  AND (p.start_ts IS NULL OR d.created_at >= p.start_ts)
-  AND (p.end_ts IS NULL OR d.created_at <= p.end_ts);
+  AND (p.start_ts IS NULL OR julianday(d.created_at) >= julianday(p.start_ts))
+  AND (p.end_ts IS NULL OR julianday(d.created_at) <= julianday(p.end_ts));
 
 DROP VIEW IF EXISTS temp.job19_paper_final_decisions;
 CREATE TEMP VIEW job19_paper_final_decisions AS
@@ -38,8 +40,8 @@ SELECT e.*,
 FROM trade_lifecycle_events AS e
 CROSS JOIN job19_parameters AS p
 WHERE UPPER(COALESCE(e.mode, '')) = 'PAPER'
-  AND (p.start_ts IS NULL OR e.created_at >= p.start_ts)
-  AND (p.end_ts IS NULL OR e.created_at <= p.end_ts);
+  AND (p.start_ts IS NULL OR julianday(e.created_at) >= julianday(p.start_ts))
+  AND (p.end_ts IS NULL OR julianday(e.created_at) <= julianday(p.end_ts));
 
 SELECT '00_SCOPE' AS audit_section,
        (SELECT start_ts FROM job19_parameters) AS requested_start_ts,
