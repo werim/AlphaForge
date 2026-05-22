@@ -50,7 +50,7 @@ class LiveReadinessEvaluator:
     def evaluate(
         self,
         *,
-        mode_parity: Mapping[str, bool],
+        mode_parity: Mapping[str, Any],
         reconciliation_snapshot: Mapping[str, Any],
         observability_snapshot: Mapping[str, Any],
         canary_enabled: bool,
@@ -118,7 +118,6 @@ class LiveReadinessEvaluator:
         by_signal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             by_signal.setdefault(str(row["signal_id"]), []).append(dict(row))
-
         orphan_signals = [sid for sid, events in by_signal.items() if events and events[0]["lifecycle_state"] != LifecycleEventType.SIGNAL_CREATED.value]
         invalid_transitions = 0
         reject_missing = 0
@@ -135,7 +134,6 @@ class LiveReadinessEvaluator:
             if any(e["lifecycle_state"] == LifecycleEventType.ENTRY_TRIGGERED.value for e in events):
                 if not any(e["lifecycle_state"] in {LifecycleEventType.TP_HIT.value, LifecycleEventType.SL_HIT.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.OPEN_AT_END.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value} for e in events):
                     exit_missing += 1
-
         return [
             CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"),
             CheckResult("lifecycle_transitions_valid", invalid_transitions == 0, f"invalid_transitions={invalid_transitions}"),
@@ -156,7 +154,6 @@ class LiveReadinessEvaluator:
             checks.append(CheckResult(f"schema_{table}", len(missing) == 0, f"missing_fields={missing}"))
             null_row = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE " + " OR ".join([f"{f} IS NULL" for f in fields]))).scalar_one()
             checks.append(CheckResult(f"critical_not_null_{table}", int(null_row) == 0, f"null_rows={null_row}"))
-
         rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
         rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE lifecycle_state='SIGNAL_REJECTED'")).scalar_one()
         checks.append(CheckResult("reject_persistence_parity", int(rejected_decisions) <= int(rejected_events), f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
@@ -175,20 +172,14 @@ class LiveReadinessEvaluator:
             CheckResult("score_not_constant", (min_score is not None and max_score is not None and min_score != max_score), f"min_score={min_score},max_score={max_score}"),
         ]
 
-    def _check_runtime(self, mode_parity: Mapping[str, bool], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
+    def _check_runtime(self, mode_parity: Mapping[str, Any], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
         parity_status = str(mode_parity.get("evidence_status", "INCOMPLETE")).upper() if mode_parity else "INCOMPLETE"
         sample_count = int(mode_parity.get("sample_count", 0)) if mode_parity else 0
         min_samples = int(mode_parity.get("min_sample_count", 1)) if mode_parity else 1
         mismatch_count = int(mode_parity.get("mismatch_count", 0)) if mode_parity else 0
         missing_field_count = int(mode_parity.get("missing_field_count", 0)) if mode_parity else 0
         no_submit_verified = bool(mode_parity.get("no_order_submission_verified", False)) if mode_parity else False
-        parity_ok = (
-            parity_status == "COMPLETE"
-            and sample_count >= min_samples
-            and mismatch_count == 0
-            and missing_field_count == 0
-            and no_submit_verified
-        )
+        parity_ok = parity_status == "COMPLETE" and sample_count >= min_samples and mismatch_count == 0 and missing_field_count == 0 and no_submit_verified
         checks = [CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}")]
         provider_configured = bool(reconciliation.get("provider_configured", False))
         checks.append(CheckResult("live_reconciliation_provider", provider_configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not provider_configured else "provider_configured=true"))
@@ -201,8 +192,11 @@ class LiveReadinessEvaluator:
         return checks
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
+        observability_provenance = str(obs.get("observability_evidence_source", "")).upper() == "MEASURED_PROBE" and bool(obs.get("observability_evidence_persisted", False))
+        rollback_provenance = str(obs.get("rollback_evidence_source", "")).upper() == "DETERMINISTIC_VALIDATION" and bool(obs.get("rollback_evidence_persisted", False))
         coverage = (
-            bool(obs.get("qualification_persistence_verified", False))
+            observability_provenance
+            and bool(obs.get("qualification_persistence_verified", False))
             and bool(obs.get("incident_persistence_verified", False))
             and bool(obs.get("forensic_export_verified", False))
             and bool(obs.get("sensitive_data_redaction_verified", False))
@@ -210,7 +204,8 @@ class LiveReadinessEvaluator:
             and str(obs.get("evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
         )
         rollback = (
-            bool(obs.get("kill_switch_block_verified", False))
+            rollback_provenance
+            and bool(obs.get("kill_switch_block_verified", False))
             and bool(obs.get("no_submit_on_kill_switch_verified", False))
             and bool(obs.get("fail_closed_reconciliation_verified", False))
             and bool(obs.get("repair_actions_non_mutating_verified", False))
@@ -253,5 +248,4 @@ class LiveReadinessEvaluator:
             if isinstance(value, str):
                 return sanitize_string(value)
             return value
-
         return sanitize(dict(runtime_snapshot))
