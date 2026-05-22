@@ -1,3 +1,108 @@
+## [Unreleased] - 2026-05-22 (LIVE qualification startup persistence and forensic redaction precision follow-up)
+
+### Changed
+- LIVE qualification startup no longer persists reconciliation findings to `reconciliation_incidents`; fail-closed qualification logic still uses canonical reconciliation counters.
+- Qualification observability snapshot now sets `incident_persistence_verified=false` during startup evidence evaluation.
+- Mode parity numeric evidence parsing is now defensive and fail-closed on invalid/placeholder values without raising exceptions.
+
+### Fixed
+- Forensic runtime snapshot sanitation now preserves benign keys containing `signed` (for example `assigned_symbols`) while still redacting signed/auth/secret payload values and sensitive nested keys.
+
+### Added
+- Regression coverage for fail-closed qualification on canonical orphan/duplicate findings without incident writes.
+- Regression coverage for invalid parity numeric evidence persistence and non-throwing fail-closed behavior.
+- Regression coverage proving `assigned_symbols` survives sanitation while signed/auth/signature values are redacted.
+
+## [Unreleased] - 2026-05-22 (Evidence-based LIVE readiness qualification hardening)
+
+### Added
+- Structured fail-closed readiness evidence contract checks for mode parity, observability, and rollback/emergency controls.
+- Forensic snapshot sanitization that removes key/secret/signature/signed-header style fields from persisted runtime snapshot payloads.
+- Readiness tests covering parity minimum-sample enforcement and forensic secret redaction.
+
+### Changed
+- `mode_parity` qualification now requires COMPLETE evidence with minimum samples, zero mismatches, zero missing fields, and no-order-submission verification.
+- Observability/rollback readiness checks now require measured evidence fields instead of optimistic booleans.
+
+### Fixed
+- Closed gap where static `alerts_configured` / `rollback_ready` booleans could qualify LIVE without measured evidence.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; alert delivery evidence is still blocking.
+
+## [Unreleased] - 2026-05-22 (LIVE canonical reconciliation evidence-chain hardening)
+
+### Added
+- Duplicate-fill detection in canonical reconciliation (`DUPLICATE_FILL`) using exchange `trade_id` with documented fallback compound key.
+- Canonical reconciliation finding summary adapter for readiness counters (`orphan_orders`, `orphan_positions`, `duplicate_fills`, `lifecycle_divergences`, `fail_closed_findings`, `stale_orders`).
+- LIVE qualification tests proving provider optimistic counters cannot bypass canonical orphan/position detection.
+
+### Changed
+- LIVE qualification now passes provider raw `orders`/`positions`/`fills` through `ReconciliationEngine.reconcile(...)` and ignores provider orphan/duplicate summary claims.
+- LIVE runtime/readiness fails closed on incomplete reconciliation evidence and on any fail-closed canonical finding.
+
+### Fixed
+- Closed false-qualification gap where provider-supplied zero orphan/duplicate counters could be trusted without runtime-intent comparison.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; no real order submission/cancellation/modification is introduced.
+
+## [Unreleased] - 2026-05-22 (Authenticated Binance read-only LIVE reconciliation evidence)
+
+### Added
+- `BinanceReadonlyReconciliationProvider` with signed USER_DATA GET support for `/fapi/v1/openOrders`, `/fapi/v3/positionRisk`, and symbol-scoped `/fapi/v1/userTrades`.
+- Deterministic mocked unit tests for request signing, credential redaction, hedge-mode position normalization, and fail-closed behavior.
+- Runtime env gate test for LIVE fail-closed when read-only reconciliation is enabled without credentials.
+
+### Changed
+- Runtime env bootstrap now supports explicit read-only reconciliation toggles and bounded recvWindow/lookback configuration.
+- LIVE runtime wiring can attach read-only reconciliation provider only when explicitly enabled and full credentials are present.
+
+### Fixed
+- Closed gap where LIVE had no authenticated exchange reconciliation evidence provider implementation.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; no real order submission/execution adapter is implemented.
+
+## [Unreleased] - 2026-05-22 (LIVE qualification evidence fail-closed + reconciliation provider requirement)
+
+### Added
+- Runtime tests for deterministic scanner provenance assignment and stricter LIVE provenance allowlist blocking.
+- LIVE readiness tests asserting fail-closed qualification details are persisted with explicit missing-evidence reasons.
+- Runtime reconciliation test asserting LIVE mode blocks when no reconciliation provider is configured.
+
+### Changed
+- LIVE startup scanner provenance gate now requires explicit allowlisted provenance (`EXCHANGE_PUBLIC_MARKET_DATA`) instead of blacklist-only checks.
+- Runtime bootstrap now deterministically assigns scanner provenance (`SAFE_PLACEHOLDER` override vs exchange-backed source).
+- LIVE qualification no longer injects optimistic hardcoded mode parity/reconciliation/observability evidence.
+
+### Fixed
+- `_build_runtime_from_env()` now always assigns `scanner_source` before `RuntimeOrchestrator` construction.
+- LIVE reconciliation now fail-closes when no explicit reconciliation provider exists, preventing in-memory-only snapshots from being treated as exchange truth.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; this patch does not add real order placement or authenticated exchange reconciliation reads.
+
+## [Unreleased] - 2026-05-22 (P0 LIVE startup safety + Binance Futures consistency)
+
+### Added
+- Runtime regression tests for LIVE scanner provenance blocking and early missing-real-adapter startup blocking.
+- Connectivity regression tests asserting Binance Futures endpoint family usage and funding fail-closed behavior.
+- Config regression test for default Binance Futures host when `BINANCE_BASE_URL` is unset.
+
+### Changed
+- Runtime orchestrator now uses explicit scanner provenance (`scanner_source`) for LIVE startup safety gating.
+- Binance connectivity probe now validates Futures orderbook and funding endpoints used by runtime scanner.
+- Binance config default/fallback base URL now defaults to `https://fapi.binance.com`.
+
+### Fixed
+- Closed LIVE startup bypass where safe scanner could be wrapped by `_runtime_market_scanner` and evade name-based detection.
+- Closed delayed LIVE startup failure path by blocking early when `real_execution_adapter` is not configured.
+- Removed Spot endpoint qualification path for Binance Futures runtime readiness.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; no real trading adapter/order placement was enabled.
+
 ## [Unreleased] - 2026-05-22 (Binance Futures bookTicker spread hardening follow-up)
 
 ### Changed
@@ -525,3 +630,17 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ## 2026-05-21 config centralization
 - Added centralized env config loading and runtime/exchange/backtest wiring updates.
+
+## 2026-05-22
+- Added deterministic historical Binance Futures replay provider with paginated kline fetching, gap checks, and funding joins.
+- Backtest runtime now treats synthetic scanner as smoke-test only and labels market_data_source=SYNTHETIC_SMOKE_TEST when enabled.
+
+## 2026-05-22 PR #148 follow-up (LIVE qualification non-mutating parity fix)
+
+### Changed
+- LIVE qualification mode parity evidence now runs through side-effect-free scoring/planning/explanation calls and no longer calls persistence-capable `before_real_order(...)`.
+- Qualification parity samples now use stable fixture sample IDs and stable fixture market timestamps to keep parity inputs deterministic across repeated runs.
+
+### Fixed
+- Removed synthetic LIVE qualification probe mutation of `signals`, `order_decisions`, `ai_decision_features`, `trade_lifecycle_events`, and rejected-review tables during parity evaluation.
+- Added regression coverage for non-mutating parity evidence and deterministic replay parity output (excluding `generated_at`).

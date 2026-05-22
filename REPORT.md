@@ -1,3 +1,274 @@
+## 2026-05-22 Patch Addendum — Minimal follow-up: startup incident persistence rollback + defensive evidence parsing
+
+### Why the patch was needed
+- LIVE qualification startup was persisting reconciliation findings into `reconciliation_incidents`, creating false operational history during preflight gating.
+- Mode parity numeric parsing could raise on malformed evidence payloads and risk aborting readiness flow instead of persisting fail-closed reports.
+- Forensic sanitation over-redacted benign keys containing `signed`, including legitimate metadata.
+
+### Root cause
+- `_run_live_qualification_gate()` persisted canonical findings unconditionally when provider evidence was COMPLETE.
+- `_check_runtime()` used direct `int(...)` casts for evidence counters.
+- `_sanitize_runtime_snapshot()` blocked keys using substring `signed` rather than sensitive key semantics/value redaction.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_live_readiness.py`
+- `tests/test_live_readiness_security_regression.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE qualification startup still fails closed on canonical reconciliation findings (orphan/duplicate/fail-closed) but no longer writes startup findings into `reconciliation_incidents`.
+- Qualification startup now explicitly reports `incident_persistence_verified=false`.
+- Invalid parity numeric evidence values (`None`, `''`, `N/A`, malformed strings) now fail closed without exceptions; readiness report persistence continues.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle transition changes.
+- No schema changes.
+- `live_readiness_reports` persistence remains intact even for invalid parity evidence payloads.
+
+### Tests added/updated
+- Added fail-closed parity parsing regression with persisted readiness report.
+- Added LIVE qualification regression using canonical orphan/duplicate snapshot and asserting no incident rows written at startup.
+- Strengthened forensic redaction regression to assert `assigned_symbols` retention and signed/auth/signature redaction.
+
+### Risks / remaining limitations
+- LIVE still not ready; observability evidence remains intentionally blocking without complete measured proof.
+- This patch does not alter scoring, RR, thresholds, trade frequency, adapter behavior, or order submission paths.
+
+### Push recommendation
+- Merge as minimal follow-up patch restoring startup persistence semantics while preserving fail-closed LIVE qualification.
+
+## 2026-05-22 Patch Addendum — Evidence-based parity/operational readiness checks
+
+### Why the patch was needed
+- LIVE readiness still accepted placeholder booleans for parity/observability/rollback without persisted, measurable operational evidence.
+
+### Root cause
+- `LiveReadinessEvaluator` runtime/operational checks were boolean shortcuts (`all(mode_parity.values())`, `alerts_configured`, `rollback_ready`) with no structured evidence sufficiency contract.
+
+### Files changed
+- `src/alphaforge/live_readiness.py`
+- `src/alphaforge/runtime.py`
+- `tests/test_live_readiness.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- Mode parity now fail-closes unless evidence is COMPLETE and satisfies minimum sample, zero mismatch, zero missing-field, and no-submit verification constraints.
+- Observability and rollback checks now require explicit measured evidence fields rather than static booleans.
+- Forensic snapshot export now sanitizes runtime snapshot keys that look like credentials/signatures/auth headers.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- Existing `live_readiness_reports.report_payload` persists structured evidence details safely.
+
+### Security/execution safety
+- No real order submission/cancel/modify/close path introduced.
+- No exchange mutation path added.
+- Reconciliation remediation posture remains dry-run/non-mutating.
+
+### Remaining limitations / blockers
+- Alert delivery verification is not implemented and remains an explicit readiness blocker.
+- Real execution readiness remains unavailable.
+- LIVE remains NOT LIVE-READY.
+
+### Push recommendation
+- Merge as minimal fail-closed evidence hardening increment.
+
+## 2026-05-22 Patch Addendum — LIVE canonical reconciliation evidence-chain hardening
+
+### Why the patch was needed
+- LIVE qualification consumed provider snapshot fields directly and could trust optimistic orphan/duplicate counters without canonical runtime-intent comparison.
+
+### Root cause
+- Canonical reconciliation ownership was split: provider returned summary counters while readiness gate relied on those counters instead of reconciliation findings produced by AlphaForge runtime logic.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/reconciliation.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_reconciliation.py`
+- `tests/test_live_readiness.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE qualification now treats authenticated provider as raw read-only exchange evidence source only.
+- LIVE qualification converts provider snapshot to canonical reconciliation snapshot and runs `ReconciliationEngine.reconcile(...)` against runtime intended orders/lifecycle state.
+- Provider-supplied `orphan_orders` / `orphan_positions` / `duplicate_fills` values are ignored for qualification decisions.
+- LIVE readiness now fails closed when provider evidence is incomplete and when canonical fail-closed findings are present.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- Reconciliation findings continue to persist through existing `reconciliation_incidents` persistence layer, including duplicate-fill incidents.
+
+### Security/redaction impact
+- No API keys/secrets/signatures added to incident payloads; persisted payloads contain only normalized safe reconciliation evidence.
+
+### Remaining limitations / blockers
+- Remediation suggestions remain dry-run/operator-review only.
+- No order create/cancel/modify/close behavior introduced.
+- LIVE remains blocked by broader readiness requirements and missing production execution/operational evidence.
+
+### Push recommendation
+- Merge as minimal fail-closed P0/P1 patch.
+
+## 2026-05-22 Patch Addendum — Authenticated Binance READ-ONLY reconciliation provider
+
+### Why the patch was needed
+- LIVE qualification/readiness required authenticated reconciliation provider evidence, but no provider existed.
+
+### Root cause
+- The runtime had a reconciliation provider contract and fail-closed requirement, but no authenticated Binance USER_DATA implementation.
+
+### Files changed
+- `src/alphaforge/binance_reconciliation_provider.py`
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/config.py`
+- `src/alphaforge/config/__init__.py`
+- `tests/test_binance_reconciliation_provider.py`
+- `tests/test_runtime_env_config.py`
+- `.env.example`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added read-only Binance reconciliation snapshot support with signed GET-only USER_DATA calls.
+- Runtime wires provider only in LIVE when `ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION=true` and complete credentials are configured.
+- LIVE fails closed with explicit missing/partial credential errors when reconciliation is enabled but credentials are incomplete.
+
+### Security/redaction behavior
+- API secret and signature are never persisted in evidence snapshots.
+- Failure payloads are sanitized to class-level redacted errors.
+
+### Orphan coverage strategy
+- Uses global `/fapi/v3/positionRisk` and global `/fapi/v1/openOrders` to preserve orphan discovery capability.
+- Uses bounded symbol-scoped `/fapi/v1/userTrades` only for tracked/open-position symbols.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- No execution-path changes.
+
+### Tests executed
+- `pytest -q tests/test_binance_reconciliation_provider.py tests/test_runtime_env_config.py::test_live_reconciliation_enabled_requires_credentials`
+
+### Remaining limitations / blockers
+- No real order submission adapter exists.
+- Mode parity/observability/rollback readiness evidence remains unverified.
+- LIVE remains blocked/not ready by design.
+
+### Push recommendation
+- Merge as minimal authenticated read-only reconciliation evidence increment.
+
+## 2026-05-22 Patch Addendum — LIVE qualification evidence fail-closed + scanner/reconciliation provenance hardening
+
+### Why the patch was needed
+- LIVE qualification still used optimistic hardcoded evidence payloads that could pass checks without measured runtime proof.
+- LIVE reconciliation logic used in-memory runtime state snapshots only, which is insufficient as exchange-state evidence.
+- Runtime bootstrap referenced `scanner_source` at construction time without deterministic assignment on all paths.
+
+### Root cause
+- `_run_live_qualification_gate()` supplied static pass-biased snapshots for mode parity, reconciliation, and observability.
+- `_reconcile_runtime_state()` always built snapshots from `_pending_orders`/`_active_positions` regardless of mode.
+- `_build_runtime_from_env()` passed `scanner_source` without guaranteed initialization.
+- LIVE startup scanner checks were blacklist-based; UNKNOWN/unverified provenance could remain ambiguous.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_runtime.py`
+- `tests/test_live_readiness.py`
+- `tests/test_exchange_connectivity.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE startup now requires explicit allowlisted scanner provenance and blocks unverified/unknown sources fail-closed.
+- Runtime bootstrap now assigns deterministic scanner provenance (`SAFE_PLACEHOLDER` for safe override, otherwise `EXCHANGE_PUBLIC_MARKET_DATA`).
+- LIVE qualification now uses fail-closed evidence defaults and records explicit missing evidence reasons:
+  - `MODE_PARITY_UNVERIFIED`
+  - `LIVE_RECONCILIATION_PROVIDER_MISSING`
+  - `OBSERVABILITY_EVIDENCE_UNVERIFIED`
+  - `ROLLBACK_EVIDENCE_UNVERIFIED`
+- LIVE reconciliation now requires an explicit reconciliation provider and blocks when absent.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle schema changes.
+- No persistence schema rewrite; readiness report payload now carries explicit missing-evidence details in existing `live_readiness_reports` table.
+
+### Tests added/updated
+- Added/updated scanner provenance and bootstrap determinism tests.
+- Added fail-closed readiness evidence tests including persisted report detail checks.
+- Updated LIVE connectivity runtime tests to set explicit allowlisted scanner provenance when testing connectivity gate behavior.
+
+### Risks / limitations
+- No authenticated exchange snapshot provider was introduced in this patch.
+- LIVE remains intentionally blocked until real reconciliation provider evidence is available.
+- No order placement capability was added.
+
+### Push recommendation
+- Merge as minimal P0 fail-closed hardening before any further LIVE enablement work.
+
+## 2026-05-22 Patch Addendum — P0 LIVE startup scanner/adapter guards + Binance Futures gate consistency
+
+### Why the patch was needed
+- LIVE startup safety checks could be bypassed by runtime scanner wrapper indirection and did not fail early when no real execution adapter existed.
+- Binance runtime scanner used Futures endpoints while config default/connectivity checks could still validate Spot assumptions.
+
+### Root cause
+- LIVE scanner guard relied on function `__name__` rather than resolved scanner provenance.
+- LIVE adapter guard existed only inside execution path, after loops started.
+- Binance default host and connectivity probe endpoint family were inconsistent with Futures runtime scanner endpoints.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/config/__init__.py`
+- `src/alphaforge/exchange_connectivity.py`
+- `tests/test_runtime.py`
+- `tests/test_config_layer.py`
+- `tests/test_exchange_connectivity.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- LIVE startup now blocks when resolved scanner source is safe/placeholder/mock/offline/synthetic and raises:
+  - `LIVE mode blocked: safe/placeholder market scanner is not allowed`
+- LIVE startup now blocks pre-loop when `real_execution_adapter` is missing and raises:
+  - `LIVE mode blocked: real execution adapter is not configured`
+- Binance connectivity now validates Futures endpoints (`/fapi/v1/ticker/bookTicker`, `/fapi/v1/premiumIndex`, optional `/fapi/v1/time`) and only marks connected when Futures orderbook+funding checks pass.
+- Binance default base URL now resolves to `https://fapi.binance.com` when `BINANCE_BASE_URL` is unset.
+
+### Lifecycle/persistence/schema impact
+- No lifecycle schema changes.
+- No persistence schema changes.
+
+### Tests added/updated
+- Added/updated regression tests for LIVE scanner-wrapper block, LIVE missing adapter startup block, Binance Futures default host, Futures-only connectivity endpoint checks, funding fail-closed behavior, and Spot-only non-qualification.
+- Updated stale runtime expectation tests to validate effective behavior rather than wrapper function-name assumptions.
+
+### Tests executed
+- `pytest -q tests/test_runtime.py`
+- `pytest -q tests/test_config_layer.py`
+- `pytest -q tests/test_exchange_connectivity.py`
+- `pytest -q tests/test_exchange_market_scanner.py`
+- `pytest -q`
+
+### Risks / limitations
+- This patch does not introduce real order submission and does not change acceptance thresholds.
+- LIVE readiness remains blocked by additional unresolved requirements outside this P0 patch.
+
+### Push recommendation
+- Merge as a minimal fail-closed safety patch before further LIVE transition work.
+
 ## 2026-05-22 Patch Addendum — Binance Futures bookTicker spread derivation hardening
 
 ### Why the patch was needed
@@ -1174,3 +1445,53 @@ Tests: pytest -q tests/test_config_layer.py tests/test_runtime_env_config.py tes
 
 ### Push recommendation
 - Safe to merge as audit/traceability documentation update; no behavioral/runtime code change included.
+
+## Patch 2026-05-22
+- Runtime/backtest path now uses deterministic historical Binance Futures replay data with explicit source labeling.
+- Added cache metadata coverage validation and loud failures for incomplete historical coverage.
+- Added unit tests for pagination, dedupe, incomplete coverage failures, cache coverage checks, and funding anti-leak joins.
+
+## 2026-05-22 PR #148 follow-up — LIVE qualification mutation bug fix
+
+### Why the patch was needed
+- LIVE qualification parity evaluation path was invoking `AIBrain.before_real_order(...)`, which internally persists decision artifacts. This violated the non-mutating LIVE qualification guarantee.
+
+### Root cause
+- Qualification probing reused a persistence-capable hook instead of a read-only decision path.
+- Qualification sample inputs were partially runtime-derived, preventing strict deterministic replay comparison.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `tests/test_live_readiness_security_regression.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added side-effect-free pre-submit evaluator that calls:
+  - `score_signal(...)`
+  - `choose_order_plan(...)`
+  - `explain_decision(...)`
+- Added deterministic parity evidence builder with stable qualification sample IDs/timestamps and explicit comparison fields.
+
+### Lifecycle / persistence impact
+- LIVE qualification parity checks no longer mutate trading/audit persistence tables.
+- No new order submit/amend/cancel/close behavior added.
+
+### Safety posture
+- `incident_persistence_verified` remains `False`.
+- LIVE remains fail-closed / not live-ready pending alerting, rollback proof, real execution readiness, and protective-order lifecycle proof.
+
+### Tests added
+- Non-mutating parity evidence regression (pre/post table row-count invariance, including optional tables when present).
+- Deterministic replay assertion for two parity evidence builds (equal after excluding `generated_at`, including identical sample IDs).
+
+### Tests executed
+- `pytest -q tests/test_live_readiness_security_regression.py tests/test_live_readiness.py tests/test_runtime.py`
+
+### Risks / limitations
+- Parity evidence now depends on AIBrain public scoring/planning/explanation interfaces being available and behaviorally stable.
+- Deterministic fixture set is intentionally narrow (qualification evidence, not market-replay realism).
+
+### Push recommendation
+- Merge recommended. This closes a P1 qualification mutation bug while preserving deterministic PAPER vs LIVE_PRECHECK parity evidence semantics.

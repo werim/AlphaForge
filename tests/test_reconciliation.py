@@ -85,3 +85,16 @@ def test_snapshot_replay_consistency() -> None:
     f2, r2, _ = engine.reconcile(intended_orders=[], lifecycle_state_by_symbol={}, snapshot=s2, mode="PAPER")
     assert [f.finding_type for f in f1] == [f.finding_type for f in f2]
     assert [r.category for r in r1] == [r.category for r in r2]
+
+def test_duplicate_fill_detection_by_trade_id() -> None:
+    engine = ReconciliationEngine()
+    snapshot = engine.snapshot_from_source({"orders": [], "positions": [], "fills": [{"trade_id": "t1", "symbol": "BTCUSDT"}, {"trade_id": "t1", "symbol": "BTCUSDT"}]})
+    findings, _, _ = engine.reconcile(intended_orders=[], lifecycle_state_by_symbol={}, snapshot=snapshot, mode="LIVE")
+    assert any(f.finding_type == "DUPLICATE_FILL" and f.fail_closed for f in findings)
+
+
+def test_distinct_fill_ids_no_duplicate_detection() -> None:
+    engine = ReconciliationEngine()
+    snapshot = engine.snapshot_from_source({"orders": [], "positions": [], "fills": [{"trade_id": "t1", "symbol": "BTCUSDT"}, {"trade_id": "t2", "symbol": "BTCUSDT"}]})
+    findings, _, _ = engine.reconcile(intended_orders=[], lifecycle_state_by_symbol={}, snapshot=snapshot, mode="LIVE")
+    assert not any(f.finding_type == "DUPLICATE_FILL" for f in findings)

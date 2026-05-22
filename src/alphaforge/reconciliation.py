@@ -108,6 +108,27 @@ class ReconciliationEngine:
                 findings.append(self._mk("ORPHAN_POSITION", "HIGH", symbol, f"position:{symbol}", {"position": pos}, "close orphan position", True))
                 recommendations.append(self._repair("close_orphan_position", symbol, mode, {"qty": qty}))
 
+        seen_fill_keys: set[str] = set()
+        for fill in snapshot.fills:
+            symbol = str(fill.get("symbol") or "UNKNOWN")
+            trade_id = str(fill.get("trade_id") or "").strip()
+            if trade_id:
+                dedupe_key = f"trade_id:{trade_id}"
+            else:
+                dedupe_key = "fallback:" + "|".join([
+                    symbol,
+                    str(fill.get("order_id") or ""),
+                    str(fill.get("time") or ""),
+                    str(fill.get("qty") or ""),
+                    str(fill.get("price") or ""),
+                    str(fill.get("side") or ""),
+                ])
+            if dedupe_key in seen_fill_keys:
+                findings.append(self._mk("DUPLICATE_FILL", "HIGH", symbol, f"fill:{dedupe_key}", {"fill": fill, "dedupe_key": dedupe_key}, "escalate incident", True))
+                recommendations.append(self._repair("escalate_incident", symbol, mode, {"duplicate_fill_key": dedupe_key}))
+                continue
+            seen_fill_keys.add(dedupe_key)
+
         metrics = {
             "reconciliation_latency_ms": 0,
             "reconciliation_success": 1 if not any(f.fail_closed for f in findings) else 0,
@@ -117,6 +138,7 @@ class ReconciliationEngine:
             "repair_recommendation_counts": len(recommendations),
         }
         return findings, recommendations, metrics
+
 
     def _is_stale(self, order: Mapping[str, Any], now: datetime) -> bool:
         created_at = str(order.get("created_at") or "")
@@ -134,6 +156,17 @@ class ReconciliationEngine:
     def _repair(self, category: str, symbol: str, mode: str, payload: dict[str, Any]) -> RepairRecommendation:
         return RepairRecommendation(category, symbol, str(mode).upper() == "LIVE", {"dry_run": True, "shadow_mode": True, **payload})
 
+
+
+def summarize_findings(findings: list[ReconciliationFinding]) -> dict[str, int]:
+    return {
+        "orphan_orders": sum(1 for f in findings if f.finding_type == "ORPHAN_ORDER"),
+        "orphan_positions": sum(1 for f in findings if f.finding_type == "ORPHAN_POSITION"),
+        "duplicate_fills": sum(1 for f in findings if f.finding_type == "DUPLICATE_FILL"),
+        "lifecycle_divergences": sum(1 for f in findings if f.finding_type == "LIFECYCLE_DIVERGENCE"),
+        "fail_closed_findings": sum(1 for f in findings if f.fail_closed),
+        "stale_orders": sum(1 for f in findings if f.finding_type == "STALE_ORDER"),
+    }
 
 def ensure_reconciliation_tables(engine: Engine) -> None:
     with engine.begin() as conn:

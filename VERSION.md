@@ -1,3 +1,69 @@
+## 2026-05-22 LIVE qualification incident persistence rollback + defensive parity parsing follow-up
+- **Version:** `0.3.31-dev`
+- **Current phase:** Phase 6.2 fail-closed readiness evidence integrity follow-up.
+- **Runtime maturity:** LIVE qualification still fail-closed, but startup reconciliation findings are no longer persisted as incidents.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST/runtime reconciliation loop behavior unchanged; only LIVE qualification startup persistence side-effect removed.
+- **Lifecycle coverage:** unchanged lifecycle transitions and reject semantics.
+- **Execution realism coverage:** canonical reconciliation findings still determine qualification fail-closed outcomes; no scoring/RR/execution-path changes.
+- **Known critical risks:** observability evidence remains incomplete (`incident_persistence_verified=false` at qualification startup), so LIVE remains blocked.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-22 LIVE readiness evidence hardening (mode parity + observability + rollback)
+- **Version:** `0.3.30-dev`
+- **Current phase:** Phase 6.2 fail-closed operational-readiness evidence.
+- **Runtime maturity:** readiness checks now require structured measured evidence payloads, not static booleans.
+- **BACKTEST/PAPER/LIVE alignment:** decision-path parity is blocked by default until COMPLETE measured parity evidence (sampled, zero-mismatch, no-submit-verified) is present.
+- **Lifecycle coverage:** unchanged lifecycle transitions; kill-switch/rollback evidence remains explicit blocker unless proven.
+- **Execution realism coverage:** no order submission/cancel/modify/close was added; reconciliation remediation remains dry-run/non-mutating.
+- **Known critical risks:** external alert delivery evidence remains unverified and therefore blocking.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-22 LIVE canonical reconciliation evidence-chain hardening
+- **Version:** `0.3.29-dev`
+- **Current phase:** Phase 6.1 LIVE fail-closed reconciliation safety patch.
+- **Runtime maturity:** authenticated provider is exchange evidence source only; canonical `ReconciliationEngine` is reconciliation authority.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST deterministic in-memory reconciliation unchanged; LIVE now evaluates provider snapshots through canonical reconciliation engine.
+- **Lifecycle coverage:** reconciliation findings (`ORPHAN_ORDER`, `ORPHAN_POSITION`, `LIFECYCLE_DIVERGENCE`, `DUPLICATE_FILL`) are persisted as incidents.
+- **Execution realism coverage:** provider-supplied orphan/duplicate counters are non-authoritative and ignored for readiness decisions.
+- **Known critical risks:** no real execution adapter/observability parity evidence; remediation remains dry-run only.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-22 Authenticated Binance read-only reconciliation evidence patch
+- **Version:** `0.3.28-dev`
+- **Current phase:** Phase 6.1 reconciliation evidence hardening.
+- **Runtime maturity:** LIVE can now gather authenticated Binance USER_DATA reconciliation evidence in explicit read-only mode when enabled and fully credentialed.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST unchanged and credential-free; LIVE gains optional read-only reconciliation evidence path only.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** reconciliation now uses authenticated exchange truth for open orders, position risk, and bounded fill history.
+- **Known critical risks:** no real execution adapter/order submission path; mode parity/observability/rollback evidence still unverified.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-22 LIVE qualification evidence fail-closed + reconciliation provider requirement patch
+- **Version:** `0.3.27-dev`
+- **Current phase:** Phase 6.1 live qualification evidence hardening.
+- **Runtime maturity:** LIVE startup now requires explicit allowlisted scanner provenance and LIVE qualification no longer uses optimistic hardcoded evidence snapshots.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST behavior unchanged; LIVE fail-closed requirements tightened for scanner provenance and reconciliation evidence provider availability.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** LIVE reconciliation cannot treat in-memory-only runtime state as exchange evidence without an explicit reconciliation provider.
+- **Known critical risks:** LIVE remains not production-ready; real exchange reconciliation provider and real execution/order pathways remain unresolved requirements.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+## 2026-05-22 LIVE startup and Binance Futures connectivity fail-closed patch
+- **Version:** `0.3.26-dev`
+- **Current phase:** Phase 6.1 live safety gate hardening.
+- **Runtime maturity:** LIVE startup now hard-blocks safe/placeholder scanner provenance and missing real execution adapter before loops/tasks start.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER/BACKTEST behavior unchanged; LIVE-only fail-closed guards tightened.
+- **Lifecycle coverage:** unchanged lifecycle transitions/states.
+- **Execution realism coverage:** Binance defaults and connectivity gates now validate Futures public endpoints used by runtime scanning.
+- **Known critical risks:** LIVE remains not production-ready.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 Binance Futures bookTicker spread hardening follow-up
 - **Version:** `0.3.25-dev`
 - **Current phase:** Phase 6.1 runtime market-data quality hardening.
@@ -420,3 +486,17 @@
 
 Last audit date: 2026-05-21
 - Updated centralized configuration layer integration status.
+
+- Last audit date: 2026-05-22
+- Historical backtest data source: deterministic Binance USD-M Futures replay (klines + historical funding joins).
+
+## 2026-05-22 PR #148 follow-up
+- **Version:** `0.3.17-dev`
+- **Current phase:** Phase 6.1 live qualification hardening.
+- **Runtime maturity:** qualification parity path is now explicitly side-effect-free and deterministic for replay.
+- **BACKTEST/PAPER/LIVE alignment:** parity evidence compares PAPER vs LIVE_PRECHECK using canonical decision functions without persistence.
+- **Lifecycle coverage:** unchanged runtime lifecycle progression; qualification probes no longer inject lifecycle rows.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** unresolved alert delivery proof, rollback evidence proof, real execution readiness, protective-order lifecycle proof.
+- **Last audit date:** `2026-05-22`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.

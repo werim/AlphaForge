@@ -32,3 +32,9 @@ def test_env_example_keys_are_wired_or_reserved():
     known = set(Path('src/alphaforge/config.py').read_text().split('"'))
     for key in keys:
         assert key in known or 'RESERVED_NOT_WIRED' in '\n'.join(content)
+
+
+def test_default_binance_base_url_is_futures_host(monkeypatch):
+    monkeypatch.delenv("BINANCE_BASE_URL", raising=False)
+    cfg = load_config_from_env()
+    assert cfg.exchange.binance.base_url == "https://fapi.binance.com"

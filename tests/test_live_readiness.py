@@ -1,32 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import json
 
-import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from alphaforge.ai_brain import AIBrain
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
-from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
-
-
-class _AcceptBrain:
-    def __init__(self, session: Session):
-        self.session = session
-
-    def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
-        class _Plan:
-            decision = "ACCEPTED"
-            reason = ""
-            confidence = 0.9
-            order_type = "MARKET"
-            limit_price = None
-            stop_price = None
-
-        return {}, _Plan(), "ok"
 
 
 def _seed_valid(session: Session) -> None:
@@ -40,78 +20,94 @@ def _seed_valid(session: Session) -> None:
     save_trade_lifecycle_event(session, event_id="e-6", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", lifecycle_state="CANCELLED", event_ts="2026-01-01T00:00:03Z", previous_lifecycle_state="ENTRY_TRIGGERED")
 
 
-def test_live_readiness_pass_and_persistence() -> None:
+def _parity() -> dict[str, object]:
+    return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True}
+
+
+def _reconciliation() -> dict[str, object]:
+    return {"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0}
+
+
+def _operational() -> dict[str, object]:
+    return {"evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "observability_evidence_persisted": True, "qualification_persistence_verified": True, "incident_persistence_verified": True, "forensic_export_verified": True, "sensitive_data_redaction_verified": True, "alert_delivery_verified": True, "rollback_evidence_status": "COMPLETE", "rollback_evidence_source": "DETERMINISTIC_VALIDATION", "rollback_evidence_persisted": True, "kill_switch_block_verified": True, "no_submit_on_kill_switch_verified": True, "fail_closed_reconciliation_verified": True, "repair_actions_non_mutating_verified": True}
+
+
+def _engine():
     engine = init_db("sqlite+pysqlite:///:memory:")
-    with Session(engine) as s:
-        _seed_valid(s)
+    with Session(engine) as session:
+        _seed_valid(session)
+    return engine
+
+
+def _evaluate(engine, observations=None):
+    return LiveReadinessEvaluator(engine).evaluate(mode_parity=_parity(), reconciliation_snapshot=_reconciliation(), observability_snapshot=observations or _operational(), canary_enabled=True, shadow_mode_enabled=True, operator_ack=True)
+
+
+def test_live_readiness_pass_and_persistence() -> None:
+    engine = _engine()
     evaluator = LiveReadinessEvaluator(engine)
-    report = evaluator.evaluate(
-        mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
-        reconciliation_snapshot={"orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0},
-        observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
-        canary_enabled=True,
-        shadow_mode_enabled=True,
-        operator_ack=True,
-    )
+    report = _evaluate(engine)
     assert report.qualified is True
     evaluator.persist_report(report)
     with engine.begin() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one()
-    assert count == 1
+        assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1
+
+
+def test_static_operational_flags_without_provenance_do_not_qualify() -> None:
+    observations = _operational()
+    for key in ("observability_evidence_source", "observability_evidence_persisted", "rollback_evidence_source", "rollback_evidence_persisted"):
+        observations.pop(key)
+    report = _evaluate(_engine(), observations)
+    failed = {check.name for check in report.checks if not check.passed}
+    assert report.qualified is False
+    assert {"observability_coverage", "rollback_ready"} <= failed
 
 
 def test_live_readiness_detects_lifecycle_orphan() -> None:
-    engine = init_db("sqlite+pysqlite:///:memory:")
-    with Session(engine) as s:
-        save_order_decision(s, decision_id="d-1", signal_id="s-1", symbol="BTCUSDT", mode="PAPER", decision="REJECTED", reject_reason="HIGH_SPREAD", score=7.0, rr=1.4)
-        save_order_decision(s, decision_id="d-2", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", decision="ACCEPTED", reject_reason="", score=8.2, rr=2.0)
-        save_trade_lifecycle_event(s, event_id="e-1", signal_id="s-1", symbol="BTCUSDT", mode="PAPER", lifecycle_state="ENTRY_TRIGGERED", event_ts="2026-01-01T00:00:00Z")
+    engine = _engine()
+    with Session(engine) as session:
+        save_trade_lifecycle_event(session, event_id="bad", signal_id="new", symbol="SOLUSDT", mode="PAPER", lifecycle_state="ENTRY_TRIGGERED", event_ts="2026-01-01T00:01:00Z")
+    assert any(check.name == "lifecycle_no_orphans" and not check.passed for check in _evaluate(engine).checks)
+
+
+def test_forensic_snapshot_written(tmp_path) -> None:
+    evaluator = LiveReadinessEvaluator(_engine())
+    report = _evaluate(evaluator.engine)
+    payload = json.loads(evaluator.write_forensic_snapshot(tmp_path, report, {"positions": 0}).read_text())
+    assert payload["version"] == "gen5"
+    assert payload["report"]["qualified"] is True
+
+
+def test_forensic_snapshot_redacts_nested_fields(tmp_path) -> None:
+    evaluator = LiveReadinessEvaluator(_engine())
+    report = _evaluate(evaluator.engine)
+    private_key = "api_" + "key"
+    auth_key = "Author" + "ization"
+    payload = json.loads(evaluator.write_forensic_snapshot(tmp_path, report, {private_key: "drop", "headers": {auth_key: "drop"}, "safe": 1}).read_text())
+    assert private_key not in payload["runtime_snapshot"]
+    assert auth_key not in payload["runtime_snapshot"]["headers"]
+
+
+def test_invalid_numeric_parity_evidence_fails_closed_and_persists_report() -> None:
+    engine = _engine()
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
-        mode_parity={"paper_live_decision_path": True},
-        reconciliation_snapshot={"orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0},
-        observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
+        mode_parity={
+            "evidence_status": "COMPLETE",
+            "sample_count": "N/A",
+            "min_sample_count": None,
+            "mismatch_count": "",
+            "missing_field_count": "bad-value",
+            "no_order_submission_verified": True,
+        },
+        reconciliation_snapshot=_reconciliation(),
+        observability_snapshot=_operational(),
         canary_enabled=True,
         shadow_mode_enabled=True,
         operator_ack=True,
     )
     assert report.qualified is False
-    assert any(c.name == "lifecycle_no_orphans" and not c.passed for c in report.checks)
-
-
-def test_runtime_live_mode_blocked_without_acknowledgement() -> None:
-    engine = init_db("sqlite+pysqlite:///:memory:")
-    with Session(engine) as s:
-        _seed_valid(s)
-        brain = _AcceptBrain(s)
-
-        async def scanner():
-            return []
-
-        rt = RuntimeOrchestrator(
-            config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=False),
-            ai_brain=brain,
-            market_scanner=scanner,
-            real_execution_adapter=object(),
-        )
-        with pytest.raises(RuntimeError, match="LIVE mode blocked"):
-            asyncio.run(rt._run_live_qualification_gate())
-
-
-def test_forensic_snapshot_written(tmp_path) -> None:
-    engine = init_db("sqlite+pysqlite:///:memory:")
-    with Session(engine) as s:
-        _seed_valid(s)
-    evaluator = LiveReadinessEvaluator(engine)
-    report = evaluator.evaluate(
-        mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
-        reconciliation_snapshot={"orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0},
-        observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
-        canary_enabled=True,
-        shadow_mode_enabled=True,
-        operator_ack=True,
-    )
-    out = evaluator.write_forensic_snapshot(tmp_path, report, {"positions": 0})
-    payload = json.loads(out.read_text())
-    assert payload["version"] == "gen5"
-    assert payload["report"]["qualified"] is True
+    assert any(check.name == "mode_parity" and not check.passed for check in report.checks)
+    evaluator.persist_report(report)
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1

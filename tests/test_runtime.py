@@ -210,6 +210,7 @@ def test_runtime_rejected_decisions_do_not_persist_incomplete_real_rows(tmp_path
     db_path = tmp_path / "runtime_rejects.sqlite3"
     monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
     monkeypatch.setenv("EXECUTION_MODE", "BACKTEST")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
     orchestrator = _build_runtime_from_env()
     asyncio.run(orchestrator._scan_once())
 
@@ -227,6 +228,7 @@ def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_p
     db_path = tmp_path / "runtime_paper_rejects.sqlite3"
     monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
     monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
     orchestrator = _build_runtime_from_env()
     asyncio.run(orchestrator._scan_once())
 
@@ -267,8 +269,9 @@ def test_live_start_blocks_placeholder_bootstrap_scanner(monkeypatch: pytest.Mon
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION", "0")
     monkeypatch.setenv("ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", "0")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
     orchestrator = _build_runtime_from_env()
-    with pytest.raises(RuntimeError, match="placeholder/mock scanner"):
+    with pytest.raises(RuntimeError, match="exchange-backed market scanner is required"):
         asyncio.run(orchestrator.start())
 
 def test_runtime_module_bootstrap_builds_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -407,3 +410,87 @@ def test_build_runtime_keeps_safe_scanner_for_backtest(monkeypatch: pytest.Monke
     orchestrator = _build_runtime_from_env()
     asyncio.run(orchestrator._scan_once())
     assert orchestrator.metrics.scans == 1
+
+
+def test_live_start_blocks_safe_scanner_override_through_runtime_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
+    orchestrator = _build_runtime_from_env()
+    with pytest.raises(RuntimeError, match="LIVE mode blocked: exchange-backed market scanner is required"):
+        asyncio.run(orchestrator.start())
+
+
+def test_live_start_blocks_when_real_execution_adapter_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "LIVE")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")
+    orchestrator = _build_runtime_from_env()
+    with pytest.raises(RuntimeError, match="LIVE mode blocked: real execution adapter is not configured"):
+        asyncio.run(orchestrator.start())
+
+
+def test_build_runtime_assigns_deterministic_scanner_source_for_paper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")
+    orchestrator = _build_runtime_from_env()
+    assert orchestrator.scanner_source == "EXCHANGE_PUBLIC_MARKET_DATA"
+
+
+def test_build_runtime_assigns_safe_placeholder_scanner_source_when_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
+    orchestrator = _build_runtime_from_env()
+    assert orchestrator.scanner_source == "SAFE_PLACEHOLDER"
+
+
+def test_live_start_blocks_unknown_scanner_provenance() -> None:
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, require_exchange_connectivity_for_live=False, require_live_qualification=False),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        scanner_source="UNKNOWN",
+        real_execution_adapter=object(),
+    )
+    with pytest.raises(RuntimeError, match="provenance is not verified"):
+        asyncio.run(orchestrator.start())
+
+
+def test_live_start_blocks_non_allowlisted_scanner_provenance() -> None:
+    for source in ("SAFE_PLACEHOLDER", "MOCK", "OFFLINE", "SYNTHETIC", ""):
+        orchestrator = RuntimeOrchestrator(
+            config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, require_exchange_connectivity_for_live=False, require_live_qualification=False),
+            ai_brain=_brain(),
+            market_scanner=lambda: asyncio.sleep(0, result=[]),
+            scanner_source=source,
+            real_execution_adapter=object(),
+        )
+        with pytest.raises(RuntimeError, match="exchange-backed market scanner is required|provenance is not verified"):
+            asyncio.run(orchestrator.start())
+
+
+def test_live_reconciliation_requires_provider() -> None:
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+    )
+    with pytest.raises(RuntimeError, match="reconciliation provider is not configured"):
+        asyncio.run(orchestrator._reconcile_runtime_state())
+
+class _StaticProvider:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def snapshot(self):
+        return dict(self._payload)
+
+
+def test_live_reconciliation_loop_fails_closed_on_incomplete_evidence() -> None:
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, reconciliation_timeout_sec=1.0),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        live_reconciliation_provider=_StaticProvider({"evidence_status": "INCOMPLETE", "orders": [], "positions": [], "fills": []}),
+    )
+    with pytest.raises(RuntimeError, match="evidence incomplete"):
+        asyncio.run(orchestrator._reconcile_runtime_state())

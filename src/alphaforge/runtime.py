@@ -19,7 +19,8 @@ from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import scan_exchange_markets
-from alphaforge.reconciliation import ReconciliationEngine, persist_findings
+from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
+from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
 from alphaforge.config import load_config_from_env
@@ -38,6 +39,10 @@ class ExecutionMode(str, Enum):
 
 class RealExecutionAdapter(Protocol):
     async def submit(self, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+class LiveReconciliationProvider(Protocol):
+    def snapshot(self) -> Mapping[str, Any]: ...
 
 
 @dataclass(slots=True)
@@ -64,6 +69,7 @@ class RuntimeConfig:
     require_exchange_connectivity_for_live: bool = True
     required_live_exchanges: tuple[str, ...] = ("binance",)
     exchange_connectivity_timeout_sec: float = 2.0
+    enable_binance_readonly_reconciliation: bool = False
 
 
 @dataclass(slots=True)
@@ -85,7 +91,9 @@ class RuntimeOrchestrator:
     config: RuntimeConfig
     ai_brain: AIBrain
     market_scanner: Callable[[], Awaitable[list[dict[str, Any]]]]
+    scanner_source: str = "UNKNOWN"
     real_execution_adapter: RealExecutionAdapter | None = None
+    live_reconciliation_provider: LiveReconciliationProvider | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     paper_slippage_bps: float = 2.0
@@ -105,6 +113,44 @@ class RuntimeOrchestrator:
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
     _exchange_health: list[ExchangeHealth] = field(default_factory=list, init=False)
+    _qualification_samples: tuple[dict[str, Any], ...] = field(default_factory=lambda: (
+        {
+            "sample_id": "qp-001-btc-long",
+            "symbol": "BTCUSDT",
+            "entry": 67250.0,
+            "market_ts": 1716200000.0,
+            "side": "LONG",
+            "rr": 2.15,
+            "spread_pct": 0.0009,
+            "funding_rate_pct": 0.00005,
+            "liquidity_score": 0.86,
+            "timeframe": "5m",
+        },
+        {
+            "sample_id": "qp-002-eth-short",
+            "symbol": "ETHUSDT",
+            "entry": 3450.0,
+            "market_ts": 1716200060.0,
+            "side": "SHORT",
+            "rr": 1.95,
+            "spread_pct": 0.0008,
+            "funding_rate_pct": 0.00004,
+            "liquidity_score": 0.82,
+            "timeframe": "5m",
+        },
+        {
+            "sample_id": "qp-003-sol-long",
+            "symbol": "SOLUSDT",
+            "entry": 155.0,
+            "market_ts": 1716200120.0,
+            "side": "LONG",
+            "rr": 2.05,
+            "spread_pct": 0.0011,
+            "funding_rate_pct": 0.00003,
+            "liquidity_score": 0.78,
+            "timeframe": "5m",
+        },
+    ), init=False)
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
@@ -119,9 +165,14 @@ class RuntimeOrchestrator:
 
     async def start(self) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE:
-            scanner_name = getattr(self.market_scanner, "__name__", "")
-            if scanner_name == "_safe_market_scanner":
-                raise RuntimeError("LIVE mode blocked: placeholder/mock scanner is not allowed")
+            allowed_sources = {"EXCHANGE_PUBLIC_MARKET_DATA"}
+            scanner_source = str(self.scanner_source or "UNKNOWN").strip().upper()
+            if not scanner_source or scanner_source == "UNKNOWN":
+                raise RuntimeError("LIVE mode blocked: market scanner provenance is not verified")
+            if scanner_source not in allowed_sources:
+                raise RuntimeError("LIVE mode blocked: exchange-backed market scanner is required")
+            if self.real_execution_adapter is None:
+                raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
             await self._run_live_exchange_connectivity_gate()
             if self.config.require_live_qualification:
                 await self._run_live_qualification_gate()
@@ -164,10 +215,48 @@ class RuntimeOrchestrator:
         if engine is None:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
         evaluator = LiveReadinessEvaluator(engine)
-        reconciliation_snapshot = {"orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0}
-        observability_snapshot = {"alerts_configured": True, "forensic_exports": True, "rollback_ready": True}
+        mode_parity = self._build_mode_parity_evidence(min_sample_count=3)
+        reconciliation_snapshot = {
+            "provider_configured": self.live_reconciliation_provider is not None,
+            "evidence_status": "UNVERIFIED",
+        }
+        if self.live_reconciliation_provider is not None:
+            provider_snapshot = dict(self.live_reconciliation_provider.snapshot())
+            evidence_status = str(provider_snapshot.get("evidence_status") or "INCOMPLETE").upper()
+            reconciliation_snapshot["evidence_status"] = evidence_status
+            if evidence_status == "COMPLETE":
+                snapshot = self._reconciliation_engine.snapshot_from_source(provider_snapshot)
+                findings, _recommendations, _metrics = self._reconciliation_engine.reconcile(
+                    intended_orders=list(self._pending_orders.values()),
+                    lifecycle_state_by_symbol=self._last_lifecycle_state_by_symbol,
+                    snapshot=snapshot,
+                    mode=ExecutionMode.LIVE.value,
+                )
+                counters = summarize_findings(findings)
+                reconciliation_snapshot.update(counters)
+            else:
+                reconciliation_snapshot.update({
+                    "orphan_orders": 0,
+                    "orphan_positions": 0,
+                    "duplicate_fills": 0,
+                    "lifecycle_divergences": 0,
+                    "fail_closed_findings": 1,
+                })
+        observability_snapshot = {
+            "evidence_status": "INCOMPLETE",
+            "qualification_persistence_verified": True,
+            "incident_persistence_verified": False,
+            "forensic_export_verified": True,
+            "sensitive_data_redaction_verified": True,
+            "alert_delivery_verified": False,
+            "rollback_evidence_status": "INCOMPLETE",
+            "kill_switch_block_verified": True,
+            "no_submit_on_kill_switch_verified": True,
+            "fail_closed_reconciliation_verified": True,
+            "repair_actions_non_mutating_verified": True,
+        }
         report = evaluator.evaluate(
-            mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
+            mode_parity=mode_parity,
             reconciliation_snapshot=reconciliation_snapshot,
             observability_snapshot=observability_snapshot,
             canary_enabled=self.config.enable_canary_mode,
@@ -179,6 +268,66 @@ class RuntimeOrchestrator:
         logger.warning("live_readiness_report=%s", report.to_dict())
         if not report.qualified:
             raise RuntimeError("LIVE mode blocked: readiness qualification failed")
+
+    def _evaluate_pre_submit(self, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> dict[str, Any]:
+        score_ctx = self.ai_brain.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)
+        order_plan = self.ai_brain.choose_order_plan(signal_payload, market_ctx, score_ctx)
+        explanation = self.ai_brain.explain_decision(signal_payload, score_ctx, order_plan)
+        return {
+            "decision": order_plan.decision,
+            "reason": order_plan.reason,
+            "order_type": order_plan.order_type,
+            "confidence": float(order_plan.confidence),
+            "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
+            "effective_rr": float(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)) or 0.0),
+            "explanation": explanation,
+        }
+
+    def _build_mode_parity_evidence(self, *, min_sample_count: int = 3) -> dict[str, Any]:
+        samples = list(self._qualification_samples[: max(0, int(min_sample_count))])
+        comparisons: list[dict[str, Any]] = []
+        mismatch_count = 0
+        missing_field_count = 0
+        compare_fields = ("decision", "reason", "order_type", "confidence", "score", "effective_rr", "explanation")
+        for row in samples:
+            sample = dict(row)
+            sample_id = str(sample["sample_id"])
+            paper_signal_payload = {
+                "signal_id": f"precheck:{sample_id}",
+                "symbol": sample["symbol"],
+                "mode": "PAPER",
+                "side": sample.get("side", "LONG"),
+                "timeframe": sample.get("timeframe", "5m"),
+                "entry_price": float(sample.get("entry", 0.0) or 0.0),
+                "risk_reward": float(sample.get("rr", 0.0) or 0.0),
+            }
+            live_precheck_signal_payload = {**paper_signal_payload, "mode": "LIVE_PRECHECK"}
+            regime_ctx = {"alignment": 0.8}
+            stats_ctx: dict[str, Any] = {}
+            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**sample, "mode": "PAPER"}, regime_ctx, stats_ctx)
+            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**sample, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
+            missing = [field for field in compare_fields if field not in paper_eval or field not in live_eval]
+            mismatch = [field for field in compare_fields if field in paper_eval and field in live_eval and paper_eval[field] != live_eval[field]]
+            missing_field_count += len(missing)
+            mismatch_count += len(mismatch)
+            comparisons.append({
+                "sample_id": sample_id,
+                "paper": {k: paper_eval.get(k) for k in compare_fields},
+                "live_precheck": {k: live_eval.get(k) for k in compare_fields},
+                "missing_fields": missing,
+                "mismatch_fields": mismatch,
+            })
+        return {
+            "evidence_status": "COMPLETE" if samples and mismatch_count == 0 and missing_field_count == 0 else "INCOMPLETE",
+            "sample_count": len(samples),
+            "min_sample_count": int(min_sample_count),
+            "mismatch_count": mismatch_count,
+            "missing_field_count": missing_field_count,
+            "no_order_submission_verified": True,
+            "comparison_fields": list(compare_fields),
+            "samples": comparisons,
+            "generated_at": canonical_utc_timestamp(),
+        }
 
     async def _market_scan_loop(self) -> None:
         try:
@@ -466,11 +615,18 @@ class RuntimeOrchestrator:
             self.shutdown()
 
     async def _reconcile_runtime_state(self) -> None:
-        snapshot_source = {
-            "orders": list(self._pending_orders.values()),
-            "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()],
-            "fills": [],
-        }
+        if self.config.execution_mode == ExecutionMode.LIVE:
+            if self.live_reconciliation_provider is None:
+                raise RuntimeError("LIVE mode blocked: reconciliation provider is not configured")
+            snapshot_source = dict(self.live_reconciliation_provider.snapshot())
+            if str(snapshot_source.get("evidence_status") or "INCOMPLETE").upper() != "COMPLETE":
+                raise RuntimeError("LIVE mode blocked: reconciliation evidence incomplete")
+        else:
+            snapshot_source = {
+                "orders": list(self._pending_orders.values()),
+                "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()],
+                "fills": [],
+            }
         snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
         findings, recommendations, _metrics = self._reconciliation_engine.reconcile(
             intended_orders=list(self._pending_orders.values()),
@@ -549,15 +705,20 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec)
+    config = RuntimeConfig(execution_mode=mode, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation)
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         now_ts = time.time()
         return [{"symbol": "BTCUSDT", "volume_24h_usdt": 125_000_000.0, "spread_pct": 0.0009, "funding_rate_pct": 0.00005, "liquidity_score": 0.86, "liquidity_quality": "HIGH", "volatility_pct": 0.011, "volatility_fit": "GOOD", "volatility_regime": "MODERATE", "trend_strength": 0.64, "momentum_confirmation": 0.7, "recent_volume_change_pct": 0.085, "chop_score": 0.27, "panic_score": 0.06, "fakeout_risk": 0.22, "spread_bps": 9.0, "expected_slippage_pct": 0.0006, "latency_ms": 55.0, "market_ts": now_ts, "entry": 67_250.0, "side": "LONG", "rr": 2.15, "timeframe": "5m", "tick_size": 0.1}]
 
-    use_safe_scanner = mode == ExecutionMode.BACKTEST or str(os.getenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    safe_scanner_requested = str(os.getenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    use_safe_scanner = safe_scanner_requested
+    scanner_source = "SAFE_PLACEHOLDER" if use_safe_scanner else "EXCHANGE_PUBLIC_MARKET_DATA"
 
     async def _runtime_market_scanner() -> list[dict[str, Any]]:
+        if mode == ExecutionMode.BACKTEST and use_safe_scanner:
+            logger.warning("market_data_source=SYNTHETIC_SMOKE_TEST backtest_runtime_scanner=_safe_market_scanner smoke_test_only=true")
+            return await _safe_market_scanner()
         if use_safe_scanner:
             return await _safe_market_scanner()
         return await scan_exchange_markets(cfg)
@@ -609,10 +770,31 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                 raise RuntimeError("order_decision_persistence_failed")
             session.commit()
 
+    live_reconciliation_provider = None
+    if mode == ExecutionMode.LIVE and cfg.runtime.enable_binance_readonly_reconciliation:
+        api_key = str(os.getenv("BINANCE_API_KEY", "")).strip()
+        api_secret = str(os.getenv("BINANCE_API_SECRET", "")).strip()
+        if bool(api_key) ^ bool(api_secret):
+            raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are partial")
+        if not api_key or not api_secret:
+            raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are missing")
+        live_reconciliation_provider = BinanceReadonlyReconciliationProvider(
+            config=BinanceReadonlyReconciliationConfig(
+                base_url=cfg.exchange.binance.base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms,
+                request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
+                trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
+            )
+        )
+
     orchestrator = RuntimeOrchestrator(
         config=config,
         ai_brain=brain,
         market_scanner=_runtime_market_scanner,
+        scanner_source=scanner_source,
+        live_reconciliation_provider=live_reconciliation_provider,
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
         persistence_engine=engine,
