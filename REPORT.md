@@ -1,3 +1,45 @@
+## 2026-05-22 Patch Addendum — Evidence-based parity/operational readiness checks
+
+### Why the patch was needed
+- LIVE readiness still accepted placeholder booleans for parity/observability/rollback without persisted, measurable operational evidence.
+
+### Root cause
+- `LiveReadinessEvaluator` runtime/operational checks were boolean shortcuts (`all(mode_parity.values())`, `alerts_configured`, `rollback_ready`) with no structured evidence sufficiency contract.
+
+### Files changed
+- `src/alphaforge/live_readiness.py`
+- `src/alphaforge/runtime.py`
+- `tests/test_live_readiness.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- Mode parity now fail-closes unless evidence is COMPLETE and satisfies minimum sample, zero mismatch, zero missing-field, and no-submit verification constraints.
+- Observability and rollback checks now require explicit measured evidence fields rather than static booleans.
+- Forensic snapshot export now sanitizes runtime snapshot keys that look like credentials/signatures/auth headers.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- Existing `live_readiness_reports.report_payload` persists structured evidence details safely.
+
+### Security/execution safety
+- No real order submission/cancel/modify/close path introduced.
+- No exchange mutation path added.
+- Reconciliation remediation posture remains dry-run/non-mutating.
+
+### Remaining limitations / blockers
+- Alert delivery verification is not implemented and remains an explicit readiness blocker.
+- Real execution readiness remains unavailable.
+- LIVE remains NOT LIVE-READY.
+
+### Push recommendation
+- Merge as minimal fail-closed evidence hardening increment.
+
+### Follow-up corrections
+- Removed qualification-startup persistence of reconciliation findings to prevent probe-only incident writes in production incident tables.
+- Expanded forensic redaction coverage for nested secret-bearing keys and signed/auth-bearing string values.
+
 ## 2026-05-22 Patch Addendum — LIVE canonical reconciliation evidence-chain hardening
 
 ### Why the patch was needed

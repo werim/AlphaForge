@@ -46,9 +46,9 @@ def test_live_readiness_pass_and_persistence() -> None:
         _seed_valid(s)
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
-        mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
+        mode_parity={"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True},
         reconciliation_snapshot={"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0},
-        observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
+        observability_snapshot={"evidence_status": "COMPLETE", "qualification_persistence_verified": True, "incident_persistence_verified": True, "forensic_export_verified": True, "sensitive_data_redaction_verified": True, "alert_delivery_verified": True, "rollback_evidence_status": "COMPLETE", "kill_switch_block_verified": True, "no_submit_on_kill_switch_verified": True, "fail_closed_reconciliation_verified": True, "repair_actions_non_mutating_verified": True},
         canary_enabled=True,
         shadow_mode_enabled=True,
         operator_ack=True,
@@ -68,9 +68,9 @@ def test_live_readiness_detects_lifecycle_orphan() -> None:
         save_trade_lifecycle_event(s, event_id="e-1", signal_id="s-1", symbol="BTCUSDT", mode="PAPER", lifecycle_state="ENTRY_TRIGGERED", event_ts="2026-01-01T00:00:00Z")
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
-        mode_parity={"paper_live_decision_path": True},
+        mode_parity={"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True},
         reconciliation_snapshot={"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0},
-        observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
+        observability_snapshot={"evidence_status": "COMPLETE", "qualification_persistence_verified": True, "incident_persistence_verified": True, "forensic_export_verified": True, "sensitive_data_redaction_verified": True, "alert_delivery_verified": True, "rollback_evidence_status": "COMPLETE", "kill_switch_block_verified": True, "no_submit_on_kill_switch_verified": True, "fail_closed_reconciliation_verified": True, "repair_actions_non_mutating_verified": True},
         canary_enabled=True,
         shadow_mode_enabled=True,
         operator_ack=True,
@@ -104,9 +104,9 @@ def test_forensic_snapshot_written(tmp_path) -> None:
         _seed_valid(s)
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
-        mode_parity={"paper_live_decision_path": True, "paper_live_reject_path": True},
+        mode_parity={"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True},
         reconciliation_snapshot={"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0},
-        observability_snapshot={"alerts_configured": True, "forensic_exports": True, "rollback_ready": True},
+        observability_snapshot={"evidence_status": "COMPLETE", "qualification_persistence_verified": True, "incident_persistence_verified": True, "forensic_export_verified": True, "sensitive_data_redaction_verified": True, "alert_delivery_verified": True, "rollback_evidence_status": "COMPLETE", "kill_switch_block_verified": True, "no_submit_on_kill_switch_verified": True, "fail_closed_reconciliation_verified": True, "repair_actions_non_mutating_verified": True},
         canary_enabled=True,
         shadow_mode_enabled=True,
         operator_ack=True,
@@ -115,6 +115,63 @@ def test_forensic_snapshot_written(tmp_path) -> None:
     payload = json.loads(out.read_text())
     assert payload["version"] == "gen5"
     assert payload["report"]["qualified"] is True
+
+
+def test_forensic_snapshot_redacts_secrets(tmp_path) -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evaluator = LiveReadinessEvaluator(engine)
+    report = evaluator.evaluate(
+        mode_parity={},
+        reconciliation_snapshot={"provider_configured": False, "evidence_status": "INCOMPLETE"},
+        observability_snapshot={},
+        canary_enabled=False,
+        shadow_mode_enabled=False,
+        operator_ack=False,
+    )
+    out = evaluator.write_forensic_snapshot(
+        tmp_path,
+        report,
+        {
+            "api_key": "x",
+            "nested": {
+                "api_secret": "y",
+                "secret": "z",
+                "signature": "deadbeef",
+                "authorization": "Bearer token",
+                "signed_url": "https://example.test/api?symbol=BTCUSDT&signature=abc123&api_key=zzz",
+            },
+            "headers": {"Authorization": "Bearer x", "X-MBX-APIKEY": "abc"},
+            "safe": 1,
+        },
+    )
+    data = json.loads(out.read_text())
+    assert "api_key" not in data["runtime_snapshot"]
+    assert "Authorization" not in data["runtime_snapshot"]["headers"]
+    assert "api_secret" not in data["runtime_snapshot"]["nested"]
+    assert "secret" not in data["runtime_snapshot"]["nested"]
+    assert "signature" not in data["runtime_snapshot"]["nested"]
+    assert "authorization" not in data["runtime_snapshot"]["nested"]
+    assert "signed_url" not in data["runtime_snapshot"]["nested"]
+
+
+def test_live_qualification_startup_does_not_persist_probe_reconciliation_incidents() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        _seed_valid(s)
+    rt = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        ai_brain=_AcceptBrain(Session(engine)),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        live_reconciliation_provider=_Provider({"evidence_status": "COMPLETE", "orders": [{"order_id": "x", "symbol": "BTCUSDT", "status": "OPEN"}], "positions": [], "fills": []}),
+    )
+    with pytest.raises(RuntimeError):
+        asyncio.run(rt._run_live_qualification_gate())
+    with engine.begin() as conn:
+        table_exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reconciliation_incidents'")).scalar_one()
+    assert table_exists == 0
 
 
 def test_runtime_live_qualification_fails_closed_on_missing_evidence() -> None:

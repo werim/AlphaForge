@@ -107,7 +107,7 @@ class LiveReadinessEvaluator:
             "version": "gen5",
             "timestamp": canonical_utc_timestamp(),
             "report": report.to_dict(),
-            "runtime_snapshot": dict(runtime_snapshot),
+            "runtime_snapshot": self._sanitize_runtime_snapshot(runtime_snapshot),
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
@@ -175,7 +175,19 @@ class LiveReadinessEvaluator:
         ]
 
     def _check_runtime(self, mode_parity: Mapping[str, bool], reconciliation: Mapping[str, Any]) -> list[CheckResult]:
-        parity_ok = all(bool(v) for v in mode_parity.values()) if mode_parity else False
+        parity_status = str(mode_parity.get("evidence_status", "INCOMPLETE")).upper() if mode_parity else "INCOMPLETE"
+        sample_count = int(mode_parity.get("sample_count", 0)) if mode_parity else 0
+        min_samples = int(mode_parity.get("min_sample_count", 1)) if mode_parity else 1
+        mismatch_count = int(mode_parity.get("mismatch_count", 0)) if mode_parity else 0
+        missing_field_count = int(mode_parity.get("missing_field_count", 0)) if mode_parity else 0
+        no_submit_verified = bool(mode_parity.get("no_order_submission_verified", False)) if mode_parity else False
+        parity_ok = (
+            parity_status == "COMPLETE"
+            and sample_count >= min_samples
+            and mismatch_count == 0
+            and missing_field_count == 0
+            and no_submit_verified
+        )
         checks = [CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}")]
         provider_configured = bool(reconciliation.get("provider_configured", False))
         checks.append(CheckResult("live_reconciliation_provider", provider_configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not provider_configured else "provider_configured=true"))
@@ -188,8 +200,21 @@ class LiveReadinessEvaluator:
         return checks
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
-        coverage = bool(obs.get("alerts_configured", False)) and bool(obs.get("forensic_exports", False))
-        rollback = bool(obs.get("rollback_ready", False))
+        coverage = (
+            bool(obs.get("qualification_persistence_verified", False))
+            and bool(obs.get("incident_persistence_verified", False))
+            and bool(obs.get("forensic_export_verified", False))
+            and bool(obs.get("sensitive_data_redaction_verified", False))
+            and bool(obs.get("alert_delivery_verified", False))
+            and str(obs.get("evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
+        )
+        rollback = (
+            bool(obs.get("kill_switch_block_verified", False))
+            and bool(obs.get("no_submit_on_kill_switch_verified", False))
+            and bool(obs.get("fail_closed_reconciliation_verified", False))
+            and bool(obs.get("repair_actions_non_mutating_verified", False))
+            and str(obs.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
+        )
         return [
             CheckResult("shadow_mode_enabled", shadow_mode_enabled, "shadow mode required"),
             CheckResult("canary_enabled", canary_enabled, "canary required for controlled enablement"),
@@ -197,3 +222,26 @@ class LiveReadinessEvaluator:
             CheckResult("observability_coverage", coverage, "OBSERVABILITY_EVIDENCE_UNVERIFIED" if not coverage else f"observability={dict(obs)}"),
             CheckResult("rollback_ready", rollback, "ROLLBACK_EVIDENCE_UNVERIFIED" if not rollback else f"rollback_ready={rollback}"),
         ]
+
+    def _sanitize_runtime_snapshot(self, runtime_snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        blocked = ("api_key", "api_secret", "secret", "signature", "signed", "authorization", "x-mbx")
+        blocked_value_markers = ("api_key=", "api_secret=", "signature=", "signed=", "authorization:", "bearer ")
+
+        def sanitize(value: Any) -> Any:
+            if isinstance(value, Mapping):
+                out: dict[str, Any] = {}
+                for key, item in value.items():
+                    k = str(key)
+                    if any(tok in k.lower() for tok in blocked):
+                        continue
+                    out[k] = sanitize(item)
+                return out
+            if isinstance(value, list):
+                return [sanitize(v) for v in value]
+            if isinstance(value, str):
+                low = value.lower()
+                if any(marker in low for marker in blocked_value_markers):
+                    return "[REDACTED]"
+            return value
+
+        return sanitize(dict(runtime_snapshot))

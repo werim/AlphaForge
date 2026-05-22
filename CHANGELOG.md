@@ -1,3 +1,24 @@
+## [Unreleased] - 2026-05-22 (Evidence-based LIVE readiness qualification hardening)
+
+### Added
+- Structured fail-closed readiness evidence contract checks for mode parity, observability, and rollback/emergency controls.
+- Forensic snapshot sanitization that removes key/secret/signature/signed-header style fields from persisted runtime snapshot payloads.
+- Readiness tests covering parity minimum-sample enforcement and forensic secret redaction.
+
+### Changed
+- `mode_parity` qualification now requires COMPLETE evidence with minimum samples, zero mismatches, zero missing fields, and no-order-submission verification.
+- Observability/rollback readiness checks now require measured evidence fields instead of optimistic booleans.
+
+### Fixed
+- Closed gap where static `alerts_configured` / `rollback_ready` booleans could qualify LIVE without measured evidence.
+
+### Known Issues
+- LIVE remains ❌ NOT LIVE-READY; alert delivery evidence is still blocking.
+
+### Fixed
+- LIVE qualification startup no longer persists probe reconciliation findings into `reconciliation_incidents`; incident-persistence proof remains test/diagnostic-only.
+- Forensic redaction now strips nested `secret`-class keys and signed/auth-bearing string values.
+
 ## [Unreleased] - 2026-05-22 (LIVE canonical reconciliation evidence-chain hardening)
 
 ### Added
