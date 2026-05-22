@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence, persist_alert_delivery_evidence
+from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 
@@ -33,6 +34,14 @@ def _operational() -> dict[str, object]:
     return {"evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "observability_evidence_persisted": True, "qualification_persistence_verified": True, "incident_persistence_verified": True, "forensic_export_verified": True, "sensitive_data_redaction_verified": True, "alert_delivery_verified": True, "rollback_evidence_status": "COMPLETE", "rollback_evidence_source": "DETERMINISTIC_VALIDATION", "rollback_evidence_persisted": True, "kill_switch_block_verified": True, "no_submit_on_kill_switch_verified": True, "fail_closed_reconciliation_verified": True, "repair_actions_non_mutating_verified": True}
 
 
+class _StaticProvider:
+    def __init__(self, result: dict[str, object]):
+        self.result = result
+
+    def snapshot(self):
+        return self.result
+
+
 def _verified_alert() -> dict[str, object]:
     return {"provider_configured": True, "evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "alert_delivery_verified": True, "delivery_attempted": True, "delivery_acknowledged": True, "non_trading_probe_verified": True, "probe_id": "probe-verified", "endpoint_origin": "https://alerts.example.test", "blocking_reasons": []}
 
@@ -42,7 +51,7 @@ def _engine(*, persist_alert: bool = True):
     with Session(engine) as session:
         _seed_valid(session)
     if persist_alert:
-        persist_alert_delivery_evidence(engine, _verified_alert())
+        capture_alert_delivery_evidence(engine, _StaticProvider(_verified_alert()))
     return engine
 
 
@@ -70,7 +79,8 @@ def test_in_memory_alert_delivery_flag_without_persisted_ack_does_not_qualify() 
 
 def test_persisted_incomplete_alert_overrides_optimistic_operational_flag() -> None:
     engine = _engine(persist_alert=False)
-    persist_alert_delivery_evidence(engine, {"evidence_status": "INCOMPLETE", "alert_delivery_verified": False, "delivery_attempted": True, "delivery_acknowledged": False, "non_trading_probe_verified": True, "endpoint_origin": "https://alerts.example.test", "blocking_reasons": ["ACKNOWLEDGEMENT_NOT_VERIFIED"]})
+    incomplete = {"evidence_status": "INCOMPLETE", "alert_delivery_verified": False, "delivery_attempted": True, "delivery_acknowledged": False, "non_trading_probe_verified": True, "endpoint_origin": "https://alerts.example.test", "blocking_reasons": ["ACKNOWLEDGEMENT_NOT_VERIFIED"]}
+    capture_alert_delivery_evidence(engine, _StaticProvider(incomplete))
     report = _evaluate(engine, _operational())
     failed = {check.name for check in report.checks if not check.passed}
     assert report.qualified is False
@@ -105,6 +115,15 @@ def test_insecure_probe_destination_is_not_called() -> None:
     result = provider.snapshot()
     assert invoked == []
     assert result["alert_delivery_verified"] is False
+
+
+def test_stale_persisted_alert_evidence_is_rejected() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE live_alert_delivery_evidence SET recorded_at='2026-01-01T00:00:00+00:00'"))
+    evidence = latest_persisted_alert_delivery_evidence(engine, now=datetime(2026, 5, 22, tzinfo=timezone.utc))
+    assert evidence["alert_delivery_verified"] is False
+    assert evidence["alert_delivery_blocking_reasons"] == ["ALERT_DELIVERY_EVIDENCE_STALE"]
 
 
 def test_static_operational_flags_without_persisted_alert_or_rollback_provenance_do_not_qualify() -> None:
