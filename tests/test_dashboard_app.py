@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import OperationalError
 
 from alphaforge.dashboard.app import create_app
 from alphaforge.persistence import init_db
@@ -20,6 +22,16 @@ def test_dashboard_health_and_status_are_read_only_and_honest(tmp_path) -> None:
     assert status["latest_readiness"]["status"] == "NOT_AVAILABLE"
     assert inspect(app.state.engine).get_table_names() == []
     assert not db_path.exists(), "dashboard must not create a missing runtime SQLite database"
+
+
+def test_existing_runtime_sqlite_is_opened_read_only(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'runtime.db'}"
+    seed_engine = init_db(database_url)
+    seed_engine.dispose()
+    app = create_app(database_url)
+    with pytest.raises(OperationalError):
+        with app.state.engine.begin() as conn:
+            conn.execute(text("INSERT INTO order_decisions(decision_id) VALUES ('must-not-write')"))
 
 
 def test_reject_summary_surfaces_incomplete_rows(tmp_path) -> None:
