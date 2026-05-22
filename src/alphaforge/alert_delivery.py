@@ -103,6 +103,12 @@ def persist_alert_delivery_evidence(engine: Engine, evidence: Mapping[str, Any])
     return safe
 
 
+def capture_alert_delivery_evidence(engine: Engine, provider: WebhookAlertDeliveryEvidenceProvider) -> dict[str, Any]:
+    """Collect exactly one diagnostic probe and persist its sanitized result."""
+
+    return persist_alert_delivery_evidence(engine, provider.snapshot())
+
+
 def latest_persisted_alert_delivery_evidence(engine: Engine) -> dict[str, Any]:
     missing = {"observability_evidence_source": "UNVERIFIED", "observability_evidence_persisted": False, "alert_delivery_verified": False, "alert_delivery_evidence_status": "INCOMPLETE", "alert_delivery_blocking_reasons": ["ALERT_DELIVERY_EVIDENCE_MISSING"]}
     with engine.begin() as conn:
