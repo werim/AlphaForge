@@ -5,6 +5,7 @@ import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from alphaforge.alert_delivery import persist_alert_delivery_evidence
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 
@@ -32,10 +33,16 @@ def _operational() -> dict[str, object]:
     return {"evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "observability_evidence_persisted": True, "qualification_persistence_verified": True, "incident_persistence_verified": True, "forensic_export_verified": True, "sensitive_data_redaction_verified": True, "alert_delivery_verified": True, "rollback_evidence_status": "COMPLETE", "rollback_evidence_source": "DETERMINISTIC_VALIDATION", "rollback_evidence_persisted": True, "kill_switch_block_verified": True, "no_submit_on_kill_switch_verified": True, "fail_closed_reconciliation_verified": True, "repair_actions_non_mutating_verified": True}
 
 
-def _engine():
+def _verified_alert() -> dict[str, object]:
+    return {"provider_configured": True, "evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "alert_delivery_verified": True, "delivery_attempted": True, "delivery_acknowledged": True, "non_trading_probe_verified": True, "probe_id": "probe-verified", "endpoint_origin": "https://alerts.example.test", "blocking_reasons": []}
+
+
+def _engine(*, persist_alert: bool = True):
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
+    if persist_alert:
+        persist_alert_delivery_evidence(engine, _verified_alert())
     return engine
 
 
@@ -53,14 +60,31 @@ def test_live_readiness_pass_and_persistence() -> None:
         assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1
 
 
-def test_static_operational_flags_without_provenance_do_not_qualify() -> None:
-    observations = _operational()
-    for key in ("observability_evidence_source", "observability_evidence_persisted", "rollback_evidence_source", "rollback_evidence_persisted"):
-        observations.pop(key)
-    report = _evaluate(_engine(), observations)
+def test_in_memory_alert_delivery_flag_without_persisted_ack_does_not_qualify() -> None:
+    report = _evaluate(_engine(persist_alert=False), _operational())
+    results = {check.name: check for check in report.checks}
+    assert report.qualified is False
+    assert results["alert_delivery_evidence"].passed is False
+    assert results["observability_coverage"].passed is False
+
+
+def test_persisted_incomplete_alert_overrides_optimistic_operational_flag() -> None:
+    engine = _engine(persist_alert=False)
+    persist_alert_delivery_evidence(engine, {"evidence_status": "INCOMPLETE", "alert_delivery_verified": False, "delivery_attempted": True, "delivery_acknowledged": False, "non_trading_probe_verified": True, "endpoint_origin": "https://alerts.example.test", "blocking_reasons": ["ACKNOWLEDGEMENT_NOT_VERIFIED"]})
+    report = _evaluate(engine, _operational())
     failed = {check.name for check in report.checks if not check.passed}
     assert report.qualified is False
-    assert {"observability_coverage", "rollback_ready"} <= failed
+    assert {"alert_delivery_evidence", "observability_coverage"} <= failed
+
+
+def test_static_operational_flags_without_persisted_alert_or_rollback_provenance_do_not_qualify() -> None:
+    observations = _operational()
+    observations.pop("rollback_evidence_source")
+    observations.pop("rollback_evidence_persisted")
+    report = _evaluate(_engine(persist_alert=False), observations)
+    failed = {check.name for check in report.checks if not check.passed}
+    assert report.qualified is False
+    assert {"alert_delivery_evidence", "observability_coverage", "rollback_ready"} <= failed
 
 
 def test_live_readiness_detects_lifecycle_orphan() -> None:
@@ -92,14 +116,7 @@ def test_invalid_numeric_parity_evidence_fails_closed_and_persists_report() -> N
     engine = _engine()
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
-        mode_parity={
-            "evidence_status": "COMPLETE",
-            "sample_count": "N/A",
-            "min_sample_count": None,
-            "mismatch_count": "",
-            "missing_field_count": "bad-value",
-            "no_order_submission_verified": True,
-        },
+        mode_parity={"evidence_status": "COMPLETE", "sample_count": "N/A", "min_sample_count": None, "mismatch_count": "", "missing_field_count": "bad-value", "no_order_submission_verified": True},
         reconciliation_snapshot=_reconciliation(),
         observability_snapshot=_operational(),
         canary_enabled=True,
