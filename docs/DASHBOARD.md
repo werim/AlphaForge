@@ -33,6 +33,8 @@ This initial dashboard branch deliberately omits:
 
 The panel reports runtime process status as `UNVERIFIED` until persisted runtime heartbeat evidence is implemented. Missing readiness evidence is displayed as `NOT_AVAILABLE`, never as PASS.
 
+For the current SQLite runtime database, the dashboard opens an existing database through a read-only SQLite URI. If the runtime database does not exist yet, the dashboard displays empty/unavailable states without creating a runtime database file or running migrations.
+
 ## Local macOS start
 
 ```bash
