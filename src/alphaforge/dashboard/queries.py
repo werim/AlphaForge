@@ -11,10 +11,16 @@ def _has_table(engine: Engine, table_name: str) -> bool:
     return bool(inspect(engine).has_table(table_name))
 
 
+def _column_names(engine: Engine, table_name: str) -> set[str]:
+    if not _has_table(engine, table_name):
+        return set()
+    return {str(column["name"]) for column in inspect(engine).get_columns(table_name)}
+
+
 def fetch_latest_readiness(engine: Engine) -> dict[str, Any]:
     if not _has_table(engine, "live_readiness_reports"):
         return {"status": "NOT_AVAILABLE", "reason": "NO_READINESS_REPORT_TABLE"}
-    with engine.begin() as conn:
+    with engine.connect() as conn:
         row = conn.execute(text("""
             SELECT generated_at, qualified, deployment_state, acknowledgement_required, report_payload
             FROM live_readiness_reports
@@ -38,17 +44,20 @@ def fetch_latest_readiness(engine: Engine) -> dict[str, Any]:
 
 
 def fetch_reject_summary(engine: Engine) -> dict[str, Any]:
-    if not _has_table(engine, "order_decisions"):
+    columns = _column_names(engine, "order_decisions")
+    required_columns = {"decision", "reject_reason", "signal_id", "symbol"}
+    if not required_columns.issubset(columns):
         return {
             "status": "NOT_AVAILABLE",
+            "reason": "ORDER_DECISIONS_SCHEMA_INCOMPLETE",
             "total_final_decisions": None,
             "total_rejected": None,
             "rejection_rate": None,
             "reasons": [],
             "incomplete_rejected_rows": {},
         }
-    where_final = "COALESCE(phase, 'final') = 'final'"
-    with engine.begin() as conn:
+    where_final = "COALESCE(phase, 'final') = 'final'" if "phase" in columns else "1 = 1"
+    with engine.connect() as conn:
         total = int(conn.execute(text(f"SELECT COUNT(*) FROM order_decisions WHERE {where_final}")).scalar_one())
         rejected = int(conn.execute(text(f"SELECT COUNT(*) FROM order_decisions WHERE {where_final} AND UPPER(COALESCE(decision, '')) = 'REJECTED'")).scalar_one())
         rows = conn.execute(text(f"""
@@ -84,7 +93,9 @@ def fetch_reject_summary(engine: Engine) -> dict[str, Any]:
 
 
 def fetch_recent_lifecycle(engine: Engine, *, limit: int = 100, signal_id: str | None = None, symbol: str | None = None) -> list[dict[str, Any]]:
-    if not _has_table(engine, "trade_lifecycle_events"):
+    columns = _column_names(engine, "trade_lifecycle_events")
+    required_columns = {"signal_id", "symbol", "mode", "lifecycle_state", "reject_reason", "event_ts"}
+    if not required_columns.issubset(columns):
         return []
     conditions: list[str] = []
     params: dict[str, Any] = {"limit": max(1, min(int(limit), 500))}
@@ -95,9 +106,9 @@ def fetch_recent_lifecycle(engine: Engine, *, limit: int = 100, signal_id: str |
         conditions.append("symbol = :symbol")
         params["symbol"] = symbol
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
-    with engine.begin() as conn:
+    with engine.connect() as conn:
         rows = conn.execute(text(f"""
-            SELECT signal_id, symbol, mode, lifecycle_state, reject_reason, failure_reason, event_ts
+            SELECT signal_id, symbol, mode, lifecycle_state, reject_reason, event_ts
             FROM trade_lifecycle_events
             {where}
             ORDER BY event_ts DESC
