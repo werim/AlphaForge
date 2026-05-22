@@ -1226,3 +1226,8 @@ Tests: pytest -q tests/test_config_layer.py tests/test_runtime_env_config.py tes
 
 ### Push recommendation
 - Safe to merge as audit/traceability documentation update; no behavioral/runtime code change included.
+
+## Patch 2026-05-22
+- Runtime/backtest path now uses deterministic historical Binance Futures replay data with explicit source labeling.
+- Added cache metadata coverage validation and loud failures for incomplete historical coverage.
+- Added unit tests for pagination, dedupe, incomplete coverage failures, cache coverage checks, and funding anti-leak joins.

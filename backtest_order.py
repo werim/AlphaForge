@@ -17,6 +17,17 @@ from alphaforge.execution import build_execution_context, build_execution_cost_m
 from alphaforge.config import load_config_from_env
 from alphaforge.persistence import init_db, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
+from alphaforge.historical_market_data import (
+    HistoricalCandle,
+    HistoricalDataError,
+    build_cache_metadata,
+    cache_covers,
+    fetch_binance_klines_paginated,
+    fetch_historical_funding_rates,
+    join_funding_to_candles,
+    load_cache,
+    write_cache,
+)
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from urllib.parse import urlencode
@@ -322,7 +333,9 @@ def parse_ts(value: str) -> int:
 def fetch_json(url: str) -> Any:
     with urlopen(url) as resp:  # nosec - public market data
         return json.loads(resp.read().decode("utf-8"))
-def select_symbol_universe(top_n: int, quote: str = "USDT") -> List[Dict[str, Any]]:
+def select_symbol_universe(top_n: int, quote: str = "USDT", symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    if symbols:
+        return [{"symbol": sym.strip().upper(), "quoteVolume": 0.0} for sym in symbols if sym.strip()]
     info = fetch_json("https://fapi.binance.com/fapi/v1/exchangeInfo")
     tickers = fetch_json("https://fapi.binance.com/fapi/v1/ticker/24hr")
     ticker_map = {t["symbol"]: t for t in tickers}
@@ -351,6 +364,10 @@ def save_symbol_universe(path: str, universe: List[Dict[str, Any]]) -> None:
         w.writeheader()
         w.writerows(universe)
 def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> List[Candle]:
+    rows = fetch_binance_klines_paginated(symbol=symbol, interval=interval, start_ms=start_ms, end_ms=end_ms)
+    return [Candle(timestamp=r.timestamp, open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume) for r in rows]
+
+def _fetch_klines_legacy(symbol: str, interval: str, start_ms: int, end_ms: int) -> List[Candle]:
     params = urlencode(
         {
             "symbol": symbol,
@@ -373,17 +390,17 @@ def fetch_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> List
         for r in rows
     ]
 def load_or_fetch_candles(symbol: str, interval: str, start_ms: int, end_ms: int, output_dir: str) -> List[Candle]:
-    path = os.path.join(output_dir, "candles", f"{symbol}_{interval}.csv")
-    if os.path.exists(path):
-        return load_candles(path, start_ms, end_ms)
-    candles = fetch_klines(symbol, interval, start_ms, end_ms)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["timestamp", "open", "high", "low", "close", "volume"])
-        w.writeheader()
-        for c in candles:
-            w.writerow(asdict(c))
-    return candles
+    cache_path = Path(output_dir) / "candles" / f"{symbol}_{interval}.json"
+    if cache_path.exists():
+        metadata, cached = load_cache(cache_path)
+        if cache_covers(metadata, start_ms, end_ms):
+            return [Candle(timestamp=r.timestamp, open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume) for r in cached if start_ms <= r.timestamp <= end_ms]
+    rows = fetch_binance_klines_paginated(symbol=symbol, interval=interval, start_ms=start_ms, end_ms=end_ms)
+    funding = fetch_historical_funding_rates(symbol=symbol, start_ms=start_ms, end_ms=end_ms)
+    rows = join_funding_to_candles(rows, funding)
+    metadata = build_cache_metadata(symbol=symbol, interval=interval, requested_start_ms=start_ms, requested_end_ms=end_ms, candles=rows)
+    write_cache(cache_path, rows, metadata)
+    return [Candle(timestamp=r.timestamp, open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume) for r in rows]
 def load_candles(path: str, start_ms: int, end_ms: int) -> List[Candle]:
     out = []
     with open(path, newline="") as f:
@@ -1904,6 +1921,7 @@ def main():
     p.add_argument("--telegram", action="store_true")
     p.add_argument("--offline", action="store_true", help="Run without network APIs using deterministic fixture data")
     p.add_argument("--ci", action="store_true", help="CI-safe mode; implies --offline")
+    p.add_argument("--symbols", default="", help="Comma-separated fixed symbol list for deterministic historical universe")
     args = p.parse_args()
     if args.ci:
         args.offline = True
@@ -1916,7 +1934,8 @@ def main():
     if args.offline:
         universe, candles_by_symbol = _offline_fixture(start_ms)
     else:
-        universe = select_symbol_universe(args.top_n, args.quote)
+        fixed_symbols = [x.strip() for x in str(args.symbols or "").split(",") if x.strip()]
+        universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
         candles_by_symbol = {}
         for row in universe:
             c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir)
