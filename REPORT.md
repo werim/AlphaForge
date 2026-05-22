@@ -1450,3 +1450,48 @@ Tests: pytest -q tests/test_config_layer.py tests/test_runtime_env_config.py tes
 - Runtime/backtest path now uses deterministic historical Binance Futures replay data with explicit source labeling.
 - Added cache metadata coverage validation and loud failures for incomplete historical coverage.
 - Added unit tests for pagination, dedupe, incomplete coverage failures, cache coverage checks, and funding anti-leak joins.
+
+## 2026-05-22 PR #148 follow-up — LIVE qualification mutation bug fix
+
+### Why the patch was needed
+- LIVE qualification parity evaluation path was invoking `AIBrain.before_real_order(...)`, which internally persists decision artifacts. This violated the non-mutating LIVE qualification guarantee.
+
+### Root cause
+- Qualification probing reused a persistence-capable hook instead of a read-only decision path.
+- Qualification sample inputs were partially runtime-derived, preventing strict deterministic replay comparison.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `tests/test_live_readiness_security_regression.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added side-effect-free pre-submit evaluator that calls:
+  - `score_signal(...)`
+  - `choose_order_plan(...)`
+  - `explain_decision(...)`
+- Added deterministic parity evidence builder with stable qualification sample IDs/timestamps and explicit comparison fields.
+
+### Lifecycle / persistence impact
+- LIVE qualification parity checks no longer mutate trading/audit persistence tables.
+- No new order submit/amend/cancel/close behavior added.
+
+### Safety posture
+- `incident_persistence_verified` remains `False`.
+- LIVE remains fail-closed / not live-ready pending alerting, rollback proof, real execution readiness, and protective-order lifecycle proof.
+
+### Tests added
+- Non-mutating parity evidence regression (pre/post table row-count invariance, including optional tables when present).
+- Deterministic replay assertion for two parity evidence builds (equal after excluding `generated_at`, including identical sample IDs).
+
+### Tests executed
+- `pytest -q tests/test_live_readiness_security_regression.py tests/test_live_readiness.py tests/test_runtime.py`
+
+### Risks / limitations
+- Parity evidence now depends on AIBrain public scoring/planning/explanation interfaces being available and behaviorally stable.
+- Deterministic fixture set is intentionally narrow (qualification evidence, not market-replay realism).
+
+### Push recommendation
+- Merge recommended. This closes a P1 qualification mutation bug while preserving deterministic PAPER vs LIVE_PRECHECK parity evidence semantics.

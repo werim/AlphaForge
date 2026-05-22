@@ -27,6 +27,24 @@ class _AcceptBrain:
 
         return {}, _Plan(), "ok"
 
+    def score_signal(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
+        class _Score:
+            total_score = 0.91
+        return _Score()
+
+    def choose_order_plan(self, signal_payload, market_ctx, score_ctx):
+        class _Plan:
+            decision = "ACCEPTED"
+            reason = ""
+            confidence = 0.9
+            order_type = "MARKET"
+            limit_price = None
+            stop_price = None
+        return _Plan()
+
+    def explain_decision(self, signal_payload, score_ctx, order_plan):
+        return "ok"
+
 
 class _CleanProvider:
     def snapshot(self):
@@ -139,3 +157,41 @@ def test_live_qualification_clean_provider_does_not_write_incidents() -> None:
             assert conn.execute(text("SELECT COUNT(*) FROM reconciliation_incidents")).scalar_one() == 0
     assert runtime._qualification_report is not None
     assert runtime._qualification_report.qualified is False
+
+
+def test_mode_parity_evidence_does_not_mutate_persistence_and_is_deterministic() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        _seed_valid(session)
+        session.commit()
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        ai_brain=_AcceptBrain(Session(engine)),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        live_reconciliation_provider=_CleanProvider(),
+    )
+
+    with engine.begin() as conn:
+        tables = ["signals", "order_decisions", "ai_decision_features", "trade_lifecycle_events"]
+        optional_tables = ["rejected_signal_reviews", "reconciliation_incidents"]
+        before = {t: conn.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar_one() for t in tables}
+        for t in optional_tables:
+            exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:name"), {"name": t}).scalar_one()
+            if exists:
+                before[t] = conn.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar_one()
+
+    first = runtime._build_mode_parity_evidence(min_sample_count=3)
+    second = runtime._build_mode_parity_evidence(min_sample_count=3)
+
+    with engine.begin() as conn:
+        after = {t: conn.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar_one() for t in before.keys()}
+    assert before == after
+    assert first["no_order_submission_verified"] is True
+
+    first_no_time = {k: v for k, v in first.items() if k != "generated_at"}
+    second_no_time = {k: v for k, v in second.items() if k != "generated_at"}
+    assert first_no_time == second_no_time
+    assert [s["sample_id"] for s in first_no_time["samples"]] == [s["sample_id"] for s in second_no_time["samples"]]
