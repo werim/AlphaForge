@@ -5,28 +5,38 @@ from typing import Any
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 
 def _has_table(engine: Engine, table_name: str) -> bool:
-    return bool(inspect(engine).has_table(table_name))
+    try:
+        return bool(inspect(engine).has_table(table_name))
+    except SQLAlchemyError:
+        return False
 
 
 def _column_names(engine: Engine, table_name: str) -> set[str]:
     if not _has_table(engine, table_name):
         return set()
-    return {str(column["name"]) for column in inspect(engine).get_columns(table_name)}
+    try:
+        return {str(column["name"]) for column in inspect(engine).get_columns(table_name)}
+    except SQLAlchemyError:
+        return set()
 
 
 def fetch_latest_readiness(engine: Engine) -> dict[str, Any]:
     if not _has_table(engine, "live_readiness_reports"):
         return {"status": "NOT_AVAILABLE", "reason": "NO_READINESS_REPORT_TABLE"}
-    with engine.connect() as conn:
-        row = conn.execute(text("""
-            SELECT generated_at, qualified, deployment_state, acknowledgement_required, report_payload
-            FROM live_readiness_reports
-            ORDER BY id DESC
-            LIMIT 1
-        """)).mappings().first()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT generated_at, qualified, deployment_state, acknowledgement_required, report_payload
+                FROM live_readiness_reports
+                ORDER BY id DESC
+                LIMIT 1
+            """)).mappings().first()
+    except SQLAlchemyError:
+        return {"status": "NOT_AVAILABLE", "reason": "READINESS_QUERY_UNAVAILABLE"}
     if row is None:
         return {"status": "NOT_AVAILABLE", "reason": "NO_READINESS_REPORT"}
     try:
@@ -57,24 +67,35 @@ def fetch_reject_summary(engine: Engine) -> dict[str, Any]:
             "incomplete_rejected_rows": {},
         }
     where_final = "COALESCE(phase, 'final') = 'final'" if "phase" in columns else "1 = 1"
-    with engine.connect() as conn:
-        total = int(conn.execute(text(f"SELECT COUNT(*) FROM order_decisions WHERE {where_final}")).scalar_one())
-        rejected = int(conn.execute(text(f"SELECT COUNT(*) FROM order_decisions WHERE {where_final} AND UPPER(COALESCE(decision, '')) = 'REJECTED'")).scalar_one())
-        rows = conn.execute(text(f"""
-            SELECT COALESCE(NULLIF(TRIM(reject_reason), ''), 'MISSING_REASON') AS reject_reason, COUNT(*) AS count
-            FROM order_decisions
-            WHERE {where_final} AND UPPER(COALESCE(decision, '')) = 'REJECTED'
-            GROUP BY COALESCE(NULLIF(TRIM(reject_reason), ''), 'MISSING_REASON')
-            ORDER BY count DESC, reject_reason ASC
-        """)).mappings().all()
-        incomplete = conn.execute(text(f"""
-            SELECT
-                SUM(CASE WHEN signal_id IS NULL OR TRIM(signal_id) = '' THEN 1 ELSE 0 END) AS empty_signal_id_count,
-                SUM(CASE WHEN symbol IS NULL OR TRIM(symbol) = '' THEN 1 ELSE 0 END) AS empty_symbol_count,
-                SUM(CASE WHEN reject_reason IS NULL OR TRIM(reject_reason) = '' THEN 1 ELSE 0 END) AS empty_reject_reason_count
-            FROM order_decisions
-            WHERE {where_final} AND UPPER(COALESCE(decision, '')) = 'REJECTED'
-        """)).mappings().one()
+    try:
+        with engine.connect() as conn:
+            total = int(conn.execute(text(f"SELECT COUNT(*) FROM order_decisions WHERE {where_final}")).scalar_one())
+            rejected = int(conn.execute(text(f"SELECT COUNT(*) FROM order_decisions WHERE {where_final} AND UPPER(COALESCE(decision, '')) = 'REJECTED'")).scalar_one())
+            rows = conn.execute(text(f"""
+                SELECT COALESCE(NULLIF(TRIM(reject_reason), ''), 'MISSING_REASON') AS reject_reason, COUNT(*) AS count
+                FROM order_decisions
+                WHERE {where_final} AND UPPER(COALESCE(decision, '')) = 'REJECTED'
+                GROUP BY COALESCE(NULLIF(TRIM(reject_reason), ''), 'MISSING_REASON')
+                ORDER BY count DESC, reject_reason ASC
+            """)).mappings().all()
+            incomplete = conn.execute(text(f"""
+                SELECT
+                    SUM(CASE WHEN signal_id IS NULL OR TRIM(signal_id) = '' THEN 1 ELSE 0 END) AS empty_signal_id_count,
+                    SUM(CASE WHEN symbol IS NULL OR TRIM(symbol) = '' THEN 1 ELSE 0 END) AS empty_symbol_count,
+                    SUM(CASE WHEN reject_reason IS NULL OR TRIM(reject_reason) = '' THEN 1 ELSE 0 END) AS empty_reject_reason_count
+                FROM order_decisions
+                WHERE {where_final} AND UPPER(COALESCE(decision, '')) = 'REJECTED'
+            """)).mappings().one()
+    except SQLAlchemyError:
+        return {
+            "status": "NOT_AVAILABLE",
+            "reason": "ORDER_DECISIONS_QUERY_UNAVAILABLE",
+            "total_final_decisions": None,
+            "total_rejected": None,
+            "rejection_rate": None,
+            "reasons": [],
+            "incomplete_rejected_rows": {},
+        }
     return {
         "status": "AVAILABLE",
         "total_final_decisions": total,
@@ -106,14 +127,17 @@ def fetch_recent_lifecycle(engine: Engine, *, limit: int = 100, signal_id: str |
         conditions.append("symbol = :symbol")
         params["symbol"] = symbol
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
-    with engine.connect() as conn:
-        rows = conn.execute(text(f"""
-            SELECT signal_id, symbol, mode, lifecycle_state, reject_reason, event_ts
-            FROM trade_lifecycle_events
-            {where}
-            ORDER BY event_ts DESC
-            LIMIT :limit
-        """), params).mappings().all()
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(f"""
+                SELECT signal_id, symbol, mode, lifecycle_state, reject_reason, event_ts
+                FROM trade_lifecycle_events
+                {where}
+                ORDER BY event_ts DESC
+                LIMIT :limit
+            """), params).mappings().all()
+    except SQLAlchemyError:
+        return []
     return [dict(row) for row in rows]
 
 
