@@ -7,6 +7,11 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 import uuid
 
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+
+from alphaforge.contracts import canonical_utc_timestamp
+
 
 Transport = Callable[[str, bytes, Mapping[str, str], float], Mapping[str, Any]]
 
@@ -100,7 +105,7 @@ class WebhookAlertDeliveryEvidenceProvider:
 
     def _validated_endpoint_origin(self) -> str | None:
         parts = urlsplit(str(self.config.endpoint_url or "").strip())
-        if parts.scheme.lower() != "https" or not parts.netloc:
+        if parts.scheme.lower() != "https" or not parts.netloc or parts.username or parts.password:
             return None
         return f"https://{parts.netloc}"
 
@@ -137,3 +142,37 @@ class WebhookAlertDeliveryEvidenceProvider:
             body = response.read().decode("utf-8")
         parsed = json.loads(body or "{}")
         return parsed if isinstance(parsed, Mapping) else {"acknowledged": False, "status": "INVALID_RESPONSE"}
+
+
+def persist_alert_delivery_evidence(engine: Engine, evidence: Mapping[str, Any]) -> None:
+    """Persist probe evidence after sanitization performed by the provider contract."""
+
+    payload = dict(evidence)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS live_alert_delivery_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recorded_at TEXT NOT NULL,
+                probe_id TEXT,
+                evidence_status TEXT NOT NULL,
+                alert_delivery_verified INTEGER NOT NULL,
+                endpoint_origin TEXT NOT NULL,
+                evidence_payload TEXT NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO live_alert_delivery_evidence(
+                recorded_at, probe_id, evidence_status, alert_delivery_verified,
+                endpoint_origin, evidence_payload
+            ) VALUES (
+                :recorded_at, :probe_id, :evidence_status, :verified,
+                :endpoint_origin, :payload
+            )
+        """), {
+            "recorded_at": canonical_utc_timestamp(),
+            "probe_id": payload.get("probe_id"),
+            "evidence_status": str(payload.get("evidence_status") or "INCOMPLETE").upper(),
+            "verified": 1 if bool(payload.get("alert_delivery_verified", False)) else 0,
+            "endpoint_origin": str(payload.get("endpoint_origin") or "UNAVAILABLE"),
+            "payload": json.dumps(payload, sort_keys=True),
+        })
