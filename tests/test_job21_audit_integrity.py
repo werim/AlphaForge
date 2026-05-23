@@ -24,9 +24,10 @@ def test_execution_diagnostics_use_decision_cost_surface() -> None:
 
 def test_canonical_audit_entrypoint_is_read_only_runner_safe() -> None:
     sql = (ROOT / 'sql/diagnostics/job19_paper_reject_rate_decision_quality_audit.sql').read_text(encoding='utf-8')
-    assert '.headers' not in sql
-    assert '.mode' not in sql
-    executable = '\n'.join(line for line in sql.splitlines() if not line.strip().startswith('--')).lstrip().lower()
+    executable_lines = [line.strip().lower() for line in sql.splitlines() if line.strip() and not line.strip().startswith('--')]
+    assert not any(line.startswith('.headers') for line in executable_lines)
+    assert not any(line.startswith('.mode') for line in executable_lines)
+    executable = '\n'.join(executable_lines).lstrip()
     assert executable.startswith('with')
     assert 'lifecycle_integrity_failure' in executable
 
