@@ -48,13 +48,20 @@ class LifecycleEventType(str, Enum):
     ENTRY_TIMEOUT = "ENTRY_TIMEOUT"
 
 
+# Runtime currently tracks its latest lifecycle checkpoint by symbol. A new
+# candidate on a symbol is therefore a new lifecycle instance even when the
+# previous instance ended in a reject or an error. Permit only that reset
+# transition here so a terminal reject/incident cannot poison every following
+# signal on the same symbol into ERROR. This does not permit order execution or
+# loosen any decision gate.
 ALLOWED_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
     LifecycleEventType.SIGNAL_CREATED.value: {LifecycleEventType.SIGNAL_REJECTED.value, LifecycleEventType.WAITING_ENTRY_ZONE.value, LifecycleEventType.ENTRY_PENDING.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.WAITING_ENTRY_ZONE.value: {LifecycleEventType.ENTRY_TRIGGERED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.ENTRY_TRIGGERED.value: {LifecycleEventType.ORDER_PLACED.value, LifecycleEventType.ORDER_REJECTED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.ORDER_PLACED.value: {LifecycleEventType.POSITION_OPENED.value, LifecycleEventType.ORDER_REJECTED.value, LifecycleEventType.ENTRY_TIMEOUT.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.POSITION_OPENED.value: {LifecycleEventType.TP_HIT.value, LifecycleEventType.SL_HIT.value, LifecycleEventType.OPEN_AT_END.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.SIGNAL_REJECTED.value: set(),
+    LifecycleEventType.SIGNAL_REJECTED.value: {LifecycleEventType.SIGNAL_CREATED.value},
+    LifecycleEventType.ERROR.value: {LifecycleEventType.SIGNAL_CREATED.value},
     LifecycleEventType.ENTRY_PENDING.value: {LifecycleEventType.ENTRY_SUBMITTED.value, LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.EXECUTION_ERROR.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.ENTRY_SUBMITTED.value: {LifecycleEventType.ENTRY_ACKNOWLEDGED.value, LifecycleEventType.EXCHANGE_REJECT.value, LifecycleEventType.EXECUTION_ERROR.value, LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.ENTRY_ACKNOWLEDGED.value: {LifecycleEventType.ENTRY_PARTIAL.value, LifecycleEventType.ENTRY_FILLED.value, LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.EXECUTION_ERROR.value, LifecycleEventType.ERROR.value},
