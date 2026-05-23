@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -13,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 
 from alphaforge.dashboard.app import create_app
 from alphaforge.persistence import init_db
+from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 
 
 def test_dashboard_health_and_status_are_read_only_and_honest(tmp_path) -> None:
@@ -23,8 +25,8 @@ def test_dashboard_health_and_status_are_read_only_and_honest(tmp_path) -> None:
 
     assert client.get("/health").json()["status"] == "ok"
     status = client.get("/api/v1/runtime/status").json()
-    assert status["runtime_process_status"] == "UNVERIFIED"
-    assert status["runtime_process_status_reason"] == "PERSISTED_HEARTBEAT_NOT_IMPLEMENTED"
+    assert status["runtime_process_status"] == "MISSING"
+    assert status["runtime_process_status_reason"] == "NO_PERSISTED_RUNTIME_HEARTBEAT"
     assert status["latest_readiness"]["status"] == "NOT_AVAILABLE"
     assert inspect(app.state.engine).get_table_names() == []
     assert not db_path.exists(), "dashboard must not create a missing runtime SQLite database"
@@ -38,6 +40,82 @@ def test_existing_runtime_sqlite_is_opened_read_only(tmp_path) -> None:
     with pytest.raises(OperationalError):
         with app.state.engine.begin() as conn:
             conn.execute(text("INSERT INTO order_decisions(decision_id) VALUES ('must-not-write')"))
+
+
+def test_fresh_paper_heartbeat_appears_in_dashboard_runtime_status(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'fresh_paper.db'}"
+    engine = init_db(database_url)
+    save_runtime_heartbeat(
+        engine,
+        runtime_instance_id="runtime:paper-fresh",
+        execution_mode="PAPER",
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        last_scan_ts=datetime.now(timezone.utc).isoformat(),
+        active_positions_count=1,
+        pending_orders_count=2,
+    )
+    engine.dispose()
+
+    payload = TestClient(create_app(database_url)).get("/api/v1/runtime/status").json()
+    assert payload["runtime_process_status"] == "FRESH"
+    assert payload["runtime_process_status_reason"] == "HEARTBEAT_WITHIN_MAX_AGE"
+    assert payload["execution_mode"] == "PAPER"
+    assert payload["runtime_instance_id"] == "runtime:paper-fresh"
+    assert payload["latest_heartbeat_ts"]
+    assert payload["active_positions_count"] == 1
+    assert payload["pending_orders_count"] == 2
+
+
+def test_dashboard_read_does_not_persist_or_mutate_heartbeat_evidence(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'read_only_heartbeat.db'}"
+    engine = init_db(database_url)
+    save_runtime_heartbeat(engine, runtime_instance_id="runtime:read-only", execution_mode="PAPER", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
+    with engine.connect() as conn:
+        before = conn.execute(text("SELECT COUNT(*) FROM runtime_heartbeats")).scalar_one()
+    engine.dispose()
+
+    client = TestClient(create_app(database_url))
+    assert client.get("/api/v1/runtime/status").status_code == 200
+    assert client.get("/api/v1/readiness/probes").status_code == 200
+
+    verify = init_db(database_url)
+    with verify.connect() as conn:
+        after = conn.execute(text("SELECT COUNT(*) FROM runtime_heartbeats")).scalar_one()
+    assert before == after == 1
+
+
+@pytest.mark.parametrize(
+    ("heartbeat_ts", "expected_state"),
+    [
+        ((datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(), "STALE"),
+        ((datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(), "FUTURE_DATED"),
+        ("not-a-timestamp", "INVALID"),
+    ],
+)
+def test_stale_future_or_malformed_heartbeat_fails_closed_in_dashboard(tmp_path, heartbeat_ts: str, expected_state: str) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / (expected_state.lower() + '.db')}"
+    engine = init_db(database_url)
+    save_runtime_heartbeat(
+        engine,
+        runtime_instance_id=f"runtime:{expected_state.lower()}",
+        execution_mode="PAPER",
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        heartbeat_ts=heartbeat_ts,
+    )
+    engine.dispose()
+    payload = TestClient(create_app(database_url)).get("/api/v1/runtime/status").json()
+    assert payload["runtime_process_status"] == expected_state
+
+
+def test_latest_heartbeat_selection_is_deterministic_for_equal_timestamps(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'latest.db'}"
+    engine = init_db(database_url)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    save_runtime_heartbeat(engine, runtime_instance_id="runtime:first", execution_mode="PAPER", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", heartbeat_ts=timestamp)
+    save_runtime_heartbeat(engine, runtime_instance_id="runtime:second", execution_mode="PAPER", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", heartbeat_ts=timestamp)
+    engine.dispose()
+    payload = TestClient(create_app(database_url)).get("/api/v1/runtime/status").json()
+    assert payload["runtime_instance_id"] == "runtime:second"
 
 
 def test_reject_summary_surfaces_incomplete_rows(tmp_path) -> None:
@@ -77,7 +155,7 @@ def test_lifecycle_timeline_is_sorted_and_flags_missing_reject_reason(tmp_path) 
     assert payload["rejected_without_reason"] is True
 
 
-def test_readiness_probe_matrix_fail_closes_missing_report_and_heartbeat(tmp_path) -> None:
+def test_readiness_probe_matrix_fail_closes_missing_report_and_live_heartbeat(tmp_path) -> None:
     db_path = tmp_path / "probe_matrix.db"
     app = create_app(f"sqlite+pysqlite:///{db_path}")
     payload = TestClient(app).get("/api/v1/readiness/probes").json()
@@ -86,16 +164,18 @@ def test_readiness_probe_matrix_fail_closes_missing_report_and_heartbeat(tmp_pat
     assert payload["expected_probe_count"] == 27
     assert payload["critical_gap_count"] == 27
     heartbeat = next(probe for probe in payload["probes"] if probe["name"] == "runtime_heartbeat")
-    assert heartbeat["status"] == "MISSING_PROBE"
-    assert heartbeat["details"] == "PERSISTED_HEARTBEAT_NOT_IMPLEMENTED"
+    assert heartbeat["status"] == "MISSING"
+    assert heartbeat["details"] == "NO_PERSISTED_LIVE_RUNTIME_HEARTBEAT"
+    assert payload["counts"]["MISSING"] == 1
     assert payload["counts"]["NO_EVIDENCE"] == 26
     assert payload["control_boundary"]["dashboard_mutation_controls"] == "INTENTIONALLY_OMITTED"
     assert not db_path.exists(), "probe view must not create a missing runtime SQLite database"
 
 
-def test_readiness_probe_matrix_surfaces_missing_expected_report_checks(tmp_path) -> None:
+def test_readiness_probe_matrix_surfaces_fresh_live_heartbeat_and_missing_report_checks(tmp_path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'readiness.db'}"
     seed_engine = init_db(database_url)
+    save_runtime_heartbeat(seed_engine, runtime_instance_id="runtime:live-fresh", execution_mode="LIVE", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
     with seed_engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS live_readiness_reports (
@@ -117,9 +197,10 @@ def test_readiness_probe_matrix_surfaces_missing_expected_report_checks(tmp_path
     seed_engine.dispose()
     payload = TestClient(create_app(database_url)).get("/api/v1/readiness/probes").json()
 
+    assert next(probe for probe in payload["probes"] if probe["name"] == "runtime_heartbeat")["status"] == "PASS"
     assert next(probe for probe in payload["probes"] if probe["name"] == "lifecycle_no_orphans")["status"] == "PASS"
     assert next(probe for probe in payload["probes"] if probe["name"] == "mode_parity")["status"] == "MISSING_IN_REPORT"
-    assert payload["critical_gap_count"] == 26
+    assert payload["critical_gap_count"] == 25
 
 
 def test_html_dashboard_pages_load_without_existing_runtime_schema(tmp_path) -> None:
@@ -133,5 +214,5 @@ def test_html_dashboard_pages_load_without_existing_runtime_schema(tmp_path) -> 
 def test_dashboard_has_no_execution_or_live_mutation_routes(tmp_path) -> None:
     app = create_app(f"sqlite+pysqlite:///{tmp_path / 'routes.db'}")
     paths = {route.path for route in app.routes}
-    forbidden_fragments = {"order", "execute", "live/activate", "kill-switch", "config/update"}
+    forbidden_fragments = {"order", "execute", "live/activate", "kill-switch", "config/update", "heartbeat/write"}
     assert not any(fragment in path.lower() for path in paths for fragment in forbidden_fragments)
