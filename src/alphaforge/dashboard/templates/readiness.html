@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Readiness · AlphaForge{% endblock %}
+{% block content %}
+  <div class="page-title"><h1>LIVE Readiness</h1><p>Ölçülmüş readiness kanıtı olmadan yeşil ışık yok.</p></div>
+  {% if readiness.status == 'NOT_AVAILABLE' %}
+    <div class="alert warn-box"><strong>Readiness raporu yok.</strong> {{ readiness.reason }}. LIVE hazır kabul edilmez.</div>
+  {% else %}
+    <section class="cards">
+      <article class="metric"><label>Status</label><strong class="badge {% if readiness.status == 'PASS' %}pass{% else %}fail{% endif %}">{{ readiness.status }}</strong></article>
+      <article class="metric"><label>Deployment</label><strong>{{ readiness.deployment_state }}</strong></article>
+      <article class="metric"><label>Generated At</label><strong class="small-value">{{ readiness.generated_at }}</strong></article>
+    </section>
+    <section class="panel">
+      <h2>Checks</h2>
+      <table>
+        <thead><tr><th>Check</th><th>Result</th><th>Details</th></tr></thead>
+        <tbody>
+        {% for check in readiness.payload.get('checks', []) %}
+          <tr><td>{{ check.name }}</td><td><span class="badge {% if check.passed %}pass{% else %}fail{% endif %}">{{ 'PASS' if check.passed else 'FAIL' }}</span></td><td>{{ check.details }}</td></tr>
+        {% else %}<tr><td colspan="3" class="empty">Check payload bulunamadı.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% endif %}
+{% endblock %}
