@@ -9,7 +9,7 @@ Python-only, read-only operations panel for AlphaForge. It uses FastAPI, Jinja2 
 | `/` | Configured safety state, reject summary and recent lifecycle events |
 | `/rejects` | Reject distribution and incomplete persistence-row warnings |
 | `/lifecycle` | Recent event list and per-signal timeline |
-| `/readiness` | Most recently persisted LIVE readiness report, if one exists |
+| `/readiness` | Most recently persisted LIVE readiness report plus expected-probe evidence coverage matrix |
 | `/health` | Service heartbeat for the dashboard process only |
 
 JSON read endpoints:
@@ -18,6 +18,28 @@ JSON read endpoints:
 - `GET /api/v1/rejects/summary`
 - `GET /api/v1/lifecycle/{signal_id}`
 - `GET /api/v1/readiness/latest`
+- `GET /api/v1/readiness/probes`
+
+## Operations & Readiness Console audit increment
+
+The merged dashboard initially surfaced persisted readiness checks only when a readiness report already existed. It did not enumerate the expected readiness evidence universe or distinguish an absent probe from a failed probe. The lowest-risk next increment is read-only evidence coverage visibility:
+
+- an explicit catalog of the 26 existing `LiveReadinessEvaluator` checks and the not-yet-implemented persisted runtime heartbeat probe;
+- fail-closed statuses: `PASS`, `FAIL`, `NO_EVIDENCE`, `MISSING_IN_REPORT`, and `MISSING_PROBE`;
+- critical-gap count and a clearly rendered control boundary;
+- no execution, configuration, LIVE activation or kill-switch write endpoint.
+
+This increment audits whether expected probes are represented in persisted evidence. It does not run external probes, assert market execution quality, generate a readiness report or qualify LIVE.
+
+### Missing probes, controls and data surfaces identified
+
+| Target console surface | Existing before increment | State after increment | Safe next step, not implemented here |
+|---|---|---|---|
+| Persisted runtime heartbeat / liveness | Explicitly `UNVERIFIED`; no evidence table | Displayed as `MISSING_PROBE` | Add persisted heartbeat production and freshness logic in a separate runtime-reviewed change |
+| Readiness expected-check coverage | Only raw latest-report checks shown | Catalog coverage matrix and missing-check visibility | Link probe history/freshness after evidence persistence is stable |
+| Mode parity, reconciliation, alert and rollback evidence | Present inside latest report payload only | Mapped into observable coverage categories | Add dedicated evidence-detail drill-down only if backed by stable stored contracts |
+| Order/LIVE/kill-switch/config mutation controls | Deliberately absent | Still deliberately absent | Keep absent until authenticated RBAC, audit log and fail-closed approval workflow exist |
+| External exchange/runtime active probing from dashboard | Absent | Still absent | Prefer runtime-produced persisted evidence; do not let UI become an execution surface |
 
 ## Safety boundary
 
@@ -31,7 +53,7 @@ This initial dashboard branch deliberately omits:
 - external exchange probes,
 - automatic runtime startup.
 
-The panel reports runtime process status as `UNVERIFIED` until persisted runtime heartbeat evidence is implemented. Missing readiness evidence is displayed as `NOT_AVAILABLE`, never as PASS.
+The panel reports runtime process status as `UNVERIFIED` until persisted runtime heartbeat evidence is implemented. Missing readiness evidence is displayed as `NOT_AVAILABLE`, never as PASS. The readiness probe matrix likewise remains `INCOMPLETE` when a probe is missing, a report is absent, or an expected check is absent from the latest report.
 
 For the current SQLite runtime database, the dashboard opens an existing database through a read-only SQLite URI. If the runtime database does not exist yet, the dashboard displays empty/unavailable states without creating a runtime database file or running migrations.
 

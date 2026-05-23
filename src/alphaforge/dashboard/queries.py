@@ -8,6 +8,37 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 
+READINESS_PROBE_CATALOG: tuple[dict[str, Any], ...] = (
+    {"name": "runtime_heartbeat", "category": "runtime_presence", "surface": "persisted heartbeat", "critical": True, "implemented": False, "gap_reason": "PERSISTED_HEARTBEAT_NOT_IMPLEMENTED"},
+    {"name": "lifecycle_no_orphans", "category": "lifecycle_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "lifecycle_transitions_valid", "category": "lifecycle_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "rejected_has_reason", "category": "decision_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "entry_exit_completeness", "category": "lifecycle_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "schema_signals", "category": "persistence_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "critical_not_null_signals", "category": "persistence_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "schema_order_decisions", "category": "persistence_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "critical_not_null_order_decisions", "category": "persistence_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "schema_trade_lifecycle_events", "category": "persistence_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "critical_not_null_trade_lifecycle_events", "category": "persistence_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "reject_persistence_parity", "category": "decision_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "reject_rate_sanity", "category": "selectivity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "rr_not_constant", "category": "decision_quality", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "score_not_constant", "category": "decision_quality", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "mode_parity", "category": "paper_live_parity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "live_reconciliation_provider", "category": "exchange_reconciliation", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "reconciliation_evidence_complete", "category": "exchange_reconciliation", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "reconciliation_no_orphans", "category": "exchange_reconciliation", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "duplicate_execution_free", "category": "exchange_reconciliation", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "reconciliation_fail_closed_clear", "category": "exchange_reconciliation", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "shadow_mode_enabled", "category": "deployment_guard", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "canary_enabled", "category": "deployment_guard", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "operator_acknowledged", "category": "deployment_guard", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "alert_delivery_evidence", "category": "observability", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "observability_coverage", "category": "observability", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "rollback_ready", "category": "emergency_control", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+)
+
+
 def _has_table(engine: Engine, table_name: str) -> bool:
     try:
         return bool(inspect(engine).has_table(table_name))
@@ -50,6 +81,44 @@ def fetch_latest_readiness(engine: Engine) -> dict[str, Any]:
         "acknowledgement_required": bool(row["acknowledgement_required"]),
         "generated_at": row["generated_at"],
         "payload": payload,
+    }
+
+
+def fetch_readiness_probe_matrix(engine: Engine) -> dict[str, Any]:
+    """Expose expected readiness probes and evidence gaps without running probes or mutating state."""
+    readiness = fetch_latest_readiness(engine)
+    report_checks = {
+        str(check.get("name")): check
+        for check in readiness.get("payload", {}).get("checks", [])
+        if isinstance(check, dict) and check.get("name")
+    }
+    probes: list[dict[str, Any]] = []
+    for expected in READINESS_PROBE_CATALOG:
+        probe = dict(expected)
+        if not probe["implemented"]:
+            probe.update({"status": "MISSING_PROBE", "details": probe["gap_reason"]})
+        elif readiness.get("status") == "NOT_AVAILABLE":
+            probe.update({"status": "NO_EVIDENCE", "details": readiness.get("reason", "NO_READINESS_REPORT")})
+        elif probe["name"] not in report_checks:
+            probe.update({"status": "MISSING_IN_REPORT", "details": "EXPECTED_CHECK_NOT_PRESENT_IN_LATEST_REPORT"})
+        else:
+            observed = report_checks[probe["name"]]
+            probe.update({"status": "PASS" if bool(observed.get("passed")) else "FAIL", "details": str(observed.get("details", ""))})
+        probes.append(probe)
+    counts = {status: sum(1 for probe in probes if probe["status"] == status) for status in ("PASS", "FAIL", "MISSING_PROBE", "MISSING_IN_REPORT", "NO_EVIDENCE")}
+    gaps = [probe for probe in probes if probe["status"] != "PASS"]
+    return {
+        "status": "COMPLETE" if not gaps else "INCOMPLETE",
+        "readiness_report_status": readiness.get("status", "NOT_AVAILABLE"),
+        "expected_probe_count": len(probes),
+        "counts": counts,
+        "critical_gap_count": sum(1 for probe in gaps if probe["critical"]),
+        "probes": probes,
+        "control_boundary": {
+            "dashboard_mutation_controls": "INTENTIONALLY_OMITTED",
+            "reason": "READ_ONLY_OBSERVABILITY_INCREMENT",
+            "forbidden_actions": ["ORDER_SUBMISSION", "LIVE_ACTIVATION", "KILL_SWITCH_MUTATION", "CONFIG_EDIT"],
+        },
     }
 
 

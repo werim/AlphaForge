@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -73,6 +75,51 @@ def test_lifecycle_timeline_is_sorted_and_flags_missing_reject_reason(tmp_path) 
     assert [row["lifecycle_state"] for row in payload["events"]] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
     assert payload["has_signal_created"] is True
     assert payload["rejected_without_reason"] is True
+
+
+def test_readiness_probe_matrix_fail_closes_missing_report_and_heartbeat(tmp_path) -> None:
+    db_path = tmp_path / "probe_matrix.db"
+    app = create_app(f"sqlite+pysqlite:///{db_path}")
+    payload = TestClient(app).get("/api/v1/readiness/probes").json()
+
+    assert payload["status"] == "INCOMPLETE"
+    assert payload["expected_probe_count"] == 27
+    assert payload["critical_gap_count"] == 27
+    heartbeat = next(probe for probe in payload["probes"] if probe["name"] == "runtime_heartbeat")
+    assert heartbeat["status"] == "MISSING_PROBE"
+    assert heartbeat["details"] == "PERSISTED_HEARTBEAT_NOT_IMPLEMENTED"
+    assert payload["counts"]["NO_EVIDENCE"] == 26
+    assert payload["control_boundary"]["dashboard_mutation_controls"] == "INTENTIONALLY_OMITTED"
+    assert not db_path.exists(), "probe view must not create a missing runtime SQLite database"
+
+
+def test_readiness_probe_matrix_surfaces_missing_expected_report_checks(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'readiness.db'}"
+    seed_engine = init_db(database_url)
+    with seed_engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS live_readiness_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                generated_at TEXT NOT NULL,
+                qualified INTEGER NOT NULL,
+                deployment_state TEXT NOT NULL,
+                acknowledgement_required INTEGER NOT NULL,
+                report_payload TEXT NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO live_readiness_reports(generated_at, qualified, deployment_state, acknowledgement_required, report_payload)
+            VALUES (:generated_at, 0, 'LIVE_BLOCKED', 1, :payload)
+        """), {
+            "generated_at": "2026-05-23T10:00:00Z",
+            "payload": json.dumps({"checks": [{"name": "lifecycle_no_orphans", "passed": True, "details": "orphan_signals=0"}]}),
+        })
+    seed_engine.dispose()
+    payload = TestClient(create_app(database_url)).get("/api/v1/readiness/probes").json()
+
+    assert next(probe for probe in payload["probes"] if probe["name"] == "lifecycle_no_orphans")["status"] == "PASS"
+    assert next(probe for probe in payload["probes"] if probe["name"] == "mode_parity")["status"] == "MISSING_IN_REPORT"
+    assert payload["critical_gap_count"] == 26
 
 
 def test_html_dashboard_pages_load_without_existing_runtime_schema(tmp_path) -> None:
