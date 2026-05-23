@@ -130,10 +130,10 @@ class LiveReadinessEvaluator:
             for idx in range(1, len(events)):
                 if str(events[idx]["lifecycle_state"]) not in ALLOWED_LIFECYCLE_TRANSITIONS.get(str(events[idx - 1]["lifecycle_state"]), set()):
                     invalid_transitions += 1
-            rejected = [e for e in events if e["lifecycle_state"] == LifecycleEventType.SIGNAL_REJECTED.value]
-            if rejected and not any((e.get("reject_reason") or "").strip() for e in rejected):
+            rejected = [event for event in events if event["lifecycle_state"] == LifecycleEventType.SIGNAL_REJECTED.value]
+            if rejected and not any((event.get("reject_reason") or "").strip() for event in rejected):
                 reject_missing += 1
-            if any(e["lifecycle_state"] == LifecycleEventType.ENTRY_TRIGGERED.value for e in events) and not any(e["lifecycle_state"] in terminal_states for e in events):
+            if any(event["lifecycle_state"] == LifecycleEventType.ENTRY_TRIGGERED.value for event in events) and not any(event["lifecycle_state"] in terminal_states for event in events):
                 exit_missing += 1
         return [
             CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"),
@@ -145,7 +145,7 @@ class LiveReadinessEvaluator:
     def _check_persistence(self, conn: Any) -> list[CheckResult]:
         checks: list[CheckResult] = []
         for table, fields in {"signals": CRITICAL_SIGNAL_FIELDS, "order_decisions": CRITICAL_DECISION_FIELDS, "trade_lifecycle_events": CRITICAL_LIFECYCLE_FIELDS}.items():
-            cols = {str(r[1]) for r in conn.execute(text(f"PRAGMA table_info({table})")).all()}
+            cols = {str(row[1]) for row in conn.execute(text(f"PRAGMA table_info({table})")).all()}
             missing = [field for field in fields if field not in cols]
             checks.append(CheckResult(f"schema_{table}", not missing, f"missing_fields={missing}"))
             null_rows = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE " + " OR ".join([f"{field} IS NULL" for field in fields]))).scalar_one()
@@ -169,11 +169,7 @@ class LiveReadinessEvaluator:
         ]
 
     def _check_runtime_heartbeat(self) -> CheckResult:
-        evidence = evaluate_runtime_heartbeat_freshness(
-            self.engine,
-            required_mode="LIVE",
-            max_age_sec=self.runtime_heartbeat_max_age_sec,
-        )
+        evidence = evaluate_runtime_heartbeat_freshness(self.engine, required_mode="LIVE", max_age_sec=self.runtime_heartbeat_max_age_sec)
         latest = evidence.latest_heartbeat or {}
         details = (
             f"state={evidence.state},reason={evidence.reason},"
@@ -219,10 +215,11 @@ class LiveReadinessEvaluator:
         stored_alert = latest_persisted_alert_delivery_evidence(self.engine)
         stored_rollback = latest_persisted_rollback_evidence(self.engine)
         effective = {**dict(obs), **stored_alert, **stored_rollback}
+        mutation_count, mutation_count_ok = self._parse_non_negative_int(effective.get("execution_mutation_attempt_count"))
         observability_provenance = str(effective.get("observability_evidence_source", "")).upper() == "MEASURED_PROBE" and bool(effective.get("observability_evidence_persisted", False))
         rollback_provenance = str(effective.get("rollback_evidence_source", "")).upper() == "DETERMINISTIC_VALIDATION" and bool(effective.get("rollback_evidence_persisted", False))
         coverage = observability_provenance and bool(effective.get("qualification_persistence_verified", False)) and bool(effective.get("incident_persistence_verified", False)) and bool(effective.get("forensic_export_verified", False)) and bool(effective.get("sensitive_data_redaction_verified", False)) and bool(effective.get("alert_delivery_verified", False)) and str(effective.get("evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
-        rollback = rollback_provenance and bool(effective.get("rollback_evidence_verified", False)) and bool(effective.get("kill_switch_block_verified", False)) and bool(effective.get("no_submit_on_kill_switch_verified", False)) and bool(effective.get("fail_closed_reconciliation_verified", False)) and bool(effective.get("repair_actions_non_mutating_verified", False)) and int(effective.get("execution_mutation_attempt_count", 1) or 1) == 0 and str(effective.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
+        rollback = rollback_provenance and bool(effective.get("rollback_evidence_verified", False)) and bool(effective.get("kill_switch_block_verified", False)) and bool(effective.get("no_submit_on_kill_switch_verified", False)) and bool(effective.get("fail_closed_reconciliation_verified", False)) and bool(effective.get("repair_actions_non_mutating_verified", False)) and mutation_count_ok and mutation_count == 0 and str(effective.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
         return [
             CheckResult("shadow_mode_enabled", shadow_mode_enabled, "shadow mode required"),
             CheckResult("canary_enabled", canary_enabled, "canary required for controlled enablement"),
