@@ -1495,3 +1495,53 @@ Tests: pytest -q tests/test_config_layer.py tests/test_runtime_env_config.py tes
 
 ### Push recommendation
 - Merge recommended. This closes a P1 qualification mutation bug while preserving deterministic PAPER vs LIVE_PRECHECK parity evidence semantics.
+
+## 2026-05-22 JOB19 V1 — PAPER runtime reject-rate and decision-quality audit diagnostics (audit-only)
+
+### Why this patch was needed
+- JOB19 V1 required a lowest-risk audit instrument to inspect PAPER runtime selectivity and persistence quality without changing runtime behavior, thresholds, schema, or lifecycle emission logic.
+
+### Root cause addressed
+- There was no single reusable SQL diagnostics bundle in-repo to consistently evaluate PAPER decision/reject quality and lifecycle integrity from a runtime SQLite artifact.
+
+### Files changed
+- `sql/diagnostics/job19_paper_reject_rate_decision_quality_audit.sql`
+- `REPORT.md`
+
+### Runtime behavior changes
+- None. No runtime Python execution path, reject logic, schema DDL, thresholds, score calculation, RR calculation, scanner wiring, or lifecycle emission code was modified.
+
+### What the diagnostic queries prove
+Given a real PAPER runtime SQLite DB containing `order_decisions` and `trade_lifecycle_events`, this query pack can prove:
+- Total PAPER decisions, rejected/accepted counts, and computed rejection rate.
+- Whether rejected rows are missing `reject_reason`.
+- Missingness of audit-critical fields (`signal_id`, `symbol`, `decision`, timestamps, score/RR/effective RR, execution context fields).
+- Duplicate or inconsistent per-signal decisions.
+- Whether score/raw RR/effective RR show variation versus constant-like behavior.
+- Execution context presence and `execution_ctx_missing` flag coverage.
+- Lifecycle row completeness, unexpected state labels, and per-signal sequence/time ordering anomalies.
+
+### What the diagnostic queries cannot prove (without runtime artifact evidence)
+- They cannot issue a real reject-quality verdict in absence of a committed/repository-accessible PAPER runtime SQLite artifact with representative production-like sample size.
+- They cannot prove economic expectancy or execution-adjusted profitability; they only measure persistence and decision/lifecycle data characteristics.
+- They cannot validate external market realism inputs (spread/slippage/latency/liquidity fidelity) beyond what was persisted.
+
+### Classification framework for JOB19
+Use this framework only after executing diagnostics against a real PAPER runtime DB sample:
+- `HEALTHY_SELECTIVITY`
+  - Rejection rate and reason distribution are plausible, required fields are substantially complete, lifecycle ordering is coherent, and score/RR signals are non-constant.
+- `DATA_INTEGRITY_FAILURE`
+  - Critical missing fields, duplicated/inconsistent decisions, or lifecycle-state/timestamp integrity failures materially undermine auditability.
+- `EXECUTION_CONTEXT_FAILURE`
+  - Execution context availability is broadly absent or consistently flagged missing, preventing execution-aware reject-quality interpretation.
+- `SCORING_OR_REGIME_PIPELINE_FAILURE`
+  - Score/raw RR/effective RR variability collapses (constant/near-constant signatures) or reject reasoning appears structurally disconnected from expected signal diversity.
+- `INSUFFICIENT_SAMPLE`
+  - Sample too small or too narrow in time/symbol/regime coverage for confident selectivity conclusions.
+
+### Risks / limitations
+- Results remain fully artifact-dependent; query outputs should be interpreted with minimum sample-size and regime-diversity checks.
+- SQLite dialect assumptions (e.g., `GROUP_CONCAT`) are intentionally used because runtime persistence target is SQLite by default.
+
+### Push recommendation
+- Recommend merge as audit-only instrumentation with minimal blast radius.

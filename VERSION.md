@@ -1,3 +1,14 @@
+## 2026-05-22 JOB19 V1 audit-only PAPER reject-rate diagnostics
+- **Current version:** 0.1.0-audit
+- **Current phase:** PAPER runtime audit instrumentation
+- **Runtime maturity:** Trading/runtime behavior unchanged; SQL-only diagnostics added for PAPER decision-quality audits.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged (no decision-path modifications).
+- **Lifecycle coverage:** query-level lifecycle consistency checks added; emission logic unchanged.
+- **Execution realism coverage:** unchanged; diagnostics only inspect persisted evidence quality.
+- **Known critical risks:** no repository-committed PAPER runtime DB artifact yet for real verdict classification.
+- **Last audit date:** 2026-05-22
+- **Live readiness verdict:** BLOCKED (unchanged).
+
 ## 2026-05-22 LIVE qualification incident persistence rollback + defensive parity parsing follow-up
 - **Version:** `0.3.31-dev`
 - **Current phase:** Phase 6.2 fail-closed readiness evidence integrity follow-up.

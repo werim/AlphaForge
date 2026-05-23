@@ -1,3 +1,23 @@
+## [Unreleased] - 2026-05-22 (JOB19 V1 audit diagnostics only)
+
+### Added
+- Added `sql/diagnostics/job19_paper_reject_rate_decision_quality_audit.sql` with reusable PAPER runtime SQL checks for reject-rate, reject-reason completeness, missing critical fields, duplicate/inconsistent decisions, score/RR variability, execution-context availability, and lifecycle consistency.
+
+### Changed
+- Updated `REPORT.md` with JOB19 V1 audit scope, evidence limitations, and classification framework (`HEALTHY_SELECTIVITY`, `DATA_INTEGRITY_FAILURE`, `EXECUTION_CONTEXT_FAILURE`, `SCORING_OR_REGIME_PIPELINE_FAILURE`, `INSUFFICIENT_SAMPLE`).
+
+### Fixed
+- None.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Real verdict remains blocked without repository-accessible PAPER runtime SQLite evidence artifact.
+
 ## [Unreleased] - 2026-05-22 (LIVE qualification startup persistence and forensic redaction precision follow-up)
 
 ### Changed
