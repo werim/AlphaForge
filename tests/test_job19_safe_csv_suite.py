@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+import sys
 from pathlib import Path
+
+# The exporter is a repository-root CLI module, while CI's test path exposes
+# the application package under src/. Add the repository root explicitly so
+# this regression test exercises the real CLI implementation.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from run_sql_audits import run_all_sql_audits
 
