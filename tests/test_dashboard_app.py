@@ -98,7 +98,7 @@ def test_readiness_probe_matrix_surfaces_missing_expected_report_checks(tmp_path
     seed_engine = init_db(database_url)
     with seed_engine.begin() as conn:
         conn.execute(text("""
-            CREATE TABLE live_readiness_reports (
+            CREATE TABLE IF NOT EXISTS live_readiness_reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 generated_at TEXT NOT NULL,
                 qualified INTEGER NOT NULL,
