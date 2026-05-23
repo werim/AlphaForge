@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 from typing import Any, Mapping
 
@@ -150,7 +150,7 @@ def fetch_latest_runtime_heartbeat(engine: Engine, *, execution_mode: str | None
                        pending_orders_count, evidence_status, payload_json
                 FROM runtime_heartbeats
                 {where}
-                ORDER BY heartbeat_ts DESC, id DESC
+                ORDER BY id DESC
                 LIMIT 1
             """), params).mappings().first()
     except SQLAlchemyError:
