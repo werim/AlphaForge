@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 
 from alphaforge.alert_delivery import latest_persisted_alert_delivery_evidence
 from alphaforge.contracts import ALLOWED_LIFECYCLE_TRANSITIONS, LifecycleEventType, canonical_utc_timestamp
+from alphaforge.rollback_evidence import latest_persisted_rollback_evidence
 from alphaforge.runtime_heartbeat import DEFAULT_MAX_AGE_SEC, evaluate_runtime_heartbeat_freshness
 
 CRITICAL_SIGNAL_FIELDS = ("signal_id", "symbol", "mode", "created_at")
@@ -216,18 +217,19 @@ class LiveReadinessEvaluator:
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
         stored_alert = latest_persisted_alert_delivery_evidence(self.engine)
-        effective = {**dict(obs), **stored_alert}
+        stored_rollback = latest_persisted_rollback_evidence(self.engine)
+        effective = {**dict(obs), **stored_alert, **stored_rollback}
         observability_provenance = str(effective.get("observability_evidence_source", "")).upper() == "MEASURED_PROBE" and bool(effective.get("observability_evidence_persisted", False))
         rollback_provenance = str(effective.get("rollback_evidence_source", "")).upper() == "DETERMINISTIC_VALIDATION" and bool(effective.get("rollback_evidence_persisted", False))
         coverage = observability_provenance and bool(effective.get("qualification_persistence_verified", False)) and bool(effective.get("incident_persistence_verified", False)) and bool(effective.get("forensic_export_verified", False)) and bool(effective.get("sensitive_data_redaction_verified", False)) and bool(effective.get("alert_delivery_verified", False)) and str(effective.get("evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
-        rollback = rollback_provenance and bool(effective.get("kill_switch_block_verified", False)) and bool(effective.get("no_submit_on_kill_switch_verified", False)) and bool(effective.get("fail_closed_reconciliation_verified", False)) and bool(effective.get("repair_actions_non_mutating_verified", False)) and str(effective.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
+        rollback = rollback_provenance and bool(effective.get("rollback_evidence_verified", False)) and bool(effective.get("kill_switch_block_verified", False)) and bool(effective.get("no_submit_on_kill_switch_verified", False)) and bool(effective.get("fail_closed_reconciliation_verified", False)) and bool(effective.get("repair_actions_non_mutating_verified", False)) and int(effective.get("execution_mutation_attempt_count", 1) or 1) == 0 and str(effective.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
         return [
             CheckResult("shadow_mode_enabled", shadow_mode_enabled, "shadow mode required"),
             CheckResult("canary_enabled", canary_enabled, "canary required for controlled enablement"),
             CheckResult("operator_acknowledged", operator_ack, "explicit operator acknowledgement required"),
             CheckResult("alert_delivery_evidence", bool(stored_alert.get("alert_delivery_verified", False)), f"alert_evidence={stored_alert}"),
             CheckResult("observability_coverage", coverage, "OBSERVABILITY_EVIDENCE_UNVERIFIED" if not coverage else f"observability={effective}"),
-            CheckResult("rollback_ready", rollback, "ROLLBACK_EVIDENCE_UNVERIFIED" if not rollback else f"rollback_ready={rollback}"),
+            CheckResult("rollback_ready", rollback, f"rollback_evidence={stored_rollback}" if rollback else f"ROLLBACK_EVIDENCE_UNVERIFIED:{stored_rollback.get('rollback_blocking_reasons', [])}"),
         ]
 
     def _sanitize_runtime_snapshot(self, runtime_snapshot: Mapping[str, Any]) -> dict[str, Any]:
