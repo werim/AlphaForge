@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 
 from sqlalchemy import text
 
@@ -59,3 +60,31 @@ def test_failed_evidence_cannot_report_complete() -> None:
     saved = persist_rollback_validation_evidence(engine, evidence)
     assert saved["evidence_status"] == "INCOMPLETE"
     assert latest_persisted_rollback_evidence(engine)["rollback_evidence_verified"] is False
+
+
+def test_evidence_payload_persists_only_allowlisted_fields() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    evidence = _complete_evidence()
+    evidence["evidence_payload"] = {
+        "validation_scope": "ALLOWLIST_TEST",
+        "guard_path": "existing_guard",
+        "unapproved_note": "must-not-persist",
+        "raw_transport_payload": "must-not-persist",
+    }
+    persist_rollback_validation_evidence(engine, evidence)
+    with engine.connect() as conn:
+        stored = json.loads(conn.execute(text("SELECT evidence_payload FROM live_rollback_validation_evidence")).scalar_one())
+    assert stored["validation_scope"] == "ALLOWLIST_TEST"
+    assert stored["guard_path"] == "existing_guard"
+    assert "unapproved_note" not in stored
+    assert "raw_transport_payload" not in stored
+
+
+def test_malformed_persisted_payload_fails_closed() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    persist_rollback_validation_evidence(engine, _complete_evidence())
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE live_rollback_validation_evidence SET evidence_payload=:payload"), {"payload": "not-json"})
+    loaded = latest_persisted_rollback_evidence(engine)
+    assert loaded["rollback_evidence_verified"] is False
+    assert loaded["rollback_blocking_reasons"] == ["ROLLBACK_EVIDENCE_INVALID"]
