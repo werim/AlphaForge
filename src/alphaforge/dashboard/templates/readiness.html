@@ -22,4 +22,27 @@
       </table>
     </section>
   {% endif %}
+  <section class="panel">
+    <h2>Operations &amp; Readiness Evidence Coverage</h2>
+    <p>Salt-okunur kapsama görünümü. Eksik kanıt veya eksik probe, LIVE için yeşil ışık sayılmaz.</p>
+    <section class="cards">
+      <article class="metric"><label>Expected Probes</label><strong>{{ probe_matrix.expected_probe_count }}</strong></article>
+      <article class="metric"><label>Critical Gaps</label><strong class="badge {% if probe_matrix.critical_gap_count == 0 %}pass{% else %}fail{% endif %}">{{ probe_matrix.critical_gap_count }}</strong></article>
+      <article class="metric"><label>Coverage Status</label><strong class="badge {% if probe_matrix.status == 'COMPLETE' %}pass{% else %}fail{% endif %}">{{ probe_matrix.status }}</strong></article>
+    </section>
+    <table>
+      <thead><tr><th>Category</th><th>Probe</th><th>Status</th><th>Evidence Surface / Detail</th></tr></thead>
+      <tbody>
+      {% for probe in probe_matrix.probes %}
+        <tr>
+          <td>{{ probe.category }}</td>
+          <td>{{ probe.name }}</td>
+          <td><span class="badge {% if probe.status == 'PASS' %}pass{% else %}fail{% endif %}">{{ probe.status }}</span></td>
+          <td>{{ probe.surface }} · {{ probe.details }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div class="alert warn-box"><strong>Control boundary:</strong> {{ probe_matrix.control_boundary.dashboard_mutation_controls }}. This increment does not add order, LIVE activation, kill-switch or configuration write controls.</div>
+  </section>
 {% endblock %}
