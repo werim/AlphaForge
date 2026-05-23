@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-import time
 import uuid
 from typing import Any, Mapping
 
@@ -27,6 +27,7 @@ _ALLOWED_FIELDS = (
     "recommendation_categories",
     "repair_payloads_dry_run",
     "execution_adapter_bound",
+    "supported_mutation_interfaces",
 )
 
 
@@ -82,6 +83,8 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
     safe = {key: raw.get(key) for key in _ALLOWED_FIELDS if key in raw}
     if "recommendation_categories" in safe:
         safe["recommendation_categories"] = [str(item)[:80] for item in list(safe["recommendation_categories"] or [])[:20]]
+    if "supported_mutation_interfaces" in safe:
+        safe["supported_mutation_interfaces"] = [str(item)[:80] for item in list(safe["supported_mutation_interfaces"] or [])[:20]]
     if "finding_counts" in safe and isinstance(safe["finding_counts"], Mapping):
         safe["finding_counts"] = {str(key)[:80]: int(value) for key, value in safe["finding_counts"].items()}
     return safe
@@ -233,23 +236,64 @@ def latest_persisted_rollback_evidence(
     }
 
 
-def run_deterministic_rollback_validation(engine: Engine) -> dict[str, Any]:
-    """Persist a no-exchange-mutation validation of existing emergency safety paths."""
-    from alphaforge.runtime import RuntimeConfig, RuntimeOrchestrator, ExecutionMode
+async def run_deterministic_rollback_validation(engine: Engine) -> dict[str, Any]:
+    """Exercise existing no-submit and dry-run safety paths, then persist sanitized evidence."""
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+    from alphaforge.symbol_selector import SymbolSelectionResult
 
-    class _RiskGuardHarness:
-        config = RuntimeConfig(execution_mode=ExecutionMode.LIVE, global_kill_switch=True)
-        _active_positions: dict[str, float] = {}
-        _symbol_cooldown_until: dict[str, float] = {}
+    lifecycle_events: list[dict[str, Any]] = []
+    rejects: list[dict[str, Any]] = []
 
-    reason = RuntimeOrchestrator._evaluate_runtime_risk(
-        _RiskGuardHarness(),
-        "VALIDATIONUSDT",
-        {"market_ts": time.time(), "spread_pct": 0.0, "funding_rate_pct": 0.0},
+    class _NeverCalledBrain:
+        def before_real_order(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("kill-switch validation reached decision path")
+
+    class _TrackingAdapter:
+        def __init__(self) -> None:
+            self.submit_calls = 0
+
+        async def submit(self, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> Mapping[str, Any]:
+            self.submit_calls += 1
+            return {"status": "unexpected_submit"}
+
+    async def _scanner() -> list[dict[str, Any]]:
+        return []
+
+    adapter = _TrackingAdapter()
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, global_kill_switch=True),
+        ai_brain=_NeverCalledBrain(),
+        market_scanner=_scanner,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        real_execution_adapter=adapter,
+        on_lifecycle_event=lambda payload: lifecycle_events.append(dict(payload)),
+        on_reject_persist=lambda payload: rejects.append(dict(payload)),
     )
-    kill_switch_ok = reason == "GLOBAL_KILL_SWITCH"
-    mutation_attempts = 0
-    no_submit_ok = kill_switch_ok and mutation_attempts == 0
+    selection = SymbolSelectionResult(
+        symbol="VALIDATIONUSDT",
+        tradable=True,
+        symbol_score=8.0,
+        regime_hint="FAVORABLE",
+        liquidity_score=8.0,
+        volatility_score=8.0,
+        trend_score=8.0,
+        spread_score=8.0,
+        volume_score=8.0,
+        diagnostics={"inputs": {
+            "market_ts": __import__("time").time(),
+            "spread_pct": 0.0001,
+            "funding_rate_pct": 0.00001,
+            "entry": 100.0,
+            "rr": 2.0,
+            "side": "LONG",
+        }},
+    )
+    await orchestrator._process_symbol(selection)
+    reject_reason = str(rejects[-1].get("reason") if rejects else "")
+    states = [str(event.get("lifecycle_state")) for event in lifecycle_events]
+    kill_switch_ok = reject_reason == "GLOBAL_KILL_SWITCH" and "SIGNAL_REJECTED" in states
+    mutation_attempts = adapter.submit_calls
+    no_submit_ok = kill_switch_ok and mutation_attempts == 0 and orchestrator.metrics.executions == 0
 
     reconciler = ReconciliationEngine()
     snapshot = reconciler.snapshot_from_source({
@@ -290,14 +334,15 @@ def run_deterministic_rollback_validation(engine: Engine) -> dict[str, Any]:
         "execution_mutation_attempt_count": mutation_attempts,
         "blocking_reasons": blocking_reasons,
         "evidence_payload": {
-            "validation_scope": "LOCAL_DETERMINISTIC_NO_ADAPTER_BOUND",
-            "guard_path": "RuntimeOrchestrator._evaluate_runtime_risk",
-            "guard_reject_reason": reason,
+            "validation_scope": "LOCAL_DETERMINISTIC_TRACKING_ADAPTER",
+            "guard_path": "RuntimeOrchestrator._process_symbol -> _evaluate_runtime_risk -> _persist_reject",
+            "guard_reject_reason": reject_reason,
             "unsafe_snapshot_case": "ORPHAN_ORDER",
             "finding_counts": finding_counts,
             "recommendation_categories": [item.category for item in recommendations],
             "repair_payloads_dry_run": repair_non_mutating_ok,
-            "execution_adapter_bound": False,
+            "execution_adapter_bound": True,
+            "supported_mutation_interfaces": ["submit"],
         },
     })
 
@@ -306,7 +351,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Persist deterministic non-trading rollback readiness evidence")
     parser.add_argument("--database-url", required=True, help="Runtime SQLite SQLAlchemy URL")
     args = parser.parse_args()
-    result = run_deterministic_rollback_validation(create_engine(args.database_url, future=True))
+    result = asyncio.run(run_deterministic_rollback_validation(create_engine(args.database_url, future=True)))
     print(json.dumps(result, sort_keys=True))
 
 
