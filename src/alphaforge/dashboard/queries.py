@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from alphaforge.runtime_heartbeat import evaluate_runtime_heartbeat_freshness
+from .rollback_queries import fetch_rollback_evidence_status
 
 
 READINESS_PROBE_CATALOG: tuple[dict[str, Any], ...] = (
@@ -37,7 +38,7 @@ READINESS_PROBE_CATALOG: tuple[dict[str, Any], ...] = (
     {"name": "operator_acknowledged", "category": "deployment_guard", "surface": "live_readiness_reports", "critical": True, "implemented": True},
     {"name": "alert_delivery_evidence", "category": "observability", "surface": "live_readiness_reports", "critical": True, "implemented": True},
     {"name": "observability_coverage", "category": "observability", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "rollback_ready", "category": "emergency_control", "surface": "live_readiness_reports", "critical": True, "implemented": True},
+    {"name": "rollback_ready", "category": "emergency_control", "surface": "live_rollback_validation_evidence", "critical": True, "implemented": True},
 )
 
 
@@ -84,9 +85,7 @@ def fetch_latest_readiness(engine: Engine) -> dict[str, Any]:
         with engine.connect() as conn:
             row = conn.execute(text("""
                 SELECT generated_at, qualified, deployment_state, acknowledgement_required, report_payload
-                FROM live_readiness_reports
-                ORDER BY id DESC
-                LIMIT 1
+                FROM live_readiness_reports ORDER BY id DESC LIMIT 1
             """)).mappings().first()
     except SQLAlchemyError:
         return {"status": "NOT_AVAILABLE", "reason": "READINESS_QUERY_UNAVAILABLE"}
@@ -106,10 +105,29 @@ def fetch_latest_readiness(engine: Engine) -> dict[str, Any]:
     }
 
 
+def _rollback_probe(evidence: dict[str, Any]) -> dict[str, Any]:
+    passed = bool(evidence.get("rollback_evidence_verified", False))
+    persisted = bool(evidence.get("rollback_evidence_persisted", False))
+    reasons = evidence.get("rollback_blocking_reasons") or []
+    status = "PASS" if passed else ("NO_EVIDENCE" if not persisted else "FAIL")
+    details = (
+        f"source={evidence.get('rollback_evidence_source', 'UNVERIFIED')};"
+        f"status={evidence.get('rollback_evidence_status', 'INCOMPLETE')};"
+        f"kill_switch_block={evidence.get('kill_switch_block_verified', False)};"
+        f"no_submit={evidence.get('no_submit_on_kill_switch_verified', False)};"
+        f"fail_closed_reconciliation={evidence.get('fail_closed_reconciliation_verified', False)};"
+        f"repair_non_mutating={evidence.get('repair_actions_non_mutating_verified', False)};"
+        f"mutation_attempts={evidence.get('execution_mutation_attempt_count')};"
+        f"blocking_reasons={reasons}"
+    )
+    return {"status": status, "details": details, "recorded_at": evidence.get("recorded_at"), "age_sec": evidence.get("rollback_evidence_age_sec")}
+
+
 def fetch_readiness_probe_matrix(engine: Engine) -> dict[str, Any]:
     """Expose expected readiness probes and evidence gaps without running probes or mutating state."""
     readiness = fetch_latest_readiness(engine)
     heartbeat = evaluate_runtime_heartbeat_freshness(engine, required_mode="LIVE")
+    rollback = fetch_rollback_evidence_status(engine)
     report_checks = {
         str(check.get("name")): check
         for check in readiness.get("payload", {}).get("checks", [])
@@ -128,6 +146,8 @@ def fetch_readiness_probe_matrix(engine: Engine) -> dict[str, Any]:
                 "runtime_instance_id": latest.get("runtime_instance_id"),
                 "freshness_state": heartbeat.state,
             })
+        elif probe["name"] == "rollback_ready":
+            probe.update(_rollback_probe(rollback))
         elif readiness.get("status") == "NOT_AVAILABLE":
             probe.update({"status": "NO_EVIDENCE", "details": readiness.get("reason", "NO_READINESS_REPORT")})
         elif probe["name"] not in report_checks:
