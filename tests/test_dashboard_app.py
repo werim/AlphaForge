@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import pytest
+
+pytest.importorskip("fastapi")
+pytest.importorskip("httpx")
+
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError
