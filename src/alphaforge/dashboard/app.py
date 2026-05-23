@@ -14,7 +14,13 @@ from sqlalchemy.engine.url import make_url
 from alphaforge.config import load_config_from_env
 from alphaforge.contracts import canonical_utc_timestamp
 
-from .queries import fetch_latest_readiness, fetch_recent_lifecycle, fetch_reject_summary, fetch_signal_timeline
+from .queries import (
+    fetch_latest_readiness,
+    fetch_readiness_probe_matrix,
+    fetch_recent_lifecycle,
+    fetch_reject_summary,
+    fetch_signal_timeline,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -113,7 +119,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return TEMPLATES.TemplateResponse(
             request=request,
             name="readiness.html",
-            context={"readiness": fetch_latest_readiness(app.state.engine), "page": "readiness"},
+            context={
+                "readiness": fetch_latest_readiness(app.state.engine),
+                "probe_matrix": fetch_readiness_probe_matrix(app.state.engine),
+                "page": "readiness",
+            },
         )
 
     @app.get("/api/v1/runtime/status")
@@ -131,6 +141,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/api/v1/readiness/latest")
     async def api_latest_readiness() -> dict[str, Any]:
         return fetch_latest_readiness(app.state.engine)
+
+    @app.get("/api/v1/readiness/probes")
+    async def api_readiness_probe_matrix() -> dict[str, Any]:
+        return fetch_readiness_probe_matrix(app.state.engine)
 
     return app
 
