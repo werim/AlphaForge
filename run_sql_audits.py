@@ -10,6 +10,9 @@ produce a small status CSV. Failures are isolated per file and written as
 Use `--db auto` to discover a local SQLite runtime database automatically.
 Discovery favors PAPER/runtime database names, then the most recently modified
 valid SQLite database candidate.
+
+Every run also writes `all_reports_summary.csv`, a single inventory of each SQL
+file, execution status, row/column counts, output CSV path, and DB metadata.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import csv
 import os
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -66,6 +70,29 @@ _PREFERRED_NAME_PARTS = (
     "decision",
     "trade",
 )
+_SUMMARY_COLUMNS = [
+    "sql_file",
+    "status",
+    "rows",
+    "columns",
+    "output_csv",
+    "error_type",
+    "error",
+    "db_path",
+    "db_size_bytes",
+    "db_mtime_epoch",
+]
+
+
+@dataclass(slots=True)
+class AuditResult:
+    sql_file: str
+    status: str
+    rows: int
+    columns: int
+    output_csv: str
+    error_type: str = ""
+    error: str = ""
 
 
 def safe_report_name(sql_file: Path) -> str:
@@ -202,13 +229,13 @@ def write_error_csv(csv_path: Path, sql_file: str, error: Exception) -> None:
         writer.writerow([sql_file, type(error).__name__, str(error)])
 
 
-def run_sql_to_csv(conn: sqlite3.Connection, sql_path: Path, out_dir: Path) -> Path:
+def run_sql_to_csv(conn: sqlite3.Connection, sql_path: Path, out_dir: Path) -> AuditResult:
     sql = read_sql(sql_path)
     out_csv = out_dir / f"{safe_report_name(sql_path)}.csv"
 
     if not sql:
         write_status_csv(out_csv, "SKIPPED_EMPTY_SQL")
-        return out_csv
+        return AuditResult(sql_path.name, "SKIPPED_EMPTY_SQL", 0, 1, str(out_csv))
 
     if not looks_like_result_query(sql):
         raise ValueError(
@@ -219,15 +246,37 @@ def run_sql_to_csv(conn: sqlite3.Connection, sql_path: Path, out_dir: Path) -> P
     cursor = conn.execute(sql)
     if cursor.description is None:
         write_status_csv(out_csv, "SQL_EXECUTED_WITH_NO_RESULT_SET")
-        return out_csv
+        return AuditResult(sql_path.name, "NO_RESULT_SET", 0, 1, str(out_csv))
 
     rows = cursor.fetchall()
     columns = [description[0] for description in cursor.description]
     write_rows_csv(out_csv, columns, rows)
-    return out_csv
+    return AuditResult(sql_path.name, "OK", len(rows), len(columns), str(out_csv))
 
 
-def run_all_sql_audits(db_path: Path, sql_dir: Path, out_dir: Path) -> int:
+def write_summary_csv(summary_path: Path, db_path: Path, results: list[AuditResult]) -> None:
+    db_stat = db_path.stat()
+    with summary_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_SUMMARY_COLUMNS)
+        writer.writeheader()
+        for result in results:
+            writer.writerow(
+                {
+                    "sql_file": result.sql_file,
+                    "status": result.status,
+                    "rows": result.rows,
+                    "columns": result.columns,
+                    "output_csv": result.output_csv,
+                    "error_type": result.error_type,
+                    "error": result.error,
+                    "db_path": str(db_path),
+                    "db_size_bytes": db_stat.st_size,
+                    "db_mtime_epoch": db_stat.st_mtime,
+                }
+            )
+
+
+def run_all_sql_audits(db_path: Path, sql_dir: Path, out_dir: Path, summary_name: str) -> int:
     if not db_path.exists():
         raise FileNotFoundError(f"SQLite DB not found: {db_path}")
     if not sql_dir.exists():
@@ -238,21 +287,37 @@ def run_all_sql_audits(db_path: Path, sql_dir: Path, out_dir: Path) -> int:
 
     if not sql_files:
         print(f"No .sql files found in {sql_dir}")
+        write_summary_csv(out_dir / summary_name, db_path, [])
         return 0
 
     failures = 0
+    results: list[AuditResult] = []
     with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
         conn.row_factory = sqlite3.Row
         for sql_path in sql_files:
             try:
-                csv_path = run_sql_to_csv(conn, sql_path, out_dir)
-                print(f"OK {sql_path.name} -> {csv_path}")
+                result = run_sql_to_csv(conn, sql_path, out_dir)
+                results.append(result)
+                print(f"OK {sql_path.name} -> {result.output_csv}")
             except Exception as exc:  # keep audits independent
                 failures += 1
                 error_csv = out_dir / f"{safe_report_name(sql_path)}__ERROR.csv"
                 write_error_csv(error_csv, sql_path.name, exc)
+                result = AuditResult(
+                    sql_file=sql_path.name,
+                    status="ERROR",
+                    rows=1,
+                    columns=3,
+                    output_csv=str(error_csv),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                results.append(result)
                 print(f"ERROR {sql_path.name} -> {error_csv}: {exc}")
 
+    summary_path = out_dir / summary_name
+    write_summary_csv(summary_path, db_path, results)
+    print(f"SUMMARY -> {summary_path}")
     return failures
 
 
@@ -273,6 +338,11 @@ def parse_args() -> argparse.Namespace:
         help="Directory where CSV reports will be written",
     )
     parser.add_argument(
+        "--summary-name",
+        default="all_reports_summary.csv",
+        help="Aggregate summary CSV filename written inside --out-dir",
+    )
+    parser.add_argument(
         "--search-root",
         default=Path("."),
         type=Path,
@@ -289,7 +359,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     db_path = resolve_db_path(args.db, args.search_root)
-    failures = run_all_sql_audits(db_path, args.sql_dir, args.out_dir)
+    failures = run_all_sql_audits(db_path, args.sql_dir, args.out_dir, args.summary_name)
     if failures and not args.allow_failures:
         return 1
     return 0
