@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
 from sqlalchemy import text
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
+from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 
 
 def _seed_valid(session: Session) -> None:
@@ -46,12 +47,19 @@ def _verified_alert() -> dict[str, object]:
     return {"provider_configured": True, "evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "alert_delivery_verified": True, "delivery_attempted": True, "delivery_acknowledged": True, "non_trading_probe_verified": True, "probe_id": "probe-verified", "endpoint_origin": "https://alerts.example.test", "blocking_reasons": []}
 
 
-def _engine(*, persist_alert: bool = True):
+def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True):
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
     if persist_alert:
         capture_alert_delivery_evidence(engine, _StaticProvider(_verified_alert()))
+    if persist_live_heartbeat:
+        save_runtime_heartbeat(
+            engine,
+            runtime_instance_id="runtime:live-qualified-test",
+            execution_mode="LIVE",
+            scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        )
     return engine
 
 
@@ -64,9 +72,43 @@ def test_live_readiness_pass_and_persistence() -> None:
     evaluator = LiveReadinessEvaluator(engine)
     report = _evaluate(engine)
     assert report.qualified is True
+    assert next(check for check in report.checks if check.name == "runtime_heartbeat").passed is True
     evaluator.persist_report(report)
     with engine.begin() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1
+
+
+def test_live_readiness_rejects_missing_runtime_heartbeat() -> None:
+    report = _evaluate(_engine(persist_live_heartbeat=False))
+    heartbeat = next(check for check in report.checks if check.name == "runtime_heartbeat")
+    assert report.qualified is False
+    assert heartbeat.passed is False
+    assert "NO_PERSISTED_LIVE_RUNTIME_HEARTBEAT" in heartbeat.details
+
+
+def test_live_readiness_rejects_paper_only_runtime_heartbeat() -> None:
+    engine = _engine(persist_live_heartbeat=False)
+    save_runtime_heartbeat(engine, runtime_instance_id="runtime:paper-only", execution_mode="PAPER", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
+    heartbeat = next(check for check in _evaluate(engine).checks if check.name == "runtime_heartbeat")
+    assert heartbeat.passed is False
+    assert "NO_PERSISTED_LIVE_RUNTIME_HEARTBEAT" in heartbeat.details
+
+
+def test_live_readiness_rejects_stale_live_runtime_heartbeat() -> None:
+    engine = _engine(persist_live_heartbeat=False)
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    save_runtime_heartbeat(engine, runtime_instance_id="runtime:stale-live", execution_mode="LIVE", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", heartbeat_ts=stale)
+    heartbeat = next(check for check in _evaluate(engine).checks if check.name == "runtime_heartbeat")
+    assert heartbeat.passed is False
+    assert "state=STALE" in heartbeat.details
+
+
+def test_fresh_live_heartbeat_satisfies_only_its_independent_subcheck() -> None:
+    report = _evaluate(_engine(persist_alert=False))
+    results = {check.name: check for check in report.checks}
+    assert results["runtime_heartbeat"].passed is True
+    assert results["alert_delivery_evidence"].passed is False
+    assert report.qualified is False
 
 
 def test_in_memory_alert_delivery_flag_without_persisted_ack_does_not_qualify() -> None:

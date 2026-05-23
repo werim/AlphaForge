@@ -7,9 +7,11 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from alphaforge.runtime_heartbeat import evaluate_runtime_heartbeat_freshness
+
 
 READINESS_PROBE_CATALOG: tuple[dict[str, Any], ...] = (
-    {"name": "runtime_heartbeat", "category": "runtime_presence", "surface": "persisted heartbeat", "critical": True, "implemented": False, "gap_reason": "PERSISTED_HEARTBEAT_NOT_IMPLEMENTED"},
+    {"name": "runtime_heartbeat", "category": "runtime_presence", "surface": "runtime_heartbeats", "critical": True, "implemented": True},
     {"name": "lifecycle_no_orphans", "category": "lifecycle_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
     {"name": "lifecycle_transitions_valid", "category": "lifecycle_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
     {"name": "rejected_has_reason", "category": "decision_integrity", "surface": "live_readiness_reports", "critical": True, "implemented": True},
@@ -55,6 +57,26 @@ def _column_names(engine: Engine, table_name: str) -> set[str]:
         return set()
 
 
+def fetch_runtime_heartbeat_status(engine: Engine, *, max_age_sec: float = 120.0) -> dict[str, Any]:
+    evidence = evaluate_runtime_heartbeat_freshness(engine, max_age_sec=max_age_sec)
+    heartbeat = evidence.latest_heartbeat or {}
+    return {
+        "runtime_process_status": evidence.state,
+        "runtime_process_status_reason": evidence.reason,
+        "latest_heartbeat_ts": heartbeat.get("heartbeat_ts"),
+        "runtime_instance_id": heartbeat.get("runtime_instance_id"),
+        "execution_mode": heartbeat.get("execution_mode"),
+        "scanner_source": heartbeat.get("scanner_source"),
+        "runtime_state": heartbeat.get("runtime_state"),
+        "heartbeat_age_sec": evidence.age_sec,
+        "heartbeat_max_age_sec": evidence.max_age_sec,
+        "last_scan_ts": heartbeat.get("last_scan_ts"),
+        "last_decision_ts": heartbeat.get("last_decision_ts"),
+        "active_positions_count": heartbeat.get("active_positions_count"),
+        "pending_orders_count": heartbeat.get("pending_orders_count"),
+    }
+
+
 def fetch_latest_readiness(engine: Engine) -> dict[str, Any]:
     if not _has_table(engine, "live_readiness_reports"):
         return {"status": "NOT_AVAILABLE", "reason": "NO_READINESS_REPORT_TABLE"}
@@ -87,6 +109,7 @@ def fetch_latest_readiness(engine: Engine) -> dict[str, Any]:
 def fetch_readiness_probe_matrix(engine: Engine) -> dict[str, Any]:
     """Expose expected readiness probes and evidence gaps without running probes or mutating state."""
     readiness = fetch_latest_readiness(engine)
+    heartbeat = evaluate_runtime_heartbeat_freshness(engine, required_mode="LIVE")
     report_checks = {
         str(check.get("name")): check
         for check in readiness.get("payload", {}).get("checks", [])
@@ -95,8 +118,16 @@ def fetch_readiness_probe_matrix(engine: Engine) -> dict[str, Any]:
     probes: list[dict[str, Any]] = []
     for expected in READINESS_PROBE_CATALOG:
         probe = dict(expected)
-        if not probe["implemented"]:
-            probe.update({"status": "MISSING_PROBE", "details": probe["gap_reason"]})
+        if probe["name"] == "runtime_heartbeat":
+            latest = heartbeat.latest_heartbeat or {}
+            probe.update({
+                "status": "PASS" if heartbeat.is_fresh else heartbeat.state,
+                "details": heartbeat.reason,
+                "heartbeat_ts": latest.get("heartbeat_ts"),
+                "execution_mode": latest.get("execution_mode"),
+                "runtime_instance_id": latest.get("runtime_instance_id"),
+                "freshness_state": heartbeat.state,
+            })
         elif readiness.get("status") == "NOT_AVAILABLE":
             probe.update({"status": "NO_EVIDENCE", "details": readiness.get("reason", "NO_READINESS_REPORT")})
         elif probe["name"] not in report_checks:
@@ -105,7 +136,8 @@ def fetch_readiness_probe_matrix(engine: Engine) -> dict[str, Any]:
             observed = report_checks[probe["name"]]
             probe.update({"status": "PASS" if bool(observed.get("passed")) else "FAIL", "details": str(observed.get("details", ""))})
         probes.append(probe)
-    counts = {status: sum(1 for probe in probes if probe["status"] == status) for status in ("PASS", "FAIL", "MISSING_PROBE", "MISSING_IN_REPORT", "NO_EVIDENCE")}
+    status_values = ("PASS", "FAIL", "MISSING", "STALE", "INVALID", "FUTURE_DATED", "MISSING_IN_REPORT", "NO_EVIDENCE")
+    counts = {status: sum(1 for probe in probes if probe["status"] == status) for status in status_values}
     gaps = [probe for probe in probes if probe["status"] != "PASS"]
     return {
         "status": "COMPLETE" if not gaps else "INCOMPLETE",
@@ -117,7 +149,7 @@ def fetch_readiness_probe_matrix(engine: Engine) -> dict[str, Any]:
         "control_boundary": {
             "dashboard_mutation_controls": "INTENTIONALLY_OMITTED",
             "reason": "READ_ONLY_OBSERVABILITY_INCREMENT",
-            "forbidden_actions": ["ORDER_SUBMISSION", "LIVE_ACTIVATION", "KILL_SWITCH_MUTATION", "CONFIG_EDIT"],
+            "forbidden_actions": ["ORDER_SUBMISSION", "LIVE_ACTIVATION", "KILL_SWITCH_MUTATION", "CONFIG_EDIT", "HEARTBEAT_WRITE"],
         },
     }
 
@@ -126,15 +158,7 @@ def fetch_reject_summary(engine: Engine) -> dict[str, Any]:
     columns = _column_names(engine, "order_decisions")
     required_columns = {"decision", "reject_reason", "signal_id", "symbol"}
     if not required_columns.issubset(columns):
-        return {
-            "status": "NOT_AVAILABLE",
-            "reason": "ORDER_DECISIONS_SCHEMA_INCOMPLETE",
-            "total_final_decisions": None,
-            "total_rejected": None,
-            "rejection_rate": None,
-            "reasons": [],
-            "incomplete_rejected_rows": {},
-        }
+        return {"status": "NOT_AVAILABLE", "reason": "ORDER_DECISIONS_SCHEMA_INCOMPLETE", "total_final_decisions": None, "total_rejected": None, "rejection_rate": None, "reasons": [], "incomplete_rejected_rows": {}}
     where_final = "COALESCE(phase, 'final') = 'final'" if "phase" in columns else "1 = 1"
     try:
         with engine.connect() as conn:
@@ -156,28 +180,13 @@ def fetch_reject_summary(engine: Engine) -> dict[str, Any]:
                 WHERE {where_final} AND UPPER(COALESCE(decision, '')) = 'REJECTED'
             """)).mappings().one()
     except SQLAlchemyError:
-        return {
-            "status": "NOT_AVAILABLE",
-            "reason": "ORDER_DECISIONS_QUERY_UNAVAILABLE",
-            "total_final_decisions": None,
-            "total_rejected": None,
-            "rejection_rate": None,
-            "reasons": [],
-            "incomplete_rejected_rows": {},
-        }
+        return {"status": "NOT_AVAILABLE", "reason": "ORDER_DECISIONS_QUERY_UNAVAILABLE", "total_final_decisions": None, "total_rejected": None, "rejection_rate": None, "reasons": [], "incomplete_rejected_rows": {}}
     return {
         "status": "AVAILABLE",
         "total_final_decisions": total,
         "total_rejected": rejected,
         "rejection_rate": (rejected / total) if total else None,
-        "reasons": [
-            {
-                "reason": row["reject_reason"],
-                "count": int(row["count"]),
-                "ratio": (int(row["count"]) / rejected) if rejected else None,
-            }
-            for row in rows
-        ],
+        "reasons": [{"reason": row["reject_reason"], "count": int(row["count"]), "ratio": (int(row["count"]) / rejected) if rejected else None} for row in rows],
         "incomplete_rejected_rows": {key: int(incomplete[key] or 0) for key in incomplete.keys()},
     }
 

@@ -19,6 +19,7 @@ from .queries import (
     fetch_readiness_probe_matrix,
     fetch_recent_lifecycle,
     fetch_reject_summary,
+    fetch_runtime_heartbeat_status,
     fetch_signal_timeline,
 )
 
@@ -45,6 +46,7 @@ def _create_dashboard_engine(database_url: str) -> Engine:
 
 def _status_payload(engine: Engine) -> dict[str, Any]:
     cfg = load_config_from_env().runtime
+    heartbeat_status = fetch_runtime_heartbeat_status(engine)
     return {
         "configured_execution_mode": cfg.execution_mode,
         "global_kill_switch": cfg.global_kill_switch,
@@ -53,8 +55,7 @@ def _status_payload(engine: Engine) -> dict[str, Any]:
         "enable_canary_mode": cfg.enable_canary_mode,
         "required_live_exchanges": list(cfg.required_live_exchanges),
         "enable_binance_readonly_reconciliation": cfg.enable_binance_readonly_reconciliation,
-        "runtime_process_status": "UNVERIFIED",
-        "runtime_process_status_reason": "PERSISTED_HEARTBEAT_NOT_IMPLEMENTED",
+        **heartbeat_status,
         "latest_readiness": fetch_latest_readiness(engine),
     }
 

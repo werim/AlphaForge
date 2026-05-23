@@ -8,8 +8,12 @@
       <p>Karar kalitesi, reject bütünlüğü ve LIVE hazırlığı. Trade motoruna müdahale etmeyen, kanıt odaklı pencere.</p>
     </div>
     <div class="callout neutral-callout">
-      <strong>Runtime status: UNVERIFIED</strong>
-      <span>Persisted heartbeat henüz uygulanmadı. Panel çalışan runtime varsayımı yapmaz.</span>
+      <strong>Runtime status: {{ status.runtime_process_status }}</strong>
+      {% if status.latest_heartbeat_ts %}
+        <span>{{ status.execution_mode }} · {{ status.latest_heartbeat_ts }} · {{ status.runtime_process_status_reason }}</span>
+      {% else %}
+        <span>Persisted runtime heartbeat evidence bulunamadı. {{ status.runtime_process_status_reason }}.</span>
+      {% endif %}
     </div>
   </section>
   <section class="cards">

@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import time
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
@@ -17,6 +18,7 @@ from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, ca
 from alphaforge.order import LifecycleState
 from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
+from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
@@ -81,6 +83,8 @@ class RuntimeMetrics:
     executions: int = 0
     lifecycle_events: int = 0
     last_heartbeat_ts: float = 0.0
+    last_scan_ts: str | None = None
+    last_decision_ts: str | None = None
     reconciliation_runs: int = 0
     reconciliation_fail_closed: int = 0
     persistence_enabled: bool = False
@@ -102,6 +106,7 @@ class RuntimeOrchestrator:
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
+    runtime_instance_id: str = field(default_factory=lambda: f"runtime:{uuid.uuid4().hex}", init=False)
     _last_lifecycle_state_by_symbol: dict[str, str] = field(default_factory=dict, init=False)
     _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
     _active_positions: dict[str, float] = field(default_factory=dict, init=False)
@@ -163,6 +168,39 @@ class RuntimeOrchestrator:
             return session.get_bind()
         return None
 
+    def _persist_runtime_heartbeat(self, *, runtime_state: str = "OPERATING") -> None:
+        engine = self._resolve_persistence_engine()
+        if (
+            engine is None
+            or not self.metrics.persistence_enabled
+            or self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}
+        ):
+            return
+        save_runtime_heartbeat(
+            engine,
+            runtime_instance_id=self.runtime_instance_id,
+            execution_mode=self.config.execution_mode.value,
+            scanner_source=self.scanner_source,
+            runtime_state=runtime_state,
+            last_scan_ts=self.metrics.last_scan_ts,
+            last_decision_ts=self.metrics.last_decision_ts,
+            active_positions_count=len(self._active_positions),
+            pending_orders_count=len(self._pending_orders),
+            payload={
+                "scans": self.metrics.scans,
+                "symbols_selected": self.metrics.symbols_selected,
+                "decisions_generated": self.metrics.decisions_generated,
+                "rejects_persisted": self.metrics.rejects_persisted,
+                "executions": self.metrics.executions,
+                "lifecycle_events": self.metrics.lifecycle_events,
+                "reconciliation_runs": self.metrics.reconciliation_runs,
+                "reconciliation_fail_closed": self.metrics.reconciliation_fail_closed,
+                "persistence_enabled": self.metrics.persistence_enabled,
+                "top_selection_reject_reasons": dict(sorted(self._last_scan_rejection_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
+                "decision_gate_blockers": self._last_scan_gate_blockers,
+            },
+        )
+
     async def start(self) -> None:
         if self.config.execution_mode == ExecutionMode.LIVE:
             allowed_sources = {"EXCHANGE_PUBLIC_MARKET_DATA"}
@@ -175,6 +213,7 @@ class RuntimeOrchestrator:
                 raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
             await self._run_live_exchange_connectivity_gate()
             if self.config.require_live_qualification:
+                self._persist_runtime_heartbeat()
                 await self._run_live_qualification_gate()
         self._register_signals()
         self._tasks = [
@@ -187,6 +226,7 @@ class RuntimeOrchestrator:
         try:
             await self._stop_event.wait()
         finally:
+            self._persist_runtime_heartbeat(runtime_state="STOPPING")
             await self._shutdown_tasks()
 
     def _on_task_done(self, task: asyncio.Task[Any]) -> None:
@@ -198,7 +238,6 @@ class RuntimeOrchestrator:
 
     def shutdown(self) -> None:
         self._stop_event.set()
-
 
     async def _run_live_exchange_connectivity_gate(self) -> None:
         if not self.config.require_exchange_connectivity_for_live:
@@ -267,6 +306,7 @@ class RuntimeOrchestrator:
         self._qualification_report = report
         logger.warning("live_readiness_report=%s", report.to_dict())
         if not report.qualified:
+            self._persist_runtime_heartbeat(runtime_state="STOPPING")
             raise RuntimeError("LIVE mode blocked: readiness qualification failed")
 
     def _evaluate_pre_submit(self, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> dict[str, Any]:
@@ -345,6 +385,7 @@ class RuntimeOrchestrator:
     async def _scan_once(self) -> None:
         self.metrics.scans += 1
         candidates = await self.market_scanner()
+        self.metrics.last_scan_ts = canonical_utc_timestamp()
         pre_selection = select_symbols(candidates, {"include_rejected": True})
         selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
         reject_reasons: dict[str, int] = {}
@@ -387,6 +428,7 @@ class RuntimeOrchestrator:
             await self._emit_runtime_error(selection.symbol, signal_id, "before_real_order", exc)
             return
         self.metrics.decisions_generated += 1
+        self.metrics.last_decision_ts = canonical_utc_timestamp()
 
         if order_plan.decision != "ACCEPTED":
             reject_reason = canonical_reject_reason(order_plan.reason)
@@ -408,32 +450,12 @@ class RuntimeOrchestrator:
             return
 
         if self.config.execution_mode == ExecutionMode.PAPER:
-            await self._emit_lifecycle_event(
-              LifecycleState.WAITING_ENTRY_ZONE.value,
-              selection.symbol,
-              {},
-            )
-            await self._emit_lifecycle_event(
-              LifecycleState.ENTRY_TRIGGERED.value,
-              selection.symbol,
-              {},
-            )
-            await self._emit_lifecycle_event(
-              LifecycleState.ORDER_PLACED.value,
-              selection.symbol,
-              {},
-            )
+            await self._emit_lifecycle_event(LifecycleState.WAITING_ENTRY_ZONE.value, selection.symbol, {})
+            await self._emit_lifecycle_event(LifecycleState.ENTRY_TRIGGERED.value, selection.symbol, {})
+            await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, selection.symbol, {})
         else:
-            await self._emit_lifecycle_event(
-                LifecycleEventType.ENTRY_PENDING.value,
-                selection.symbol,
-                {},
-            )
-            await self._emit_lifecycle_event(
-                LifecycleEventType.ENTRY_SUBMITTED.value,
-                selection.symbol,
-                {},
-            )
+            await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
+            await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         await self._execute(symbol=selection.symbol, decision={
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
@@ -513,6 +535,7 @@ class RuntimeOrchestrator:
             maybe_coro = self.on_lifecycle_event(event_payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
+
     async def _record_incident(self, symbol: str, lifecycle_event: str, reason: str) -> None:
         self._incident_counters[reason] = self._incident_counters.get(reason, 0) + 1
         await self._emit_lifecycle_event(lifecycle_event, symbol, {"reason": reason, "incident_count": self._incident_counters[reason]})
@@ -584,6 +607,7 @@ class RuntimeOrchestrator:
         try:
             while not self._stop_event.is_set():
                 self.metrics.last_heartbeat_ts = time.time()
+                self._persist_runtime_heartbeat()
                 logger.info(
                     "runtime_heartbeat=%s persistence_enabled=%s top_selection_reject_reasons=%s decision_gate_blockers=%s",
                     self.metrics,
@@ -801,7 +825,6 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     )
     orchestrator.metrics.persistence_enabled = persistence_enabled
     return orchestrator
-
 
 
 async def main() -> None:

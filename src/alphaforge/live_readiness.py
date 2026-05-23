@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 
 from alphaforge.alert_delivery import latest_persisted_alert_delivery_evidence
 from alphaforge.contracts import ALLOWED_LIFECYCLE_TRANSITIONS, LifecycleEventType, canonical_utc_timestamp
+from alphaforge.runtime_heartbeat import DEFAULT_MAX_AGE_SEC, evaluate_runtime_heartbeat_freshness
 
 CRITICAL_SIGNAL_FIELDS = ("signal_id", "symbol", "mode", "created_at")
 CRITICAL_DECISION_FIELDS = ("decision_id", "signal_id", "symbol", "mode", "decision", "created_at")
@@ -44,9 +45,16 @@ class QualificationReport:
 
 
 class LiveReadinessEvaluator:
-    def __init__(self, engine: Engine, *, reject_rate_bounds: tuple[float, float] = (0.05, 0.98)) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        reject_rate_bounds: tuple[float, float] = (0.05, 0.98),
+        runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC,
+    ) -> None:
         self.engine = engine
         self.reject_rate_bounds = reject_rate_bounds
+        self.runtime_heartbeat_max_age_sec = max(1.0, float(runtime_heartbeat_max_age_sec))
 
     def evaluate(
         self,
@@ -63,6 +71,7 @@ class LiveReadinessEvaluator:
             checks.extend(self._check_lifecycle(conn))
             checks.extend(self._check_persistence(conn))
             checks.extend(self._check_stats(conn))
+        checks.append(self._check_runtime_heartbeat())
         checks.extend(self._check_runtime(mode_parity, reconciliation_snapshot))
         checks.extend(self._check_operational(observability_snapshot, canary_enabled, shadow_mode_enabled, operator_ack))
         qualified = all(c.passed for c in checks)
@@ -157,6 +166,20 @@ class LiveReadinessEvaluator:
             CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"),
             CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}"),
         ]
+
+    def _check_runtime_heartbeat(self) -> CheckResult:
+        evidence = evaluate_runtime_heartbeat_freshness(
+            self.engine,
+            required_mode="LIVE",
+            max_age_sec=self.runtime_heartbeat_max_age_sec,
+        )
+        latest = evidence.latest_heartbeat or {}
+        details = (
+            f"state={evidence.state},reason={evidence.reason},"
+            f"heartbeat_ts={latest.get('heartbeat_ts')},execution_mode={latest.get('execution_mode')},"
+            f"runtime_instance_id={latest.get('runtime_instance_id')},max_age_sec={evidence.max_age_sec}"
+        )
+        return CheckResult("runtime_heartbeat", evidence.is_fresh, details)
 
     @staticmethod
     def _parse_non_negative_int(value: Any, *, default: int = 0) -> tuple[int, bool]:

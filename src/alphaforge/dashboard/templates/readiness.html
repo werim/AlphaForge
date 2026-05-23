@@ -24,7 +24,7 @@
   {% endif %}
   <section class="panel">
     <h2>Operations &amp; Readiness Evidence Coverage</h2>
-    <p>Salt-okunur kapsama görünümü. Eksik kanıt veya eksik probe, LIVE için yeşil ışık sayılmaz.</p>
+    <p>Salt-okunur kapsama görünümü. Eksik, stale, invalid veya geleceğe tarihli kanıt LIVE için yeşil ışık sayılmaz.</p>
     <section class="cards">
       <article class="metric"><label>Expected Probes</label><strong>{{ probe_matrix.expected_probe_count }}</strong></article>
       <article class="metric"><label>Critical Gaps</label><strong class="badge {% if probe_matrix.critical_gap_count == 0 %}pass{% else %}fail{% endif %}">{{ probe_matrix.critical_gap_count }}</strong></article>
@@ -38,11 +38,14 @@
           <td>{{ probe.category }}</td>
           <td>{{ probe.name }}</td>
           <td><span class="badge {% if probe.status == 'PASS' %}pass{% else %}fail{% endif %}">{{ probe.status }}</span></td>
-          <td>{{ probe.surface }} · {{ probe.details }}</td>
+          <td>
+            {{ probe.surface }} · {{ probe.details }}
+            {% if probe.name == 'runtime_heartbeat' %}<br>mode={{ probe.execution_mode or 'N/A' }} · heartbeat_ts={{ probe.heartbeat_ts or 'N/A' }} · freshness={{ probe.freshness_state }}{% endif %}
+          </td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
-    <div class="alert warn-box"><strong>Control boundary:</strong> {{ probe_matrix.control_boundary.dashboard_mutation_controls }}. This increment does not add order, LIVE activation, kill-switch or configuration write controls.</div>
+    <div class="alert warn-box"><strong>Control boundary:</strong> {{ probe_matrix.control_boundary.dashboard_mutation_controls }}. This increment does not add order, LIVE activation, kill-switch, configuration or heartbeat-write controls to the dashboard.</div>
   </section>
 {% endblock %}
