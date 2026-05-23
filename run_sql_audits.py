@@ -6,12 +6,17 @@ This utility is intentionally SQL-first and read-oriented. It expects each
 WITH ... SELECT. Files that execute successfully but return no result set still
 produce a small status CSV. Failures are isolated per file and written as
 `<sql_name>__ERROR.csv` so one broken diagnostic does not hide the rest.
+
+Use `--db auto` to discover a local SQLite runtime database automatically.
+Discovery favors PAPER/runtime database names, then the most recently modified
+valid SQLite database candidate.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -19,6 +24,48 @@ from typing import Iterable
 
 
 _RESULT_QUERY_PREFIXES = ("select", "with", "pragma", "explain")
+_SQLITE_SUFFIXES = (".sqlite", ".sqlite3", ".db")
+_DB_ENV_KEYS = (
+    "ALPHAFORGE_DB_PATH",
+    "ALPHAFORGE_SQLITE_DB",
+    "PAPER_RUNTIME_DB",
+    "PAPER_RUNTIME_DB_PATH",
+    "RUNTIME_DB_PATH",
+    "SQLITE_DB_PATH",
+)
+_KNOWN_DB_PATHS = (
+    "data/paper_runtime.sqlite",
+    "data/paper_runtime.db",
+    "data/runtime.sqlite",
+    "data/runtime.db",
+    "data/alphaforge.sqlite",
+    "data/alphaforge.db",
+    "paper_runtime.sqlite",
+    "paper_runtime.db",
+    "runtime.sqlite",
+    "runtime.db",
+    "alphaforge.sqlite",
+    "alphaforge.db",
+)
+_EXCLUDED_DIR_PARTS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+    "node_modules",
+    "venv",
+    ".venv",
+}
+_PREFERRED_NAME_PARTS = (
+    "paper_runtime",
+    "paper",
+    "runtime",
+    "alphaforge",
+    "order",
+    "decision",
+    "trade",
+)
 
 
 def safe_report_name(sql_file: Path) -> str:
@@ -42,6 +89,95 @@ def looks_like_result_query(sql: str) -> bool:
     """Best-effort guard against multi-statement mutation scripts."""
     stripped = sql.lstrip().lower()
     return stripped.startswith(_RESULT_QUERY_PREFIXES)
+
+
+def is_sqlite_database(path: Path) -> bool:
+    """Validate that a file is openable as SQLite without mutating it."""
+    if not path.is_file():
+        return False
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            conn.execute("PRAGMA schema_version").fetchone()
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def candidate_name_score(path: Path) -> int:
+    """Prefer runtime/PAPER-looking DBs over unrelated SQLite files."""
+    lowered = str(path).lower()
+    score = 0
+    for index, part in enumerate(_PREFERRED_NAME_PARTS):
+        if part in lowered:
+            score += (len(_PREFERRED_NAME_PARTS) - index) * 10
+    if "test" in lowered or "fixture" in lowered:
+        score -= 100
+    if "backup" in lowered or "old" in lowered:
+        score -= 25
+    return score
+
+
+def iter_db_candidates(search_root: Path) -> Iterable[Path]:
+    """Yield DB candidates from env, known paths, and recursive file search."""
+    seen: set[Path] = set()
+
+    for env_key in _DB_ENV_KEYS:
+        value = os.getenv(env_key)
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = search_root / path
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            yield resolved
+
+    for relative in _KNOWN_DB_PATHS:
+        resolved = (search_root / relative).resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            yield resolved
+
+    for suffix in _SQLITE_SUFFIXES:
+        for path in search_root.rglob(f"*{suffix}"):
+            if any(part in _EXCLUDED_DIR_PARTS for part in path.parts):
+                continue
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                yield resolved
+
+
+def discover_db(search_root: Path) -> Path:
+    """Find the best local SQLite DB candidate for audit execution."""
+    search_root = search_root.resolve()
+    valid_candidates = [path for path in iter_db_candidates(search_root) if is_sqlite_database(path)]
+    if not valid_candidates:
+        raise FileNotFoundError(
+            "No valid SQLite DB found. Pass --db /path/to/file.sqlite or set one of: "
+            + ", ".join(_DB_ENV_KEYS)
+        )
+
+    valid_candidates.sort(
+        key=lambda path: (
+            candidate_name_score(path),
+            path.stat().st_mtime,
+            -len(path.parts),
+            str(path),
+        ),
+        reverse=True,
+    )
+    return valid_candidates[0]
+
+
+def resolve_db_path(db_arg: str, search_root: Path) -> Path:
+    """Resolve explicit DB path or auto-discover one."""
+    if db_arg.lower() == "auto":
+        db_path = discover_db(search_root)
+        print(f"AUTO DB {db_path}")
+        return db_path
+    return Path(db_arg).expanduser()
 
 
 def write_rows_csv(csv_path: Path, columns: list[str], rows: list[sqlite3.Row]) -> None:
@@ -124,13 +260,23 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run each .sql file in a folder against a SQLite DB and export one CSV per SQL file."
     )
-    parser.add_argument("--db", required=True, type=Path, help="SQLite database path")
+    parser.add_argument(
+        "--db",
+        default="auto",
+        help="SQLite database path, or 'auto' to discover a local runtime DB. Default: auto",
+    )
     parser.add_argument("--sql-dir", default=Path("sql"), type=Path, help="Directory containing .sql audit files")
     parser.add_argument(
         "--out-dir",
         default=Path("reports/sql_csv"),
         type=Path,
         help="Directory where CSV reports will be written",
+    )
+    parser.add_argument(
+        "--search-root",
+        default=Path("."),
+        type=Path,
+        help="Root directory used for --db auto discovery. Default: current directory",
     )
     parser.add_argument(
         "--allow-failures",
@@ -142,7 +288,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    failures = run_all_sql_audits(args.db, args.sql_dir, args.out_dir)
+    db_path = resolve_db_path(args.db, args.search_root)
+    failures = run_all_sql_audits(db_path, args.sql_dir, args.out_dir)
     if failures and not args.allow_failures:
         return 1
     return 0
