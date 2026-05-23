@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 
 from alphaforge.alert_delivery import latest_persisted_alert_delivery_evidence
 from alphaforge.contracts import ALLOWED_LIFECYCLE_TRANSITIONS, LifecycleEventType, canonical_utc_timestamp
+from alphaforge.rollback_evidence import latest_persisted_rollback_evidence
 from alphaforge.runtime_heartbeat import DEFAULT_MAX_AGE_SEC, evaluate_runtime_heartbeat_freshness
 
 CRITICAL_SIGNAL_FIELDS = ("signal_id", "symbol", "mode", "created_at")
@@ -45,27 +46,12 @@ class QualificationReport:
 
 
 class LiveReadinessEvaluator:
-    def __init__(
-        self,
-        engine: Engine,
-        *,
-        reject_rate_bounds: tuple[float, float] = (0.05, 0.98),
-        runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC,
-    ) -> None:
+    def __init__(self, engine: Engine, *, reject_rate_bounds: tuple[float, float] = (0.05, 0.98), runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC) -> None:
         self.engine = engine
         self.reject_rate_bounds = reject_rate_bounds
         self.runtime_heartbeat_max_age_sec = max(1.0, float(runtime_heartbeat_max_age_sec))
 
-    def evaluate(
-        self,
-        *,
-        mode_parity: Mapping[str, Any],
-        reconciliation_snapshot: Mapping[str, Any],
-        observability_snapshot: Mapping[str, Any],
-        canary_enabled: bool,
-        shadow_mode_enabled: bool,
-        operator_ack: bool,
-    ) -> QualificationReport:
+    def evaluate(self, *, mode_parity: Mapping[str, Any], reconciliation_snapshot: Mapping[str, Any], observability_snapshot: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> QualificationReport:
         checks: list[CheckResult] = []
         with self.engine.begin() as conn:
             checks.extend(self._check_lifecycle(conn))
@@ -75,13 +61,7 @@ class LiveReadinessEvaluator:
         checks.extend(self._check_runtime(mode_parity, reconciliation_snapshot))
         checks.extend(self._check_operational(observability_snapshot, canary_enabled, shadow_mode_enabled, operator_ack))
         qualified = all(c.passed for c in checks)
-        return QualificationReport(
-            qualified=qualified,
-            checks=checks,
-            generated_at=canonical_utc_timestamp(),
-            deployment_state="LIVE_ENABLED" if qualified and operator_ack else "LIVE_BLOCKED",
-            acknowledgement_required=not operator_ack,
-        )
+        return QualificationReport(qualified=qualified, checks=checks, generated_at=canonical_utc_timestamp(), deployment_state="LIVE_ENABLED" if qualified and operator_ack else "LIVE_BLOCKED", acknowledgement_required=not operator_ack)
 
     def persist_report(self, report: QualificationReport) -> None:
         with self.engine.begin() as conn:
@@ -98,13 +78,7 @@ class LiveReadinessEvaluator:
             conn.execute(text("""
                 INSERT INTO live_readiness_reports(generated_at, qualified, deployment_state, acknowledgement_required, report_payload)
                 VALUES (:generated_at, :qualified, :deployment_state, :ack, :payload)
-            """), {
-                "generated_at": report.generated_at,
-                "qualified": 1 if report.qualified else 0,
-                "deployment_state": report.deployment_state,
-                "ack": 1 if report.acknowledgement_required else 0,
-                "payload": json.dumps(report.to_dict()),
-            })
+            """), {"generated_at": report.generated_at, "qualified": 1 if report.qualified else 0, "deployment_state": report.deployment_state, "ack": 1 if report.acknowledgement_required else 0, "payload": json.dumps(report.to_dict())})
 
     def write_forensic_snapshot(self, base_dir: str | Path, report: QualificationReport, runtime_snapshot: Mapping[str, Any]) -> Path:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -134,12 +108,7 @@ class LiveReadinessEvaluator:
                 reject_missing += 1
             if any(e["lifecycle_state"] == LifecycleEventType.ENTRY_TRIGGERED.value for e in events) and not any(e["lifecycle_state"] in terminal_states for e in events):
                 exit_missing += 1
-        return [
-            CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"),
-            CheckResult("lifecycle_transitions_valid", invalid_transitions == 0, f"invalid_transitions={invalid_transitions}"),
-            CheckResult("rejected_has_reason", reject_missing == 0, f"missing_reject_reason={reject_missing}"),
-            CheckResult("entry_exit_completeness", exit_missing == 0, f"missing_exit={exit_missing}"),
-        ]
+        return [CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"), CheckResult("lifecycle_transitions_valid", invalid_transitions == 0, f"invalid_transitions={invalid_transitions}"), CheckResult("rejected_has_reason", reject_missing == 0, f"missing_reject_reason={reject_missing}"), CheckResult("entry_exit_completeness", exit_missing == 0, f"missing_exit={exit_missing}")]
 
     def _check_persistence(self, conn: Any) -> list[CheckResult]:
         checks: list[CheckResult] = []
@@ -161,24 +130,12 @@ class LiveReadinessEvaluator:
         min_rr, max_rr = conn.execute(text("SELECT MIN(rr), MAX(rr) FROM order_decisions")).one()
         min_score, max_score = conn.execute(text("SELECT MIN(score), MAX(score) FROM order_decisions")).one()
         lower, upper = self.reject_rate_bounds
-        return [
-            CheckResult("reject_rate_sanity", lower <= reject_rate <= upper if total else False, f"reject_rate={reject_rate:.4f},total={total}"),
-            CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"),
-            CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}"),
-        ]
+        return [CheckResult("reject_rate_sanity", lower <= reject_rate <= upper if total else False, f"reject_rate={reject_rate:.4f},total={total}"), CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"), CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}")]
 
     def _check_runtime_heartbeat(self) -> CheckResult:
-        evidence = evaluate_runtime_heartbeat_freshness(
-            self.engine,
-            required_mode="LIVE",
-            max_age_sec=self.runtime_heartbeat_max_age_sec,
-        )
+        evidence = evaluate_runtime_heartbeat_freshness(self.engine, required_mode="LIVE", max_age_sec=self.runtime_heartbeat_max_age_sec)
         latest = evidence.latest_heartbeat or {}
-        details = (
-            f"state={evidence.state},reason={evidence.reason},"
-            f"heartbeat_ts={latest.get('heartbeat_ts')},execution_mode={latest.get('execution_mode')},"
-            f"runtime_instance_id={latest.get('runtime_instance_id')},max_age_sec={evidence.max_age_sec}"
-        )
+        details = f"state={evidence.state},reason={evidence.reason},heartbeat_ts={latest.get('heartbeat_ts')},execution_mode={latest.get('execution_mode')},runtime_instance_id={latest.get('runtime_instance_id')},max_age_sec={evidence.max_age_sec}"
         return CheckResult("runtime_heartbeat", evidence.is_fresh, details)
 
     @staticmethod
@@ -205,38 +162,22 @@ class LiveReadinessEvaluator:
         evidence_status = str(reconciliation.get("evidence_status") or "INCOMPLETE").upper()
         complete = configured and evidence_status == "COMPLETE"
         no_orphans = int(reconciliation.get("orphan_positions", 0)) == 0 and int(reconciliation.get("orphan_orders", 0)) == 0
-        return [
-            CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}"),
-            CheckResult("live_reconciliation_provider", configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not configured else "provider_configured=true"),
-            CheckResult("reconciliation_evidence_complete", complete, f"evidence_status={evidence_status}"),
-            CheckResult("reconciliation_no_orphans", complete and no_orphans, f"snapshot={dict(reconciliation)}"),
-            CheckResult("duplicate_execution_free", complete and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"),
-            CheckResult("reconciliation_fail_closed_clear", complete and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}"),
-        ]
+        return [CheckResult("mode_parity", parity_ok, "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}"), CheckResult("live_reconciliation_provider", configured, "LIVE_RECONCILIATION_PROVIDER_MISSING" if not configured else "provider_configured=true"), CheckResult("reconciliation_evidence_complete", complete, f"evidence_status={evidence_status}"), CheckResult("reconciliation_no_orphans", complete and no_orphans, f"snapshot={dict(reconciliation)}"), CheckResult("duplicate_execution_free", complete and int(reconciliation.get("duplicate_fills", 0)) == 0, f"duplicate_fills={reconciliation.get('duplicate_fills', 'UNVERIFIED')}"), CheckResult("reconciliation_fail_closed_clear", complete and int(reconciliation.get("fail_closed_findings", 0)) == 0, f"fail_closed_findings={reconciliation.get('fail_closed_findings', 'UNVERIFIED')}")]
 
     def _check_operational(self, obs: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> list[CheckResult]:
         stored_alert = latest_persisted_alert_delivery_evidence(self.engine)
-        effective = {**dict(obs), **stored_alert}
+        stored_rollback = latest_persisted_rollback_evidence(self.engine)
+        effective = {**dict(obs), **stored_alert, **stored_rollback}
+        mutation_count, mutation_count_ok = self._parse_non_negative_int(effective.get("execution_mutation_attempt_count"))
         observability_provenance = str(effective.get("observability_evidence_source", "")).upper() == "MEASURED_PROBE" and bool(effective.get("observability_evidence_persisted", False))
         rollback_provenance = str(effective.get("rollback_evidence_source", "")).upper() == "DETERMINISTIC_VALIDATION" and bool(effective.get("rollback_evidence_persisted", False))
         coverage = observability_provenance and bool(effective.get("qualification_persistence_verified", False)) and bool(effective.get("incident_persistence_verified", False)) and bool(effective.get("forensic_export_verified", False)) and bool(effective.get("sensitive_data_redaction_verified", False)) and bool(effective.get("alert_delivery_verified", False)) and str(effective.get("evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
-        rollback = rollback_provenance and bool(effective.get("kill_switch_block_verified", False)) and bool(effective.get("no_submit_on_kill_switch_verified", False)) and bool(effective.get("fail_closed_reconciliation_verified", False)) and bool(effective.get("repair_actions_non_mutating_verified", False)) and str(effective.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
-        return [
-            CheckResult("shadow_mode_enabled", shadow_mode_enabled, "shadow mode required"),
-            CheckResult("canary_enabled", canary_enabled, "canary required for controlled enablement"),
-            CheckResult("operator_acknowledged", operator_ack, "explicit operator acknowledgement required"),
-            CheckResult("alert_delivery_evidence", bool(stored_alert.get("alert_delivery_verified", False)), f"alert_evidence={stored_alert}"),
-            CheckResult("observability_coverage", coverage, "OBSERVABILITY_EVIDENCE_UNVERIFIED" if not coverage else f"observability={effective}"),
-            CheckResult("rollback_ready", rollback, "ROLLBACK_EVIDENCE_UNVERIFIED" if not rollback else f"rollback_ready={rollback}"),
-        ]
+        rollback = rollback_provenance and bool(effective.get("rollback_evidence_verified", False)) and bool(effective.get("kill_switch_block_verified", False)) and bool(effective.get("no_submit_on_kill_switch_verified", False)) and bool(effective.get("fail_closed_reconciliation_verified", False)) and bool(effective.get("repair_actions_non_mutating_verified", False)) and mutation_count_ok and mutation_count == 0 and str(effective.get("rollback_evidence_status", "INCOMPLETE")).upper() == "COMPLETE"
+        return [CheckResult("shadow_mode_enabled", shadow_mode_enabled, "shadow mode required"), CheckResult("canary_enabled", canary_enabled, "canary required for controlled enablement"), CheckResult("operator_acknowledged", operator_ack, "explicit operator acknowledgement required"), CheckResult("alert_delivery_evidence", bool(stored_alert.get("alert_delivery_verified", False)), f"alert_evidence={stored_alert}"), CheckResult("observability_coverage", coverage, "OBSERVABILITY_EVIDENCE_UNVERIFIED" if not coverage else f"observability={effective}"), CheckResult("rollback_ready", rollback, f"rollback_evidence={stored_rollback}" if rollback else f"ROLLBACK_EVIDENCE_UNVERIFIED:{stored_rollback.get('rollback_blocking_reasons', [])}")]
 
     def _sanitize_runtime_snapshot(self, runtime_snapshot: Mapping[str, Any]) -> dict[str, Any]:
         blocked = ("api_" + "key", "api_" + "secret", "secret", "signature", "author" + "ization", "x-mbx-apikey")
-        patterns = (
-            re.compile(r"(?i)((?:api[_-]?key|api[_-]?secret|secret|signature|x-mbx-apikey)\s*[=:]\s*)[^&\s,;\"']+"),
-            re.compile(r"(?i)([?&](?:signature|signed(?:_[a-z0-9_]+)?|authorization|x-mbx-apikey|api[_-]?key|api[_-]?secret|secret)=)[^&\s,;\"']+"),
-            re.compile(r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?[^,;\r\n\"']+"),
-        )
+        patterns = (re.compile(r"(?i)((?:api[_-]?key|api[_-]?secret|secret|signature|x-mbx-apikey)\s*[=:]\s*)[^&\s,;\"']+"), re.compile(r"(?i)([?&](?:signature|signed(?:_[a-z0-9_]+)?|authorization|x-mbx-apikey|api[_-]?key|api[_-]?secret|secret)=)[^&\s,;\"']+"), re.compile(r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?[^,;\r\n\"']+"))
         def clean(value: Any) -> Any:
             if isinstance(value, Mapping):
                 result: dict[str, Any] = {}
