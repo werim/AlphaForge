@@ -29,6 +29,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "panic_score_reject": 0.85,
     "min_trend_strength": 0.25,
     "range_edge_bonus_chop_limit": 0.55,
+    "max_spoof_risk": 0.70,
+    "max_fakeout_risk": 0.65,
+    "max_abs_funding_rate_pct": 0.0010,
+    "max_correlation_exposure": 0.80,
+    "min_abs_orderbook_imbalance": 0.0,
     "include_rejected": False,
 }
 
@@ -65,6 +70,11 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
     recent_volume_change_pct = _safe_float(market_data, "recent_volume_change_pct", 0.0, diagnostics, warnings)
     chop_score = _safe_float(market_data, "chop_score", 0.65, diagnostics, warnings)
     panic_score = _safe_float(market_data, "panic_score", 0.0, diagnostics, warnings) if "panic_score" in market_data else 0.0
+    spoof_risk = _safe_float(market_data, "spoof_risk", 0.0, diagnostics, warnings) if "spoof_risk" in market_data else 0.0
+    fakeout_risk = _safe_float(market_data, "fakeout_risk", 0.25, diagnostics, warnings) if "fakeout_risk" in market_data else 0.25
+    funding_rate_pct = _safe_float(market_data, "funding_rate_pct", 0.0, diagnostics, warnings) if "funding_rate_pct" in market_data else 0.0
+    correlation_exposure = _safe_float(market_data, "correlation_exposure", 0.0, diagnostics, warnings) if "correlation_exposure" in market_data else 0.0
+    orderbook_imbalance = _safe_float(market_data, "orderbook_imbalance", 0.0, diagnostics, warnings) if "orderbook_imbalance" in market_data else 0.0
 
     if volume_24h_usdt < cfg["min_volume_24h_usdt"]:
         reject_reasons.append("LOW_VOLUME")
@@ -78,6 +88,16 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
         reject_reasons.append("TOO_CHOPPY")
     if panic_score >= cfg["panic_score_reject"]:
         reject_reasons.append("PANIC_CONDITIONS")
+    if spoof_risk > cfg["max_spoof_risk"]:
+        reject_reasons.append("SPOOF_RISK")
+    if fakeout_risk > cfg["max_fakeout_risk"]:
+        reject_reasons.append("FAKEOUT_RISK")
+    if abs(funding_rate_pct) > cfg["max_abs_funding_rate_pct"]:
+        reject_reasons.append("FUNDING_ANOMALY")
+    if correlation_exposure > cfg["max_correlation_exposure"]:
+        reject_reasons.append("CORRELATION_OVEREXPOSURE")
+    if abs(orderbook_imbalance) < cfg["min_abs_orderbook_imbalance"]:
+        reject_reasons.append("LOW_ORDERBOOK_ALIGNMENT")
 
     has_clean_trend = trend_strength >= cfg["min_trend_strength"] and chop_score <= cfg["max_chop_score"]
     has_range_edge = chop_score <= cfg["range_edge_bonus_chop_limit"] and abs(recent_volume_change_pct) <= 20.0
@@ -94,6 +114,16 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
     if has_range_edge:
         trend_score = min(10.0, trend_score + 1.0)
 
+    microstructure_penalty = 0.0
+    if "SPOOF_RISK" in reject_reasons:
+        microstructure_penalty += 1.5
+    if "FAKEOUT_RISK" in reject_reasons:
+        microstructure_penalty += 1.2
+    if "FUNDING_ANOMALY" in reject_reasons:
+        microstructure_penalty += 0.8
+    if "CORRELATION_OVEREXPOSURE" in reject_reasons:
+        microstructure_penalty += 0.8
+
     symbol_score = (
         volume_score * 0.2
         + spread_score * 0.2
@@ -105,9 +135,17 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
         symbol_score -= 1.0
     if "PANIC_CONDITIONS" in reject_reasons:
         symbol_score -= 1.5
+    symbol_score -= microstructure_penalty
 
     symbol_score = round(max(0.0, min(10.0, symbol_score)), 2)
-    regime_hint = "TREND" if has_clean_trend else ("RANGE" if has_range_edge else "UNFAVORABLE")
+    if panic_score >= cfg["panic_score_reject"]:
+        regime_hint = "PANIC"
+    elif has_clean_trend:
+        regime_hint = "TREND"
+    elif has_range_edge:
+        regime_hint = "RANGE"
+    else:
+        regime_hint = "UNFAVORABLE"
 
     diagnostics.update(
         {
@@ -120,6 +158,11 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
                 "recent_volume_change_pct": recent_volume_change_pct,
                 "chop_score": chop_score,
                 "panic_score": panic_score,
+                "spoof_risk": spoof_risk,
+                "fakeout_risk": fakeout_risk,
+                "funding_rate_pct": funding_rate_pct,
+                "correlation_exposure": correlation_exposure,
+                "orderbook_imbalance": orderbook_imbalance,
             },
             "sub_scores": {
                 "volume_score": round(volume_score, 2),
@@ -127,6 +170,7 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
                 "liquidity_score": round(liquidity_score, 2),
                 "volatility_score": round(volatility_score, 2),
                 "trend_score": round(trend_score, 2),
+                "microstructure_penalty": round(microstructure_penalty, 2),
             },
         }
     )
