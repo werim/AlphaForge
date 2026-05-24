@@ -46,6 +46,7 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         if isinstance(item, dict) and item.get("symbol")
     }
     now_ts = time.time()
+    market_data_latency_ms = None
     candidates: list[dict[str, Any]] = []
     for item in tickers:
         if not isinstance(item, dict):
@@ -84,7 +85,14 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
                 "volume_24h_usdt": volume_quote,
                 "spread_pct": spread_pct,
                 "spread_bps": spread_pct * 10_000.0,
-                "funding_rate_pct": funding_map.get(symbol, 0.0),
+                "spread_status": "MEASURED",
+                "spread_source": "BINANCE_BOOK_TICKER",
+                "funding_rate_pct": funding_map.get(symbol),
+                "funding_status": "MEASURED" if symbol in funding_map else "UNAVAILABLE",
+                "funding_source": "BINANCE_PREMIUM_INDEX" if symbol in funding_map else "UNAVAILABLE",
+                "market_data_latency_ms": market_data_latency_ms,
+                "market_data_latency_status": "UNAVAILABLE" if market_data_latency_ms is None else "MEASURED",
+                "market_data_latency_source": "UNAVAILABLE" if market_data_latency_ms is None else "BINANCE_PUBLIC_HTTP_RTT",
                 "volatility_pct": max(0.0001, change_pct),
                 "trend_strength": trend_strength,
                 "liquidity_score": 1.0 if volume_quote >= 50_000_000 else 0.7,
@@ -110,6 +118,7 @@ def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> list[dict[str, Any]
     if not isinstance(mids, dict):
         return []
     now_ts = time.time()
+    market_data_latency_ms = None
     rows: list[dict[str, Any]] = []
     for symbol, mid in mids.items():
         normalized = f"{symbol}USDT" if not str(symbol).endswith("USDT") else str(symbol)
@@ -126,7 +135,14 @@ def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> list[dict[str, Any]
                 "timeframe": "1m",
                 "volume_24h_usdt": 0.0,
                 "spread_pct": None,
+                "spread_status": "UNAVAILABLE",
+                "spread_source": "MID_ONLY_NO_BOOK",
                 "funding_rate_pct": None,
+                "funding_status": "UNAVAILABLE",
+                "funding_source": "UNAVAILABLE",
+                "market_data_latency_ms": None,
+                "market_data_latency_status": "UNAVAILABLE",
+                "market_data_latency_source": "UNAVAILABLE",
                 "volatility_pct": None,
                 "trend_strength": 0.0,
                 "liquidity_score": 0.5,

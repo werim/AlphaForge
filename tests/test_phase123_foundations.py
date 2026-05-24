@@ -213,3 +213,13 @@ def test_trade_lifecycle_generates_event_id_when_missing() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as s:
         assert save_trade_lifecycle_event(s, signal_id="s1", symbol="BTCUSDT", lifecycle_state="SIGNAL_CREATED") is True
+
+
+def test_save_order_decision_unavailable_execution_metrics_persist_null() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        save_order_decision(s, decision_id="null-evidence", decision="REJECTED", execution_ctx={"evidence_status": "UNAVAILABLE"}, spread_pct=None, expected_slippage_pct=None, latency_ms=None)
+        row = s.execute(text("SELECT spread_pct, expected_slippage_pct, latency_ms FROM order_decisions WHERE decision_id='null-evidence'" )).one()
+        assert row.spread_pct is None
+        assert row.expected_slippage_pct is None
+        assert row.latency_ms is None

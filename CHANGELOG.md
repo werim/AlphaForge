@@ -664,3 +664,11 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Fixed
 - Removed synthetic LIVE qualification probe mutation of `signals`, `order_decisions`, `ai_decision_features`, `trade_lifecycle_events`, and rejected-review tables during parity evaluation.
 - Added regression coverage for non-mutating parity evidence and deterministic replay parity output (excluding `generated_at`).
+
+## [JOB-22A] - 2026-05-24
+### Changed
+- Canonical execution evidence now preserves measured/modeled/unavailable provenance through scanner->runtime->persistence paths.
+### Fixed
+- Removed optimistic zero-default persistence for spread/slippage/latency when evidence is unavailable.
+### Known Issues
+- effective_rr currently remains equal to rr in persisted decisions and is still unresolved.
