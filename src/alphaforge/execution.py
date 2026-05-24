@@ -10,28 +10,78 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         market_ctx.get("expected_slippage_pct", _expected_slippage_pct(klines, market_ctx)),
         field="expected_slippage_pct",
     )
-    spread_pct, spread_unit_assumed = normalize_pct_input(
-        market_ctx.get("spread_pct", _spread_pct_from_prices(market_ctx)),
-        field="spread_pct",
-    )
-    latency_ms = float(market_ctx.get("latency_ms", 50.0) or 50.0)
-    orderbook_imbalance = float(market_ctx.get("orderbook_imbalance", 0.0) or 0.0)
+    raw_spread = market_ctx.get("spread_pct", _spread_pct_from_prices(market_ctx))
+    spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
+
+    def _to_float(v: Any) -> float | None:
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    measured_spread = _to_float(raw_spread) is not None
+    spread_status = str(market_ctx.get("spread_status", "MEASURED" if measured_spread else "UNAVAILABLE"))
+    spread_source = str(market_ctx.get("spread_source", "BOOK_TICKER" if measured_spread else "UNAVAILABLE"))
+
+    slippage_status = str(market_ctx.get("slippage_status", "MODEL_ESTIMATE"))
+    slippage_source = str(market_ctx.get("slippage_source", "KLINE_RANGE_MODEL"))
+
+    md_latency = _to_float(market_ctx.get("market_data_latency_ms"))
+    md_latency_status = str(market_ctx.get("market_data_latency_status", "MEASURED" if md_latency is not None else "UNAVAILABLE"))
+    md_latency_source = str(market_ctx.get("market_data_latency_source", "UNKNOWN" if md_latency is not None else "UNAVAILABLE"))
+
+    submit_ack = _to_float(market_ctx.get("submit_ack_latency_ms"))
+    submit_ack_status = str(market_ctx.get("submit_ack_latency_status", "UNAVAILABLE" if submit_ack is None else "MEASURED"))
+    submit_ack_source = str(market_ctx.get("submit_ack_latency_source", "UNAVAILABLE" if submit_ack is None else "RUNTIME_ACK"))
+
+    funding = funding_rate_pct if funding_rate_pct is not None else market_ctx.get("funding_rate_pct")
+    funding_val = _to_float(funding)
+    funding_status = str(market_ctx.get("funding_status", "MEASURED" if funding_val is not None else "UNAVAILABLE"))
+    funding_source = str(market_ctx.get("funding_source", "UNKNOWN" if funding_val is not None else "UNAVAILABLE"))
+
+    orderbook = _to_float(market_ctx.get("orderbook_imbalance"))
+    orderbook_status = str(market_ctx.get("orderbook_status", "MEASURED" if orderbook is not None else "UNAVAILABLE"))
+    orderbook_source = str(market_ctx.get("orderbook_source", "UNKNOWN" if orderbook is not None else "UNAVAILABLE"))
+
     liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
-    funding = funding_rate_pct if funding_rate_pct is not None else market_ctx.get("funding_rate_pct", 0.0)
-    funding_rate_pct_val = float(funding or 0.0)
     volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
 
+    required = [spread_status, slippage_status, md_latency_status, funding_status]
+    if all(s == "MEASURED" for s in required):
+        evidence_status = "COMPLETE_MEASURED"
+    elif any(s in {"MEASURED", "MODEL_ESTIMATE"} for s in required):
+        evidence_status = "PARTIAL"
+    else:
+        evidence_status = "UNAVAILABLE"
+
     return {
-        "expected_slippage_pct": max(expected_slippage_pct, 0.0),
-        "latency_ms": max(latency_ms, 0.0),
-        "spread_pct": max(spread_pct, 0.0),
-        "spread_source": str(market_ctx.get("spread_source", "UNKNOWN") or "UNKNOWN"),
+        "expected_slippage_pct": max(expected_slippage_pct, 0.0) if slippage_status != "UNAVAILABLE" else None,
+        "expected_slippage_legacy_pct": max(expected_slippage_pct, 0.0),
+        "slippage_status": slippage_status,
+        "slippage_source": slippage_source,
+        "market_data_latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
+        "market_data_latency_status": md_latency_status,
+        "market_data_latency_source": md_latency_source,
+        "submit_ack_latency_ms": max(submit_ack, 0.0) if submit_ack is not None else None,
+        "submit_ack_latency_status": submit_ack_status,
+        "submit_ack_latency_source": submit_ack_source,
+        "latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
+        "spread_pct": max(spread_pct, 0.0) if spread_status != "UNAVAILABLE" else None,
+        "spread_status": spread_status,
+        "spread_source": spread_source,
         "spread_unit_assumed": spread_unit_assumed,
         "slippage_unit_assumed": slippage_unit_assumed,
-        "orderbook_imbalance": max(min(orderbook_imbalance, 1.0), -1.0),
+        "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
+        "orderbook_status": orderbook_status,
+        "orderbook_source": orderbook_source,
         "liquidity_score": max(min(liquidity_score, 1.0), 0.0),
-        "funding_rate_pct": funding_rate_pct_val,
+        "funding_rate_pct": funding_val,
+        "funding_status": funding_status,
+        "funding_source": funding_source,
         "volatility_regime": volatility_regime,
+        "evidence_status": evidence_status,
         "spoof_risk": float(market_ctx.get("spoof_risk", 0.0) or 0.0),
         "absorption_score": float(market_ctx.get("absorption_score", 0.0) or 0.0),
     }
