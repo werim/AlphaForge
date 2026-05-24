@@ -15,11 +15,11 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         field="spread_pct",
     )
     latency_raw = market_ctx.get("latency_ms", 50.0)
-    latency_ms = float(50.0 if latency_raw is None else latency_raw)
-    orderbook_imbalance = float(market_ctx.get("orderbook_imbalance", 0.0) or 0.0)
-    liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
+    latency_ms = _safe_float(50.0 if latency_raw is None else latency_raw, default=50.0)
+    orderbook_imbalance = _safe_float(market_ctx.get("orderbook_imbalance", 0.0), default=0.0)
+    liquidity_score = _safe_float(market_ctx.get("liquidity_score", 1.0), default=1.0)
     funding = funding_rate_pct if funding_rate_pct is not None else market_ctx.get("funding_rate_pct", 0.0)
-    funding_rate_pct_val = float(funding or 0.0)
+    funding_rate_pct_val = _safe_float(funding, default=0.0)
     volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
 
     return {
@@ -33,8 +33,8 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "liquidity_score": max(min(liquidity_score, 1.0), 0.0),
         "funding_rate_pct": funding_rate_pct_val,
         "volatility_regime": volatility_regime,
-        "spoof_risk": float(market_ctx.get("spoof_risk", 0.0) or 0.0),
-        "absorption_score": float(market_ctx.get("absorption_score", 0.0) or 0.0),
+        "spoof_risk": _safe_float(market_ctx.get("spoof_risk", 0.0), default=0.0),
+        "absorption_score": _safe_float(market_ctx.get("absorption_score", 0.0), default=0.0),
     }
 
 
@@ -53,9 +53,16 @@ def neutral_execution_context() -> dict[str, Any]:
     }
 
 
+def _safe_float(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _spread_pct_from_prices(market_ctx: Mapping[str, Any]) -> float:
-    bid = float(market_ctx.get("best_bid", 0.0) or 0.0)
-    ask = float(market_ctx.get("best_ask", 0.0) or 0.0)
+    bid = _safe_float(market_ctx.get("best_bid", 0.0), default=0.0)
+    ask = _safe_float(market_ctx.get("best_ask", 0.0), default=0.0)
     mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
     if mid <= 0:
         return 0.0
@@ -64,14 +71,14 @@ def _spread_pct_from_prices(market_ctx: Mapping[str, Any]) -> float:
 
 def _expected_slippage_pct(klines: list[Any], market_ctx: Mapping[str, Any]) -> float:
     if not klines:
-        return float(market_ctx.get("expected_slippage_pct", 0.001) or 0.001)
+        return _safe_float(market_ctx.get("expected_slippage_pct", 0.001), default=0.001)
     highs, lows = [], []
     for k in klines[-20:]:
         if isinstance(k, Mapping):
-            highs.append(float(k.get("high", 0.0) or 0.0))
-            lows.append(float(k.get("low", 0.0) or 0.0))
+            highs.append(_safe_float(k.get("high", 0.0), default=0.0))
+            lows.append(_safe_float(k.get("low", 0.0), default=0.0))
     if not highs or not lows:
-        return float(market_ctx.get("expected_slippage_pct", 0.001) or 0.001)
+        return _safe_float(market_ctx.get("expected_slippage_pct", 0.001), default=0.001)
     avg_high = sum(highs) / len(highs)
     avg_low = sum(lows) / len(lows)
     if avg_high <= 0:
@@ -85,8 +92,8 @@ def _volatility_regime(klines: list[Any]) -> str:
     ranges = []
     for k in klines[-20:]:
         if isinstance(k, Mapping):
-            h = float(k.get("high", 0.0) or 0.0)
-            l = float(k.get("low", 0.0) or 0.0)
+            h = _safe_float(k.get("high", 0.0), default=0.0)
+            l = _safe_float(k.get("low", 0.0), default=0.0)
             if h > 0:
                 ranges.append((h - l) / h)
     if not ranges:
