@@ -46,6 +46,44 @@ def test_ai_brain_persistence_uses_short_lived_sessions_across_to_thread(tmp_pat
     assert decisions == 6
     shared_session.close()
 
+
+def test_ai_brain_persists_canonical_effective_rr_and_execution_breakdown() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        brain = AIBrain(session, min_accept_score=0.99)
+        signal = {"signal_id": "sig-rr-1", "symbol": "BTCUSDT", "side": "LONG", "timeframe": "1m", "risk_reward": 2.0}
+        market_ctx = {"spread_pct": 0.002, "expected_slippage_pct": 0.001, "latency_ms": 250.0, "liquidity_score": 0.5, "funding_rate_pct": 0.0004}
+        brain.before_real_order(signal, market_ctx, {"alignment": 0.7}, {})
+        row = session.execute(text("SELECT s.rr, s.effective_rr, od.effective_rr, rsr.raw_rr, rsr.effective_rr FROM signals s JOIN order_decisions od ON od.signal_id=s.signal_id JOIN rejected_signal_reviews rsr ON rsr.signal_id=s.signal_id WHERE s.signal_id='sig-rr-1'")).one()
+        assert row.effective_rr < row.rr
+        assert row.effective_rr == row.effective_rr
+        assert row.effective_rr == pytest.approx(row[2], rel=1e-9)
+        assert row[4] < row[3]
+        exec_features = session.execute(text("SELECT execution_features FROM ai_decision_features WHERE decision_id LIKE 'sig-rr-1:%'")).scalar_one()
+        assert '"spread_penalty"' in exec_features
+        assert '"slippage_penalty"' in exec_features
+        assert '"latency_penalty"' in exec_features
+        assert '"liquidity_penalty"' in exec_features
+        assert '"funding_penalty"' in exec_features
+        assert '"total_penalty"' in exec_features
+
+
+def test_ai_brain_zero_cost_and_missing_execution_context_handled() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        brain = AIBrain(session, min_accept_score=0.99)
+        signal = {"signal_id": "sig-rr-2", "symbol": "ETHUSDT", "side": "LONG", "timeframe": "1m", "risk_reward": 1.8}
+        market_ctx = {"spread_pct": 0.0, "expected_slippage_pct": 0.0, "latency_ms": 0.0, "liquidity_score": 1.0, "funding_rate_pct": 0.0}
+        brain.before_real_order(signal, market_ctx, {"alignment": 0.7}, {})
+        rr, effective_rr = session.execute(text("SELECT rr, effective_rr FROM signals WHERE signal_id='sig-rr-2'")).one()
+        assert effective_rr == pytest.approx(rr, rel=1e-9)
+
+        signal_missing = {"signal_id": "sig-rr-3", "symbol": "SOLUSDT", "side": "LONG", "timeframe": "1m", "risk_reward": 1.4}
+        brain.before_real_order(signal_missing, {}, {"alignment": 0.7}, {})
+        exec_features = session.execute(text("SELECT execution_features FROM ai_decision_features WHERE decision_id LIKE 'sig-rr-3:%'")).scalar_one()
+        assert '"completeness"' in exec_features
+        assert '"missing_fields"' in exec_features
+
 class _AlwaysAcceptBrain:
     def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
         class _Plan:
@@ -179,6 +217,23 @@ def test_runtime_risk_gate_rejects_stale_market_data() -> None:
     assert rejects[0].get("signal_id")
     assert rejects[0].get("reason") == "STALE_MARKET_DATA"
     assert any(evt["lifecycle_event_type"] == "SIGNAL_REJECTED" for evt in events)
+
+
+def test_runtime_final_reject_uses_canonical_effective_rr() -> None:
+    rejects: list[dict] = []
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0, "side": "LONG", "market_ts": 1.0, "spread_pct": 0.002, "expected_slippage_pct": 0.001, "latency_ms": 300.0, "liquidity_score": 0.5, "funding_rate_pct": 0.0005, "volume_24h_usdt": 90_000_000, "volatility_pct": 0.3, "trend_strength": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST, stale_market_data_sec=0.01),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=scanner,
+        on_reject_persist=lambda r: rejects.append(r),
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert rejects
+    assert rejects[0]["effective_rr"] < rejects[0]["rr"]
 
 
 def test_runtime_exception_persists_diagnostic_error_lifecycle() -> None:

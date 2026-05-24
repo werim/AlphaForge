@@ -1,3 +1,16 @@
+## [Unreleased] - 2026-05-24 (JOB-04 effective RR canonicalization)
+
+### Changed
+- `AIBrain._persist_decision` now computes canonical `effective_rr = max(raw_rr - execution_cost_model.total_penalty, 0.0)` and persists it consistently into `signals`, `order_decisions`, and rejected-review persistence.
+- Runtime `_process_symbol` final reject persistence now uses canonical effective RR instead of raw `market_ctx["rr"]`.
+- `ai_decision_features.execution_features` now includes canonical execution penalty breakdown plus completeness/missing fields.
+
+### Added
+- Regression coverage for canonical effective RR persistence, zero-cost equality behavior, missing execution-context robustness, and runtime final reject canonicalization.
+
+### Fixed
+- Eliminated raw-RR fallback masquerading as effective RR in AI persistence and runtime final reject rows when execution costs exist.
+
 ## [Unreleased] - 2026-05-22 (JOB19 V1 audit diagnostics only)
 
 ### Added

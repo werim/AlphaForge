@@ -1,3 +1,45 @@
+## 2026-05-24 Patch Addendum — JOB-04 Effective RR Canonicalization
+
+### Why the patch was needed
+- Persisted `effective_rr` in AI decision rows and runtime final rejects could equal raw RR even when execution costs were non-zero, undermining reject-quality and expectancy realism.
+
+### Root cause
+- `AIBrain._persist_decision` and runtime final reject path wrote raw RR (`risk_reward`/`rr`) directly into `effective_rr` instead of using canonical execution-cost adjustment.
+
+### Files changed
+- `src/alphaforge/ai_brain.py`
+- `src/alphaforge/runtime.py`
+- `tests/test_runtime.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- AI decision persistence now computes `raw_rr` once, builds canonical execution context/cost model, then persists `effective_rr = max(raw_rr - total_penalty, 0.0)`.
+- Runtime risk-gate final rejects now persist canonical effective RR using the same execution-context/cost-model path.
+- AI decision feature payload now includes explicit execution penalties (`spread/slippage/latency/liquidity/funding/total`) plus completeness diagnostics.
+
+### Lifecycle/persistence/schema impact
+- No schema changes.
+- Lifecycle transitions unchanged.
+- Reject persistence quality improved via canonical effective RR consistency across signal/decision/review evidence.
+
+### Tests added/executed
+- Added runtime/AI persistence regressions for:
+  - non-zero cost effective RR reduction,
+  - signals/order_decisions effective RR parity,
+  - rejected review effective RR non-raw behavior,
+  - zero-cost equality,
+  - missing execution-context robustness with completeness/missing-fields,
+  - runtime final reject canonical effective RR.
+
+### Risks / remaining limitations
+- No threshold or scoring-weight change; trade frequency should not increase from this patch.
+- LIVE submission behavior unchanged by design.
+
+### Push recommendation
+- Merge as minimal canonicalization patch for effective RR audit integrity and reject-quality realism.
+
 ## 2026-05-22 Patch Addendum — Minimal follow-up: startup incident persistence rollback + defensive evidence parsing
 
 ### Why the patch was needed

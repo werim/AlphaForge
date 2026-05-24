@@ -1,3 +1,14 @@
+## 2026-05-24 JOB-04 effective RR canonicalization
+- **Current version:** 0.3.32-dev
+- **Current phase:** Execution-cost canonicalization hardening.
+- **Runtime maturity:** `effective_rr` now persists as execution-cost-adjusted value using canonical execution context/cost model in AI decision persistence and runtime final rejects.
+- **BACKTEST/PAPER/LIVE alignment:** improved parity for reject persistence semantics (`effective_rr = max(raw_rr - total_penalty, 0.0)`).
+- **Lifecycle coverage:** unchanged transitions; rejected-row economics now auditable with canonical effective RR.
+- **Execution realism coverage:** execution penalty breakdown persisted (spread/slippage/latency/liquidity/funding + completeness/missing fields).
+- **Known critical risks:** LIVE remains blocked; no LIVE submission-path behavior changed.
+- **Last audit date:** 2026-05-24
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 JOB19 V1 audit-only PAPER reject-rate diagnostics
 - **Current version:** 0.1.0-audit
 - **Current phase:** PAPER runtime audit instrumentation

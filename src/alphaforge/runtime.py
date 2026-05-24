@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 from alphaforge.ai_brain import AIBrain
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.order import LifecycleState
-from alphaforge.execution import build_execution_context
+from alphaforge.execution import build_execution_context, build_execution_cost_model
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
@@ -407,11 +407,15 @@ class RuntimeOrchestrator:
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
         market_ctx.setdefault("mode", self.config.execution_mode.value)
+        raw_rr = float(market_ctx.get("rr", 0.0) or 0.0)
+        execution_ctx = build_execution_context(market_ctx)
+        cost_model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
+        canonical_effective_rr = max(raw_rr - float(cost_model.total_penalty), 0.0)
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if risk_reject is not None:
-            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": market_ctx.get("rr"), "effective_rr": market_ctx.get("rr"), "explanation": "runtime_risk_gate", "execution_ctx": {"phase": "runtime_risk_gate", "market_ts": market_ctx.get("market_ts"), "risk_reject": risk_reject}})
+            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": canonical_effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": {"phase": "runtime_risk_gate", "market_ts": market_ctx.get("market_ts"), "risk_reject": risk_reject}})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject, "signal_id": signal_id})
             return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)

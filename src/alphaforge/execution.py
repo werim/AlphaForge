@@ -14,7 +14,8 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         market_ctx.get("spread_pct", _spread_pct_from_prices(market_ctx)),
         field="spread_pct",
     )
-    latency_ms = float(market_ctx.get("latency_ms", 50.0) or 50.0)
+    latency_raw = market_ctx.get("latency_ms", 50.0)
+    latency_ms = float(50.0 if latency_raw is None else latency_raw)
     orderbook_imbalance = float(market_ctx.get("orderbook_imbalance", 0.0) or 0.0)
     liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
     funding = funding_rate_pct if funding_rate_pct is not None else market_ctx.get("funding_rate_pct", 0.0)
