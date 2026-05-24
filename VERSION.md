@@ -1,3 +1,16 @@
+## 2026-05-24 JOB-22 Persisted rollback / emergency no-submit evidence
+- **Version:** `0.3.32-dev`
+- **Current phase:** Phase 6.2 persisted emergency-control readiness evidence.
+- **Runtime maturity:** LIVE readiness now requires fresh persisted deterministic rollback validation evidence; optimistic in-memory rollback flags cannot qualify independently.
+- **BACKTEST/PAPER/LIVE alignment:** decision, scoring, RR, regime and symbol-selection behavior unchanged; this is a LIVE readiness evidence-only increment.
+- **Lifecycle coverage:** deterministic validation exercises the existing kill-switch reject path and reconciliation dry-run path without introducing execution lifecycles or operational incident pollution.
+- **Execution realism coverage:** validator proves `GLOBAL_KILL_SWITCH` rejection before submit, zero execution mutation attempts, fail-closed reconciliation findings, and non-mutating repair recommendations.
+- **Dashboard coverage:** the existing read-only readiness probe matrix exposes persisted rollback/no-submit evidence, freshness status, mutation attempt count and blockers; no mutation controls were added.
+- **Known critical risks:** LIVE remains blocked unless every independent readiness control passes; validation evidence is not trading permission.
+- **Validation:** GitHub Actions `Tests` workflow run `#907` passed on JOB-22 head `8196deeef67f4e1223e4d86a4e27497910370e3a` before this documentation-only commit.
+- **Last audit date:** `2026-05-24`
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
 ## 2026-05-22 JOB19 V1 audit-only PAPER reject-rate diagnostics
 - **Current version:** 0.1.0-audit
 - **Current phase:** PAPER runtime audit instrumentation
@@ -309,7 +322,7 @@
 1. **Live readiness risk:** LIVE execution path is not production-safe (controls, operational safeguards, reconciliation maturity not yet at live standard).
 2. **Parity risk:** Full contract/lifecycle parity across all optional fields and timestamp typing nuances is still incomplete.
 3. **Migration risk:** Existing SQLite databases with legacy `execution_ctx_missing` text representations may require migration/rebuild strategies.
-4. **Data-source dependency risk:** Backtest universe/top-N behavior can still rely on live endpoint availability unless fixture mode is used.
+4. **Data-source dependency risk:** Backtest universe/top-N behavior can still rely on live Binance endpoints unless fixture mode is used.
 
 ## Last Audit Date
 - **2026-05-16** (documentation audit based on repository README + REPORT state).
@@ -427,7 +440,7 @@
 - Backtest quality summary now counts plain candidate decision rows directly when lifecycle `SIGNAL_CREATED` rows are absent, while preserving signal-scoped denominator behavior when lifecycle rows are present.
 - Adaptive closed-trade persistence now writes legacy `execution_metrics` JSON alongside structured review payload fields.
 - SQLite init/migration now ensures `closed_trade_reviews.execution_metrics` exists for backward-compatible read paths.
-- Live readiness verdict remains: ❌ **NOT LIVE-READY**.
+- Live readiness verdict remains: ❌ **NOT LIVE-ADY**.
 
 ## Generation N+2 Foundation Status (2026-05-18)
 - **Generation:** N+2 foundation — deterministic forward-window reject telemetry and scoped adaptive reject-learning aggregation.
