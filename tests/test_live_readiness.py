@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
+from alphaforge.rollback_evidence import persist_rollback_validation_evidence
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 
 
@@ -47,19 +48,29 @@ def _verified_alert() -> dict[str, object]:
     return {"provider_configured": True, "evidence_status": "COMPLETE", "observability_evidence_source": "MEASURED_PROBE", "alert_delivery_verified": True, "delivery_attempted": True, "delivery_acknowledged": True, "non_trading_probe_verified": True, "probe_id": "probe-verified", "endpoint_origin": "https://alerts.example.test", "blocking_reasons": []}
 
 
-def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True):
+def _persist_verified_rollback(engine) -> None:
+    persist_rollback_validation_evidence(engine, {
+        "validation_id": "rollback:readiness-test",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "READINESS_TEST_FIXTURE"},
+    })
+
+
+def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, persist_rollback: bool = True):
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
     if persist_alert:
         capture_alert_delivery_evidence(engine, _StaticProvider(_verified_alert()))
     if persist_live_heartbeat:
-        save_runtime_heartbeat(
-            engine,
-            runtime_instance_id="runtime:live-qualified-test",
-            execution_mode="LIVE",
-            scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
-        )
+        save_runtime_heartbeat(engine, runtime_instance_id="runtime:live-qualified-test", execution_mode="LIVE", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
+    if persist_rollback:
+        _persist_verified_rollback(engine)
     return engine
 
 
@@ -73,6 +84,7 @@ def test_live_readiness_pass_and_persistence() -> None:
     report = _evaluate(engine)
     assert report.qualified is True
     assert next(check for check in report.checks if check.name == "runtime_heartbeat").passed is True
+    assert next(check for check in report.checks if check.name == "rollback_ready").passed is True
     evaluator.persist_report(report)
     with engine.begin() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1
@@ -84,6 +96,14 @@ def test_live_readiness_rejects_missing_runtime_heartbeat() -> None:
     assert report.qualified is False
     assert heartbeat.passed is False
     assert "NO_PERSISTED_LIVE_RUNTIME_HEARTBEAT" in heartbeat.details
+
+
+def test_optimistic_rollback_flags_without_persisted_evidence_do_not_qualify() -> None:
+    report = _evaluate(_engine(persist_rollback=False), _operational())
+    rollback = next(check for check in report.checks if check.name == "rollback_ready")
+    assert report.qualified is False
+    assert rollback.passed is False
+    assert "ROLLBACK_EVIDENCE_MISSING" in rollback.details
 
 
 def test_live_readiness_rejects_paper_only_runtime_heartbeat() -> None:
@@ -133,7 +153,6 @@ def test_matching_diagnostic_probe_ack_is_persisted_and_accepted() -> None:
     def transport(url: str, payload: bytes, headers, timeout: float):
         request = json.loads(payload.decode("utf-8"))
         return {"status": "ACKNOWLEDGED", "acknowledged": True, "probe_id": request["probe_id"]}
-
     engine = _engine(persist_alert=False)
     provider = WebhookAlertDeliveryEvidenceProvider(AlertDeliveryProbeConfig(endpoint_url="https://alerts.example.test/probe"), transport=transport, probe_id_factory=lambda: "probe-measured")
     saved = capture_alert_delivery_evidence(engine, provider)
@@ -172,7 +191,7 @@ def test_static_operational_flags_without_persisted_alert_or_rollback_provenance
     observations = _operational()
     observations.pop("rollback_evidence_source")
     observations.pop("rollback_evidence_persisted")
-    report = _evaluate(_engine(persist_alert=False), observations)
+    report = _evaluate(_engine(persist_alert=False, persist_rollback=False), observations)
     failed = {check.name for check in report.checks if not check.passed}
     assert report.qualified is False
     assert {"alert_delivery_evidence", "observability_coverage", "rollback_ready"} <= failed
@@ -208,11 +227,7 @@ def test_invalid_numeric_parity_evidence_fails_closed_and_persists_report() -> N
     evaluator = LiveReadinessEvaluator(engine)
     report = evaluator.evaluate(
         mode_parity={"evidence_status": "COMPLETE", "sample_count": "N/A", "min_sample_count": None, "mismatch_count": "", "missing_field_count": "bad-value", "no_order_submission_verified": True},
-        reconciliation_snapshot=_reconciliation(),
-        observability_snapshot=_operational(),
-        canary_enabled=True,
-        shadow_mode_enabled=True,
-        operator_ack=True,
+        reconciliation_snapshot=_reconciliation(), observability_snapshot=_operational(), canary_enabled=True, shadow_mode_enabled=True, operator_ack=True,
     )
     assert report.qualified is False
     assert any(check.name == "mode_parity" and not check.passed for check in report.checks)

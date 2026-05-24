@@ -1,0 +1,260 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+from datetime import datetime, timezone
+import json
+import uuid
+from typing import Any, Mapping
+
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+from alphaforge.contracts import canonical_utc_timestamp
+from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
+
+MAX_EVIDENCE_AGE_SEC = 900.0
+FUTURE_TOLERANCE_SEC = 5.0
+EVIDENCE_SOURCE = "DETERMINISTIC_VALIDATION"
+_ALLOWED_PAYLOAD_KEYS = {
+    "validation_scope", "guard_path", "guard_reject_reason", "unsafe_snapshot_case",
+    "finding_counts", "recommendation_categories", "repair_payloads_dry_run",
+    "execution_adapter_bound", "supported_mutation_interfaces", "incident_rows_before",
+    "incident_rows_after",
+}
+
+
+def ensure_rollback_evidence_schema(engine: Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS live_rollback_validation_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                validation_id TEXT NOT NULL UNIQUE,
+                recorded_at TEXT NOT NULL,
+                evidence_status TEXT NOT NULL,
+                rollback_evidence_source TEXT NOT NULL,
+                kill_switch_block_verified INTEGER NOT NULL,
+                no_submit_on_kill_switch_verified INTEGER NOT NULL,
+                fail_closed_reconciliation_verified INTEGER NOT NULL,
+                repair_actions_non_mutating_verified INTEGER NOT NULL,
+                execution_mutation_attempt_count INTEGER NOT NULL,
+                blocking_reasons TEXT NOT NULL,
+                evidence_payload TEXT NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_live_rollback_validation_recorded_at
+            ON live_rollback_validation_evidence(recorded_at DESC, id DESC)
+        """))
+
+
+def _safe_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    source = dict(payload or {})
+    safe = {key: source[key] for key in _ALLOWED_PAYLOAD_KEYS if key in source}
+    if isinstance(safe.get("finding_counts"), Mapping):
+        safe["finding_counts"] = {str(key)[:80]: int(value) for key, value in safe["finding_counts"].items()}
+    if isinstance(safe.get("recommendation_categories"), list):
+        safe["recommendation_categories"] = [str(value)[:80] for value in safe["recommendation_categories"][:20]]
+    if isinstance(safe.get("supported_mutation_interfaces"), list):
+        safe["supported_mutation_interfaces"] = [str(value)[:80] for value in safe["supported_mutation_interfaces"][:20]]
+    return safe
+
+
+def persist_rollback_validation_evidence(engine: Engine, evidence: Mapping[str, Any]) -> dict[str, Any]:
+    checks = {
+        "kill_switch_block_verified": bool(evidence.get("kill_switch_block_verified", False)),
+        "no_submit_on_kill_switch_verified": bool(evidence.get("no_submit_on_kill_switch_verified", False)),
+        "fail_closed_reconciliation_verified": bool(evidence.get("fail_closed_reconciliation_verified", False)),
+        "repair_actions_non_mutating_verified": bool(evidence.get("repair_actions_non_mutating_verified", False)),
+    }
+    mutation_count = max(0, int(evidence.get("execution_mutation_attempt_count", 0) or 0))
+    reasons = [str(reason)[:120] for reason in list(evidence.get("blocking_reasons") or [])]
+    complete = all(checks.values()) and mutation_count == 0 and not reasons
+    row = {
+        "validation_id": str(evidence.get("validation_id") or f"rollback-validation:{uuid.uuid4().hex}")[:160],
+        "recorded_at": str(evidence.get("recorded_at") or canonical_utc_timestamp()),
+        "evidence_status": "COMPLETE" if complete else "INCOMPLETE",
+        "rollback_evidence_source": EVIDENCE_SOURCE,
+        **checks,
+        "execution_mutation_attempt_count": mutation_count,
+        "blocking_reasons": reasons,
+        "evidence_payload": _safe_payload(evidence.get("evidence_payload") if isinstance(evidence.get("evidence_payload"), Mapping) else {}),
+    }
+    ensure_rollback_evidence_schema(engine)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO live_rollback_validation_evidence(
+                validation_id, recorded_at, evidence_status, rollback_evidence_source,
+                kill_switch_block_verified, no_submit_on_kill_switch_verified,
+                fail_closed_reconciliation_verified, repair_actions_non_mutating_verified,
+                execution_mutation_attempt_count, blocking_reasons, evidence_payload
+            ) VALUES (
+                :validation_id, :recorded_at, :evidence_status, :rollback_evidence_source,
+                :kill_switch_block_verified, :no_submit_on_kill_switch_verified,
+                :fail_closed_reconciliation_verified, :repair_actions_non_mutating_verified,
+                :execution_mutation_attempt_count, :blocking_reasons, :evidence_payload
+            )
+        """), {
+            **row,
+            "kill_switch_block_verified": int(row["kill_switch_block_verified"]),
+            "no_submit_on_kill_switch_verified": int(row["no_submit_on_kill_switch_verified"]),
+            "fail_closed_reconciliation_verified": int(row["fail_closed_reconciliation_verified"]),
+            "repair_actions_non_mutating_verified": int(row["repair_actions_non_mutating_verified"]),
+            "blocking_reasons": json.dumps(row["blocking_reasons"], sort_keys=True),
+            "evidence_payload": json.dumps(row["evidence_payload"], sort_keys=True),
+        })
+    return row
+
+
+def _timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def latest_persisted_rollback_evidence(engine: Engine, *, max_age_sec: float = MAX_EVIDENCE_AGE_SEC, now: datetime | None = None) -> dict[str, Any]:
+    missing = {
+        "rollback_evidence_source": "UNVERIFIED", "rollback_evidence_persisted": False,
+        "rollback_evidence_verified": False, "rollback_evidence_status": "INCOMPLETE",
+        "kill_switch_block_verified": False, "no_submit_on_kill_switch_verified": False,
+        "fail_closed_reconciliation_verified": False, "repair_actions_non_mutating_verified": False,
+        "execution_mutation_attempt_count": None, "rollback_blocking_reasons": ["ROLLBACK_EVIDENCE_MISSING"],
+    }
+    try:
+        if not inspect(engine).has_table("live_rollback_validation_evidence"):
+            return missing
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT validation_id, recorded_at, evidence_status, rollback_evidence_source,
+                       kill_switch_block_verified, no_submit_on_kill_switch_verified,
+                       fail_closed_reconciliation_verified, repair_actions_non_mutating_verified,
+                       execution_mutation_attempt_count, blocking_reasons, evidence_payload
+                FROM live_rollback_validation_evidence ORDER BY id DESC LIMIT 1
+            """)).mappings().first()
+    except SQLAlchemyError:
+        return {**missing, "rollback_blocking_reasons": ["ROLLBACK_EVIDENCE_QUERY_UNAVAILABLE"]}
+    if row is None:
+        return missing
+    recorded = _timestamp(row["recorded_at"])
+    if recorded is None:
+        return {**missing, "rollback_evidence_persisted": True, "rollback_blocking_reasons": ["ROLLBACK_EVIDENCE_INVALID_TIMESTAMP"]}
+    age = ((now or datetime.now(timezone.utc)).astimezone(timezone.utc) - recorded).total_seconds()
+    if age < -FUTURE_TOLERANCE_SEC:
+        return {**missing, "rollback_evidence_persisted": True, "rollback_evidence_age_sec": age, "rollback_blocking_reasons": ["ROLLBACK_EVIDENCE_FUTURE_DATED"]}
+    if age > float(max_age_sec):
+        return {**missing, "rollback_evidence_persisted": True, "rollback_evidence_age_sec": age, "rollback_blocking_reasons": ["ROLLBACK_EVIDENCE_STALE"]}
+    try:
+        reasons = json.loads(str(row["blocking_reasons"] or "[]"))
+        payload = json.loads(str(row["evidence_payload"] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {**missing, "rollback_evidence_persisted": True, "rollback_evidence_age_sec": age, "rollback_blocking_reasons": ["ROLLBACK_EVIDENCE_INVALID"]}
+    valid = (
+        str(row["evidence_status"]).upper() == "COMPLETE"
+        and str(row["rollback_evidence_source"]).upper() == EVIDENCE_SOURCE
+        and bool(row["kill_switch_block_verified"])
+        and bool(row["no_submit_on_kill_switch_verified"])
+        and bool(row["fail_closed_reconciliation_verified"])
+        and bool(row["repair_actions_non_mutating_verified"])
+        and int(row["execution_mutation_attempt_count"]) == 0
+        and isinstance(reasons, list) and not reasons and isinstance(payload, dict)
+    )
+    return {
+        "validation_id": str(row["validation_id"]), "recorded_at": str(row["recorded_at"]),
+        "rollback_evidence_source": EVIDENCE_SOURCE if valid else "UNVERIFIED",
+        "rollback_evidence_persisted": True, "rollback_evidence_verified": valid,
+        "rollback_evidence_status": "COMPLETE" if valid else "INCOMPLETE",
+        "kill_switch_block_verified": valid, "no_submit_on_kill_switch_verified": valid,
+        "fail_closed_reconciliation_verified": valid, "repair_actions_non_mutating_verified": valid,
+        "execution_mutation_attempt_count": int(row["execution_mutation_attempt_count"]),
+        "rollback_evidence_age_sec": age, "evidence_payload": payload,
+        "rollback_blocking_reasons": [] if valid else ["ROLLBACK_EVIDENCE_INVALID"],
+    }
+
+
+def _incident_count(engine: Engine) -> int:
+    if not inspect(engine).has_table("reconciliation_incidents"):
+        return 0
+    with engine.connect() as conn:
+        return int(conn.execute(text("SELECT COUNT(*) FROM reconciliation_incidents")).scalar_one())
+
+
+async def run_deterministic_rollback_validation(engine: Engine) -> dict[str, Any]:
+    """Validate emergency controls locally; no exchange transport is constructed or invoked."""
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+    from alphaforge.symbol_selector import SymbolSelectionResult
+
+    rejects: list[dict[str, Any]] = []
+    lifecycle: list[dict[str, Any]] = []
+
+    class _NeverReachedBrain:
+        def before_real_order(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("kill-switch validation reached order-decision path")
+
+    class _TrackingAdapter:
+        submit_calls = 0
+        async def submit(self, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> Mapping[str, Any]:
+            self.submit_calls += 1
+            return {"status": "unexpected_submit"}
+
+    async def _empty_scanner() -> list[dict[str, Any]]:
+        return []
+
+    adapter = _TrackingAdapter()
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, global_kill_switch=True),
+        ai_brain=_NeverReachedBrain(), market_scanner=_empty_scanner,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", real_execution_adapter=adapter,
+        on_reject_persist=lambda item: rejects.append(dict(item)),
+        on_lifecycle_event=lambda item: lifecycle.append(dict(item)),
+    )
+    selection = SymbolSelectionResult(
+        symbol="VALIDATIONUSDT", tradable=True, symbol_score=8.0, regime_hint="FAVORABLE",
+        liquidity_score=8.0, volatility_score=8.0, trend_score=8.0, spread_score=8.0, volume_score=8.0,
+        diagnostics={"inputs": {"market_ts": datetime.now(timezone.utc).timestamp(), "spread_pct": 0.0001, "funding_rate_pct": 0.0, "entry": 100.0, "rr": 2.0, "side": "LONG"}},
+    )
+    await orchestrator._process_symbol(selection)
+    reason = str(rejects[-1].get("reason") if rejects else "")
+    states = [str(item.get("lifecycle_state")) for item in lifecycle]
+    kill_switch_ok = reason == "GLOBAL_KILL_SWITCH" and "SIGNAL_REJECTED" in states
+    no_submit_ok = adapter.submit_calls == 0 and orchestrator.metrics.executions == 0
+
+    incident_rows_before = _incident_count(engine)
+    reconciler = ReconciliationEngine()
+    snapshot = reconciler.snapshot_from_source({"orders": [{"order_id": "validation-orphan", "symbol": "VALIDATIONUSDT", "status": "OPEN"}], "positions": [], "fills": []})
+    findings, recommendations, _metrics = reconciler.reconcile(intended_orders=[], lifecycle_state_by_symbol={}, snapshot=snapshot, mode="LIVE")
+    incident_rows_after = _incident_count(engine)
+    counts = summarize_findings(findings)
+    fail_closed_ok = counts.get("orphan_orders", 0) == 1 and counts.get("fail_closed_findings", 0) == 1
+    repair_ok = bool(recommendations) and all(item.requires_operator_approval and item.action_payload.get("dry_run") is True and item.action_payload.get("shadow_mode") is True for item in recommendations) and incident_rows_before == incident_rows_after
+    blockers = []
+    if not kill_switch_ok: blockers.append("KILL_SWITCH_GUARD_NOT_VERIFIED")
+    if not no_submit_ok: blockers.append("NO_SUBMIT_GUARD_NOT_VERIFIED")
+    if not fail_closed_ok: blockers.append("FAIL_CLOSED_RECONCILIATION_NOT_VERIFIED")
+    if not repair_ok: blockers.append("NON_MUTATING_REPAIR_NOT_VERIFIED")
+    return persist_rollback_validation_evidence(engine, {
+        "kill_switch_block_verified": kill_switch_ok, "no_submit_on_kill_switch_verified": no_submit_ok,
+        "fail_closed_reconciliation_verified": fail_closed_ok, "repair_actions_non_mutating_verified": repair_ok,
+        "execution_mutation_attempt_count": adapter.submit_calls, "blocking_reasons": blockers,
+        "evidence_payload": {
+            "validation_scope": "LOCAL_DETERMINISTIC_TRACKING_ADAPTER", "guard_path": "RuntimeOrchestrator._process_symbol",
+            "guard_reject_reason": reason, "unsafe_snapshot_case": "ORPHAN_ORDER", "finding_counts": counts,
+            "recommendation_categories": [item.category for item in recommendations], "repair_payloads_dry_run": repair_ok,
+            "execution_adapter_bound": True, "supported_mutation_interfaces": ["submit"],
+            "incident_rows_before": incident_rows_before, "incident_rows_after": incident_rows_after,
+        },
+    })
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Persist deterministic rollback readiness evidence")
+    parser.add_argument("--database-url", required=True)
+    args = parser.parse_args()
+    result = asyncio.run(run_deterministic_rollback_validation(create_engine(args.database_url, future=True)))
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
