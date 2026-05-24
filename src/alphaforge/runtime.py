@@ -407,15 +407,16 @@ class RuntimeOrchestrator:
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
         market_ctx.setdefault("mode", self.config.execution_mode.value)
-        raw_rr = float(market_ctx.get("rr", 0.0) or 0.0)
+        raw_rr = self._safe_float(market_ctx.get("rr"), default=0.0)
         execution_ctx = build_execution_context(market_ctx)
+        market_ctx["execution_ctx"] = execution_ctx
         cost_model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
         canonical_effective_rr = max(raw_rr - float(cost_model.total_penalty), 0.0)
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if risk_reject is not None:
-            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": canonical_effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": {"phase": "runtime_risk_gate", "market_ts": market_ctx.get("market_ts"), "risk_reject": risk_reject}})
+            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": canonical_effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": {**execution_ctx, "phase": "runtime_risk_gate", "market_ts": market_ctx.get("market_ts"), "risk_reject": risk_reject}})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject, "signal_id": signal_id})
             return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
@@ -445,10 +446,10 @@ class RuntimeOrchestrator:
                 "reason": reject_reason,
                 "confidence": order_plan.confidence,
                 "score": getattr(score_ctx, "total_score", None),
-                "rr": signal_payload.get("risk_reward"),
-                "effective_rr": signal_payload.get("risk_reward"),
+                "rr": raw_rr,
+                "effective_rr": canonical_effective_rr,
                 "explanation": explanation,
-                "execution_ctx": {"phase": "before_real_order", "market_ts": market_ctx.get("market_ts"), "reject_reason_raw": order_plan.reason},
+                "execution_ctx": {**execution_ctx, "phase": "before_real_order", "market_ts": market_ctx.get("market_ts"), "reject_reason_raw": order_plan.reason},
             })
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": reject_reason, "signal_id": signal_id})
             return
@@ -493,11 +494,11 @@ class RuntimeOrchestrator:
             await self._reconcile_symbol_state(symbol, result, market_ctx)
             return
         await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
-        self._active_positions[symbol] = float(market_ctx.get("entry", 0.0) or 0.0)
+        self._active_positions[symbol] = self._safe_float(market_ctx.get("entry"), default=0.0)
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
     def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        entry = float(market_ctx.get("entry", 0.0) or 0.0)
+        entry = self._safe_float(market_ctx.get("entry"), default=0.0)
         slip = self.paper_slippage_bps / 10_000.0
         side = str(market_ctx.get("side", "LONG"))
         fill = entry * (1 + slip) if side.upper() == "LONG" else entry * (1 - slip)
@@ -564,6 +565,13 @@ class RuntimeOrchestrator:
         )
 
     @staticmethod
+    def _safe_float(value: Any, *, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
     def _resolve_signal_id(symbol: str, payload: Mapping[str, Any]) -> str:
         if payload.get("signal_id"):
             return str(payload["signal_id"])
@@ -584,13 +592,13 @@ class RuntimeOrchestrator:
             return "MAX_CONCURRENT_POSITIONS"
         if now < self._symbol_cooldown_until.get(symbol, 0.0):
             return "SYMBOL_COOLDOWN"
-        market_ts = float(market_ctx.get("market_ts", now) or now)
+        market_ts = self._safe_float(market_ctx.get("market_ts"), default=now)
         if (now - market_ts) > self.config.stale_market_data_sec:
             return "STALE_MARKET_DATA"
-        spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
+        spread_pct = self._safe_float(market_ctx.get("spread_pct"), default=0.0)
         if spread_pct > self.config.max_spread_pct:
             return "HIGH_SPREAD"
-        funding = abs(float(market_ctx.get("funding_rate_pct", 0.0) or 0.0))
+        funding = abs(self._safe_float(market_ctx.get("funding_rate_pct"), default=0.0))
         if funding > self.config.max_abs_funding_rate_pct:
             return "FUNDING_SANITY_REJECT"
         if symbol in self._active_positions:
@@ -697,14 +705,14 @@ class RuntimeOrchestrator:
     @staticmethod
     def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any], *, signal_id: str | None = None) -> dict[str, Any]:
         execution_ctx = build_execution_context(market_ctx)
-        rr = float(market_ctx.get("rr", 2.0) or 2.0)
+        rr = RuntimeOrchestrator._safe_float(market_ctx.get("rr"), default=2.0)
         return {
             "symbol": selection.symbol,
             "signal_id": signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
             "mode": str(market_ctx.get("mode", "PAPER")).upper(),
             "side": market_ctx.get("side", "LONG"),
             "timeframe": market_ctx.get("timeframe", "1m"),
-            "entry_price": float(market_ctx.get("entry", 0.0) or 0.0),
+            "entry_price": RuntimeOrchestrator._safe_float(market_ctx.get("entry"), default=0.0),
             "risk_reward": rr,
             "max_spread_bps": 12.0,
             "max_funding_rate": 0.0008,
