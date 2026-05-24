@@ -419,14 +419,14 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         return None
     now = _utc_now_iso()
     decision_id = decision.get("decision_id") or decision.get("id") or f"{decision.get('signal_id', 'UNKNOWN')}:{now}:{decision.get('decision', 'UNKNOWN')}"
-    execution_ctx = decision.get("execution_ctx", {})
+    execution_ctx = decision.get("execution_ctx", {}) or {}
     payload = {
         "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
         "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
         "reject_reason": canonical_reject_reason(decision.get("reject_reason")) if str(decision.get("decision", "")).upper() == "REJECTED" else decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
         "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
         "execution_ctx": json.dumps(execution_ctx),
-        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
+        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", execution_ctx.get("evidence_status") in {"UNAVAILABLE", None})) else 0,
         "created_at": now, "updated_at": now,
     }
     payload_obj = decision.get("order_payload")
@@ -462,11 +462,11 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "phase": decision.get("phase"), "order_type": decision.get("order_type"), "confidence": decision.get("confidence") or decision.get("score"),
         "explanation": decision.get("explanation"), "order_payload": json.dumps(payload_obj), "payload": json.dumps(payload_obj),
         "execution_ctx": json.dumps(execution_ctx),
-        "expected_slippage_pct": decision.get("expected_slippage_pct", 0.0), "spread_pct": decision.get("spread_pct", 0.0),
-        "latency_ms": decision.get("latency_ms", 0.0), "orderbook_imbalance": decision.get("orderbook_imbalance", 0.0),
-        "funding_rate_pct": decision.get("funding_rate_pct", 0.0), "execution_regime": decision.get("execution_regime"),
+        "expected_slippage_pct": decision.get("expected_slippage_pct"), "spread_pct": decision.get("spread_pct"),
+        "latency_ms": decision.get("latency_ms"), "orderbook_imbalance": decision.get("orderbook_imbalance"),
+        "funding_rate_pct": decision.get("funding_rate_pct"), "execution_regime": decision.get("execution_regime"),
         "volatility_regime": decision.get("volatility_regime"),
-        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", False)) else 0,
+        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", execution_ctx.get("evidence_status") in {"UNAVAILABLE", None})) else 0,
         "created_at": now, "updated_at": now,
     })
         if hasattr(session, "commit"):

@@ -22,16 +22,38 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     funding_rate_pct_val = _safe_float(funding, default=0.0)
     volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
 
+    required = [spread_status, slippage_status, md_latency_status, funding_status]
+    if all(s == "MEASURED" for s in required):
+        evidence_status = "COMPLETE_MEASURED"
+    elif any(s in {"MEASURED", "MODEL_ESTIMATE"} for s in required):
+        evidence_status = "PARTIAL"
+    else:
+        evidence_status = "UNAVAILABLE"
+
     return {
-        "expected_slippage_pct": max(expected_slippage_pct, 0.0),
-        "latency_ms": max(latency_ms, 0.0),
-        "spread_pct": max(spread_pct, 0.0),
-        "spread_source": str(market_ctx.get("spread_source", "UNKNOWN") or "UNKNOWN"),
+        "expected_slippage_pct": max(expected_slippage_pct, 0.0) if slippage_status != "UNAVAILABLE" else None,
+        "expected_slippage_legacy_pct": max(expected_slippage_pct, 0.0),
+        "slippage_status": slippage_status,
+        "slippage_source": slippage_source,
+        "market_data_latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
+        "market_data_latency_status": md_latency_status,
+        "market_data_latency_source": md_latency_source,
+        "submit_ack_latency_ms": max(submit_ack, 0.0) if submit_ack is not None else None,
+        "submit_ack_latency_status": submit_ack_status,
+        "submit_ack_latency_source": submit_ack_source,
+        "latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
+        "spread_pct": max(spread_pct, 0.0) if spread_status != "UNAVAILABLE" else None,
+        "spread_status": spread_status,
+        "spread_source": spread_source,
         "spread_unit_assumed": spread_unit_assumed,
         "slippage_unit_assumed": slippage_unit_assumed,
-        "orderbook_imbalance": max(min(orderbook_imbalance, 1.0), -1.0),
+        "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
+        "orderbook_status": orderbook_status,
+        "orderbook_source": orderbook_source,
         "liquidity_score": max(min(liquidity_score, 1.0), 0.0),
-        "funding_rate_pct": funding_rate_pct_val,
+        "funding_rate_pct": funding_val,
+        "funding_status": funding_status,
+        "funding_source": funding_source,
         "volatility_regime": volatility_regime,
         "spoof_risk": _safe_float(market_ctx.get("spoof_risk", 0.0), default=0.0),
         "absorption_score": _safe_float(market_ctx.get("absorption_score", 0.0), default=0.0),

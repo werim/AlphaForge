@@ -1587,3 +1587,8 @@ Use this framework only after executing diagnostics against a real PAPER runtime
 
 ### Push recommendation
 - Recommend merge as audit-only instrumentation with minimal blast radius.
+
+## JOB-22A (2026-05-24)
+- Root cause: final persistence paths defaulted missing execution evidence to optimistic zeros and dropped canonical provenance.
+- Fix: propagate one canonical execution_ctx across runtime/AI/final reject persistence and persist NULL for unavailable spread/slippage/latency.
+- Remaining blocker: effective_rr is still not execution-cost-adjusted gate (tracked for follow-up).

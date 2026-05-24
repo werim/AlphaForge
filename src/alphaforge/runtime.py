@@ -413,6 +413,8 @@ class RuntimeOrchestrator:
         cost_model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
         canonical_effective_rr = max(raw_rr - float(cost_model.total_penalty), 0.0)
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
+        execution_ctx = build_execution_context(market_ctx)
+        market_ctx["execution_ctx"] = execution_ctx
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if risk_reject is not None:

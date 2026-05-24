@@ -78,6 +78,9 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
     assert btc["spread_pct"] == pytest.approx((100.2 - 100.0) / 100.1)
     assert btc["spread_bps"] == pytest.approx(btc["spread_pct"] * 10_000.0)
     assert btc["funding_rate_pct"] == pytest.approx(0.0003)
+    assert btc["spread_status"] == "MEASURED"
+    assert btc["spread_source"] == "BINANCE_BOOK_TICKER"
+    assert btc["funding_status"] == "MEASURED"
 
 
 def test_binance_urls_use_fapi_v1_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,3 +131,13 @@ def test_scan_exchange_markets_handles_exchange_failure(monkeypatch: pytest.Monk
     cfg = load_config_from_env()
     rows = asyncio.run(scan_exchange_markets(cfg))
     assert rows == []
+
+
+def test_hyperliquid_mid_only_sets_unavailable_spread(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen_multi([[], [], [], {"ETH": "2500.0"}]))
+    cfg = load_config_from_env()
+    rows = asyncio.run(scan_exchange_markets(cfg))
+    eth = next(row for row in rows if row.get("source_exchange") == "hyperliquid")
+    assert eth["spread_pct"] is None
+    assert eth["spread_status"] == "UNAVAILABLE"
+    assert eth["spread_source"] == "MID_ONLY_NO_BOOK"

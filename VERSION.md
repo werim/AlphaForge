@@ -522,3 +522,6 @@ Last audit date: 2026-05-21
 - **Known critical risks:** unresolved alert delivery proof, rollback evidence proof, real execution readiness, protective-order lifecycle proof.
 - **Last audit date:** `2026-05-22`
 - **Live readiness verdict:** ❌ **NOT LIVE-READY**.
+
+- Last audit date: 2026-05-24 (JOB-22A)
+- Known critical risk: effective_rr execution-cost gating remains unresolved; PAPER/LIVE readiness not claimed.
