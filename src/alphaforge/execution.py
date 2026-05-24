@@ -10,16 +10,42 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         market_ctx.get("expected_slippage_pct", _expected_slippage_pct(klines, market_ctx)),
         field="expected_slippage_pct",
     )
-    spread_pct, spread_unit_assumed = normalize_pct_input(
-        market_ctx.get("spread_pct", _spread_pct_from_prices(market_ctx)),
-        field="spread_pct",
-    )
-    latency_raw = market_ctx.get("latency_ms", 50.0)
-    latency_ms = _safe_float(50.0 if latency_raw is None else latency_raw, default=50.0)
-    orderbook_imbalance = _safe_float(market_ctx.get("orderbook_imbalance", 0.0), default=0.0)
-    liquidity_score = _safe_float(market_ctx.get("liquidity_score", 1.0), default=1.0)
-    funding = funding_rate_pct if funding_rate_pct is not None else market_ctx.get("funding_rate_pct", 0.0)
-    funding_rate_pct_val = _safe_float(funding, default=0.0)
+    raw_spread = market_ctx.get("spread_pct", _spread_pct_from_prices(market_ctx))
+    spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
+
+    def _to_float(v: Any) -> float | None:
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    measured_spread = _to_float(raw_spread) is not None
+    spread_status = str(market_ctx.get("spread_status", "MEASURED" if measured_spread else "UNAVAILABLE"))
+    spread_source = str(market_ctx.get("spread_source", "BOOK_TICKER" if measured_spread else "UNAVAILABLE"))
+
+    slippage_status = str(market_ctx.get("slippage_status", "MODEL_ESTIMATE"))
+    slippage_source = str(market_ctx.get("slippage_source", "KLINE_RANGE_MODEL"))
+
+    md_latency = _to_float(market_ctx.get("market_data_latency_ms"))
+    md_latency_status = str(market_ctx.get("market_data_latency_status", "MEASURED" if md_latency is not None else "UNAVAILABLE"))
+    md_latency_source = str(market_ctx.get("market_data_latency_source", "UNKNOWN" if md_latency is not None else "UNAVAILABLE"))
+
+    submit_ack = _to_float(market_ctx.get("submit_ack_latency_ms"))
+    submit_ack_status = str(market_ctx.get("submit_ack_latency_status", "UNAVAILABLE" if submit_ack is None else "MEASURED"))
+    submit_ack_source = str(market_ctx.get("submit_ack_latency_source", "UNAVAILABLE" if submit_ack is None else "RUNTIME_ACK"))
+
+    funding = funding_rate_pct if funding_rate_pct is not None else market_ctx.get("funding_rate_pct")
+    funding_val = _to_float(funding)
+    funding_status = str(market_ctx.get("funding_status", "MEASURED" if funding_val is not None else "UNAVAILABLE"))
+    funding_source = str(market_ctx.get("funding_source", "UNKNOWN" if funding_val is not None else "UNAVAILABLE"))
+
+    orderbook = _to_float(market_ctx.get("orderbook_imbalance"))
+    orderbook_status = str(market_ctx.get("orderbook_status", "MEASURED" if orderbook is not None else "UNAVAILABLE"))
+    orderbook_source = str(market_ctx.get("orderbook_source", "UNKNOWN" if orderbook is not None else "UNAVAILABLE"))
+
+    liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
     volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
 
     required = [spread_status, slippage_status, md_latency_status, funding_status]
@@ -55,8 +81,9 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "funding_status": funding_status,
         "funding_source": funding_source,
         "volatility_regime": volatility_regime,
-        "spoof_risk": _safe_float(market_ctx.get("spoof_risk", 0.0), default=0.0),
-        "absorption_score": _safe_float(market_ctx.get("absorption_score", 0.0), default=0.0),
+        "evidence_status": evidence_status,
+        "spoof_risk": float(market_ctx.get("spoof_risk", 0.0) or 0.0),
+        "absorption_score": float(market_ctx.get("absorption_score", 0.0) or 0.0),
     }
 
 
@@ -75,16 +102,9 @@ def neutral_execution_context() -> dict[str, Any]:
     }
 
 
-def _safe_float(value: Any, *, default: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _spread_pct_from_prices(market_ctx: Mapping[str, Any]) -> float:
-    bid = _safe_float(market_ctx.get("best_bid", 0.0), default=0.0)
-    ask = _safe_float(market_ctx.get("best_ask", 0.0), default=0.0)
+    bid = float(market_ctx.get("best_bid", 0.0) or 0.0)
+    ask = float(market_ctx.get("best_ask", 0.0) or 0.0)
     mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
     if mid <= 0:
         return 0.0
@@ -93,14 +113,14 @@ def _spread_pct_from_prices(market_ctx: Mapping[str, Any]) -> float:
 
 def _expected_slippage_pct(klines: list[Any], market_ctx: Mapping[str, Any]) -> float:
     if not klines:
-        return _safe_float(market_ctx.get("expected_slippage_pct", 0.001), default=0.001)
+        return float(market_ctx.get("expected_slippage_pct", 0.001) or 0.001)
     highs, lows = [], []
     for k in klines[-20:]:
         if isinstance(k, Mapping):
-            highs.append(_safe_float(k.get("high", 0.0), default=0.0))
-            lows.append(_safe_float(k.get("low", 0.0), default=0.0))
+            highs.append(float(k.get("high", 0.0) or 0.0))
+            lows.append(float(k.get("low", 0.0) or 0.0))
     if not highs or not lows:
-        return _safe_float(market_ctx.get("expected_slippage_pct", 0.001), default=0.001)
+        return float(market_ctx.get("expected_slippage_pct", 0.001) or 0.001)
     avg_high = sum(highs) / len(highs)
     avg_low = sum(lows) / len(lows)
     if avg_high <= 0:
@@ -114,8 +134,8 @@ def _volatility_regime(klines: list[Any]) -> str:
     ranges = []
     for k in klines[-20:]:
         if isinstance(k, Mapping):
-            h = _safe_float(k.get("high", 0.0), default=0.0)
-            l = _safe_float(k.get("low", 0.0), default=0.0)
+            h = float(k.get("high", 0.0) or 0.0)
+            l = float(k.get("low", 0.0) or 0.0)
             if h > 0:
                 ranges.append((h - l) / h)
     if not ranges:
