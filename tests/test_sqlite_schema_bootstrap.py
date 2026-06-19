@@ -126,3 +126,11 @@ def test_init_db_migrations_are_idempotent_and_preserve_data(tmp_path) -> None:
         assert "phase" in cols
         preserved = conn.execute("SELECT COUNT(*) FROM order_decisions WHERE decision_id='preserved-row'").fetchone()[0]
         assert preserved == 1
+        migration_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone()
+        assert migration_table is not None
+        migration_count = conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version='2026_05_16_persistence_integrity_v1'"
+        ).fetchone()[0]
+        assert migration_count == 1
