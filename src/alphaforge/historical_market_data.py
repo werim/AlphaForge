@@ -137,3 +137,33 @@ def build_cache_metadata(symbol: str, interval: str, requested_start_ms: int, re
         "row_count": len(candles),
         "downloaded_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def load_or_fetch_candles(
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    output_dir: str | Path,
+    force_refresh: bool = False,
+) -> list[HistoricalCandle]:
+    """Load cached Binance candles or fetch the full requested range.
+
+    Cache coverage is treated as an optimization only. A stale cache must not
+    fail a backtest before Binance has been asked for the requested range.
+    """
+    cache_path = Path(output_dir) / "candles" / f"{symbol}_{interval}.json"
+    if not force_refresh and cache_path.exists():
+        metadata, cached = load_cache(cache_path)
+        if cache_covers(metadata, start_ms, end_ms):
+            step = _interval_ms(interval)
+            selected = [c for c in cached if start_ms <= c.timestamp <= end_ms]
+            _validate_coverage(selected, start_ms, end_ms, step, symbol, interval)
+            return selected
+
+    rows = fetch_binance_klines_paginated(symbol=symbol, interval=interval, start_ms=start_ms, end_ms=end_ms)
+    funding = fetch_historical_funding_rates(symbol=symbol, start_ms=start_ms, end_ms=end_ms)
+    rows = join_funding_to_candles(rows, funding)
+    metadata = build_cache_metadata(symbol=symbol, interval=interval, requested_start_ms=start_ms, requested_end_ms=end_ms, candles=rows)
+    write_cache(cache_path, rows, metadata)
+    return rows
