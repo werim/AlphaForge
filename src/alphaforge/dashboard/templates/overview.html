@@ -22,6 +22,46 @@
     <article class="metric"><label>Reject Rate</label><strong>{% if rejects.rejection_rate is not none %}{{ '%.2f'|format(rejects.rejection_rate * 100) }}%{% else %}N/A{% endif %}</strong></article>
     <article class="metric"><label>Required Exchanges</label><strong>{{ status.required_live_exchanges|join(', ') }}</strong></article>
   </section>
+
+  <section class="panel" id="run-backtest">
+    <div class="panel-head"><h2>Run Backtest</h2><span class="badge neutral">BACKTEST ONLY</span></div>
+    <p>Backtest only. Does not place orders.</p>
+    <form class="backtest-form" method="post" action="/backtest/run">
+      <div><label for="last_days">Last N days</label><input id="last_days" name="last_days" type="number" min="1" max="730" value="{{ backtest_form.last_days }}">{% if backtest_errors.last_days %}<small class="field-error">{{ backtest_errors.last_days }}</small>{% endif %}</div>
+      <div><label for="symbols">Symbols</label><input id="symbols" name="symbols" value="{{ backtest_form.symbols }}" placeholder="BTCUSDT,ETHUSDT">{% if backtest_errors.symbols %}<small class="field-error">{{ backtest_errors.symbols }}</small>{% endif %}</div>
+      <div><label for="timeframe">Timeframe</label><select id="timeframe" name="timeframe">{% for tf in backtest_form.timeframes %}<option value="{{ tf }}" {% if tf == backtest_form.timeframe %}selected{% endif %}>{{ tf }}</option>{% endfor %}</select>{% if backtest_errors.timeframe %}<small class="field-error">{{ backtest_errors.timeframe }}</small>{% endif %}</div>
+      <div><label for="initial_balance">Initial balance</label><input id="initial_balance" name="initial_balance" type="number" min="100" max="10000000" step="0.01" value="{{ backtest_form.initial_balance }}">{% if backtest_errors.initial_balance %}<small class="field-error">{{ backtest_errors.initial_balance }}</small>{% endif %}</div>
+      <div><label for="max_symbols">Max symbols</label><input id="max_symbols" name="max_symbols" type="number" min="1" max="200" value="{{ backtest_form.max_symbols }}">{% if backtest_errors.max_symbols %}<small class="field-error">{{ backtest_errors.max_symbols }}</small>{% endif %}</div>
+      <button type="submit">Run Backtest</button>
+    </form>
+    <div class="alert warn-box"><strong>Safety boundary:</strong> This action forces mode BACKTEST and never invokes PAPER/LIVE runtime loops or live order submission controls.</div>
+    {% if backtest_result %}
+    <section class="result-panel">
+      <h2>Backtest Result</h2>
+      <div class="cards">
+        <article class="metric"><label>Status</label><strong class="badge {% if backtest_result.status == 'COMPLETED' %}pass{% else %}fail{% endif %}">{{ backtest_result.status }}</strong></article>
+        <article class="metric"><label>Period</label><strong>{{ backtest_result.period }}</strong></article>
+        <article class="metric"><label>Symbols</label><strong class="small-value">{{ backtest_result.symbols|join(', ') }}</strong></article>
+        <article class="metric"><label>Timeframe</label><strong>{{ backtest_result.timeframe }}</strong></article>
+      </div>
+      {% if backtest_result.error_message %}<div class="alert fail-box"><strong>Backtest failed closed.</strong> {{ backtest_result.error_message }}</div>{% endif %}
+      {% if backtest_result.lifecycle_warning %}<div class="alert warn-box">{{ backtest_result.lifecycle_warning }}</div>{% endif %}
+      {% if backtest_result.execution_context_warning %}<div class="alert warn-box">{{ backtest_result.execution_context_warning }}</div>{% endif %}
+      <table>
+        <tbody>
+          <tr><th>Total candidates/signals</th><td>{{ backtest_result.total_candidates if backtest_result.total_candidates is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Accepted trades</th><td>{{ backtest_result.accepted_trades if backtest_result.accepted_trades is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Rejected signals</th><td>{{ backtest_result.rejected_signals if backtest_result.rejected_signals is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Win / Loss / Open</th><td>{{ backtest_result.win_count if backtest_result.win_count is not none else 'Unavailable' }} / {{ backtest_result.loss_count if backtest_result.loss_count is not none else 'Unavailable' }} / {{ backtest_result.open_count if backtest_result.open_count is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Net PnL</th><td>{{ backtest_result.net_pnl if backtest_result.net_pnl is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Return / Max drawdown</th><td>{{ backtest_result.total_return_pct if backtest_result.total_return_pct is not none else 'Unavailable' }} / {{ backtest_result.max_drawdown if backtest_result.max_drawdown is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Artifacts</th><td>{{ backtest_result.output_dir or 'Unavailable' }}{% if backtest_result.summary_path %}<br>{{ backtest_result.summary_path }}{% endif %}{% if backtest_result.lifecycle_path %}<br>{{ backtest_result.lifecycle_path }}{% endif %}{% if backtest_result.rejected_path %}<br>{{ backtest_result.rejected_path }}{% endif %}</td></tr>
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
+  </section>
+
   <div class="grid-two">
     <section class="panel">
       <div class="panel-head"><h2>Top Reject Reasons</h2><a href="/rejects">Detay</a></div>

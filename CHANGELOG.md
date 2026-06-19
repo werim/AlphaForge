@@ -1,3 +1,26 @@
+## [Unreleased] - 2026-06-19 (Dashboard BACKTEST control panel)
+
+### Added
+- Added a dashboard "Run Backtest" form with last-days, comma-separated symbols, safe timeframe selection, initial balance, and max-symbol controls.
+- Added a BACKTEST-only dashboard runner wrapper around the existing `backtest_order.py` pipeline and result artifact summarization.
+- Added dashboard tests for form rendering, validation, BACKTEST-only runner invocation, safe failure rendering, and unavailable lifecycle/execution warnings.
+
+### Changed
+- Overview dashboard now includes a clearly labeled BACKTEST ONLY control section and result panel.
+
+### Fixed
+- Dashboard no longer requires operators to leave the web UI for simple bounded backtest launches while preserving the no-LIVE/no-PAPER safety boundary.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Dashboard backtest execution is synchronous and may time out on large historical windows.
+- Historical data, lifecycle accuracy, and execution context fidelity remain limited to what the existing backtest pipeline and artifacts can provide.
+
 ## [Unreleased] - 2026-06-19 (Alembic revision graph integrity repair)
 
 ### Added
