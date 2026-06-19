@@ -60,23 +60,41 @@ class TimesFMForecaster:
         if self._model is None:
             raise TimesFMForecastError("No TimesFM model configured")
 
-        # TimesFM releases expose slightly different call surfaces. Support the
-        # common ``forecast(..., horizon_len=...)`` shape without masking model
-        # failures; invalid or missing quantiles are rejected by the parser.
-        forecast = self._model.forecast([list(close_prices)], horizon_len=horizon)
+        inputs = [list(close_prices)]
+        forecast = _call_timesfm_forecast(self._model, inputs, horizon)
         return _parse_timesfm_output(forecast, horizon)
+
+
+def _call_timesfm_forecast(model: object, inputs: list[list[float]], horizon: int) -> object:
+    forecast_fn = getattr(model, "forecast", None)
+    if forecast_fn is None:
+        raise TimesFMForecastError("Configured TimesFM model does not expose forecast()")
+
+    call_attempts = (
+        lambda: forecast_fn(inputs=inputs, horizon=horizon),
+        lambda: forecast_fn(inputs=inputs, horizon_len=horizon),
+        lambda: forecast_fn(inputs, horizon_len=horizon),
+        lambda: forecast_fn(inputs, horizon=horizon),
+        lambda: forecast_fn(inputs=inputs, freq=[0]),
+        lambda: forecast_fn(inputs, freq=[0]),
+    )
+    last_type_error: TypeError | None = None
+    for attempt in call_attempts:
+        try:
+            return attempt()
+        except TypeError as exc:
+            last_type_error = exc
+    raise TimesFMForecastError(f"TimesFM forecast() signature is unsupported: {last_type_error}")
 
 
 def _parse_timesfm_output(raw: object, horizon: int) -> QuantileForecast:
     if isinstance(raw, dict):
-        p10 = _last_value(raw.get("p10") or raw.get("0.1"), horizon)
-        p50 = _last_value(raw.get("p50") or raw.get("0.5") or raw.get("mean"), horizon)
-        p90 = _last_value(raw.get("p90") or raw.get("0.9"), horizon)
+        p10 = _last_value(_first_present(raw, ("p10", "0.1")), horizon)
+        p50 = _last_value(_first_present(raw, ("p50", "0.5", "median", "mean")), horizon)
+        p90 = _last_value(_first_present(raw, ("p90", "0.9")), horizon)
     elif isinstance(raw, tuple) and len(raw) >= 2:
-        mean, quantiles = raw[0], raw[1]
-        p50 = _last_value(mean, horizon)
-        p10 = _quantile_value(quantiles, 0, horizon)
-        p90 = _quantile_value(quantiles, -1, horizon)
+        point, quantiles = raw[0], raw[1]
+        p10, p50, p90 = _tuple_quantile_values(point, quantiles, horizon)
     else:
         raise TimesFMForecastError("Unsupported TimesFM forecast output")
 
@@ -86,18 +104,59 @@ def _parse_timesfm_output(raw: object, horizon: int) -> QuantileForecast:
     return QuantileForecast(horizon=horizon, p10=values[0], p50=values[1], p90=values[2])
 
 
+def _first_present(raw: dict[object, object], keys: tuple[str, ...]) -> object:
+    for key in keys:
+        if key in raw and raw[key] is not None:
+            return raw[key]
+    raise TimesFMForecastError("Missing forecast quantiles")
+
+
+def _tuple_quantile_values(point: object, quantiles: object, horizon: int) -> tuple[float, float, float]:
+    row = _horizon_quantile_row(quantiles, horizon)
+    width = len(row)
+    if width >= 10:
+        return float(row[1]), float(row[5]), float(row[9])
+    if width >= 9:
+        return float(row[0]), float(row[4]), float(row[8])
+    if width >= 3:
+        return float(row[0]), float(row[1]), float(row[2])
+    if width == 1:
+        median = _last_value(point, horizon)
+        return float(row[0]), float(median), float(row[0])
+    raise TimesFMForecastError("Missing forecast quantiles")
+
+
 def _last_value(values: object, horizon: int) -> float:
-    seq = values[0] if isinstance(values, list | tuple) and values and isinstance(values[0], list | tuple) else values
-    if not isinstance(seq, list | tuple) or len(seq) < horizon:
+    seq = _first_series(values)
+    if len(seq) < horizon:
         raise TimesFMForecastError("Forecast output shorter than requested horizon")
     return float(seq[horizon - 1])
 
 
-def _quantile_value(values: object, quantile_index: int, horizon: int) -> float:
-    if not isinstance(values, list | tuple) or not values:
-        raise TimesFMForecastError("Missing forecast quantiles")
-    first_series = values[0] if isinstance(values[0], list | tuple) else values
-    horizon_row = first_series[horizon - 1]
-    if not isinstance(horizon_row, list | tuple):
-        return float(horizon_row)
-    return float(horizon_row[quantile_index])
+def _horizon_quantile_row(values: object, horizon: int) -> object:
+    series = _first_series(values)
+    if len(series) < horizon:
+        raise TimesFMForecastError("Forecast quantiles shorter than requested horizon")
+    row = series[horizon - 1]
+    if not _is_sequence_like(row):
+        raise TimesFMForecastError("Forecast quantile row is not sequence-like")
+    return row
+
+
+def _first_series(values: object) -> object:
+    if not _is_sequence_like(values) or len(values) == 0:
+        raise TimesFMForecastError("Missing forecast values")
+    first = values[0]
+    if _is_sequence_like(first) and len(first) > 0 and not _is_number(first[0]):
+        return first
+    if _is_sequence_like(first) and len(first) > 0 and _is_number(first[0]):
+        return first
+    return values
+
+
+def _is_sequence_like(value: object) -> bool:
+    return not isinstance(value, str | bytes | dict) and hasattr(value, "__len__") and hasattr(value, "__getitem__")
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, int | float) or hasattr(value, "item")

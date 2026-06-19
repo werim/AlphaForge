@@ -1,3 +1,14 @@
+## 2026-06-19 TimesFM post-merge compatibility hardening
+- **Current version:** 0.3.33-dev
+- **Current phase:** PAPER/BACKTEST forecast integration hardening after PR #177.
+- **Runtime maturity:** TimesFM decisions remain logged-only research outputs; no LIVE order path or execution adapter integration was added.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER still share replay and quantile decision conversion; LIVE remains explicitly blocked.
+- **Lifecycle coverage:** Forecast failures fail closed into `NO_TRADE` / `INVALID_FORECAST`; no order lifecycle states are advanced.
+- **Execution realism coverage:** Real TimesFM API/output compatibility improved, including NumPy tuple outputs and mean-plus-decile quantile parsing; spread/slippage/funding remain unavailable rather than faked.
+- **Known critical risks:** Optional TimesFM package/model weights are still externally managed; local environment could not install NumPy due package-index access, so NumPy-specific tests skip unless the dependency is installed.
+- **Last audit date:** 2026-06-19
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; module is PAPER/BACKTEST only.
+
 ## 2026-06-19 TimesFM BTCUSDT futures PAPER/BACKTEST forecasting
 - **Current version:** 0.3.32-dev
 - **Current phase:** PAPER/BACKTEST forecast research module.

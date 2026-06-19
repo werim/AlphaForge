@@ -1,3 +1,59 @@
+## 2026-06-19 Patch Addendum — TimesFM post-merge API/output compatibility hardening
+
+### Why the patch was needed
+- PR #177 left unresolved compatibility risk around real TimesFM forecast call signatures and returned tuple/NumPy output shapes.
+- Quantile extraction could misread a mean column as p10 for TimesFM layouts that return mean followed by q10...q90 columns.
+
+### Root cause
+- The wrapper assumed a single `forecast([series], horizon_len=horizon)` API surface and list/tuple-only output handling.
+- Tuple parsing treated the first and last quantile columns as p10/p90, which is wrong for mean-plus-decile layouts where column 0 is the mean and p10 begins at column 1.
+
+### Files changed
+- `src/alphaforge/models/timesfm_forecaster.py`
+- `tests/test_timesfm_futures.py`
+- `pyproject.toml`
+- `requirements.txt`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- `TimesFMForecaster` now tries compatible TimesFM call surfaces using `inputs` plus `horizon`, `horizon_len`, positional variants, and legacy `freq` variants before failing closed.
+- The parser now accepts generic sequence-like outputs, including NumPy arrays, while keeping malformed output fail-closed as `TimesFMForecastError`.
+- Tuple quantile parsing now supports mean-plus-q10...q90, q10...q90, and p10/p50/p90 compact layouts.
+
+### Lifecycle changes
+- No order lifecycle states are emitted or advanced.
+- Bad model output continues to become `NO_TRADE` with `INVALID_FORECAST` during replay instead of creating trades.
+
+### Persistence/export/schema changes
+- No database or CSV schema changes.
+- Rejected forecast rows remain exportable with null forecast/order fields where quality is unavailable.
+
+### Tests added
+- `test_timesfm_tuple_numpy_mean_plus_deciles_extracts_true_p10_p50_p90`
+- `test_timesfm_tuple_numpy_older_nine_quantile_layout_is_supported`
+- `test_timesfm_forecaster_tries_legacy_freq_signature`
+- `test_timesfm_malformed_numpy_output_raises_forecast_error`
+- `test_replay_logs_invalid_forecast_for_malformed_real_shaped_model_output`
+
+### Tests executed
+- `pytest -q tests/test_timesfm_futures.py`
+- `pytest -q`
+- `python -m compileall -q src/alphaforge tests`
+
+### Risks / remaining limitations
+- Real TimesFM installation/model weights remain external and were not exercised against a live package in this environment.
+- Local package-index access denied NumPy installation, so NumPy-specific tests skip unless NumPy is available from the test environment.
+- This patch does not add spread, slippage, funding, liquidity, latency, fill, or exchange-rejection modeling.
+
+### Migration concerns
+- No schema migration required.
+- Test environments should install development dependencies, including NumPy, to execute ndarray-specific regression tests.
+
+### Push recommendation
+- Safe to merge as a contained PAPER/BACKTEST compatibility hardening patch. Do not enable LIVE trading.
+
 ## 2026-06-19 Patch — TimesFM BTCUSDT futures PAPER/BACKTEST forecasting module
 
 ### Why the patch was needed

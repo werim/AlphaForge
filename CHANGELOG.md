@@ -1,3 +1,27 @@
+## [Unreleased] - 2026-06-19 (TimesFM post-merge compatibility hardening)
+
+### Added
+- Added deterministic TimesFM wrapper tests for tuple-style point/quantile outputs, NumPy array-like outputs, mean-plus-q10...q90 quantile layout, older nine-quantile layout, legacy `freq` forecast calls, malformed output rejection, and replay `INVALID_FORECAST` logging.
+- Added NumPy to development/test dependencies for real ndarray-shaped TimesFM output regression coverage.
+
+### Changed
+- Hardened the TimesFM wrapper to try compatible 1.x/2.x forecast call surfaces before failing closed.
+- Extended TimesFM output parsing to accept sequence-like list, tuple, and ndarray outputs without requiring NumPy at runtime.
+
+### Fixed
+- Fixed quantile extraction for real-shaped TimesFM tuple output where column 0 is a mean and p10 starts at the q10 column, preventing mean values from being mislabeled as p10.
+- Fixed malformed tuple output handling so invalid forecasts raise `TimesFMForecastError` and replay records `INVALID_FORECAST` instead of crashing.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- TimesFM inference still requires an externally installed/configured `timesfm` package/model.
+- Forecast replay still does not model spread, slippage, funding, liquidity, latency, or live execution and must not be used for LIVE orders.
+
 ## [Unreleased] - 2026-06-19 (TimesFM BTCUSDT futures PAPER/BACKTEST forecasting)
 
 ### Added
