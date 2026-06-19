@@ -1,3 +1,23 @@
+## [Unreleased] - 2026-06-19 (Alembic revision graph integrity repair)
+
+### Added
+- Added Alembic revision-graph regression coverage for dangling `down_revision` references, script directory head resolution, and temporary SQLite `upgrade head` execution when Alembic is installed.
+
+### Changed
+- Restored the Phase 1 base migration revision identifier to `0001_phase1_init` so the existing adaptive learning lifecycle migration's `down_revision` points to a present base revision.
+
+### Fixed
+- Fixed Alembic graph loading failure where `0002_adaptive_learning_lifecycle` referenced missing revision `0001_phase1_init` while the base migration file declared `revision = "0001_phase1"`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for fresh databases. Existing databases stamped with the erroneous `0001_phase1` revision require explicit operator review rather than blind stamping.
+
+### Known Issues
+- This patch repairs migration metadata lineage only; it does not change LIVE readiness, execution realism, or runtime trading behavior.
+
 ## [Unreleased] - 2026-06-19 (SQLite schema migration bootstrap legacy regression hardening)
 
 ### Added

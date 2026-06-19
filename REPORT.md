@@ -1,3 +1,68 @@
+## 2026-06-19 Patch Addendum — Alembic revision graph integrity repair
+
+### Why the patch was needed
+- `alembic upgrade head` failed because the migration graph contained a dangling `down_revision`: `0002_adaptive_learning_lifecycle` pointed to `0001_phase1_init`, but no loaded migration declared that revision identifier.
+- The base migration file existed as `alembic/versions/0001_phase1_init.py`, but its internal `revision` metadata was `0001_phase1`, creating a filename/header/lineage mismatch.
+
+### Root cause
+- The initial Phase 1 migration was not deleted or replaced by SQLite bootstrap logic; it was present under the expected filename and contains the base schema DDL.
+- The revision identifier inside that base migration was shortened/renamed to `0001_phase1` while the next migration retained the intended `down_revision = "0001_phase1_init"` lineage.
+
+### Files changed
+- `alembic/versions/0001_phase1_init.py`
+- `tests/test_alembic_revision_graph.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Migration graph before
+- Present revision declared by base file: `0001_phase1` with `down_revision = None`.
+- Adaptive lifecycle migration: `0002_adaptive_learning_lifecycle` with `down_revision = "0001_phase1_init"`.
+- Result: dangling reference to missing `0001_phase1_init`; Alembic script loading can warn and then fail with `KeyError` when resolving heads/upgrades.
+
+### Migration graph after
+- Base migration: `0001_phase1_init` with `down_revision = None`.
+- Adaptive lifecycle migration: `0002_adaptive_learning_lifecycle` with `down_revision = "0001_phase1_init"`.
+- Result: single linear graph `0001_phase1_init -> 0002_adaptive_learning_lifecycle` with head `0002_adaptive_learning_lifecycle`.
+
+### Runtime behavior changes
+- None. No trading thresholds, scoring, reject logic, lifecycle semantics, scanner behavior, order behavior, or execution-cost logic changed.
+- This is an Alembic metadata-lineage repair only.
+
+### Lifecycle changes
+- None. Lifecycle transition emission and persistence semantics are unchanged.
+
+### Persistence changes
+- No table/column DDL was changed in the base migration body.
+- Fresh Alembic databases now have a resolvable migration chain and can apply the existing base and adaptive lifecycle migrations in order.
+- Existing databases whose `alembic_version` table contains the erroneous `0001_phase1` value need explicit operator review/remediation; this patch intentionally does not use `alembic stamp` or fake migration success.
+
+### Export/schema changes
+- None. CSV exports and runtime schema definitions are unchanged by this metadata repair.
+
+### Tests added
+- Added a static regression test that fails on any Alembic migration referencing a missing `down_revision`.
+- Added an Alembic `ScriptDirectory` regression test that verifies script loading and head resolution when the Alembic package is installed.
+- Added a temporary SQLite `alembic upgrade head` regression test when the Alembic package is installed.
+
+### Tests executed
+- `pytest -q tests/test_alembic_revision_graph.py` passed for the static graph test, with Alembic-dependent tests skipped in this container because the Alembic package is not installed.
+
+### Risks
+- Low for fresh databases and repositories that had not stamped the incorrect `0001_phase1` revision.
+- Compatibility risk exists for any database already stamped with `0001_phase1`; those databases should be handled through explicit migration-version remediation reviewed against actual schema state, not blind stamping.
+
+### Remaining limitations
+- This patch does not reconcile SQLAlchemy metadata-vs-Alembic DDL completeness beyond the reported graph integrity issue.
+- LIVE readiness remains unchanged and not approved.
+
+### Migration concerns
+- No manual action is needed for fresh databases.
+- Operators should inspect `alembic_version` on existing databases before upgrading; if it contains `0001_phase1`, verify the Phase 1 schema is present before applying a deliberate version-table correction.
+
+### Push recommendation
+- Safe to push as a minimal Alembic lineage repair after validating Alembic-dependent tests in a normal development environment with project dependencies installed.
+
 ## 2026-06-19 Patch Addendum — SQLite schema migration bootstrap legacy regression hardening
 
 ### Why the patch was needed
