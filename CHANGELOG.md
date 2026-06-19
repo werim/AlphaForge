@@ -1,3 +1,28 @@
+## [Unreleased] - 2026-06-19 (TimesFM BTCUSDT futures PAPER/BACKTEST forecasting)
+
+### Added
+- Added BTCUSDT Binance USD-M Futures OHLCV loader support for 15m and 1h TimesFM research inputs.
+- Added a TimesFM forecaster wrapper that lazily uses the optional `timesfm` package and exposes quantile forecasts for horizons 8, 16, and 24.
+- Added PAPER/BACKTEST-only historical replay that passes only candles visible at decision time to prevent lookahead bias.
+- Added CSV decision logging fields for timestamp, symbol, timeframe, current price, forecast quantiles, side, entry, stop, take-profit, expected RR, and rejection reason.
+- Added tests for no-lookahead replay, invalid forecast rejection, LONG, SHORT, and NO_TRADE decisions.
+
+### Changed
+- REPORT.md and VERSION.md now document TimesFM module behavior, limitations, and live-readiness impact.
+
+### Fixed
+- None.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- TimesFM inference requires an externally installed/configured `timesfm` package/model.
+- Forecast replay does not model spread, slippage, funding, liquidity, latency, or live execution and must not be used for LIVE orders.
+
 ## [Unreleased] - 2026-05-22 (JOB19 V1 audit diagnostics only)
 
 ### Added

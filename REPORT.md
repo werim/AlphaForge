@@ -1,3 +1,64 @@
+## 2026-06-19 Patch — TimesFM BTCUSDT futures PAPER/BACKTEST forecasting module
+
+### Why the patch was needed
+- The repository needed an execution-safe research module for TimesFM-based BTCUSDT futures forecasts without introducing any LIVE order path.
+- Forecast decisions needed auditable quantile, RR, and rejection fields for PAPER/BACKTEST replay.
+
+### Root cause
+- No existing module combined Binance USD-M Futures candle loading, TimesFM quantile forecasts, no-lookahead historical replay, and decision logging for BTCUSDT forecast research.
+
+### Files changed
+- `src/alphaforge/historical_market_data.py` (existing Binance Futures kline pagination reused)
+- `src/alphaforge/models/timesfm_forecaster.py`
+- `src/alphaforge/timesfm_futures.py`
+- `tests/test_timesfm_futures.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+- Added a PAPER/BACKTEST-only TimesFM futures replay path for BTCUSDT 15m/1h candles.
+- Added quantile-to-decision conversion for horizons 8, 16, and 24 with `LONG`, `SHORT`, or `NO_TRADE` output.
+- LIVE mode is explicitly rejected by the replay API; the module has no order-placement function or execution adapter integration.
+
+### Lifecycle changes
+- No production order lifecycle transitions are emitted.
+- Forecast outputs are decision/audit records only; rejected forecasts remain visible as `NO_TRADE` with `rejection_reason`.
+
+### Persistence/export/schema changes
+- No database schema changes.
+- Added CSV export support for every required decision field: timestamp, symbol, timeframe, current price, p10/p50/p90, side, entry, stop, take profit, expected RR, and rejection reason.
+- Unavailable forecast/order fields are written as null/empty CSV values rather than fake defaults.
+
+### Backtest metrics
+- Unit replay fixture: 70 historical candles with `min_history=64` produced 7 replay decisions, matching the number of decision points available without future candles.
+- Decision conversion tests cover one accepted LONG, one accepted SHORT, one low-confidence NO_TRADE, and invalid forecast rejection.
+- No PnL, win-rate, drawdown, spread, slippage, funding, or latency metrics are claimed because this patch does not simulate fills or real execution costs.
+
+### Tests added
+- `test_loader_uses_binance_futures_btcusdt_15m_and_1h`
+- `test_backtest_replay_prevents_lookahead_bias`
+- `test_invalid_forecast_handling_logs_no_trade_rejection`
+- `test_long_decision_from_quantile_forecast`
+- `test_short_decision_from_quantile_forecast`
+- `test_no_trade_decision_from_low_confidence_forecast`
+
+### Tests executed
+- `pytest -q tests/test_timesfm_futures.py`
+
+### Risks / remaining limitations
+- Actual TimesFM inference depends on installing/configuring the optional external `timesfm` package and model weights.
+- The wrapper supports common TimesFM output shapes but may require adaptation for a specific upstream release.
+- The module does not model spread, slippage, funding, liquidity, latency, partial fills, or exchange rejection.
+- The module is not LIVE-ready and must remain research/logging only until execution realism and lifecycle integration are separately verified.
+
+### Migration concerns
+- None for database users; no schema migration is required.
+- Consumers should treat CSV logs as a new research artifact, not canonical live execution evidence.
+
+### Push recommendation
+- Merge as a contained PAPER/BACKTEST research capability. Do not enable for LIVE trading.
+
 ## 2026-05-22 Patch Addendum — Minimal follow-up: startup incident persistence rollback + defensive evidence parsing
 
 ### Why the patch was needed

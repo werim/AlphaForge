@@ -1,3 +1,14 @@
+## 2026-06-19 TimesFM BTCUSDT futures PAPER/BACKTEST forecasting
+- **Current version:** 0.3.32-dev
+- **Current phase:** PAPER/BACKTEST forecast research module.
+- **Runtime maturity:** TimesFM decisions are logged-only research outputs; no live order path or runtime execution adapter integration was added.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER share the same quantile decision conversion; LIVE is explicitly blocked.
+- **Lifecycle coverage:** Forecast decisions are audit rows (`LONG`, `SHORT`, `NO_TRADE`) and do not advance order lifecycle states.
+- **Execution realism coverage:** Uses Binance USD-M Futures OHLCV, quantile uncertainty, expected-RR rejection, and nulls for unavailable order fields; spread/slippage/funding are not modeled in this module.
+- **Known critical risks:** TimesFM package/model is optional and externally configured; module is not live-ready and lacks full execution-cost simulation.
+- **Last audit date:** 2026-06-19
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; module is PAPER/BACKTEST only.
+
 ## 2026-05-22 JOB19 V1 audit-only PAPER reject-rate diagnostics
 - **Current version:** 0.1.0-audit
 - **Current phase:** PAPER runtime audit instrumentation
