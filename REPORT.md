@@ -1,3 +1,71 @@
+## 2026-06-19 Patch Addendum — Dashboard BACKTEST control panel
+
+### Why the patch was needed
+- Operators had dashboard observability for runtime status, rejects, lifecycle, and readiness, but no guarded UI path to run a bounded BACKTEST from the web dashboard.
+- A dashboard control was needed without weakening the existing runtime safety posture or duplicating trading/strategy logic in UI code.
+
+### Root cause
+- The dashboard app factory is `create_app(...)` in `src/alphaforge/dashboard/app.py` and previously exposed read-oriented overview/reject/lifecycle/readiness pages only.
+- The existing backtest entrypoint is the repository-level `backtest_order.py` script, whose CLI already accepts `--mode`, `--last-n-days`, `--symbols`, `--top-n`, `--interval`, `--balance`, and `--output-dir`.
+- There was no dashboard adapter to validate operator inputs, force BACKTEST mode, run that existing pipeline, and summarize generated artifacts.
+
+### Files changed
+- `src/alphaforge/dashboard/app.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `src/alphaforge/dashboard/static/dashboard.css`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added `POST /backtest/run` to validate dashboard form inputs and invoke the existing backtest pipeline synchronously.
+- The command constructed by the dashboard always includes `--mode BACKTEST`; the user form has no mode field and cannot select PAPER or LIVE.
+- The dashboard wrapper summarizes `order_backtest_summary.csv`, `order_lifecycle.csv`, and `rejected_orders.csv` when the existing pipeline produces them.
+
+### Lifecycle changes
+- No lifecycle transition semantics were changed.
+- Dashboard displays lifecycle/reject counts only if generated artifacts expose them; missing values are rendered as unavailable with an explicit lifecycle/reject warning.
+
+### Persistence changes
+- No runtime persistence schema changes.
+- Backtest artifacts are written under the configured backtest output directory in a dashboard timestamp subdirectory.
+
+### Export/schema changes
+- No CSV schema change was made to the backtest writer.
+- Dashboard reads existing artifact fields opportunistically and does not invent absent metrics such as max drawdown.
+
+### Tests added
+- Dashboard form rendering coverage.
+- Server-side validation coverage for invalid `last_days` and empty symbols.
+- Runner invocation coverage proving the dashboard passes a mode-less validated request and the runner command forces BACKTEST.
+- Safe failure rendering coverage.
+- Unavailable lifecycle/execution metric warning coverage.
+
+### Tests executed
+- `pytest -q` failed during collection before changes because NumPy is not installed for `tests/test_timesfm_futures.py`.
+- `pytest -q tests/test_dashboard_app.py` skipped in this container because FastAPI/httpx/Jinja2 are not installed.
+- `python -m pip install fastapi httpx python-multipart jinja2` failed because package-index access returned 403 Forbidden.
+- `PYTHONPATH=src python -m py_compile src/alphaforge/dashboard/backtest_control.py src/alphaforge/dashboard/app.py` passed.
+- `PYTHONPATH=src python - <<'PY' ...` direct validation/forced-BACKTEST smoke passed using a mocked subprocess result.
+
+### Risks
+- Synchronous runs may exceed the 600-second subprocess timeout for large symbol/window combinations.
+- The backtest runner may use network-backed historical data unless local cache is available; unavailable history fails closed through the result error message.
+- Max drawdown remains unavailable because the current summary artifact does not expose it.
+
+### Remaining limitations
+- This is not a LIVE readiness improvement and does not add order placement.
+- Lifecycle/reject and execution-context accuracy remain bounded by the current backtest pipeline artifacts.
+- Unknown spread/slippage/funding is displayed as unavailable/incomplete rather than converted to zero.
+
+### Migration concerns
+- None; no database migration or schema change.
+
+### Push recommendation
+- Safe to push after dependency-complete CI runs the dashboard test suite; preserve NOT LIVE-READY posture.
+
 ## 2026-06-19 Patch Addendum — Alembic revision graph integrity repair
 
 ### Why the patch was needed

@@ -216,3 +216,143 @@ def test_dashboard_has_no_execution_or_live_mutation_routes(tmp_path) -> None:
     paths = {route.path for route in app.routes}
     forbidden_fragments = {"order", "execute", "live/activate", "kill-switch", "config/update", "heartbeat/write"}
     assert not any(fragment in path.lower() for path in paths for fragment in forbidden_fragments)
+
+
+def test_dashboard_exposes_backtest_form(tmp_path) -> None:
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'form.db'}")).get("/")
+    assert response.status_code == 200
+    assert "Run Backtest" in response.text
+    assert "Backtest only. Does not place orders." in response.text
+    assert "BACKTEST ONLY" in response.text
+    assert 'name="last_days"' in response.text
+    assert 'name="symbols"' in response.text
+
+
+def test_dashboard_rejects_invalid_last_days(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import alphaforge.dashboard.app as dashboard_app
+
+    called = False
+
+    def fail_if_called(_request):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", fail_if_called)
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'invalid-days.db'}")).post(
+        "/backtest/run",
+        data={"last_days": "0", "symbols": "BTCUSDT", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "2"},
+    )
+    assert response.status_code == 200
+    assert "last_days must be between 1 and 730" in response.text
+    assert called is False
+
+
+def test_dashboard_rejects_empty_symbols(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import alphaforge.dashboard.app as dashboard_app
+
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", lambda _request: pytest.fail("runner must not be called"))
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'empty-symbols.db'}")).post(
+        "/backtest/run",
+        data={"last_days": "30", "symbols": " , ", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "2"},
+    )
+    assert response.status_code == 200
+    assert "symbols must contain at least one non-empty symbol" in response.text
+
+
+def test_backtest_endpoint_calls_runner_with_backtest_only_request(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import alphaforge.dashboard.app as dashboard_app
+    from alphaforge.dashboard.backtest_control import DashboardBacktestResult
+
+    seen = {}
+
+    def fake_runner(request):
+        seen["request"] = request
+        return DashboardBacktestResult(
+            status="COMPLETED",
+            period="last 30 days",
+            symbols=request.symbols,
+            timeframe=request.timeframe,
+            initial_balance=request.initial_balance,
+            max_symbols=request.max_symbols,
+            total_candidates=3,
+            accepted_trades=1,
+            rejected_signals=2,
+            win_count=1,
+            loss_count=0,
+            open_count=0,
+            net_pnl="12.5",
+            total_return_pct="0.125",
+            output_dir=str(tmp_path / "bt"),
+        )
+
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", fake_runner)
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'success.db'}")).post(
+        "/backtest/run",
+        data={"last_days": "30", "symbols": " BTCUSDT, ETHUSDT ", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "2"},
+    )
+    assert response.status_code == 200
+    assert seen["request"].symbols == ["BTCUSDT", "ETHUSDT"]
+    assert not hasattr(seen["request"], "mode"), "dashboard request should not expose user-selectable PAPER/LIVE mode"
+    assert "COMPLETED" in response.text
+    assert "Total candidates/signals" in response.text
+    assert "12.5" in response.text
+
+
+def test_backtest_button_cannot_trigger_live_or_paper_order_execution(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import subprocess
+
+    import alphaforge.dashboard.backtest_control as backtest_control
+    from alphaforge.dashboard.backtest_control import DashboardBacktestRequest, run_dashboard_backtest
+
+    monkeypatch.setattr(backtest_control.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, "", "NO_HISTORICAL_DATA"))
+    request = DashboardBacktestRequest(last_days=1, symbols=["BTCUSDT"], timeframe="15m", initial_balance=10000.0, max_symbols=1)
+    result = run_dashboard_backtest(request)
+    assert "--mode" in result.command
+    assert result.command[result.command.index("--mode") + 1] == "BACKTEST"
+    command_text = " ".join(result.command).lower()
+    assert " live" not in command_text
+    assert " paper" not in command_text
+
+
+def test_backtest_failure_is_rendered_as_safe_error(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import alphaforge.dashboard.app as dashboard_app
+    from alphaforge.dashboard.backtest_control import DashboardBacktestResult
+
+    def fake_runner(request):
+        return DashboardBacktestResult("FAILED", "last 30 days", request.symbols, request.timeframe, request.initial_balance, request.max_symbols, error_message="NO_HISTORICAL_DATA")
+
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", fake_runner)
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'failed.db'}")).post(
+        "/backtest/run",
+        data={"last_days": "30", "symbols": "BTCUSDT", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "1"},
+    )
+    assert response.status_code == 200
+    assert "Backtest failed closed" in response.text
+    assert "NO_HISTORICAL_DATA" in response.text
+
+
+def test_unavailable_lifecycle_metrics_render_warning_not_fake_zero(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import alphaforge.dashboard.app as dashboard_app
+    from alphaforge.dashboard.backtest_control import DashboardBacktestResult
+
+    def fake_runner(request):
+        return DashboardBacktestResult(
+            "COMPLETED",
+            "last 30 days",
+            request.symbols,
+            request.timeframe,
+            request.initial_balance,
+            request.max_symbols,
+            lifecycle_warning="Lifecycle/reject metrics unavailable from generated backtest artifacts; values are shown as unavailable, not zero.",
+            execution_context_warning="Execution context is incomplete; unknown spread/slippage/funding is unavailable, not assumed zero.",
+        )
+
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", fake_runner)
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'warnings.db'}")).post(
+        "/backtest/run",
+        data={"last_days": "30", "symbols": "BTCUSDT", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "1"},
+    )
+    assert response.status_code == 200
+    assert "Lifecycle/reject metrics unavailable" in response.text
+    assert "unknown spread/slippage/funding is unavailable" in response.text
+    assert "<td>Unavailable</td>" in response.text
