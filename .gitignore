@@ -17,3 +17,5 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3.env.*
 !.env.example
+
+reports/
