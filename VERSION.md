@@ -1,3 +1,14 @@
+## 2026-06-19 SQLite schema migration bootstrap legacy regression hardening
+- **Current version:** 0.3.36-dev
+- **Current phase:** Persistence bootstrap regression hardening.
+- **Runtime maturity:** Fresh and partial legacy SQLite initialization has explicit regression coverage proving migration bookkeeping is created before version reads and remains idempotent across repeated `init_db(...)` calls.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged; patch only strengthens shared SQLite bootstrap test coverage and does not alter decision, reject, scoring, lifecycle, or order runtime paths.
+- **Lifecycle coverage:** unchanged; no lifecycle transition behavior changed.
+- **Execution realism coverage:** unchanged; no thresholds, RR calculations, spread/slippage/funding assumptions, or execution realism gates changed.
+- **Known critical risks:** migration/bootstrap regressions remain high-impact and require continued fresh/legacy SQLite coverage.
+- **Last audit date:** 2026-06-19.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; posture unchanged.
+
 ## 2026-06-19 SQLite rollback evidence bootstrap hardening
 - **Current version:** 0.3.35-dev
 - **Current phase:** Persistence bootstrap hardening.

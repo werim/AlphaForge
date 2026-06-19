@@ -1,3 +1,55 @@
+## 2026-06-19 Patch Addendum — SQLite schema migration bootstrap legacy regression hardening
+
+### Why the patch was needed
+- The reported failure path was `init_db(...) -> _apply_sqlite_migrations(conn) -> SELECT version FROM schema_migrations`, which crashes on fresh or partial legacy SQLite databases if migration bookkeeping has not been created first.
+- The implementation already creates `schema_migrations` before the version query; this patch strengthens regression coverage for repeated legacy initialization so the bootstrap ordering cannot regress silently.
+
+### Root cause
+- A migration bootstrap path that queries applied versions before creating `schema_migrations` is invalid for brand new SQLite files and legacy files that predate migration bookkeeping.
+- Partial legacy databases can contain runtime tables and user rows while still lacking `schema_migrations`.
+
+### Files changed
+- `tests/test_sqlite_schema_bootstrap.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- None. The production bootstrap remains `_ensure_sqlite_schema_migrations_table(conn)` followed by `SELECT version FROM schema_migrations` inside `_apply_sqlite_migrations(conn)`.
+- No trading thresholds, scoring, reject logic, lifecycle semantics, scanner behavior, order behavior, or execution-cost logic changed.
+
+### Lifecycle changes
+- None. Lifecycle transition emission and persistence semantics are unchanged.
+
+### Persistence changes
+- No new schema change beyond the existing idempotent `CREATE TABLE IF NOT EXISTS schema_migrations` bootstrap contract.
+- Regression coverage now verifies a legacy `order_decisions` table without `schema_migrations` preserves existing rows, creates migration bookkeeping, and records the persistence migration once across repeated `init_db(...)` calls.
+
+### Export/schema changes
+- None. CSV exports and runtime data-table schemas are unchanged by this test-only hardening patch.
+
+### Tests added
+- Extended `test_init_db_migrations_are_idempotent_and_preserve_data` to assert `schema_migrations` exists and contains exactly one `2026_05_16_persistence_integrity_v1` row after repeated initialization of a partial legacy SQLite database.
+
+### Tests executed
+- `pytest -q tests/test_sqlite_schema_bootstrap.py` passed.
+- `pytest -q tests/test_runtime.py tests/test_runtime_heartbeat.py tests/test_dashboard_app.py tests/test_job22_dashboard_rollback_evidence.py` passed.
+- `pytest -q` failed during collection because this container cannot import NumPy for `tests/test_timesfm_futures.py`.
+- `python -m pip install numpy` failed because package-index access returned 403 Forbidden for `/simple/numpy/`.
+
+### Risks
+- Low; this patch changes regression assertions only and leaves production persistence code unchanged.
+
+### Remaining limitations
+- LIVE readiness remains unchanged and not approved.
+- Migration safety still depends on continued fresh and legacy SQLite test coverage.
+
+### Migration concerns
+- No manual migration required; existing bootstrap DDL is `CREATE TABLE IF NOT EXISTS` and the regression confirms user rows are preserved.
+
+### Push recommendation
+- Safe to push as persistence/bootstrap regression hardening; do not change LIVE readiness posture.
+
 ## 2026-06-19 SQLite rollback evidence bootstrap hardening
 
 ### Why the patch was needed

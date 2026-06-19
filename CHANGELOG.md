@@ -1,3 +1,23 @@
+## [Unreleased] - 2026-06-19 (SQLite schema migration bootstrap legacy regression hardening)
+
+### Added
+- Extended legacy SQLite bootstrap regression coverage to assert `schema_migrations` is created and records the persistence migration exactly once across repeated `init_db(...)` calls.
+
+### Changed
+- Documentation now records the schema migration bootstrap regression hardening follow-up.
+
+### Fixed
+- Guarded against regressions where partial legacy SQLite databases with existing runtime rows but no `schema_migrations` table could fail before migrations are applied.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE readiness remains unchanged and blocked.
+
 ## [Unreleased] - 2026-06-19 (SQLite rollback evidence bootstrap)
 
 ### Added
