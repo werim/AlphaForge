@@ -287,7 +287,13 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             _add_column_if_missing(conn, table_name, column_name, ddl)
 
 
-def _apply_sqlite_migrations(conn: Any) -> None:
+def _ensure_sqlite_schema_migrations_table(conn: Any) -> None:
+    """Bootstrap SQLite migration bookkeeping before reading applied versions.
+
+    This must stay ahead of any SELECT from schema_migrations so fresh SQLite
+    databases and partial legacy databases can enter the normal idempotent
+    migration path without dropping or recreating runtime/audit tables.
+    """
     conn.execute(
         text(
             """
@@ -299,6 +305,10 @@ def _apply_sqlite_migrations(conn: Any) -> None:
             """
         )
     )
+
+
+def _apply_sqlite_migrations(conn: Any) -> None:
+    _ensure_sqlite_schema_migrations_table(conn)
     existing = {str(r[0]) for r in conn.execute(text("SELECT version FROM schema_migrations")).all()}
     migrations: list[tuple[str, str]] = [
         ("2026_05_16_persistence_integrity_v1", "Backfill missing persistence columns and normalize legacy execution_ctx_missing semantics."),

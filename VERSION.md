@@ -1,7 +1,7 @@
 ## 2026-06-19 SQLite schema migration bootstrap regression
 - **Current version:** 0.3.34-dev
 - **Current phase:** Persistence bootstrap hardening.
-- **Runtime maturity:** SQLite runtime persistence can bootstrap fresh and legacy databases without bypassing the existing migration flow.
+- **Runtime maturity:** SQLite runtime persistence can bootstrap fresh and legacy databases with explicit migration-bookkeeping creation before applied-version reads.
 - **BACKTEST/PAPER/LIVE alignment:** unchanged; this patch only hardens shared persistence initialization used by runtime modes.
 - **Lifecycle coverage:** unchanged; no lifecycle transitions or reject behavior were modified.
 - **Execution realism coverage:** unchanged; no thresholds, RR calculations, spread/slippage/funding assumptions, or execution paths changed.

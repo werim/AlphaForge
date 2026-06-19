@@ -6,17 +6,16 @@
 
 ### Root cause
 - `_apply_sqlite_migrations` depends on `schema_migrations` for idempotency bookkeeping; the safe behavior is to bootstrap that table before selecting existing versions.
-- A compact one-line DDL made the bootstrap contract easy to regress and lacked direct fresh-database assertion coverage.
+- The bootstrap contract needed to be isolated into an explicit helper so `CREATE TABLE IF NOT EXISTS schema_migrations` remains visibly ahead of the version read and direct fresh-database regression coverage.
 
 ### Files changed
 - `src/alphaforge/persistence.py`
-- `tests/test_sqlite_schema_bootstrap.py`
 - `VERSION.md`
 - `REPORT.md`
 - `CHANGELOG.md`
 
 ### Runtime behavior changes
-- SQLite migration bookkeeping is explicitly created before `SELECT version FROM schema_migrations` runs.
+- SQLite migration bookkeeping is explicitly created by `_ensure_sqlite_schema_migrations_table()` before `SELECT version FROM schema_migrations` runs.
 - Migration execution remains idempotent through the existing version table and does not alter trading thresholds, scoring, reject logic, or order lifecycle behavior.
 
 ### Lifecycle changes
@@ -30,18 +29,15 @@
 - Adds no export fields and no trading-data schema change beyond ensuring migration bookkeeping exists.
 
 ### Tests added
-- Added a fresh SQLite bootstrap regression asserting `schema_migrations` exists and records the persistence integrity migration.
+- No new test file changes in this patch; existing SQLite bootstrap regression coverage validates `schema_migrations` creation and migration idempotency.
 
 ### Tests executed
-- `python -m compileall -q src/alphaforge tests` passed.
-- `pytest -q tests/test_sqlite_schema_bootstrap.py -rs` passed.
-- `pytest -q tests/test_runtime_heartbeat.py -rs` passed.
-- `pytest -q tests/test_dashboard_app.py -rs` skipped because FastAPI is not installed in this container.
-- `pytest -q tests/test_runtime.py -rs` passed.
-- `pytest -q` failed during collection because this container cannot import NumPy for `tests/test_timesfm_futures.py`; attempted `python -m pip install numpy`, but package-index access returned 403 Forbidden.
+- `pytest tests/test_sqlite_schema_bootstrap.py -q` passed.
+- `pytest tests/test_runtime_heartbeat.py -q` passed.
+- `pytest -q` failed during collection because this container cannot import NumPy for `tests/test_timesfm_futures.py`.
 
 ### Risks
-- Low; the patch is limited to SQLite migration bootstrap formatting/coverage and does not modify execution decisions.
+- Low; the patch is limited to SQLite migration bootstrap ordering/coverage and does not modify execution decisions.
 
 ### Remaining limitations
 - LIVE readiness remains unchanged and not approved.
