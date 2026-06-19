@@ -356,3 +356,36 @@ def test_unavailable_lifecycle_metrics_render_warning_not_fake_zero(monkeypatch:
     assert "Lifecycle/reject metrics unavailable" in response.text
     assert "unknown spread/slippage/funding is unavailable" in response.text
     assert "<td>Unavailable</td>" in response.text
+
+def test_dashboard_backtest_command_forces_fresh_historical_refresh(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import subprocess
+
+    import alphaforge.dashboard.backtest_control as backtest_control
+    from alphaforge.dashboard.backtest_control import DashboardBacktestRequest, run_dashboard_backtest
+
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        return subprocess.CompletedProcess(command, 1, "", "NO_HISTORICAL_DATA")
+
+    monkeypatch.setattr(backtest_control.subprocess, "run", fake_run)
+    request = DashboardBacktestRequest(last_days=30, symbols=["BTCUSDT", "ETHUSDT"], timeframe="15m", initial_balance=10000.0, max_symbols=2)
+    result = run_dashboard_backtest(request)
+    assert result.status == "FAILED"
+    assert "--force-refresh" in seen["command"]
+    assert "--force-refresh" in result.command
+
+
+def test_backtest_historical_data_failure_uses_clean_dashboard_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    import alphaforge.dashboard.backtest_control as backtest_control
+    from alphaforge.dashboard.backtest_control import DashboardBacktestRequest, INSUFFICIENT_BINANCE_DATA_MESSAGE, run_dashboard_backtest
+
+    stderr = "HistoricalDataError: Historical coverage starts after requested start"
+    monkeypatch.setattr(backtest_control.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", stderr))
+    request = DashboardBacktestRequest(last_days=30, symbols=["BTCUSDT"], timeframe="15m", initial_balance=10000.0, max_symbols=1)
+    result = run_dashboard_backtest(request)
+    assert result.status == "FAILED"
+    assert result.error_message == INSUFFICIENT_BINANCE_DATA_MESSAGE

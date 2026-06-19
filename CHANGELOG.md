@@ -1,3 +1,25 @@
+## 2026-06-19 Dashboard historical refresh hotfix
+
+### Added
+- Added `--force-refresh` CLI support for backtest historical candle hydration.
+- Added regression coverage for dashboard force-refresh commands, stale-cache refresh attempts, and clean insufficient-data failures.
+
+### Changed
+- Dashboard BACKTEST runs now always request fresh Binance historical candles for the selected symbols, timeframe, and period before simulation.
+
+### Fixed
+- Fixed stale candle caches causing immediate `HistoricalDataError` failures when cached coverage started after the requested start.
+- Fixed dashboard historical data failures to return a clean FAILED result with an operator-facing insufficient-data message.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Fresh Binance historical data remains dependent on Binance API availability and coverage.
+
 ## [Unreleased] - 2026-06-19 (Dashboard BACKTEST control panel)
 
 ### Added

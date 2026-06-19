@@ -11,6 +11,7 @@ from alphaforge.config import load_config_from_env
 from alphaforge.contracts import canonical_utc_timestamp
 
 SUPPORTED_TIMEFRAMES: tuple[str, ...] = ("1m", "15m", "1h", "4h", "1d")
+INSUFFICIENT_BINANCE_DATA_MESSAGE = "Not enough historical data returned by Binance for the requested period. Try fewer days or a higher timeframe."
 
 
 @dataclass(slots=True)
@@ -147,6 +148,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         str(request.initial_balance),
         "--output-dir",
         str(output_dir),
+        "--force-refresh",
     ]
     period = f"last {request.last_days} days"
     result = DashboardBacktestResult("RUNNING", period, symbols, request.timeframe, request.initial_balance, request.max_symbols, output_dir=str(output_dir), command=command)
@@ -159,7 +161,10 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     if completed.returncode != 0:
         result.status = "FAILED"
         stderr = (completed.stderr or completed.stdout or "BACKTEST_PROCESS_FAILED").strip()
-        result.error_message = stderr[-1200:]
+        if "HistoricalDataError" in stderr or "Historical coverage" in stderr or "No candles returned" in stderr:
+            result.error_message = INSUFFICIENT_BINANCE_DATA_MESSAGE
+        else:
+            result.error_message = stderr[-1200:]
         return result
 
     summary_path = output_dir / "order_backtest_summary.csv"

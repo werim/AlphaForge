@@ -20,13 +20,8 @@ from alphaforge.symbol_selector import select_symbol
 from alphaforge.historical_market_data import (
     HistoricalCandle,
     HistoricalDataError,
-    build_cache_metadata,
-    cache_covers,
     fetch_binance_klines_paginated,
-    fetch_historical_funding_rates,
-    join_funding_to_candles,
-    load_cache,
-    write_cache,
+    load_or_fetch_candles as load_or_fetch_historical_candles,
 )
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -389,17 +384,15 @@ def _fetch_klines_legacy(symbol: str, interval: str, start_ms: int, end_ms: int)
         )
         for r in rows
     ]
-def load_or_fetch_candles(symbol: str, interval: str, start_ms: int, end_ms: int, output_dir: str) -> List[Candle]:
-    cache_path = Path(output_dir) / "candles" / f"{symbol}_{interval}.json"
-    if cache_path.exists():
-        metadata, cached = load_cache(cache_path)
-        if cache_covers(metadata, start_ms, end_ms):
-            return [Candle(timestamp=r.timestamp, open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume) for r in cached if start_ms <= r.timestamp <= end_ms]
-    rows = fetch_binance_klines_paginated(symbol=symbol, interval=interval, start_ms=start_ms, end_ms=end_ms)
-    funding = fetch_historical_funding_rates(symbol=symbol, start_ms=start_ms, end_ms=end_ms)
-    rows = join_funding_to_candles(rows, funding)
-    metadata = build_cache_metadata(symbol=symbol, interval=interval, requested_start_ms=start_ms, requested_end_ms=end_ms, candles=rows)
-    write_cache(cache_path, rows, metadata)
+def load_or_fetch_candles(symbol: str, interval: str, start_ms: int, end_ms: int, output_dir: str, force_refresh: bool = False) -> List[Candle]:
+    rows = load_or_fetch_historical_candles(
+        symbol=symbol,
+        interval=interval,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        output_dir=output_dir,
+        force_refresh=force_refresh,
+    )
     return [Candle(timestamp=r.timestamp, open=r.open, high=r.high, low=r.low, close=r.close, volume=r.volume) for r in rows]
 def load_candles(path: str, start_ms: int, end_ms: int) -> List[Candle]:
     out = []
@@ -1922,6 +1915,7 @@ def main():
     p.add_argument("--offline", action="store_true", help="Run without network APIs using deterministic fixture data")
     p.add_argument("--ci", action="store_true", help="CI-safe mode; implies --offline")
     p.add_argument("--symbols", default="", help="Comma-separated fixed symbol list for deterministic historical universe")
+    p.add_argument("--force-refresh", action="store_true", help="Fetch the full requested Binance historical range before running")
     args = p.parse_args()
     if args.ci:
         args.offline = True
@@ -1938,7 +1932,7 @@ def main():
         universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
         candles_by_symbol = {}
         for row in universe:
-            c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir)
+            c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir, force_refresh=args.force_refresh)
             if c:
                 candles_by_symbol[row["symbol"]] = c
     save_symbol_universe(os.path.join(args.output_dir, "symbol_universe.csv"), universe)
