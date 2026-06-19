@@ -1,3 +1,27 @@
+## [Unreleased] - 2026-06-19 (TimesFM unbatched quantile + integration smoke hardening)
+
+### Added
+- Added unbatched TimesFM ndarray tuple regression tests for `(horizon, 10)` mean-plus-decile and `(horizon, 9)` older quantile layouts.
+- Added an optional real TimesFM integration smoke gated by `ALPHAFORGE_RUN_TIMESFM_INTEGRATION=1`.
+- Added a LIVE-mode rejection regression for the TimesFM replay API.
+
+### Changed
+- NumPy-shaped TimesFM tests now import NumPy directly so declared dev dependency coverage is not silently skipped in normal development environments.
+- TimesFM tuple quantile parsing now uses quantile-specific batch detection to support both batched and unbatched output matrices.
+
+### Fixed
+- Fixed unbatched quantile matrices being interpreted as if the first horizon row were the entire forecast series.
+
+### Removed
+- Removed NumPy `importorskip` gates from TimesFM ndarray regression tests.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Optional real TimesFM smoke requires externally installed/configured TimesFM package and model weights.
+- This module remains PAPER/BACKTEST only and does not add LIVE or order-placement capability.
+
 ## [Unreleased] - 2026-06-19 (TimesFM post-merge compatibility hardening)
 
 ### Added

@@ -1,3 +1,58 @@
+## 2026-06-19 Patch Addendum — TimesFM unbatched quantile + optional integration smoke hardening
+
+### Why the patch was needed
+- Real TimesFM tuple outputs can be returned without an explicit batch dimension, so quantile matrices shaped `(horizon, 10)` and `(horizon, 9)` needed deterministic regression coverage.
+- NumPy-backed tests previously used `pytest.importorskip`, which could silently hide coverage in a correctly provisioned development environment.
+- The real TimesFM package/model smoke needed to remain explicit and opt-in through `ALPHAFORGE_RUN_TIMESFM_INTEGRATION=1`.
+
+### Root cause
+- Quantile tuple parsing distinguished batch-vs-series shape through the generic point-series helper, which was safe for batched tuples but ambiguous for unbatched quantile matrices.
+- Test coverage validated batched ndarray layouts only and skipped NumPy tests when NumPy was absent instead of requiring the declared dev dependency.
+
+### Files changed
+- `src/alphaforge/models/timesfm_forecaster.py`
+- `tests/test_timesfm_futures.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- TimesFM tuple parsing now selects the quantile horizon row with quantile-specific shape detection, supporting both batched `(1, horizon, width)` and unbatched `(horizon, width)` arrays.
+- No trade threshold, signal scoring, order lifecycle, persistence write path, exchange adapter, or LIVE execution behavior changed.
+
+### Lifecycle changes
+- None. TimesFM remains a forecast-decision logger only; invalid forecasts still produce `NO_TRADE` / `INVALID_FORECAST`.
+
+### Persistence changes
+- None. No schema, SQLite, or CSV field change was introduced.
+
+### Export/schema changes
+- None. Decision log columns are unchanged.
+
+### Tests added
+- Added unbatched NumPy tuple regression coverage for `(horizon, 10)` mean-plus-decile output.
+- Added unbatched NumPy tuple regression coverage for `(horizon, 9)` older quantile output.
+- Added an opt-in real TimesFM integration smoke gated by `ALPHAFORGE_RUN_TIMESFM_INTEGRATION=1`.
+- Added a LIVE-mode rejection regression to confirm the TimesFM replay API remains PAPER/BACKTEST-only and introduces no order path.
+
+### Tests executed
+- `pytest -q tests/test_timesfm_futures.py` failed in this container because NumPy could not be imported.
+- `python -m pip install -e '.[dev]'` failed because package-index access for build dependencies returned 403 Forbidden.
+
+### Risks
+- Real TimesFM default factory construction may require upstream-specific model arguments; the optional smoke intentionally fails when enabled in an incorrectly configured environment.
+- Current container could not validate NumPy-backed tests because dependency installation was blocked by package-index access.
+
+### Remaining limitations
+- TimesFM model weights/package setup remains external.
+- Execution costs such as spread, slippage, funding, liquidity, and latency remain unavailable in this research module and are not faked.
+
+### Migration concerns
+- None expected; parser behavior is backward-compatible for existing batched tuple and dict outputs.
+
+### Push recommendation
+- Safe to push after validating `pytest -q tests/test_timesfm_futures.py` in a normal dev environment with NumPy installed; do not enable LIVE based on this patch.
+
 ## 2026-06-19 Patch Addendum — TimesFM post-merge API/output compatibility hardening
 
 ### Why the patch was needed

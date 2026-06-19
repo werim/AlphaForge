@@ -1,3 +1,13 @@
+## 2026-06-19 TimesFM unbatched quantile + optional integration smoke hardening
+- **Current phase:** TimesFM PAPER/BACKTEST research compatibility hardening.
+- **Runtime maturity:** TimesFM decisions remain logged-only research outputs; no LIVE order placement or execution adapter path was added.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER keep the same replay/quantile decision conversion; LIVE remains explicitly rejected by the TimesFM replay API.
+- **Lifecycle coverage:** unchanged; forecast failures still fail closed into `NO_TRADE` / `INVALID_FORECAST` without advancing order lifecycle states.
+- **Execution realism coverage:** Parser now covers batched and unbatched NumPy quantile layouts shaped `(horizon, 10)` and `(horizon, 9)`; spread/slippage/funding remain unavailable rather than faked.
+- **Known critical risks:** Real TimesFM package/model weights remain externally managed; optional integration smoke only runs when `ALPHAFORGE_RUN_TIMESFM_INTEGRATION=1`.
+- **Last audit date:** 2026-06-19.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; module is PAPER/BACKTEST only.
+
 ## 2026-06-19 TimesFM post-merge compatibility hardening
 - **Current version:** 0.3.33-dev
 - **Current phase:** PAPER/BACKTEST forecast integration hardening after PR #177.
