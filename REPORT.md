@@ -1,3 +1,136 @@
+## 2026-06-19 Patch Addendum — Dashboard BACKTEST control panel
+
+### Why the patch was needed
+- Operators had dashboard observability for runtime status, rejects, lifecycle, and readiness, but no guarded UI path to run a bounded BACKTEST from the web dashboard.
+- A dashboard control was needed without weakening the existing runtime safety posture or duplicating trading/strategy logic in UI code.
+
+### Root cause
+- The dashboard app factory is `create_app(...)` in `src/alphaforge/dashboard/app.py` and previously exposed read-oriented overview/reject/lifecycle/readiness pages only.
+- The existing backtest entrypoint is the repository-level `backtest_order.py` script, whose CLI already accepts `--mode`, `--last-n-days`, `--symbols`, `--top-n`, `--interval`, `--balance`, and `--output-dir`.
+- There was no dashboard adapter to validate operator inputs, force BACKTEST mode, run that existing pipeline, and summarize generated artifacts.
+
+### Files changed
+- `src/alphaforge/dashboard/app.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `src/alphaforge/dashboard/static/dashboard.css`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added `POST /backtest/run` to validate dashboard form inputs and invoke the existing backtest pipeline synchronously.
+- The command constructed by the dashboard always includes `--mode BACKTEST`; the user form has no mode field and cannot select PAPER or LIVE.
+- The dashboard wrapper summarizes `order_backtest_summary.csv`, `order_lifecycle.csv`, and `rejected_orders.csv` when the existing pipeline produces them.
+
+### Lifecycle changes
+- No lifecycle transition semantics were changed.
+- Dashboard displays lifecycle/reject counts only if generated artifacts expose them; missing values are rendered as unavailable with an explicit lifecycle/reject warning.
+
+### Persistence changes
+- No runtime persistence schema changes.
+- Backtest artifacts are written under the configured backtest output directory in a dashboard timestamp subdirectory.
+
+### Export/schema changes
+- No CSV schema change was made to the backtest writer.
+- Dashboard reads existing artifact fields opportunistically and does not invent absent metrics such as max drawdown.
+
+### Tests added
+- Dashboard form rendering coverage.
+- Server-side validation coverage for invalid `last_days` and empty symbols.
+- Runner invocation coverage proving the dashboard passes a mode-less validated request and the runner command forces BACKTEST.
+- Safe failure rendering coverage.
+- Unavailable lifecycle/execution metric warning coverage.
+
+### Tests executed
+- `pytest -q` failed during collection before changes because NumPy is not installed for `tests/test_timesfm_futures.py`.
+- `pytest -q tests/test_dashboard_app.py` skipped in this container because FastAPI/httpx/Jinja2 are not installed.
+- `python -m pip install fastapi httpx python-multipart jinja2` failed because package-index access returned 403 Forbidden.
+- `PYTHONPATH=src python -m py_compile src/alphaforge/dashboard/backtest_control.py src/alphaforge/dashboard/app.py` passed.
+- `PYTHONPATH=src python - <<'PY' ...` direct validation/forced-BACKTEST smoke passed using a mocked subprocess result.
+
+### Risks
+- Synchronous runs may exceed the 600-second subprocess timeout for large symbol/window combinations.
+- The backtest runner may use network-backed historical data unless local cache is available; unavailable history fails closed through the result error message.
+- Max drawdown remains unavailable because the current summary artifact does not expose it.
+
+### Remaining limitations
+- This is not a LIVE readiness improvement and does not add order placement.
+- Lifecycle/reject and execution-context accuracy remain bounded by the current backtest pipeline artifacts.
+- Unknown spread/slippage/funding is displayed as unavailable/incomplete rather than converted to zero.
+
+### Migration concerns
+- None; no database migration or schema change.
+
+### Push recommendation
+- Safe to push after dependency-complete CI runs the dashboard test suite; preserve NOT LIVE-READY posture.
+
+## 2026-06-19 Patch Addendum — Alembic revision graph integrity repair
+
+### Why the patch was needed
+- `alembic upgrade head` failed because the migration graph contained a dangling `down_revision`: `0002_adaptive_learning_lifecycle` pointed to `0001_phase1_init`, but no loaded migration declared that revision identifier.
+- The base migration file existed as `alembic/versions/0001_phase1_init.py`, but its internal `revision` metadata was `0001_phase1`, creating a filename/header/lineage mismatch.
+
+### Root cause
+- The initial Phase 1 migration was not deleted or replaced by SQLite bootstrap logic; it was present under the expected filename and contains the base schema DDL.
+- The revision identifier inside that base migration was shortened/renamed to `0001_phase1` while the next migration retained the intended `down_revision = "0001_phase1_init"` lineage.
+
+### Files changed
+- `alembic/versions/0001_phase1_init.py`
+- `tests/test_alembic_revision_graph.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Migration graph before
+- Present revision declared by base file: `0001_phase1` with `down_revision = None`.
+- Adaptive lifecycle migration: `0002_adaptive_learning_lifecycle` with `down_revision = "0001_phase1_init"`.
+- Result: dangling reference to missing `0001_phase1_init`; Alembic script loading can warn and then fail with `KeyError` when resolving heads/upgrades.
+
+### Migration graph after
+- Base migration: `0001_phase1_init` with `down_revision = None`.
+- Adaptive lifecycle migration: `0002_adaptive_learning_lifecycle` with `down_revision = "0001_phase1_init"`.
+- Result: single linear graph `0001_phase1_init -> 0002_adaptive_learning_lifecycle` with head `0002_adaptive_learning_lifecycle`.
+
+### Runtime behavior changes
+- None. No trading thresholds, scoring, reject logic, lifecycle semantics, scanner behavior, order behavior, or execution-cost logic changed.
+- This is an Alembic metadata-lineage repair only.
+
+### Lifecycle changes
+- None. Lifecycle transition emission and persistence semantics are unchanged.
+
+### Persistence changes
+- No table/column DDL was changed in the base migration body.
+- Fresh Alembic databases now have a resolvable migration chain and can apply the existing base and adaptive lifecycle migrations in order.
+- Existing databases whose `alembic_version` table contains the erroneous `0001_phase1` value need explicit operator review/remediation; this patch intentionally does not use `alembic stamp` or fake migration success.
+
+### Export/schema changes
+- None. CSV exports and runtime schema definitions are unchanged by this metadata repair.
+
+### Tests added
+- Added a static regression test that fails on any Alembic migration referencing a missing `down_revision`.
+- Added an Alembic `ScriptDirectory` regression test that verifies script loading and head resolution when the Alembic package is installed.
+- Added a temporary SQLite `alembic upgrade head` regression test when the Alembic package is installed.
+
+### Tests executed
+- `pytest -q tests/test_alembic_revision_graph.py` passed for the static graph test, with Alembic-dependent tests skipped in this container because the Alembic package is not installed.
+
+### Risks
+- Low for fresh databases and repositories that had not stamped the incorrect `0001_phase1` revision.
+- Compatibility risk exists for any database already stamped with `0001_phase1`; those databases should be handled through explicit migration-version remediation reviewed against actual schema state, not blind stamping.
+
+### Remaining limitations
+- This patch does not reconcile SQLAlchemy metadata-vs-Alembic DDL completeness beyond the reported graph integrity issue.
+- LIVE readiness remains unchanged and not approved.
+
+### Migration concerns
+- No manual action is needed for fresh databases.
+- Operators should inspect `alembic_version` on existing databases before upgrading; if it contains `0001_phase1`, verify the Phase 1 schema is present before applying a deliberate version-table correction.
+
+### Push recommendation
+- Safe to push as a minimal Alembic lineage repair after validating Alembic-dependent tests in a normal development environment with project dependencies installed.
+
 ## 2026-06-19 Patch Addendum — SQLite schema migration bootstrap legacy regression hardening
 
 ### Why the patch was needed

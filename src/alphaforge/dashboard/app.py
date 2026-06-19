@@ -14,6 +14,8 @@ from sqlalchemy.engine.url import make_url
 from alphaforge.config import load_config_from_env
 from alphaforge.contracts import canonical_utc_timestamp
 
+from .backtest_control import default_form_values, parse_backtest_form, run_dashboard_backtest
+
 from .queries import (
     fetch_latest_readiness,
     fetch_readiness_probe_matrix,
@@ -82,7 +84,42 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return TEMPLATES.TemplateResponse(
             request=request,
             name="overview.html",
-            context={"status": status, "rejects": rejects, "lifecycle": lifecycle, "page": "overview"},
+            context={
+                "status": status,
+                "rejects": rejects,
+                "lifecycle": lifecycle,
+                "page": "overview",
+                "backtest_form": default_form_values(),
+                "backtest_errors": {},
+                "backtest_result": None,
+            },
+        )
+
+
+    @app.post("/backtest/run", response_class=HTMLResponse)
+    async def run_backtest(request: Request) -> HTMLResponse:
+        form_data = dict(await request.form())
+        parsed, errors = parse_backtest_form(form_data)
+        result = None
+        if parsed is not None:
+            result = run_dashboard_backtest(parsed)
+        status = _status_payload(app.state.engine)
+        rejects = fetch_reject_summary(app.state.engine)
+        lifecycle = fetch_recent_lifecycle(app.state.engine, limit=10)
+        form_values = default_form_values()
+        form_values.update({key: form_data.get(key, form_values.get(key)) for key in form_values.keys() if key != "timeframes"})
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="overview.html",
+            context={
+                "status": status,
+                "rejects": rejects,
+                "lifecycle": lifecycle,
+                "page": "overview",
+                "backtest_form": form_values,
+                "backtest_errors": errors,
+                "backtest_result": result,
+            },
         )
 
     @app.get("/partials/status-bar", response_class=HTMLResponse)

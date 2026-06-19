@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+VERSIONS_DIR = REPO_ROOT / "alembic" / "versions"
+
+
+def _migration_revisions() -> tuple[dict[str, Path], dict[Path, str | tuple[str, ...] | None]]:
+    revisions: dict[str, Path] = {}
+    down_revisions: dict[Path, str | tuple[str, ...] | None] = {}
+    for migration_path in sorted(VERSIONS_DIR.glob("*.py")):
+        module = ast.parse(migration_path.read_text(encoding="utf-8"), filename=str(migration_path))
+        values: dict[str, object] = {}
+        for node in module.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in {"revision", "down_revision"}:
+                    values[target.id] = ast.literal_eval(node.value)
+        revision = values.get("revision")
+        assert isinstance(revision, str), f"{migration_path.name} must define a string revision"
+        assert revision not in revisions, f"duplicate Alembic revision {revision!r}"
+        revisions[revision] = migration_path
+        down_revision = values.get("down_revision")
+        assert down_revision is None or isinstance(down_revision, (str, tuple)), (
+            f"{migration_path.name} down_revision must be None, a revision string, or a tuple"
+        )
+        down_revisions[migration_path] = down_revision
+    return revisions, down_revisions
+
+
+def test_alembic_migrations_do_not_reference_missing_down_revisions() -> None:
+    revisions, down_revisions = _migration_revisions()
+
+    missing: list[str] = []
+    for migration_path, down_revision in down_revisions.items():
+        referenced = () if down_revision is None else ((down_revision,) if isinstance(down_revision, str) else down_revision)
+        for revision_id in referenced:
+            if revision_id not in revisions:
+                missing.append(f"{migration_path.name} references missing down_revision {revision_id!r}")
+
+    assert not missing, "Alembic revision graph has dangling down_revision references: " + "; ".join(missing)
+
+
+def test_alembic_script_directory_loads_and_resolves_heads() -> None:
+    pytest.importorskip("alembic.config")
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    config = Config(str(REPO_ROOT / "alembic.ini"))
+    script = ScriptDirectory.from_config(config)
+
+    assert script.get_heads() == ["0002_adaptive_learning_lifecycle"]
+    assert script.get_current_head() == "0002_adaptive_learning_lifecycle"
+
+
+def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Path) -> None:
+    pytest.importorskip("alembic.command")
+    from alembic import command
+    from alembic.config import Config
+
+    db_path = tmp_path / "alembic_upgrade_head.db"
+    config = Config(str(REPO_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{db_path}")
+
+    command.upgrade(config, "head")

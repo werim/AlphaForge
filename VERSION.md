@@ -1,3 +1,25 @@
+## 2026-06-19 Dashboard BACKTEST control panel
+- **Current version:** 0.3.38-dev
+- **Current phase:** Dashboard BACKTEST-only operations control.
+- **Runtime maturity:** Dashboard can launch the existing `backtest_order.py` pipeline synchronously with server-side validation and a forced `--mode BACKTEST` boundary; no PAPER/LIVE runtime loop or order endpoint control was added.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST launch reuses the existing backtest pipeline and does not duplicate strategy logic in dashboard code; PAPER/LIVE remain unavailable from this button.
+- **Lifecycle coverage:** Generated lifecycle/reject artifact metrics are displayed when present; missing lifecycle/reject metrics are shown as unavailable with warnings rather than fake zeros.
+- **Execution realism coverage:** Unknown/incomplete spread, slippage, funding, or execution context is surfaced as unavailable/incomplete and not assumed to be zero.
+- **Known critical risks:** Synchronous web runs can be long-running; real historical data availability still depends on existing backtest data/API/cache behavior; max drawdown is unavailable unless the backtest artifact exposes it.
+- **Last audit date:** 2026-06-19.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; this patch intentionally adds BACKTEST-only controls and no LIVE capability.
+
+## 2026-06-19 Alembic revision graph integrity repair
+- **Current version:** 0.3.37-dev
+- **Current phase:** Alembic persistence lineage repair.
+- **Runtime maturity:** Alembic migration graph now resolves from the restored Phase 1 base revision through adaptive learning lifecycle migration; SQLite upgrade-head has regression coverage when Alembic is installed.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged; patch only repairs migration metadata lineage and does not alter decision, reject, lifecycle, scoring, or order runtime paths.
+- **Lifecycle coverage:** unchanged; no lifecycle transition behavior changed.
+- **Execution realism coverage:** unchanged; no thresholds, RR calculations, spread/slippage/funding assumptions, or execution realism gates changed.
+- **Known critical risks:** environments that already stamped the incorrect `0001_phase1` revision may need an explicit DBA-reviewed Alembic version-table remediation before applying later revisions; do not use blind stamping as a fix.
+- **Last audit date:** 2026-06-19.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; posture unchanged.
+
 ## 2026-06-19 SQLite schema migration bootstrap legacy regression hardening
 - **Current version:** 0.3.36-dev
 - **Current phase:** Persistence bootstrap regression hardening.
