@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+
+import numpy as np
 import pytest
 
 from alphaforge.historical_market_data import HistoricalCandle
@@ -65,6 +68,11 @@ def test_invalid_forecast_handling_logs_no_trade_rejection() -> None:
     assert decision.entry is None
 
 
+def test_timesfm_replay_rejects_live_mode_without_order_path() -> None:
+    with pytest.raises(Exception, match="PAPER/BACKTEST only"):
+        replay_timesfm_backtest(_candles(3), forecaster=RecordingForecaster(), timeframe="15m", horizon=8, min_history=1, mode="LIVE")
+
+
 def test_long_decision_from_quantile_forecast() -> None:
     decision = decide_from_forecast(timestamp=1, symbol="BTCUSDT", timeframe="15m", current_price=100.0, forecast=QuantileForecast(8, 99.0, 104.0, 110.0))
     assert decision.side == "LONG"
@@ -92,9 +100,7 @@ def test_no_trade_decision_from_low_confidence_forecast() -> None:
     assert decision.entry is None
 
 
-def test_timesfm_tuple_numpy_mean_plus_deciles_extracts_true_p10_p50_p90() -> None:
-    np = pytest.importorskip("numpy")
-
+def test_timesfm_tuple_numpy_batched_mean_plus_deciles_extracts_true_p10_p50_p90() -> None:
     class MeanPlusDecilesModel:
         def forecast(self, *, inputs, horizon):
             assert horizon == 8
@@ -114,9 +120,7 @@ def test_timesfm_tuple_numpy_mean_plus_deciles_extracts_true_p10_p50_p90() -> No
     assert forecast.p90 == 110.0
 
 
-def test_timesfm_tuple_numpy_older_nine_quantile_layout_is_supported() -> None:
-    np = pytest.importorskip("numpy")
-
+def test_timesfm_tuple_numpy_batched_older_nine_quantile_layout_is_supported() -> None:
     class NineQuantileModel:
         def forecast(self, inputs, horizon_len):
             point = np.array([[100.0, 101.0, 102.0]])
@@ -132,9 +136,41 @@ def test_timesfm_tuple_numpy_older_nine_quantile_layout_is_supported() -> None:
     assert forecast == QuantileForecast(horizon=3, p10=91.0, p50=105.0, p90=111.0)
 
 
-def test_timesfm_forecaster_tries_legacy_freq_signature() -> None:
-    np = pytest.importorskip("numpy")
+def test_timesfm_tuple_numpy_unbatched_mean_plus_deciles_extracts_true_p10_p50_p90() -> None:
+    class UnbatchedMeanPlusDecilesModel:
+        def forecast(self, *, inputs, horizon):
+            assert horizon == 8
+            point = np.array([100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0])
+            quantiles = np.zeros((8, 10), dtype=float)
+            quantiles[:, 0] = 999.0  # mean column; must not be labeled p10.
+            quantiles[:, 1] = 90.0
+            quantiles[:, 5] = 104.0
+            quantiles[:, 9] = 110.0
+            return point, quantiles
 
+    from alphaforge.models.timesfm_forecaster import TimesFMForecaster
+
+    forecast = TimesFMForecaster(UnbatchedMeanPlusDecilesModel()).forecast_quantiles([100.0] * 64, 8)
+    assert forecast == QuantileForecast(horizon=8, p10=90.0, p50=104.0, p90=110.0)
+
+
+def test_timesfm_tuple_numpy_unbatched_older_nine_quantile_layout_is_supported() -> None:
+    class UnbatchedNineQuantileModel:
+        def forecast(self, inputs, horizon_len):
+            point = np.array([100.0, 101.0, 102.0])
+            quantiles = np.zeros((horizon_len, 9), dtype=float)
+            quantiles[:, 0] = 91.0
+            quantiles[:, 4] = 105.0
+            quantiles[:, 8] = 111.0
+            return point, quantiles
+
+    from alphaforge.models.timesfm_forecaster import TimesFMForecaster
+
+    forecast = TimesFMForecaster(UnbatchedNineQuantileModel()).forecast_quantiles([100.0] * 64, 3)
+    assert forecast == QuantileForecast(horizon=3, p10=91.0, p50=105.0, p90=111.0)
+
+
+def test_timesfm_forecaster_tries_legacy_freq_signature() -> None:
     class LegacyFreqModel:
         def forecast(self, inputs, freq):
             assert freq == [0]
@@ -147,8 +183,6 @@ def test_timesfm_forecaster_tries_legacy_freq_signature() -> None:
 
 
 def test_timesfm_malformed_numpy_output_raises_forecast_error() -> None:
-    np = pytest.importorskip("numpy")
-
     class BadModel:
         def forecast(self, *, inputs, horizon):
             return np.array([[100.0] * horizon]), np.array([[[999.0, 110.0, 100.0, 90.0]] * horizon])
@@ -160,8 +194,6 @@ def test_timesfm_malformed_numpy_output_raises_forecast_error() -> None:
 
 
 def test_replay_logs_invalid_forecast_for_malformed_real_shaped_model_output() -> None:
-    np = pytest.importorskip("numpy")
-
     class BadModelForecaster:
         def forecast_quantiles(self, close_prices, horizon: int) -> QuantileForecast:
             from alphaforge.models.timesfm_forecaster import TimesFMForecaster
@@ -175,3 +207,16 @@ def test_replay_logs_invalid_forecast_for_malformed_real_shaped_model_output() -
     decision = replay_timesfm_backtest(_candles(1), forecaster=BadModelForecaster(), timeframe="15m", horizon=8, min_history=1)[0]
     assert decision.side == "NO_TRADE"
     assert decision.rejection_reason == "INVALID_FORECAST"
+
+
+@pytest.mark.integration
+def test_optional_real_timesfm_integration_smoke() -> None:
+    if os.environ.get("ALPHAFORGE_RUN_TIMESFM_INTEGRATION") != "1":
+        pytest.skip("set ALPHAFORGE_RUN_TIMESFM_INTEGRATION=1 to run the optional real TimesFM smoke test")
+
+    from alphaforge.models.timesfm_forecaster import TimesFMForecaster
+
+    forecast = TimesFMForecaster.from_timesfm().forecast_quantiles([100.0] * 64, 8)
+    assert forecast.horizon == 8
+    assert forecast.p10 <= forecast.p50 <= forecast.p90
+    assert forecast.p10 > 0

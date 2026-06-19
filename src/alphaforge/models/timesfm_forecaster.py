@@ -134,13 +134,24 @@ def _last_value(values: object, horizon: int) -> float:
 
 
 def _horizon_quantile_row(values: object, horizon: int) -> object:
-    series = _first_series(values)
+    series = _quantile_series(values)
     if len(series) < horizon:
         raise TimesFMForecastError("Forecast quantiles shorter than requested horizon")
     row = series[horizon - 1]
     if not _is_sequence_like(row):
         raise TimesFMForecastError("Forecast quantile row is not sequence-like")
     return row
+
+
+def _quantile_series(values: object) -> object:
+    if not _is_sequence_like(values) or len(values) == 0:
+        raise TimesFMForecastError("Missing forecast values")
+    first = values[0]
+    if _is_sequence_like(first) and len(first) > 0 and _is_sequence_like(first[0]):
+        return first
+    if _is_sequence_like(first) and len(first) > 0 and _is_number(first[0]):
+        return values
+    raise TimesFMForecastError("Forecast quantiles are not sequence-like")
 
 
 def _first_series(values: object) -> object:
