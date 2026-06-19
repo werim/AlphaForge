@@ -1,3 +1,23 @@
+## [Unreleased] - 2026-06-19 (SQLite schema migration bootstrap regression)
+
+### Added
+- Added regression coverage proving fresh SQLite initialization creates `schema_migrations` before migration version reads.
+
+### Changed
+- Expanded the SQLite migration bookkeeping DDL for clarity while preserving the same idempotent schema.
+
+### Fixed
+- Fixed the migration bootstrap contract so `schema_migrations` exists before selecting applied migration versions.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE readiness remains unchanged and blocked.
+
 ## [Unreleased] - 2026-06-19 (TimesFM unbatched quantile + integration smoke hardening)
 
 ### Added

@@ -8,6 +8,20 @@ from sqlalchemy.orm import Session
 from alphaforge.persistence import init_db, save_order_decision
 
 
+def test_init_db_bootstraps_schema_migrations_before_selecting_versions(tmp_path) -> None:
+    db_path = tmp_path / "fresh_bootstrap.db"
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+
+    with sqlite3.connect(db_path) as conn:
+        migration_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone()
+        assert migration_table is not None
+        applied_versions = conn.execute("SELECT version FROM schema_migrations").fetchall()
+        assert ("2026_05_16_persistence_integrity_v1",) in applied_versions
+
+
 def _sqlite_columns(db_path: str, table_name: str) -> set[str]:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
