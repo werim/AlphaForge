@@ -307,12 +307,52 @@ def _ensure_sqlite_schema_migrations_table(conn: Any) -> None:
     )
 
 
+def _ensure_sqlite_rollback_evidence_schema(conn: Any) -> None:
+    """Create the rollback validation evidence table for fresh SQLite DBs.
+
+    The canonical rollback evidence surface is
+    ``live_rollback_validation_evidence`` (see ``alphaforge.rollback_evidence``).
+    Keep this idempotent and additive so runtime/audit rows are preserved across
+    repeated bootstraps and legacy database repairs.
+    """
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS live_rollback_validation_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                validation_id TEXT NOT NULL UNIQUE,
+                recorded_at TEXT NOT NULL,
+                evidence_status TEXT NOT NULL,
+                rollback_evidence_source TEXT NOT NULL,
+                kill_switch_block_verified INTEGER NOT NULL,
+                no_submit_on_kill_switch_verified INTEGER NOT NULL,
+                fail_closed_reconciliation_verified INTEGER NOT NULL,
+                repair_actions_non_mutating_verified INTEGER NOT NULL,
+                execution_mutation_attempt_count INTEGER NOT NULL,
+                blocking_reasons TEXT NOT NULL,
+                evidence_payload TEXT NOT NULL
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS ix_live_rollback_validation_recorded_at
+            ON live_rollback_validation_evidence(recorded_at DESC, id DESC)
+            """
+        )
+    )
+
+
 def _apply_sqlite_migrations(conn: Any) -> None:
     _ensure_sqlite_schema_migrations_table(conn)
     existing = {str(r[0]) for r in conn.execute(text("SELECT version FROM schema_migrations")).all()}
     migrations: list[tuple[str, str]] = [
         ("2026_05_16_persistence_integrity_v1", "Backfill missing persistence columns and normalize legacy execution_ctx_missing semantics."),
+        ("2026_06_19_rollback_evidence_bootstrap", "Ensure fresh SQLite bootstrap creates canonical live rollback validation evidence table."),
     ]
+    _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_sqlite_runtime_schema(conn)
     signal_cols = _sqlite_columns(conn, "signals")
     if "signal_id" in signal_cols and "uq_signals_signal_id_not_null" not in existing:

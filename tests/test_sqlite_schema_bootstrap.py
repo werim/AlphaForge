@@ -20,6 +20,38 @@ def test_init_db_bootstraps_schema_migrations_before_selecting_versions(tmp_path
         assert migration_table is not None
         applied_versions = conn.execute("SELECT version FROM schema_migrations").fetchall()
         assert ("2026_05_16_persistence_integrity_v1",) in applied_versions
+        assert ("2026_06_19_rollback_evidence_bootstrap",) in applied_versions
+
+
+def test_init_db_bootstraps_live_rollback_validation_evidence_schema(tmp_path) -> None:
+    db_path = tmp_path / "fresh_rollback_evidence.db"
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+
+    expected_columns = {
+        "id",
+        "validation_id",
+        "recorded_at",
+        "evidence_status",
+        "rollback_evidence_source",
+        "kill_switch_block_verified",
+        "no_submit_on_kill_switch_verified",
+        "fail_closed_reconciliation_verified",
+        "repair_actions_non_mutating_verified",
+        "execution_mutation_attempt_count",
+        "blocking_reasons",
+        "evidence_payload",
+    }
+    assert expected_columns.issubset(_sqlite_columns(str(db_path), "live_rollback_validation_evidence"))
+
+    with sqlite3.connect(db_path) as conn:
+        index_row = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='index' AND name='ix_live_rollback_validation_recorded_at'
+            """
+        ).fetchone()
+        assert index_row is not None
 
 
 def _sqlite_columns(db_path: str, table_name: str) -> set[str]:

@@ -1,3 +1,14 @@
+## 2026-06-19 SQLite rollback evidence bootstrap hardening
+- **Current version:** 0.3.35-dev
+- **Current phase:** Persistence bootstrap hardening.
+- **Runtime maturity:** Fresh and legacy SQLite initialization now creates migration bookkeeping before reads and also bootstraps canonical rollback validation evidence storage idempotently.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged; patch only affects shared SQLite schema bootstrap and does not alter decision, reject, scoring, lifecycle, or order runtime paths.
+- **Lifecycle coverage:** unchanged; rollback evidence persistence is additive schema support only.
+- **Execution realism coverage:** unchanged; no thresholds, RR calculations, spread/slippage/funding assumptions, or execution realism gates changed.
+- **Known critical risks:** migration/bootstrap regressions remain high-impact and require continued fresh/legacy SQLite coverage.
+- **Last audit date:** 2026-06-19.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; posture unchanged.
+
 ## 2026-06-19 SQLite schema migration bootstrap regression
 - **Current version:** 0.3.34-dev
 - **Current phase:** Persistence bootstrap hardening.
