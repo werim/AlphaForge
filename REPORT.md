@@ -1,3 +1,58 @@
+## 2026-06-19 Patch Addendum — SQLite schema migration bootstrap regression
+
+### Why the patch was needed
+- Fresh and partially legacy SQLite databases must initialize without failing before migration bookkeeping exists.
+- The persistence migration path needed explicit regression coverage that `schema_migrations` is present before version reads occur.
+
+### Root cause
+- `_apply_sqlite_migrations` depends on `schema_migrations` for idempotency bookkeeping; the safe behavior is to bootstrap that table before selecting existing versions.
+- A compact one-line DDL made the bootstrap contract easy to regress and lacked direct fresh-database assertion coverage.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- SQLite migration bookkeeping is explicitly created before `SELECT version FROM schema_migrations` runs.
+- Migration execution remains idempotent through the existing version table and does not alter trading thresholds, scoring, reject logic, or order lifecycle behavior.
+
+### Lifecycle changes
+- None. No lifecycle transitions or reject semantics changed.
+
+### Persistence changes
+- Fresh SQLite databases now have a guaranteed `schema_migrations` table during migration bootstrap.
+- Existing legacy table data remains preserved; migrations still add only missing runtime columns and normalize existing persistence fields.
+
+### Export/schema changes
+- Adds no export fields and no trading-data schema change beyond ensuring migration bookkeeping exists.
+
+### Tests added
+- Added a fresh SQLite bootstrap regression asserting `schema_migrations` exists and records the persistence integrity migration.
+
+### Tests executed
+- `python -m compileall -q src/alphaforge tests` passed.
+- `pytest -q tests/test_sqlite_schema_bootstrap.py -rs` passed.
+- `pytest -q tests/test_runtime_heartbeat.py -rs` passed.
+- `pytest -q tests/test_dashboard_app.py -rs` skipped because FastAPI is not installed in this container.
+- `pytest -q tests/test_runtime.py -rs` passed.
+- `pytest -q` failed during collection because this container cannot import NumPy for `tests/test_timesfm_futures.py`; attempted `python -m pip install numpy`, but package-index access returned 403 Forbidden.
+
+### Risks
+- Low; the patch is limited to SQLite migration bootstrap formatting/coverage and does not modify execution decisions.
+
+### Remaining limitations
+- LIVE readiness remains unchanged and not approved.
+- Migration safety still depends on tests continuing to cover fresh and legacy SQLite database shapes.
+
+### Migration concerns
+- No manual migration required; the bootstrap uses `CREATE TABLE IF NOT EXISTS` and remains backward-compatible with databases that already have `schema_migrations`.
+
+### Push recommendation
+- Safe to push as a minimal persistence/bootstrap fix after validating full-suite dependencies in a normal dev environment; do not change LIVE readiness posture.
+
 ## 2026-06-19 Patch Addendum — TimesFM unbatched quantile + optional integration smoke hardening
 
 ### Why the patch was needed
