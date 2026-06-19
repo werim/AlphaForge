@@ -1,13 +1,13 @@
 """phase1 init full
 
-Revision ID: 0001_phase1
+Revision ID: 0001_phase1_init
 Revises:
 Create Date: 2026-04-30
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0001_phase1"
+revision = "0001_phase1_init"
 down_revision = None
 branch_labels = None
 depends_on = None

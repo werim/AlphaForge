@@ -1,3 +1,14 @@
+## 2026-06-19 Alembic revision graph integrity repair
+- **Current version:** 0.3.37-dev
+- **Current phase:** Alembic persistence lineage repair.
+- **Runtime maturity:** Alembic migration graph now resolves from the restored Phase 1 base revision through adaptive learning lifecycle migration; SQLite upgrade-head has regression coverage when Alembic is installed.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged; patch only repairs migration metadata lineage and does not alter decision, reject, lifecycle, scoring, or order runtime paths.
+- **Lifecycle coverage:** unchanged; no lifecycle transition behavior changed.
+- **Execution realism coverage:** unchanged; no thresholds, RR calculations, spread/slippage/funding assumptions, or execution realism gates changed.
+- **Known critical risks:** environments that already stamped the incorrect `0001_phase1` revision may need an explicit DBA-reviewed Alembic version-table remediation before applying later revisions; do not use blind stamping as a fix.
+- **Last audit date:** 2026-06-19.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; posture unchanged.
+
 ## 2026-06-19 SQLite schema migration bootstrap legacy regression hardening
 - **Current version:** 0.3.36-dev
 - **Current phase:** Persistence bootstrap regression hardening.
