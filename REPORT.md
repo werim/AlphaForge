@@ -1,3 +1,48 @@
+## 2026-06-19 Dashboard BACKTEST Binance historical refresh hotfix
+
+### Why this patch was needed
+- Dashboard-triggered 30-day BTCUSDT/ETHUSDT 15m backtests could fail immediately when an existing candle cache started after the requested start timestamp.
+- The failure surfaced as a raw `HistoricalDataError` instead of a clean dashboard FAILED result.
+
+### Root cause
+- Historical candle cache coverage was treated as a hard precondition in the backtest wrapper path rather than an optimization.
+- Dashboard backtest commands did not force a fresh Binance candle download for the operator-selected range.
+
+### Files changed
+- `src/alphaforge/historical_market_data.py`
+- `backtest_order.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `tests/test_dashboard_app.py`
+- `tests/test_historical_market_data.py`
+- `REPORT.md`
+- `VERSION.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- `load_or_fetch_candles(...)` now accepts `force_refresh=False`.
+- When `force_refresh=True`, Binance klines are fetched for the full requested range regardless of existing cache.
+- When `force_refresh=False`, stale/incomplete cache coverage triggers a full-range Binance fetch attempt before any historical coverage error can be raised.
+- Dashboard backtests now always invoke `backtest_order.py` with `--force-refresh`.
+
+### Lifecycle changes
+- No lifecycle transition semantics changed. The patch only affects pre-simulation historical data hydration and dashboard failure reporting.
+
+### Persistence / cache / export changes
+- Successful fresh fetches preserve the existing candle cache write format and metadata contract.
+- No SQLite schema or CSV export schema changes were introduced.
+
+### Tests added / executed
+- Added dashboard command regression coverage for `--force-refresh`.
+- Added stale-cache regression coverage proving a fetch is attempted before `HistoricalDataError`.
+- Added clean dashboard FAILED-result coverage for insufficient Binance historical data.
+
+### Risks / remaining limitations
+- Binance availability/rate-limit behavior remains an external dependency for non-offline dashboard backtests.
+- If Binance genuinely returns insufficient range coverage, the simulation correctly fails closed with an operator-facing message rather than fabricating missing candles.
+
+### Push recommendation
+- Merge recommended. This is a narrow fail-closed data-refresh hotfix with no LIVE readiness claim.
+
 ## 2026-06-19 Patch Addendum — Dashboard BACKTEST control panel
 
 ### Why the patch was needed

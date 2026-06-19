@@ -1,3 +1,14 @@
+## 2026-06-19 Dashboard historical data refresh hotfix
+- **Current version:** 0.3.39-dev
+- **Current phase:** Dashboard BACKTEST historical data reliability hardening.
+- **Runtime maturity:** Dashboard backtests now force full-range Binance candle refresh before simulation, while stale cache remains an optimization for non-forced backtest use only.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST historical hydration improved; PAPER/LIVE decision and order paths unchanged.
+- **Lifecycle coverage:** unchanged; no lifecycle states or transition order were modified.
+- **Execution realism coverage:** improved by failing closed on genuinely insufficient Binance coverage instead of using fake/default candles.
+- **Known critical risks:** Binance API availability and rate limits can still prevent dashboard backtests from completing; insufficient data now surfaces as a clean FAILED result.
+- **Last audit date:** 2026-06-19.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; this patch is BACKTEST-only and does not add LIVE execution readiness.
+
 ## 2026-06-19 Dashboard BACKTEST control panel
 - **Current version:** 0.3.38-dev
 - **Current phase:** Dashboard BACKTEST-only operations control.

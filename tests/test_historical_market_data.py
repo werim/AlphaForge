@@ -40,3 +40,25 @@ def test_funding_join_no_future_leak() -> None:
     assert joined[0].funding_rate_pct is None
     assert joined[1].funding_rate_pct == pytest.approx(0.001)
     assert joined[2].funding_rate_pct == pytest.approx(0.001)
+
+
+def test_stale_cache_fetches_before_raising_historical_data_error(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import alphaforge.historical_market_data as hmd
+
+    cache_path = tmp_path / "candles" / "BTCUSDT_1m.json"
+    cached = [hmd.HistoricalCandle(60_000, 1, 1, 1, 1, 1)]
+    hmd.write_cache(
+        cache_path,
+        cached,
+        {"actual_first_ts": 60_000, "actual_last_ts": 60_000},
+    )
+    calls = {"fetch": 0}
+
+    def fake_fetch(**kwargs):
+        calls["fetch"] += 1
+        raise hmd.HistoricalDataError("Historical coverage starts after requested start")
+
+    monkeypatch.setattr(hmd, "fetch_binance_klines_paginated", fake_fetch)
+    with pytest.raises(HistoricalDataError):
+        hmd.load_or_fetch_candles("BTCUSDT", "1m", 0, 120_000, tmp_path)
+    assert calls["fetch"] == 1
