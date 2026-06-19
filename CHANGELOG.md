@@ -1,3 +1,24 @@
+## [Unreleased] - 2026-06-19 (SQLite rollback evidence bootstrap)
+
+### Added
+- Fresh SQLite bootstrap now creates the canonical `live_rollback_validation_evidence` rollback evidence table and index idempotently.
+- Regression coverage verifies rollback evidence schema creation during `init_db(...)`.
+
+### Changed
+- SQLite migrations now record the rollback evidence bootstrap migration without changing trading thresholds, scoring, reject logic, lifecycle semantics, or runtime decision behavior.
+
+### Fixed
+- Dashboard/readiness rollback evidence queries no longer depend on a later write path to create the rollback evidence table in fresh SQLite databases.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE readiness remains blocked; this is persistence bootstrap hardening only.
+
 ## [Unreleased] - 2026-06-19 (SQLite schema migration bootstrap regression)
 
 ### Added

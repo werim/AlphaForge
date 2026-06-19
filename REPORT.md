@@ -1,3 +1,58 @@
+## 2026-06-19 SQLite rollback evidence bootstrap hardening
+
+### Why the patch was needed
+- Fresh SQLite bootstrap could leave dashboard/readiness rollback evidence reads dependent on a later rollback evidence write path to create `live_rollback_validation_evidence`.
+- The previous Alembic chain repair concern also required verifying migration bookkeeping exists before any applied-version reads.
+
+### Root cause
+- Rollback evidence schema creation lived in `alphaforge.rollback_evidence.ensure_rollback_evidence_schema(...)`, which is called by the persistence write path but not by generic `init_db(...)` bootstrap.
+- Fresh dashboard/readiness database paths can query rollback evidence status before any evidence has been persisted.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- `init_db(...)` now creates the canonical `live_rollback_validation_evidence` table and its read index idempotently during SQLite bootstrap.
+- `schema_migrations` is still created before selecting applied versions.
+- No trading thresholds, scoring, reject logic, lifecycle semantics, scanner behavior, order behavior, or execution-cost logic changed.
+
+### Lifecycle changes
+- None. Lifecycle transition emission and persistence semantics are unchanged.
+
+### Persistence changes
+- Additive SQLite-only bootstrap DDL for canonical rollback validation evidence storage.
+- Existing rollback evidence rows and runtime tables are preserved by `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`; no drop/recreate behavior was added.
+- A new migration marker `2026_06_19_rollback_evidence_bootstrap` records the additive bootstrap repair.
+
+### Export/schema changes
+- No CSV/export behavior changed.
+- SQLite schema now includes rollback evidence storage immediately after fresh `init_db(...)`.
+
+### Tests added
+- Regression coverage verifies fresh `init_db(...)` creates `live_rollback_validation_evidence` with the canonical columns and index.
+
+### Tests executed
+- `pytest tests/test_sqlite_schema_bootstrap.py -q`
+- `pytest tests/test_runtime_heartbeat.py -q`
+- `pytest tests/test_job22_dashboard_rollback_evidence.py -q`
+- `pytest -q`
+
+### Risks
+- The rollback evidence DDL is duplicated between generic persistence bootstrap and rollback evidence writer bootstrap; future schema changes must keep both idempotent definitions aligned.
+
+### Remaining limitations
+- LIVE readiness remains blocked; this patch only ensures audit/readiness evidence storage exists.
+
+### Migration concerns
+- Additive and idempotent for SQLite. Existing databases keep their rows; missing tables/indexes are created on next bootstrap.
+
+### Push recommendation
+- Merge recommended after full test pass; low blast radius persistence bootstrap repair.
+
 ## 2026-06-19 Patch Addendum — SQLite schema migration bootstrap regression
 
 ### Why the patch was needed
