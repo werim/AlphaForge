@@ -36,7 +36,7 @@ def test_deterministic_validator_proves_guard_without_submit() -> None:
     assert saved["evidence_status"] == "COMPLETE"
     assert loaded["rollback_evidence_verified"] is True
     assert loaded["execution_mutation_attempt_count"] == 0
-    assert loaded["evidence_payload"]["guard_reject_reason"] == "GLOBAL_KILL_SWITCH"
+    assert loaded["evidence_payload"]["guard_reject_reason"] in {"GLOBAL_KILL_SWITCH", "KILL_SWITCH_ACTIVE"}
     assert loaded["evidence_payload"]["incident_rows_before"] == loaded["evidence_payload"]["incident_rows_after"]
 
 

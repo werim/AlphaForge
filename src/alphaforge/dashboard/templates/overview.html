@@ -23,6 +23,30 @@
     <article class="metric"><label>Required Exchanges</label><strong>{{ status.required_live_exchanges|join(', ') }}</strong></article>
   </section>
 
+
+  <section class="panel" id="runtime-controls">
+    <div class="panel-head"><h2>Runtime Controls</h2><span class="badge {% if status.kill_switch_active %}fail{% else %}neutral{% endif %}">Kill Switch {{ status.kill_switch_state }}</span></div>
+    <div class="cards">
+      <article class="metric"><label>Requested Mode</label><strong>{{ status.mode_requested }}</strong></article>
+      <article class="metric"><label>Actual Running Mode</label><strong>{{ status.mode_running or 'NONE' }}</strong></article>
+      <article class="metric"><label>Runtime Status</label><strong>{{ status.runtime_status }}</strong></article>
+      <article class="metric"><label>Last Error</label><strong class="small-value">{{ status.last_error or 'None' }}</strong></article>
+    </div>
+    <p>Controls write persisted runtime control state and fail closed. LIVE startup still requires all runtime LIVE guards; it is never silently downgraded to PAPER.</p>
+    <form method="post" action="/runtime/mode" class="backtest-form">
+      <div><label for="mode">Requested run mode</label><select id="mode" name="mode"><option value="PAPER" {% if status.mode_requested == 'PAPER' %}selected{% endif %}>PAPER</option><option value="LIVE" {% if status.mode_requested == 'LIVE' %}selected{% endif %}>LIVE</option></select></div>
+      <button type="submit">Set Mode</button>
+    </form>
+    <form method="post" action="/runtime/start"><button type="submit">Start Selected Runtime</button></form>
+    <form method="post" action="/runtime/stop"><button type="submit">Stop Runtime</button></form>
+    <form method="post" action="/runtime/kill-switch"><input type="hidden" name="active" value="{{ 'false' if status.kill_switch_active else 'true' }}"><button type="submit">{{ 'Deactivate' if status.kill_switch_active else 'Activate' }} Kill Switch</button></form>
+    <table><tbody>
+      <tr><th>Kill switch state</th><td>{{ status.kill_switch_state }}</td></tr>
+      <tr><th>Last changed</th><td>{{ status.kill_switch_updated_at or 'Unavailable' }}</td></tr>
+      <tr><th>Source</th><td>{{ status.kill_switch_source or 'Unavailable' }}</td></tr>
+    </tbody></table>
+  </section>
+
   <section class="panel" id="run-backtest">
     <div class="panel-head"><h2>Run Backtest</h2><span class="badge neutral">BACKTEST ONLY</span></div>
     <p>Backtest only. Does not place orders.</p>

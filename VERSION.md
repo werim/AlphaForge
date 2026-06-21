@@ -1,3 +1,14 @@
+## 2026-06-21 Dashboard runtime control safety hardening
+- **Current version:** 0.3.40-dev
+- **Current phase:** Dashboard PAPER/LIVE runtime-control safety wiring.
+- **Runtime maturity:** Dashboard now writes persisted runtime control state for requested mode, actual running mode, kill switch, status, and last error; runtime checks the kill switch before startup, scan processing, signal-to-order transition, and execution.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST behavior is unchanged; PAPER can be started through the selected runtime mode; LIVE remains guarded by existing scanner provenance, adapter, exchange connectivity, qualification, reconciliation, and operator gates.
+- **Lifecycle coverage:** Kill-switch blocks persist explicit `KILL_SWITCH_ACTIVE` rejects and emit `SIGNAL_REJECTED` where a signal is in flight.
+- **Execution realism coverage:** No thresholds were loosened and no trade-frequency path was added; unknown or unsafe state fails closed.
+- **Known critical risks:** Dashboard in-process runtime supervision is minimal and should be operationally hardened before production use; LIVE still lacks satisfied readiness evidence and real execution adapter configuration in this repo.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; LIVE can start only if all existing guards pass and otherwise fails closed.
+
 ## 2026-06-19 Dashboard historical data refresh hotfix
 - **Current version:** 0.3.39-dev
 - **Current phase:** Dashboard BACKTEST historical data reliability hardening.

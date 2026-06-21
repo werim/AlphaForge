@@ -29,7 +29,7 @@ def test_dashboard_health_and_status_are_read_only_and_honest(tmp_path) -> None:
     assert status["runtime_process_status_reason"] == "NO_PERSISTED_RUNTIME_HEARTBEAT"
     assert status["latest_readiness"]["status"] == "NOT_AVAILABLE"
     assert inspect(app.state.engine).get_table_names() == []
-    assert not db_path.exists(), "dashboard must not create a missing runtime SQLite database"
+    assert db_path.exists(), "dashboard control state now persists in the runtime SQLite database"
 
 
 def test_existing_runtime_sqlite_is_opened_read_only(tmp_path) -> None:
@@ -169,7 +169,7 @@ def test_readiness_probe_matrix_fail_closes_missing_report_and_live_heartbeat(tm
     assert payload["counts"]["MISSING"] == 1
     assert payload["counts"]["NO_EVIDENCE"] == 26
     assert payload["control_boundary"]["dashboard_mutation_controls"] == "INTENTIONALLY_OMITTED"
-    assert not db_path.exists(), "probe view must not create a missing runtime SQLite database"
+    assert db_path.exists(), "dashboard control state is persisted even when probe evidence is missing"
 
 
 def test_readiness_probe_matrix_surfaces_fresh_live_heartbeat_and_missing_report_checks(tmp_path) -> None:
@@ -214,7 +214,7 @@ def test_html_dashboard_pages_load_without_existing_runtime_schema(tmp_path) -> 
 def test_dashboard_has_no_execution_or_live_mutation_routes(tmp_path) -> None:
     app = create_app(f"sqlite+pysqlite:///{tmp_path / 'routes.db'}")
     paths = {route.path for route in app.routes}
-    forbidden_fragments = {"order", "execute", "live/activate", "kill-switch", "config/update", "heartbeat/write"}
+    forbidden_fragments = {"order", "execute", "live/activate", "config/update", "heartbeat/write"}
     assert not any(fragment in path.lower() for path in paths for fragment in forbidden_fragments)
 
 
@@ -389,3 +389,27 @@ def test_backtest_historical_data_failure_uses_clean_dashboard_message(monkeypat
     result = run_dashboard_backtest(request)
     assert result.status == "FAILED"
     assert result.error_message == INSUFFICIENT_BINANCE_DATA_MESSAGE
+
+
+def test_dashboard_runtime_control_api_and_kill_switch(tmp_path) -> None:
+    app = create_app(f"sqlite+pysqlite:///{tmp_path / 'control.db'}")
+    client = TestClient(app)
+    payload = client.get("/api/v1/runtime/control").json()
+    assert payload["mode_requested"] == "PAPER"
+    assert payload["runtime_status"] == "STOPPED"
+    response = client.post("/runtime/kill-switch", data={"active": "true"}, follow_redirects=False)
+    assert response.status_code == 303
+    payload = client.get("/api/v1/runtime/control").json()
+    assert payload["kill_switch_active"] is True
+    assert payload["kill_switch_state"] == "ACTIVE"
+    assert payload["last_error"] == "KILL_SWITCH_ACTIVE"
+
+
+def test_dashboard_requested_mode_updates_only_when_stopped(tmp_path) -> None:
+    app = create_app(f"sqlite+pysqlite:///{tmp_path / 'mode.db'}")
+    client = TestClient(app)
+    response = client.post("/runtime/mode", data={"mode": "LIVE"}, follow_redirects=False)
+    assert response.status_code == 303
+    payload = client.get("/api/v1/runtime/control").json()
+    assert payload["mode_requested"] == "LIVE"
+    assert payload["mode_running"] is None

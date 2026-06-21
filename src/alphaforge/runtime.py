@@ -19,6 +19,7 @@ from alphaforge.order import LifecycleState
 from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
+from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
@@ -102,6 +103,7 @@ class RuntimeOrchestrator:
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     paper_slippage_bps: float = 2.0
     persistence_engine: Engine | None = None
+    control_store: RuntimeControlStore | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
@@ -201,7 +203,16 @@ class RuntimeOrchestrator:
             },
         )
 
+    def _kill_switch_active(self) -> bool:
+        if self.config.global_kill_switch:
+            return True
+        if self.control_store is not None:
+            return self.control_store.is_kill_switch_active()
+        return False
+
     async def start(self) -> None:
+        if self._kill_switch_active():
+            raise RuntimeError("KILL_SWITCH_ACTIVE")
         if self.config.execution_mode == ExecutionMode.LIVE:
             allowed_sources = {"EXCHANGE_PUBLIC_MARKET_DATA"}
             scanner_source = str(self.scanner_source or "UNKNOWN").strip().upper()
@@ -383,6 +394,9 @@ class RuntimeOrchestrator:
             self.shutdown()
 
     async def _scan_once(self) -> None:
+        if self._kill_switch_active():
+            self._last_scan_gate_blockers = ["KILL_SWITCH_ACTIVE"]
+            return
         self.metrics.scans += 1
         candidates = await self.market_scanner()
         self.metrics.last_scan_ts = canonical_utc_timestamp()
@@ -412,6 +426,10 @@ class RuntimeOrchestrator:
         market_ctx["execution_ctx"] = execution_ctx
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
+        if self._kill_switch_active():
+            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": 0.0, "rr": market_ctx.get("rr"), "effective_rr": market_ctx.get("rr"), "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")})
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": "KILL_SWITCH_ACTIVE", "signal_id": signal_id})
+            return
         if risk_reject is not None:
             await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": market_ctx.get("rr"), "effective_rr": market_ctx.get("rr"), "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject, "signal_id": signal_id})
@@ -431,6 +449,11 @@ class RuntimeOrchestrator:
             return
         self.metrics.decisions_generated += 1
         self.metrics.last_decision_ts = canonical_utc_timestamp()
+
+        if self._kill_switch_active():
+            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": signal_payload.get("risk_reward"), "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")})
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": "KILL_SWITCH_ACTIVE", "signal_id": signal_id})
+            return
 
         if order_plan.decision != "ACCEPTED":
             reject_reason = canonical_reject_reason(order_plan.reason)
@@ -472,6 +495,8 @@ class RuntimeOrchestrator:
         }, market_ctx=market_ctx)
 
     async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> None:
+        if self._kill_switch_active():
+            raise RuntimeError("KILL_SWITCH_ACTIVE")
         mode = self.config.execution_mode
         if mode == ExecutionMode.PAPER:
             result = self._simulate_paper_execution(symbol, decision, market_ctx)
@@ -830,6 +855,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
         persistence_engine=engine,
+        control_store=RuntimeControlStore(engine),
     )
     orchestrator.metrics.persistence_enabled = persistence_enabled
     return orchestrator

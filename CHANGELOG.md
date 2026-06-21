@@ -1,3 +1,28 @@
+## [Unreleased] - 2026-06-21 (Dashboard runtime control safety hardening)
+
+### Added
+- Added persisted runtime control state for requested mode, running mode, kill-switch state/source/time, runtime status, and last error.
+- Added dashboard runtime mode, start, stop, kill-switch, and control-status endpoints.
+- Added runtime-control and dashboard regression tests for kill switch, PAPER start, LIVE fail-closed errors, duplicate start prevention, and stopped transitions.
+
+### Changed
+- Runtime now checks the persisted/global kill switch before startup, scan processing, signal-to-order transition, and PAPER/LIVE execution action.
+- Dashboard overview now displays requested mode, actual running mode, runtime status, kill-switch state, last change metadata, and last error.
+
+### Fixed
+- Fixed cosmetic-only dashboard control risk by wiring controls to runtime control state and supervisor behavior.
+- Fixed silent mode-drift risk by rejecting mismatches between dashboard requested mode and constructed runtime mode.
+
+### Removed
+- Removed the prior read-only-only dashboard route assumption for kill-switch/runtime controls; order submission routes remain absent.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY unless existing runtime/live-readiness guards independently pass.
+- Dashboard runtime supervision is intentionally small and fail-closed; external process management may still be preferred operationally.
+
 ## 2026-06-19 Dashboard historical refresh hotfix
 
 ### Added
