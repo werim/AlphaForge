@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Any
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine
@@ -13,8 +15,14 @@ from sqlalchemy.engine.url import make_url
 
 from alphaforge.config import load_config_from_env
 from alphaforge.contracts import canonical_utc_timestamp
+from alphaforge.runtime import _build_runtime_from_env
+from alphaforge.runtime_control import RuntimeControlStore, RuntimeSupervisor
 
 from .backtest_control import default_form_values, parse_backtest_form, run_dashboard_backtest
+
+async def _form_dict(request: Request) -> dict[str, str]:
+    body = (await request.body()).decode("utf-8")
+    return {key: values[-1] for key, values in parse_qs(body, keep_blank_values=True).items()}
 
 from .queries import (
     fetch_latest_readiness,
@@ -46,9 +54,10 @@ def _create_dashboard_engine(database_url: str) -> Engine:
     return create_engine(read_only_url, future=True)
 
 
-def _status_payload(engine: Engine) -> dict[str, Any]:
+def _status_payload(engine: Engine, control_store: RuntimeControlStore | None = None) -> dict[str, Any]:
     cfg = load_config_from_env().runtime
     heartbeat_status = fetch_runtime_heartbeat_status(engine)
+    control = control_store.read().to_dict() if control_store is not None else {}
     return {
         "configured_execution_mode": cfg.execution_mode,
         "global_kill_switch": cfg.global_kill_switch,
@@ -58,6 +67,7 @@ def _status_payload(engine: Engine) -> dict[str, Any]:
         "required_live_exchanges": list(cfg.required_live_exchanges),
         "enable_binance_readonly_reconciliation": cfg.enable_binance_readonly_reconciliation,
         **heartbeat_status,
+        **control,
         "latest_readiness": fetch_latest_readiness(engine),
     }
 
@@ -66,11 +76,33 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app = FastAPI(title="AlphaForge Dashboard", version="0.1.0")
     resolved_database_url = database_url or load_config_from_env().persistence.database_url
     app.state.engine = _create_dashboard_engine(resolved_database_url)
+    app.state.control_engine = create_engine(resolved_database_url, future=True)
+    app.state.control_store = RuntimeControlStore(app.state.control_engine)
+
+    def _factory(mode: str):
+        old_exec = os.environ.get("EXECUTION_MODE")
+        old_alpha = os.environ.get("ALPHAFORGE_EXECUTION_MODE")
+        os.environ["EXECUTION_MODE"] = mode
+        os.environ["ALPHAFORGE_EXECUTION_MODE"] = mode
+        try:
+            return _build_runtime_from_env()
+        finally:
+            if old_exec is None:
+                os.environ.pop("EXECUTION_MODE", None)
+            else:
+                os.environ["EXECUTION_MODE"] = old_exec
+            if old_alpha is None:
+                os.environ.pop("ALPHAFORGE_EXECUTION_MODE", None)
+            else:
+                os.environ["ALPHAFORGE_EXECUTION_MODE"] = old_alpha
+
+    app.state.runtime_supervisor = RuntimeSupervisor(app.state.control_store, _factory)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.on_event("shutdown")
     async def dispose_dashboard_engine() -> None:
         app.state.engine.dispose()
+        app.state.control_engine.dispose()
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -78,7 +110,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def overview(request: Request) -> HTMLResponse:
-        status = _status_payload(app.state.engine)
+        status = _status_payload(app.state.engine, app.state.control_store)
         rejects = fetch_reject_summary(app.state.engine)
         lifecycle = fetch_recent_lifecycle(app.state.engine, limit=10)
         return TEMPLATES.TemplateResponse(
@@ -98,12 +130,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/backtest/run", response_class=HTMLResponse)
     async def run_backtest(request: Request) -> HTMLResponse:
-        form_data = dict(await request.form())
+        form_data = await _form_dict(request)
         parsed, errors = parse_backtest_form(form_data)
         result = None
         if parsed is not None:
             result = run_dashboard_backtest(parsed)
-        status = _status_payload(app.state.engine)
+        status = _status_payload(app.state.engine, app.state.control_store)
         rejects = fetch_reject_summary(app.state.engine)
         lifecycle = fetch_recent_lifecycle(app.state.engine, limit=10)
         form_values = default_form_values()
@@ -127,8 +159,42 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return TEMPLATES.TemplateResponse(
             request=request,
             name="partials/status_bar.html",
-            context={"status": _status_payload(app.state.engine)},
+            context={"status": _status_payload(app.state.engine, app.state.control_store)},
         )
+
+
+    @app.post("/runtime/mode")
+    async def set_runtime_mode(request: Request) -> RedirectResponse:
+        form = await _form_dict(request)
+        try:
+            app.state.control_store.set_requested_mode(str(form.get("mode", "PAPER")))
+        except Exception as exc:
+            app.state.control_store.set_status("ERROR", last_error=str(exc))
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/runtime/kill-switch")
+    async def set_kill_switch(request: Request) -> RedirectResponse:
+        form = await _form_dict(request)
+        active = str(form.get("active", "false")).lower() in {"1", "true", "on", "yes"}
+        app.state.control_store.set_kill_switch(active, source="dashboard")
+        if active and app.state.runtime_supervisor.is_running():
+            await app.state.runtime_supervisor.stop()
+            app.state.control_store.set_kill_switch(True, source="dashboard")
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/runtime/start")
+    async def start_runtime() -> RedirectResponse:
+        await app.state.runtime_supervisor.start()
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.post("/runtime/stop")
+    async def stop_runtime() -> RedirectResponse:
+        await app.state.runtime_supervisor.stop()
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.get("/api/v1/runtime/control")
+    async def api_runtime_control() -> dict[str, Any]:
+        return _status_payload(app.state.engine, app.state.control_store)
 
     @app.get("/rejects", response_class=HTMLResponse)
     async def rejects(request: Request) -> HTMLResponse:
@@ -166,7 +232,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.get("/api/v1/runtime/status")
     async def api_runtime_status() -> dict[str, Any]:
-        return _status_payload(app.state.engine)
+        return _status_payload(app.state.engine, app.state.control_store)
 
     @app.get("/api/v1/rejects/summary")
     async def api_reject_summary() -> dict[str, Any]:

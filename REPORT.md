@@ -1,3 +1,63 @@
+## 2026-06-21 Dashboard runtime control safety hardening
+
+### Why this patch was needed
+- Dashboard Kill Switch and PAPER/LIVE controls needed to be real runtime controls rather than cosmetic UI state.
+- Operators needed explicit visibility into requested mode, actual running mode, runtime status, kill-switch metadata, and last error.
+
+### Root cause
+- The dashboard previously consumed runtime heartbeat/readiness evidence but did not own a persisted runtime-control contract.
+- Runtime kill-switch behavior came only from environment config and was not re-read from dashboard state before signal execution/order placement.
+
+### Files changed
+- `src/alphaforge/runtime_control.py`
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/dashboard/app.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `src/alphaforge/dashboard/templates/partials/status_bar.html`
+- `tests/test_runtime_control.py`
+- `tests/test_runtime.py`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added a persisted `runtime_control_state` table with requested mode, running mode, kill-switch state/source/time, status, last error, and update timestamp.
+- Runtime checks kill switch before startup, scans, in-flight signal acceptance, and execution.
+- Kill-switch blocks persist explicit final rejects with reason `KILL_SWITCH_ACTIVE` where a signal exists.
+- Dashboard start uses requested mode only and fails closed if constructed runtime mode differs.
+- Repeated dashboard starts reuse the existing running task instead of creating duplicate loops.
+
+### Lifecycle changes
+- In-flight kill-switch blocks emit `SIGNAL_REJECTED` after `SIGNAL_CREATED` with reason `KILL_SWITCH_ACTIVE`.
+- No lifecycle states were removed or collapsed.
+
+### Persistence changes
+- Added additive SQLite table `runtime_control_state`; existing runtime/order/lifecycle tables are unchanged.
+- Existing `order_decisions` reject persistence is reused for `KILL_SWITCH_ACTIVE` when practical.
+
+### Export/schema changes
+- No CSV export schema changes.
+- SQLite schema addition is additive and idempotent.
+
+### Tests added
+- Runtime-control store persistence and kill-switch read tests.
+- Runtime supervisor PAPER start, duplicate start prevention, stop transition, and LIVE guard fail-closed tests.
+- Dashboard control API tests for kill switch and requested mode.
+
+### Tests executed
+- `pytest -q tests/test_runtime_control.py tests/test_runtime.py::test_live_start_blocks_placeholder_bootstrap_scanner tests/test_runtime.py::test_paper_accept_path_uses_canonical_lifecycle_sequence tests/test_dashboard_app.py::test_dashboard_runtime_control_api_and_kill_switch tests/test_dashboard_app.py::test_dashboard_requested_mode_updates_only_when_stopped` passed.
+
+### Risks / remaining limitations
+- Dashboard runtime supervision is intentionally minimal and in-process; production deployments may still prefer a dedicated process supervisor using the same persisted control state.
+- LIVE remains blocked unless all existing independent readiness, scanner, exchange connectivity, qualification, reconciliation, and adapter guards pass.
+
+### Migration concerns
+- The `runtime_control_state` table is additive and created lazily/idempotently.
+
+### Push recommendation
+- Merge after full CI confirms dependency-complete test suite health. Do not treat this as LIVE readiness approval.
+
 ## 2026-06-19 Dashboard BACKTEST Binance historical refresh hotfix
 
 ### Why this patch was needed
