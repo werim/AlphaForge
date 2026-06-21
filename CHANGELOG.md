@@ -939,3 +939,27 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Removed optimistic zero-default persistence for spread/slippage/latency when evidence is unavailable.
 ### Known Issues
 - effective_rr currently remains equal to rr in persisted decisions and is still unresolved.
+
+## [Unreleased] - 2026-06-21 (P0-3 TimesFM canonical evidence integration)
+
+### Added
+- Added canonical `timesfm_forecast_evidence` SQL persistence for TimesFM research decisions.
+- Added stable TimesFM `forecast_id` generation and no-lookahead input end timestamp tracking.
+- Added optional `timesfm_forward_outcome_labels` schema for future calibrated outcome labeling.
+- Added tests for SQL TimesFM evidence persistence, stable IDs/idempotency, CSV evidence fields, and invalid forecast persistence.
+
+### Changed
+- TimesFM CSV decision logs now include canonical evidence fields and model/provider metadata.
+
+### Fixed
+- TimesFM forecast evidence is no longer CSV-only when a persistence session is supplied.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. Schema changes are additive and TimesFM remains PAPER/BACKTEST only.
+
+### Known Issues
+- Forward outcome calibration is not implemented yet; TimesFM should remain isolated research evidence until calibrated.
+- LIVE readiness remains NOT READY and TimesFM has no order authority.
