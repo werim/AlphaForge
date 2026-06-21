@@ -1,3 +1,14 @@
+## 2026-06-21 Backtest lifecycle truth audit hardening
+- **Current version:** 0.3.41-dev
+- **Current phase:** BACKTEST lifecycle export truthfulness and fail-closed integrity checks.
+- **Runtime maturity:** BACKTEST continues to use the existing scanner/order cycle and persisted lifecycle export path; this patch hardens export verification only.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST rejects and accepted candidates remain routed through the shared order/reject pipeline where feasible; PAPER/LIVE behavior is unchanged.
+- **Lifecycle coverage:** Export integrity now fails on legacy `CREATED`, missing lifecycle state/status, CREATED-only signal rows, rejected rows without reject reasons, and rejected CSV/SQL count drift.
+- **Execution realism coverage:** Missing execution context must remain `UNAVAILABLE_BACKTEST`/null when marked missing; fake zero execution context is rejected by export integrity checks.
+- **Known critical risks:** BACKTEST execution context still depends on available market metadata or conservative estimates; full real execution fidelity and LIVE protective-order proof remain incomplete.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; no LIVE order placement or readiness claim was added.
+
 ## 2026-06-21 Dashboard runtime control safety hardening
 - **Current version:** 0.3.40-dev
 - **Current phase:** Dashboard PAPER/LIVE runtime-control safety wiring.

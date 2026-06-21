@@ -1,3 +1,24 @@
+## [Unreleased] - 2026-06-21 (Backtest lifecycle truth audit hardening)
+
+### Added
+- Added export integrity checks for rejected lifecycle SQL versus `rejected_orders.csv` count consistency.
+- Added regression tests for legacy `CREATED`, CREATED-only lifecycle exports, missing lifecycle state/status, fake zero execution context, and suspicious constant score/RR distributions.
+
+### Changed
+- BACKTEST export verification now treats persisted lifecycle rows as the audit source and fails closed on lifecycle/reject/export truth defects.
+
+### Fixed
+- Fixed audit coverage gaps where malformed lifecycle exports, missing rejected rows, and missing execution context represented as numeric zero could pass verification.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for valid exports; invalid BACKTEST artifacts now fail closed instead of being accepted.
+
+### Known Issues
+- LIVE remains NOT READY. BACKTEST execution context is still limited by available historical metadata and conservative estimates.
+
 ## [Unreleased] - 2026-06-21 (Dashboard runtime control safety hardening)
 
 ### Added
