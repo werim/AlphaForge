@@ -1431,6 +1431,27 @@ def write_backtest_quality_summary(path: str, summary: Mapping[str, Any]) -> Non
             w.writerow({"metric": key, "value": serialized})
 
 
+def _decode_execution_ctx(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value in (None, ""):
+        return {}
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _is_fake_missing_zero(value: Any) -> bool:
+    if value in (None, "", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        return False
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
 def verify_export_integrity(
     persisted_lifecycle_rows: List[Mapping[str, Any]],
     rejected_rows: List[Mapping[str, Any]],
@@ -1438,18 +1459,53 @@ def verify_export_integrity(
     rejected_csv_rows: List[Mapping[str, Any]],
 ) -> list[str]:
     errors: list[str] = []
+    rejected_states = {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}
     if len(persisted_lifecycle_rows) != len(lifecycle_csv_rows):
         errors.append("lifecycle row count mismatch between SQLite lifecycle and order_lifecycle.csv")
     if len(rejected_rows) != len(rejected_csv_rows):
         errors.append("rejected row count mismatch between rejected records and rejected_orders.csv")
+    lifecycle_reject_count = sum(
+        1
+        for row in persisted_lifecycle_rows
+        if str(row.get("lifecycle_state", "") or "").strip().upper() in rejected_states
+    )
+    if lifecycle_reject_count != len(rejected_csv_rows):
+        errors.append("rejected_orders.csv count mismatch with rejected lifecycle SQL rows")
+    signal_terminals: dict[str, set[str]] = {}
+    score_by_signal: dict[str, Any] = {}
+    rr_by_signal: dict[str, Any] = {}
     for idx, row in enumerate(persisted_lifecycle_rows):
+        lifecycle_state = str(row.get("lifecycle_state", "") or "").strip().upper()
+        status_after = str(row.get("status_after", "") or lifecycle_state).strip().upper()
+        if lifecycle_state == "" or status_after == "":
+            errors.append(f"lifecycle row index={idx} missing lifecycle_state/status_after")
+        if lifecycle_state == "CREATED" or status_after == "CREATED":
+            errors.append(f"lifecycle row index={idx} uses legacy CREATED state")
         decision = str(row.get("decision", "")).upper()
         reject_reason = str(row.get("reject_reason", "") or "").strip().upper()
-        if decision == "REJECTED" and reject_reason in {"", "UNKNOWN"}:
+        if (decision == "REJECTED" or lifecycle_state in rejected_states) and reject_reason in {"", "UNKNOWN"}:
             errors.append(f"rejected lifecycle row index={idx} missing reject_reason")
         expectancy_bucket = str(row.get("expectancy_bucket", "") or "").strip().upper()
         if expectancy_bucket == "":
             errors.append(f"lifecycle row index={idx} missing expectancy_bucket")
+        signal_id = str(row.get("signal_id", "") or f"idx:{idx}")
+        signal_terminals.setdefault(signal_id, set()).add(lifecycle_state)
+        if lifecycle_state == "SIGNAL_CREATED":
+            score_by_signal[signal_id] = row.get("score")
+            rr_by_signal[signal_id] = row.get("rr")
+        ctx = _decode_execution_ctx(row.get("execution_ctx"))
+        execution_ctx_missing = str(row.get("execution_ctx_missing", "") or "").strip().lower() in {"1", "true", "t", "yes"}
+        if execution_ctx_missing:
+            for field in ("volume_24h_usdt", "spread_pct", "funding_rate_pct", "expected_slippage_pct", "liquidity_score"):
+                if _is_fake_missing_zero(ctx.get(field)):
+                    errors.append(f"lifecycle row index={idx} has fake zero for missing execution field {field}")
+    for signal_id, states in signal_terminals.items():
+        if states == {"SIGNAL_CREATED"}:
+            errors.append(f"signal_id={signal_id} has CREATED-only lifecycle export")
+    if len(score_by_signal) >= 3 and len({str(v) for v in score_by_signal.values()}) == 1:
+        errors.append("score distribution suspiciously constant across lifecycle candidates")
+    if len(rr_by_signal) >= 3 and len({str(v) for v in rr_by_signal.values()}) == 1:
+        errors.append("rr distribution suspiciously constant across lifecycle candidates")
     return errors
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

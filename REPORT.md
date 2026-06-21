@@ -1,3 +1,53 @@
+## 2026-06-21 Patch Addendum — Backtest lifecycle truth audit hardening
+
+### Why this patch was needed
+Earlier BACKTEST lifecycle artifacts showed red flags: constant score/RR, `CREATED`-style shortcut rows, empty reject reasons, missing rejected rows, and execution context represented as zero. The current pipeline already used improved lifecycle rows in normal paths, but export verification did not fully prove that persisted lifecycle truth matched CSV artifacts.
+
+### Root cause
+`verify_export_integrity(...)` only checked lifecycle/CSV row counts, rejected-record/CSV row counts, rejected lifecycle reasons, and empty expectancy buckets. It did not fail closed on legacy `CREATED`, CREATED-only signal exports, SQL rejected lifecycle count drift versus `rejected_orders.csv`, missing lifecycle state/status, fake zero execution fields when context was missing, or suspiciously constant score/RR distributions.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+BACKTEST generation remains on the existing scanner/order-cycle path. The patch only hardens post-generation export integrity verification and fails closed when lifecycle artifacts are not audit-truthful. PAPER and LIVE paths are unchanged.
+
+### Lifecycle changes
+No new lifecycle states were introduced. Export integrity now rejects legacy `CREATED`, empty lifecycle state/status, and signal IDs that export only `SIGNAL_CREATED` without a terminal or progression state. Rejected lifecycle states must carry `reject_reason`.
+
+### Persistence / export / schema changes
+No schema changes. `order_lifecycle.csv` continues to be written from persisted in-memory SQLite lifecycle rows. Verification now compares rejected CSV rows to rejected lifecycle SQL rows and rejects fake zero execution context when `execution_ctx_missing` is true.
+
+### Tests added
+- Rejected SQL lifecycle count versus `rejected_orders.csv` mismatch detection.
+- Missing lifecycle state/status and legacy `CREATED` detection.
+- CREATED-only lifecycle export detection.
+- Fake zero missing execution context detection.
+- Suspicious constant score/RR distribution detection.
+
+### Tests executed
+- `python -m compileall -q src tests backtest_order.py` — passed.
+- `pytest -q tests/test_backtest_order_scanner.py` — passed.
+- `pytest -q tests/test_backtest_order_scanner.py tests/test_phase123_foundations.py tests/test_schema.py tests/test_sqlite_schema_bootstrap.py tests/test_execution_layer.py tests/test_runtime.py` — passed.
+- `python backtest_order.py --offline --start 2026-01-01T00:00:00Z --end 2026-01-01T01:00:00Z --output-dir <tmp>` — passed.
+- `pytest -q` — blocked by missing optional dependency `numpy` during `tests/test_timesfm_futures.py` collection.
+
+### Risks
+The suspicious constant score/RR check is intentionally conservative and only triggers at three or more signal-created candidates. Very small deterministic fixtures may not prove variability.
+
+### Remaining limitations
+BACKTEST context is still bounded by historical metadata availability and conservative estimates. This patch does not prove full real execution fidelity, protective order behavior, or LIVE readiness.
+
+### Migration concerns
+None. No database schema or CSV column migration was introduced.
+
+### Push recommendation
+Safe to push after review. LIVE remains NOT READY.
+
 ## 2026-06-21 Dashboard runtime control safety hardening
 
 ### Why this patch was needed
