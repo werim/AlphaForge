@@ -24,6 +24,7 @@ __all__ = [
     "save_ai_decision_features",
     "save_signal",
     "save_order_decision",
+    "save_rejected_decision_artifact",
     "save_trade_lifecycle_event",
     "save_closed_trade_review",
     "upsert_expectancy_stats",
@@ -536,6 +537,98 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         return None
 
 
+def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, Any] | None:
+    """Persist a rejected signal/order as one auditable SQL artifact.
+
+    The helper intentionally writes the signal, order_decision, and lifecycle
+    row together with the same stable signal_id and canonical reject reason so
+    BACKTEST/PAPER callers do not accidentally return early with only partial
+    rejection evidence.
+    """
+    if session is None:
+        return None
+    reason = canonical_reject_reason(artifact.get("reject_reason") or artifact.get("reason"))
+    if reason == "UNKNOWN":
+        return None
+    now = canonical_utc_timestamp(artifact.get("event_ts"))
+    signal_id = str(
+        artifact.get("signal_id")
+        or f"{artifact.get('mode', 'UNKNOWN')}:{artifact.get('symbol', 'UNKNOWN')}:{now}:{reason}"
+    )
+    raw_rr = artifact.get("raw_rr", artifact.get("rr"))
+    effective_rr = artifact.get("effective_rr")
+    if effective_rr is None:
+        effective_rr = raw_rr
+    execution_ctx = dict(artifact.get("execution_ctx") or {})
+    execution_ctx_missing = bool(
+        artifact.get(
+            "execution_ctx_missing",
+            execution_ctx.get("evidence_status") in {"UNAVAILABLE", "UNKNOWN", None},
+        )
+    )
+    signal_payload = {
+        "signal_id": signal_id,
+        "symbol": artifact.get("symbol"),
+        "side": artifact.get("side"),
+        "timeframe": artifact.get("timeframe"),
+        "mode": artifact.get("mode"),
+        "score": artifact.get("score"),
+        "rr": raw_rr,
+        "effective_rr": effective_rr,
+        "expectancy_bucket": artifact.get("expectancy_bucket"),
+    }
+    save_signal(session, **signal_payload)
+    decision_id = save_order_decision(
+        session,
+        decision_id=artifact.get("decision_id") or f"{signal_id}:REJECTED",
+        signal_id=signal_id,
+        order_id=artifact.get("order_id"),
+        symbol=artifact.get("symbol"),
+        mode=artifact.get("mode"),
+        phase=artifact.get("phase", "final"),
+        decision="REJECTED",
+        reject_reason=reason,
+        score=artifact.get("score"),
+        rr=raw_rr,
+        effective_rr=effective_rr,
+        expectancy_bucket=artifact.get("expectancy_bucket"),
+        order_payload=artifact.get("order_payload"),
+        explanation=artifact.get("explanation"),
+        execution_ctx=execution_ctx,
+        execution_ctx_missing=execution_ctx_missing,
+        expected_slippage_pct=artifact.get("expected_slippage_pct", execution_ctx.get("expected_slippage_pct")),
+        spread_pct=artifact.get("spread_pct", execution_ctx.get("spread_pct")),
+        latency_ms=artifact.get("latency_ms", execution_ctx.get("market_data_latency_ms") or execution_ctx.get("latency_ms")),
+        orderbook_imbalance=artifact.get("orderbook_imbalance", execution_ctx.get("orderbook_imbalance")),
+        funding_rate_pct=artifact.get("funding_rate_pct", execution_ctx.get("funding_rate_pct")),
+        volatility_regime=artifact.get("volatility_regime", execution_ctx.get("volatility_regime")),
+    )
+    lifecycle_ok = save_trade_lifecycle_event(
+        session,
+        event_id=artifact.get("event_id") or f"{signal_id}:SIGNAL_REJECTED",
+        signal_id=signal_id,
+        order_id=artifact.get("order_id"),
+        symbol=artifact.get("symbol"),
+        mode=artifact.get("mode"),
+        lifecycle_state=artifact.get("lifecycle_state", "SIGNAL_REJECTED"),
+        decision="REJECTED",
+        reject_reason=reason,
+        score=artifact.get("score"),
+        rr=raw_rr,
+        effective_rr=effective_rr,
+        expectancy_bucket=artifact.get("expectancy_bucket"),
+        execution_ctx=execution_ctx,
+        execution_ctx_missing=execution_ctx_missing,
+        event_ts=now,
+        lifecycle_seq=artifact.get("lifecycle_seq"),
+        lifecycle_id=artifact.get("lifecycle_id") or f"{signal_id}:reject",
+        payload={"reject_reason": reason, **dict(artifact.get("payload") or {})},
+    )
+    if not decision_id or not lifecycle_ok:
+        return None
+    return {"signal_id": signal_id, "decision_id": decision_id, "reject_reason": reason}
+
+
 def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
     if session is None:
         return False
@@ -552,7 +645,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
         "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),
         "reject_reason": canonical_reject_reason(event.get("reject_reason")), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
         "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
-        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", False)) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
+        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", (event.get("execution_ctx") or {}).get("evidence_status") in {"UNAVAILABLE", "UNKNOWN", None})) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
         "lifecycle_seq": event.get("lifecycle_seq"),
         "cancel_reason": event.get("cancel_reason"),
         "lifecycle_id": event.get("lifecycle_id") or f"{signal_id}:{canonical_utc_timestamp(event.get('event_ts'))}:{lifecycle_state}",

@@ -1,3 +1,14 @@
+## 2026-06-21 Rejected decision SQL/CSV integrity
+- **Current version:** 0.3.42-dev
+- **Current phase:** BACKTEST/PAPER rejected-decision auditability hardening.
+- **Runtime maturity:** Rejected decisions are persisted as first-class signal, order-decision, and lifecycle artifacts through a canonical persistence helper; BACKTEST rejected CSV rows now carry stable signal IDs and cost-adjusted effective RR.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER use the same canonical reject artifact vocabulary/persistence contract where feasible; no thresholds were loosened and no accepted-trade path was added.
+- **Lifecycle coverage:** Rejected rows must have non-empty reject reasons, stable signal IDs, score/RR/effective-RR fields, expectancy bucket, lifecycle state, and execution-context status.
+- **Execution realism coverage:** Effective RR is reduced by execution penalties when context exists; unavailable context is marked missing/null rather than converted to zero-cost evidence.
+- **Known critical risks:** Runtime exchange/order rejects still depend on adapter-provided detail quality; real protective-order and reconciliation evidence remain incomplete for LIVE.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; this patch improves rejection auditability only.
+
 ## 2026-06-21 Backtest lifecycle truth audit hardening
 - **Current version:** 0.3.41-dev
 - **Current phase:** BACKTEST lifecycle export truthfulness and fail-closed integrity checks.
