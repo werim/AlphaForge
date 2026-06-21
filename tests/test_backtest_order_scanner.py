@@ -1060,3 +1060,36 @@ def test_export_integrity_flags_suspicious_constant_score_and_rr_distribution():
     errors = bo.verify_export_integrity(rows, rejected, list(rows), list(rejected))
     assert any("score distribution suspiciously constant" in e for e in errors)
     assert any("rr distribution suspiciously constant" in e for e in errors)
+
+
+def test_backtest_rejected_rows_have_signal_id_effective_rr_and_export_parity():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    recent_stats = {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "outcomes": []}
+    candle = bo.Candle(1710000000000, 100.0, 101.0, 99.0, 100.5, 1000.0)
+    mctx = {
+        "side": "LONG",
+        "setup_type": "BREAKOUT_UP",
+        "setup_reason": "X",
+        "regime": "TREND",
+        "score": 6.2,
+        "rr": 1.4,
+        "entry": 100.0,
+        "sl": 99.0,
+        "tp": 101.4,
+        "expectancy": 0.01,
+        "spread_pct": 0.004,
+        "expected_slippage_pct": 0.003,
+        "funding_rate_pct": 0.0,
+        "liquidity_score": 0.8,
+        "volume_24h_usdt": 1000000.0,
+    }
+    result = {"status": "rejected", "reason": "LOW_SCORE", "diagnostics": dict(mctx)}
+    assert bo.process_backtest_result("BTCUSDT", candle, 0, [candle], result, mctx, 1000.0, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats) is None
+    persisted = bo._persist_lifecycle_rows(lifecycle)
+    rejected_lifecycle = [r for r in persisted if r["decision"] == "REJECTED"]
+    assert len(rejected_lifecycle) == len(rejected) == 1
+    assert rejected[0]["signal_id"] == rejected_lifecycle[0]["signal_id"] == "BTCUSDT:1710000000000"
+    assert rejected[0]["reject_reason"] == rejected_lifecycle[0]["reject_reason"] == "LOW_SCORE"
+    assert float(rejected[0]["raw_rr"]) != float(rejected[0]["effective_rr"])
+    errors = bo.verify_export_integrity(persisted, rejected, list(persisted), list(rejected))
+    assert not [error for error in errors if "rejected_orders.csv count mismatch" in error or "missing reject_reason" in error]

@@ -1,3 +1,57 @@
+## 2026-06-21 Patch Addendum — Rejected decision SQL/CSV integrity
+
+### Why this patch was needed
+Rejected signals/orders must be auditable alpha artifacts, not side effects. Some BACKTEST rejected CSV rows lacked stable `signal_id`/lifecycle metadata, PAPER reject persistence wrote order decisions separately from lifecycle evidence, and raw RR could be reused where execution penalties should reduce effective RR.
+
+### Root cause
+Reject persistence was split across callers. BACKTEST constructed CSV rows and lifecycle rows independently, while runtime PAPER persistence used separate reject and lifecycle callbacks. This made it easy for reject paths to miss shared fields or persist incomplete SQL evidence.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `src/alphaforge/runtime.py`
+- `backtest_order.py`
+- `tests/test_phase123_foundations.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+PAPER rejected decisions now persist through `save_rejected_decision_artifact(...)`, which writes the signal, rejected order decision, and rejected lifecycle artifact with one stable signal ID and non-empty canonical reason. Runtime risk/AI rejects now use execution-cost-adjusted effective RR.
+
+### Lifecycle changes
+Rejected runtime lifecycle persistence now receives reject reason, score, RR, effective RR, expectancy bucket when present, execution context, and missing-context status. BACKTEST rejected lifecycle and CSV rows share the same stable signal ID.
+
+### Persistence changes
+No duplicate schema was introduced. Existing `signals`, `order_decisions`, and `trade_lifecycle_events` tables are reused. Empty/UNKNOWN rejected artifact reasons fail closed instead of writing unauditable rows.
+
+### Export/schema changes
+No schema migration. `rejected_orders.csv` rows now include stable `signal_id`, `lifecycle_state`, `execution_ctx_missing`, `expectancy_bucket`, `raw_rr`, and cost-adjusted `effective_rr` parity with rejected lifecycle SQL rows.
+
+### Tests added
+- Canonical rejected artifact SQL persistence across signal/order/lifecycle rows.
+- Unknown/empty reject reason refusal.
+- Major reject reason class coverage.
+- BACKTEST rejected SQL/CSV signal ID, reject reason, effective RR, and count parity.
+
+### Tests executed
+- `pytest -q tests/test_phase123_foundations.py tests/test_backtest_order_scanner.py tests/test_runtime.py` — passed (130 passed, 54 warnings).
+- `shopt -s nullglob; files=(tests/test_order*.py tests/test_runtime*.py tests/test_persistence*.py tests/test_*lifecycle*.py); pytest -q "${files[@]}"` — passed (49 passed, 54 warnings).
+- `python -m compileall -q src tests backtest_order.py` — passed.
+- `pytest -q` — blocked by missing optional dependency `numpy` during `tests/test_timesfm_futures.py` collection.
+
+### Risks
+The helper is intentionally additive and strict; any caller trying to write a rejected artifact without a real reason now receives `None` and should treat that as a persistence failure.
+
+### Remaining limitations
+Symbol-selection rejects are summarized by runtime metrics but are not individually persisted as order decisions unless they become processed signal candidates. Exchange adapter reject payload richness remains adapter-dependent.
+
+### Migration concerns
+None. Existing SQLite tables and CSV exports are extended by populated fields, not schema replacement.
+
+### Push recommendation
+Safe to push after the required targeted and full test commands complete in CI. LIVE remains NOT READY.
+
 ## 2026-06-21 Patch Addendum — Backtest lifecycle truth audit hardening
 
 ### Why this patch was needed

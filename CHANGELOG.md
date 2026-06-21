@@ -1,3 +1,25 @@
+## [Unreleased] - 2026-06-21 (Rejected decision SQL/CSV integrity)
+
+### Added
+- Added canonical rejected-decision artifact persistence that writes signal, order decision, and lifecycle rows with one stable `signal_id`.
+- Added regression coverage for LOW_SCORE, RR_TOO_LOW, EXPECTANCY_MISSING, REGIME_MISMATCH, SPREAD_TOO_HIGH, SLIPPAGE_TOO_HIGH, VOLATILITY_TOO_HIGH/LOW, rejected SQL/CSV parity, and unknown reject refusal.
+
+### Changed
+- BACKTEST rejected rows now include stable `signal_id`, lifecycle state, execution-context-missing status, expectancy bucket, and cost-adjusted `effective_rr`.
+- PAPER runtime reject persistence now uses the canonical rejected-decision helper and carries reject metadata into lifecycle persistence.
+
+### Fixed
+- Fixed rejected artifacts that could be persisted with partial SQL evidence, missing stable IDs, or raw RR reused as effective RR despite execution penalties.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for valid rejected artifacts; attempts to persist rejected artifacts with empty/UNKNOWN reasons fail closed.
+
+### Known Issues
+- LIVE remains NOT READY. Exchange/order reject detail quality still depends on adapter evidence.
+
 ## [Unreleased] - 2026-06-21 (Backtest lifecycle truth audit hardening)
 
 ### Added

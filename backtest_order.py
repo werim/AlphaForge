@@ -977,6 +977,18 @@ def process_backtest_result(
     order_type = diagnostics.get("order_type", "LIMIT")
     expectancy = diagnostics.get("expectancy", mctx.get("expectancy"))
     expectancy_bucket = _bucket_expectancy(expectancy)
+    signal_id = f"{symbol}:{candle.timestamp}"
+    base_effective_rr, _base_execution_flags, _base_penalty_breakdown = _execution_reject_flags(rr, mctx)
+    execution_ctx_missing = any(
+        value == "UNAVAILABLE_BACKTEST"
+        for value in (
+            mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
+            mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+            mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"),
+            mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+            mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+        )
+    )
     lifecycle.append(
         LifecycleRow(
             timestamp=candle.timestamp,
@@ -1000,10 +1012,15 @@ def process_backtest_result(
             expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
             volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
             liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+            effective_rr=base_effective_rr,
+            signal_id=signal_id,
+            lifecycle_id=signal_id,
         )
     )
     if result.get("status") == "rejected":
-        reason = result.get("reason", "UNKNOWN")
+        reason = str(result.get("reason") or result.get("reject_reason") or "").strip().upper()
+        if not reason or reason == "UNKNOWN":
+            reason = "REJECT_REASON_MISSING"
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
         lifecycle.append(
             LifecycleRow(
@@ -1029,10 +1046,17 @@ def process_backtest_result(
                 expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
                 volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
                 liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+                effective_rr=base_effective_rr,
+                signal_id=signal_id,
+                lifecycle_id=signal_id,
             )
         )
         rejected.append(
             {
+                "signal_id": signal_id,
+                "lifecycle_state": "SIGNAL_REJECTED",
+                "execution_ctx_missing": execution_ctx_missing,
+                "expectancy_bucket": expectancy_bucket,
                 "timestamp": candle.timestamp,
                 "symbol": symbol,
                 "side": side,
@@ -1054,7 +1078,7 @@ def process_backtest_result(
                 "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")),
                 "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
                 "raw_rr": rr,
-                "effective_rr": diagnostics.get("effective_rr", rr),
+                "effective_rr": diagnostics.get("effective_rr", base_effective_rr),
                 "min_required_score": ((diagnostics.get("adaptive_thresholds") or {}).get("min_score") if isinstance(diagnostics, dict) else None),
                 "trend_strength": mctx.get("trend_strength", "UNAVAILABLE_BACKTEST"),
                 "volatility_pct": mctx.get("volatility_pct", "UNAVAILABLE_BACKTEST"),
@@ -1115,10 +1139,16 @@ def process_backtest_result(
                 volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
                 liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 effective_rr=effective_rr,
+                signal_id=signal_id,
+                lifecycle_id=signal_id,
             )
         )
         rejected.append(
             {
+                "signal_id": signal_id,
+                "lifecycle_state": "ORDER_REJECTED",
+                "execution_ctx_missing": execution_ctx_missing,
+                "expectancy_bucket": cand.expectancy_bucket,
                 "timestamp": candle.timestamp,
                 "symbol": symbol,
                 "side": cand.side,
