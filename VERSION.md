@@ -645,3 +645,14 @@ Last audit date: 2026-05-21
 
 - Last audit date: 2026-05-24 (JOB-22A)
 - Known critical risk: effective_rr execution-cost gating remains unresolved; PAPER/LIVE readiness not claimed.
+
+## 2026-06-21 TimesFM canonical evidence integration
+- **Current version:** Unreleased P0-3.
+- **Current phase:** TimesFM canonical evidence persistence hardening.
+- **Runtime maturity:** TimesFM remains PAPER/BACKTEST-only forecast evidence; it is not an execution authority and no order-placement path was added.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER persist the same replay evidence rows; LIVE remains explicitly blocked by the TimesFM replay API.
+- **Lifecycle coverage:** TimesFM evidence does not advance order lifecycle state. Invalid or malformed forecasts remain `NO_TRADE` with `INVALID_FORECAST`.
+- **Execution realism coverage:** Quantile forecasts, expected RR, rejection reason, model metadata, and no-lookahead input end timestamp are persisted for audit. Spread/slippage/funding are still unavailable and are not faked.
+- **Known critical risks:** Forward outcome labeling table exists for future calibration, but full TimesFM calibration against TP-before-SL / SL-before-TP / timeout outcomes is not implemented in this patch.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** NOT READY. TimesFM has no LIVE permission and no direct order authority.

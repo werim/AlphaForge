@@ -2222,3 +2222,68 @@ Use this framework only after executing diagnostics against a real PAPER runtime
 - Root cause: final persistence paths defaulted missing execution evidence to optimistic zeros and dropped canonical provenance.
 - Fix: propagate one canonical execution_ctx across runtime/AI/final reject persistence and persist NULL for unavailable spread/slippage/latency.
 - Remaining blocker: effective_rr is still not execution-cost-adjusted gate (tracked for follow-up).
+
+## 2026-06-21 Patch Addendum — P0-3 TimesFM canonical evidence integration
+
+### Why the patch was needed
+- TimesFM decisions were CSV-exportable research outputs, but they lacked a canonical SQL evidence surface for audit, idempotency checks, and later calibration.
+- P0-3 required TimesFM to become auditable forecast evidence without bypassing AIBrain, order, reject, or LIVE safety gates.
+
+### Root cause
+- `replay_timesfm_backtest` returned decisions and `write_decision_log` exported CSV, but no TimesFM-specific SQL table existed.
+- Forward calibration status was not represented in schema, which made calibration gaps less explicit.
+
+### Files changed
+- `src/alphaforge/timesfm_futures.py`
+- `src/alphaforge/persistence.py`
+- `tests/test_timesfm_futures.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- TimesFM replay still accepts only PAPER/BACKTEST modes and still raises/fails closed for LIVE.
+- Replay decisions now include a stable `forecast_id`, `mode`, `horizon`, model/provider metadata, and `no_lookahead_input_end_ts`.
+- Optional SQL persistence writes TimesFM forecast evidence rows when a persistence session is supplied.
+- No AIBrain, order, or execution adapter integration was added.
+
+### Lifecycle changes
+- None to production order lifecycle. TimesFM remains research evidence only.
+- Invalid forecasts still produce `NO_TRADE` / `INVALID_FORECAST` and do not create orders or lifecycle fills.
+
+### Persistence changes
+- Added additive SQLite table `timesfm_forecast_evidence` with stable `forecast_id` uniqueness and audit fields: timestamp, symbol, timeframe, horizon, current price, p10/p50/p90, side, expected RR, rejection reason, mode, model metadata, and no-lookahead input end timestamp.
+- Added additive `timesfm_forward_outcome_labels` table for future calibrated outcomes (`TP_BEFORE_SL`, `SL_BEFORE_TP`, `TIMEOUT`, `AMBIGUOUS`) and MFE/MAE / expected-vs-realized R storage.
+- Added schema migration marker `2026_06_21_timesfm_canonical_evidence`.
+
+### Export/schema changes
+- CSV TimesFM decision logs now include canonical evidence fields, including `forecast_id`, `horizon`, `mode`, provider/model metadata, and `no_lookahead_input_end_ts`.
+- Schema changes are additive only.
+
+### Tests added
+- Decision CSV contains canonical TimesFM evidence fields.
+- SQL persistence contains TimesFM evidence rows and does not create order decision rows.
+- Re-running the same candles produces stable forecast IDs and idempotent SQL rows.
+- Invalid forecasts persist `NO_TRADE` / `INVALID_FORECAST`.
+
+### Tests executed
+- `pytest -q tests/test_timesfm_futures.py` failed during collection because this container cannot import NumPy.
+- `PYTHONPATH=src python -m compileall -q src tests` passed.
+- `PYTHONPATH=src python - <<'PY' ...` SQL smoke passed: two TimesFM evidence rows persisted and zero order decisions were created.
+- `rg -n "submit|place_order|order_decision|save_order_decision" src/alphaforge/timesfm_futures.py src/alphaforge/models/timesfm_forecaster.py` returned no TimesFM order-submit path.
+
+### Risks
+- Full forward outcome labeling/calibration is not implemented; the table is present to support a future truthful calibration job.
+- NumPy is missing in this container, so TimesFM ndarray regression tests could not execute here.
+- Real TimesFM model weights/package setup remains external.
+
+### Remaining limitations
+- TimesFM should stay isolated as a forecast evidence provider until calibrated against forward outcomes.
+- TimesFM should not become an AIBrain feature until calibration proves incremental value and execution-cost impact is measured.
+
+### Migration concerns
+- Additive SQLite migration only; no existing tables are dropped or rewritten.
+- Existing CSV consumers may see additional columns in TimesFM decision logs.
+
+### Push recommendation
+- Safe to push after validating the full TimesFM test file in an environment with NumPy installed. Do not treat this patch as LIVE readiness.
