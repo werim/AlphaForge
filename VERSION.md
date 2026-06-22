@@ -1,3 +1,14 @@
+## 2026-06-22 PAPER burn-in report generator
+- **Current version:** 0.3.47-dev
+- **Current phase:** P2-1 PAPER burn-in diagnostics and fail-closed readiness reporting.
+- **Runtime maturity:** PAPER runtime evidence can now be summarized into deterministic CSV, Markdown, and JSON blocker artifacts without changing trading thresholds or order behavior.
+- **BACKTEST/PAPER/LIVE alignment:** Reporting reads persisted PAPER decisions/lifecycle/execution evidence only; it does not bypass runtime validation or promote LIVE modes.
+- **Lifecycle coverage:** Burn-in diagnostics count lifecycle states, invalid transition ordering, duplicate signal/order identifiers, missing reject reasons, incidents, kill-switch events, and reconciliation evidence.
+- **Execution realism coverage:** Burn-in diagnostics summarize score/raw-RR/effective-RR distributions, effective-RR adjustments, execution context completeness, fake-zero fields, and spread/slippage/funding/liquidity availability.
+- **Known critical risks:** Missing heartbeat/reconciliation/readiness evidence remains a blocker; TimesFM evidence absence is noted but not fatal unless future configuration makes it required.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; the burn-in report is evidence-only and always fails closed for LIVE readiness when blockers remain.
+
 ## 2026-06-22 Execution realism evidence contract
 - **Current version:** 0.3.46-dev
 - **Current phase:** P1-2 execution realism evidence hardening.
