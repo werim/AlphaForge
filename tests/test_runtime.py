@@ -300,9 +300,14 @@ def test_paper_bootstrap_initializes_schema_with_empty_cycle(tmp_path: Path, mon
 
 
 def test_runtime_logs_absolute_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    logging.disable(logging.NOTSET)
+    runtime_logger = logging.getLogger("alphaforge.runtime")
+    runtime_logger.disabled = False
+    runtime_logger.propagate = True
+    runtime_logger.setLevel(logging.INFO)
     db_path = tmp_path / "paper_runtime.sqlite3"
     monkeypatch.setenv("ALPHAFORGE_DB_URL", f"sqlite+pysqlite:///{db_path}")
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.INFO, logger="alphaforge.runtime")
     _build_runtime_from_env()
     assert any("resolved_db_url=sqlite+pysqlite:///" in rec.message and str(db_path.resolve()) in rec.message for rec in caplog.records)
 
