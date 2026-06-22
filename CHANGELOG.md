@@ -1,3 +1,160 @@
+## [Unreleased] - 2026-06-22 (Execution realism evidence contract)
+
+### Added
+- Added execution evidence classifier statuses: `COMPLETE_MEASURED`, `PARTIAL_ESTIMATED`, `UNAVAILABLE_BLOCKING`, and `INVALID_FAKE_ZERO`.
+- Added persisted effective-RR breakdown fields for raw RR and spread, slippage, latency, liquidity, funding, and volatility penalties.
+- Added regression tests for missing execution evidence, fake-zero detection, BACKTEST estimated labeling, LOW_EFFECTIVE_RR, LIVE_PRECHECK readiness blocking, and persisted penalty evidence.
+
+### Changed
+- PAPER/LIVE-style order prechecks now require measured execution evidence and fail closed on missing or fake-zero required fields.
+- BACKTEST estimates must be explicitly labeled as estimated evidence rather than implied zero-cost realism.
+
+### Fixed
+- Fixed unavailable execution costs being normalized toward neutral defaults in order evidence.
+- Fixed effective-RR evidence gaps by persisting the full penalty breakdown.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for valid evidence; incomplete or fake-zero execution contexts now block readiness/precheck paths more explicitly.
+
+### Known Issues
+- LIVE remains NOT READY. Measured exchange evidence, reconciliation, rollback, observability, heartbeat, canary, shadow, and operator readiness remain required.
+
+## [Unreleased] - 2026-06-22 (LIVE_PRECHECK no-submit parity evidence)
+
+### Added
+- Added `LIVE_PRECHECK` execution mode for evidence-only PAPER parity checks without exchange mutation.
+- Added persisted LIVE_PRECHECK evidence fields for input snapshot hash, no-submit verification, parity result, and execution context.
+- Added runtime/readiness tests for parity, no-submit behavior, persisted evidence, missing execution context, mismatch blocking, and LIVE_REAL_ORDERS lockout.
+
+### Changed
+- Live readiness mode parity now requires explicit no-submit verification and complete execution-context evidence.
+
+### Fixed
+- Closed the gap where parity evidence could be considered without persisted no-submit evidence or execution-context completeness.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for existing modes; `order_decisions` receives nullable additive columns.
+
+### Known Issues
+- LIVE remains NOT READY. LIVE_PRECHECK parity alone does not satisfy reconciliation, rollback, observability, heartbeat, canary, shadow, operator, or real adapter readiness gates.
+
+## [Unreleased] - 2026-06-22 (Dashboard test import CI repair)
+
+### Added
+- None.
+
+### Changed
+- Imported SQLAlchemy `create_engine` in dashboard tests so audit-event queries execute in full CI.
+
+### Fixed
+- Fixed full-suite CI failures in dashboard kill-switch/audit tests caused by a missing test import.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY; no runtime behavior changed.
+
+## [Unreleased] - 2026-06-21 (Dashboard kill switch/PAPER-LIVE fail-closed audit)
+
+### Added
+- Added persisted `runtime_control_audit_events` records for mode-switch attempts and kill-switch ON/OFF actions.
+- Added dashboard tests for kill-switch rendering, restart persistence, switch audit events, LIVE readiness lockout, and secret redaction in HTML responses.
+- Added runtime regression coverage proving persisted kill-switch state prevents scanner work.
+
+### Changed
+- Dashboard LIVE mode selection now requires explicit operator acknowledgement and PASS readiness evidence before changing requested mode.
+- Dashboard overview now displays NOT LIVE-READY messaging when readiness evidence is absent or failing.
+
+### Fixed
+- Fixed unsafe dashboard mode-switch ambiguity by auditing blocked LIVE attempts with explicit failure reasons instead of silently accepting LIVE as requested mode.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Dashboard requests to set LIVE mode now fail closed unless readiness evidence is PASS and acknowledgement is supplied.
+
+### Known Issues
+- LIVE remains NOT READY. This patch does not add real order placement or make existing readiness blockers pass.
+
+## [Unreleased] - 2026-06-21 (Rejected decision SQL/CSV integrity)
+
+### Added
+- Added canonical rejected-decision artifact persistence that writes signal, order decision, and lifecycle rows with one stable `signal_id`.
+- Added regression coverage for LOW_SCORE, RR_TOO_LOW, EXPECTANCY_MISSING, REGIME_MISMATCH, SPREAD_TOO_HIGH, SLIPPAGE_TOO_HIGH, VOLATILITY_TOO_HIGH/LOW, rejected SQL/CSV parity, and unknown reject refusal.
+
+### Changed
+- BACKTEST rejected rows now include stable `signal_id`, lifecycle state, execution-context-missing status, expectancy bucket, and cost-adjusted `effective_rr`.
+- PAPER runtime reject persistence now uses the canonical rejected-decision helper and carries reject metadata into lifecycle persistence.
+
+### Fixed
+- Fixed rejected artifacts that could be persisted with partial SQL evidence, missing stable IDs, or raw RR reused as effective RR despite execution penalties.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for valid rejected artifacts; attempts to persist rejected artifacts with empty/UNKNOWN reasons fail closed.
+
+### Known Issues
+- LIVE remains NOT READY. Exchange/order reject detail quality still depends on adapter evidence.
+
+## [Unreleased] - 2026-06-21 (Backtest lifecycle truth audit hardening)
+
+### Added
+- Added export integrity checks for rejected lifecycle SQL versus `rejected_orders.csv` count consistency.
+- Added regression tests for legacy `CREATED`, CREATED-only lifecycle exports, missing lifecycle state/status, fake zero execution context, and suspicious constant score/RR distributions.
+
+### Changed
+- BACKTEST export verification now treats persisted lifecycle rows as the audit source and fails closed on lifecycle/reject/export truth defects.
+
+### Fixed
+- Fixed audit coverage gaps where malformed lifecycle exports, missing rejected rows, and missing execution context represented as numeric zero could pass verification.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for valid exports; invalid BACKTEST artifacts now fail closed instead of being accepted.
+
+### Known Issues
+- LIVE remains NOT READY. BACKTEST execution context is still limited by available historical metadata and conservative estimates.
+
+## [Unreleased] - 2026-06-21 (Dashboard runtime control safety hardening)
+
+### Added
+- Added persisted runtime control state for requested mode, running mode, kill-switch state/source/time, runtime status, and last error.
+- Added dashboard runtime mode, start, stop, kill-switch, and control-status endpoints.
+- Added runtime-control and dashboard regression tests for kill switch, PAPER start, LIVE fail-closed errors, duplicate start prevention, and stopped transitions.
+
+### Changed
+- Runtime now checks the persisted/global kill switch before startup, scan processing, signal-to-order transition, and PAPER/LIVE execution action.
+- Dashboard overview now displays requested mode, actual running mode, runtime status, kill-switch state, last change metadata, and last error.
+
+### Fixed
+- Fixed cosmetic-only dashboard control risk by wiring controls to runtime control state and supervisor behavior.
+- Fixed silent mode-drift risk by rejecting mismatches between dashboard requested mode and constructed runtime mode.
+
+### Removed
+- Removed the prior read-only-only dashboard route assumption for kill-switch/runtime controls; order submission routes remain absent.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY unless existing runtime/live-readiness guards independently pass.
+- Dashboard runtime supervision is intentionally small and fail-closed; external process management may still be preferred operationally.
+
 ## 2026-06-19 Dashboard historical refresh hotfix
 
 ### Added
@@ -871,3 +1028,27 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Removed optimistic zero-default persistence for spread/slippage/latency when evidence is unavailable.
 ### Known Issues
 - effective_rr currently remains equal to rr in persisted decisions and is still unresolved.
+
+## [Unreleased] - 2026-06-21 (P0-3 TimesFM canonical evidence integration)
+
+### Added
+- Added canonical `timesfm_forecast_evidence` SQL persistence for TimesFM research decisions.
+- Added stable TimesFM `forecast_id` generation and no-lookahead input end timestamp tracking.
+- Added optional `timesfm_forward_outcome_labels` schema for future calibrated outcome labeling.
+- Added tests for SQL TimesFM evidence persistence, stable IDs/idempotency, CSV evidence fields, and invalid forecast persistence.
+
+### Changed
+- TimesFM CSV decision logs now include canonical evidence fields and model/provider metadata.
+
+### Fixed
+- TimesFM forecast evidence is no longer CSV-only when a persistence session is supplied.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. Schema changes are additive and TimesFM remains PAPER/BACKTEST only.
+
+### Known Issues
+- Forward outcome calibration is not implemented yet; TimesFM should remain isolated research evidence until calibrated.
+- LIVE readiness remains NOT READY and TimesFM has no order authority.

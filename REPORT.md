@@ -1,3 +1,387 @@
+## 2026-06-22 Patch Addendum — Execution realism evidence contract
+
+### Why this patch was needed
+P1-2 required spread, slippage, latency, liquidity, funding, orderbook, volatility, and effective-RR evidence to be measurable, explicit, and fail-closed across BACKTEST, PAPER, and LIVE_PRECHECK.
+
+### Root cause
+Execution context normalization still allowed some unavailable fields to become neutral numeric defaults, and effective-RR persistence did not expose a complete penalty breakdown with a readiness-grade evidence classifier.
+
+### Files changed
+- `src/alphaforge/execution.py`
+- `src/alphaforge/effective_rr.py`
+- `src/alphaforge/order.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_execution_layer.py`
+- `tests/test_live_readiness.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added execution evidence statuses: `COMPLETE_MEASURED`, `PARTIAL_ESTIMATED`, `UNAVAILABLE_BLOCKING`, and `INVALID_FAKE_ZERO`.
+- PAPER/LIVE-style prechecks require measured evidence and flag missing or fake-zero fields.
+- BACKTEST can use estimated execution fields only when explicitly labeled as estimates such as `ESTIMATED_BACKTEST`.
+- Effective RR now persists a full cost breakdown instead of only a final adjusted value.
+
+### Lifecycle changes
+No lifecycle vocabulary changed. Decision evidence attached to lifecycle/order artifacts now carries execution-evidence status and penalty breakdown for auditability.
+
+### Persistence changes
+No schema migration. Existing JSON payload fields now include `effective_rr_breakdown` and expanded `execution_metrics` with raw RR and per-cost penalties.
+
+### Export/schema changes
+No CSV/schema shape was changed in this patch. JSON evidence is additive.
+
+### Tests added
+- Missing spread/slippage/funding remain null and block instead of becoming zero.
+- Fake measured zero context is classified `INVALID_FAKE_ZERO`.
+- Costs reduce effective RR and can trigger `LOW_EFFECTIVE_RR`.
+- BACKTEST estimates classify as `PARTIAL_ESTIMATED`.
+- LIVE_PRECHECK invalid execution evidence blocks readiness.
+- Order decision persistence includes the effective-RR penalty breakdown.
+
+### Tests executed
+- `pytest -q tests/test_execution_layer.py tests/test_live_readiness.py tests/test_runtime_heartbeat.py tests/test_exchange_connectivity.py tests/test_backtest*`
+
+### Risks
+The fake-zero detector is intentionally conservative for measured zero cost fields; legitimate zero measurements must include explicit zero-verification evidence before they should be considered complete.
+
+### Remaining limitations
+Upstream exchange/scanner modules still determine whether evidence is measured or estimated. LIVE remains blocked until measured execution evidence, reconciliation, heartbeat, rollback, observability, canary/shadow, and operator gates all pass.
+
+### Migration concerns
+None; persistence changes are additive JSON payload content only.
+
+### Push recommendation
+Safe to push as P1-2 execution-realism hardening. Do not enable LIVE trading.
+
+## 2026-06-22 Patch Addendum — LIVE_PRECHECK no-submit parity evidence
+
+### Why this patch was needed
+P1-1 required a safe LIVE-like precheck path that can prove PAPER/LIVE decision parity without placing, modifying, or canceling exchange orders.
+
+### Root cause
+Existing mode-parity evidence was in-memory qualification data and did not persist a full no-submit evidence contract for runtime LIVE_PRECHECK decisions, including input snapshot hash, no-submit verification, parity result, and execution context completeness.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `src/alphaforge/persistence.py`
+- `tests/test_runtime.py`
+- `tests/test_live_readiness.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added `LIVE_PRECHECK` execution mode.
+- LIVE_PRECHECK requires verified exchange public market-data scanner provenance when started, but does not require a real execution adapter.
+- LIVE_PRECHECK runs the same pre-submit scoring/order-plan helpers used for PAPER parity comparison on normalized input.
+- Accepted LIVE_PRECHECK candidates persist parity evidence and return before real execution.
+- Direct `_execute` calls in LIVE_PRECHECK produce a local `no_submit_verified` result and never invoke adapter submit.
+
+### Lifecycle changes
+LIVE_PRECHECK follows PAPER-style pre-entry lifecycle evidence through `SIGNAL_CREATED`, `WAITING_ENTRY_ZONE`, `ENTRY_TRIGGERED`, and local `ORDER_PLACED` evidence, then stops before exchange mutation. This is evidence-only and not a real exchange order.
+
+### Persistence changes
+- Added additive `order_decisions` columns: `input_snapshot_hash`, `no_submit_verified`, and `parity_result`.
+- LIVE_PRECHECK evidence persists mode, symbol, decision, reject reason, score, raw RR, effective RR, execution context, snapshot hash, no-submit flag, and PAPER-vs-LIVE_PRECHECK comparison payload.
+
+### Export/schema changes
+SQLite schema is additively extended only. Existing order decision writes remain backward-compatible through nullable new columns. No CSV export format changed in this patch.
+
+### Tests added
+- LIVE_PRECHECK PAPER parity/no-submit persistence regression.
+- Direct LIVE_PRECHECK execution no-submit regression.
+- Readiness block on LIVE_PRECHECK parity mismatch.
+- Readiness block on missing LIVE_PRECHECK execution context.
+- Successful LIVE_PRECHECK parity alone does not unlock LIVE real orders.
+
+### Tests executed
+- `pytest -q tests/test_runtime*.py tests/test_live_readiness*.py tests/test_order*.py` (blocked because this checkout has no `tests/test_order*.py` path)
+- `pytest -q tests/test_runtime*.py tests/test_live_readiness*.py`
+- `pytest -q` (blocked by missing optional `numpy` for TimesFM futures tests)
+- `python -m compileall -q src tests`
+
+### Risks
+LIVE_PRECHECK evidence depends on the supplied market scanner/execution context fidelity. Missing context fails readiness; partial context remains visible in persisted JSON rather than being fabricated.
+
+### Remaining limitations
+LIVE_DRY_RUN still needs complete reconciliation evidence, observability evidence, rollback evidence, fresh LIVE heartbeat, canary/shadow gates, operator acknowledgement, and adapter-specific non-mutating endpoint proof.
+
+### Migration concerns
+The schema change is additive and nullable. Existing SQLite databases require `init_db()`/schema bootstrap to add the new columns before querying them.
+
+### Push recommendation
+Safe to push as P1-1 no-submit parity hardening. Do not enable LIVE_REAL_ORDERS from this evidence alone.
+
+## 2026-06-22 Patch Addendum — Dashboard test import CI repair
+
+### Why this patch was needed
+CI full-suite execution exposed that the new dashboard audit tests referenced `create_engine` without importing it in environments where dashboard dependencies are installed and the tests execute instead of skipping.
+
+### Root cause
+Local optional dependency availability caused `tests/test_dashboard_app.py` to skip during the earlier targeted run, so the missing SQLAlchemy import was not exercised locally.
+
+### Files changed
+- `tests/test_dashboard_app.py`
+- `REPORT.md`
+- `CHANGELOG.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+None. This is a test/import repair only.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+None.
+
+### Tests added
+No new assertions; existing dashboard audit tests can now execute in CI.
+
+### Tests executed
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_kill_switch_survives_restart_and_audits tests/test_dashboard_app.py::test_dashboard_paper_switch_accepted_and_live_blocked_without_readiness` (skipped locally because optional dashboard test dependencies are unavailable)
+- `pytest -q` (blocked locally during collection by missing optional `numpy` for TimesFM futures tests)
+- `python -m compileall -q src tests`
+
+### Risks
+Low; import-only test repair.
+
+### Remaining limitations
+LIVE remains NOT READY; this repair does not change runtime controls or readiness posture.
+
+### Push recommendation
+Safe to push as CI repair for the P0-4 dashboard-control test coverage.
+
+## 2026-06-21 Patch Addendum — Dashboard kill switch/PAPER-LIVE fail-closed audit
+
+### Why this patch was needed
+Dashboard runtime controls existed, but the P0-4 audit required explicit proof that operator actions are persisted, auditable, fail-closed for LIVE, restart-visible, and do not expose credentials or create a real order path.
+
+### Root cause
+The prior persisted control state covered requested mode and kill switch, but switch attempts were not written to a dedicated audit log and the dashboard could accept LIVE as the requested mode before proving PASS readiness evidence plus explicit operator acknowledgement.
+
+### Files changed
+- `src/alphaforge/runtime_control.py`
+- `src/alphaforge/dashboard/app.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `tests/test_runtime.py`
+- `tests/test_runtime_control.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Persisted kill switch remains a runtime gate and now has audit records for ON/OFF transitions.
+- Persisted kill switch blocks scanner invocation before new work is selected.
+- PAPER mode remains safely selectable while stopped.
+- LIVE requested mode is refused unless latest persisted readiness evidence is PASS and the operator acknowledgement field is present.
+
+### Lifecycle changes
+No lifecycle vocabulary or transition sequence changed. Runtime kill-switch blocks for in-flight signals continue to use explicit `KILL_SWITCH_ACTIVE` reject semantics.
+
+### Persistence changes
+- Added idempotent `runtime_control_audit_events` table for operator-control audit evidence.
+- The existing single-row `runtime_control_state` table remains backward compatible.
+
+### Export/schema changes
+No CSV export format changed. SQLite schema gains one additive audit table only.
+
+### Tests added
+- Dashboard render verifies kill-switch visibility, NOT LIVE-READY display, and secret non-disclosure.
+- Dashboard kill-switch POST persists across app recreation and writes an audit event.
+- Dashboard PAPER switch succeeds; LIVE switch with incomplete evidence is blocked with an explicit message and audit event.
+- Runtime scan refuses scanner work when persisted kill switch is ON.
+
+### Tests executed
+- `pytest -q tests/test_dashboard_app.py` (skipped in this environment because optional dashboard test dependencies are unavailable)
+- `pytest -q tests/test_runtime*.py tests/test_live_readiness*.py`
+- `pytest -q` (blocked during collection by missing optional `numpy` for TimesFM futures tests)
+- `python -m compileall -q src tests`
+
+### Risks
+- The audit table is created idempotently outside Alembic in the same style as current runtime-control bootstrap; formal migration alignment may be needed if this repository later requires Alembic-only schema management for operator-control tables.
+
+### Remaining limitations
+- LIVE remains blocked by readiness, connectivity, adapter, reconciliation, observability, and operational evidence requirements.
+- Dashboard supervisor remains minimal and is not a production process manager.
+
+### Migration concerns
+Existing SQLite databases receive the new audit table on runtime-control store initialization. Existing control state rows are preserved.
+
+### Push recommendation
+Safe to push as a narrow fail-closed operator-control hardening patch. Do not interpret this as LIVE readiness approval.
+
+## 2026-06-21 Patch Addendum — Rejected decision SQL/CSV integrity
+
+### Why this patch was needed
+Rejected signals/orders must be auditable alpha artifacts, not side effects. Some BACKTEST rejected CSV rows lacked stable `signal_id`/lifecycle metadata, PAPER reject persistence wrote order decisions separately from lifecycle evidence, and raw RR could be reused where execution penalties should reduce effective RR.
+
+### Root cause
+Reject persistence was split across callers. BACKTEST constructed CSV rows and lifecycle rows independently, while runtime PAPER persistence used separate reject and lifecycle callbacks. This made it easy for reject paths to miss shared fields or persist incomplete SQL evidence.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `src/alphaforge/runtime.py`
+- `backtest_order.py`
+- `tests/test_phase123_foundations.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+PAPER rejected decisions now persist through `save_rejected_decision_artifact(...)`, which writes the signal, rejected order decision, and rejected lifecycle artifact with one stable signal ID and non-empty canonical reason. Runtime risk/AI rejects now use execution-cost-adjusted effective RR.
+
+### Lifecycle changes
+Rejected runtime lifecycle persistence now receives reject reason, score, RR, effective RR, expectancy bucket when present, execution context, and missing-context status. BACKTEST rejected lifecycle and CSV rows share the same stable signal ID.
+
+### Persistence changes
+No duplicate schema was introduced. Existing `signals`, `order_decisions`, and `trade_lifecycle_events` tables are reused. Empty/UNKNOWN rejected artifact reasons fail closed instead of writing unauditable rows.
+
+### Export/schema changes
+No schema migration. `rejected_orders.csv` rows now include stable `signal_id`, `lifecycle_state`, `execution_ctx_missing`, `expectancy_bucket`, `raw_rr`, and cost-adjusted `effective_rr` parity with rejected lifecycle SQL rows.
+
+### Tests added
+- Canonical rejected artifact SQL persistence across signal/order/lifecycle rows.
+- Unknown/empty reject reason refusal.
+- Major reject reason class coverage.
+- BACKTEST rejected SQL/CSV signal ID, reject reason, effective RR, and count parity.
+
+### Tests executed
+- `pytest -q tests/test_phase123_foundations.py tests/test_backtest_order_scanner.py tests/test_runtime.py` — passed (130 passed, 54 warnings).
+- `shopt -s nullglob; files=(tests/test_order*.py tests/test_runtime*.py tests/test_persistence*.py tests/test_*lifecycle*.py); pytest -q "${files[@]}"` — passed (49 passed, 54 warnings).
+- `python -m compileall -q src tests backtest_order.py` — passed.
+- `pytest -q` — blocked by missing optional dependency `numpy` during `tests/test_timesfm_futures.py` collection.
+
+### Risks
+The helper is intentionally additive and strict; any caller trying to write a rejected artifact without a real reason now receives `None` and should treat that as a persistence failure.
+
+### Remaining limitations
+Symbol-selection rejects are summarized by runtime metrics but are not individually persisted as order decisions unless they become processed signal candidates. Exchange adapter reject payload richness remains adapter-dependent.
+
+### Migration concerns
+None. Existing SQLite tables and CSV exports are extended by populated fields, not schema replacement.
+
+### Push recommendation
+Safe to push after the required targeted and full test commands complete in CI. LIVE remains NOT READY.
+
+## 2026-06-21 Patch Addendum — Backtest lifecycle truth audit hardening
+
+### Why this patch was needed
+Earlier BACKTEST lifecycle artifacts showed red flags: constant score/RR, `CREATED`-style shortcut rows, empty reject reasons, missing rejected rows, and execution context represented as zero. The current pipeline already used improved lifecycle rows in normal paths, but export verification did not fully prove that persisted lifecycle truth matched CSV artifacts.
+
+### Root cause
+`verify_export_integrity(...)` only checked lifecycle/CSV row counts, rejected-record/CSV row counts, rejected lifecycle reasons, and empty expectancy buckets. It did not fail closed on legacy `CREATED`, CREATED-only signal exports, SQL rejected lifecycle count drift versus `rejected_orders.csv`, missing lifecycle state/status, fake zero execution fields when context was missing, or suspiciously constant score/RR distributions.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+BACKTEST generation remains on the existing scanner/order-cycle path. The patch only hardens post-generation export integrity verification and fails closed when lifecycle artifacts are not audit-truthful. PAPER and LIVE paths are unchanged.
+
+### Lifecycle changes
+No new lifecycle states were introduced. Export integrity now rejects legacy `CREATED`, empty lifecycle state/status, and signal IDs that export only `SIGNAL_CREATED` without a terminal or progression state. Rejected lifecycle states must carry `reject_reason`.
+
+### Persistence / export / schema changes
+No schema changes. `order_lifecycle.csv` continues to be written from persisted in-memory SQLite lifecycle rows. Verification now compares rejected CSV rows to rejected lifecycle SQL rows and rejects fake zero execution context when `execution_ctx_missing` is true.
+
+### Tests added
+- Rejected SQL lifecycle count versus `rejected_orders.csv` mismatch detection.
+- Missing lifecycle state/status and legacy `CREATED` detection.
+- CREATED-only lifecycle export detection.
+- Fake zero missing execution context detection.
+- Suspicious constant score/RR distribution detection.
+
+### Tests executed
+- `python -m compileall -q src tests backtest_order.py` — passed.
+- `pytest -q tests/test_backtest_order_scanner.py` — passed.
+- `pytest -q tests/test_backtest_order_scanner.py tests/test_phase123_foundations.py tests/test_schema.py tests/test_sqlite_schema_bootstrap.py tests/test_execution_layer.py tests/test_runtime.py` — passed.
+- `python backtest_order.py --offline --start 2026-01-01T00:00:00Z --end 2026-01-01T01:00:00Z --output-dir <tmp>` — passed.
+- `pytest -q` — blocked by missing optional dependency `numpy` during `tests/test_timesfm_futures.py` collection.
+
+### Risks
+The suspicious constant score/RR check is intentionally conservative and only triggers at three or more signal-created candidates. Very small deterministic fixtures may not prove variability.
+
+### Remaining limitations
+BACKTEST context is still bounded by historical metadata availability and conservative estimates. This patch does not prove full real execution fidelity, protective order behavior, or LIVE readiness.
+
+### Migration concerns
+None. No database schema or CSV column migration was introduced.
+
+### Push recommendation
+Safe to push after review. LIVE remains NOT READY.
+
+## 2026-06-21 Dashboard runtime control safety hardening
+
+### Why this patch was needed
+- Dashboard Kill Switch and PAPER/LIVE controls needed to be real runtime controls rather than cosmetic UI state.
+- Operators needed explicit visibility into requested mode, actual running mode, runtime status, kill-switch metadata, and last error.
+
+### Root cause
+- The dashboard previously consumed runtime heartbeat/readiness evidence but did not own a persisted runtime-control contract.
+- Runtime kill-switch behavior came only from environment config and was not re-read from dashboard state before signal execution/order placement.
+
+### Files changed
+- `src/alphaforge/runtime_control.py`
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/dashboard/app.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `src/alphaforge/dashboard/templates/partials/status_bar.html`
+- `tests/test_runtime_control.py`
+- `tests/test_runtime.py`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added a persisted `runtime_control_state` table with requested mode, running mode, kill-switch state/source/time, status, last error, and update timestamp.
+- Runtime checks kill switch before startup, scans, in-flight signal acceptance, and execution.
+- Kill-switch blocks persist explicit final rejects with reason `KILL_SWITCH_ACTIVE` where a signal exists.
+- Dashboard start uses requested mode only and fails closed if constructed runtime mode differs.
+- Repeated dashboard starts reuse the existing running task instead of creating duplicate loops.
+
+### Lifecycle changes
+- In-flight kill-switch blocks emit `SIGNAL_REJECTED` after `SIGNAL_CREATED` with reason `KILL_SWITCH_ACTIVE`.
+- No lifecycle states were removed or collapsed.
+
+### Persistence changes
+- Added additive SQLite table `runtime_control_state`; existing runtime/order/lifecycle tables are unchanged.
+- Existing `order_decisions` reject persistence is reused for `KILL_SWITCH_ACTIVE` when practical.
+
+### Export/schema changes
+- No CSV export schema changes.
+- SQLite schema addition is additive and idempotent.
+
+### Tests added
+- Runtime-control store persistence and kill-switch read tests.
+- Runtime supervisor PAPER start, duplicate start prevention, stop transition, and LIVE guard fail-closed tests.
+- Dashboard control API tests for kill switch and requested mode.
+
+### Tests executed
+- `pytest -q tests/test_runtime_control.py tests/test_runtime.py::test_live_start_blocks_placeholder_bootstrap_scanner tests/test_runtime.py::test_paper_accept_path_uses_canonical_lifecycle_sequence tests/test_dashboard_app.py::test_dashboard_runtime_control_api_and_kill_switch tests/test_dashboard_app.py::test_dashboard_requested_mode_updates_only_when_stopped` passed.
+
+### Risks / remaining limitations
+- Dashboard runtime supervision is intentionally minimal and in-process; production deployments may still prefer a dedicated process supervisor using the same persisted control state.
+- LIVE remains blocked unless all existing independent readiness, scanner, exchange connectivity, qualification, reconciliation, and adapter guards pass.
+
+### Migration concerns
+- The `runtime_control_state` table is additive and created lazily/idempotently.
+
+### Push recommendation
+- Merge after full CI confirms dependency-complete test suite health. Do not treat this as LIVE readiness approval.
+
 ## 2026-06-19 Dashboard BACKTEST Binance historical refresh hotfix
 
 ### Why this patch was needed
@@ -2058,3 +2442,68 @@ Use this framework only after executing diagnostics against a real PAPER runtime
 - Root cause: final persistence paths defaulted missing execution evidence to optimistic zeros and dropped canonical provenance.
 - Fix: propagate one canonical execution_ctx across runtime/AI/final reject persistence and persist NULL for unavailable spread/slippage/latency.
 - Remaining blocker: effective_rr is still not execution-cost-adjusted gate (tracked for follow-up).
+
+## 2026-06-21 Patch Addendum — P0-3 TimesFM canonical evidence integration
+
+### Why the patch was needed
+- TimesFM decisions were CSV-exportable research outputs, but they lacked a canonical SQL evidence surface for audit, idempotency checks, and later calibration.
+- P0-3 required TimesFM to become auditable forecast evidence without bypassing AIBrain, order, reject, or LIVE safety gates.
+
+### Root cause
+- `replay_timesfm_backtest` returned decisions and `write_decision_log` exported CSV, but no TimesFM-specific SQL table existed.
+- Forward calibration status was not represented in schema, which made calibration gaps less explicit.
+
+### Files changed
+- `src/alphaforge/timesfm_futures.py`
+- `src/alphaforge/persistence.py`
+- `tests/test_timesfm_futures.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- TimesFM replay still accepts only PAPER/BACKTEST modes and still raises/fails closed for LIVE.
+- Replay decisions now include a stable `forecast_id`, `mode`, `horizon`, model/provider metadata, and `no_lookahead_input_end_ts`.
+- Optional SQL persistence writes TimesFM forecast evidence rows when a persistence session is supplied.
+- No AIBrain, order, or execution adapter integration was added.
+
+### Lifecycle changes
+- None to production order lifecycle. TimesFM remains research evidence only.
+- Invalid forecasts still produce `NO_TRADE` / `INVALID_FORECAST` and do not create orders or lifecycle fills.
+
+### Persistence changes
+- Added additive SQLite table `timesfm_forecast_evidence` with stable `forecast_id` uniqueness and audit fields: timestamp, symbol, timeframe, horizon, current price, p10/p50/p90, side, expected RR, rejection reason, mode, model metadata, and no-lookahead input end timestamp.
+- Added additive `timesfm_forward_outcome_labels` table for future calibrated outcomes (`TP_BEFORE_SL`, `SL_BEFORE_TP`, `TIMEOUT`, `AMBIGUOUS`) and MFE/MAE / expected-vs-realized R storage.
+- Added schema migration marker `2026_06_21_timesfm_canonical_evidence`.
+
+### Export/schema changes
+- CSV TimesFM decision logs now include canonical evidence fields, including `forecast_id`, `horizon`, `mode`, provider/model metadata, and `no_lookahead_input_end_ts`.
+- Schema changes are additive only.
+
+### Tests added
+- Decision CSV contains canonical TimesFM evidence fields.
+- SQL persistence contains TimesFM evidence rows and does not create order decision rows.
+- Re-running the same candles produces stable forecast IDs and idempotent SQL rows.
+- Invalid forecasts persist `NO_TRADE` / `INVALID_FORECAST`.
+
+### Tests executed
+- `pytest -q tests/test_timesfm_futures.py` failed during collection because this container cannot import NumPy.
+- `PYTHONPATH=src python -m compileall -q src tests` passed.
+- `PYTHONPATH=src python - <<'PY' ...` SQL smoke passed: two TimesFM evidence rows persisted and zero order decisions were created.
+- `rg -n "submit|place_order|order_decision|save_order_decision" src/alphaforge/timesfm_futures.py src/alphaforge/models/timesfm_forecaster.py` returned no TimesFM order-submit path.
+
+### Risks
+- Full forward outcome labeling/calibration is not implemented; the table is present to support a future truthful calibration job.
+- NumPy is missing in this container, so TimesFM ndarray regression tests could not execute here.
+- Real TimesFM model weights/package setup remains external.
+
+### Remaining limitations
+- TimesFM should stay isolated as a forecast evidence provider until calibrated against forward outcomes.
+- TimesFM should not become an AIBrain feature until calibration proves incremental value and execution-cost impact is measured.
+
+### Migration concerns
+- Additive SQLite migration only; no existing tables are dropped or rewritten.
+- Existing CSV consumers may see additional columns in TimesFM decision logs.
+
+### Push recommendation
+- Safe to push after validating the full TimesFM test file in an environment with NumPy installed. Do not treat this patch as LIVE readiness.

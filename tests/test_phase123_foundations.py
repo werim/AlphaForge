@@ -6,8 +6,8 @@ import importlib
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
-from alphaforge.order import OrderExecutionContext, TradingMode, run_order_cycle
+from alphaforge.persistence import init_db, save_order_decision, save_rejected_decision_artifact, save_trade_lifecycle_event
+from alphaforge.order import OrderCandidate, OrderExecutionContext, TradingMode, evaluate_trade_quality, run_order_cycle
 from alphaforge.runtime import RuntimeConfig, RuntimeOrchestrator, ExecutionMode
 
 
@@ -65,6 +65,57 @@ def test_save_trade_lifecycle_event_persists_state() -> None:
         row = s.execute(text("SELECT lifecycle_state,reject_reason FROM trade_lifecycle_events WHERE event_id='evt-1'" )).one()
         assert row.lifecycle_state == "ORDER_REJECTED"
         assert row.reject_reason == "SPREAD_TOO_HIGH"
+
+
+def test_save_rejected_decision_artifact_persists_sql_signal_decision_and_lifecycle() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        artifact = save_rejected_decision_artifact(
+            s,
+            signal_id="sig-reject-1",
+            symbol="BTCUSDT",
+            mode="PAPER",
+            reject_reason="LOW_EFFECTIVE_RR",
+            score=6.4,
+            raw_rr=1.4,
+            effective_rr=1.1,
+            expectancy_bucket="LOW",
+            execution_ctx={"spread_pct": 0.004, "expected_slippage_pct": 0.002, "evidence_status": "MEASURED"},
+            execution_ctx_missing=False,
+        )
+        assert artifact and artifact["signal_id"] == "sig-reject-1"
+        row = s.execute(text("SELECT signal_id, reject_reason, rr, effective_rr FROM order_decisions WHERE decision='REJECTED'")).one()
+        lifecycle = s.execute(text("SELECT signal_id, lifecycle_state, reject_reason, rr, effective_rr FROM trade_lifecycle_events WHERE decision='REJECTED'")).one()
+        assert row.signal_id == lifecycle.signal_id == "sig-reject-1"
+        assert row.reject_reason == lifecycle.reject_reason == "LOW_EFFECTIVE_RR"
+        assert float(row.rr) != float(row.effective_rr)
+
+
+def test_rejected_artifact_refuses_unknown_reason() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        assert save_rejected_decision_artifact(s, signal_id="sig-bad", symbol="BTCUSDT", mode="PAPER", reject_reason="") is None
+        count = s.execute(text("SELECT COUNT(*) FROM order_decisions")).scalar_one()
+        assert count == 0
+
+
+def test_major_reject_reason_classes_are_non_empty() -> None:
+    base = OrderCandidate("BTCUSDT", "LONG", "BREAKOUT_UP", "X", "TREND", 9.0, 2.0, 0.2, 100.0, 99.0, 103.0)
+    cases = [
+        ("LOW_SCORE", {**base.__dict__, "score": 1.0}, {}, {}),
+        ("RR_TOO_LOW", {**base.__dict__, "rr": 1.0}, {}, {}),
+        ("EXPECTANCY_MISSING", {**base.__dict__, "expectancy": None}, {}, {}),
+        ("REGIME_MISMATCH", {**base.__dict__, "setup_type": "RANGE_MEAN_REVERSION", "regime": "TREND"}, {}, {}),
+        ("SPREAD_TOO_HIGH", base.__dict__, {"spread_pct": 0.10}, {}),
+        ("SLIPPAGE_TOO_HIGH", base.__dict__, {"expected_slippage_pct": 0.10}, {}),
+        ("VOLATILITY_TOO_HIGH", base.__dict__, {"atr_pct": 5.0}, {}),
+        ("VOLATILITY_TOO_LOW", base.__dict__, {"atr_pct": 0.01}, {}),
+    ]
+    for expected, candidate_payload, market_overrides, stats in cases:
+        candidate = OrderCandidate(**candidate_payload)
+        decision = evaluate_trade_quality(candidate, {"volatility_regime": "normal", **market_overrides}, stats, {})
+        assert decision.reject_reason == expected
+        assert decision.reject_reason not in {"", "UNKNOWN"}
 
 import importlib.util
 

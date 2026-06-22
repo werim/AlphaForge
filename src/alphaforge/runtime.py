@@ -16,9 +16,10 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 from alphaforge.ai_brain import AIBrain
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.order import LifecycleState
-from alphaforge.execution import build_execution_context
+from alphaforge.execution import build_execution_context, build_execution_cost_model
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
+from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 class ExecutionMode(str, Enum):
     BACKTEST = "BACKTEST"
     PAPER = "PAPER"
+    LIVE_PRECHECK = "LIVE_PRECHECK"
     LIVE = "LIVE"
 
 
@@ -102,6 +104,7 @@ class RuntimeOrchestrator:
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     paper_slippage_bps: float = 2.0
     persistence_engine: Engine | None = None
+    control_store: RuntimeControlStore | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
@@ -201,18 +204,27 @@ class RuntimeOrchestrator:
             },
         )
 
+    def _kill_switch_active(self) -> bool:
+        if self.config.global_kill_switch:
+            return True
+        if self.control_store is not None:
+            return self.control_store.is_kill_switch_active()
+        return False
+
     async def start(self) -> None:
-        if self.config.execution_mode == ExecutionMode.LIVE:
+        if self._kill_switch_active():
+            raise RuntimeError("KILL_SWITCH_ACTIVE")
+        if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK}:
             allowed_sources = {"EXCHANGE_PUBLIC_MARKET_DATA"}
             scanner_source = str(self.scanner_source or "UNKNOWN").strip().upper()
             if not scanner_source or scanner_source == "UNKNOWN":
                 raise RuntimeError("LIVE mode blocked: market scanner provenance is not verified")
             if scanner_source not in allowed_sources:
                 raise RuntimeError("LIVE mode blocked: exchange-backed market scanner is required")
-            if self.real_execution_adapter is None:
+            if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
                 raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
             await self._run_live_exchange_connectivity_gate()
-            if self.config.require_live_qualification:
+            if self.config.execution_mode == ExecutionMode.LIVE and self.config.require_live_qualification:
                 self._persist_runtime_heartbeat()
                 await self._run_live_qualification_gate()
         self._register_signals()
@@ -319,16 +331,24 @@ class RuntimeOrchestrator:
             "order_type": order_plan.order_type,
             "confidence": float(order_plan.confidence),
             "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
-            "effective_rr": float(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)) or 0.0),
+            "reject_reason": canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else "",
+            "raw_rr": float(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)) or 0.0),
+            "effective_rr": self._effective_rr_from_execution(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)), market_ctx.get("execution_ctx", market_ctx)),
             "explanation": explanation,
         }
+
+    @staticmethod
+    def _effective_rr_from_execution(raw_rr: Any, execution_ctx: Mapping[str, Any]) -> float:
+        rr = float(raw_rr or 0.0)
+        model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
+        return round(max(rr - model.total_penalty, 0.0), 6)
 
     def _build_mode_parity_evidence(self, *, min_sample_count: int = 3) -> dict[str, Any]:
         samples = list(self._qualification_samples[: max(0, int(min_sample_count))])
         comparisons: list[dict[str, Any]] = []
         mismatch_count = 0
         missing_field_count = 0
-        compare_fields = ("decision", "reason", "order_type", "confidence", "score", "effective_rr", "explanation")
+        compare_fields = ("decision", "reject_reason", "order_type", "confidence", "score", "raw_rr", "effective_rr", "explanation")
         for row in samples:
             sample = dict(row)
             sample_id = str(sample["sample_id"])
@@ -344,8 +364,10 @@ class RuntimeOrchestrator:
             live_precheck_signal_payload = {**paper_signal_payload, "mode": "LIVE_PRECHECK"}
             regime_ctx = {"alignment": 0.8}
             stats_ctx: dict[str, Any] = {}
-            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**sample, "mode": "PAPER"}, regime_ctx, stats_ctx)
-            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**sample, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
+            execution_ctx = build_execution_context(sample)
+            normalized_market = {**sample, "execution_ctx": execution_ctx}
+            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**normalized_market, "mode": "PAPER"}, regime_ctx, stats_ctx)
+            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**normalized_market, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
             missing = [field for field in compare_fields if field not in paper_eval or field not in live_eval]
             mismatch = [field for field in compare_fields if field in paper_eval and field in live_eval and paper_eval[field] != live_eval[field]]
             missing_field_count += len(missing)
@@ -356,6 +378,12 @@ class RuntimeOrchestrator:
                 "live_precheck": {k: live_eval.get(k) for k in compare_fields},
                 "missing_fields": missing,
                 "mismatch_fields": mismatch,
+                "input_snapshot_hash": self._snapshot_hash({"signal": paper_signal_payload, "market": normalized_market, "regime": regime_ctx, "stats": stats_ctx}),
+                "symbol": sample.get("symbol"),
+                "timestamp": canonical_utc_timestamp(sample.get("market_ts")),
+                "execution_context": execution_ctx,
+                "no_submit_verified": True,
+                "parity_result": "PASS" if not missing and not mismatch else "FAIL",
             })
         return {
             "evidence_status": "COMPLETE" if samples and mismatch_count == 0 and missing_field_count == 0 else "INCOMPLETE",
@@ -364,10 +392,17 @@ class RuntimeOrchestrator:
             "mismatch_count": mismatch_count,
             "missing_field_count": missing_field_count,
             "no_order_submission_verified": True,
+            "no_submit_verified": True,
+            "execution_context_complete": all(str(c.get("execution_context", {}).get("evidence_status", "")).upper() not in {"", "UNAVAILABLE", "UNKNOWN"} for c in comparisons),
             "comparison_fields": list(compare_fields),
             "samples": comparisons,
             "generated_at": canonical_utc_timestamp(),
         }
+
+    @staticmethod
+    def _snapshot_hash(payload: Mapping[str, Any]) -> str:
+        import json
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
     async def _market_scan_loop(self) -> None:
         try:
@@ -383,6 +418,9 @@ class RuntimeOrchestrator:
             self.shutdown()
 
     async def _scan_once(self) -> None:
+        if self._kill_switch_active():
+            self._last_scan_gate_blockers = ["KILL_SWITCH_ACTIVE"]
+            return
         self.metrics.scans += 1
         candidates = await self.market_scanner()
         self.metrics.last_scan_ts = canonical_utc_timestamp()
@@ -410,11 +448,19 @@ class RuntimeOrchestrator:
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
         execution_ctx = build_execution_context(market_ctx)
         market_ctx["execution_ctx"] = execution_ctx
+        raw_rr = market_ctx.get("rr")
+        effective_rr = self._effective_rr_from_execution(raw_rr, execution_ctx)
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
+        if self._kill_switch_active():
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            await self._persist_reject(reject_payload)
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
+            return
         if risk_reject is not None:
-            await self._persist_reject({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": market_ctx.get("rr"), "effective_rr": market_ctx.get("rr"), "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")})
-            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": risk_reject, "signal_id": signal_id})
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            await self._persist_reject(reject_payload)
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
         regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
@@ -432,6 +478,12 @@ class RuntimeOrchestrator:
         self.metrics.decisions_generated += 1
         self.metrics.last_decision_ts = canonical_utc_timestamp()
 
+        if self._kill_switch_active():
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            await self._persist_reject(reject_payload)
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
+            return
+
         if order_plan.decision != "ACCEPTED":
             reject_reason = canonical_reject_reason(order_plan.reason)
             await self._persist_reject({
@@ -444,7 +496,7 @@ class RuntimeOrchestrator:
                 "confidence": order_plan.confidence,
                 "score": getattr(score_ctx, "total_score", None),
                 "rr": signal_payload.get("risk_reward"),
-                "effective_rr": signal_payload.get("risk_reward"),
+                "effective_rr": effective_rr,
                 "explanation": explanation,
                 "execution_ctx": execution_ctx,
                 "spread_pct": execution_ctx.get("spread_pct"),
@@ -454,16 +506,29 @@ class RuntimeOrchestrator:
                 "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
                 "volatility_regime": execution_ctx.get("volatility_regime"),
             })
-            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {"reason": reject_reason, "signal_id": signal_id})
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {
+                "reason": reject_reason,
+                "reject_reason": reject_reason,
+                "decision": "REJECTED",
+                "signal_id": signal_id,
+                "score": getattr(score_ctx, "total_score", None),
+                "rr": signal_payload.get("risk_reward"),
+                "effective_rr": effective_rr,
+                "execution_ctx": execution_ctx,
+            })
             return
 
-        if self.config.execution_mode == ExecutionMode.PAPER:
+        if self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
             await self._emit_lifecycle_event(LifecycleState.WAITING_ENTRY_ZONE.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleState.ENTRY_TRIGGERED.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, selection.symbol, {})
         else:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
+        if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
+            await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
+            return
+
         await self._execute(symbol=selection.symbol, decision={
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
@@ -472,9 +537,13 @@ class RuntimeOrchestrator:
         }, market_ctx=market_ctx)
 
     async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> None:
+        if self._kill_switch_active():
+            raise RuntimeError("KILL_SWITCH_ACTIVE")
         mode = self.config.execution_mode
         if mode == ExecutionMode.PAPER:
             result = self._simulate_paper_execution(symbol, decision, market_ctx)
+        elif mode == ExecutionMode.LIVE_PRECHECK:
+            result = {"mode": mode.value, "status": "no_submit_verified", "symbol": symbol}
         elif mode == ExecutionMode.LIVE:
             if self.real_execution_adapter is None:
                 raise RuntimeError("LIVE mode requires real_execution_adapter")
@@ -487,6 +556,8 @@ class RuntimeOrchestrator:
         self._pending_orders[symbol] = {"order_id": order_id, "symbol": symbol, "status": result.get("status", "UNKNOWN"), "created_at": canonical_utc_timestamp()}
         await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
         result_status = str(result.get("status", "")).lower()
+        if result_status == "no_submit_verified":
+            return
         if result_status == "partial_fill":
             await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result), "fill_state": "partial"})
         elif result_status in {"rejected", "exchange_reject"}:
@@ -499,6 +570,50 @@ class RuntimeOrchestrator:
         await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
         self._active_positions[symbol] = float(market_ctx.get("entry", 0.0) or 0.0)
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
+
+    async def _persist_live_precheck_evidence(self, symbol: str, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], score_ctx: Any, order_plan: Any, explanation: str, effective_rr: float) -> None:
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            return
+        from alphaforge.persistence import save_order_decision
+        paper_signal = {**dict(signal_payload), "mode": ExecutionMode.PAPER.value}
+        precheck_signal = {**dict(signal_payload), "mode": ExecutionMode.LIVE_PRECHECK.value}
+        paper_eval = self._evaluate_pre_submit(paper_signal, {**dict(market_ctx), "mode": ExecutionMode.PAPER.value}, regime_ctx, stats_ctx)
+        live_eval = self._evaluate_pre_submit(precheck_signal, {**dict(market_ctx), "mode": ExecutionMode.LIVE_PRECHECK.value}, regime_ctx, stats_ctx)
+        fields = ("decision", "reject_reason", "order_type", "confidence", "score", "raw_rr", "effective_rr", "explanation")
+        mismatch = [field for field in fields if paper_eval.get(field) != live_eval.get(field)]
+        execution_ctx = dict(market_ctx.get("execution_ctx") or build_execution_context(market_ctx))
+        input_hash = self._snapshot_hash({"signal": paper_signal, "market": {**dict(market_ctx), "mode": ExecutionMode.PAPER.value}, "regime": dict(regime_ctx), "stats": dict(stats_ctx)})
+        with sessionmaker(bind=engine, expire_on_commit=False, future=True)() as session:
+            save_order_decision(
+                session,
+                decision_id=f"live_precheck:{signal_payload.get('signal_id')}",
+                signal_id=signal_payload.get("signal_id"),
+                symbol=symbol,
+                mode=ExecutionMode.LIVE_PRECHECK.value,
+                phase="live_precheck",
+                decision=order_plan.decision,
+                reject_reason=canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else "",
+                score=getattr(score_ctx, "total_score", None),
+                rr=signal_payload.get("risk_reward"),
+                effective_rr=effective_rr,
+                order_type=order_plan.order_type,
+                confidence=order_plan.confidence,
+                explanation=explanation,
+                execution_ctx=execution_ctx,
+                execution_ctx_missing=str(execution_ctx.get("evidence_status", "")).upper() in {"", "UNAVAILABLE", "UNKNOWN"},
+                expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
+                spread_pct=execution_ctx.get("spread_pct"),
+                latency_ms=execution_ctx.get("market_data_latency_ms"),
+                funding_rate_pct=execution_ctx.get("funding_rate_pct"),
+                orderbook_imbalance=execution_ctx.get("orderbook_imbalance"),
+                volatility_regime=execution_ctx.get("volatility_regime"),
+                input_snapshot_hash=input_hash,
+                no_submit_verified=True,
+                parity_result="PASS" if not mismatch else "FAIL",
+                order_payload={"paper": paper_eval, "live_precheck": live_eval, "mismatch_fields": mismatch, "no_submit_verified": True, "input_snapshot_hash": input_hash},
+            )
+            session.commit()
 
     def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
         entry = float(market_ctx.get("entry", 0.0) or 0.0)
@@ -722,7 +837,7 @@ def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
     try:
         return ExecutionMode(mode)
     except ValueError as exc:
-        raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE") from exc
+        raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE_PRECHECK/LIVE") from exc
 
 
 def _build_runtime_from_env() -> RuntimeOrchestrator:
@@ -760,6 +875,11 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
             return
         from alphaforge.persistence import save_trade_lifecycle_event
         details = dict(payload.get("details") or {})
+        if (
+            payload.get("lifecycle_state") == LifecycleState.SIGNAL_REJECTED.value
+            and str(details.get("decision") or "").upper() == "REJECTED"
+        ):
+            return
         with SessionLocal() as session:
             if not save_trade_lifecycle_event(
                 session,
@@ -773,7 +893,13 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                 payload=details,
                 failure_reason=details.get("failure_reason"),
                 incident_payload=details.get("incident_payload"),
-                reject_reason=details.get("reason"),
+                reject_reason=details.get("reject_reason") or details.get("reason"),
+                score=details.get("score"),
+                rr=details.get("rr"),
+                effective_rr=details.get("effective_rr"),
+                expectancy_bucket=details.get("expectancy_bucket"),
+                execution_ctx=details.get("execution_ctx", {}),
+                execution_ctx_missing=details.get("execution_ctx_missing"),
             ):
                 raise RuntimeError("trade_lifecycle_event_persistence_failed")
             session.commit()
@@ -781,25 +907,31 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     def _persist_reject(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
             return
-        from alphaforge.persistence import save_order_decision
+        from alphaforge.persistence import save_rejected_decision_artifact
         with SessionLocal() as session:
-            decision_id = save_order_decision(
+            persisted = save_rejected_decision_artifact(
                 session,
                 mode=mode.value,
                 phase=payload.get("phase", "final"),
                 signal_id=payload.get("signal_id"),
                 symbol=payload.get("symbol"),
-                decision=payload.get("decision"),
                 reject_reason=payload.get("reason"),
                 confidence=payload.get("confidence"),
                 score=payload.get("score"),
                 rr=payload.get("rr"),
+                raw_rr=payload.get("rr"),
                 effective_rr=payload.get("effective_rr"),
                 explanation=payload.get("explanation"),
                 execution_ctx=payload.get("execution_ctx", {}),
+                spread_pct=payload.get("spread_pct"),
+                expected_slippage_pct=payload.get("expected_slippage_pct"),
+                latency_ms=payload.get("latency_ms"),
+                funding_rate_pct=payload.get("funding_rate_pct"),
+                orderbook_imbalance=payload.get("orderbook_imbalance"),
+                volatility_regime=payload.get("volatility_regime"),
             )
-            if decision_id is None:
-                raise RuntimeError("order_decision_persistence_failed")
+            if persisted is None:
+                raise RuntimeError("rejected_decision_artifact_persistence_failed")
             session.commit()
 
     live_reconciliation_provider = None
@@ -830,6 +962,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
         persistence_engine=engine,
+        control_store=RuntimeControlStore(engine),
     )
     orchestrator.metrics.persistence_enabled = persistence_enabled
     return orchestrator

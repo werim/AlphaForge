@@ -996,3 +996,100 @@ def test_backtest_quality_summary_uses_signal_created_as_candidate_denominator()
     assert summary["accepted_count"] == 1
     assert summary["rejected_count"] == 1
     assert summary["reject_reason_distribution"]["LOW_SCORE"] == 1
+
+
+def test_export_integrity_reject_count_matches_lifecycle_sql_rows():
+    persisted = [
+        {"signal_id": "A:1", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 5.0, "rr": 1.2, "expectancy_bucket": "LOW", "execution_ctx_missing": 1, "execution_ctx": '{"spread_pct":"UNAVAILABLE_BACKTEST"}'},
+        {"signal_id": "A:1", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "LOW_SCORE", "score": 5.0, "rr": 1.2, "expectancy_bucket": "LOW", "execution_ctx_missing": 1, "execution_ctx": '{"spread_pct":"UNAVAILABLE_BACKTEST"}'},
+    ]
+    errors = bo.verify_export_integrity(
+        persisted_lifecycle_rows=persisted,
+        rejected_rows=[{"reject_reason": "LOW_SCORE"}],
+        lifecycle_csv_rows=list(persisted),
+        rejected_csv_rows=[],
+    )
+    assert any("rejected_orders.csv count mismatch" in e for e in errors)
+
+
+def test_export_integrity_rejects_missing_lifecycle_state_and_legacy_created_only():
+    errors = bo.verify_export_integrity(
+        persisted_lifecycle_rows=[{"signal_id": "A:1", "lifecycle_state": "", "decision": "PENDING", "reject_reason": "", "score": 5.0, "rr": 1.2, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"}],
+        rejected_rows=[],
+        lifecycle_csv_rows=[{}],
+        rejected_csv_rows=[],
+    )
+    assert any("missing lifecycle_state/status_after" in e for e in errors)
+    errors = bo.verify_export_integrity(
+        persisted_lifecycle_rows=[{"signal_id": "A:1", "lifecycle_state": "CREATED", "decision": "PENDING", "reject_reason": "", "score": 5.0, "rr": 1.2, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"}],
+        rejected_rows=[],
+        lifecycle_csv_rows=[{}],
+        rejected_csv_rows=[],
+    )
+    assert any("legacy CREATED" in e for e in errors)
+    errors = bo.verify_export_integrity(
+        persisted_lifecycle_rows=[{"signal_id": "A:1", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 5.0, "rr": 1.2, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"}],
+        rejected_rows=[],
+        lifecycle_csv_rows=[{}],
+        rejected_csv_rows=[],
+    )
+    assert any("CREATED-only" in e for e in errors)
+
+
+def test_export_integrity_fails_on_fake_zero_missing_execution_context():
+    errors = bo.verify_export_integrity(
+        persisted_lifecycle_rows=[
+            {"signal_id": "A:1", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 5.0, "rr": 1.2, "expectancy_bucket": "LOW", "execution_ctx_missing": 1, "execution_ctx": '{"spread_pct":0.0,"expected_slippage_pct":"UNAVAILABLE_BACKTEST","funding_rate_pct":"UNAVAILABLE_BACKTEST","volume_24h_usdt":"UNAVAILABLE_BACKTEST","liquidity_score":"UNAVAILABLE_BACKTEST"}'},
+            {"signal_id": "A:1", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "LOW_SCORE", "score": 5.0, "rr": 1.2, "expectancy_bucket": "LOW", "execution_ctx_missing": 1, "execution_ctx": '{"spread_pct":"UNAVAILABLE_BACKTEST"}'},
+        ],
+        rejected_rows=[{"reject_reason": "LOW_SCORE"}],
+        lifecycle_csv_rows=[{}, {}],
+        rejected_csv_rows=[{"reject_reason": "LOW_SCORE"}],
+    )
+    assert any("fake zero" in e for e in errors)
+
+
+def test_export_integrity_flags_suspicious_constant_score_and_rr_distribution():
+    rows = []
+    for idx in range(3):
+        rows.extend([
+            {"signal_id": f"S:{idx}", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 0.8, "rr": 2.0, "expectancy_bucket": "MEDIUM", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+            {"signal_id": f"S:{idx}", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "LOW_SCORE", "score": 0.8, "rr": 2.0, "expectancy_bucket": "MEDIUM", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        ])
+    rejected = [{"reject_reason": "LOW_SCORE"} for _ in range(3)]
+    errors = bo.verify_export_integrity(rows, rejected, list(rows), list(rejected))
+    assert any("score distribution suspiciously constant" in e for e in errors)
+    assert any("rr distribution suspiciously constant" in e for e in errors)
+
+
+def test_backtest_rejected_rows_have_signal_id_effective_rr_and_export_parity():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    recent_stats = {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "outcomes": []}
+    candle = bo.Candle(1710000000000, 100.0, 101.0, 99.0, 100.5, 1000.0)
+    mctx = {
+        "side": "LONG",
+        "setup_type": "BREAKOUT_UP",
+        "setup_reason": "X",
+        "regime": "TREND",
+        "score": 6.2,
+        "rr": 1.4,
+        "entry": 100.0,
+        "sl": 99.0,
+        "tp": 101.4,
+        "expectancy": 0.01,
+        "spread_pct": 0.004,
+        "expected_slippage_pct": 0.003,
+        "funding_rate_pct": 0.0,
+        "liquidity_score": 0.8,
+        "volume_24h_usdt": 1000000.0,
+    }
+    result = {"status": "rejected", "reason": "LOW_SCORE", "diagnostics": dict(mctx)}
+    assert bo.process_backtest_result("BTCUSDT", candle, 0, [candle], result, mctx, 1000.0, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats) is None
+    persisted = bo._persist_lifecycle_rows(lifecycle)
+    rejected_lifecycle = [r for r in persisted if r["decision"] == "REJECTED"]
+    assert len(rejected_lifecycle) == len(rejected) == 1
+    assert rejected[0]["signal_id"] == rejected_lifecycle[0]["signal_id"] == "BTCUSDT:1710000000000"
+    assert rejected[0]["reject_reason"] == rejected_lifecycle[0]["reject_reason"] == "LOW_SCORE"
+    assert float(rejected[0]["raw_rr"]) != float(rejected[0]["effective_rr"])
+    errors = bo.verify_export_integrity(persisted, rejected, list(persisted), list(rejected))
+    assert not [error for error in errors if "rejected_orders.csv count mismatch" in error or "missing reject_reason" in error]

@@ -220,3 +220,66 @@ def test_optional_real_timesfm_integration_smoke() -> None:
     assert forecast.horizon == 8
     assert forecast.p10 <= forecast.p50 <= forecast.p90
     assert forecast.p10 > 0
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+from alphaforge.persistence import init_db
+
+
+def test_timesfm_decision_log_contains_canonical_evidence_fields(tmp_path) -> None:
+    from alphaforge.timesfm_futures import write_decision_log
+
+    decisions = replay_timesfm_backtest(_candles(1), forecaster=RecordingForecaster(), timeframe="15m", horizon=8, min_history=1, mode="PAPER")
+    path = tmp_path / "timesfm.csv"
+    write_decision_log(path, decisions)
+    content = path.read_text(encoding="utf-8")
+    assert "forecast_id,timestamp,symbol,timeframe,horizon,current_price,forecast_p10,forecast_p50,forecast_p90" in content
+    assert "expected_rr,rejection_reason,mode,model_provider,model_name,model_version,no_lookahead_input_end_ts" in content
+    assert decisions[0].forecast_id.startswith("timesfm-")
+    assert decisions[0].no_lookahead_input_end_ts == decisions[0].timestamp
+
+
+def test_timesfm_sql_persistence_contains_evidence_rows_and_is_idempotent() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    forecaster = RecordingForecaster(QuantileForecast(horizon=8, p10=99.0, p50=104.0, p90=110.0))
+    with Session(engine) as session:
+        first = replay_timesfm_backtest(_candles(2), forecaster=forecaster, timeframe="15m", horizon=8, min_history=1, persistence_session=session)
+        second = replay_timesfm_backtest(_candles(2), forecaster=forecaster, timeframe="15m", horizon=8, min_history=1, persistence_session=session)
+        rows = session.execute(text("SELECT * FROM timesfm_forecast_evidence ORDER BY timestamp")).mappings().all()
+        order_rows = session.execute(text("SELECT COUNT(*) FROM order_decisions")).scalar_one()
+        label_table = session.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='timesfm_forward_outcome_labels'")).scalar_one_or_none()
+
+    assert [d.forecast_id for d in first] == [d.forecast_id for d in second]
+    assert len(rows) == 2
+    assert rows[0]["forecast_id"] == first[0].forecast_id
+    assert rows[0]["horizon"] == 8
+    assert rows[0]["forecast_p10"] == 99.0
+    assert rows[0]["forecast_p50"] == 104.0
+    assert rows[0]["forecast_p90"] == 110.0
+    assert rows[0]["side"] == "LONG"
+    assert rows[1]["side"] == "LONG"
+    assert rows[0]["mode"] == "BACKTEST"
+    assert rows[0]["no_lookahead_input_end_ts"] == rows[0]["timestamp"]
+    assert order_rows == 0
+    assert label_table == "timesfm_forward_outcome_labels"
+
+
+def test_invalid_timesfm_forecast_persists_no_trade_invalid_forecast() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        decisions = replay_timesfm_backtest(_candles(1), forecaster=RecordingForecaster(fail=True), timeframe="15m", horizon=8, min_history=1, persistence_session=session)
+        row = session.execute(text("SELECT side, rejection_reason, forecast_p10 FROM timesfm_forecast_evidence")).first()
+    assert decisions[0].side == "NO_TRADE"
+    assert row == ("NO_TRADE", "INVALID_FORECAST", None)
+
+
+def test_timesfm_default_fixture_persists_low_effective_rr_no_trade() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        decisions = replay_timesfm_backtest(_candles(2), forecaster=RecordingForecaster(), timeframe="15m", horizon=8, min_history=1, persistence_session=session)
+        rows = session.execute(text("SELECT side, rejection_reason FROM timesfm_forecast_evidence ORDER BY timestamp")).all()
+        order_rows = session.execute(text("SELECT COUNT(*) FROM order_decisions")).scalar_one()
+
+    assert [d.side for d in decisions] == ["NO_TRADE", "NO_TRADE"]
+    assert rows == [("NO_TRADE", "LOW_EFFECTIVE_RR"), ("NO_TRADE", "LOW_EFFECTIVE_RR")]
+    assert order_rows == 0

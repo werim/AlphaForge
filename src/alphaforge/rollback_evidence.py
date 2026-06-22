@@ -218,7 +218,7 @@ async def run_deterministic_rollback_validation(engine: Engine) -> dict[str, Any
     await orchestrator._process_symbol(selection)
     reason = str(rejects[-1].get("reason") if rejects else "")
     states = [str(item.get("lifecycle_state")) for item in lifecycle]
-    kill_switch_ok = reason == "GLOBAL_KILL_SWITCH" and "SIGNAL_REJECTED" in states
+    kill_switch_ok = reason in {"GLOBAL_KILL_SWITCH", "KILL_SWITCH_ACTIVE"} and "SIGNAL_REJECTED" in states
     no_submit_ok = adapter.submit_calls == 0 and orchestrator.metrics.executions == 0
 
     incident_rows_before = _incident_count(engine)

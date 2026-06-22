@@ -1,3 +1,80 @@
+## 2026-06-22 Execution realism evidence contract
+- **Current version:** 0.3.46-dev
+- **Current phase:** P1-2 execution realism evidence hardening.
+- **Runtime maturity:** PAPER/BACKTEST/LIVE_PRECHECK execution-cost evidence is classified before effective-RR decisions; missing or fake-zero execution evidence fails closed instead of becoming zero-cost input.
+- **BACKTEST/PAPER/LIVE alignment:** Shared execution evidence classifier and effective-RR breakdown are used by order prechecks; BACKTEST may label estimates as `ESTIMATED_BACKTEST`, while PAPER/LIVE_PRECHECK require measured evidence for readiness.
+- **Lifecycle coverage:** Order decision payloads persist execution evidence status and full penalty breakdown for accepted/rejected pre-submit decisions.
+- **Execution realism coverage:** Effective RR now records raw RR, spread, slippage, latency, liquidity, funding, volatility penalties, and adjusted RR.
+- **Known critical risks:** Evidence quality still depends on upstream exchange/scanner fields; missing required execution inputs block readiness and must not be patched with fake zeros.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; LIVE remains blocked and fake/missing execution evidence is an explicit blocker.
+
+## 2026-06-22 LIVE_PRECHECK no-submit parity evidence
+- **Current version:** 0.3.45-dev
+- **Current phase:** P1-1 no-submit LIVE_PRECHECK parity hardening.
+- **Runtime maturity:** Added LIVE_PRECHECK as evidence-gathering mode that evaluates the same normalized decision/reject pipeline used for PAPER while refusing real submit/cancel/modify behavior.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER and LIVE_PRECHECK decisions are compared on the same normalized input snapshot with hash, score, raw RR, effective RR, reject reason, and execution context.
+- **Lifecycle coverage:** LIVE_PRECHECK accepted candidates stop before exchange mutation; rejected decisions remain explicit and accepted precheck evidence is persisted as order-decision evidence with `phase=live_precheck`.
+- **Execution realism coverage:** Precheck evidence requires non-missing execution context; missing execution context blocks readiness unless a future research-only override is explicitly designed.
+- **Known critical risks:** LIVE_PRECHECK parity alone does not unlock LIVE_REAL_ORDERS; runtime heartbeat, reconciliation, rollback, observability, canary, shadow, and operator gates remain required.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; no real order submission/cancel/modify capability was added.
+
+## 2026-06-22 Dashboard test import CI repair
+- **Current version:** 0.3.44-dev
+- **Current phase:** P0-4 dashboard control CI stabilization.
+- **Runtime maturity:** unchanged; import-only test repair for dashboard audit coverage.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged.
+- **Lifecycle coverage:** unchanged.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** LIVE readiness evidence and production execution blockers remain.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; no runtime readiness behavior changed.
+
+## 2026-06-21 Dashboard kill switch/PAPER-LIVE fail-closed audit
+- **Current version:** 0.3.43-dev
+- **Current phase:** Dashboard operator-control auditability and LIVE lockout hardening.
+- **Runtime maturity:** Persisted kill-switch state remains runtime-readable and dashboard mode switches now record audit events; runtime refuses scan work while persisted kill switch is active.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER remains selectable through persisted control state; LIVE mode selection is fail-closed unless persisted readiness evidence is PASS and the operator explicitly acknowledges the LIVE risk gate.
+- **Lifecycle coverage:** No lifecycle vocabulary change; kill-switch in-flight rejects remain explicit `KILL_SWITCH_ACTIVE` artifacts.
+- **Execution realism coverage:** No real order path, credential display, threshold loosening, or fake readiness evidence was added.
+- **Known critical risks:** LIVE readiness evidence is still absent/incomplete in normal repo operation; production supervisor hardening and real adapter validation remain blockers.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; dashboard LIVE switch is locked by default and blocked without PASS evidence plus acknowledgement.
+
+## 2026-06-21 Rejected decision SQL/CSV integrity
+- **Current version:** 0.3.42-dev
+- **Current phase:** BACKTEST/PAPER rejected-decision auditability hardening.
+- **Runtime maturity:** Rejected decisions are persisted as first-class signal, order-decision, and lifecycle artifacts through a canonical persistence helper; BACKTEST rejected CSV rows now carry stable signal IDs and cost-adjusted effective RR.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER use the same canonical reject artifact vocabulary/persistence contract where feasible; no thresholds were loosened and no accepted-trade path was added.
+- **Lifecycle coverage:** Rejected rows must have non-empty reject reasons, stable signal IDs, score/RR/effective-RR fields, expectancy bucket, lifecycle state, and execution-context status.
+- **Execution realism coverage:** Effective RR is reduced by execution penalties when context exists; unavailable context is marked missing/null rather than converted to zero-cost evidence.
+- **Known critical risks:** Runtime exchange/order rejects still depend on adapter-provided detail quality; real protective-order and reconciliation evidence remain incomplete for LIVE.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; this patch improves rejection auditability only.
+
+## 2026-06-21 Backtest lifecycle truth audit hardening
+- **Current version:** 0.3.41-dev
+- **Current phase:** BACKTEST lifecycle export truthfulness and fail-closed integrity checks.
+- **Runtime maturity:** BACKTEST continues to use the existing scanner/order cycle and persisted lifecycle export path; this patch hardens export verification only.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST rejects and accepted candidates remain routed through the shared order/reject pipeline where feasible; PAPER/LIVE behavior is unchanged.
+- **Lifecycle coverage:** Export integrity now fails on legacy `CREATED`, missing lifecycle state/status, CREATED-only signal rows, rejected rows without reject reasons, and rejected CSV/SQL count drift.
+- **Execution realism coverage:** Missing execution context must remain `UNAVAILABLE_BACKTEST`/null when marked missing; fake zero execution context is rejected by export integrity checks.
+- **Known critical risks:** BACKTEST execution context still depends on available market metadata or conservative estimates; full real execution fidelity and LIVE protective-order proof remain incomplete.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; no LIVE order placement or readiness claim was added.
+
+## 2026-06-21 Dashboard runtime control safety hardening
+- **Current version:** 0.3.40-dev
+- **Current phase:** Dashboard PAPER/LIVE runtime-control safety wiring.
+- **Runtime maturity:** Dashboard now writes persisted runtime control state for requested mode, actual running mode, kill switch, status, and last error; runtime checks the kill switch before startup, scan processing, signal-to-order transition, and execution.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST behavior is unchanged; PAPER can be started through the selected runtime mode; LIVE remains guarded by existing scanner provenance, adapter, exchange connectivity, qualification, reconciliation, and operator gates.
+- **Lifecycle coverage:** Kill-switch blocks persist explicit `KILL_SWITCH_ACTIVE` rejects and emit `SIGNAL_REJECTED` where a signal is in flight.
+- **Execution realism coverage:** No thresholds were loosened and no trade-frequency path was added; unknown or unsafe state fails closed.
+- **Known critical risks:** Dashboard in-process runtime supervision is minimal and should be operationally hardened before production use; LIVE still lacks satisfied readiness evidence and real execution adapter configuration in this repo.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; LIVE can start only if all existing guards pass and otherwise fails closed.
+
 ## 2026-06-19 Dashboard historical data refresh hotfix
 - **Current version:** 0.3.39-dev
 - **Current phase:** Dashboard BACKTEST historical data reliability hardening.
@@ -612,3 +689,14 @@ Last audit date: 2026-05-21
 
 - Last audit date: 2026-05-24 (JOB-22A)
 - Known critical risk: effective_rr execution-cost gating remains unresolved; PAPER/LIVE readiness not claimed.
+
+## 2026-06-21 TimesFM canonical evidence integration
+- **Current version:** Unreleased P0-3.
+- **Current phase:** TimesFM canonical evidence persistence hardening.
+- **Runtime maturity:** TimesFM remains PAPER/BACKTEST-only forecast evidence; it is not an execution authority and no order-placement path was added.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER persist the same replay evidence rows; LIVE remains explicitly blocked by the TimesFM replay API.
+- **Lifecycle coverage:** TimesFM evidence does not advance order lifecycle state. Invalid or malformed forecasts remain `NO_TRADE` with `INVALID_FORECAST`.
+- **Execution realism coverage:** Quantile forecasts, expected RR, rejection reason, model metadata, and no-lookahead input end timestamp are persisted for audit. Spread/slippage/funding are still unavailable and are not faked.
+- **Known critical risks:** Forward outcome labeling table exists for future calibration, but full TimesFM calibration against TP-before-SL / SL-before-TP / timeout outcomes is not implemented in this patch.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** NOT READY. TimesFM has no LIVE permission and no direct order authority.

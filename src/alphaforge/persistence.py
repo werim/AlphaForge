@@ -24,8 +24,10 @@ __all__ = [
     "save_ai_decision_features",
     "save_signal",
     "save_order_decision",
+    "save_rejected_decision_artifact",
     "save_trade_lifecycle_event",
     "save_closed_trade_review",
+    "save_timesfm_forecast_evidence",
     "upsert_expectancy_stats",
 ]
 
@@ -99,6 +101,9 @@ def init_db(database_url: str | None = None) -> Engine:
             payload TEXT,
             execution_ctx TEXT,
             execution_ctx_missing INTEGER,
+            input_snapshot_hash TEXT,
+            no_submit_verified INTEGER,
+            parity_result TEXT,
             created_at TEXT,
             updated_at TEXT
         )
@@ -191,6 +196,45 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS setup_expectancy_stats (setup TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
+        """
+        CREATE TABLE IF NOT EXISTS timesfm_forecast_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_id TEXT NOT NULL UNIQUE,
+            timestamp INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            horizon INTEGER,
+            current_price REAL,
+            forecast_p10 REAL,
+            forecast_p50 REAL,
+            forecast_p90 REAL,
+            side TEXT NOT NULL,
+            expected_rr REAL,
+            rejection_reason TEXT,
+            mode TEXT NOT NULL,
+            model_provider TEXT,
+            model_name TEXT,
+            model_version TEXT,
+            no_lookahead_input_end_ts INTEGER NOT NULL,
+            payload_json TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS timesfm_forward_outcome_labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_id TEXT NOT NULL UNIQUE,
+            outcome TEXT NOT NULL,
+            mfe REAL,
+            mae REAL,
+            expected_r REAL,
+            realized_r REAL,
+            labeled_at TEXT,
+            payload_json TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_timesfm_evidence_symbol_timeframe_ts ON timesfm_forecast_evidence(symbol, timeframe, timestamp)",
         "CREATE TABLE IF NOT EXISTS cooldown_states (symbol TEXT PRIMARY KEY, cooldown_remaining_sec INTEGER NOT NULL DEFAULT 0)",
     ]
     with engine.begin() as conn:
@@ -252,6 +296,9 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("funding_rate_pct", "funding_rate_pct REAL DEFAULT 0.0"),
             ("execution_regime", "execution_regime TEXT"),
             ("volatility_regime", "volatility_regime TEXT"),
+            ("input_snapshot_hash", "input_snapshot_hash TEXT"),
+            ("no_submit_verified", "no_submit_verified INTEGER"),
+            ("parity_result", "parity_result TEXT"),
             ("created_at", "created_at TEXT"),
             ("updated_at", "updated_at TEXT"),
         ],
@@ -351,6 +398,7 @@ def _apply_sqlite_migrations(conn: Any) -> None:
     migrations: list[tuple[str, str]] = [
         ("2026_05_16_persistence_integrity_v1", "Backfill missing persistence columns and normalize legacy execution_ctx_missing semantics."),
         ("2026_06_19_rollback_evidence_bootstrap", "Ensure fresh SQLite bootstrap creates canonical live rollback validation evidence table."),
+        ("2026_06_21_timesfm_canonical_evidence", "Add canonical TimesFM forecast evidence and optional forward outcome labels tables."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_sqlite_runtime_schema(conn)
@@ -439,6 +487,54 @@ def fetch_expectancy_stat(session: Any, table_name: str, key_column: str, key_va
         return None
 
 
+
+def save_timesfm_forecast_evidence(session: Any, **evidence: Any) -> str | None:
+    """Persist one TimesFM forecast evidence row without creating an order path.
+
+    TimesFM rows are research evidence only. Accepted-looking LONG/SHORT sides are
+    not submitted to order_decisions and invalid forecasts remain NO_TRADE with
+    INVALID_FORECAST or another explicit rejection reason.
+    """
+    if session is None:
+        return None
+    now = _utc_now_iso()
+    forecast_id = evidence.get("forecast_id")
+    if not forecast_id:
+        return None
+    payload = dict(evidence)
+    try:
+        session.execute(text("""
+            INSERT INTO timesfm_forecast_evidence (
+                forecast_id, timestamp, symbol, timeframe, horizon, current_price, forecast_p10, forecast_p50, forecast_p90,
+                side, expected_rr, rejection_reason, mode, model_provider, model_name, model_version, no_lookahead_input_end_ts,
+                payload_json, created_at, updated_at
+            ) VALUES (
+                :forecast_id, :timestamp, :symbol, :timeframe, :horizon, :current_price, :forecast_p10, :forecast_p50, :forecast_p90,
+                :side, :expected_rr, :rejection_reason, :mode, :model_provider, :model_name, :model_version, :no_lookahead_input_end_ts,
+                :payload_json, :created_at, :updated_at
+            )
+            ON CONFLICT(forecast_id) DO UPDATE SET
+                timestamp=excluded.timestamp, symbol=excluded.symbol, timeframe=excluded.timeframe, horizon=excluded.horizon,
+                current_price=excluded.current_price, forecast_p10=excluded.forecast_p10, forecast_p50=excluded.forecast_p50, forecast_p90=excluded.forecast_p90,
+                side=excluded.side, expected_rr=excluded.expected_rr, rejection_reason=excluded.rejection_reason, mode=excluded.mode,
+                model_provider=excluded.model_provider, model_name=excluded.model_name, model_version=excluded.model_version,
+                no_lookahead_input_end_ts=excluded.no_lookahead_input_end_ts, payload_json=excluded.payload_json, updated_at=excluded.updated_at
+        """), {
+            "forecast_id": forecast_id, "timestamp": evidence.get("timestamp"), "symbol": evidence.get("symbol"),
+            "timeframe": evidence.get("timeframe"), "horizon": evidence.get("horizon"), "current_price": evidence.get("current_price"),
+            "forecast_p10": evidence.get("forecast_p10"), "forecast_p50": evidence.get("forecast_p50"), "forecast_p90": evidence.get("forecast_p90"),
+            "side": evidence.get("side"), "expected_rr": evidence.get("expected_rr"), "rejection_reason": evidence.get("rejection_reason"),
+            "mode": evidence.get("mode"), "model_provider": evidence.get("model_provider"), "model_name": evidence.get("model_name"),
+            "model_version": evidence.get("model_version"), "no_lookahead_input_end_ts": evidence.get("no_lookahead_input_end_ts"),
+            "payload_json": json.dumps(payload), "created_at": now, "updated_at": now,
+        })
+        if hasattr(session, "commit"):
+            session.commit()
+        return str(forecast_id)
+    except Exception:
+        return None
+
+
 def save_ai_decision_features(*args, execution_features=None, **kwargs):
     payload = execution_features
     if payload is None and kwargs:
@@ -498,12 +594,12 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
             decision_id, signal_id, order_id, symbol, mode, phase, decision, order_type, confidence, explanation,
             reject_reason, score, rr, effective_rr, expectancy_bucket, order_payload, payload, execution_ctx,
             execution_ctx_missing, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance,
-            funding_rate_pct, execution_regime, volatility_regime, created_at, updated_at
+            funding_rate_pct, execution_regime, volatility_regime, input_snapshot_hash, no_submit_verified, parity_result, created_at, updated_at
         ) VALUES (
             :decision_id, :signal_id, :order_id, :symbol, :mode, :phase, :decision, :order_type, :confidence, :explanation,
             :reject_reason, :score, :rr, :effective_rr, :expectancy_bucket, :order_payload, :payload, :execution_ctx,
             :execution_ctx_missing, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance,
-            :funding_rate_pct, :execution_regime, :volatility_regime, :created_at, :updated_at
+            :funding_rate_pct, :execution_regime, :volatility_regime, :input_snapshot_hash, :no_submit_verified, :parity_result, :created_at, :updated_at
         )
         ON CONFLICT(decision_id) DO UPDATE SET
             signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
@@ -513,7 +609,9 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing,
             expected_slippage_pct=excluded.expected_slippage_pct, spread_pct=excluded.spread_pct, latency_ms=excluded.latency_ms,
             orderbook_imbalance=excluded.orderbook_imbalance, funding_rate_pct=excluded.funding_rate_pct,
-            execution_regime=excluded.execution_regime, volatility_regime=excluded.volatility_regime, updated_at=excluded.updated_at
+            execution_regime=excluded.execution_regime, volatility_regime=excluded.volatility_regime,
+            input_snapshot_hash=excluded.input_snapshot_hash, no_submit_verified=excluded.no_submit_verified,
+            parity_result=excluded.parity_result, updated_at=excluded.updated_at
     """), {
         "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
         "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
@@ -526,6 +624,9 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "latency_ms": decision.get("latency_ms"), "orderbook_imbalance": decision.get("orderbook_imbalance"),
         "funding_rate_pct": decision.get("funding_rate_pct"), "execution_regime": decision.get("execution_regime"),
         "volatility_regime": decision.get("volatility_regime"),
+        "input_snapshot_hash": decision.get("input_snapshot_hash"),
+        "no_submit_verified": 1 if bool(decision.get("no_submit_verified", False)) else 0,
+        "parity_result": decision.get("parity_result"),
         "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", execution_ctx.get("evidence_status") in {"UNAVAILABLE", None})) else 0,
         "created_at": now, "updated_at": now,
     })
@@ -534,6 +635,98 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         return decision_id or row.lastrowid
     except Exception:
         return None
+
+
+def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, Any] | None:
+    """Persist a rejected signal/order as one auditable SQL artifact.
+
+    The helper intentionally writes the signal, order_decision, and lifecycle
+    row together with the same stable signal_id and canonical reject reason so
+    BACKTEST/PAPER callers do not accidentally return early with only partial
+    rejection evidence.
+    """
+    if session is None:
+        return None
+    reason = canonical_reject_reason(artifact.get("reject_reason") or artifact.get("reason"))
+    if reason == "UNKNOWN":
+        return None
+    now = canonical_utc_timestamp(artifact.get("event_ts"))
+    signal_id = str(
+        artifact.get("signal_id")
+        or f"{artifact.get('mode', 'UNKNOWN')}:{artifact.get('symbol', 'UNKNOWN')}:{now}:{reason}"
+    )
+    raw_rr = artifact.get("raw_rr", artifact.get("rr"))
+    effective_rr = artifact.get("effective_rr")
+    if effective_rr is None:
+        effective_rr = raw_rr
+    execution_ctx = dict(artifact.get("execution_ctx") or {})
+    execution_ctx_missing = bool(
+        artifact.get(
+            "execution_ctx_missing",
+            execution_ctx.get("evidence_status") in {"UNAVAILABLE", "UNKNOWN", None},
+        )
+    )
+    signal_payload = {
+        "signal_id": signal_id,
+        "symbol": artifact.get("symbol"),
+        "side": artifact.get("side"),
+        "timeframe": artifact.get("timeframe"),
+        "mode": artifact.get("mode"),
+        "score": artifact.get("score"),
+        "rr": raw_rr,
+        "effective_rr": effective_rr,
+        "expectancy_bucket": artifact.get("expectancy_bucket"),
+    }
+    save_signal(session, **signal_payload)
+    decision_id = save_order_decision(
+        session,
+        decision_id=artifact.get("decision_id") or f"{signal_id}:REJECTED",
+        signal_id=signal_id,
+        order_id=artifact.get("order_id"),
+        symbol=artifact.get("symbol"),
+        mode=artifact.get("mode"),
+        phase=artifact.get("phase", "final"),
+        decision="REJECTED",
+        reject_reason=reason,
+        score=artifact.get("score"),
+        rr=raw_rr,
+        effective_rr=effective_rr,
+        expectancy_bucket=artifact.get("expectancy_bucket"),
+        order_payload=artifact.get("order_payload"),
+        explanation=artifact.get("explanation"),
+        execution_ctx=execution_ctx,
+        execution_ctx_missing=execution_ctx_missing,
+        expected_slippage_pct=artifact.get("expected_slippage_pct", execution_ctx.get("expected_slippage_pct")),
+        spread_pct=artifact.get("spread_pct", execution_ctx.get("spread_pct")),
+        latency_ms=artifact.get("latency_ms", execution_ctx.get("market_data_latency_ms") or execution_ctx.get("latency_ms")),
+        orderbook_imbalance=artifact.get("orderbook_imbalance", execution_ctx.get("orderbook_imbalance")),
+        funding_rate_pct=artifact.get("funding_rate_pct", execution_ctx.get("funding_rate_pct")),
+        volatility_regime=artifact.get("volatility_regime", execution_ctx.get("volatility_regime")),
+    )
+    lifecycle_ok = save_trade_lifecycle_event(
+        session,
+        event_id=artifact.get("event_id") or f"{signal_id}:SIGNAL_REJECTED",
+        signal_id=signal_id,
+        order_id=artifact.get("order_id"),
+        symbol=artifact.get("symbol"),
+        mode=artifact.get("mode"),
+        lifecycle_state=artifact.get("lifecycle_state", "SIGNAL_REJECTED"),
+        decision="REJECTED",
+        reject_reason=reason,
+        score=artifact.get("score"),
+        rr=raw_rr,
+        effective_rr=effective_rr,
+        expectancy_bucket=artifact.get("expectancy_bucket"),
+        execution_ctx=execution_ctx,
+        execution_ctx_missing=execution_ctx_missing,
+        event_ts=now,
+        lifecycle_seq=artifact.get("lifecycle_seq"),
+        lifecycle_id=artifact.get("lifecycle_id") or f"{signal_id}:reject",
+        payload={"reject_reason": reason, **dict(artifact.get("payload") or {})},
+    )
+    if not decision_id or not lifecycle_ok:
+        return None
+    return {"signal_id": signal_id, "decision_id": decision_id, "reject_reason": reason}
 
 
 def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
@@ -552,7 +745,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
         "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),
         "reject_reason": canonical_reject_reason(event.get("reject_reason")), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
         "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
-        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", False)) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
+        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", (event.get("execution_ctx") or {}).get("evidence_status") in {"UNAVAILABLE", "UNKNOWN", None})) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
         "lifecycle_seq": event.get("lifecycle_seq"),
         "cancel_reason": event.get("cancel_reason"),
         "lifecycle_id": event.get("lifecycle_id") or f"{signal_id}:{canonical_utc_timestamp(event.get('event_ts'))}:{lifecycle_state}",

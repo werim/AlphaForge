@@ -9,7 +9,8 @@ from typing import Any, Callable, Mapping
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
-from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model
+from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+from alphaforge.effective_rr import calculate_effective_rr
 from alphaforge.persistence import (
     fetch_expectancy_stat,
     save_ai_decision_features,
@@ -29,13 +30,22 @@ MIN_RR_BASE = 1.3
 def normalize_execution_ctx(ctx: Mapping[str, Any] | None) -> dict[str, Any]:
     base = dict(ctx or {})
     return {
-        "expected_slippage_pct": float(base.get("expected_slippage_pct", 0.0) or 0.0),
-        "spread_pct": float(base.get("spread_pct", 0.0) or 0.0),
-        "latency_ms": int(base.get("latency_ms", 0) or 0),
-        "liquidity_score": float(base.get("liquidity_score", 1.0) or 1.0),
-        "volatility_regime": str(base.get("volatility_regime", "unknown") or "unknown"),
-        "orderbook_imbalance": float(base.get("orderbook_imbalance", 0.0) or 0.0),
-        "funding_rate_pct": float(base.get("funding_rate_pct", 0.0) or 0.0),
+        "expected_slippage_pct": _nullable_float(base.get("expected_slippage_pct")),
+        "spread_pct": _nullable_float(base.get("spread_pct")),
+        "latency_ms": _nullable_float(base.get("latency_ms")),
+        "liquidity_score": _nullable_float(base.get("liquidity_score")),
+        "volatility_regime": base.get("volatility_regime"),
+        "orderbook_imbalance": _nullable_float(base.get("orderbook_imbalance")),
+        "funding_rate_pct": _nullable_float(base.get("funding_rate_pct")),
+        "spread_status": str(base.get("spread_status", "") or ""),
+        "slippage_status": str(base.get("slippage_status", "") or ""),
+        "latency_status": str(base.get("latency_status", base.get("market_data_latency_status", "")) or ""),
+        "market_data_latency_status": str(base.get("market_data_latency_status", base.get("latency_status", "")) or ""),
+        "liquidity_status": str(base.get("liquidity_status", "") or ""),
+        "funding_status": str(base.get("funding_status", "") or ""),
+        "orderbook_status": str(base.get("orderbook_status", "") or ""),
+        "volatility_status": str(base.get("volatility_status", "") or ""),
+        "evidence_status": str(base.get("evidence_status", "") or ""),
         "spoof_risk": float(base.get("spoof_risk", 0.0) or 0.0),
         "absorption_score": float(base.get("absorption_score", 0.0) or 0.0),
     }
@@ -107,6 +117,15 @@ class TradeQualityDecision:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
+def _nullable_float(value: Any) -> float | None:
+    if value in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def normalize_execution_payload(payload: Mapping[str, Any] | None, order: Mapping[str, Any] | None = None, ctx: Mapping[str, Any] | None = None) -> dict[str, Any]:
     base = dict(payload or {})
     order = dict(order or {})
@@ -122,6 +141,7 @@ def normalize_execution_payload(payload: Mapping[str, Any] | None, order: Mappin
     base.setdefault("execution_metrics", {})
     base.setdefault("execution_ctx_missing", bool((ctx or {}).get("execution_ctx_missing", False)))
     base.setdefault("adjusted_risk_reward", base["effective_rr"])
+    base.setdefault("effective_rr_breakdown", {})
     base.setdefault("block_reason", "")
     base.setdefault("reject_reason", "")
     return base
@@ -435,7 +455,7 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         enriched_market_ctx = {**ctx, **execution_ctx}
 
         score, plan, explanation = brain.before_real_order(signal, enriched_market_ctx, regime_ctx, stats_ctx)
-        effective_rr, execution_flags = _effective_rr(order, execution_ctx)
+        effective_rr, execution_flags, rr_breakdown = _effective_rr(order, execution_ctx, mode=mode)
         if missing_execution_ctx:
             execution_flags.append("EXECUTION_CTX_MISSING")
             execution_flags.append("UNKNOWN_EXECUTION_CONTEXT")
@@ -443,12 +463,12 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         blocked = _is_blocked(score, regime_ctx, stats_ctx) or effective_rr < MIN_RR_THRESHOLD
 
         qty = float(order.get("quantity", 0.0)) * _position_mult(score.total_score)
-        slippage_penalty_factor = min(execution_ctx["expected_slippage_pct"] * 10.0, 0.9)
+        slippage_penalty_factor = min(float(execution_ctx.get("expected_slippage_pct") or 0.0) * 10.0, 0.9)
         qty *= max(0.0, 1.0 - slippage_penalty_factor)
 
         payload.update(dict(order))
         payload["quantity"] = max(qty, 0.0)
-        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 6), "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {"execution_cost_completeness": build_execution_cost_model(execution_ctx).completeness, "missing_fields": list(build_execution_cost_model(execution_ctx).missing_fields)}, "adjusted_risk_reward": round(effective_rr, 6), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
+        payload.update({"ai_score": score.total_score, "ai_reason": explanation, "effective_rr": round(effective_rr, 6), "effective_rr_breakdown": rr_breakdown, "expected_slippage_pct": execution_ctx["expected_slippage_pct"], "execution_flags": execution_flags, "execution_ctx": execution_ctx, "execution_ctx_missing": missing_execution_ctx, "execution_metrics": {**rr_breakdown, "execution_cost_completeness": rr_breakdown.get("execution_cost_completeness"), "missing_fields": rr_breakdown.get("missing_fields", [])}, "adjusted_risk_reward": round(effective_rr, 6), "block_reason": "QUALITY_BLOCKED" if blocked else "", "reject_reason": "QUALITY_BLOCKED" if blocked else ""})
         payload = normalize_execution_payload(payload, order=order, ctx={"execution_ctx_missing": missing_execution_ctx})
         if blocked and payload["execution_flags"]:
             payload["block_reason"] = payload["execution_flags"][0]
@@ -504,14 +524,21 @@ def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any
     return normalize_execution_ctx(neutral_execution_context()), True
 
 
-def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float, list[str]]:
+def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any], *, mode: str = "live") -> tuple[float, list[str], dict[str, Any]]:
     rr = float(order.get("risk_reward", 1.0) or 1.0)
+    require_measured = str(mode).upper() in {"LIVE", "LIVE_PRECHECK", "PAPER"}
+    evidence_status = classify_execution_evidence(execution_ctx, require_measured=require_measured)
+    result = calculate_effective_rr(rr, execution_ctx, include_missing_penalty=False)
     model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
-    effective = round(max(rr - model.total_penalty, 0.0), 6)
+    effective = result.effective_rr
+    breakdown = result.as_dict()
+    breakdown["execution_evidence_status"] = evidence_status
 
     flags: list[str] = []
-    if model.missing_fields:
+    if model.missing_fields or evidence_status == EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING:
         flags.append("UNKNOWN_EXECUTION_CONTEXT")
+    if evidence_status == EXECUTION_EVIDENCE_INVALID_FAKE_ZERO:
+        flags.append("INVALID_FAKE_ZERO")
     if model.spread_penalty >= 0.20:
         flags.append("HIGH_SPREAD")
     if model.slippage_penalty >= 0.20:
@@ -526,7 +553,7 @@ def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any]) ->
         flags.append("EXCESSIVE_VOLATILITY")
     if effective < MIN_RR_THRESHOLD:
         flags.append("LOW_EFFECTIVE_RR")
-    return effective, sorted(set(flags))
+    return effective, sorted(set(flags)), breakdown
 
 
 def _execution_review(closed_trade: Mapping[str, Any]) -> dict[str, float]:

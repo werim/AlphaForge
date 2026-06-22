@@ -16,6 +16,7 @@ class EffectiveRRResult:
     latency_penalty: float
     funding_penalty: float
     liquidity_penalty: float
+    volatility_penalty: float
     missing_fields: tuple[str, ...]
     completeness: str
 
@@ -29,6 +30,7 @@ class EffectiveRRResult:
             "latency_penalty": self.latency_penalty,
             "funding_penalty": self.funding_penalty,
             "liquidity_penalty": self.liquidity_penalty,
+            "volatility_penalty": self.volatility_penalty,
             "missing_fields": list(self.missing_fields),
             "execution_cost_completeness": self.completeness,
         }
@@ -72,6 +74,7 @@ def calculate_effective_rr(
         latency_penalty=model.latency_penalty,
         funding_penalty=model.funding_penalty,
         liquidity_penalty=model.liquidity_penalty,
+        volatility_penalty=model.volatility_penalty,
         missing_fields=model.missing_fields,
         completeness=model.completeness,
     )
