@@ -1,3 +1,59 @@
+## 2026-06-22 Patch Addendum — PAPER burn-in report generator
+
+### Why this patch was needed
+P2-1 required a deterministic PAPER burn-in report so operators can inspect whether persisted PAPER runtime evidence is safe and complete before considering any later LIVE_DRY_RUN or LIVE_REAL_ORDERS discussion.
+
+### Root cause
+PAPER runtime evidence existed across decisions, lifecycle rows, heartbeat evidence, execution context, dashboard/runtime-control tables, readiness reports, and TimesFM tables, but there was no single fail-closed report contract that summarized selectivity, integrity, observability, reconciliation, and execution-realism blockers.
+
+### Files changed
+- `src/alphaforge/paper_burnin.py`
+- `tests/test_paper_burnin.py`
+- `README.md`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None. This is reporting-only and does not change thresholds, order placement, scanner behavior, runtime controls, or live-readiness gates.
+
+### Lifecycle changes
+No lifecycle vocabulary changed. The report validates persisted PAPER lifecycle ordering with the existing lifecycle transition contract and surfaces invalid ordering as `LIFECYCLE_INTEGRITY_FAILURE`.
+
+### Persistence changes
+No schema migration. The CLI reads existing SQLite tables and writes external report artifacts: `paper_burnin_summary.csv`, `paper_burnin_report.md`, and `paper_burnin_blockers.json`.
+
+### Export/schema changes
+Added a deterministic burn-in report artifact contract. Missing tables or incomplete evidence are represented as blockers instead of fabricated metrics.
+
+### Tests added
+- Empty DB classifies as `INSUFFICIENT_SAMPLE`.
+- Missing reject reasons classify as `DATA_INTEGRITY_FAILURE`.
+- Bad lifecycle ordering classifies as `LIFECYCLE_INTEGRITY_FAILURE`.
+- Missing execution context and fake-zero execution fields classify as `EXECUTION_CONTEXT_FAILURE`.
+- Healthy synthetic PAPER evidence can classify as `HEALTHY_SELECTIVITY` while still remaining `NOT_LIVE_READY`.
+- TimesFM absence is noted as optional/non-fatal.
+
+### Tests executed
+- `pytest -q tests/test_paper_burnin.py`
+
+### Usage
+```bash
+python -m alphaforge.paper_burnin --db path/to/paper_runtime.db --out reports/paper_burnin
+```
+
+### Risks
+The report is intentionally conservative: incomplete heartbeat, reconciliation, readiness, or execution evidence remains blocking even when selectivity looks healthy. Fake-zero detection is field-level and should be reviewed if an exchange supplies explicit zero-cost proof in the future.
+
+### Remaining limitations
+The report does not prove LIVE readiness, does not configure TimesFM requirements, and does not create reconciliation evidence. It summarizes persisted evidence only.
+
+### Migration concerns
+None; no database schema changes.
+
+### Push recommendation
+Safe to push as P2-1 PAPER diagnostics. Do not enable LIVE trading from this report alone.
+
 ## 2026-06-22 Patch Addendum — Execution realism evidence contract
 
 ### Why this patch was needed
