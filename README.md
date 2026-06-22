@@ -66,6 +66,17 @@ alembic upgrade head
 pytest -q
 ```
 
+## PAPER burn-in report
+
+Generate deterministic PAPER runtime diagnostics from a SQLite runtime database without changing thresholds or enabling live order flow:
+
+```bash
+python -m alphaforge.paper_burnin --db path/to/paper_runtime.db --out reports/paper_burnin
+```
+
+The command writes `paper_burnin_summary.csv`, `paper_burnin_report.md`, and `paper_burnin_blockers.json`. Missing evidence is reported as a blocker; this report never promotes LIVE readiness by itself.
+
+
 ## Next Development Priority
 
 1. Unify `BACKTEST` / `PAPER` / `LIVE` decision lifecycle contract as much as possible.

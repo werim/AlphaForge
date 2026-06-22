@@ -1,3 +1,25 @@
+## [Unreleased] - 2026-06-22 (PAPER burn-in report generator)
+
+### Added
+- Added `alphaforge.paper_burnin` SQL-first CLI/report generator that writes `paper_burnin_summary.csv`, `paper_burnin_report.md`, and `paper_burnin_blockers.json`.
+- Added burn-in classifications for selectivity, insufficient samples, data integrity, lifecycle integrity, execution context, observability, reconciliation, and LIVE-blocked posture.
+- Added regression tests for empty DBs, missing reject reasons, bad lifecycle ordering, missing execution context, fake zeros, healthy synthetic selectivity, and optional TimesFM absence.
+
+### Changed
+- Documentation now includes PAPER burn-in usage and explicitly keeps LIVE readiness blocked unless independent readiness evidence exists.
+
+### Fixed
+- Closed the reporting gap where PAPER evidence had to be inspected manually across multiple SQL tables without a deterministic blocker artifact.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; reporting is additive and does not alter runtime decisions, thresholds, schemas, or order paths.
+
+### Known Issues
+- LIVE remains NOT READY. Missing heartbeat, reconciliation, rollback, observability, operator, and execution evidence must remain blockers.
+
 ## [Unreleased] - 2026-06-22 (Execution realism evidence contract)
 
 ### Added
