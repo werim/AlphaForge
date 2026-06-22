@@ -1,3 +1,106 @@
+## 2026-06-22 Patch Addendum — Dashboard test import CI repair
+
+### Why this patch was needed
+CI full-suite execution exposed that the new dashboard audit tests referenced `create_engine` without importing it in environments where dashboard dependencies are installed and the tests execute instead of skipping.
+
+### Root cause
+Local optional dependency availability caused `tests/test_dashboard_app.py` to skip during the earlier targeted run, so the missing SQLAlchemy import was not exercised locally.
+
+### Files changed
+- `tests/test_dashboard_app.py`
+- `REPORT.md`
+- `CHANGELOG.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+None. This is a test/import repair only.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+None.
+
+### Tests added
+No new assertions; existing dashboard audit tests can now execute in CI.
+
+### Tests executed
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_kill_switch_survives_restart_and_audits tests/test_dashboard_app.py::test_dashboard_paper_switch_accepted_and_live_blocked_without_readiness` (skipped locally because optional dashboard test dependencies are unavailable)
+- `pytest -q` (blocked locally during collection by missing optional `numpy` for TimesFM futures tests)
+- `python -m compileall -q src tests`
+
+### Risks
+Low; import-only test repair.
+
+### Remaining limitations
+LIVE remains NOT READY; this repair does not change runtime controls or readiness posture.
+
+### Push recommendation
+Safe to push as CI repair for the P0-4 dashboard-control test coverage.
+
+## 2026-06-21 Patch Addendum — Dashboard kill switch/PAPER-LIVE fail-closed audit
+
+### Why this patch was needed
+Dashboard runtime controls existed, but the P0-4 audit required explicit proof that operator actions are persisted, auditable, fail-closed for LIVE, restart-visible, and do not expose credentials or create a real order path.
+
+### Root cause
+The prior persisted control state covered requested mode and kill switch, but switch attempts were not written to a dedicated audit log and the dashboard could accept LIVE as the requested mode before proving PASS readiness evidence plus explicit operator acknowledgement.
+
+### Files changed
+- `src/alphaforge/runtime_control.py`
+- `src/alphaforge/dashboard/app.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `tests/test_runtime.py`
+- `tests/test_runtime_control.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Persisted kill switch remains a runtime gate and now has audit records for ON/OFF transitions.
+- Persisted kill switch blocks scanner invocation before new work is selected.
+- PAPER mode remains safely selectable while stopped.
+- LIVE requested mode is refused unless latest persisted readiness evidence is PASS and the operator acknowledgement field is present.
+
+### Lifecycle changes
+No lifecycle vocabulary or transition sequence changed. Runtime kill-switch blocks for in-flight signals continue to use explicit `KILL_SWITCH_ACTIVE` reject semantics.
+
+### Persistence changes
+- Added idempotent `runtime_control_audit_events` table for operator-control audit evidence.
+- The existing single-row `runtime_control_state` table remains backward compatible.
+
+### Export/schema changes
+No CSV export format changed. SQLite schema gains one additive audit table only.
+
+### Tests added
+- Dashboard render verifies kill-switch visibility, NOT LIVE-READY display, and secret non-disclosure.
+- Dashboard kill-switch POST persists across app recreation and writes an audit event.
+- Dashboard PAPER switch succeeds; LIVE switch with incomplete evidence is blocked with an explicit message and audit event.
+- Runtime scan refuses scanner work when persisted kill switch is ON.
+
+### Tests executed
+- `pytest -q tests/test_dashboard_app.py` (skipped in this environment because optional dashboard test dependencies are unavailable)
+- `pytest -q tests/test_runtime*.py tests/test_live_readiness*.py`
+- `pytest -q` (blocked during collection by missing optional `numpy` for TimesFM futures tests)
+- `python -m compileall -q src tests`
+
+### Risks
+- The audit table is created idempotently outside Alembic in the same style as current runtime-control bootstrap; formal migration alignment may be needed if this repository later requires Alembic-only schema management for operator-control tables.
+
+### Remaining limitations
+- LIVE remains blocked by readiness, connectivity, adapter, reconciliation, observability, and operational evidence requirements.
+- Dashboard supervisor remains minimal and is not a production process manager.
+
+### Migration concerns
+Existing SQLite databases receive the new audit table on runtime-control store initialization. Existing control state rows are preserved.
+
+### Push recommendation
+Safe to push as a narrow fail-closed operator-control hardening patch. Do not interpret this as LIVE readiness approval.
+
 ## 2026-06-21 Patch Addendum — Rejected decision SQL/CSV integrity
 
 ### Why this patch was needed

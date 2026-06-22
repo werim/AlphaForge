@@ -54,6 +54,21 @@ def ensure_runtime_control_schema(engine: Engine) -> None:
                 updated_at TEXT NOT NULL
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS runtime_control_audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_ts TEXT NOT NULL,
+                action TEXT NOT NULL,
+                requested_mode TEXT,
+                previous_mode TEXT,
+                success INTEGER NOT NULL,
+                reason TEXT,
+                source TEXT NOT NULL,
+                kill_switch_active INTEGER,
+                readiness_status TEXT,
+                operator_acknowledged INTEGER NOT NULL DEFAULT 0
+            )
+        """))
         now = canonical_utc_timestamp()
         conn.execute(text("""
             INSERT OR IGNORE INTO runtime_control_state(
@@ -82,17 +97,48 @@ class RuntimeControlStore:
             updated_at=row["updated_at"],
         )
 
-    def set_requested_mode(self, mode: str) -> RuntimeControlState:
-        mode = str(mode or "").strip().upper()
-        if mode not in VALID_MODES:
-            raise ValueError("mode_requested must be PAPER or LIVE")
-        state = self.read()
-        if state.runtime_status not in {"STOPPED", "ERROR", "KILL_SWITCH_ACTIVE"} or state.mode_running:
-            raise RuntimeError("mode_requested can only be changed while runtime is stopped")
-        now = canonical_utc_timestamp()
+    def _latest_readiness_status(self) -> str:
+        try:
+            with self.engine.connect() as conn:
+                exists = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='live_readiness_reports'")).first()
+                if not exists:
+                    return "NOT_AVAILABLE"
+                row = conn.execute(text("SELECT qualified FROM live_readiness_reports ORDER BY id DESC LIMIT 1")).first()
+                if row is None:
+                    return "NOT_AVAILABLE"
+                return "PASS" if bool(row[0]) else "FAIL"
+        except SQLAlchemyError:
+            return "NOT_AVAILABLE"
+
+    def _audit(self, *, action: str, requested_mode: str | None = None, previous_mode: str | None = None, success: bool, reason: str | None = None, source: str = "dashboard", kill_switch_active: bool | None = None, readiness_status: str | None = None, operator_acknowledged: bool = False) -> None:
+        ensure_runtime_control_schema(self.engine)
         with self.engine.begin() as conn:
-            conn.execute(text("UPDATE runtime_control_state SET mode_requested=:mode, last_error=NULL, updated_at=:now WHERE id=1"), {"mode": mode, "now": now})
-        return self.read()
+            conn.execute(text("""
+                INSERT INTO runtime_control_audit_events(event_ts, action, requested_mode, previous_mode, success, reason, source, kill_switch_active, readiness_status, operator_acknowledged)
+                VALUES (:event_ts, :action, :requested_mode, :previous_mode, :success, :reason, :source, :kill_switch_active, :readiness_status, :operator_acknowledged)
+            """), {"event_ts": canonical_utc_timestamp(), "action": action, "requested_mode": requested_mode, "previous_mode": previous_mode, "success": 1 if success else 0, "reason": reason, "source": source, "kill_switch_active": None if kill_switch_active is None else (1 if kill_switch_active else 0), "readiness_status": readiness_status, "operator_acknowledged": 1 if operator_acknowledged else 0})
+
+    def set_requested_mode(self, mode: str, *, operator_acknowledged: bool = False, source: str = "dashboard") -> RuntimeControlState:
+        mode = str(mode or "").strip().upper()
+        state = self.read()
+        readiness_status = self._latest_readiness_status() if mode == "LIVE" else None
+        try:
+            if mode not in VALID_MODES:
+                raise ValueError("mode_requested must be PAPER or LIVE")
+            if state.runtime_status not in {"STOPPED", "ERROR", "KILL_SWITCH_ACTIVE"} or state.mode_running:
+                raise RuntimeError("mode_requested can only be changed while runtime is stopped")
+            if mode == "LIVE" and not operator_acknowledged:
+                raise RuntimeError("LIVE mode blocked: explicit operator acknowledgement is required")
+            if mode == "LIVE" and readiness_status != "PASS":
+                raise RuntimeError(f"LIVE mode blocked: readiness evidence is {readiness_status}; expected PASS")
+            now = canonical_utc_timestamp()
+            with self.engine.begin() as conn:
+                conn.execute(text("UPDATE runtime_control_state SET mode_requested=:mode, last_error=NULL, updated_at=:now WHERE id=1"), {"mode": mode, "now": now})
+            self._audit(action="MODE_SWITCH", requested_mode=mode, previous_mode=state.mode_requested, success=True, source=source, readiness_status=readiness_status, operator_acknowledged=operator_acknowledged)
+            return self.read()
+        except Exception as exc:
+            self._audit(action="MODE_SWITCH", requested_mode=mode, previous_mode=state.mode_requested, success=False, reason=str(exc), source=source, readiness_status=readiness_status, operator_acknowledged=operator_acknowledged)
+            raise
 
     def set_kill_switch(self, active: bool, *, source: str = "dashboard") -> RuntimeControlState:
         now = canonical_utc_timestamp()
@@ -109,6 +155,7 @@ class RuntimeControlStore:
                     updated_at=:now
                 WHERE id=1
             """), {"active": 1 if active else 0, "source": source, "now": now, "status": status})
+        self._audit(action="KILL_SWITCH_ON" if active else "KILL_SWITCH_OFF", success=True, source=source, kill_switch_active=active)
         return self.read()
 
     def set_status(self, status: str, *, mode_running: str | None = None, last_error: str | None = None) -> RuntimeControlState:

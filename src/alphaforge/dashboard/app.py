@@ -167,7 +167,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     async def set_runtime_mode(request: Request) -> RedirectResponse:
         form = await _form_dict(request)
         try:
-            app.state.control_store.set_requested_mode(str(form.get("mode", "PAPER")))
+            app.state.control_store.set_requested_mode(str(form.get("mode", "PAPER")), operator_acknowledged=str(form.get("operator_acknowledged", "")).lower() in {"1", "true", "on", "yes"}, source="dashboard")
         except Exception as exc:
             app.state.control_store.set_status("ERROR", last_error=str(exc))
         return RedirectResponse(url="/", status_code=303)

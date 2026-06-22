@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from alphaforge.runtime_control import RuntimeControlStore, RuntimeSupervisor
 
@@ -65,7 +65,10 @@ def test_runtime_supervisor_starts_requested_paper_and_prevents_duplicate_loops(
 def test_runtime_supervisor_live_mode_fails_closed_on_guard_error():
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     store = RuntimeControlStore(engine)
-    store.set_requested_mode("LIVE")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE live_readiness_reports (id INTEGER PRIMARY KEY AUTOINCREMENT, generated_at TEXT NOT NULL, qualified INTEGER NOT NULL, deployment_state TEXT NOT NULL, acknowledgement_required INTEGER NOT NULL, report_payload TEXT NOT NULL)"))
+        conn.execute(text("INSERT INTO live_readiness_reports(generated_at, qualified, deployment_state, acknowledgement_required, report_payload) VALUES ('now', 1, 'LIVE_ENABLED', 0, '{}')"))
+    store.set_requested_mode("LIVE", operator_acknowledged=True, source="test")
 
     def factory(mode: str):
         raise RuntimeError("LIVE mode blocked: exchange connectivity unavailable (binance:UNAVAILABLE)")

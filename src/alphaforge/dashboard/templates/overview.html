@@ -33,8 +33,14 @@
       <article class="metric"><label>Last Error</label><strong class="small-value">{{ status.last_error or 'None' }}</strong></article>
     </div>
     <p>Controls write persisted runtime control state and fail closed. LIVE startup still requires all runtime LIVE guards; it is never silently downgraded to PAPER.</p>
+    {% if status.latest_readiness.status == 'PASS' %}
+      <div class="alert pass-box"><strong>LIVE readiness evidence: PASS.</strong> LIVE still requires explicit acknowledgement and runtime guards.</div>
+    {% else %}
+      <div class="alert fail-box"><strong>NOT LIVE-READY.</strong> LIVE switch is refused until persisted readiness evidence is PASS. Current evidence: {{ status.latest_readiness.status }} {{ status.latest_readiness.reason or '' }}.</div>
+    {% endif %}
     <form method="post" action="/runtime/mode" class="backtest-form">
-      <div><label for="mode">Requested run mode</label><select id="mode" name="mode"><option value="PAPER" {% if status.mode_requested == 'PAPER' %}selected{% endif %}>PAPER</option><option value="LIVE" {% if status.mode_requested == 'LIVE' %}selected{% endif %}>LIVE</option></select></div>
+      <div><label for="mode">Requested run mode</label><select id="mode" name="mode"><option value="PAPER" {% if status.mode_requested == 'PAPER' %}selected{% endif %}>PAPER</option><option value="LIVE" {% if status.mode_requested == 'LIVE' %}selected{% endif %}>LIVE (locked unless readiness PASS)</option></select></div>
+      <div><label><input type="checkbox" name="operator_acknowledged" value="true"> I acknowledge LIVE risk gates and no real order path is added by this dashboard switch.</label></div>
       <button type="submit">Set Mode</button>
     </form>
     <form method="post" action="/runtime/start"><button type="submit">Start Selected Runtime</button></form>

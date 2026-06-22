@@ -1,3 +1,25 @@
+## 2026-06-22 Dashboard test import CI repair
+- **Current version:** 0.3.44-dev
+- **Current phase:** P0-4 dashboard control CI stabilization.
+- **Runtime maturity:** unchanged; import-only test repair for dashboard audit coverage.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged.
+- **Lifecycle coverage:** unchanged.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** LIVE readiness evidence and production execution blockers remain.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; no runtime readiness behavior changed.
+
+## 2026-06-21 Dashboard kill switch/PAPER-LIVE fail-closed audit
+- **Current version:** 0.3.43-dev
+- **Current phase:** Dashboard operator-control auditability and LIVE lockout hardening.
+- **Runtime maturity:** Persisted kill-switch state remains runtime-readable and dashboard mode switches now record audit events; runtime refuses scan work while persisted kill switch is active.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER remains selectable through persisted control state; LIVE mode selection is fail-closed unless persisted readiness evidence is PASS and the operator explicitly acknowledges the LIVE risk gate.
+- **Lifecycle coverage:** No lifecycle vocabulary change; kill-switch in-flight rejects remain explicit `KILL_SWITCH_ACTIVE` artifacts.
+- **Execution realism coverage:** No real order path, credential display, threshold loosening, or fake readiness evidence was added.
+- **Known critical risks:** LIVE readiness evidence is still absent/incomplete in normal repo operation; production supervisor hardening and real adapter validation remain blockers.
+- **Last audit date:** 2026-06-21.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; dashboard LIVE switch is locked by default and blocked without PASS evidence plus acknowledgement.
+
 ## 2026-06-21 Rejected decision SQL/CSV integrity
 - **Current version:** 0.3.42-dev
 - **Current phase:** BACKTEST/PAPER rejected-decision auditability hardening.

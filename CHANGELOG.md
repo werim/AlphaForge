@@ -1,3 +1,46 @@
+## [Unreleased] - 2026-06-22 (Dashboard test import CI repair)
+
+### Added
+- None.
+
+### Changed
+- Imported SQLAlchemy `create_engine` in dashboard tests so audit-event queries execute in full CI.
+
+### Fixed
+- Fixed full-suite CI failures in dashboard kill-switch/audit tests caused by a missing test import.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY; no runtime behavior changed.
+
+## [Unreleased] - 2026-06-21 (Dashboard kill switch/PAPER-LIVE fail-closed audit)
+
+### Added
+- Added persisted `runtime_control_audit_events` records for mode-switch attempts and kill-switch ON/OFF actions.
+- Added dashboard tests for kill-switch rendering, restart persistence, switch audit events, LIVE readiness lockout, and secret redaction in HTML responses.
+- Added runtime regression coverage proving persisted kill-switch state prevents scanner work.
+
+### Changed
+- Dashboard LIVE mode selection now requires explicit operator acknowledgement and PASS readiness evidence before changing requested mode.
+- Dashboard overview now displays NOT LIVE-READY messaging when readiness evidence is absent or failing.
+
+### Fixed
+- Fixed unsafe dashboard mode-switch ambiguity by auditing blocked LIVE attempts with explicit failure reasons instead of silently accepting LIVE as requested mode.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Dashboard requests to set LIVE mode now fail closed unless readiness evidence is PASS and acknowledgement is supplied.
+
+### Known Issues
+- LIVE remains NOT READY. This patch does not add real order placement or make existing readiness blockers pass.
+
 ## [Unreleased] - 2026-06-21 (Rejected decision SQL/CSV integrity)
 
 ### Added

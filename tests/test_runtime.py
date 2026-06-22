@@ -494,3 +494,28 @@ def test_live_reconciliation_loop_fails_closed_on_incomplete_evidence() -> None:
     )
     with pytest.raises(RuntimeError, match="evidence incomplete"):
         asyncio.run(orchestrator._reconcile_runtime_state())
+
+
+def test_runtime_scan_refuses_new_work_when_persisted_kill_switch_on() -> None:
+    from sqlalchemy import create_engine
+    from alphaforge.runtime_control import RuntimeControlStore
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    store = RuntimeControlStore(engine)
+    store.set_kill_switch(True, source="test")
+    called = {"scanner": 0}
+
+    async def scanner() -> list[dict]:
+        called["scanner"] += 1
+        return [{"symbol": "BTCUSDT", "volume_24h_usdt": 1000000.0}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+        control_store=store,
+    )
+    asyncio.run(orchestrator._scan_once())
+    assert called["scanner"] == 0
+    assert orchestrator.metrics.scans == 0
+    assert orchestrator._last_scan_gate_blockers == ["KILL_SWITCH_ACTIVE"]
