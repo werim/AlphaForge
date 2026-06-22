@@ -265,3 +265,14 @@ def test_successful_live_precheck_parity_alone_does_not_unlock_live_real_orders(
     assert results["mode_parity"].passed is True
     assert report.qualified is False
     assert results["runtime_heartbeat"].passed is False
+
+
+def test_live_precheck_invalid_execution_evidence_blocks_readiness() -> None:
+    engine = _engine()
+    parity = _parity()
+    parity["execution_evidence_status"] = "INVALID_FAKE_ZERO"
+    report = LiveReadinessEvaluator(engine).evaluate(mode_parity=parity, reconciliation_snapshot=_reconciliation(), observability_snapshot=_operational(), canary_enabled=True, shadow_mode_enabled=True, operator_ack=True)
+    mode_parity = next(check for check in report.checks if check.name == "mode_parity")
+    assert report.qualified is False
+    assert mode_parity.passed is False
+    assert "LIVE_PRECHECK_EXECUTION_EVIDENCE_BLOCKING:INVALID_FAKE_ZERO" in mode_parity.details

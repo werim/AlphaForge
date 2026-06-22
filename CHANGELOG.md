@@ -1,3 +1,27 @@
+## [Unreleased] - 2026-06-22 (Execution realism evidence contract)
+
+### Added
+- Added execution evidence classifier statuses: `COMPLETE_MEASURED`, `PARTIAL_ESTIMATED`, `UNAVAILABLE_BLOCKING`, and `INVALID_FAKE_ZERO`.
+- Added persisted effective-RR breakdown fields for raw RR and spread, slippage, latency, liquidity, funding, and volatility penalties.
+- Added regression tests for missing execution evidence, fake-zero detection, BACKTEST estimated labeling, LOW_EFFECTIVE_RR, LIVE_PRECHECK readiness blocking, and persisted penalty evidence.
+
+### Changed
+- PAPER/LIVE-style order prechecks now require measured execution evidence and fail closed on missing or fake-zero required fields.
+- BACKTEST estimates must be explicitly labeled as estimated evidence rather than implied zero-cost realism.
+
+### Fixed
+- Fixed unavailable execution costs being normalized toward neutral defaults in order evidence.
+- Fixed effective-RR evidence gaps by persisting the full penalty breakdown.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for valid evidence; incomplete or fake-zero execution contexts now block readiness/precheck paths more explicitly.
+
+### Known Issues
+- LIVE remains NOT READY. Measured exchange evidence, reconciliation, rollback, observability, heartbeat, canary, shadow, and operator readiness remain required.
+
 ## [Unreleased] - 2026-06-22 (LIVE_PRECHECK no-submit parity evidence)
 
 ### Added

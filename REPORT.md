@@ -1,3 +1,60 @@
+## 2026-06-22 Patch Addendum — Execution realism evidence contract
+
+### Why this patch was needed
+P1-2 required spread, slippage, latency, liquidity, funding, orderbook, volatility, and effective-RR evidence to be measurable, explicit, and fail-closed across BACKTEST, PAPER, and LIVE_PRECHECK.
+
+### Root cause
+Execution context normalization still allowed some unavailable fields to become neutral numeric defaults, and effective-RR persistence did not expose a complete penalty breakdown with a readiness-grade evidence classifier.
+
+### Files changed
+- `src/alphaforge/execution.py`
+- `src/alphaforge/effective_rr.py`
+- `src/alphaforge/order.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_execution_layer.py`
+- `tests/test_live_readiness.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added execution evidence statuses: `COMPLETE_MEASURED`, `PARTIAL_ESTIMATED`, `UNAVAILABLE_BLOCKING`, and `INVALID_FAKE_ZERO`.
+- PAPER/LIVE-style prechecks require measured evidence and flag missing or fake-zero fields.
+- BACKTEST can use estimated execution fields only when explicitly labeled as estimates such as `ESTIMATED_BACKTEST`.
+- Effective RR now persists a full cost breakdown instead of only a final adjusted value.
+
+### Lifecycle changes
+No lifecycle vocabulary changed. Decision evidence attached to lifecycle/order artifacts now carries execution-evidence status and penalty breakdown for auditability.
+
+### Persistence changes
+No schema migration. Existing JSON payload fields now include `effective_rr_breakdown` and expanded `execution_metrics` with raw RR and per-cost penalties.
+
+### Export/schema changes
+No CSV/schema shape was changed in this patch. JSON evidence is additive.
+
+### Tests added
+- Missing spread/slippage/funding remain null and block instead of becoming zero.
+- Fake measured zero context is classified `INVALID_FAKE_ZERO`.
+- Costs reduce effective RR and can trigger `LOW_EFFECTIVE_RR`.
+- BACKTEST estimates classify as `PARTIAL_ESTIMATED`.
+- LIVE_PRECHECK invalid execution evidence blocks readiness.
+- Order decision persistence includes the effective-RR penalty breakdown.
+
+### Tests executed
+- `pytest -q tests/test_execution_layer.py tests/test_live_readiness.py tests/test_runtime_heartbeat.py tests/test_exchange_connectivity.py tests/test_backtest*`
+
+### Risks
+The fake-zero detector is intentionally conservative for measured zero cost fields; legitimate zero measurements must include explicit zero-verification evidence before they should be considered complete.
+
+### Remaining limitations
+Upstream exchange/scanner modules still determine whether evidence is measured or estimated. LIVE remains blocked until measured execution evidence, reconciliation, heartbeat, rollback, observability, canary/shadow, and operator gates all pass.
+
+### Migration concerns
+None; persistence changes are additive JSON payload content only.
+
+### Push recommendation
+Safe to push as P1-2 execution-realism hardening. Do not enable LIVE trading.
+
 ## 2026-06-22 Patch Addendum — LIVE_PRECHECK no-submit parity evidence
 
 ### Why this patch was needed
