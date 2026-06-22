@@ -1,3 +1,14 @@
+## 2026-06-22 Execution realism evidence contract
+- **Current version:** 0.3.46-dev
+- **Current phase:** P1-2 execution realism evidence hardening.
+- **Runtime maturity:** PAPER/BACKTEST/LIVE_PRECHECK execution-cost evidence is classified before effective-RR decisions; missing or fake-zero execution evidence fails closed instead of becoming zero-cost input.
+- **BACKTEST/PAPER/LIVE alignment:** Shared execution evidence classifier and effective-RR breakdown are used by order prechecks; BACKTEST may label estimates as `ESTIMATED_BACKTEST`, while PAPER/LIVE_PRECHECK require measured evidence for readiness.
+- **Lifecycle coverage:** Order decision payloads persist execution evidence status and full penalty breakdown for accepted/rejected pre-submit decisions.
+- **Execution realism coverage:** Effective RR now records raw RR, spread, slippage, latency, liquidity, funding, volatility penalties, and adjusted RR.
+- **Known critical risks:** Evidence quality still depends on upstream exchange/scanner fields; missing required execution inputs block readiness and must not be patched with fake zeros.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; LIVE remains blocked and fake/missing execution evidence is an explicit blocker.
+
 ## 2026-06-22 LIVE_PRECHECK no-submit parity evidence
 - **Current version:** 0.3.45-dev
 - **Current phase:** P1-1 no-submit LIVE_PRECHECK parity hardening.

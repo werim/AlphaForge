@@ -75,3 +75,102 @@ def test_unknown_execution_context_not_treated_as_zero() -> None:
         assert not ok
         assert "UNKNOWN_EXECUTION_CONTEXT" in payload["execution_flags"]
         assert payload["effective_rr"] == pytest.approx(1.4, rel=1e-6)
+
+from alphaforge.execution import (
+    EXECUTION_EVIDENCE_INVALID_FAKE_ZERO,
+    EXECUTION_EVIDENCE_PARTIAL_ESTIMATED,
+    classify_execution_evidence,
+)
+
+
+def _measured_ctx(**overrides):
+    ctx = {
+        "expected_slippage_pct": 0.001,
+        "slippage_status": "MEASURED",
+        "spread_pct": 0.001,
+        "spread_status": "MEASURED",
+        "latency_ms": 50,
+        "latency_status": "MEASURED",
+        "market_data_latency_status": "MEASURED",
+        "liquidity_score": 0.9,
+        "liquidity_status": "MEASURED",
+        "funding_rate_pct": 0.001,
+        "funding_status": "MEASURED",
+        "orderbook_imbalance": 0.1,
+        "orderbook_status": "MEASURED",
+        "volatility_regime": "normal",
+        "volatility_status": "MEASURED",
+    }
+    ctx.update(overrides)
+    return ctx
+
+
+def test_missing_spread_slippage_funding_do_not_become_zero() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        ok, payload = before_real_order(
+            s,
+            {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 2.0},
+            {"execution_ctx": _measured_ctx(spread_pct=None, expected_slippage_pct=None, funding_rate_pct=None)},
+            {"alignment": 0.8},
+            {},
+        )
+        assert not ok
+        assert payload["execution_ctx"]["spread_pct"] is None
+        assert payload["execution_ctx"]["expected_slippage_pct"] is None
+        assert payload["execution_ctx"]["funding_rate_pct"] is None
+        assert "UNKNOWN_EXECUTION_CONTEXT" in payload["execution_flags"]
+
+
+def test_fake_zero_context_classified_invalid_when_measured_required() -> None:
+    ctx = _measured_ctx(spread_pct=0.0, expected_slippage_pct=0.0)
+    assert classify_execution_evidence(ctx, require_measured=True) == EXECUTION_EVIDENCE_INVALID_FAKE_ZERO
+
+
+def test_low_effective_rr_reject_when_costs_destroy_setup() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        ok, payload = before_real_order(
+            s,
+            {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 1.25},
+            {"execution_ctx": _measured_ctx(expected_slippage_pct=0.006, spread_pct=0.004, liquidity_score=0.5)},
+            {"alignment": 0.8},
+            {},
+        )
+        assert not ok
+        assert payload["effective_rr"] < 1.1
+        assert "LOW_EFFECTIVE_RR" in payload["execution_flags"]
+        assert payload["reject_reason"]
+
+
+def test_backtest_estimated_fields_labeled_estimated() -> None:
+    ctx = _measured_ctx(
+        spread_status="ESTIMATED_BACKTEST",
+        slippage_status="ESTIMATED_BACKTEST",
+        liquidity_status="ESTIMATED_BACKTEST",
+        volatility_status="ESTIMATED_BACKTEST",
+    )
+    assert classify_execution_evidence(ctx, require_measured=False) == EXECUTION_EVIDENCE_PARTIAL_ESTIMATED
+
+
+def test_persistence_includes_effective_rr_penalty_breakdown() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as s:
+        before_real_order(
+            s,
+            {"symbol": "BTCUSDT", "quantity": 1, "entry_price": 100, "risk_reward": 2.0},
+            {"execution_ctx": _measured_ctx()},
+            {"alignment": 0.8},
+            {},
+        )
+        row = s.execute(text("SELECT order_payload FROM order_decisions ORDER BY id DESC LIMIT 1")).one()
+        payload = json.loads(row.order_payload)
+        breakdown = payload["effective_rr_breakdown"]
+        assert breakdown["raw_rr"] == pytest.approx(2.0)
+        assert "spread_penalty" in breakdown
+        assert "slippage_penalty" in breakdown
+        assert "latency_penalty" in breakdown
+        assert "liquidity_penalty" in breakdown
+        assert "funding_penalty" in breakdown
+        assert "volatility_penalty" in breakdown
+        assert breakdown["effective_rr"] < breakdown["raw_rr"]

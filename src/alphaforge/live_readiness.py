@@ -159,13 +159,17 @@ class LiveReadinessEvaluator:
         missing_count, missing_ok = self._parse_non_negative_int(mode_parity.get("missing_field_count", 0) if mode_parity else 0)
         no_submit_verified = bool(mode_parity.get("no_submit_verified", mode_parity.get("no_order_submission_verified", False)))
         execution_context_complete = bool(mode_parity.get("execution_context_complete", False))
-        parity_ok = status == "COMPLETE" and sample_ok and min_ok and mismatch_ok and missing_ok and sample_count >= min_samples and mismatch_count == 0 and missing_count == 0 and no_submit_verified and execution_context_complete
+        execution_evidence_status = str(mode_parity.get("execution_evidence_status", "COMPLETE_MEASURED") or "").upper()
+        execution_evidence_blocking = execution_evidence_status in {"UNAVAILABLE_BLOCKING", "INVALID_FAKE_ZERO", "INCOMPLETE", "UNAVAILABLE"}
+        parity_ok = status == "COMPLETE" and sample_ok and min_ok and mismatch_ok and missing_ok and sample_count >= min_samples and mismatch_count == 0 and missing_count == 0 and no_submit_verified and execution_context_complete and not execution_evidence_blocking
         configured = bool(reconciliation.get("provider_configured", False))
         evidence_status = str(reconciliation.get("evidence_status") or "INCOMPLETE").upper()
         complete = configured and evidence_status == "COMPLETE"
         no_orphans = int(reconciliation.get("orphan_positions", 0)) == 0 and int(reconciliation.get("orphan_orders", 0)) == 0
         parity_details = "MODE_PARITY_UNVERIFIED" if not parity_ok else f"parity={dict(mode_parity)}"
-        if not execution_context_complete:
+        if execution_evidence_blocking:
+            parity_details = f"LIVE_PRECHECK_EXECUTION_EVIDENCE_BLOCKING:{execution_evidence_status}"
+        elif not execution_context_complete:
             parity_details = "LIVE_PRECHECK_EXECUTION_CONTEXT_MISSING"
         elif not no_submit_verified:
             parity_details = "LIVE_PRECHECK_NO_SUBMIT_UNVERIFIED"
