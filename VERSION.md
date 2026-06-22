@@ -1,3 +1,14 @@
+## 2026-06-22 LIVE_PRECHECK no-submit parity evidence
+- **Current version:** 0.3.45-dev
+- **Current phase:** P1-1 no-submit LIVE_PRECHECK parity hardening.
+- **Runtime maturity:** Added LIVE_PRECHECK as evidence-gathering mode that evaluates the same normalized decision/reject pipeline used for PAPER while refusing real submit/cancel/modify behavior.
+- **BACKTEST/PAPER/LIVE alignment:** PAPER and LIVE_PRECHECK decisions are compared on the same normalized input snapshot with hash, score, raw RR, effective RR, reject reason, and execution context.
+- **Lifecycle coverage:** LIVE_PRECHECK accepted candidates stop before exchange mutation; rejected decisions remain explicit and accepted precheck evidence is persisted as order-decision evidence with `phase=live_precheck`.
+- **Execution realism coverage:** Precheck evidence requires non-missing execution context; missing execution context blocks readiness unless a future research-only override is explicitly designed.
+- **Known critical risks:** LIVE_PRECHECK parity alone does not unlock LIVE_REAL_ORDERS; runtime heartbeat, reconciliation, rollback, observability, canary, shadow, and operator gates remain required.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; no real order submission/cancel/modify capability was added.
+
 ## 2026-06-22 Dashboard test import CI repair
 - **Current version:** 0.3.44-dev
 - **Current phase:** P0-4 dashboard control CI stabilization.

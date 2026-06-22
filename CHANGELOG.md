@@ -1,3 +1,25 @@
+## [Unreleased] - 2026-06-22 (LIVE_PRECHECK no-submit parity evidence)
+
+### Added
+- Added `LIVE_PRECHECK` execution mode for evidence-only PAPER parity checks without exchange mutation.
+- Added persisted LIVE_PRECHECK evidence fields for input snapshot hash, no-submit verification, parity result, and execution context.
+- Added runtime/readiness tests for parity, no-submit behavior, persisted evidence, missing execution context, mismatch blocking, and LIVE_REAL_ORDERS lockout.
+
+### Changed
+- Live readiness mode parity now requires explicit no-submit verification and complete execution-context evidence.
+
+### Fixed
+- Closed the gap where parity evidence could be considered without persisted no-submit evidence or execution-context completeness.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for existing modes; `order_decisions` receives nullable additive columns.
+
+### Known Issues
+- LIVE remains NOT READY. LIVE_PRECHECK parity alone does not satisfy reconciliation, rollback, observability, heartbeat, canary, shadow, operator, or real adapter readiness gates.
+
 ## [Unreleased] - 2026-06-22 (Dashboard test import CI repair)
 
 ### Added

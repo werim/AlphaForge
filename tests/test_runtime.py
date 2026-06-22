@@ -519,3 +519,95 @@ def test_runtime_scan_refuses_new_work_when_persisted_kill_switch_on() -> None:
     assert called["scanner"] == 0
     assert orchestrator.metrics.scans == 0
     assert orchestrator._last_scan_gate_blockers == ["KILL_SWITCH_ACTIVE"]
+
+class _ParityBrain:
+    def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
+        score_ctx = self.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)
+        plan = self.choose_order_plan(signal_payload, market_ctx, score_ctx)
+        return score_ctx, plan, self.explain_decision(signal_payload, score_ctx, plan)
+
+    def score_signal(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
+        class _Score:
+            total_score = 0.88
+        return _Score()
+
+    def choose_order_plan(self, signal_payload, market_ctx, score_ctx):
+        class _Plan:
+            decision = "ACCEPTED"
+            reason = ""
+            confidence = 0.88
+            order_type = "MARKET"
+            limit_price = None
+            stop_price = None
+        return _Plan()
+
+    def explain_decision(self, signal_payload, score_ctx, order_plan):
+        return "parity-test"
+
+class _MutationTrapAdapter:
+    def __init__(self) -> None:
+        self.submit_calls = 0
+        self.cancel_calls = 0
+        self.modify_calls = 0
+
+    async def submit(self, decision, market_ctx):
+        self.submit_calls += 1
+        raise AssertionError("LIVE_PRECHECK must not submit")
+
+    async def cancel(self, *args, **kwargs):
+        self.cancel_calls += 1
+        raise AssertionError("LIVE_PRECHECK must not cancel")
+
+    async def modify(self, *args, **kwargs):
+        self.modify_calls += 1
+        raise AssertionError("LIVE_PRECHECK must not modify")
+
+
+def test_live_precheck_uses_paper_decision_pipeline_and_does_not_submit(tmp_path: Path) -> None:
+    db_path = tmp_path / "live_precheck.sqlite3"
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
+    brain = AIBrain(Session(engine), min_accept_score=0.62)
+    adapter = _MutationTrapAdapter()
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 9999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),
+        ai_brain=_ParityBrain(),
+        market_scanner=scanner,
+        real_execution_adapter=adapter,
+        persistence_engine=engine,
+    )
+    asyncio.run(orchestrator._scan_once())
+
+    assert adapter.submit_calls == 0
+    assert adapter.cancel_calls == 0
+    assert adapter.modify_calls == 0
+    assert orchestrator.metrics.executions == 0
+    with Session(engine) as session:
+        row = session.execute(text("""
+            SELECT mode, phase, no_submit_verified, parity_result, input_snapshot_hash, execution_ctx_missing, order_payload
+            FROM order_decisions WHERE mode='LIVE_PRECHECK' AND phase='live_precheck'
+        """)).mappings().one()
+    payload = __import__("json").loads(row["order_payload"])
+    assert row["no_submit_verified"] == 1
+    assert row["parity_result"] == "PASS"
+    assert row["input_snapshot_hash"]
+    assert row["execution_ctx_missing"] == 0
+    assert payload["paper"]["decision"] == payload["live_precheck"]["decision"]
+    assert payload["mismatch_fields"] == []
+
+
+def test_live_precheck_execute_path_is_no_submit_even_if_called_directly() -> None:
+    adapter = _MutationTrapAdapter()
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=adapter,
+    )
+    asyncio.run(orchestrator._execute("BTCUSDT", {"order_type": "MARKET"}, {"entry": 100.0}))
+    assert adapter.submit_calls == 0
+    assert orchestrator.metrics.executions == 1
+    assert orchestrator._active_positions == {}

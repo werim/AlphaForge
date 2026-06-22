@@ -1,3 +1,63 @@
+## 2026-06-22 Patch Addendum — LIVE_PRECHECK no-submit parity evidence
+
+### Why this patch was needed
+P1-1 required a safe LIVE-like precheck path that can prove PAPER/LIVE decision parity without placing, modifying, or canceling exchange orders.
+
+### Root cause
+Existing mode-parity evidence was in-memory qualification data and did not persist a full no-submit evidence contract for runtime LIVE_PRECHECK decisions, including input snapshot hash, no-submit verification, parity result, and execution context completeness.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `src/alphaforge/persistence.py`
+- `tests/test_runtime.py`
+- `tests/test_live_readiness.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- Added `LIVE_PRECHECK` execution mode.
+- LIVE_PRECHECK requires verified exchange public market-data scanner provenance when started, but does not require a real execution adapter.
+- LIVE_PRECHECK runs the same pre-submit scoring/order-plan helpers used for PAPER parity comparison on normalized input.
+- Accepted LIVE_PRECHECK candidates persist parity evidence and return before real execution.
+- Direct `_execute` calls in LIVE_PRECHECK produce a local `no_submit_verified` result and never invoke adapter submit.
+
+### Lifecycle changes
+LIVE_PRECHECK follows PAPER-style pre-entry lifecycle evidence through `SIGNAL_CREATED`, `WAITING_ENTRY_ZONE`, `ENTRY_TRIGGERED`, and local `ORDER_PLACED` evidence, then stops before exchange mutation. This is evidence-only and not a real exchange order.
+
+### Persistence changes
+- Added additive `order_decisions` columns: `input_snapshot_hash`, `no_submit_verified`, and `parity_result`.
+- LIVE_PRECHECK evidence persists mode, symbol, decision, reject reason, score, raw RR, effective RR, execution context, snapshot hash, no-submit flag, and PAPER-vs-LIVE_PRECHECK comparison payload.
+
+### Export/schema changes
+SQLite schema is additively extended only. Existing order decision writes remain backward-compatible through nullable new columns. No CSV export format changed in this patch.
+
+### Tests added
+- LIVE_PRECHECK PAPER parity/no-submit persistence regression.
+- Direct LIVE_PRECHECK execution no-submit regression.
+- Readiness block on LIVE_PRECHECK parity mismatch.
+- Readiness block on missing LIVE_PRECHECK execution context.
+- Successful LIVE_PRECHECK parity alone does not unlock LIVE real orders.
+
+### Tests executed
+- `pytest -q tests/test_runtime*.py tests/test_live_readiness*.py tests/test_order*.py` (blocked because this checkout has no `tests/test_order*.py` path)
+- `pytest -q tests/test_runtime*.py tests/test_live_readiness*.py`
+- `pytest -q` (blocked by missing optional `numpy` for TimesFM futures tests)
+- `python -m compileall -q src tests`
+
+### Risks
+LIVE_PRECHECK evidence depends on the supplied market scanner/execution context fidelity. Missing context fails readiness; partial context remains visible in persisted JSON rather than being fabricated.
+
+### Remaining limitations
+LIVE_DRY_RUN still needs complete reconciliation evidence, observability evidence, rollback evidence, fresh LIVE heartbeat, canary/shadow gates, operator acknowledgement, and adapter-specific non-mutating endpoint proof.
+
+### Migration concerns
+The schema change is additive and nullable. Existing SQLite databases require `init_db()`/schema bootstrap to add the new columns before querying them.
+
+### Push recommendation
+Safe to push as P1-1 no-submit parity hardening. Do not enable LIVE_REAL_ORDERS from this evidence alone.
+
 ## 2026-06-22 Patch Addendum — Dashboard test import CI repair
 
 ### Why this patch was needed

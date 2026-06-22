@@ -25,7 +25,7 @@ def _seed_valid(session: Session) -> None:
 
 
 def _parity() -> dict[str, object]:
-    return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True}
+    return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True, "no_submit_verified": True, "execution_context_complete": True}
 
 
 def _reconciliation() -> dict[str, object]:
@@ -234,3 +234,34 @@ def test_invalid_numeric_parity_evidence_fails_closed_and_persists_report() -> N
     evaluator.persist_report(report)
     with engine.begin() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1
+
+
+def test_live_precheck_parity_mismatch_blocks_readiness() -> None:
+    engine = _engine()
+    parity = _parity()
+    parity["mismatch_count"] = 1
+    parity["evidence_status"] = "INCOMPLETE"
+    report = LiveReadinessEvaluator(engine).evaluate(mode_parity=parity, reconciliation_snapshot=_reconciliation(), observability_snapshot=_operational(), canary_enabled=True, shadow_mode_enabled=True, operator_ack=True)
+    mode_parity = next(check for check in report.checks if check.name == "mode_parity")
+    assert report.qualified is False
+    assert mode_parity.passed is False
+
+
+def test_live_precheck_missing_execution_context_blocks_readiness() -> None:
+    engine = _engine()
+    parity = _parity()
+    parity["execution_context_complete"] = False
+    report = LiveReadinessEvaluator(engine).evaluate(mode_parity=parity, reconciliation_snapshot=_reconciliation(), observability_snapshot=_operational(), canary_enabled=True, shadow_mode_enabled=True, operator_ack=True)
+    mode_parity = next(check for check in report.checks if check.name == "mode_parity")
+    assert report.qualified is False
+    assert mode_parity.passed is False
+    assert "LIVE_PRECHECK_EXECUTION_CONTEXT_MISSING" in mode_parity.details
+
+
+def test_successful_live_precheck_parity_alone_does_not_unlock_live_real_orders() -> None:
+    engine = _engine(persist_alert=False, persist_rollback=False, persist_live_heartbeat=False)
+    report = LiveReadinessEvaluator(engine).evaluate(mode_parity=_parity(), reconciliation_snapshot=_reconciliation(), observability_snapshot=_operational(), canary_enabled=True, shadow_mode_enabled=True, operator_ack=True)
+    results = {check.name: check for check in report.checks}
+    assert results["mode_parity"].passed is True
+    assert report.qualified is False
+    assert results["runtime_heartbeat"].passed is False

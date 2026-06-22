@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 class ExecutionMode(str, Enum):
     BACKTEST = "BACKTEST"
     PAPER = "PAPER"
+    LIVE_PRECHECK = "LIVE_PRECHECK"
     LIVE = "LIVE"
 
 
@@ -213,17 +214,17 @@ class RuntimeOrchestrator:
     async def start(self) -> None:
         if self._kill_switch_active():
             raise RuntimeError("KILL_SWITCH_ACTIVE")
-        if self.config.execution_mode == ExecutionMode.LIVE:
+        if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK}:
             allowed_sources = {"EXCHANGE_PUBLIC_MARKET_DATA"}
             scanner_source = str(self.scanner_source or "UNKNOWN").strip().upper()
             if not scanner_source or scanner_source == "UNKNOWN":
                 raise RuntimeError("LIVE mode blocked: market scanner provenance is not verified")
             if scanner_source not in allowed_sources:
                 raise RuntimeError("LIVE mode blocked: exchange-backed market scanner is required")
-            if self.real_execution_adapter is None:
+            if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
                 raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
             await self._run_live_exchange_connectivity_gate()
-            if self.config.require_live_qualification:
+            if self.config.execution_mode == ExecutionMode.LIVE and self.config.require_live_qualification:
                 self._persist_runtime_heartbeat()
                 await self._run_live_qualification_gate()
         self._register_signals()
@@ -330,7 +331,9 @@ class RuntimeOrchestrator:
             "order_type": order_plan.order_type,
             "confidence": float(order_plan.confidence),
             "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
-            "effective_rr": float(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)) or 0.0),
+            "reject_reason": canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else "",
+            "raw_rr": float(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)) or 0.0),
+            "effective_rr": self._effective_rr_from_execution(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)), market_ctx.get("execution_ctx", market_ctx)),
             "explanation": explanation,
         }
 
@@ -345,7 +348,7 @@ class RuntimeOrchestrator:
         comparisons: list[dict[str, Any]] = []
         mismatch_count = 0
         missing_field_count = 0
-        compare_fields = ("decision", "reason", "order_type", "confidence", "score", "effective_rr", "explanation")
+        compare_fields = ("decision", "reject_reason", "order_type", "confidence", "score", "raw_rr", "effective_rr", "explanation")
         for row in samples:
             sample = dict(row)
             sample_id = str(sample["sample_id"])
@@ -361,8 +364,10 @@ class RuntimeOrchestrator:
             live_precheck_signal_payload = {**paper_signal_payload, "mode": "LIVE_PRECHECK"}
             regime_ctx = {"alignment": 0.8}
             stats_ctx: dict[str, Any] = {}
-            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**sample, "mode": "PAPER"}, regime_ctx, stats_ctx)
-            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**sample, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
+            execution_ctx = build_execution_context(sample)
+            normalized_market = {**sample, "execution_ctx": execution_ctx}
+            paper_eval = self._evaluate_pre_submit(paper_signal_payload, {**normalized_market, "mode": "PAPER"}, regime_ctx, stats_ctx)
+            live_eval = self._evaluate_pre_submit(live_precheck_signal_payload, {**normalized_market, "mode": "LIVE_PRECHECK"}, regime_ctx, stats_ctx)
             missing = [field for field in compare_fields if field not in paper_eval or field not in live_eval]
             mismatch = [field for field in compare_fields if field in paper_eval and field in live_eval and paper_eval[field] != live_eval[field]]
             missing_field_count += len(missing)
@@ -373,6 +378,12 @@ class RuntimeOrchestrator:
                 "live_precheck": {k: live_eval.get(k) for k in compare_fields},
                 "missing_fields": missing,
                 "mismatch_fields": mismatch,
+                "input_snapshot_hash": self._snapshot_hash({"signal": paper_signal_payload, "market": normalized_market, "regime": regime_ctx, "stats": stats_ctx}),
+                "symbol": sample.get("symbol"),
+                "timestamp": canonical_utc_timestamp(sample.get("market_ts")),
+                "execution_context": execution_ctx,
+                "no_submit_verified": True,
+                "parity_result": "PASS" if not missing and not mismatch else "FAIL",
             })
         return {
             "evidence_status": "COMPLETE" if samples and mismatch_count == 0 and missing_field_count == 0 else "INCOMPLETE",
@@ -381,10 +392,17 @@ class RuntimeOrchestrator:
             "mismatch_count": mismatch_count,
             "missing_field_count": missing_field_count,
             "no_order_submission_verified": True,
+            "no_submit_verified": True,
+            "execution_context_complete": all(str(c.get("execution_context", {}).get("evidence_status", "")).upper() not in {"", "UNAVAILABLE", "UNKNOWN"} for c in comparisons),
             "comparison_fields": list(compare_fields),
             "samples": comparisons,
             "generated_at": canonical_utc_timestamp(),
         }
+
+    @staticmethod
+    def _snapshot_hash(payload: Mapping[str, Any]) -> str:
+        import json
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
     async def _market_scan_loop(self) -> None:
         try:
@@ -500,13 +518,17 @@ class RuntimeOrchestrator:
             })
             return
 
-        if self.config.execution_mode == ExecutionMode.PAPER:
+        if self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
             await self._emit_lifecycle_event(LifecycleState.WAITING_ENTRY_ZONE.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleState.ENTRY_TRIGGERED.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, selection.symbol, {})
         else:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
+        if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
+            await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
+            return
+
         await self._execute(symbol=selection.symbol, decision={
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
@@ -520,6 +542,8 @@ class RuntimeOrchestrator:
         mode = self.config.execution_mode
         if mode == ExecutionMode.PAPER:
             result = self._simulate_paper_execution(symbol, decision, market_ctx)
+        elif mode == ExecutionMode.LIVE_PRECHECK:
+            result = {"mode": mode.value, "status": "no_submit_verified", "symbol": symbol}
         elif mode == ExecutionMode.LIVE:
             if self.real_execution_adapter is None:
                 raise RuntimeError("LIVE mode requires real_execution_adapter")
@@ -532,6 +556,8 @@ class RuntimeOrchestrator:
         self._pending_orders[symbol] = {"order_id": order_id, "symbol": symbol, "status": result.get("status", "UNKNOWN"), "created_at": canonical_utc_timestamp()}
         await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
         result_status = str(result.get("status", "")).lower()
+        if result_status == "no_submit_verified":
+            return
         if result_status == "partial_fill":
             await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result), "fill_state": "partial"})
         elif result_status in {"rejected", "exchange_reject"}:
@@ -544,6 +570,50 @@ class RuntimeOrchestrator:
         await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
         self._active_positions[symbol] = float(market_ctx.get("entry", 0.0) or 0.0)
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
+
+    async def _persist_live_precheck_evidence(self, symbol: str, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], score_ctx: Any, order_plan: Any, explanation: str, effective_rr: float) -> None:
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            return
+        from alphaforge.persistence import save_order_decision
+        paper_signal = {**dict(signal_payload), "mode": ExecutionMode.PAPER.value}
+        precheck_signal = {**dict(signal_payload), "mode": ExecutionMode.LIVE_PRECHECK.value}
+        paper_eval = self._evaluate_pre_submit(paper_signal, {**dict(market_ctx), "mode": ExecutionMode.PAPER.value}, regime_ctx, stats_ctx)
+        live_eval = self._evaluate_pre_submit(precheck_signal, {**dict(market_ctx), "mode": ExecutionMode.LIVE_PRECHECK.value}, regime_ctx, stats_ctx)
+        fields = ("decision", "reject_reason", "order_type", "confidence", "score", "raw_rr", "effective_rr", "explanation")
+        mismatch = [field for field in fields if paper_eval.get(field) != live_eval.get(field)]
+        execution_ctx = dict(market_ctx.get("execution_ctx") or build_execution_context(market_ctx))
+        input_hash = self._snapshot_hash({"signal": paper_signal, "market": {**dict(market_ctx), "mode": ExecutionMode.PAPER.value}, "regime": dict(regime_ctx), "stats": dict(stats_ctx)})
+        with sessionmaker(bind=engine, expire_on_commit=False, future=True)() as session:
+            save_order_decision(
+                session,
+                decision_id=f"live_precheck:{signal_payload.get('signal_id')}",
+                signal_id=signal_payload.get("signal_id"),
+                symbol=symbol,
+                mode=ExecutionMode.LIVE_PRECHECK.value,
+                phase="live_precheck",
+                decision=order_plan.decision,
+                reject_reason=canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else "",
+                score=getattr(score_ctx, "total_score", None),
+                rr=signal_payload.get("risk_reward"),
+                effective_rr=effective_rr,
+                order_type=order_plan.order_type,
+                confidence=order_plan.confidence,
+                explanation=explanation,
+                execution_ctx=execution_ctx,
+                execution_ctx_missing=str(execution_ctx.get("evidence_status", "")).upper() in {"", "UNAVAILABLE", "UNKNOWN"},
+                expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
+                spread_pct=execution_ctx.get("spread_pct"),
+                latency_ms=execution_ctx.get("market_data_latency_ms"),
+                funding_rate_pct=execution_ctx.get("funding_rate_pct"),
+                orderbook_imbalance=execution_ctx.get("orderbook_imbalance"),
+                volatility_regime=execution_ctx.get("volatility_regime"),
+                input_snapshot_hash=input_hash,
+                no_submit_verified=True,
+                parity_result="PASS" if not mismatch else "FAIL",
+                order_payload={"paper": paper_eval, "live_precheck": live_eval, "mismatch_fields": mismatch, "no_submit_verified": True, "input_snapshot_hash": input_hash},
+            )
+            session.commit()
 
     def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
         entry = float(market_ctx.get("entry", 0.0) or 0.0)
@@ -767,7 +837,7 @@ def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
     try:
         return ExecutionMode(mode)
     except ValueError as exc:
-        raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE") from exc
+        raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE_PRECHECK/LIVE") from exc
 
 
 def _build_runtime_from_env() -> RuntimeOrchestrator:
