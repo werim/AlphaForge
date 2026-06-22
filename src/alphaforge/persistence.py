@@ -101,6 +101,9 @@ def init_db(database_url: str | None = None) -> Engine:
             payload TEXT,
             execution_ctx TEXT,
             execution_ctx_missing INTEGER,
+            input_snapshot_hash TEXT,
+            no_submit_verified INTEGER,
+            parity_result TEXT,
             created_at TEXT,
             updated_at TEXT
         )
@@ -293,6 +296,9 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("funding_rate_pct", "funding_rate_pct REAL DEFAULT 0.0"),
             ("execution_regime", "execution_regime TEXT"),
             ("volatility_regime", "volatility_regime TEXT"),
+            ("input_snapshot_hash", "input_snapshot_hash TEXT"),
+            ("no_submit_verified", "no_submit_verified INTEGER"),
+            ("parity_result", "parity_result TEXT"),
             ("created_at", "created_at TEXT"),
             ("updated_at", "updated_at TEXT"),
         ],
@@ -588,12 +594,12 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
             decision_id, signal_id, order_id, symbol, mode, phase, decision, order_type, confidence, explanation,
             reject_reason, score, rr, effective_rr, expectancy_bucket, order_payload, payload, execution_ctx,
             execution_ctx_missing, expected_slippage_pct, spread_pct, latency_ms, orderbook_imbalance,
-            funding_rate_pct, execution_regime, volatility_regime, created_at, updated_at
+            funding_rate_pct, execution_regime, volatility_regime, input_snapshot_hash, no_submit_verified, parity_result, created_at, updated_at
         ) VALUES (
             :decision_id, :signal_id, :order_id, :symbol, :mode, :phase, :decision, :order_type, :confidence, :explanation,
             :reject_reason, :score, :rr, :effective_rr, :expectancy_bucket, :order_payload, :payload, :execution_ctx,
             :execution_ctx_missing, :expected_slippage_pct, :spread_pct, :latency_ms, :orderbook_imbalance,
-            :funding_rate_pct, :execution_regime, :volatility_regime, :created_at, :updated_at
+            :funding_rate_pct, :execution_regime, :volatility_regime, :input_snapshot_hash, :no_submit_verified, :parity_result, :created_at, :updated_at
         )
         ON CONFLICT(decision_id) DO UPDATE SET
             signal_id=excluded.signal_id, order_id=excluded.order_id, symbol=excluded.symbol, mode=excluded.mode,
@@ -603,7 +609,9 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
             execution_ctx=excluded.execution_ctx, execution_ctx_missing=excluded.execution_ctx_missing,
             expected_slippage_pct=excluded.expected_slippage_pct, spread_pct=excluded.spread_pct, latency_ms=excluded.latency_ms,
             orderbook_imbalance=excluded.orderbook_imbalance, funding_rate_pct=excluded.funding_rate_pct,
-            execution_regime=excluded.execution_regime, volatility_regime=excluded.volatility_regime, updated_at=excluded.updated_at
+            execution_regime=excluded.execution_regime, volatility_regime=excluded.volatility_regime,
+            input_snapshot_hash=excluded.input_snapshot_hash, no_submit_verified=excluded.no_submit_verified,
+            parity_result=excluded.parity_result, updated_at=excluded.updated_at
     """), {
         "decision_id": decision_id, "signal_id": decision.get("signal_id"), "order_id": decision.get("order_id"),
         "symbol": decision.get("symbol"), "mode": decision.get("mode"), "decision": decision.get("decision"),
@@ -616,6 +624,9 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "latency_ms": decision.get("latency_ms"), "orderbook_imbalance": decision.get("orderbook_imbalance"),
         "funding_rate_pct": decision.get("funding_rate_pct"), "execution_regime": decision.get("execution_regime"),
         "volatility_regime": decision.get("volatility_regime"),
+        "input_snapshot_hash": decision.get("input_snapshot_hash"),
+        "no_submit_verified": 1 if bool(decision.get("no_submit_verified", False)) else 0,
+        "parity_result": decision.get("parity_result"),
         "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", execution_ctx.get("evidence_status") in {"UNAVAILABLE", None})) else 0,
         "created_at": now, "updated_at": now,
     })
