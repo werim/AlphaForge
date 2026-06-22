@@ -1,3 +1,23 @@
+## [Unreleased] - 2026-06-22 (Dashboard test import CI repair)
+
+### Added
+- None.
+
+### Changed
+- Imported SQLAlchemy `create_engine` in dashboard tests so audit-event queries execute in full CI.
+
+### Fixed
+- Fixed full-suite CI failures in dashboard kill-switch/audit tests caused by a missing test import.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY; no runtime behavior changed.
+
 ## [Unreleased] - 2026-06-21 (Dashboard kill switch/PAPER-LIVE fail-closed audit)
 
 ### Added

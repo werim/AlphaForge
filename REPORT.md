@@ -1,3 +1,46 @@
+## 2026-06-22 Patch Addendum — Dashboard test import CI repair
+
+### Why this patch was needed
+CI full-suite execution exposed that the new dashboard audit tests referenced `create_engine` without importing it in environments where dashboard dependencies are installed and the tests execute instead of skipping.
+
+### Root cause
+Local optional dependency availability caused `tests/test_dashboard_app.py` to skip during the earlier targeted run, so the missing SQLAlchemy import was not exercised locally.
+
+### Files changed
+- `tests/test_dashboard_app.py`
+- `REPORT.md`
+- `CHANGELOG.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+None. This is a test/import repair only.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+None.
+
+### Tests added
+No new assertions; existing dashboard audit tests can now execute in CI.
+
+### Tests executed
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_kill_switch_survives_restart_and_audits tests/test_dashboard_app.py::test_dashboard_paper_switch_accepted_and_live_blocked_without_readiness` (skipped locally because optional dashboard test dependencies are unavailable)
+- `pytest -q` (blocked locally during collection by missing optional `numpy` for TimesFM futures tests)
+- `python -m compileall -q src tests`
+
+### Risks
+Low; import-only test repair.
+
+### Remaining limitations
+LIVE remains NOT READY; this repair does not change runtime controls or readiness posture.
+
+### Push recommendation
+Safe to push as CI repair for the P0-4 dashboard-control test coverage.
+
 ## 2026-06-21 Patch Addendum — Dashboard kill switch/PAPER-LIVE fail-closed audit
 
 ### Why this patch was needed
