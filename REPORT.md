@@ -1,3 +1,53 @@
+## 2026-06-23 Patch Addendum — SQLite/Alembic schema bootstrap repair
+
+### Why this patch was needed
+Fresh and partial legacy SQLite bootstraps must create runtime research evidence tables before any dependent indexes. A failure in this path cascades into TimesFM persistence and many downstream tests because the canonical `timesfm_forecast_evidence` table is absent.
+
+### Root cause
+SQLite validates the target table when creating an index, even when the index DDL uses `IF NOT EXISTS`. The TimesFM evidence index therefore cannot be allowed to appear in a bootstrap sequence unless the `timesfm_forecast_evidence` table has already been created. Alembic also did not have a dedicated runtime repair revision for the TimesFM evidence tables, and partial legacy databases could reach later revisions without `config_snapshots` present.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `alembic/versions/0003_sqlite_bootstrap_runtime_tables.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `tests/test_alembic_revision_graph.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+`init_db()` now obtains TimesFM evidence DDL from a dedicated helper that returns the table definitions before the dependent index. This is an additive bootstrap repair only; no order decision logic, reject thresholds, lifecycle vocabulary, or LIVE behavior changed.
+
+### Lifecycle changes
+None. Existing lifecycle persistence remains additive and unchanged.
+
+### Persistence changes
+Fresh SQLite databases and partial legacy databases now idempotently create `timesfm_forecast_evidence`, `timesfm_forward_outcome_labels`, and the TimesFM lookup index without dropping data. Repeated `init_db()` calls preserve existing TimesFM evidence rows.
+
+### Export/schema changes
+Added Alembic revision `0003_sqlite_bootstrap_runtime_tables` so `alembic upgrade head` creates the runtime TimesFM evidence tables and defensively repairs missing `config_snapshots` on partial legacy databases. No existing columns were removed or relaxed.
+
+### Tests added
+- `init_db()` creates TimesFM evidence columns before the TimesFM index on fresh SQLite.
+- Repeated `init_db()` calls preserve existing TimesFM evidence rows.
+- Alembic head upgrade asserts `config_snapshots`, `timesfm_forecast_evidence`, `timesfm_forward_outcome_labels`, and the TimesFM index exist.
+
+### Tests executed
+- `pytest -q tests/test_sqlite_schema_bootstrap.py tests/test_alembic_revision_graph.py`
+- `pytest -q`
+
+### Risks
+Low. The patch is additive and idempotent. It does not drop data, does not rewrite rows, and does not alter trading decisions.
+
+### Remaining limitations
+This repair only guarantees schema bootstrap availability. It does not validate TimesFM forecast quality, execution cost realism, or LIVE readiness.
+
+### Migration concerns
+Alembic head advances to `0003_sqlite_bootstrap_runtime_tables`. Operators should apply the new migration before relying on TimesFM persistence in Alembic-managed SQLite databases.
+
+### Push recommendation
+Safe to push after full tests pass. LIVE remains blocked by readiness gates.
+
 ## 2026-06-23 Patch Addendum — BACKTEST/PAPER pre-submit parity adapter
 
 ### Why this patch was needed

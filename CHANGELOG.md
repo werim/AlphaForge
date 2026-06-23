@@ -1,3 +1,25 @@
+## 2026-06-23 SQLite/Alembic schema bootstrap repair
+
+### Added
+- Added an Alembic runtime bootstrap revision for `timesfm_forecast_evidence`, `timesfm_forward_outcome_labels`, and defensive `config_snapshots` repair on partial legacy databases.
+- Added regression coverage for TimesFM SQLite bootstrap order, idempotent row preservation, and Alembic head table/index creation.
+
+### Changed
+- Centralized TimesFM SQLite DDL so the evidence table is always emitted before its dependent index.
+
+### Fixed
+- Fixed fresh SQLite bootstrap risk where `CREATE INDEX ... ON timesfm_forecast_evidence(...)` could run before the evidence table existed.
+- Fixed Alembic fresh-head coverage for runtime TimesFM evidence tables and partial legacy `config_snapshots` absence.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only repairs schema bootstrapping and does not alter trading readiness gates.
+
 ## 2026-06-23 BACKTEST/PAPER pre-submit parity adapter
 
 ### Added

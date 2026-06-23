@@ -60,6 +60,54 @@ def _sqlite_columns(db_path: str, table_name: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
+def test_init_db_bootstraps_timesfm_evidence_before_indexes(tmp_path) -> None:
+    db_path = tmp_path / "fresh_timesfm.db"
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+
+    expected_columns = {
+        "forecast_id",
+        "timestamp",
+        "symbol",
+        "timeframe",
+        "side",
+        "mode",
+        "no_lookahead_input_end_ts",
+    }
+    assert expected_columns.issubset(_sqlite_columns(str(db_path), "timesfm_forecast_evidence"))
+    with sqlite3.connect(db_path) as conn:
+        index_row = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='index' AND name='ix_timesfm_evidence_symbol_timeframe_ts'
+            """
+        ).fetchone()
+        assert index_row is not None
+
+
+def test_init_db_preserves_existing_timesfm_evidence_rows_on_repeated_calls(tmp_path) -> None:
+    db_path = tmp_path / "timesfm_idempotent.db"
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO timesfm_forecast_evidence (
+                forecast_id, timestamp, symbol, timeframe, side, mode, no_lookahead_input_end_ts
+            ) VALUES ('forecast-preserved', 1, 'BTCUSDT', '1m', 'NO_TRADE', 'BACKTEST', 1)
+            """
+        )
+        conn.commit()
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+
+    with sqlite3.connect(db_path) as conn:
+        preserved = conn.execute(
+            "SELECT COUNT(*) FROM timesfm_forecast_evidence WHERE forecast_id='forecast-preserved'"
+        ).fetchone()[0]
+        assert preserved == 1
+
+
 def test_init_db_migrates_legacy_order_decisions_schema(tmp_path) -> None:
     db_path = tmp_path / "legacy_order_decisions.db"
     with sqlite3.connect(db_path) as conn:
