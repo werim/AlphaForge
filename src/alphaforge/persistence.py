@@ -440,26 +440,27 @@ def _apply_sqlite_migrations(conn: Any) -> None:
                 END
             WHERE execution_ctx_missing IS NOT NULL
         """))
-    if "event_type" not in lifecycle_cols:
+    if lifecycle_cols and "event_type" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN event_type TEXT"))
-    if "payload" not in lifecycle_cols:
+    if lifecycle_cols and "payload" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN payload TEXT"))
-    if "lifecycle_seq" not in lifecycle_cols:
+    if lifecycle_cols and "lifecycle_seq" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN lifecycle_seq INTEGER"))
-    if "cancel_reason" not in lifecycle_cols:
+    if lifecycle_cols and "cancel_reason" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN cancel_reason TEXT"))
-    if "lifecycle_id" not in lifecycle_cols:
+    if lifecycle_cols and "lifecycle_id" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN lifecycle_id TEXT"))
-    if "failure_reason" not in lifecycle_cols:
+    if lifecycle_cols and "failure_reason" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN failure_reason TEXT"))
-    if "reconciliation_reason" not in lifecycle_cols:
+    if lifecycle_cols and "reconciliation_reason" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN reconciliation_reason TEXT"))
-    if "incident_payload" not in lifecycle_cols:
+    if lifecycle_cols and "incident_payload" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN incident_payload TEXT"))
     closed_trade_cols = _sqlite_columns(conn, "closed_trade_reviews")
-    if "execution_metrics" not in closed_trade_cols:
+    if closed_trade_cols and "execution_metrics" not in closed_trade_cols:
         conn.execute(text("ALTER TABLE closed_trade_reviews ADD COLUMN execution_metrics TEXT"))
-    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
+    if lifecycle_cols:
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
     for version, notes in migrations:
         if version not in existing:
             conn.execute(text("INSERT INTO schema_migrations(version, applied_at, notes) VALUES (:v, :at, :n)"), {"v": version, "at": _utc_now_iso(), "n": notes})

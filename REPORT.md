@@ -1,3 +1,52 @@
+## 2026-06-23 Patch Addendum — SQLite/Alembic bootstrap regression hardening
+
+### Why this patch was needed
+Local evidence showed failures could still be caused by bootstrap control flow rather than missing text: a table/index DDL string may exist in source while the executed sequence still reaches a dependent index or migration read too early.
+
+### Root cause
+The repaired code already contains the required helpers, but regression coverage needed to assert executable ordering directly: `schema_migrations` must be created before `_apply_sqlite_migrations()` reads versions, `timesfm_forecast_evidence` must precede `ix_timesfm_evidence_symbol_timeframe_ts` in the actual helper list, and SQLite Alembic head must leave `config_snapshots` present before append-only triggers are created. The new direct partial-database regression also exposed a second control-flow defect: after bootstrapping `schema_migrations`, `_apply_sqlite_migrations()` could continue into lifecycle `ALTER TABLE` and index statements even when `trade_lifecycle_events` or `closed_trade_reviews` did not exist.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `tests/test_alembic_revision_graph.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+`_apply_sqlite_migrations()` still creates `schema_migrations` before reading versions, but now guards lifecycle/review table ALTER and lifecycle index DDL behind actual table existence. This keeps partial legacy migrations additive/idempotent without hiding missing-table errors behind try/except and without dropping data.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+No schema shape changed. Regression tests now prove partial SQLite migrations create `schema_migrations` before selecting from it, skip dependent ALTER/INDEX DDL for absent optional tables, and preserve the migration bookkeeping path.
+
+### Export/schema changes
+None. Alembic fresh-head coverage now also verifies `config_snapshots` append-only triggers exist.
+
+### Tests added
+- Direct TimesFM DDL helper order assertion.
+- Direct partial-database `_apply_sqlite_migrations()` schema_migrations bootstrap assertion, including safe handling when lifecycle/review tables are absent.
+- Fresh SQLite Alembic head assertion for `config_snapshots` no-update/no-delete triggers.
+
+### Tests executed
+- `python -m pytest -q tests/test_sqlite_schema_bootstrap.py tests/test_alembic_revision_graph.py`
+- `python -m pytest -q`
+
+### Risks
+Low. The code change only prevents dependent ALTER/INDEX DDL from running when the target table is absent; no trading path, thresholds, table drops, or data rewrites were introduced.
+
+### Remaining limitations
+These tests protect bootstrap ordering but do not validate forecast quality, execution realism, or LIVE readiness.
+
+### Migration concerns
+None for this addendum.
+
+### Push recommendation
+Safe to push after targeted and full tests pass. LIVE remains blocked by readiness gates.
+
 ## 2026-06-23 Patch Addendum — SQLite/Alembic schema bootstrap repair
 
 ### Why this patch was needed
@@ -827,6 +876,7 @@ Safe to push after review. LIVE remains NOT READY.
 - Partial legacy databases can contain runtime tables and user rows while still lacking `schema_migrations`.
 
 ### Files changed
+- `src/alphaforge/persistence.py`
 - `tests/test_sqlite_schema_bootstrap.py`
 - `VERSION.md`
 - `REPORT.md`
@@ -879,6 +929,7 @@ Safe to push after review. LIVE remains NOT READY.
 - Fresh dashboard/readiness database paths can query rollback evidence status before any evidence has been persisted.
 
 ### Files changed
+- `src/alphaforge/persistence.py`
 - `src/alphaforge/persistence.py`
 - `tests/test_sqlite_schema_bootstrap.py`
 - `VERSION.md`
@@ -1905,6 +1956,7 @@ Runtime, persistence, and export paths still emitted mixed lifecycle vocabularie
 - `schema_migrations`
 
 ### Files changed
+- `src/alphaforge/persistence.py`
 - `src/alphaforge/persistence.py`
 - `tests/test_sqlite_schema_bootstrap.py`
 - `VERSION.md`

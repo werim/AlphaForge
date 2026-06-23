@@ -1,3 +1,14 @@
+## 2026-06-23 SQLite/Alembic schema bootstrap regression hardening
+- **Current version:** 0.3.52-dev
+- **Current phase:** SQLite and Alembic runtime schema bootstrap regression hardening.
+- **Runtime maturity:** Fresh and partial legacy SQLite bootstraps now create schema_migrations before migration reads, create TimesFM evidence tables before dependent indexes, avoid ALTER/INDEX statements against absent optional legacy tables, and Alembic head verifies append-only config snapshot triggers after table creation.
+- **BACKTEST/PAPER/LIVE alignment:** Persistence bootstrap is shared infrastructure only; no mode-specific decision/reject behavior changed.
+- **Lifecycle coverage:** Lifecycle migration repairs now only alter/index `trade_lifecycle_events` when that table exists, preserving partial legacy bootstrap safety without changing lifecycle semantics.
+- **Execution realism coverage:** Unchanged; no fake execution evidence, scores, RR values, or synthetic outcomes were added.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch fixes schema bootstrap/migration safety only.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; regression hardening does not enable LIVE order placement.
+
 ## 2026-06-23 SQLite/Alembic schema bootstrap repair
 - **Current version:** 0.3.51-dev
 - **Current phase:** SQLite and Alembic runtime schema bootstrap hardening.

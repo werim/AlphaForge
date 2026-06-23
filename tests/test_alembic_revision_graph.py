@@ -83,3 +83,13 @@ def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Pa
             """
         ).fetchone()
         assert index_row is not None
+        trigger_rows = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='trigger'
+              AND tbl_name='config_snapshots'
+              AND name IN ('trg_config_snapshots_no_update', 'trg_config_snapshots_no_delete')
+            ORDER BY name
+            """
+        ).fetchall()
+        assert trigger_rows == [('trg_config_snapshots_no_delete',), ('trg_config_snapshots_no_update',)]
