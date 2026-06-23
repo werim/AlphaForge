@@ -1,3 +1,14 @@
+## 2026-06-23 PR-01 Lifecycle Contract + SQL Truth Audit
+- **Current version:** 0.3.56-dev
+- **Current phase:** SQL-first lifecycle vocabulary contract and export-persistence audit hardening.
+- **Runtime maturity:** Added a canonical lifecycle contract module and documentation; SQL lifecycle persistence now rejects unknown lifecycle states and maps legacy/internal labels explicitly before new persistence/export rows are written.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST exports and PAPER/LIVE runtime compatibility keep using existing flows, with canonical lifecycle normalization added at persistence/export boundaries; no risk thresholds or trade-frequency gates were loosened.
+- **Lifecycle coverage:** Canonical states now cover `SIGNAL_CREATED`, `SIGNAL_REJECTED`, `WAITING_ENTRY_ZONE`, `ENTRY_TRIGGERED`, `ORDER_PLACED`, `ORDER_REJECTED`, `POSITION_OPENED`, `POSITION_CLOSED`, `ENTRY_TIMEOUT`, and `CANCELLED`; legacy `CREATED` is compatibility-mapped to `SIGNAL_CREATED` and is not canonical.
+- **Execution realism coverage:** Unchanged; unknown execution cost remains unavailable/null/missing evidence, not zero-cost evidence.
+- **Known critical risks:** Score/RR variability, reject/cancel completeness, SQL-derived dashboard audit depth, and lifecycle-accurate backtest terminal semantics still need later PRs.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; this contract/audit patch does not enable LIVE order placement.
+
 ## 2026-06-23 Work 1.1 SQLite schema bootstrap stabilization
 - **Current version:** 0.3.55-dev
 - **Current phase:** SQL-first SQLite schema bootstrap ordering hardening.
