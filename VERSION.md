@@ -1,3 +1,14 @@
+## 2026-06-23 BACKTEST/PAPER pre-submit parity adapter
+- **Current version:** 0.3.50-dev
+- **Current phase:** BACKTEST/PAPER canonical pre-submit parity audit.
+- **Runtime maturity:** Added a no-submit adapter that lets BACKTEST invoke PAPER-style pre-submit execution-cost checks without Binance live calls.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER can now be parity-tested through the same candidate, quality, expectancy, effective-RR, and execution-flag gates; LIVE remains disabled and unchanged.
+- **Lifecycle coverage:** Adapter audit rows preserve accepted `ORDER_PLACED` and rejected `SIGNAL_REJECTED` outcomes for parity verification.
+- **Execution realism coverage:** Effective-RR, HIGH_SPREAD, LOW_EFFECTIVE_RR, and missing/invalid execution-evidence flags are evaluated through the shared execution-cost model.
+- **Known critical risks:** RuntimeOrchestrator PAPER still has additional runtime gates (kill switch, stale data, cooldown, exposure, funding sanity) outside `backtest_order.py` scan flow; full orchestrator/backtest unification remains future work.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; no LIVE submit path or threshold loosening was added.
+
 ## 2026-06-23 LIVE readiness aggregator CI repair
 - **Current version:** 0.3.49-dev
 - **Current phase:** P2-2 final gate API compatibility repair.

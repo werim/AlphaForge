@@ -1,3 +1,24 @@
+## 2026-06-23 BACKTEST/PAPER pre-submit parity adapter
+
+### Added
+- Added `evaluate_paper_style_pre_submit(...)` for BACKTEST/PAPER no-submit parity checks using shared candidate-quality and execution-cost gates.
+- Added parity tests for LOW_SCORE, LOW_EFFECTIVE_RR, EXPECTANCY_MISSING, HIGH_SPREAD, accepted lifecycle audit sequence, and rejected lifecycle audit sequence.
+
+### Changed
+- BACKTEST can now run PAPER-style pre-submit effective-RR execution checks without Binance live-order calls when using the adapter.
+
+### Fixed
+- Documented and tested the remaining gap between `backtest_order.py` scan flow and `RuntimeOrchestrator._process_symbol`.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- The adapter does not enable LIVE and does not remove PAPER runtime-only gates such as kill switch, stale data, cooldown, funding sanity, or exposure limits.
+
 
 ## [Unreleased] - 2026-06-23 (LIVE readiness aggregator CI repair)
 

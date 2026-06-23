@@ -1,3 +1,53 @@
+## 2026-06-23 Patch Addendum — BACKTEST/PAPER pre-submit parity adapter
+
+### Why this patch was needed
+The audit showed BACKTEST uses `order.run_order_cycle(...)` in `backtest_order.py`, while PAPER runtime uses `RuntimeOrchestrator._process_symbol(...)` and `AIBrain.before_real_order(...)`. A minimal no-submit adapter was needed to prove shared pre-submit reject behavior without enabling LIVE or Binance order calls.
+
+### Root cause
+The shared candidate-quality gate already lived in `alphaforge.order.run_order_cycle(...)`, but PAPER-style execution-cost pre-submit flags were not exposed as a safe BACKTEST/PAPER parity adapter. `backtest_order.py` also has local post-cycle execution rejects, while `RuntimeOrchestrator` has runtime-only risk gates.
+
+### Files changed
+- `src/alphaforge/order.py`
+- `tests/test_backtest_paper_pre_submit_parity.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Added `evaluate_paper_style_pre_submit(...)`, a no-submit adapter that calls `run_order_cycle(...)` and then applies the shared effective-RR execution flag calculation in PAPER mode. Existing runtime flows are unchanged unless callers opt into the adapter.
+
+### Lifecycle changes
+No lifecycle vocabulary changed. Adapter audit storage records accepted candidates as `ORDER_PLACED` and rejected pre-submit candidates as `SIGNAL_REJECTED` for parity assertions.
+
+### Persistence changes
+None. The adapter is side-effect-light and does not write SQL by itself. Existing persistence helpers remain unchanged.
+
+### Export/schema changes
+None.
+
+### Tests added
+- BACKTEST/PAPER parity for LOW_SCORE.
+- BACKTEST/PAPER parity for LOW_EFFECTIVE_RR.
+- BACKTEST/PAPER parity for EXPECTANCY_MISSING.
+- BACKTEST/PAPER parity for HIGH_SPREAD.
+- Accepted candidate audit lifecycle parity.
+- Rejected candidate audit lifecycle parity.
+
+### Tests executed
+- `pytest -q tests/test_backtest_paper_pre_submit_parity.py`
+
+### Risks
+Low. The adapter does not enable LIVE, does not loosen thresholds, and does not alter existing backtest or PAPER runtime entrypoints by default.
+
+### Remaining limitations
+`RuntimeOrchestrator._process_symbol(...)` still has additional PAPER runtime gates (kill switch, stale market data, cooldown, exposure, funding sanity) that are not part of the backtest scanner. Full orchestrator/backtest unification remains separate work.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push as a parity-test adapter. Do not enable LIVE.
+
 
 ## 2026-06-23 Patch Addendum — LIVE readiness aggregator CI repair
 
