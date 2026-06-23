@@ -1,3 +1,14 @@
+## 2026-06-23 Persistence/lifecycle contract regression coverage
+- **Current version:** 0.3.53-dev
+- **Current phase:** Persistence API and accepted lifecycle regression hardening.
+- **Runtime maturity:** Scalar expectancy reads, SQLite runtime compatibility columns, and accepted backtest lifecycle ordering are now covered by direct regression tests.
+- **BACKTEST/PAPER/LIVE alignment:** No decision thresholds changed; tests preserve shared persistence contracts and accepted BACKTEST lifecycle continuity through `WAITING_ENTRY_ZONE`.
+- **Lifecycle coverage:** Accepted backtest lifecycle ordering is asserted to include `WAITING_ENTRY_ZONE` before `ENTRY_TRIGGERED`.
+- **Execution realism coverage:** Unchanged; no fake execution costs, scores, RR values, or fills were introduced.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch guards regressions only.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; regression coverage does not enable LIVE order placement.
+
 ## 2026-06-23 SQLite/Alembic schema bootstrap regression hardening
 - **Current version:** 0.3.52-dev
 - **Current phase:** SQLite and Alembic runtime schema bootstrap regression hardening.

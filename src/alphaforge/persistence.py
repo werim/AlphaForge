@@ -324,6 +324,11 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("created_at", "created_at TEXT"),
         ],
         "trade_lifecycle_events": [
+            ("event_id", "event_id TEXT"),
+            ("signal_id", "signal_id TEXT"),
+            ("order_id", "order_id TEXT"),
+            ("symbol", "symbol TEXT"),
+            ("mode", "mode TEXT"),
             ("trade_id", "trade_id TEXT"),
             ("state", "state TEXT"),
             ("event_type", "event_type TEXT"),
@@ -459,7 +464,8 @@ def _apply_sqlite_migrations(conn: Any) -> None:
     closed_trade_cols = _sqlite_columns(conn, "closed_trade_reviews")
     if closed_trade_cols and "execution_metrics" not in closed_trade_cols:
         conn.execute(text("ALTER TABLE closed_trade_reviews ADD COLUMN execution_metrics TEXT"))
-    if lifecycle_cols:
+    lifecycle_cols = _sqlite_columns(conn, "trade_lifecycle_events")
+    if {"signal_id", "event_ts", "lifecycle_state"}.issubset(lifecycle_cols):
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
     for version, notes in migrations:
         if version not in existing:
@@ -471,7 +477,7 @@ def fetch_expectancy_stat_detail(session: Any, table_name: str, key_column: str,
     if session is None:
         return None
     try:
-        row = session.execute(f"SELECT * FROM {table_name} WHERE {key_column} = :key_value LIMIT 1", {"key_value": key_value}).fetchone()
+        row = session.execute(text(f"SELECT * FROM {table_name} WHERE {key_column} = :key_value LIMIT 1"), {"key_value": key_value}).fetchone()
     except Exception:
         return None
     if not row:

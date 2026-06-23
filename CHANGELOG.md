@@ -1,3 +1,25 @@
+## 2026-06-23 Persistence/lifecycle contract regression coverage
+
+### Added
+- Added regression coverage for the legacy scalar `fetch_expectancy_stat(...)` contract, separate expectancy metadata detail helper, idempotent legacy runtime-column repair, and accepted backtest `WAITING_ENTRY_ZONE` ordering.
+
+### Changed
+- Documentation now records that the persistence/lifecycle contract fixes are guarded by executable tests.
+- SQLite legacy lifecycle table repair now adds base lifecycle audit columns before creating the uniqueness index.
+
+### Fixed
+- Protected against regressions that would return structured fallback dictionaries from the scalar expectancy API, omit legacy compatibility columns during SQLite bootstrap repair, or skip `WAITING_ENTRY_ZONE` before accepted backtest entry triggers.
+- Fixed scalar expectancy SQL execution under SQLAlchemy 2 by wrapping dynamic SELECT statements in executable `text(...)`.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch adds regression coverage and does not change trading thresholds.
+
 ## 2026-06-23 SQLite/Alembic bootstrap regression hardening
 
 ### Added
