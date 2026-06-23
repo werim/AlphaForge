@@ -12,6 +12,7 @@ import logging
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from alphaforge.contracts import canonical_reject_reason, canonical_utc_timestamp, validate_transition
+from alphaforge.lifecycle_contract import normalize_lifecycle_event
 
 
 
@@ -763,11 +764,15 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
     now = _utc_now_iso()
     event_id = event.get("event_id") or event.get("id") or f"{event.get('symbol', 'UNKNOWN')}:{canonical_utc_timestamp(event.get('event_ts'))}:{event.get('lifecycle_state') or event.get('state') or 'UNKNOWN'}"
     signal_id = event.get("signal_id") or f"UNKNOWN_SIGNAL:{event.get('symbol', 'UNKNOWN')}:{canonical_utc_timestamp(event.get('event_ts'))}"
-    lifecycle_state = event.get("lifecycle_state") or event.get("state")
+    raw_lifecycle_state = event.get("lifecycle_state") or event.get("state")
+    try:
+        lifecycle_state = normalize_lifecycle_event(raw_lifecycle_state)
+    except ValueError:
+        return None
     prev_state = event.get("previous_lifecycle_state")
     is_valid = validate_transition(prev_state, lifecycle_state) if lifecycle_state else False
     if not is_valid and prev_state is not None:
-        lifecycle_state = "ERROR"
+        return None
     payload = {
         "event_id": event_id, "signal_id": signal_id, "order_id": event.get("order_id"), "symbol": event.get("symbol"),
         "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),

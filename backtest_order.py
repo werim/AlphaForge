@@ -15,6 +15,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 from alphaforge.execution import build_execution_context, build_execution_cost_model, normalize_pct_input
 from alphaforge.config import load_config_from_env
+from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
 from alphaforge.historical_market_data import (
@@ -1210,7 +1211,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 row_value == "UNAVAILABLE_BACKTEST"
                 for row_value in (row.volume_24h_usdt, row.spread_pct, row.funding_rate_pct, row.expected_slippage_pct, row.liquidity_score)
             )
-            lifecycle_state = row.status_after
+            lifecycle_state = normalize_lifecycle_event(row.status_after)
             if lifecycle_state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}:
                 decision = "REJECTED"
             elif lifecycle_state == "SIGNAL_CREATED":

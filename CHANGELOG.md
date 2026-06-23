@@ -1,3 +1,26 @@
+## 2026-06-23 PR-01 Lifecycle Contract + SQL Truth Audit
+
+### Added
+- Added canonical lifecycle constants, legacy-state mapping, unknown-state rejection, and transition-test helpers.
+- Added `docs/decision_lifecycle_contract.md` documenting canonical state definitions, required fields, accepted/rejected flow, BACKTEST/PAPER/LIVE distinction, and unavailable execution-cost handling.
+- Added lifecycle contract regression tests for canonical acceptance, unknown rejection, legacy `CREATED` mapping, transition validation, and docs/code state parity.
+
+### Changed
+- Normalized backtest SQL lifecycle persistence/export rows through the canonical lifecycle contract so legacy/internal states are not emitted as new export truth.
+- Updated lifecycle persistence to reject unknown lifecycle states instead of silently saving them.
+
+### Fixed
+- Prevented new SQL lifecycle rows from persisting legacy `CREATED` as the first exported lifecycle truth.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None intended; legacy/internal lifecycle labels are compatibility-mapped at persistence/export boundaries.
+
+### Known Issues
+- LIVE remains NOT READY. Score/RR placeholders, reject/cancel reason completeness, and deeper SQL/dashboard export audits remain follow-up work.
+
 ## 2026-06-23 Work 1.1 SQLite schema bootstrap stabilization
 
 ### Added

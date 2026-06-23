@@ -1,3 +1,68 @@
+## 2026-06-23 PR-01 Lifecycle Contract + SQL Truth Audit
+
+### Why the patch was needed
+AlphaForge needed one explicit lifecycle vocabulary for SQL-first signal, decision, order, reject, entry, exit, and export evidence. Existing code already had partial lifecycle constants, but legacy/internal states such as `CREATED`, `SIGNAL_ACCEPTED`, `SYMBOL_REJECTED`, and terminal close reasons were not documented as compatibility mappings in one canonical contract.
+
+### Root cause
+Lifecycle semantics were distributed across persistence, runtime, order execution, and backtest export code. That made it possible for exports or audit paths to treat legacy/internal labels as final truth instead of deriving canonical lifecycle evidence from SQL.
+
+### Files/functions inspected
+- `src/alphaforge/persistence.py`: `init_db`, `save_signal`, `save_order_decision`, `save_rejected_decision_artifact`, `save_trade_lifecycle_event`.
+- `src/alphaforge/runtime.py`: `RuntimeOrchestrator._process_symbol`, `_emit_lifecycle_event`, `_persist_reject`, `_persist_lifecycle`.
+- `src/alphaforge/order.py`: `LifecycleState`, `_audit`, pre-submit decision/reject execution flow.
+- `backtest_order.py`: `LifecycleRow`, `simulate_candidate`, `scan`, `_persist_lifecycle_rows`, `verify_export_integrity`, CSV export writing.
+- `src/alphaforge/contracts.py`: shared reject/lifecycle compatibility constants and `validate_transition`.
+
+### Files changed
+- `src/alphaforge/lifecycle_contract.py`
+- `src/alphaforge/contracts.py`
+- `src/alphaforge/persistence.py`
+- `src/alphaforge/__init__.py`
+- `backtest_order.py`
+- `tests/test_lifecycle_contract.py`
+- `docs/decision_lifecycle_contract.md`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Contract added
+Added canonical lifecycle states: `SIGNAL_CREATED`, `SIGNAL_REJECTED`, `WAITING_ENTRY_ZONE`, `ENTRY_TRIGGERED`, `ORDER_PLACED`, `ORDER_REJECTED`, `POSITION_OPENED`, `POSITION_CLOSED`, `ENTRY_TIMEOUT`, and `CANCELLED`. Added explicit compatibility mappings for legacy/internal labels including `CREATED -> SIGNAL_CREATED`, `SIGNAL_ACCEPTED -> WAITING_ENTRY_ZONE`, `SYMBOL_REJECTED -> SIGNAL_REJECTED`, and terminal close reasons into `POSITION_CLOSED`.
+
+### Runtime behavior changes
+No LIVE enablement, risk-threshold loosening, or trade-frequency increase. Runtime compatibility lifecycle constants remain available for existing PAPER/LIVE readiness and reconciliation code.
+
+### Lifecycle changes
+New lifecycle persistence rejects unknown states and normalizes known legacy/internal states before storing new SQL truth. Invalid canonical transitions are now directly testable with `is_valid_lifecycle_transition`.
+
+### Persistence changes
+`save_trade_lifecycle_event` now normalizes lifecycle state through the canonical contract before writing SQL and returns `None` for unknown lifecycle states. Existing schema is unchanged.
+
+### Export/schema changes
+`backtest_order._persist_lifecycle_rows` normalizes lifecycle states before SQL persistence and CSV export reads the persisted SQL rows, preventing new exports from emitting legacy `CREATED` as canonical first state. No schema migration was added.
+
+### Tests added
+Added `tests/test_lifecycle_contract.py` covering canonical states, unknown-state rejection, `CREATED` compatibility mapping without treating it as canonical, invalid transition checks, and docs/code state parity.
+
+### Tests executed
+- `python -m pytest tests/test_lifecycle_contract.py -q` — 5 passed.
+- `pytest -q` — 354 passed, 7 skipped, 165 warnings.
+
+### Risks
+Low-to-medium. Unknown lifecycle states are now rejected instead of being silently persisted, which improves audit truth but can expose any remaining caller that invents non-contract states. Compatibility mappings reduce migration risk for known legacy/internal labels.
+
+### Remaining limitations / known gaps
+- This PR does not fix possible fixed score (`0.8`) or RR (`2.0`) placeholders except by documenting them as follow-up audit risks.
+- This PR does not fully harden reject_reason/cancel_reason completeness.
+- This PR does not prove every dashboard/export query is SQL-derived, only the current backtest lifecycle persistence/export path.
+- This PR does not make lifecycle-accurate backtest complete.
+- LIVE remains NOT_READY.
+
+### Migration concerns
+No schema migration is required. Legacy rows already stored as `CREATED` are not rewritten; new persistence/export rows normalize known legacy/internal states.
+
+### Push recommendation
+Safe to push after full tests pass. Continue with later PRs for score/RR variability, reject/cancel persistence completeness, SQL-derived dashboard audit, and lifecycle-accurate backtest terminal semantics.
+
 ## 2026-06-23 Work 1.1 SQLite schema bootstrap stabilization
 
 ### Why the patch was needed
