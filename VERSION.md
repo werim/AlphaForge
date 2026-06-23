@@ -1,3 +1,14 @@
+## 2026-06-23 SQLite/Alembic config snapshot trigger repair
+- **Current version:** 0.3.54-dev
+- **Current phase:** SQLite/Alembic schema bootstrap ordering and idempotency hardening.
+- **Runtime maturity:** SQLite `init_db()` keeps TimesFM evidence tables ahead of dependent indexes; Alembic runtime bootstrap now also idempotently restores SQLite `config_snapshots` append-only triggers after ensuring the table exists.
+- **BACKTEST/PAPER/LIVE alignment:** Persistence schema bootstrap only; no decision, reject, threshold, or mode-specific runtime behavior changed.
+- **Lifecycle coverage:** Unchanged; lifecycle persistence remains additive and existing rows are preserved.
+- **Execution realism coverage:** Unchanged; no fake execution costs, scores, RR values, or outcomes were introduced.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch only repairs schema bootstrap safety.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; schema trigger repair does not enable LIVE order placement.
+
 ## 2026-06-23 Persistence/lifecycle contract regression coverage
 - **Current version:** 0.3.53-dev
 - **Current phase:** Persistence API and accepted lifecycle regression hardening.

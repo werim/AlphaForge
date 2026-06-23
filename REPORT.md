@@ -1,3 +1,49 @@
+## 2026-06-23 Patch Addendum — SQLite/Alembic config snapshot trigger repair
+
+### Why this patch was needed
+SQLite and Alembic bootstrap paths must be ordered so tables exist before dependent indexes, triggers, or other operations reference them. TimesFM evidence ordering was already guarded in `init_db()`, and the Alembic runtime repair path also needed to preserve the append-only contract when it defensively creates a missing `config_snapshots` table.
+
+### Root cause
+A partially-applied legacy database could reach the runtime bootstrap revision without `config_snapshots`. The revision created the table before later operations, but did not also recreate the SQLite no-update/no-delete triggers in that repair path.
+
+### Files changed
+- `alembic/versions/0003_sqlite_bootstrap_runtime_tables.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None. This is an Alembic schema bootstrap repair only.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+The Alembic runtime bootstrap revision now idempotently creates SQLite `config_snapshots` append-only triggers after ensuring the table exists. Existing rows are preserved; no tables are dropped or recreated.
+
+### Export/schema changes
+No export changes. Schema metadata repair is additive/idempotent for SQLite trigger presence.
+
+### Tests added
+No new tests were required; the existing SQLite bootstrap and Alembic revision graph tests cover the intended table/index/trigger contracts when optional Alembic dependencies are present.
+
+### Tests executed
+- `python -m pytest tests/test_sqlite_schema_bootstrap.py -q`
+- `python -m pytest tests/test_alembic_revision_graph.py -q`
+- `python -m pytest -q`
+
+### Risks
+Low. The patch only adds `CREATE TRIGGER IF NOT EXISTS` statements after the target table exists on SQLite.
+
+### Remaining limitations
+This does not validate forecast quality, execution realism, or LIVE readiness.
+
+### Migration concerns
+None for fresh databases. Partial legacy SQLite databases that have `config_snapshots` but are missing append-only triggers are repaired idempotently during Alembic upgrade.
+
+### Push recommendation
+Safe to push after targeted and full tests pass. LIVE remains blocked by readiness gates.
+
 ## 2026-06-23 Patch Addendum — Persistence/lifecycle contract regression coverage
 
 ### Why this patch was needed

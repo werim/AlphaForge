@@ -1,3 +1,23 @@
+## 2026-06-23 SQLite/Alembic config snapshot trigger repair
+
+### Added
+- Added idempotent SQLite append-only trigger repair for `config_snapshots` in the Alembic runtime bootstrap migration after the table existence check.
+
+### Changed
+- Documentation now records the schema bootstrap trigger-ordering repair and successful regression test run.
+
+### Fixed
+- Fixed partial legacy Alembic upgrade paths where `config_snapshots` could be defensively recreated by the runtime bootstrap revision without restoring its SQLite no-update/no-delete triggers.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only repairs schema bootstrap metadata and does not alter trading behavior.
+
 ## 2026-06-23 Persistence/lifecycle contract regression coverage
 
 ### Added
