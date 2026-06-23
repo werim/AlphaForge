@@ -58,6 +58,57 @@ def _ensure_sqlite_parent_dir(database_url: str) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _timesfm_forecast_evidence_ddl() -> list[str]:
+    """Return TimesFM evidence DDL with tables before dependent indexes.
+
+    SQLite validates the target table when creating an index, even with
+    ``IF NOT EXISTS`` on the index. Keep the canonical evidence table first so
+    fresh databases and partial legacy databases can bootstrap idempotently
+    without dropping or rewriting existing research evidence rows.
+    """
+    return [
+        """
+        CREATE TABLE IF NOT EXISTS timesfm_forecast_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_id TEXT NOT NULL UNIQUE,
+            timestamp INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            horizon INTEGER,
+            current_price REAL,
+            forecast_p10 REAL,
+            forecast_p50 REAL,
+            forecast_p90 REAL,
+            side TEXT NOT NULL,
+            expected_rr REAL,
+            rejection_reason TEXT,
+            mode TEXT NOT NULL,
+            model_provider TEXT,
+            model_name TEXT,
+            model_version TEXT,
+            no_lookahead_input_end_ts INTEGER NOT NULL,
+            payload_json TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS timesfm_forward_outcome_labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_id TEXT NOT NULL UNIQUE,
+            outcome TEXT NOT NULL,
+            mfe REAL,
+            mae REAL,
+            expected_r REAL,
+            realized_r REAL,
+            labeled_at TEXT,
+            payload_json TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_timesfm_evidence_symbol_timeframe_ts ON timesfm_forecast_evidence(symbol, timeframe, timestamp)",
+    ]
+
+
 def init_db(database_url: str | None = None) -> Engine:
     resolved_database_url = (
         database_url
@@ -196,45 +247,7 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS setup_expectancy_stats (setup TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
-        """
-        CREATE TABLE IF NOT EXISTS timesfm_forecast_evidence (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            forecast_id TEXT NOT NULL UNIQUE,
-            timestamp INTEGER NOT NULL,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            horizon INTEGER,
-            current_price REAL,
-            forecast_p10 REAL,
-            forecast_p50 REAL,
-            forecast_p90 REAL,
-            side TEXT NOT NULL,
-            expected_rr REAL,
-            rejection_reason TEXT,
-            mode TEXT NOT NULL,
-            model_provider TEXT,
-            model_name TEXT,
-            model_version TEXT,
-            no_lookahead_input_end_ts INTEGER NOT NULL,
-            payload_json TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS timesfm_forward_outcome_labels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            forecast_id TEXT NOT NULL UNIQUE,
-            outcome TEXT NOT NULL,
-            mfe REAL,
-            mae REAL,
-            expected_r REAL,
-            realized_r REAL,
-            labeled_at TEXT,
-            payload_json TEXT
-        )
-        """,
-        "CREATE INDEX IF NOT EXISTS ix_timesfm_evidence_symbol_timeframe_ts ON timesfm_forecast_evidence(symbol, timeframe, timestamp)",
+        *_timesfm_forecast_evidence_ddl(),
         "CREATE TABLE IF NOT EXISTS cooldown_states (symbol TEXT PRIMARY KEY, cooldown_remaining_sec INTEGER NOT NULL DEFAULT 0)",
     ]
     with engine.begin() as conn:

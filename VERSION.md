@@ -1,3 +1,14 @@
+## 2026-06-23 SQLite/Alembic schema bootstrap repair
+- **Current version:** 0.3.51-dev
+- **Current phase:** SQLite and Alembic runtime schema bootstrap hardening.
+- **Runtime maturity:** Fresh and partial legacy SQLite bootstraps now create TimesFM evidence tables before dependent indexes and Alembic head includes runtime evidence table repair.
+- **BACKTEST/PAPER/LIVE alignment:** Persistence bootstrap is shared infrastructure only; no decision/reject thresholds or mode-specific trading behavior changed.
+- **Lifecycle coverage:** Unchanged; lifecycle tables remain additive and existing rows are preserved during repeated bootstraps.
+- **Execution realism coverage:** TimesFM research evidence persistence is restored without substituting fake execution fields or synthetic outcomes.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch fixes schema availability only and does not prove live execution safety.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; schema bootstrap repair does not enable LIVE order placement.
+
 ## 2026-06-23 BACKTEST/PAPER pre-submit parity adapter
 - **Current version:** 0.3.50-dev
 - **Current phase:** BACKTEST/PAPER canonical pre-submit parity audit.
