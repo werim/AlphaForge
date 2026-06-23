@@ -55,8 +55,8 @@ def test_alembic_script_directory_loads_and_resolves_heads() -> None:
     config = Config(str(REPO_ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0004_align_init_db_baseline_tables"]
-    assert script.get_current_head() == "0004_align_init_db_baseline_tables"
+    assert script.get_heads() == ["0005_core_identifier_normalization"]
+    assert script.get_current_head() == "0005_core_identifier_normalization"
 
 
 def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Path) -> None:

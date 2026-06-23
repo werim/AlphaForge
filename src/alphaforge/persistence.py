@@ -146,6 +146,7 @@ def init_db(database_url: str | None = None) -> Engine:
             signal_id TEXT,
             order_id TEXT,
             symbol TEXT,
+            timeframe TEXT,
             mode TEXT,
             decision TEXT,
             reject_reason TEXT,
@@ -253,16 +254,16 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         *_timesfm_forecast_evidence_ddl(),
 
-        "CREATE TABLE IF NOT EXISTS signal_id_state (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL UNIQUE, last_signal_id TEXT, updated_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT UNIQUE, symbol TEXT, side TEXT, qty REAL, entry_price REAL, status TEXT, created_at TEXT, updated_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT UNIQUE, signal_id TEXT, symbol TEXT, side TEXT, status TEXT, created_at TEXT, updated_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS fills (id INTEGER PRIMARY KEY AUTOINCREMENT, fill_id TEXT UNIQUE, order_id TEXT, symbol TEXT, side TEXT, qty REAL, price REAL, fee REAL, filled_at TEXT, created_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS paper_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE, event_type TEXT, symbol TEXT, payload_json TEXT, created_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS backtest_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT UNIQUE, started_at TEXT, completed_at TEXT, payload_json TEXT)",
-        "CREATE TABLE IF NOT EXISTS backtest_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, event_type TEXT, symbol TEXT, payload_json TEXT, created_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS symbol_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, timeframe TEXT, snapshot_ts TEXT, payload_json TEXT, created_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS runtime_control_state (id INTEGER PRIMARY KEY CHECK (id = 1), mode_requested TEXT NOT NULL, mode_running TEXT, kill_switch_active INTEGER NOT NULL DEFAULT 0, kill_switch_source TEXT, kill_switch_updated_at TEXT, runtime_status TEXT NOT NULL, last_error TEXT, updated_at TEXT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS calibration_labels (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT, label TEXT, payload_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS signal_id_state (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL UNIQUE, last_signal_id TEXT, signal_id TEXT, symbol TEXT, timeframe TEXT, mode TEXT, created_at TEXT, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT UNIQUE, signal_id TEXT, symbol TEXT, timeframe TEXT, mode TEXT, side TEXT, qty REAL, entry_price REAL, status TEXT, created_at TEXT, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT UNIQUE, signal_id TEXT, position_id TEXT, symbol TEXT, timeframe TEXT, mode TEXT, side TEXT, status TEXT, created_at TEXT, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS fills (id INTEGER PRIMARY KEY AUTOINCREMENT, fill_id TEXT UNIQUE, order_id TEXT, position_id TEXT, signal_id TEXT, symbol TEXT, side TEXT, qty REAL, price REAL, fee REAL, filled_at TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS paper_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE, signal_id TEXT, order_id TEXT, position_id TEXT, event_type TEXT, symbol TEXT, timeframe TEXT, mode TEXT, payload_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS backtest_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT UNIQUE, mode TEXT, started_at TEXT, completed_at TEXT, payload_json TEXT, created_at TEXT, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS backtest_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE, run_id TEXT, signal_id TEXT, order_id TEXT, position_id TEXT, event_type TEXT, symbol TEXT, timeframe TEXT, mode TEXT, payload_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS symbol_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, symbol TEXT NOT NULL, timeframe TEXT, mode TEXT, snapshot_ts TEXT, payload_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS runtime_control_state (id INTEGER PRIMARY KEY CHECK (id = 1), mode_requested TEXT NOT NULL, mode_running TEXT, kill_switch_active INTEGER NOT NULL DEFAULT 0, kill_switch_source TEXT, kill_switch_updated_at TEXT, runtime_status TEXT NOT NULL, last_error TEXT, created_at TEXT, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS calibration_labels (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT, run_id TEXT, symbol TEXT, timeframe TEXT, mode TEXT, label TEXT, payload_json TEXT, created_at TEXT)",
         "CREATE TABLE IF NOT EXISTS optimizer_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT UNIQUE, status TEXT, payload_json TEXT, created_at TEXT, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS cooldown_states (symbol TEXT PRIMARY KEY, cooldown_remaining_sec INTEGER NOT NULL DEFAULT 0)",
     ]
@@ -294,6 +295,53 @@ def _add_column_if_missing(conn: Any, table_name: str, column_name: str, ddl: st
         return
     conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
     LOGGER.info("sqlite_schema_migration added column table=%s column=%s", table_name, column_name)
+
+
+CORE_IDENTIFIER_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "signals": [("signal_id", "signal_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT"), ("updated_at", "updated_at TEXT")],
+    "order_decisions": [("decision_id", "decision_id TEXT"), ("signal_id", "signal_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT"), ("updated_at", "updated_at TEXT")],
+    "signal_id_state": [("signal_id", "signal_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT"), ("updated_at", "updated_at TEXT")],
+    "orders": [("order_id", "order_id TEXT"), ("signal_id", "signal_id TEXT"), ("position_id", "position_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT"), ("updated_at", "updated_at TEXT")],
+    "positions": [("position_id", "position_id TEXT"), ("signal_id", "signal_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT"), ("updated_at", "updated_at TEXT")],
+    "fills": [("order_id", "order_id TEXT"), ("position_id", "position_id TEXT"), ("signal_id", "signal_id TEXT"), ("symbol", "symbol TEXT"), ("created_at", "created_at TEXT")],
+    "paper_events": [("event_id", "event_id TEXT"), ("signal_id", "signal_id TEXT"), ("order_id", "order_id TEXT"), ("position_id", "position_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT")],
+    "backtest_runs": [("run_id", "run_id TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT"), ("updated_at", "updated_at TEXT")],
+    "backtest_events": [("event_id", "event_id TEXT"), ("run_id", "run_id TEXT"), ("signal_id", "signal_id TEXT"), ("order_id", "order_id TEXT"), ("position_id", "position_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT")],
+    "symbol_snapshots": [("run_id", "run_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT")],
+    "timesfm_forecast_evidence": [("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("timestamp", "timestamp INTEGER"), ("created_at", "created_at TEXT")],
+    "calibration_labels": [("signal_id", "signal_id TEXT"), ("run_id", "run_id TEXT"), ("symbol", "symbol TEXT"), ("timeframe", "timeframe TEXT"), ("mode", "mode TEXT"), ("created_at", "created_at TEXT")],
+    "optimizer_runs": [("run_id", "run_id TEXT"), ("created_at", "created_at TEXT"), ("updated_at", "updated_at TEXT")],
+}
+
+CORE_IDENTIFIER_INDEXES = [
+    ("ix_signals_signal_id", "signals", "signal_id"),
+    ("ix_order_decisions_decision_id", "order_decisions", "decision_id"),
+    ("ix_order_decisions_signal_id", "order_decisions", "signal_id"),
+    ("ix_orders_order_id", "orders", "order_id"),
+    ("ix_orders_signal_id", "orders", "signal_id"),
+    ("ix_orders_position_id", "orders", "position_id"),
+    ("ix_positions_position_id", "positions", "position_id"),
+    ("ix_positions_signal_id", "positions", "signal_id"),
+    ("ix_fills_order_id", "fills", "order_id"),
+    ("ix_fills_position_id", "fills", "position_id"),
+    ("ix_paper_events_signal_id", "paper_events", "signal_id"),
+    ("ix_paper_events_position_id", "paper_events", "position_id"),
+    ("ix_backtest_events_run_id", "backtest_events", "run_id"),
+    ("ix_backtest_events_signal_id", "backtest_events", "signal_id"),
+    ("ix_calibration_labels_signal_id", "calibration_labels", "signal_id"),
+    ("ix_optimizer_runs_run_id", "optimizer_runs", "run_id"),
+]
+
+
+def _ensure_core_identifier_schema(conn: Any) -> None:
+    for table_name, columns in CORE_IDENTIFIER_COLUMNS.items():
+        if not _sqlite_table_exists(conn, table_name):
+            continue
+        for column_name, ddl in columns:
+            _add_column_if_missing(conn, table_name, column_name, ddl)
+    for index_name, table_name, column_name in CORE_IDENTIFIER_INDEXES:
+        if table_name in CORE_IDENTIFIER_COLUMNS and column_name in _sqlite_columns(conn, table_name):
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}({column_name})"))
 
 
 def _ensure_sqlite_runtime_schema(conn: Any) -> None:
@@ -438,8 +486,10 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         ("2026_05_16_persistence_integrity_v1", "Backfill missing persistence columns and normalize legacy execution_ctx_missing semantics."),
         ("2026_06_19_rollback_evidence_bootstrap", "Ensure fresh SQLite bootstrap creates canonical live rollback validation evidence table."),
         ("2026_06_21_timesfm_canonical_evidence", "Add canonical TimesFM forecast evidence and optional forward outcome labels tables."),
+        ("2026_06_23_core_identifier_normalization", "Add normalized lifecycle identifier columns and safe join indexes."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
+    _ensure_core_identifier_schema(conn)
     _ensure_sqlite_runtime_schema(conn)
     signal_cols = _sqlite_columns(conn, "signals")
     if "signal_id" in signal_cols and "uq_signals_signal_id_not_null" not in existing:

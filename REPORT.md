@@ -1,3 +1,54 @@
+## 2026-06-23 Work 1.3 Core identifier normalization
+
+### Why the patch was needed
+Work 1.1 and Work 1.2 stabilized SQLite bootstrap and Alembic alignment, but core lifecycle tables still had inconsistent identifier surfaces, limiting reliable reconstruction of signals, decisions, orders, positions, PAPER events, BACKTEST events, calibration labels, and optimizer runs.
+
+### Root cause
+The SQL bootstrap historically grew table-by-table. Some tables had only local IDs or legacy timestamps, while related tables lacked `signal_id`, `position_id`, `run_id`, `timeframe`, `mode`, or `updated_at` fields needed for conservative joins.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `alembic/versions/0005_core_identifier_normalization.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `tests/test_alembic_revision_graph.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+No trading behavior changed. The patch only widens SQL tables additively and creates idempotent indexes for common joins.
+
+### Lifecycle changes
+No lifecycle transitions or reject semantics changed. Lifecycle reconstruction is improved by making expected identifiers available across persistence tables.
+
+### Persistence changes
+Added nullable identifier columns where missing for `signals`, `order_decisions`, `signal_id_state`, `orders`, `positions`, `fills`, `paper_events`, `backtest_runs`, `backtest_events`, `symbol_snapshots`, `timesfm_forecast_evidence`, `calibration_labels`, and `optimizer_runs`. Existing rows are preserved and no fake identifier backfill is performed.
+
+### Export/schema changes
+No CSV export behavior changed. Schema compatibility is additive and SQLite-safe.
+
+### Tests added
+Added core identifier schema assertions for fresh `init_db()`, fresh Alembic upgrade, `init_db() -> Alembic`, `Alembic -> init_db()`, important join indexes, and legacy insert-path compatibility.
+
+### Tests executed
+- `python -m pytest -q tests/test_sqlite_schema_bootstrap.py` — 14 passed, 3 skipped.
+- `python -m pytest -q tests/test_alembic_revision_graph.py` — 1 passed, 2 skipped.
+- `python -m pytest -q tests/test_runtime.py` — 35 passed, 54 warnings.
+- `python -m pytest -q tests/test_dashboard_app.py` — 1 skipped; environment does not have dashboard optional dependencies active for this focused file.
+- `python -m pytest -q` — 356 passed, 10 skipped, 165 warnings.
+
+### Risks
+Low-to-medium. Additive nullable columns and indexes are conservative, but legacy rows without deterministic identifiers remain null and require downstream consumers to tolerate unavailable IDs.
+
+### Remaining limitations
+This patch does not normalize historical data, modify runtime trading logic, introduce optimizer behavior, or make LIVE trading ready.
+
+### Migration concerns
+Alembic revision `0005_core_identifier_normalization` is additive only. Downgrade is intentionally non-destructive.
+
+### Push recommendation
+Safe to push if targeted and full pytest suites pass. LIVE remains NOT_READY.
+
 ## 2026-06-23 Work 1.2 Alembic/init_db baseline schema alignment
 
 ### Why the patch was needed

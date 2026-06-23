@@ -366,3 +366,98 @@ def test_init_db_and_alembic_baseline_schema_paths_are_idempotent(tmp_path) -> N
     init_db(_sqlite_url(alembic_then_init))
     _upgrade_alembic_head(alembic_then_init)
     _assert_required_schema(create_engine(_sqlite_url(alembic_then_init), future=True))
+
+CORE_IDENTIFIER_COLUMNS = {
+    "signals": {"signal_id", "symbol", "timeframe", "mode", "created_at", "updated_at"},
+    "order_decisions": {"decision_id", "signal_id", "symbol", "timeframe", "mode", "created_at", "updated_at"},
+    "signal_id_state": {"signal_id", "symbol", "timeframe", "mode", "created_at", "updated_at"},
+    "orders": {"order_id", "signal_id", "position_id", "symbol", "timeframe", "mode", "created_at", "updated_at"},
+    "positions": {"position_id", "signal_id", "symbol", "timeframe", "mode", "created_at", "updated_at"},
+    "fills": {"order_id", "position_id", "signal_id", "symbol", "created_at"},
+    "paper_events": {"event_id", "signal_id", "order_id", "position_id", "symbol", "timeframe", "mode", "created_at"},
+    "backtest_runs": {"run_id", "mode", "created_at", "updated_at"},
+    "backtest_events": {"event_id", "run_id", "signal_id", "order_id", "position_id", "symbol", "timeframe", "mode", "created_at"},
+    "symbol_snapshots": {"run_id", "symbol", "timeframe", "mode", "created_at"},
+    "timesfm_forecast_evidence": {"symbol", "timeframe", "timestamp", "created_at"},
+    "calibration_labels": {"signal_id", "run_id", "symbol", "timeframe", "mode", "created_at"},
+    "optimizer_runs": {"run_id", "created_at", "updated_at"},
+}
+
+CORE_IDENTIFIER_INDEXES = {
+    "ix_signals_signal_id",
+    "ix_order_decisions_decision_id",
+    "ix_order_decisions_signal_id",
+    "ix_orders_order_id",
+    "ix_orders_signal_id",
+    "ix_orders_position_id",
+    "ix_positions_position_id",
+    "ix_positions_signal_id",
+    "ix_fills_order_id",
+    "ix_fills_position_id",
+    "ix_paper_events_signal_id",
+    "ix_paper_events_position_id",
+    "ix_backtest_events_run_id",
+    "ix_backtest_events_signal_id",
+    "ix_calibration_labels_signal_id",
+    "ix_optimizer_runs_run_id",
+}
+
+
+def _assert_core_identifier_schema(engine) -> None:
+    for table_name, expected_columns in CORE_IDENTIFIER_COLUMNS.items():
+        with engine.connect() as conn:
+            columns = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table_name})"))}
+        assert expected_columns.issubset(columns), f"{table_name} missing {expected_columns - columns}"
+    assert CORE_IDENTIFIER_INDEXES.issubset(_index_names(engine))
+
+
+def test_fresh_init_db_creates_core_identifier_columns_and_indexes(tmp_path) -> None:
+    engine = init_db(_sqlite_url(tmp_path / "fresh_init_ids.db"))
+
+    _assert_core_identifier_schema(engine)
+
+
+def test_fresh_alembic_upgrade_creates_core_identifier_columns_and_indexes(tmp_path) -> None:
+    db_path = tmp_path / "fresh_alembic_ids.db"
+    _upgrade_alembic_head(db_path)
+
+    _assert_core_identifier_schema(create_engine(_sqlite_url(db_path), future=True))
+
+
+def test_mixed_init_db_and_alembic_preserve_core_identifier_schema(tmp_path) -> None:
+    init_then_alembic = tmp_path / "init_then_alembic_ids.db"
+    init_db(_sqlite_url(init_then_alembic))
+    _upgrade_alembic_head(init_then_alembic)
+    _assert_core_identifier_schema(create_engine(_sqlite_url(init_then_alembic), future=True))
+
+    alembic_then_init = tmp_path / "alembic_then_init_ids.db"
+    _upgrade_alembic_head(alembic_then_init)
+    engine = init_db(_sqlite_url(alembic_then_init))
+    _assert_core_identifier_schema(engine)
+
+
+def test_legacy_identifier_tables_are_additively_repaired_and_insertable(tmp_path) -> None:
+    db_path = tmp_path / "legacy_core_ids.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT UNIQUE)")
+        conn.execute("INSERT INTO orders (order_id) VALUES ('order-preserved')")
+        conn.execute("CREATE TABLE paper_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE)")
+        conn.commit()
+
+    engine = init_db(_sqlite_url(db_path))
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO paper_events(event_id, signal_id, order_id, position_id, symbol, timeframe, mode, created_at)
+                VALUES ('event-1', 'signal-1', 'order-1', 'position-1', 'BTCUSDT', '1m', 'PAPER', '2026-06-23T00:00:00Z')
+                """
+            )
+        )
+        preserved = conn.execute(text("SELECT COUNT(*) FROM orders WHERE order_id='order-preserved'")).scalar_one()
+        event_count = conn.execute(text("SELECT COUNT(*) FROM paper_events WHERE signal_id='signal-1'")).scalar_one()
+
+    assert preserved == 1
+    assert event_count == 1
+    _assert_core_identifier_schema(engine)
