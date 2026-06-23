@@ -58,6 +58,57 @@ def _ensure_sqlite_parent_dir(database_url: str) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _timesfm_forecast_evidence_ddl() -> list[str]:
+    """Return TimesFM evidence DDL with tables before dependent indexes.
+
+    SQLite validates the target table when creating an index, even with
+    ``IF NOT EXISTS`` on the index. Keep the canonical evidence table first so
+    fresh databases and partial legacy databases can bootstrap idempotently
+    without dropping or rewriting existing research evidence rows.
+    """
+    return [
+        """
+        CREATE TABLE IF NOT EXISTS timesfm_forecast_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_id TEXT NOT NULL UNIQUE,
+            timestamp INTEGER NOT NULL,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            horizon INTEGER,
+            current_price REAL,
+            forecast_p10 REAL,
+            forecast_p50 REAL,
+            forecast_p90 REAL,
+            side TEXT NOT NULL,
+            expected_rr REAL,
+            rejection_reason TEXT,
+            mode TEXT NOT NULL,
+            model_provider TEXT,
+            model_name TEXT,
+            model_version TEXT,
+            no_lookahead_input_end_ts INTEGER NOT NULL,
+            payload_json TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS timesfm_forward_outcome_labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            forecast_id TEXT NOT NULL UNIQUE,
+            outcome TEXT NOT NULL,
+            mfe REAL,
+            mae REAL,
+            expected_r REAL,
+            realized_r REAL,
+            labeled_at TEXT,
+            payload_json TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_timesfm_evidence_symbol_timeframe_ts ON timesfm_forecast_evidence(symbol, timeframe, timestamp)",
+    ]
+
+
 def init_db(database_url: str | None = None) -> Engine:
     resolved_database_url = (
         database_url
@@ -196,45 +247,7 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS setup_expectancy_stats (setup TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
-        """
-        CREATE TABLE IF NOT EXISTS timesfm_forecast_evidence (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            forecast_id TEXT NOT NULL UNIQUE,
-            timestamp INTEGER NOT NULL,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            horizon INTEGER,
-            current_price REAL,
-            forecast_p10 REAL,
-            forecast_p50 REAL,
-            forecast_p90 REAL,
-            side TEXT NOT NULL,
-            expected_rr REAL,
-            rejection_reason TEXT,
-            mode TEXT NOT NULL,
-            model_provider TEXT,
-            model_name TEXT,
-            model_version TEXT,
-            no_lookahead_input_end_ts INTEGER NOT NULL,
-            payload_json TEXT,
-            created_at TEXT,
-            updated_at TEXT
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS timesfm_forward_outcome_labels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            forecast_id TEXT NOT NULL UNIQUE,
-            outcome TEXT NOT NULL,
-            mfe REAL,
-            mae REAL,
-            expected_r REAL,
-            realized_r REAL,
-            labeled_at TEXT,
-            payload_json TEXT
-        )
-        """,
-        "CREATE INDEX IF NOT EXISTS ix_timesfm_evidence_symbol_timeframe_ts ON timesfm_forecast_evidence(symbol, timeframe, timestamp)",
+        *_timesfm_forecast_evidence_ddl(),
         "CREATE TABLE IF NOT EXISTS cooldown_states (symbol TEXT PRIMARY KEY, cooldown_remaining_sec INTEGER NOT NULL DEFAULT 0)",
     ]
     with engine.begin() as conn:
@@ -311,6 +324,11 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("created_at", "created_at TEXT"),
         ],
         "trade_lifecycle_events": [
+            ("event_id", "event_id TEXT"),
+            ("signal_id", "signal_id TEXT"),
+            ("order_id", "order_id TEXT"),
+            ("symbol", "symbol TEXT"),
+            ("mode", "mode TEXT"),
             ("trade_id", "trade_id TEXT"),
             ("state", "state TEXT"),
             ("event_type", "event_type TEXT"),
@@ -427,26 +445,28 @@ def _apply_sqlite_migrations(conn: Any) -> None:
                 END
             WHERE execution_ctx_missing IS NOT NULL
         """))
-    if "event_type" not in lifecycle_cols:
+    if lifecycle_cols and "event_type" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN event_type TEXT"))
-    if "payload" not in lifecycle_cols:
+    if lifecycle_cols and "payload" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN payload TEXT"))
-    if "lifecycle_seq" not in lifecycle_cols:
+    if lifecycle_cols and "lifecycle_seq" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN lifecycle_seq INTEGER"))
-    if "cancel_reason" not in lifecycle_cols:
+    if lifecycle_cols and "cancel_reason" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN cancel_reason TEXT"))
-    if "lifecycle_id" not in lifecycle_cols:
+    if lifecycle_cols and "lifecycle_id" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN lifecycle_id TEXT"))
-    if "failure_reason" not in lifecycle_cols:
+    if lifecycle_cols and "failure_reason" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN failure_reason TEXT"))
-    if "reconciliation_reason" not in lifecycle_cols:
+    if lifecycle_cols and "reconciliation_reason" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN reconciliation_reason TEXT"))
-    if "incident_payload" not in lifecycle_cols:
+    if lifecycle_cols and "incident_payload" not in lifecycle_cols:
         conn.execute(text("ALTER TABLE trade_lifecycle_events ADD COLUMN incident_payload TEXT"))
     closed_trade_cols = _sqlite_columns(conn, "closed_trade_reviews")
-    if "execution_metrics" not in closed_trade_cols:
+    if closed_trade_cols and "execution_metrics" not in closed_trade_cols:
         conn.execute(text("ALTER TABLE closed_trade_reviews ADD COLUMN execution_metrics TEXT"))
-    conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
+    lifecycle_cols = _sqlite_columns(conn, "trade_lifecycle_events")
+    if {"signal_id", "event_ts", "lifecycle_state"}.issubset(lifecycle_cols):
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
     for version, notes in migrations:
         if version not in existing:
             conn.execute(text("INSERT INTO schema_migrations(version, applied_at, notes) VALUES (:v, :at, :n)"), {"v": version, "at": _utc_now_iso(), "n": notes})
@@ -457,7 +477,7 @@ def fetch_expectancy_stat_detail(session: Any, table_name: str, key_column: str,
     if session is None:
         return None
     try:
-        row = session.execute(f"SELECT * FROM {table_name} WHERE {key_column} = :key_value LIMIT 1", {"key_value": key_value}).fetchone()
+        row = session.execute(text(f"SELECT * FROM {table_name} WHERE {key_column} = :key_value LIMIT 1"), {"key_value": key_value}).fetchone()
     except Exception:
         return None
     if not row:

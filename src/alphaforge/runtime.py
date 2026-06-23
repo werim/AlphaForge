@@ -313,13 +313,14 @@ class RuntimeOrchestrator:
             canary_enabled=self.config.enable_canary_mode,
             shadow_mode_enabled=self.config.enable_shadow_mode,
             operator_ack=self.config.operator_live_acknowledged,
+            kill_switch_active=self._kill_switch_active(),
         )
         evaluator.persist_report(report)
         self._qualification_report = report
         logger.warning("live_readiness_report=%s", report.to_dict())
-        if not report.qualified:
+        if report.verdict != "LIVE_REAL_ORDERS_READY":
             self._persist_runtime_heartbeat(runtime_state="STOPPING")
-            raise RuntimeError("LIVE mode blocked: readiness qualification failed")
+            raise RuntimeError(f"LIVE mode blocked: readiness qualification failed; verdict {report.verdict} is below LIVE_REAL_ORDERS_READY")
 
     def _evaluate_pre_submit(self, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> dict[str, Any]:
         score_ctx = self.ai_brain.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)

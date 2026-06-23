@@ -25,11 +25,11 @@ def _seed_valid(session: Session) -> None:
 
 
 def _parity() -> dict[str, object]:
-    return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True, "no_submit_verified": True, "execution_context_complete": True}
+    return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True, "no_submit_verified": True, "execution_context_complete": True, "effective_rr_penalty_breakdown_complete": True}
 
 
 def _reconciliation() -> dict[str, object]:
-    return {"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0}
+    return {"provider_configured": True, "evidence_status": "COMPLETE", "orphan_positions": 0, "orphan_orders": 0, "duplicate_fills": 0, "fail_closed_findings": 0, "exchange_connectivity_healthy": True, "authenticated": True}
 
 
 def _operational() -> dict[str, object]:
@@ -74,8 +74,33 @@ def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, 
     return engine
 
 
-def _evaluate(engine, observations=None):
-    return LiveReadinessEvaluator(engine).evaluate(mode_parity=_parity(), reconciliation_snapshot=_reconciliation(), observability_snapshot=observations or _operational(), canary_enabled=True, shadow_mode_enabled=True, operator_ack=True)
+def _dashboard_security() -> dict[str, object]:
+    return {"rbac_verified": True, "secrets_redacted": True, "live_switch_fail_closed": True}
+
+def _timesfm_evidence() -> dict[str, object]:
+    return {"non_ordering": True, "satisfies_execution_readiness": False}
+
+def _paper_burnin() -> dict[str, object]:
+    return {"status": "ACCEPTABLE"}
+
+def _tests_evidence() -> dict[str, object]:
+    return {"status": "PASS", "command": "pytest -q"}
+
+def _evaluate(engine, observations=None, **overrides):
+    kwargs = {
+        "mode_parity": _parity(),
+        "reconciliation_snapshot": _reconciliation(),
+        "observability_snapshot": observations or _operational(),
+        "canary_enabled": True,
+        "shadow_mode_enabled": True,
+        "operator_ack": True,
+        "dashboard_security": _dashboard_security(),
+        "timesfm_evidence": _timesfm_evidence(),
+        "paper_burnin_report": _paper_burnin(),
+        "tests_passing_evidence": _tests_evidence(),
+    }
+    kwargs.update(overrides)
+    return LiveReadinessEvaluator(engine).evaluate(**kwargs)
 
 
 def test_live_readiness_pass_and_persistence() -> None:
@@ -276,3 +301,48 @@ def test_live_precheck_invalid_execution_evidence_blocks_readiness() -> None:
     assert report.qualified is False
     assert mode_parity.passed is False
     assert "LIVE_PRECHECK_EXECUTION_EVIDENCE_BLOCKING:INVALID_FAKE_ZERO" in mode_parity.details
+
+
+def test_final_gate_missing_each_individual_gate_blocks_real_orders() -> None:
+    baseline = _evaluate(_engine())
+    assert baseline.verdict == "LIVE_REAL_ORDERS_READY"
+    for gate_name in [gate.name for gate in baseline.gates or []]:
+        kwargs = {}
+        if gate_name == "exchange_connectivity_healthy":
+            rec = _reconciliation(); rec["exchange_connectivity_healthy"] = False; kwargs["reconciliation_snapshot"] = rec
+        elif gate_name == "timesfm_evidence_safe_non_ordering":
+            kwargs["timesfm_evidence"] = {"non_ordering": False, "satisfies_execution_readiness": True}
+        elif gate_name == "paper_burnin_report_acceptable":
+            kwargs["paper_burnin_report"] = {"status": "MISSING"}
+        elif gate_name == "full_tests_passing_evidence_recorded":
+            kwargs["tests_passing_evidence"] = {"status": "MISSING"}
+        elif gate_name == "dashboard_rbac_secrets_safe":
+            kwargs["dashboard_security"] = {"rbac_verified": False, "secrets_redacted": True, "live_switch_fail_closed": True}
+        elif gate_name == "operator_acknowledgement_required":
+            kwargs["operator_ack"] = False
+        else:
+            continue
+        report = _evaluate(_engine(), **kwargs)
+        assert report.verdict != "LIVE_REAL_ORDERS_READY"
+        assert any(g.name == gate_name and not g.passed for g in (report.gates or []))
+
+
+def test_lower_gates_only_allow_live_precheck_ready_not_real_orders() -> None:
+    report = _evaluate(_engine(), dashboard_security={}, timesfm_evidence={}, paper_burnin_report={}, tests_passing_evidence={})
+    assert report.verdict == "LIVE_PRECHECK_READY"
+    assert report.qualified is False
+
+
+def test_kill_switch_on_blocks_all_live_readiness() -> None:
+    report = _evaluate(_engine(), kill_switch_active=True)
+    assert report.verdict == "NOT_LIVE_READY"
+    assert any(g.name == "kill_switch_verified" and not g.passed for g in (report.gates or []))
+
+
+def test_timesfm_cannot_satisfy_execution_or_order_readiness_by_itself() -> None:
+    rec = _reconciliation(); rec["exchange_connectivity_healthy"] = False; rec["authenticated"] = False
+    report = _evaluate(_engine(), reconciliation_snapshot=rec, timesfm_evidence={"non_ordering": True, "satisfies_execution_readiness": True})
+    gates = {g.name: g for g in (report.gates or [])}
+    assert gates["timesfm_evidence_safe_non_ordering"].passed is False
+    assert gates["exchange_connectivity_healthy"].passed is False
+    assert report.verdict != "LIVE_REAL_ORDERS_READY"

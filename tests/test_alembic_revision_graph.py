@@ -55,8 +55,8 @@ def test_alembic_script_directory_loads_and_resolves_heads() -> None:
     config = Config(str(REPO_ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0002_adaptive_learning_lifecycle"]
-    assert script.get_current_head() == "0002_adaptive_learning_lifecycle"
+    assert script.get_heads() == ["0003_sqlite_bootstrap_runtime_tables"]
+    assert script.get_current_head() == "0003_sqlite_bootstrap_runtime_tables"
 
 
 def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Path) -> None:
@@ -70,3 +70,26 @@ def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Pa
     config.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{db_path}")
 
     command.upgrade(config, "head")
+
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"config_snapshots", "timesfm_forecast_evidence", "timesfm_forward_outcome_labels"}.issubset(tables)
+        index_row = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='index' AND name='ix_timesfm_evidence_symbol_timeframe_ts'
+            """
+        ).fetchone()
+        assert index_row is not None
+        trigger_rows = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='trigger'
+              AND tbl_name='config_snapshots'
+              AND name IN ('trg_config_snapshots_no_update', 'trg_config_snapshots_no_delete')
+            ORDER BY name
+            """
+        ).fetchall()
+        assert trigger_rows == [('trg_config_snapshots_no_delete',), ('trg_config_snapshots_no_update',)]

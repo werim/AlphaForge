@@ -1,3 +1,155 @@
+## 2026-06-23 SQLite/Alembic config snapshot trigger repair
+
+### Added
+- Added idempotent SQLite append-only trigger repair for `config_snapshots` in the Alembic runtime bootstrap migration after the table existence check.
+
+### Changed
+- Documentation now records the schema bootstrap trigger-ordering repair and successful regression test run.
+
+### Fixed
+- Fixed partial legacy Alembic upgrade paths where `config_snapshots` could be defensively recreated by the runtime bootstrap revision without restoring its SQLite no-update/no-delete triggers.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only repairs schema bootstrap metadata and does not alter trading behavior.
+
+## 2026-06-23 Persistence/lifecycle contract regression coverage
+
+### Added
+- Added regression coverage for the legacy scalar `fetch_expectancy_stat(...)` contract, separate expectancy metadata detail helper, idempotent legacy runtime-column repair, and accepted backtest `WAITING_ENTRY_ZONE` ordering.
+
+### Changed
+- Documentation now records that the persistence/lifecycle contract fixes are guarded by executable tests.
+- SQLite legacy lifecycle table repair now adds base lifecycle audit columns before creating the uniqueness index.
+
+### Fixed
+- Protected against regressions that would return structured fallback dictionaries from the scalar expectancy API, omit legacy compatibility columns during SQLite bootstrap repair, or skip `WAITING_ENTRY_ZONE` before accepted backtest entry triggers.
+- Fixed scalar expectancy SQL execution under SQLAlchemy 2 by wrapping dynamic SELECT statements in executable `text(...)`.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch adds regression coverage and does not change trading thresholds.
+
+## 2026-06-23 SQLite/Alembic bootstrap regression hardening
+
+### Added
+- Added direct regression coverage for TimesFM DDL helper ordering so the evidence table remains before its dependent index.
+- Added direct regression coverage that `_apply_sqlite_migrations()` creates `schema_migrations` before reading applied versions on partial SQLite databases.
+- Added Alembic fresh-head regression coverage that `config_snapshots` append-only triggers exist after table creation.
+
+### Changed
+- Documentation now records the schema bootstrap control-flow protections explicitly.
+
+### Fixed
+- Fixed `_apply_sqlite_migrations()` so partial databases that have `schema_migrations` bootstrapped but do not yet have optional lifecycle/review tables do not execute dependent `ALTER TABLE` or lifecycle index DDL against absent tables.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only strengthens schema bootstrap tests and documentation.
+
+## 2026-06-23 SQLite/Alembic schema bootstrap repair
+
+### Added
+- Added an Alembic runtime bootstrap revision for `timesfm_forecast_evidence`, `timesfm_forward_outcome_labels`, and defensive `config_snapshots` repair on partial legacy databases.
+- Added regression coverage for TimesFM SQLite bootstrap order, idempotent row preservation, and Alembic head table/index creation.
+
+### Changed
+- Centralized TimesFM SQLite DDL so the evidence table is always emitted before its dependent index.
+
+### Fixed
+- Fixed fresh SQLite bootstrap risk where `CREATE INDEX ... ON timesfm_forecast_evidence(...)` could run before the evidence table existed.
+- Fixed Alembic fresh-head coverage for runtime TimesFM evidence tables and partial legacy `config_snapshots` absence.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only repairs schema bootstrapping and does not alter trading readiness gates.
+
+## 2026-06-23 BACKTEST/PAPER pre-submit parity adapter
+
+### Added
+- Added `evaluate_paper_style_pre_submit(...)` for BACKTEST/PAPER no-submit parity checks using shared candidate-quality and execution-cost gates.
+- Added parity tests for LOW_SCORE, LOW_EFFECTIVE_RR, EXPECTANCY_MISSING, HIGH_SPREAD, accepted lifecycle audit sequence, and rejected lifecycle audit sequence.
+
+### Changed
+- BACKTEST can now run PAPER-style pre-submit effective-RR execution checks without Binance live-order calls when using the adapter.
+
+### Fixed
+- Documented and tested the remaining gap between `backtest_order.py` scan flow and `RuntimeOrchestrator._process_symbol`.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- The adapter does not enable LIVE and does not remove PAPER runtime-only gates such as kill switch, stale data, cooldown, funding sanity, or exposure limits.
+
+
+## [Unreleased] - 2026-06-23 (LIVE readiness aggregator CI repair)
+
+### Added
+- None.
+
+### Changed
+- Kept final gate display on the readiness page while preserving the legacy 27-item readiness probe catalog/API contract.
+- TimesFM futures tests now skip cleanly when optional NumPy is unavailable.
+
+### Fixed
+- Fixed dashboard readiness probe matrix counts inflated by duplicating final gates into the legacy probe catalog.
+
+### Removed
+- Removed final aggregate gates from the probe catalog; they remain in readiness report JSON and dashboard gate tables.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; final readiness still requires every local gate to pass.
+
+## [Unreleased] - 2026-06-22 (LIVE readiness final gate aggregator)
+
+### Added
+- Added a sixteen-gate final LIVE readiness aggregator with explicit verdict levels and machine-readable blockers.
+- Added persisted `verdict`, `gates`, and `blockers` fields inside readiness report JSON.
+- Added dashboard final-gate table coverage and regression tests for missing gates, lower-gate precheck readiness, kill-switch blocking, and TimesFM non-ordering safety.
+
+### Changed
+- Runtime now requires `LIVE_REAL_ORDERS_READY` before allowing LIVE real-order mode; lower verdicts fail closed.
+- Dashboard readiness probes include final aggregate gates in addition to underlying evidence checks.
+
+### Fixed
+- Closed the gap where partial readiness evidence could be read as a generic pass/fail without an explicit final verdict contract.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None at schema level; readiness JSON consumers should handle additional fields.
+
+### Known Issues
+- LIVE remains NOT READY by default. Missing or stale local evidence for any final gate remains blocking, and PAPER or TimesFM success cannot promote LIVE.
+
 ## [Unreleased] - 2026-06-22 (PAPER burn-in report generator)
 
 ### Added

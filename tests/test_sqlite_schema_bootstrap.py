@@ -2,11 +2,57 @@ from __future__ import annotations
 
 import sqlite3
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from alphaforge.persistence import init_db, save_order_decision
+from alphaforge.persistence import (
+    _apply_sqlite_migrations,
+    _timesfm_forecast_evidence_ddl,
+    init_db,
+    save_order_decision,
+)
 
+
+
+def test_timesfm_ddl_helper_orders_table_before_dependent_index() -> None:
+    ddl = _timesfm_forecast_evidence_ddl()
+
+    table_position = next(
+        index
+        for index, statement in enumerate(ddl)
+        if "CREATE TABLE IF NOT EXISTS timesfm_forecast_evidence" in statement
+    )
+    index_position = next(
+        index
+        for index, statement in enumerate(ddl)
+        if "CREATE INDEX IF NOT EXISTS ix_timesfm_evidence_symbol_timeframe_ts" in statement
+    )
+
+    assert table_position < index_position
+
+
+def test_apply_sqlite_migrations_bootstraps_schema_migrations_on_partial_database(tmp_path) -> None:
+    db_path = tmp_path / "partial_without_schema_migrations.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT)")
+        conn.execute("INSERT INTO signals (signal_id) VALUES (NULL)")
+        conn.commit()
+
+    engine = create_engine(f"sqlite+pysqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        _apply_sqlite_migrations(conn)
+
+    with sqlite3.connect(db_path) as conn:
+        migration_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone()
+        assert migration_table is not None
+        migration_count = conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version='2026_05_16_persistence_integrity_v1'"
+        ).fetchone()[0]
+        assert migration_count == 1
+        backfilled_signal_id = conn.execute("SELECT signal_id FROM signals WHERE id=1").fetchone()[0]
+        assert backfilled_signal_id == "legacy-signal-1"
 
 def test_init_db_bootstraps_schema_migrations_before_selecting_versions(tmp_path) -> None:
     db_path = tmp_path / "fresh_bootstrap.db"
@@ -58,6 +104,54 @@ def _sqlite_columns(db_path: str, table_name: str) -> set[str]:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     return {str(row[1]) for row in rows}
+
+
+def test_init_db_bootstraps_timesfm_evidence_before_indexes(tmp_path) -> None:
+    db_path = tmp_path / "fresh_timesfm.db"
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+
+    expected_columns = {
+        "forecast_id",
+        "timestamp",
+        "symbol",
+        "timeframe",
+        "side",
+        "mode",
+        "no_lookahead_input_end_ts",
+    }
+    assert expected_columns.issubset(_sqlite_columns(str(db_path), "timesfm_forecast_evidence"))
+    with sqlite3.connect(db_path) as conn:
+        index_row = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='index' AND name='ix_timesfm_evidence_symbol_timeframe_ts'
+            """
+        ).fetchone()
+        assert index_row is not None
+
+
+def test_init_db_preserves_existing_timesfm_evidence_rows_on_repeated_calls(tmp_path) -> None:
+    db_path = tmp_path / "timesfm_idempotent.db"
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO timesfm_forecast_evidence (
+                forecast_id, timestamp, symbol, timeframe, side, mode, no_lookahead_input_end_ts
+            ) VALUES ('forecast-preserved', 1, 'BTCUSDT', '1m', 'NO_TRADE', 'BACKTEST', 1)
+            """
+        )
+        conn.commit()
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+
+    with sqlite3.connect(db_path) as conn:
+        preserved = conn.execute(
+            "SELECT COUNT(*) FROM timesfm_forecast_evidence WHERE forecast_id='forecast-preserved'"
+        ).fetchone()[0]
+        assert preserved == 1
 
 
 def test_init_db_migrates_legacy_order_decisions_schema(tmp_path) -> None:

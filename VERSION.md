@@ -1,3 +1,80 @@
+## 2026-06-23 SQLite/Alembic config snapshot trigger repair
+- **Current version:** 0.3.54-dev
+- **Current phase:** SQLite/Alembic schema bootstrap ordering and idempotency hardening.
+- **Runtime maturity:** SQLite `init_db()` keeps TimesFM evidence tables ahead of dependent indexes; Alembic runtime bootstrap now also idempotently restores SQLite `config_snapshots` append-only triggers after ensuring the table exists.
+- **BACKTEST/PAPER/LIVE alignment:** Persistence schema bootstrap only; no decision, reject, threshold, or mode-specific runtime behavior changed.
+- **Lifecycle coverage:** Unchanged; lifecycle persistence remains additive and existing rows are preserved.
+- **Execution realism coverage:** Unchanged; no fake execution costs, scores, RR values, or outcomes were introduced.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch only repairs schema bootstrap safety.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; schema trigger repair does not enable LIVE order placement.
+
+## 2026-06-23 Persistence/lifecycle contract regression coverage
+- **Current version:** 0.3.53-dev
+- **Current phase:** Persistence API and accepted lifecycle regression hardening.
+- **Runtime maturity:** Scalar expectancy reads, SQLite runtime compatibility columns, and accepted backtest lifecycle ordering are now covered by direct regression tests.
+- **BACKTEST/PAPER/LIVE alignment:** No decision thresholds changed; tests preserve shared persistence contracts and accepted BACKTEST lifecycle continuity through `WAITING_ENTRY_ZONE`.
+- **Lifecycle coverage:** Accepted backtest lifecycle ordering is asserted to include `WAITING_ENTRY_ZONE` before `ENTRY_TRIGGERED`.
+- **Execution realism coverage:** Unchanged; no fake execution costs, scores, RR values, or fills were introduced.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch guards regressions only.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; regression coverage does not enable LIVE order placement.
+
+## 2026-06-23 SQLite/Alembic schema bootstrap regression hardening
+- **Current version:** 0.3.52-dev
+- **Current phase:** SQLite and Alembic runtime schema bootstrap regression hardening.
+- **Runtime maturity:** Fresh and partial legacy SQLite bootstraps now create schema_migrations before migration reads, create TimesFM evidence tables before dependent indexes, avoid ALTER/INDEX statements against absent optional legacy tables, and Alembic head verifies append-only config snapshot triggers after table creation.
+- **BACKTEST/PAPER/LIVE alignment:** Persistence bootstrap is shared infrastructure only; no mode-specific decision/reject behavior changed.
+- **Lifecycle coverage:** Lifecycle migration repairs now only alter/index `trade_lifecycle_events` when that table exists, preserving partial legacy bootstrap safety without changing lifecycle semantics.
+- **Execution realism coverage:** Unchanged; no fake execution evidence, scores, RR values, or synthetic outcomes were added.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch fixes schema bootstrap/migration safety only.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; regression hardening does not enable LIVE order placement.
+
+## 2026-06-23 SQLite/Alembic schema bootstrap repair
+- **Current version:** 0.3.51-dev
+- **Current phase:** SQLite and Alembic runtime schema bootstrap hardening.
+- **Runtime maturity:** Fresh and partial legacy SQLite bootstraps now create TimesFM evidence tables before dependent indexes and Alembic head includes runtime evidence table repair.
+- **BACKTEST/PAPER/LIVE alignment:** Persistence bootstrap is shared infrastructure only; no decision/reject thresholds or mode-specific trading behavior changed.
+- **Lifecycle coverage:** Unchanged; lifecycle tables remain additive and existing rows are preserved during repeated bootstraps.
+- **Execution realism coverage:** TimesFM research evidence persistence is restored without substituting fake execution fields or synthetic outcomes.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch fixes schema availability only and does not prove live execution safety.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; schema bootstrap repair does not enable LIVE order placement.
+
+## 2026-06-23 BACKTEST/PAPER pre-submit parity adapter
+- **Current version:** 0.3.50-dev
+- **Current phase:** BACKTEST/PAPER canonical pre-submit parity audit.
+- **Runtime maturity:** Added a no-submit adapter that lets BACKTEST invoke PAPER-style pre-submit execution-cost checks without Binance live calls.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST and PAPER can now be parity-tested through the same candidate, quality, expectancy, effective-RR, and execution-flag gates; LIVE remains disabled and unchanged.
+- **Lifecycle coverage:** Adapter audit rows preserve accepted `ORDER_PLACED` and rejected `SIGNAL_REJECTED` outcomes for parity verification.
+- **Execution realism coverage:** Effective-RR, HIGH_SPREAD, LOW_EFFECTIVE_RR, and missing/invalid execution-evidence flags are evaluated through the shared execution-cost model.
+- **Known critical risks:** RuntimeOrchestrator PAPER still has additional runtime gates (kill switch, stale data, cooldown, exposure, funding sanity) outside `backtest_order.py` scan flow; full orchestrator/backtest unification remains future work.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; no LIVE submit path or threshold loosening was added.
+
+## 2026-06-23 LIVE readiness aggregator CI repair
+- **Current version:** 0.3.49-dev
+- **Current phase:** P2-2 final gate API compatibility repair.
+- **Runtime maturity:** unchanged; runtime still refuses LIVE real orders unless `LIVE_REAL_ORDERS_READY` is recorded.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged; final gates remain fail-closed and PAPER/TimesFM evidence cannot promote LIVE.
+- **Lifecycle coverage:** unchanged.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** LIVE remains blocked unless all local final-gate evidence passes.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY by default**.
+
+## 2026-06-22 LIVE readiness final gate aggregator
+- **Current version:** 0.3.48-dev
+- **Current phase:** P2-2 final fail-closed LIVE readiness gate aggregation.
+- **Runtime maturity:** Runtime now records a single machine-readable verdict from sixteen evidence gates and refuses real LIVE orders unless the verdict is `LIVE_REAL_ORDERS_READY`.
+- **BACKTEST/PAPER/LIVE alignment:** Aggregator requires lifecycle, reject persistence, execution realism, LIVE_PRECHECK no-submit parity, authenticated reconciliation, and independent operational evidence; PAPER success and TimesFM evidence cannot promote LIVE.
+- **Lifecycle coverage:** Final gate includes lifecycle integrity and reject persistence gates backed by persisted lifecycle/order-decision evidence.
+- **Execution realism coverage:** Final gate requires effective-RR penalty/evidence context and measured exchange/readiness evidence; missing or stale evidence blocks.
+- **Known critical risks:** Normal local operation remains blocked without fresh LIVE heartbeat, authenticated reconciliation, dashboard/RBAC proof, acceptable burn-in report, full-test evidence, and explicit operator acknowledgement.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY by default**; only complete local evidence for every gate can produce `LIVE_REAL_ORDERS_READY`.
+
 ## 2026-06-22 PAPER burn-in report generator
 - **Current version:** 0.3.47-dev
 - **Current phase:** P2-1 PAPER burn-in diagnostics and fail-closed readiness reporting.

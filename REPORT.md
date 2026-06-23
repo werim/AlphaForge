@@ -1,3 +1,350 @@
+## 2026-06-23 Patch Addendum — SQLite/Alembic config snapshot trigger repair
+
+### Why this patch was needed
+SQLite and Alembic bootstrap paths must be ordered so tables exist before dependent indexes, triggers, or other operations reference them. TimesFM evidence ordering was already guarded in `init_db()`, and the Alembic runtime repair path also needed to preserve the append-only contract when it defensively creates a missing `config_snapshots` table.
+
+### Root cause
+A partially-applied legacy database could reach the runtime bootstrap revision without `config_snapshots`. The revision created the table before later operations, but did not also recreate the SQLite no-update/no-delete triggers in that repair path.
+
+### Files changed
+- `alembic/versions/0003_sqlite_bootstrap_runtime_tables.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None. This is an Alembic schema bootstrap repair only.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+The Alembic runtime bootstrap revision now idempotently creates SQLite `config_snapshots` append-only triggers after ensuring the table exists. Existing rows are preserved; no tables are dropped or recreated.
+
+### Export/schema changes
+No export changes. Schema metadata repair is additive/idempotent for SQLite trigger presence.
+
+### Tests added
+No new tests were required; the existing SQLite bootstrap and Alembic revision graph tests cover the intended table/index/trigger contracts when optional Alembic dependencies are present.
+
+### Tests executed
+- `python -m pytest tests/test_sqlite_schema_bootstrap.py -q`
+- `python -m pytest tests/test_alembic_revision_graph.py -q`
+- `python -m pytest -q`
+
+### Risks
+Low. The patch only adds `CREATE TRIGGER IF NOT EXISTS` statements after the target table exists on SQLite.
+
+### Remaining limitations
+This does not validate forecast quality, execution realism, or LIVE readiness.
+
+### Migration concerns
+None for fresh databases. Partial legacy SQLite databases that have `config_snapshots` but are missing append-only triggers are repaired idempotently during Alembic upgrade.
+
+### Push recommendation
+Safe to push after targeted and full tests pass. LIVE remains blocked by readiness gates.
+
+## 2026-06-23 Patch Addendum — Persistence/lifecycle contract regression coverage
+
+### Why this patch was needed
+The reported macOS failures targeted contracts that must remain stable: `fetch_expectancy_stat(...)` must return `float | None`, SQLite bootstrap must repair compatibility columns additively, and accepted backtest lifecycles must not jump from acceptance directly to entry trigger.
+
+### Root cause
+The implementation already preserves these contracts in this checkout, but the exact failure surfaces needed explicit regression coverage so future persistence metadata helpers or lifecycle edits cannot silently weaken audit quality.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `tests/test_persistence_lifecycle_contracts.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+SQLite legacy runtime schema repair now ensures base lifecycle compatibility columns needed by the lifecycle uniqueness index are present before index creation. The scalar expectancy lookup now uses SQLAlchemy executable SQL text while preserving the existing `float | None` return contract.
+
+### Lifecycle changes
+No runtime lifecycle behavior changed. Tests now assert `WAITING_ENTRY_ZONE` appears before `ENTRY_TRIGGERED` for an accepted limit backtest candidate.
+
+### Persistence changes
+No destructive schema change. Legacy `trade_lifecycle_events` tables are additively repaired with base audit columns before index creation. Tests now verify repeated `init_db()` calls preserve legacy rows while adding `order_decisions.payload` and `trade_lifecycle_events.trade_id/state/payload`.
+
+### Export/schema changes
+None.
+
+### Tests added
+- Legacy scalar `fetch_expectancy_stat(...)` contract test.
+- Separate `fetch_expectancy_stat_detail(...)` metadata test.
+- Idempotent legacy runtime-column repair and row-preservation test.
+- Accepted backtest `WAITING_ENTRY_ZONE` ordering test.
+
+### Tests executed
+- `alembic heads` (environment warning: console script unavailable in local container)
+- `alembic history` (environment warning: console script unavailable in local container)
+- `alembic upgrade head` (environment warning: console script unavailable in local container)
+- `python -m pytest tests/test_persistence_lifecycle_contracts.py tests/test_alembic_revision_graph.py tests/test_phase123_foundations.py::test_backtest_lifecycle_does_not_start_directly_at_created tests/test_sqlite_schema_bootstrap.py::test_init_db_migrates_legacy_order_decisions_schema -q`
+- `python -m pytest -q`
+
+### Risks
+Low. The code change is additive/idempotent SQLite repair and executable SQL compatibility only; it does not alter trading thresholds, reject gates, exports, or lifecycle decisions.
+
+### Remaining limitations
+The local container lacks the Alembic console script and network package installation was blocked, so `alembic heads/history/upgrade head` could not be executed as shell commands here; the Alembic revision graph tests still load the script directory when the optional Alembic package is available.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after targeted and full tests pass. LIVE remains blocked by readiness gates.
+
+## 2026-06-23 Patch Addendum — SQLite/Alembic bootstrap regression hardening
+
+### Why this patch was needed
+Local evidence showed failures could still be caused by bootstrap control flow rather than missing text: a table/index DDL string may exist in source while the executed sequence still reaches a dependent index or migration read too early.
+
+### Root cause
+The repaired code already contains the required helpers, but regression coverage needed to assert executable ordering directly: `schema_migrations` must be created before `_apply_sqlite_migrations()` reads versions, `timesfm_forecast_evidence` must precede `ix_timesfm_evidence_symbol_timeframe_ts` in the actual helper list, and SQLite Alembic head must leave `config_snapshots` present before append-only triggers are created. The new direct partial-database regression also exposed a second control-flow defect: after bootstrapping `schema_migrations`, `_apply_sqlite_migrations()` could continue into lifecycle `ALTER TABLE` and index statements even when `trade_lifecycle_events` or `closed_trade_reviews` did not exist.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `tests/test_alembic_revision_graph.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+`_apply_sqlite_migrations()` still creates `schema_migrations` before reading versions, but now guards lifecycle/review table ALTER and lifecycle index DDL behind actual table existence. This keeps partial legacy migrations additive/idempotent without hiding missing-table errors behind try/except and without dropping data.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+No schema shape changed. Regression tests now prove partial SQLite migrations create `schema_migrations` before selecting from it, skip dependent ALTER/INDEX DDL for absent optional tables, and preserve the migration bookkeeping path.
+
+### Export/schema changes
+None. Alembic fresh-head coverage now also verifies `config_snapshots` append-only triggers exist.
+
+### Tests added
+- Direct TimesFM DDL helper order assertion.
+- Direct partial-database `_apply_sqlite_migrations()` schema_migrations bootstrap assertion, including safe handling when lifecycle/review tables are absent.
+- Fresh SQLite Alembic head assertion for `config_snapshots` no-update/no-delete triggers.
+
+### Tests executed
+- `python -m pytest -q tests/test_sqlite_schema_bootstrap.py tests/test_alembic_revision_graph.py`
+- `python -m pytest -q`
+
+### Risks
+Low. The code change only prevents dependent ALTER/INDEX DDL from running when the target table is absent; no trading path, thresholds, table drops, or data rewrites were introduced.
+
+### Remaining limitations
+These tests protect bootstrap ordering but do not validate forecast quality, execution realism, or LIVE readiness.
+
+### Migration concerns
+None for this addendum.
+
+### Push recommendation
+Safe to push after targeted and full tests pass. LIVE remains blocked by readiness gates.
+
+## 2026-06-23 Patch Addendum — SQLite/Alembic schema bootstrap repair
+
+### Why this patch was needed
+Fresh and partial legacy SQLite bootstraps must create runtime research evidence tables before any dependent indexes. A failure in this path cascades into TimesFM persistence and many downstream tests because the canonical `timesfm_forecast_evidence` table is absent.
+
+### Root cause
+SQLite validates the target table when creating an index, even when the index DDL uses `IF NOT EXISTS`. The TimesFM evidence index therefore cannot be allowed to appear in a bootstrap sequence unless the `timesfm_forecast_evidence` table has already been created. Alembic also did not have a dedicated runtime repair revision for the TimesFM evidence tables, and partial legacy databases could reach later revisions without `config_snapshots` present.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `alembic/versions/0003_sqlite_bootstrap_runtime_tables.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `tests/test_alembic_revision_graph.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+`init_db()` now obtains TimesFM evidence DDL from a dedicated helper that returns the table definitions before the dependent index. This is an additive bootstrap repair only; no order decision logic, reject thresholds, lifecycle vocabulary, or LIVE behavior changed.
+
+### Lifecycle changes
+None. Existing lifecycle persistence remains additive and unchanged.
+
+### Persistence changes
+Fresh SQLite databases and partial legacy databases now idempotently create `timesfm_forecast_evidence`, `timesfm_forward_outcome_labels`, and the TimesFM lookup index without dropping data. Repeated `init_db()` calls preserve existing TimesFM evidence rows.
+
+### Export/schema changes
+Added Alembic revision `0003_sqlite_bootstrap_runtime_tables` so `alembic upgrade head` creates the runtime TimesFM evidence tables and defensively repairs missing `config_snapshots` on partial legacy databases. No existing columns were removed or relaxed.
+
+### Tests added
+- `init_db()` creates TimesFM evidence columns before the TimesFM index on fresh SQLite.
+- Repeated `init_db()` calls preserve existing TimesFM evidence rows.
+- Alembic head upgrade asserts `config_snapshots`, `timesfm_forecast_evidence`, `timesfm_forward_outcome_labels`, and the TimesFM index exist.
+
+### Tests executed
+- `pytest -q tests/test_sqlite_schema_bootstrap.py tests/test_alembic_revision_graph.py`
+- `pytest -q`
+
+### Risks
+Low. The patch is additive and idempotent. It does not drop data, does not rewrite rows, and does not alter trading decisions.
+
+### Remaining limitations
+This repair only guarantees schema bootstrap availability. It does not validate TimesFM forecast quality, execution cost realism, or LIVE readiness.
+
+### Migration concerns
+Alembic head advances to `0003_sqlite_bootstrap_runtime_tables`. Operators should apply the new migration before relying on TimesFM persistence in Alembic-managed SQLite databases.
+
+### Push recommendation
+Safe to push after full tests pass. LIVE remains blocked by readiness gates.
+
+## 2026-06-23 Patch Addendum — BACKTEST/PAPER pre-submit parity adapter
+
+### Why this patch was needed
+The audit showed BACKTEST uses `order.run_order_cycle(...)` in `backtest_order.py`, while PAPER runtime uses `RuntimeOrchestrator._process_symbol(...)` and `AIBrain.before_real_order(...)`. A minimal no-submit adapter was needed to prove shared pre-submit reject behavior without enabling LIVE or Binance order calls.
+
+### Root cause
+The shared candidate-quality gate already lived in `alphaforge.order.run_order_cycle(...)`, but PAPER-style execution-cost pre-submit flags were not exposed as a safe BACKTEST/PAPER parity adapter. `backtest_order.py` also has local post-cycle execution rejects, while `RuntimeOrchestrator` has runtime-only risk gates.
+
+### Files changed
+- `src/alphaforge/order.py`
+- `tests/test_backtest_paper_pre_submit_parity.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Added `evaluate_paper_style_pre_submit(...)`, a no-submit adapter that calls `run_order_cycle(...)` and then applies the shared effective-RR execution flag calculation in PAPER mode. Existing runtime flows are unchanged unless callers opt into the adapter.
+
+### Lifecycle changes
+No lifecycle vocabulary changed. Adapter audit storage records accepted candidates as `ORDER_PLACED` and rejected pre-submit candidates as `SIGNAL_REJECTED` for parity assertions.
+
+### Persistence changes
+None. The adapter is side-effect-light and does not write SQL by itself. Existing persistence helpers remain unchanged.
+
+### Export/schema changes
+None.
+
+### Tests added
+- BACKTEST/PAPER parity for LOW_SCORE.
+- BACKTEST/PAPER parity for LOW_EFFECTIVE_RR.
+- BACKTEST/PAPER parity for EXPECTANCY_MISSING.
+- BACKTEST/PAPER parity for HIGH_SPREAD.
+- Accepted candidate audit lifecycle parity.
+- Rejected candidate audit lifecycle parity.
+
+### Tests executed
+- `pytest -q tests/test_backtest_paper_pre_submit_parity.py`
+
+### Risks
+Low. The adapter does not enable LIVE, does not loosen thresholds, and does not alter existing backtest or PAPER runtime entrypoints by default.
+
+### Remaining limitations
+`RuntimeOrchestrator._process_symbol(...)` still has additional PAPER runtime gates (kill switch, stale market data, cooldown, exposure, funding sanity) that are not part of the backtest scanner. Full orchestrator/backtest unification remains separate work.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push as a parity-test adapter. Do not enable LIVE.
+
+
+## 2026-06-23 Patch Addendum — LIVE readiness aggregator CI repair
+
+### Why this patch was needed
+CI showed the dashboard readiness probe matrix expected the existing 27 probe catalog entries, but the previous patch duplicated the 16 final gates into that legacy probe catalog and inflated API counts.
+
+### Root cause
+Final gates belong in readiness report JSON and the dashboard final-gate table, not in the legacy readiness probe catalog used by existing dashboard API tests and consumers.
+
+### Files changed
+- `src/alphaforge/dashboard/queries.py`
+- `tests/test_timesfm_futures.py`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None. Runtime LIVE refusal behavior and final readiness aggregation are unchanged.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+The readiness probe API contract remains at the legacy 27 probes; final gates remain exported through `live_readiness_reports.report_payload` and the readiness page.
+
+### Tests added
+No new assertions; repaired optional dependency handling for the TimesFM futures test module.
+
+### Tests executed
+- `pytest -q`
+- `python -m compileall -q src tests`
+
+### Risks
+Low. This is an API compatibility repair for dashboard probes; the final LIVE gate contract remains persisted and visible.
+
+### Remaining limitations
+LIVE remains blocked without complete measured evidence for every final gate.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push as CI repair.
+
+## 2026-06-22 Patch Addendum — LIVE readiness final gate aggregator
+
+### Why this patch was needed
+P2-2 required a single fail-closed readiness contract that combines lifecycle, persistence, parity, execution realism, exchange, reconciliation, operational, dashboard, TimesFM, PAPER burn-in, test, and operator evidence into one explicit verdict.
+
+### Root cause
+Readiness evidence existed as individual checks, reports, dashboard probes, and burn-in diagnostics, but there was no final aggregation layer with explicit verdict levels and blockers that could prevent partial evidence from being interpreted as LIVE-ready.
+
+### Files changed
+- `src/alphaforge/live_readiness.py`
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/dashboard/queries.py`
+- `src/alphaforge/dashboard/templates/readiness.html`
+- `tests/test_live_readiness.py`
+- `README.md`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Runtime persists the final readiness verdict and blocks LIVE real-order startup unless the verdict is exactly `LIVE_REAL_ORDERS_READY`. The default posture remains fail-closed.
+
+### Lifecycle changes
+No lifecycle vocabulary changed. Lifecycle integrity is now elevated into a final aggregate gate.
+
+### Persistence changes
+No schema migration. Existing `live_readiness_reports.report_payload` now includes `verdict`, `gates`, and `blockers` JSON fields for machine-readable consumption.
+
+### Export/schema changes
+Dashboard readiness JSON/probe matrix now includes final aggregate gates and blockers. The readiness page renders the final gate contract separately from underlying checks.
+
+### Tests added
+- Missing final gates block real orders.
+- Lower gates can produce only `LIVE_PRECHECK_READY`, not real orders.
+- Kill switch active blocks readiness.
+- TimesFM evidence cannot satisfy execution/order readiness.
+
+### Tests executed
+- `pytest -q tests/test_live_readiness*.py tests/test_runtime*.py tests/test_dashboard_app.py`
+- `pytest -q tests/test_live_readiness.py`
+- `python -m compileall -q src tests`
+
+### Risks
+The aggregator is intentionally conservative and may block LIVE until operators wire measured local evidence for dashboard/RBAC, burn-in, full tests, authenticated reconciliation, and heartbeat evidence. This is expected.
+
+### Remaining limitations
+Runtime currently supplies only the evidence it can measure directly; missing external operator/test/dashboard artifacts remain blockers. No live order placement was added.
+
+### Migration concerns
+No database migration is required; consumers of readiness JSON should tolerate the added `verdict`, `gates`, and `blockers` fields.
+
+### Push recommendation
+Safe to push as P2-2 fail-closed readiness aggregation. Do not enable LIVE trading until every local gate has fresh measured passing evidence.
+
 ## 2026-06-22 Patch Addendum — PAPER burn-in report generator
 
 ### Why this patch was needed
@@ -627,6 +974,7 @@ Safe to push after review. LIVE remains NOT READY.
 - Partial legacy databases can contain runtime tables and user rows while still lacking `schema_migrations`.
 
 ### Files changed
+- `src/alphaforge/persistence.py`
 - `tests/test_sqlite_schema_bootstrap.py`
 - `VERSION.md`
 - `REPORT.md`
@@ -679,6 +1027,7 @@ Safe to push after review. LIVE remains NOT READY.
 - Fresh dashboard/readiness database paths can query rollback evidence status before any evidence has been persisted.
 
 ### Files changed
+- `src/alphaforge/persistence.py`
 - `src/alphaforge/persistence.py`
 - `tests/test_sqlite_schema_bootstrap.py`
 - `VERSION.md`
@@ -1705,6 +2054,7 @@ Runtime, persistence, and export paths still emitted mixed lifecycle vocabularie
 - `schema_migrations`
 
 ### Files changed
+- `src/alphaforge/persistence.py`
 - `src/alphaforge/persistence.py`
 - `tests/test_sqlite_schema_bootstrap.py`
 - `VERSION.md`
