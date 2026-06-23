@@ -23,6 +23,21 @@ def _has_table(bind, table_name: str) -> bool:
     return sa.inspect(bind).has_table(table_name)
 
 
+def _ensure_config_snapshot_triggers(bind) -> None:
+    if bind.dialect.name == "postgresql":
+        return
+    op.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_config_snapshots_no_update "
+        "BEFORE UPDATE ON config_snapshots "
+        "BEGIN SELECT RAISE(ABORT, 'config_snapshots is append-only'); END;"
+    )
+    op.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_config_snapshots_no_delete "
+        "BEFORE DELETE ON config_snapshots "
+        "BEGIN SELECT RAISE(ABORT, 'config_snapshots is append-only'); END;"
+    )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     json_t = _json_type(bind)
@@ -40,6 +55,8 @@ def upgrade() -> None:
             sa.Column("payload", json_t, nullable=False),
             sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=False),
         )
+
+    _ensure_config_snapshot_triggers(bind)
 
     if not _has_table(bind, "timesfm_forecast_evidence"):
         op.create_table(
