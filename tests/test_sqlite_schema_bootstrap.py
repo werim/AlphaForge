@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
@@ -288,3 +290,79 @@ def test_init_db_migrations_are_idempotent_and_preserve_data(tmp_path) -> None:
             "SELECT COUNT(*) FROM schema_migrations WHERE version='2026_05_16_persistence_integrity_v1'"
         ).fetchone()[0]
         assert migration_count == 1
+
+
+REQUIRED_BASELINE_TABLES = {
+    "signals",
+    "order_decisions",
+    "signal_id_state",
+    "positions",
+    "orders",
+    "fills",
+    "paper_events",
+    "backtest_runs",
+    "backtest_events",
+    "symbol_snapshots",
+    "timesfm_forecast_evidence",
+    "runtime_control_state",
+    "calibration_labels",
+    "optimizer_runs",
+}
+
+REQUIRED_BASELINE_INDEXES = {"ix_timesfm_evidence_symbol_timeframe_ts"}
+
+
+def _sqlite_url(path):
+    return f"sqlite+pysqlite:///{path}"
+
+
+def _table_names(engine):
+    with engine.connect() as conn:
+        return {row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))}
+
+
+def _index_names(engine):
+    with engine.connect() as conn:
+        return {row[0] for row in conn.execute(text("SELECT name FROM sqlite_master WHERE type='index'"))}
+
+
+def _upgrade_alembic_head(db_path):
+    pytest.importorskip("alembic.command")
+    from alembic import command
+    from alembic.config import Config
+
+    repo_root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    config = Config(str(repo_root / "alembic.ini"))
+    config.set_main_option("script_location", str(repo_root / "alembic"))
+    config.set_main_option("sqlalchemy.url", _sqlite_url(db_path))
+    command.upgrade(config, "head")
+
+
+def _assert_required_schema(engine):
+    assert REQUIRED_BASELINE_TABLES.issubset(_table_names(engine))
+    assert REQUIRED_BASELINE_INDEXES.issubset(_index_names(engine))
+
+
+def test_init_db_and_alembic_baseline_schema_paths_are_idempotent(tmp_path) -> None:
+    init_only = tmp_path / "init_only.db"
+    init_engine = init_db(_sqlite_url(init_only))
+    init_db(_sqlite_url(init_only))
+    _assert_required_schema(init_engine)
+
+    alembic_only = tmp_path / "alembic_only.db"
+    _upgrade_alembic_head(alembic_only)
+    _upgrade_alembic_head(alembic_only)
+    alembic_engine = create_engine(_sqlite_url(alembic_only), future=True)
+    _assert_required_schema(alembic_engine)
+
+    init_then_alembic = tmp_path / "init_then_alembic.db"
+    init_db(_sqlite_url(init_then_alembic))
+    _upgrade_alembic_head(init_then_alembic)
+    init_db(_sqlite_url(init_then_alembic))
+    _assert_required_schema(create_engine(_sqlite_url(init_then_alembic), future=True))
+
+    alembic_then_init = tmp_path / "alembic_then_init.db"
+    _upgrade_alembic_head(alembic_then_init)
+    init_db(_sqlite_url(alembic_then_init))
+    _upgrade_alembic_head(alembic_then_init)
+    _assert_required_schema(create_engine(_sqlite_url(alembic_then_init), future=True))

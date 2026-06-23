@@ -111,6 +111,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_timesfm_evidence_symbol_timeframe_ts", table_name="timesfm_forecast_evidence", if_exists=True)
-    op.drop_table("timesfm_forward_outcome_labels", if_exists=True)
-    op.drop_table("timesfm_forecast_evidence", if_exists=True)
+    pass
