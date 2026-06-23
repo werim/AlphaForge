@@ -1,3 +1,44 @@
+## 2026-06-23 Explicit TimesFM SQLite bootstrap ordering
+
+### Added
+- Added explicit `init_db()` DDL sequencing for TimesFM evidence table, outcome table, and dependent TimesFM index.
+
+### Changed
+- Replaced the implicit starred TimesFM DDL expansion in the main SQLite bootstrap list with named table/index DDL variables to make execution ordering auditable.
+- Documentation now records the focused SQLite bootstrap ordering repair and test run.
+
+### Fixed
+- Fixed the SQLite bootstrap failure mode where the TimesFM index could be executed before `timesfm_forecast_evidence` existed in fresh or partial SQLite databases.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only repairs SQLite schema bootstrap ordering.
+
+## 2026-06-23 SQLite/Alembic config snapshot trigger repair
+
+### Added
+- Added idempotent SQLite append-only trigger repair for `config_snapshots` in the Alembic runtime bootstrap migration after the table existence check.
+
+### Changed
+- Documentation now records the schema bootstrap trigger-ordering repair and successful regression test run.
+
+### Fixed
+- Fixed partial legacy Alembic upgrade paths where `config_snapshots` could be defensively recreated by the runtime bootstrap revision without restoring its SQLite no-update/no-delete triggers.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only repairs schema bootstrap metadata and does not alter trading behavior.
+
 ## 2026-06-23 Persistence/lifecycle contract regression coverage
 
 ### Added

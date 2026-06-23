@@ -118,6 +118,11 @@ def init_db(database_url: str | None = None) -> Engine:
     )
     _ensure_sqlite_parent_dir(resolved_database_url)
     engine = create_engine(resolved_database_url, future=True)
+    (
+        timesfm_evidence_table_ddl,
+        timesfm_outcome_table_ddl,
+        timesfm_evidence_index_ddl,
+    ) = _timesfm_forecast_evidence_ddl()
     ddl = [
         """
         CREATE TABLE IF NOT EXISTS signals (
@@ -244,10 +249,15 @@ def init_db(database_url: str | None = None) -> Engine:
             UNIQUE(signal_id, forward_window_minutes)
         )
         """,
+        # SQLite validates index target tables at CREATE INDEX time, even when
+        # the index itself uses IF NOT EXISTS. Keep the TimesFM evidence tables
+        # explicit in the init_db execution order before dependent indexes.
+        timesfm_evidence_table_ddl,
+        timesfm_outcome_table_ddl,
         "CREATE TABLE IF NOT EXISTS setup_expectancy_stats (setup TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
-        *_timesfm_forecast_evidence_ddl(),
+        timesfm_evidence_index_ddl,
         "CREATE TABLE IF NOT EXISTS cooldown_states (symbol TEXT PRIMARY KEY, cooldown_remaining_sec INTEGER NOT NULL DEFAULT 0)",
     ]
     with engine.begin() as conn:
