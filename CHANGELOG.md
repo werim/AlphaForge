@@ -1,3 +1,25 @@
+
+## [Unreleased] - 2026-06-23 (LIVE readiness aggregator CI repair)
+
+### Added
+- None.
+
+### Changed
+- Kept final gate display on the readiness page while preserving the legacy 27-item readiness probe catalog/API contract.
+- TimesFM futures tests now skip cleanly when optional NumPy is unavailable.
+
+### Fixed
+- Fixed dashboard readiness probe matrix counts inflated by duplicating final gates into the legacy probe catalog.
+
+### Removed
+- Removed final aggregate gates from the probe catalog; they remain in readiness report JSON and dashboard gate tables.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; final readiness still requires every local gate to pass.
+
 ## [Unreleased] - 2026-06-22 (LIVE readiness final gate aggregator)
 
 ### Added

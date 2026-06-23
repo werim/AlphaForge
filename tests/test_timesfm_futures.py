@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")
 
 from alphaforge.historical_market_data import HistoricalCandle
 from alphaforge.models.timesfm_forecaster import QuantileForecast, TimesFMForecastError

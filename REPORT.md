@@ -1,3 +1,49 @@
+
+## 2026-06-23 Patch Addendum — LIVE readiness aggregator CI repair
+
+### Why this patch was needed
+CI showed the dashboard readiness probe matrix expected the existing 27 probe catalog entries, but the previous patch duplicated the 16 final gates into that legacy probe catalog and inflated API counts.
+
+### Root cause
+Final gates belong in readiness report JSON and the dashboard final-gate table, not in the legacy readiness probe catalog used by existing dashboard API tests and consumers.
+
+### Files changed
+- `src/alphaforge/dashboard/queries.py`
+- `tests/test_timesfm_futures.py`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None. Runtime LIVE refusal behavior and final readiness aggregation are unchanged.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+The readiness probe API contract remains at the legacy 27 probes; final gates remain exported through `live_readiness_reports.report_payload` and the readiness page.
+
+### Tests added
+No new assertions; repaired optional dependency handling for the TimesFM futures test module.
+
+### Tests executed
+- `pytest -q`
+- `python -m compileall -q src tests`
+
+### Risks
+Low. This is an API compatibility repair for dashboard probes; the final LIVE gate contract remains persisted and visible.
+
+### Remaining limitations
+LIVE remains blocked without complete measured evidence for every final gate.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push as CI repair.
+
 ## 2026-06-22 Patch Addendum — LIVE readiness final gate aggregator
 
 ### Why this patch was needed

@@ -1,3 +1,14 @@
+## 2026-06-23 LIVE readiness aggregator CI repair
+- **Current version:** 0.3.49-dev
+- **Current phase:** P2-2 final gate API compatibility repair.
+- **Runtime maturity:** unchanged; runtime still refuses LIVE real orders unless `LIVE_REAL_ORDERS_READY` is recorded.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged; final gates remain fail-closed and PAPER/TimesFM evidence cannot promote LIVE.
+- **Lifecycle coverage:** unchanged.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** LIVE remains blocked unless all local final-gate evidence passes.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY by default**.
+
 ## 2026-06-22 LIVE readiness final gate aggregator
 - **Current version:** 0.3.48-dev
 - **Current phase:** P2-2 final fail-closed LIVE readiness gate aggregation.

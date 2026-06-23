@@ -39,22 +39,6 @@ READINESS_PROBE_CATALOG: tuple[dict[str, Any], ...] = (
     {"name": "alert_delivery_evidence", "category": "observability", "surface": "live_readiness_reports", "critical": True, "implemented": True},
     {"name": "observability_coverage", "category": "observability", "surface": "live_readiness_reports", "critical": True, "implemented": True},
     {"name": "rollback_ready", "category": "emergency_control", "surface": "live_rollback_validation_evidence", "critical": True, "implemented": True},
-    {"name": "lifecycle_integrity_complete", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "reject_persistence_complete", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "mode_parity_complete", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "execution_realism_complete", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "effective_rr_penalty_breakdown_complete", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "exchange_connectivity_healthy", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "authenticated_reconciliation_evidence_complete", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "no_submit_live_precheck_verified", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "kill_switch_verified", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "rollback_operator_controls_verified", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "heartbeat_alerts_incidents_verified", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "dashboard_rbac_secrets_safe", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "timesfm_evidence_safe_non_ordering", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "paper_burnin_report_acceptable", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "full_tests_passing_evidence_recorded", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
-    {"name": "operator_acknowledgement_required", "category": "final_gate", "surface": "live_readiness_reports", "critical": True, "implemented": True},
 )
 
 
@@ -146,7 +130,7 @@ def fetch_readiness_probe_matrix(engine: Engine) -> dict[str, Any]:
     rollback = fetch_rollback_evidence_status(engine)
     report_checks = {
         str(check.get("name")): check
-        for check in (readiness.get("payload", {}).get("checks", []) + readiness.get("payload", {}).get("gates", []))
+        for check in readiness.get("payload", {}).get("checks", [])
         if isinstance(check, dict) and check.get("name")
     }
     probes: list[dict[str, Any]] = []
