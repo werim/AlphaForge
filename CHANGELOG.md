@@ -1,3 +1,26 @@
+## [Unreleased] - 2026-06-22 (LIVE readiness final gate aggregator)
+
+### Added
+- Added a sixteen-gate final LIVE readiness aggregator with explicit verdict levels and machine-readable blockers.
+- Added persisted `verdict`, `gates`, and `blockers` fields inside readiness report JSON.
+- Added dashboard final-gate table coverage and regression tests for missing gates, lower-gate precheck readiness, kill-switch blocking, and TimesFM non-ordering safety.
+
+### Changed
+- Runtime now requires `LIVE_REAL_ORDERS_READY` before allowing LIVE real-order mode; lower verdicts fail closed.
+- Dashboard readiness probes include final aggregate gates in addition to underlying evidence checks.
+
+### Fixed
+- Closed the gap where partial readiness evidence could be read as a generic pass/fail without an explicit final verdict contract.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None at schema level; readiness JSON consumers should handle additional fields.
+
+### Known Issues
+- LIVE remains NOT READY by default. Missing or stale local evidence for any final gate remains blocking, and PAPER or TimesFM success cannot promote LIVE.
+
 ## [Unreleased] - 2026-06-22 (PAPER burn-in report generator)
 
 ### Added

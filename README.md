@@ -2,6 +2,8 @@
 
 AlphaForge is a SQL-first, execution-aware futures trading research/runtime prototype. It includes deterministic signal decision logic, symbol selection, runtime orchestration, and backtest tooling. It does **not** currently meet production live-trading standards.
 
+> **LIVE safety gate:** AlphaForge is **not LIVE-ready by default**. Real-order LIVE use is unsafe unless the local final readiness aggregator records `LIVE_REAL_ORDERS_READY` with every lifecycle, reject persistence, execution realism, exchange connectivity, authenticated reconciliation, no-submit precheck, kill-switch, rollback, heartbeat/alert/incident, dashboard/RBAC/secrets, TimesFM non-ordering, PAPER burn-in, full-test, and operator acknowledgement gate passing. PAPER success alone is never LIVE readiness.
+
 ## Current Status
 
 - SQL-first foundation exists (SQLAlchemy models, Alembic migrations, persistence modules).
