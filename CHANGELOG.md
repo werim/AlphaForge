@@ -1,3 +1,24 @@
+## 2026-06-23 Work 1.1 SQLite schema bootstrap stabilization
+
+### Added
+- Added regression coverage proving fresh `init_db()` creates `timesfm_forecast_evidence` and `ix_timesfm_evidence_symbol_timeframe_ts`, repeated bootstrap remains idempotent, and the conservative TimesFM evidence columns are present.
+- Added conservative TimesFM evidence compatibility columns `forecast_timestamp`, `point_forecast`, and `quantiles_json` to fresh SQLite and Alembic bootstrap DDL.
+
+### Changed
+- Kept TimesFM DDL ordered as tables first and indexes after their target tables, with additive legacy-column repair for existing SQLite databases.
+
+### Fixed
+- Fixed Work 1.1 bootstrap completeness risk by ensuring the TimesFM evidence table shape exists before its lookup index is created on fresh SQLite databases.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only stabilizes SQL schema bootstrap behavior.
+
 ## 2026-06-23 SQLite/Alembic config snapshot trigger repair
 
 ### Added

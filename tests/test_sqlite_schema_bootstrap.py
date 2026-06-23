@@ -131,6 +131,66 @@ def test_init_db_bootstraps_timesfm_evidence_before_indexes(tmp_path) -> None:
         assert index_row is not None
 
 
+def test_init_db_creates_timesfm_forecast_evidence_table_and_index(tmp_path) -> None:
+    db_path = tmp_path / "alphaforge.db"
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
+
+    with engine.connect() as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            )
+        }
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='index'")
+            )
+        }
+
+    assert "timesfm_forecast_evidence" in tables
+    assert "ix_timesfm_evidence_symbol_timeframe_ts" in indexes
+
+
+def test_init_db_is_idempotent_for_timesfm_table(tmp_path) -> None:
+    db_path = tmp_path / "alphaforge.db"
+    url = f"sqlite+pysqlite:///{db_path}"
+
+    init_db(url)
+    engine = init_db(url)
+
+    with engine.connect() as conn:
+        count = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='timesfm_forecast_evidence'"
+            )
+        ).scalar_one()
+
+    assert count == 1
+
+
+def test_init_db_bootstraps_conservative_timesfm_evidence_columns(tmp_path) -> None:
+    db_path = tmp_path / "fresh_timesfm_conservative_columns.db"
+
+    init_db(f"sqlite+pysqlite:///{db_path}")
+
+    expected_columns = {
+        "id",
+        "symbol",
+        "timeframe",
+        "timestamp",
+        "forecast_timestamp",
+        "horizon",
+        "point_forecast",
+        "quantiles_json",
+        "model_name",
+        "created_at",
+    }
+    assert expected_columns.issubset(_sqlite_columns(str(db_path), "timesfm_forecast_evidence"))
+
+
 def test_init_db_preserves_existing_timesfm_evidence_rows_on_repeated_calls(tmp_path) -> None:
     db_path = tmp_path / "timesfm_idempotent.db"
 
