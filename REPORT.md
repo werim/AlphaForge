@@ -1,3 +1,55 @@
+## 2026-06-23 Patch Addendum — Persistence/lifecycle contract regression coverage
+
+### Why this patch was needed
+The reported macOS failures targeted contracts that must remain stable: `fetch_expectancy_stat(...)` must return `float | None`, SQLite bootstrap must repair compatibility columns additively, and accepted backtest lifecycles must not jump from acceptance directly to entry trigger.
+
+### Root cause
+The implementation already preserves these contracts in this checkout, but the exact failure surfaces needed explicit regression coverage so future persistence metadata helpers or lifecycle edits cannot silently weaken audit quality.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `tests/test_persistence_lifecycle_contracts.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+SQLite legacy runtime schema repair now ensures base lifecycle compatibility columns needed by the lifecycle uniqueness index are present before index creation. The scalar expectancy lookup now uses SQLAlchemy executable SQL text while preserving the existing `float | None` return contract.
+
+### Lifecycle changes
+No runtime lifecycle behavior changed. Tests now assert `WAITING_ENTRY_ZONE` appears before `ENTRY_TRIGGERED` for an accepted limit backtest candidate.
+
+### Persistence changes
+No destructive schema change. Legacy `trade_lifecycle_events` tables are additively repaired with base audit columns before index creation. Tests now verify repeated `init_db()` calls preserve legacy rows while adding `order_decisions.payload` and `trade_lifecycle_events.trade_id/state/payload`.
+
+### Export/schema changes
+None.
+
+### Tests added
+- Legacy scalar `fetch_expectancy_stat(...)` contract test.
+- Separate `fetch_expectancy_stat_detail(...)` metadata test.
+- Idempotent legacy runtime-column repair and row-preservation test.
+- Accepted backtest `WAITING_ENTRY_ZONE` ordering test.
+
+### Tests executed
+- `alembic heads` (environment warning: console script unavailable in local container)
+- `alembic history` (environment warning: console script unavailable in local container)
+- `alembic upgrade head` (environment warning: console script unavailable in local container)
+- `python -m pytest tests/test_persistence_lifecycle_contracts.py tests/test_alembic_revision_graph.py tests/test_phase123_foundations.py::test_backtest_lifecycle_does_not_start_directly_at_created tests/test_sqlite_schema_bootstrap.py::test_init_db_migrates_legacy_order_decisions_schema -q`
+- `python -m pytest -q`
+
+### Risks
+Low. The code change is additive/idempotent SQLite repair and executable SQL compatibility only; it does not alter trading thresholds, reject gates, exports, or lifecycle decisions.
+
+### Remaining limitations
+The local container lacks the Alembic console script and network package installation was blocked, so `alembic heads/history/upgrade head` could not be executed as shell commands here; the Alembic revision graph tests still load the script directory when the optional Alembic package is available.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after targeted and full tests pass. LIVE remains blocked by readiness gates.
+
 ## 2026-06-23 Patch Addendum — SQLite/Alembic bootstrap regression hardening
 
 ### Why this patch was needed
