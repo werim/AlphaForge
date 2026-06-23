@@ -27,7 +27,13 @@ def upgrade() -> None:
     decision.create(bind, checkfirst=True)
     side.create(bind, checkfirst=True)
 
-    op.create_table("exchange_symbols", sa.Column("id", sa.BigInteger(), primary_key=True), sa.Column("venue", sa.String(32), nullable=False), sa.Column("market_type", market_type, nullable=False), sa.Column("symbol", sa.String(64), nullable=False), sa.Column("pair", sa.String(64), nullable=False), sa.Column("contract_type", sa.String(32), nullable=False), sa.Column("base_asset", sa.String(32), nullable=False), sa.Column("quote_asset", sa.String(32), nullable=False), sa.Column("margin_asset", sa.String(32), nullable=False), sa.Column("status", sa.String(16), nullable=False), sa.Column("onboard_date", sa.DateTime(timezone=True)), sa.Column("delivery_date", sa.DateTime(timezone=True)), sa.Column("price_precision", sa.Integer(), nullable=False), sa.Column("quantity_precision", sa.Integer(), nullable=False), sa.Column("tick_size", sa.Numeric(20,10), nullable=False), sa.Column("step_size", sa.Numeric(20,10), nullable=False), sa.Column("min_qty", sa.Numeric(20,10), nullable=False), sa.Column("min_notional", sa.Numeric(20,10), nullable=False), sa.Column("contract_size", sa.Numeric(20,10), nullable=False), sa.Column("last_synced_at", sa.DateTime(timezone=True), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=False), sa.Column("raw_exchange_info_json", json_t, nullable=False), sa.UniqueConstraint("venue", "market_type", "symbol", name="uq_exchange_symbol"), sa.CheckConstraint("price_precision >= 0"), sa.CheckConstraint("quantity_precision >= 0"))
+    inspector = sa.inspect(bind)
+
+    def create_table_if_missing(name, *cols):
+        if not inspector.has_table(name):
+            op.create_table(name, *cols)
+
+    create_table_if_missing("exchange_symbols", sa.Column("id", sa.BigInteger(), primary_key=True), sa.Column("venue", sa.String(32), nullable=False), sa.Column("market_type", market_type, nullable=False), sa.Column("symbol", sa.String(64), nullable=False), sa.Column("pair", sa.String(64), nullable=False), sa.Column("contract_type", sa.String(32), nullable=False), sa.Column("base_asset", sa.String(32), nullable=False), sa.Column("quote_asset", sa.String(32), nullable=False), sa.Column("margin_asset", sa.String(32), nullable=False), sa.Column("status", sa.String(16), nullable=False), sa.Column("onboard_date", sa.DateTime(timezone=True)), sa.Column("delivery_date", sa.DateTime(timezone=True)), sa.Column("price_precision", sa.Integer(), nullable=False), sa.Column("quantity_precision", sa.Integer(), nullable=False), sa.Column("tick_size", sa.Numeric(20,10), nullable=False), sa.Column("step_size", sa.Numeric(20,10), nullable=False), sa.Column("min_qty", sa.Numeric(20,10), nullable=False), sa.Column("min_notional", sa.Numeric(20,10), nullable=False), sa.Column("contract_size", sa.Numeric(20,10), nullable=False), sa.Column("last_synced_at", sa.DateTime(timezone=True), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=False), sa.Column("raw_exchange_info_json", json_t, nullable=False), sa.UniqueConstraint("venue", "market_type", "symbol", name="uq_exchange_symbol"), sa.CheckConstraint("price_precision >= 0"), sa.CheckConstraint("quantity_precision >= 0"))
 
     tables = [
         ("candles", [sa.Column("id", sa.BigInteger(), primary_key=True), sa.Column("symbol_id", sa.BigInteger(), sa.ForeignKey("exchange_symbols.id"), nullable=False), sa.Column("timeframe", sa.String(16), nullable=False), sa.Column("open_time", sa.DateTime(timezone=True), nullable=False), sa.Column("close_time", sa.DateTime(timezone=True), nullable=False), sa.Column("open", sa.Numeric(20,10), nullable=False), sa.Column("high", sa.Numeric(20,10), nullable=False), sa.Column("low", sa.Numeric(20,10), nullable=False), sa.Column("close", sa.Numeric(20,10), nullable=False), sa.Column("volume", sa.Numeric(28,10), nullable=False), sa.UniqueConstraint("symbol_id","timeframe","open_time", name="uq_candles_symbol_time")]),
@@ -51,7 +57,7 @@ def upgrade() -> None:
         ("runtime_state", [sa.Column("id", sa.BigInteger(), primary_key=True), sa.Column("key", sa.String(128), unique=True, nullable=False), sa.Column("value", json_t, nullable=False), sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=False)]),
     ]
     for name, cols in tables:
-        op.create_table(name, *cols)
+        create_table_if_missing(name, *cols)
 
     if bind.dialect.name == "postgresql":
         for table in ["config_snapshots", "rejection_audit", "order_decision_audit"]:
@@ -59,8 +65,8 @@ def upgrade() -> None:
             op.execute(f"CREATE TRIGGER trg_{table}_no_update BEFORE UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION {table}_immutable_fn();")
     else:
         for table in ["config_snapshots", "rejection_audit", "order_decision_audit"]:
-            op.execute(f"CREATE TRIGGER trg_{table}_no_update BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END;")
-            op.execute(f"CREATE TRIGGER trg_{table}_no_delete BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END;")
+            op.execute(f"CREATE TRIGGER IF NOT EXISTS trg_{table}_no_update BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END;")
+            op.execute(f"CREATE TRIGGER IF NOT EXISTS trg_{table}_no_delete BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT, '{table} is append-only'); END;")
 
 
 def downgrade() -> None:

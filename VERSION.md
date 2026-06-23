@@ -1,3 +1,14 @@
+## 2026-06-23 Work 1.2 Alembic/init_db baseline schema alignment
+- **Current version:** 0.3.57-dev
+- **Current phase:** SQLite Alembic/bootstrap baseline schema convergence.
+- **Runtime maturity:** `init_db()` and Alembic now share the required baseline runtime/research table surface, including TimesFM evidence and runtime control state, through additive/idempotent DDL.
+- **BACKTEST/PAPER/LIVE alignment:** Schema bootstrap only; no trading decision logic, reject thresholds, lifecycle transitions, or execution-cost modeling changed.
+- **Lifecycle coverage:** Unchanged semantically; required lifecycle-adjacent persistence tables remain available without forcing signals into trades.
+- **Execution realism coverage:** Unchanged; no fake spreads, fills, scores, RR values, or execution defaults were introduced.
+- **Known critical risks:** LIVE remains blocked by readiness gates; this patch validates schema convergence, not production execution safety.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; schema alignment does not enable LIVE order placement.
+
 ## 2026-06-23 PR-01 Lifecycle Contract + SQL Truth Audit
 - **Current version:** 0.3.56-dev
 - **Current phase:** SQL-first lifecycle vocabulary contract and export-persistence audit hardening.

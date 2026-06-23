@@ -16,8 +16,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "adaptive_threshold_stats",
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if not inspector.has_table("adaptive_threshold_stats"):
+        op.create_table(
+            "adaptive_threshold_stats",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("window_size", sa.Integer(), nullable=False, server_default="20"),
         sa.Column("consecutive_sl_count", sa.Integer(), nullable=False, server_default="0"),
@@ -28,8 +31,9 @@ def upgrade() -> None:
         sa.Column("min_rr", sa.Float(), nullable=False, server_default="1.3"),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
-    op.create_table(
-        "expectancy_stats",
+    if not inspector.has_table("expectancy_stats"):
+        op.create_table(
+            "expectancy_stats",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("setup_type", sa.String(length=128), nullable=False),
         sa.Column("regime", sa.String(length=128), nullable=False),
@@ -44,5 +48,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_table("expectancy_stats")
-    op.drop_table("adaptive_threshold_stats")
+    pass
