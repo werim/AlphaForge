@@ -1,3 +1,25 @@
+## 2026-06-23 SQLite/Alembic bootstrap regression hardening
+
+### Added
+- Added direct regression coverage for TimesFM DDL helper ordering so the evidence table remains before its dependent index.
+- Added direct regression coverage that `_apply_sqlite_migrations()` creates `schema_migrations` before reading applied versions on partial SQLite databases.
+- Added Alembic fresh-head regression coverage that `config_snapshots` append-only triggers exist after table creation.
+
+### Changed
+- Documentation now records the schema bootstrap control-flow protections explicitly.
+
+### Fixed
+- Fixed `_apply_sqlite_migrations()` so partial databases that have `schema_migrations` bootstrapped but do not yet have optional lifecycle/review tables do not execute dependent `ALTER TABLE` or lifecycle index DDL against absent tables.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only strengthens schema bootstrap tests and documentation.
+
 ## 2026-06-23 SQLite/Alembic schema bootstrap repair
 
 ### Added

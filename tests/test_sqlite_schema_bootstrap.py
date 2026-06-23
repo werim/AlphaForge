@@ -2,11 +2,57 @@ from __future__ import annotations
 
 import sqlite3
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from alphaforge.persistence import init_db, save_order_decision
+from alphaforge.persistence import (
+    _apply_sqlite_migrations,
+    _timesfm_forecast_evidence_ddl,
+    init_db,
+    save_order_decision,
+)
 
+
+
+def test_timesfm_ddl_helper_orders_table_before_dependent_index() -> None:
+    ddl = _timesfm_forecast_evidence_ddl()
+
+    table_position = next(
+        index
+        for index, statement in enumerate(ddl)
+        if "CREATE TABLE IF NOT EXISTS timesfm_forecast_evidence" in statement
+    )
+    index_position = next(
+        index
+        for index, statement in enumerate(ddl)
+        if "CREATE INDEX IF NOT EXISTS ix_timesfm_evidence_symbol_timeframe_ts" in statement
+    )
+
+    assert table_position < index_position
+
+
+def test_apply_sqlite_migrations_bootstraps_schema_migrations_on_partial_database(tmp_path) -> None:
+    db_path = tmp_path / "partial_without_schema_migrations.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE signals (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT)")
+        conn.execute("INSERT INTO signals (signal_id) VALUES (NULL)")
+        conn.commit()
+
+    engine = create_engine(f"sqlite+pysqlite:///{db_path}", future=True)
+    with engine.begin() as conn:
+        _apply_sqlite_migrations(conn)
+
+    with sqlite3.connect(db_path) as conn:
+        migration_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone()
+        assert migration_table is not None
+        migration_count = conn.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version='2026_05_16_persistence_integrity_v1'"
+        ).fetchone()[0]
+        assert migration_count == 1
+        backfilled_signal_id = conn.execute("SELECT signal_id FROM signals WHERE id=1").fetchone()[0]
+        assert backfilled_signal_id == "legacy-signal-1"
 
 def test_init_db_bootstraps_schema_migrations_before_selecting_versions(tmp_path) -> None:
     db_path = tmp_path / "fresh_bootstrap.db"
