@@ -15,7 +15,7 @@ $TaskName = "AlphaForge Dashboard"
 $RepoDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $VenvDir = Join-Path $RepoDir ".venv"
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-$Runner = Join-Path $RepoDir "scripts\run_dashboard_windows.ps1"
+$Runner = Join-Path $RepoDir "scripts\run_dashboard.ps1"
 $LogDir = Join-Path $RepoDir "logs"
 
 function Resolve-PythonCommand {
