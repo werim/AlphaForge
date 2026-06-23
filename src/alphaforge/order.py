@@ -413,6 +413,69 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     execution = execute_order_candidate(decision, ctx)
     return {"status": "executed", "accepted": True, "candidate": decision, "reason": "", "reject_reason": "", "rejection_reason": "", "execution": execution}
 
+
+def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[str, Any] | None = None, recent_stats: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Run shared candidate-quality and PAPER execution-cost pre-submit checks.
+
+    The adapter mirrors ``run_order_cycle`` through candidate construction and
+    quality gates, then evaluates the PAPER effective-RR execution flags before
+    any virtual/paper execution audit is emitted. It never calls Binance submit
+    functions and is safe for BACKTEST/PAPER parity tests.
+    """
+    config = config or {}
+    recent_stats = recent_stats or {}
+    decision = build_order_candidate(ctx.symbol, ctx.market_ctx, config)
+    if isinstance(decision, OrderRejection):
+        _audit(ctx, None, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, decision.reject_reason)
+        return _rejected_cycle_result(decision.reject_reason, candidate=None)
+
+    session = ctx.storage.get("session")
+    if decision.expectancy is None and isinstance(session, Session):
+        setup_exp = fetch_expectancy_stat(session, "setup_expectancy_stats", "setup", decision.setup_type)
+        regime_exp = fetch_expectancy_stat(session, "regime_expectancy_stats", "regime", decision.regime)
+        if setup_exp is not None or regime_exp is not None:
+            values = [v for v in (setup_exp, regime_exp) if v is not None]
+            inferred_expectancy = sum(values) / len(values)
+            decision.expectancy = inferred_expectancy
+            ctx.market_ctx = {**ctx.market_ctx, "expectancy": inferred_expectancy}
+
+    quality = evaluate_trade_quality(decision, ctx.market_ctx, recent_stats, config)
+    if not quality.accepted:
+        ctx.diagnostics.update(quality.diagnostics)
+        reason = quality.reject_reason or "UNKNOWN"
+        _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, reason)
+        payload = _rejected_cycle_result(reason, candidate=decision, diagnostics=quality.diagnostics)
+        payload["accepted"] = False
+        payload["reason"] = reason
+        payload["reject_reason"] = reason
+        return payload
+
+    execution_ctx = ctx.market_ctx.get("execution_ctx")
+    if not isinstance(execution_ctx, Mapping):
+        execution_ctx = build_execution_context(ctx.market_ctx)
+    order_payload = {"risk_reward": decision.rr, "rr": decision.rr}
+    effective_rr, execution_flags, rr_breakdown = _effective_rr(order_payload, execution_ctx, mode="paper")
+    diagnostics = {
+        **quality.diagnostics,
+        "effective_rr": effective_rr,
+        "execution_flags": execution_flags,
+        "effective_rr_breakdown": rr_breakdown,
+    }
+    if execution_flags:
+        reason = "LOW_EFFECTIVE_RR" if "LOW_EFFECTIVE_RR" in execution_flags else execution_flags[0]
+        ctx.diagnostics.update(diagnostics)
+        _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, reason)
+        payload = _rejected_cycle_result(reason, candidate=decision, diagnostics=diagnostics)
+        payload["accepted"] = False
+        payload["reason"] = reason
+        payload["reject_reason"] = reason
+        return payload
+
+    ctx.diagnostics.update(diagnostics)
+    execution = execute_order_candidate(decision, ctx)
+    return {"status": "executed", "accepted": True, "candidate": decision, "reason": "", "reject_reason": "", "rejection_reason": "", "execution": execution, "diagnostics": diagnostics}
+
+
 # Existing functions kept below
 
 def before_virtual_order(session: Session, candidate: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], *, ai_enabled: bool = True) -> dict[str, Any] | None:
