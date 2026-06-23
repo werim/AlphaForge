@@ -1,3 +1,25 @@
+## 2026-06-23 Work 1.2 Alembic/init_db baseline schema alignment
+
+### Added
+- Added Alembic revision `0004_align_init_db_baseline_tables` to create missing baseline runtime/research tables additively.
+- Added tests for fresh `init_db()`, fresh Alembic upgrade, `init_db() -> Alembic`, and `Alembic -> init_db()` schema paths.
+
+### Changed
+- Made touched Alembic migrations idempotent for existing tables/triggers so direct SQLite bootstrap and Alembic can run in either order.
+- Extended `init_db()` baseline DDL to include required runtime tables that Alembic now also covers.
+
+### Fixed
+- Fixed schema drift risk where TimesFM evidence/index and required baseline tables could differ between Alembic and direct bootstrap paths.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains NOT READY by default; this patch only aligns schema bootstrap and migration coverage.
+
 ## 2026-06-23 PR-01 Lifecycle Contract + SQL Truth Audit
 
 ### Added

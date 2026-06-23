@@ -252,6 +252,18 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS regime_expectancy_stats (regime TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS symbol_expectancy_stats (symbol TEXT PRIMARY KEY, samples INTEGER NOT NULL DEFAULT 0, win_count INTEGER NOT NULL DEFAULT 0, total_pnl REAL NOT NULL DEFAULT 0, expectancy REAL NOT NULL DEFAULT 0, updated_at TEXT)",
         *_timesfm_forecast_evidence_ddl(),
+
+        "CREATE TABLE IF NOT EXISTS signal_id_state (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL UNIQUE, last_signal_id TEXT, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT UNIQUE, symbol TEXT, side TEXT, qty REAL, entry_price REAL, status TEXT, created_at TEXT, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT UNIQUE, signal_id TEXT, symbol TEXT, side TEXT, status TEXT, created_at TEXT, updated_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS fills (id INTEGER PRIMARY KEY AUTOINCREMENT, fill_id TEXT UNIQUE, order_id TEXT, symbol TEXT, side TEXT, qty REAL, price REAL, fee REAL, filled_at TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS paper_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE, event_type TEXT, symbol TEXT, payload_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS backtest_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT UNIQUE, started_at TEXT, completed_at TEXT, payload_json TEXT)",
+        "CREATE TABLE IF NOT EXISTS backtest_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, event_type TEXT, symbol TEXT, payload_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS symbol_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, timeframe TEXT, snapshot_ts TEXT, payload_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS runtime_control_state (id INTEGER PRIMARY KEY CHECK (id = 1), mode_requested TEXT NOT NULL, mode_running TEXT, kill_switch_active INTEGER NOT NULL DEFAULT 0, kill_switch_source TEXT, kill_switch_updated_at TEXT, runtime_status TEXT NOT NULL, last_error TEXT, updated_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS calibration_labels (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT, label TEXT, payload_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS optimizer_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT UNIQUE, status TEXT, payload_json TEXT, created_at TEXT, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS cooldown_states (symbol TEXT PRIMARY KEY, cooldown_remaining_sec INTEGER NOT NULL DEFAULT 0)",
     ]
     with engine.begin() as conn:

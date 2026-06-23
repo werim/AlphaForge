@@ -1,3 +1,56 @@
+## 2026-06-23 Work 1.2 Alembic/init_db baseline schema alignment
+
+### Why the patch was needed
+Work 1.1 stabilized fresh SQLite `init_db()` ordering, but Alembic and direct bootstrap could still drift. A database created by one path needed to be safely accepted by the other path without dropping or rewriting runtime evidence.
+
+### Root cause
+The Alembic base migrations used unconditional table/trigger creation, while `init_db()` owned several runtime baseline tables outside Alembic. That made `init_db() -> alembic upgrade head` vulnerable to duplicate-object failures and made Alembic-only fresh databases miss runtime baseline tables expected by AlphaForge tests and operators.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `alembic/versions/0001_phase1_init.py`
+- `alembic/versions/0002_adaptive_learning_lifecycle.py`
+- `alembic/versions/0003_sqlite_bootstrap_runtime_tables.py`
+- `alembic/versions/0004_align_init_db_baseline_tables.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `tests/test_alembic_revision_graph.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None beyond schema availability. The direct SQLite bootstrap now creates the required baseline persistence tables additively with `CREATE TABLE IF NOT EXISTS`.
+
+### Lifecycle changes
+No lifecycle state machine or transition logic changed.
+
+### Persistence changes
+Added additive baseline coverage for `signals`, `order_decisions`, `signal_id_state`, `positions`, `orders`, `fills`, `paper_events`, `backtest_runs`, `backtest_events`, `symbol_snapshots`, `timesfm_forecast_evidence`, `runtime_control_state`, `calibration_labels`, and `optimizer_runs`. TimesFM index `ix_timesfm_evidence_symbol_timeframe_ts` is asserted in both paths.
+
+### Export/schema changes
+No CSV export logic changed. Schema migration behavior is now conservative/idempotent and avoids destructive downgrade operations in the touched migrations.
+
+### Tests added
+Added bootstrap-path coverage for fresh `init_db()`, fresh Alembic upgrade, `init_db() -> Alembic`, and `Alembic -> init_db()`, with required table/index assertions and repeated initialization safety.
+
+### Tests executed
+- `python -m pytest -q tests/test_sqlite_schema_bootstrap.py tests/test_alembic_revision_graph.py` — 13 passed, 3 skipped.
+- `python -m pytest -q` — 354 passed, 8 skipped, 165 warnings.
+- `python -m alembic heads` — environment warning: this checkout has a local `alembic/` package directory but the Alembic package console/module entry point is not installed, so Python reported no `alembic.__main__`.
+- `alembic heads` / `alembic history` — environment warning: console script unavailable.
+
+### Risks
+Low-to-medium. The migration is additive and avoids data deletion, but legacy databases with divergent column types are intentionally handled conservatively by checking for required objects rather than byte-for-byte schema equality.
+
+### Remaining limitations
+Optional Alembic package execution is skipped in this container because the package entry point is unavailable; tests that require it skip cleanly. LIVE readiness remains out of scope.
+
+### Migration concerns
+No destructive migration. The new Alembic revision only creates missing baseline tables/indexes and leaves existing data intact.
+
+### Push recommendation
+Safe to push after the successful full test run. LIVE remains NOT_READY.
+
 ## 2026-06-23 PR-01 Lifecycle Contract + SQL Truth Audit
 
 ### Why the patch was needed
