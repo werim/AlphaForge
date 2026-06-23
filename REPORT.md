@@ -1,3 +1,103 @@
+
+## 2026-06-23 Patch Addendum — LIVE readiness aggregator CI repair
+
+### Why this patch was needed
+CI showed the dashboard readiness probe matrix expected the existing 27 probe catalog entries, but the previous patch duplicated the 16 final gates into that legacy probe catalog and inflated API counts.
+
+### Root cause
+Final gates belong in readiness report JSON and the dashboard final-gate table, not in the legacy readiness probe catalog used by existing dashboard API tests and consumers.
+
+### Files changed
+- `src/alphaforge/dashboard/queries.py`
+- `tests/test_timesfm_futures.py`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None. Runtime LIVE refusal behavior and final readiness aggregation are unchanged.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+The readiness probe API contract remains at the legacy 27 probes; final gates remain exported through `live_readiness_reports.report_payload` and the readiness page.
+
+### Tests added
+No new assertions; repaired optional dependency handling for the TimesFM futures test module.
+
+### Tests executed
+- `pytest -q`
+- `python -m compileall -q src tests`
+
+### Risks
+Low. This is an API compatibility repair for dashboard probes; the final LIVE gate contract remains persisted and visible.
+
+### Remaining limitations
+LIVE remains blocked without complete measured evidence for every final gate.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push as CI repair.
+
+## 2026-06-22 Patch Addendum — LIVE readiness final gate aggregator
+
+### Why this patch was needed
+P2-2 required a single fail-closed readiness contract that combines lifecycle, persistence, parity, execution realism, exchange, reconciliation, operational, dashboard, TimesFM, PAPER burn-in, test, and operator evidence into one explicit verdict.
+
+### Root cause
+Readiness evidence existed as individual checks, reports, dashboard probes, and burn-in diagnostics, but there was no final aggregation layer with explicit verdict levels and blockers that could prevent partial evidence from being interpreted as LIVE-ready.
+
+### Files changed
+- `src/alphaforge/live_readiness.py`
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/dashboard/queries.py`
+- `src/alphaforge/dashboard/templates/readiness.html`
+- `tests/test_live_readiness.py`
+- `README.md`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Runtime persists the final readiness verdict and blocks LIVE real-order startup unless the verdict is exactly `LIVE_REAL_ORDERS_READY`. The default posture remains fail-closed.
+
+### Lifecycle changes
+No lifecycle vocabulary changed. Lifecycle integrity is now elevated into a final aggregate gate.
+
+### Persistence changes
+No schema migration. Existing `live_readiness_reports.report_payload` now includes `verdict`, `gates`, and `blockers` JSON fields for machine-readable consumption.
+
+### Export/schema changes
+Dashboard readiness JSON/probe matrix now includes final aggregate gates and blockers. The readiness page renders the final gate contract separately from underlying checks.
+
+### Tests added
+- Missing final gates block real orders.
+- Lower gates can produce only `LIVE_PRECHECK_READY`, not real orders.
+- Kill switch active blocks readiness.
+- TimesFM evidence cannot satisfy execution/order readiness.
+
+### Tests executed
+- `pytest -q tests/test_live_readiness*.py tests/test_runtime*.py tests/test_dashboard_app.py`
+- `pytest -q tests/test_live_readiness.py`
+- `python -m compileall -q src tests`
+
+### Risks
+The aggregator is intentionally conservative and may block LIVE until operators wire measured local evidence for dashboard/RBAC, burn-in, full tests, authenticated reconciliation, and heartbeat evidence. This is expected.
+
+### Remaining limitations
+Runtime currently supplies only the evidence it can measure directly; missing external operator/test/dashboard artifacts remain blockers. No live order placement was added.
+
+### Migration concerns
+No database migration is required; consumers of readiness JSON should tolerate the added `verdict`, `gates`, and `blockers` fields.
+
+### Push recommendation
+Safe to push as P2-2 fail-closed readiness aggregation. Do not enable LIVE trading until every local gate has fresh measured passing evidence.
+
 ## 2026-06-22 Patch Addendum — PAPER burn-in report generator
 
 ### Why this patch was needed

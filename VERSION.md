@@ -1,3 +1,25 @@
+## 2026-06-23 LIVE readiness aggregator CI repair
+- **Current version:** 0.3.49-dev
+- **Current phase:** P2-2 final gate API compatibility repair.
+- **Runtime maturity:** unchanged; runtime still refuses LIVE real orders unless `LIVE_REAL_ORDERS_READY` is recorded.
+- **BACKTEST/PAPER/LIVE alignment:** unchanged; final gates remain fail-closed and PAPER/TimesFM evidence cannot promote LIVE.
+- **Lifecycle coverage:** unchanged.
+- **Execution realism coverage:** unchanged.
+- **Known critical risks:** LIVE remains blocked unless all local final-gate evidence passes.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY by default**.
+
+## 2026-06-22 LIVE readiness final gate aggregator
+- **Current version:** 0.3.48-dev
+- **Current phase:** P2-2 final fail-closed LIVE readiness gate aggregation.
+- **Runtime maturity:** Runtime now records a single machine-readable verdict from sixteen evidence gates and refuses real LIVE orders unless the verdict is `LIVE_REAL_ORDERS_READY`.
+- **BACKTEST/PAPER/LIVE alignment:** Aggregator requires lifecycle, reject persistence, execution realism, LIVE_PRECHECK no-submit parity, authenticated reconciliation, and independent operational evidence; PAPER success and TimesFM evidence cannot promote LIVE.
+- **Lifecycle coverage:** Final gate includes lifecycle integrity and reject persistence gates backed by persisted lifecycle/order-decision evidence.
+- **Execution realism coverage:** Final gate requires effective-RR penalty/evidence context and measured exchange/readiness evidence; missing or stale evidence blocks.
+- **Known critical risks:** Normal local operation remains blocked without fresh LIVE heartbeat, authenticated reconciliation, dashboard/RBAC proof, acceptable burn-in report, full-test evidence, and explicit operator acknowledgement.
+- **Last audit date:** 2026-06-22.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY by default**; only complete local evidence for every gate can produce `LIVE_REAL_ORDERS_READY`.
+
 ## 2026-06-22 PAPER burn-in report generator
 - **Current version:** 0.3.47-dev
 - **Current phase:** P2-1 PAPER burn-in diagnostics and fail-closed readiness reporting.

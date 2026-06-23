@@ -34,14 +34,22 @@ class QualificationReport:
     generated_at: str
     deployment_state: str
     acknowledgement_required: bool
+    verdict: str = "NOT_LIVE_READY"
+    gates: list[CheckResult] | None = None
+    blockers: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        gates = self.gates or []
+        blockers = self.blockers or [c.name for c in self.checks if not c.passed]
         return {
             "qualified": self.qualified,
+            "verdict": self.verdict,
             "generated_at": self.generated_at,
             "deployment_state": self.deployment_state,
             "acknowledgement_required": self.acknowledgement_required,
+            "blockers": blockers,
             "checks": [{"name": c.name, "passed": c.passed, "details": c.details} for c in self.checks],
+            "gates": [{"name": c.name, "passed": c.passed, "details": c.details} for c in gates],
         }
 
 
@@ -51,7 +59,7 @@ class LiveReadinessEvaluator:
         self.reject_rate_bounds = reject_rate_bounds
         self.runtime_heartbeat_max_age_sec = max(1.0, float(runtime_heartbeat_max_age_sec))
 
-    def evaluate(self, *, mode_parity: Mapping[str, Any], reconciliation_snapshot: Mapping[str, Any], observability_snapshot: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool) -> QualificationReport:
+    def evaluate(self, *, mode_parity: Mapping[str, Any], reconciliation_snapshot: Mapping[str, Any], observability_snapshot: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool, kill_switch_active: bool = False, dashboard_security: Mapping[str, Any] | None = None, timesfm_evidence: Mapping[str, Any] | None = None, paper_burnin_report: Mapping[str, Any] | None = None, tests_passing_evidence: Mapping[str, Any] | None = None) -> QualificationReport:
         checks: list[CheckResult] = []
         with self.engine.begin() as conn:
             checks.extend(self._check_lifecycle(conn))
@@ -60,8 +68,73 @@ class LiveReadinessEvaluator:
         checks.append(self._check_runtime_heartbeat())
         checks.extend(self._check_runtime(mode_parity, reconciliation_snapshot))
         checks.extend(self._check_operational(observability_snapshot, canary_enabled, shadow_mode_enabled, operator_ack))
-        qualified = all(c.passed for c in checks)
-        return QualificationReport(qualified=qualified, checks=checks, generated_at=canonical_utc_timestamp(), deployment_state="LIVE_ENABLED" if qualified and operator_ack else "LIVE_BLOCKED", acknowledgement_required=not operator_ack)
+        gates = self._aggregate_gates(
+            checks,
+            mode_parity=mode_parity,
+            reconciliation=reconciliation_snapshot,
+            observability=observability_snapshot,
+            kill_switch_active=kill_switch_active,
+            operator_ack=operator_ack,
+            dashboard_security=dashboard_security or {},
+            timesfm_evidence=timesfm_evidence or {},
+            paper_burnin_report=paper_burnin_report or {},
+            tests_passing_evidence=tests_passing_evidence or {},
+        )
+        blockers = [f"{gate.name}:{gate.details}" for gate in gates if not gate.passed]
+        verdict = self._verdict_from_gates(gates)
+        qualified = verdict == "LIVE_REAL_ORDERS_READY"
+        return QualificationReport(qualified=qualified, checks=checks, gates=gates, blockers=blockers, verdict=verdict, generated_at=canonical_utc_timestamp(), deployment_state=verdict, acknowledgement_required=not operator_ack)
+
+
+    @staticmethod
+    def _checks_pass(checks: list[CheckResult], names: set[str]) -> bool:
+        observed = {check.name: check.passed for check in checks}
+        return all(observed.get(name) is True for name in names)
+
+    def _aggregate_gates(self, checks: list[CheckResult], *, mode_parity: Mapping[str, Any], reconciliation: Mapping[str, Any], observability: Mapping[str, Any], kill_switch_active: bool, operator_ack: bool, dashboard_security: Mapping[str, Any], timesfm_evidence: Mapping[str, Any], paper_burnin_report: Mapping[str, Any], tests_passing_evidence: Mapping[str, Any]) -> list[CheckResult]:
+        lifecycle = {"lifecycle_no_orphans", "lifecycle_transitions_valid", "entry_exit_completeness"}
+        reject = {"rejected_has_reason", "reject_persistence_parity"}
+        parity = {"mode_parity"}
+        realism = {"rr_not_constant", "score_not_constant", "reject_rate_sanity"}
+        reconciliation_checks = {"live_reconciliation_provider", "reconciliation_evidence_complete", "reconciliation_no_orphans", "duplicate_execution_free", "reconciliation_fail_closed_clear"}
+        operational = {"alert_delivery_evidence", "observability_coverage"}
+        rollback = {"rollback_ready"}
+        gates = [
+            CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
+            CheckResult("reject_persistence_complete", self._checks_pass(checks, reject), "requires rejected decisions and lifecycle reject reasons persisted"),
+            CheckResult("mode_parity_complete", self._checks_pass(checks, parity), "requires BACKTEST/PAPER/LIVE_PRECHECK parity evidence"),
+            CheckResult("execution_realism_complete", self._checks_pass(checks, realism), "requires measured selectivity plus non-constant RR/score evidence"),
+            CheckResult("effective_rr_penalty_breakdown_complete", bool(mode_parity.get("effective_rr_penalty_breakdown_complete", False) or mode_parity.get("execution_context_complete", False)), "requires persisted execution-context/effective-RR penalty evidence"),
+            CheckResult("exchange_connectivity_healthy", bool(reconciliation.get("exchange_connectivity_healthy", False)), "requires measured healthy exchange connectivity; PAPER success is insufficient"),
+            CheckResult("authenticated_reconciliation_evidence_complete", self._checks_pass(checks, reconciliation_checks) and bool(reconciliation.get("authenticated", reconciliation.get("authenticated_reconciliation", False))), "requires authenticated read-only reconciliation evidence"),
+            CheckResult("no_submit_live_precheck_verified", bool(mode_parity.get("no_submit_verified", mode_parity.get("no_order_submission_verified", False))), "LIVE_PRECHECK must prove no submit/cancel/modify calls"),
+            CheckResult("kill_switch_verified", (not kill_switch_active) and self._checks_pass(checks, rollback), "active kill switch or missing deterministic kill-switch evidence blocks LIVE"),
+            CheckResult("rollback_operator_controls_verified", self._checks_pass(checks, rollback) and bool(observability.get("repair_actions_non_mutating_verified", False)), "requires rollback/operator controls evidence"),
+            CheckResult("heartbeat_alerts_incidents_verified", self._checks_pass(checks, {"runtime_heartbeat"} | operational), "requires fresh LIVE heartbeat, alert delivery, and incident/observability persistence"),
+            CheckResult("dashboard_rbac_secrets_safe", bool(dashboard_security.get("rbac_verified", False)) and bool(dashboard_security.get("secrets_redacted", False)) and bool(dashboard_security.get("live_switch_fail_closed", False)), "requires dashboard switch/RBAC/secrets safety evidence"),
+            CheckResult("timesfm_evidence_safe_non_ordering", bool(timesfm_evidence.get("non_ordering", False)) and not bool(timesfm_evidence.get("satisfies_execution_readiness", False)), "TimesFM evidence may inform research only and cannot satisfy order/execution gates"),
+            CheckResult("paper_burnin_report_acceptable", str(paper_burnin_report.get("status", "MISSING")).upper() == "ACCEPTABLE", "PAPER burn-in must be acceptable but never promotes LIVE by itself"),
+            CheckResult("full_tests_passing_evidence_recorded", str(tests_passing_evidence.get("status", "MISSING")).upper() == "PASS", "requires current full test evidence"),
+            CheckResult("operator_acknowledgement_required", bool(operator_ack), "explicit operator acknowledgement is required"),
+        ]
+        return gates
+
+    @staticmethod
+    def _verdict_from_gates(gates: list[CheckResult]) -> str:
+        passed = {gate.name: gate.passed for gate in gates}
+        lower_gate_names = ["lifecycle_integrity_complete", "reject_persistence_complete", "mode_parity_complete", "execution_realism_complete", "effective_rr_penalty_breakdown_complete", "no_submit_live_precheck_verified"]
+        if not all(passed.get(name, False) for name in lower_gate_names):
+            return "NOT_LIVE_READY"
+        if not passed.get("kill_switch_verified", False):
+            return "NOT_LIVE_READY"
+        if all(passed.values()):
+            return "LIVE_REAL_ORDERS_READY"
+        if all(value for name, value in passed.items() if name != "operator_acknowledgement_required"):
+            return "LIVE_REAL_ORDERS_BLOCKED"
+        dry_run_blockers = {"operator_acknowledgement_required", "full_tests_passing_evidence_recorded"}
+        if all(value for name, value in passed.items() if name not in dry_run_blockers):
+            return "LIVE_DRY_RUN_READY"
+        return "LIVE_PRECHECK_READY"
 
     def persist_report(self, report: QualificationReport) -> None:
         with self.engine.begin() as conn:
