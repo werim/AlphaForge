@@ -1,3 +1,51 @@
+## 2026-06-23 Work 1.1 SQLite schema bootstrap stabilization
+
+### Why the patch was needed
+`init_db()` is the SQL-first persistence bootstrap path and must initialize a fresh SQLite database without attempting to create indexes for absent tables. Recent failures centered on `ix_timesfm_evidence_symbol_timeframe_ts`, which depends on `timesfm_forecast_evidence`.
+
+### Root cause
+SQLite validates the target table during `CREATE INDEX IF NOT EXISTS`. If the TimesFM evidence table is absent or incomplete in the bootstrap sequence, index creation can fail even though the index DDL itself is idempotent.
+
+### Files changed
+- `src/alphaforge/persistence.py`
+- `alembic/versions/0003_sqlite_bootstrap_runtime_tables.py`
+- `tests/test_sqlite_schema_bootstrap.py`
+- `VERSION.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+Fresh SQLite bootstrap now includes conservative TimesFM evidence compatibility columns (`forecast_timestamp`, `point_forecast`, `quantiles_json`) while preserving the existing canonical forecast fields used by runtime TimesFM code. Existing SQLite databases receive these columns additively through the runtime schema repair path.
+
+### Lifecycle changes
+None. Lifecycle ordering, lifecycle state vocabulary, reject persistence, and order-decision behavior were not changed.
+
+### Persistence changes
+The TimesFM evidence table remains created before `ix_timesfm_evidence_symbol_timeframe_ts`. The change is additive only: no tables are dropped, truncated, recreated, or deleted, and no broad schema-error masking was added.
+
+### Export/schema changes
+No CSV export behavior changed. The TimesFM SQL schema is widened additively for compatibility with conservative evidence fields.
+
+### Tests added
+Added focused SQLite bootstrap tests proving fresh TimesFM table/index creation, repeated `init_db()` idempotency, and conservative TimesFM evidence columns.
+
+### Tests executed
+- `python -m pytest -q tests/test_sqlite_schema_bootstrap.py` — 12 passed.
+- `python -m pytest -q tests/test_alembic_revision_graph.py` — 1 passed, 2 skipped.
+- `python -m pytest -q` — 349 passed, 7 skipped.
+
+### Risks
+Low. The patch only adds nullable columns and tests bootstrap ordering; it does not alter trading decisions, execution modeling, lifecycle semantics, or exports.
+
+### Remaining limitations
+This does not validate all production database dialects beyond the existing Alembic coverage, and it does not make LIVE trading ready.
+
+### Migration concerns
+Existing SQLite databases are repaired additively via `ALTER TABLE ... ADD COLUMN` when columns are missing. No destructive migration is required.
+
+### Push recommendation
+Safe to merge after the requested pytest suite passes.
+
 ## 2026-06-23 Patch Addendum — SQLite/Alembic config snapshot trigger repair
 
 ### Why this patch was needed

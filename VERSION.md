@@ -1,3 +1,14 @@
+## 2026-06-23 Work 1.1 SQLite schema bootstrap stabilization
+- **Current version:** 0.3.55-dev
+- **Current phase:** SQL-first SQLite schema bootstrap ordering hardening.
+- **Runtime maturity:** `init_db()` creates TimesFM evidence tables before dependent indexes and preserves idempotent repeated bootstrap behavior for fresh and legacy SQLite databases.
+- **BACKTEST/PAPER/LIVE alignment:** Persistence bootstrap only; no mode-specific decision, reject, lifecycle, or execution-threshold behavior changed.
+- **Lifecycle coverage:** Unchanged; lifecycle audit persistence remains additive and existing rows are preserved.
+- **Execution realism coverage:** Unchanged; no fake costs, fills, scores, RR values, or outcomes were introduced.
+- **Known critical risks:** LIVE remains blocked by existing readiness gates; this patch only stabilizes schema availability and ordering.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; schema bootstrap stabilization does not enable LIVE order placement.
+
 ## 2026-06-23 SQLite/Alembic config snapshot trigger repair
 - **Current version:** 0.3.54-dev
 - **Current phase:** SQLite/Alembic schema bootstrap ordering and idempotency hardening.
