@@ -3,6 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
+from alphaforge.lifecycle_contract import (
+    CANONICAL_LIFECYCLE_EVENTS,
+    CANONICAL_LIFECYCLE_TRANSITIONS,
+    CanonicalLifecycleEvent,
+    is_canonical_lifecycle_event,
+    is_valid_lifecycle_transition,
+    normalize_lifecycle_event,
+)
+
 
 class RejectReason(str, Enum):
     LOW_EFFECTIVE_RR = "LOW_EFFECTIVE_RR"
@@ -28,6 +37,7 @@ class LifecycleEventType(str, Enum):
     ORDER_PLACED = "ORDER_PLACED"
     ORDER_REJECTED = "ORDER_REJECTED"
     POSITION_OPENED = "POSITION_OPENED"
+    POSITION_CLOSED = "POSITION_CLOSED"
     TP_HIT = "TP_HIT"
     SL_HIT = "SL_HIT"
     OPEN_AT_END = "OPEN_AT_END"
@@ -48,19 +58,8 @@ class LifecycleEventType(str, Enum):
     ENTRY_TIMEOUT = "ENTRY_TIMEOUT"
 
 
-# Runtime currently tracks its latest lifecycle checkpoint by symbol. A new
-# candidate on a symbol is therefore a new lifecycle instance even when the
-# previous instance ended in a reject or an error. Permit only that reset
-# transition here so a terminal reject/incident cannot poison every following
-# signal on the same symbol into ERROR. This does not permit order execution or
-# loosen any decision gate.
-ALLOWED_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
-    LifecycleEventType.SIGNAL_CREATED.value: {LifecycleEventType.SIGNAL_REJECTED.value, LifecycleEventType.WAITING_ENTRY_ZONE.value, LifecycleEventType.ENTRY_PENDING.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.WAITING_ENTRY_ZONE.value: {LifecycleEventType.ENTRY_TRIGGERED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.ENTRY_TRIGGERED.value: {LifecycleEventType.ORDER_PLACED.value, LifecycleEventType.ORDER_REJECTED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.ORDER_PLACED.value: {LifecycleEventType.POSITION_OPENED.value, LifecycleEventType.ORDER_REJECTED.value, LifecycleEventType.ENTRY_TIMEOUT.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.POSITION_OPENED.value: {LifecycleEventType.TP_HIT.value, LifecycleEventType.SL_HIT.value, LifecycleEventType.OPEN_AT_END.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.SIGNAL_REJECTED.value: {LifecycleEventType.SIGNAL_CREATED.value},
+ALLOWED_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {**CANONICAL_LIFECYCLE_TRANSITIONS}
+ALLOWED_LIFECYCLE_TRANSITIONS.update({
     LifecycleEventType.ERROR.value: {LifecycleEventType.SIGNAL_CREATED.value},
     LifecycleEventType.ENTRY_PENDING.value: {LifecycleEventType.ENTRY_SUBMITTED.value, LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.EXECUTION_ERROR.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.ENTRY_SUBMITTED.value: {LifecycleEventType.ENTRY_ACKNOWLEDGED.value, LifecycleEventType.EXCHANGE_REJECT.value, LifecycleEventType.EXECUTION_ERROR.value, LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.ERROR.value},
@@ -70,13 +69,11 @@ ALLOWED_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
     LifecycleEventType.STOP_SUBMITTED.value: {LifecycleEventType.TAKE_PROFIT_SUBMITTED.value, LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.TAKE_PROFIT_SUBMITTED.value: {LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.CANCEL_REQUESTED.value: {LifecycleEventType.CANCELLED.value, LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.EXECUTION_ERROR.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.CANCELLED.value: set(),
     LifecycleEventType.RECONCILIATION_REPAIR.value: {LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ENTRY_ACKNOWLEDGED.value, LifecycleEventType.ENTRY_PARTIAL.value, LifecycleEventType.ENTRY_FILLED.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.EXECUTION_ERROR.value: {LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.EXCHANGE_REJECT.value: {LifecycleEventType.CANCELLED.value, LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.ERROR.value},
     LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value: {LifecycleEventType.CANCEL_REQUESTED.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
-    LifecycleEventType.ENTRY_TIMEOUT.value: {LifecycleEventType.RECONCILIATION_REPAIR.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.ERROR.value},
-}
+})
 
 
 def canonical_utc_timestamp(raw: str | None = None) -> str:
@@ -92,5 +89,8 @@ def canonical_reject_reason(raw: str | None) -> str:
 
 def validate_transition(previous_state: str | None, next_state: str) -> bool:
     if previous_state is None:
-        return next_state == LifecycleEventType.SIGNAL_CREATED.value
-    return next_state in ALLOWED_LIFECYCLE_TRANSITIONS.get(previous_state, set())
+        return next_state in {LifecycleEventType.SIGNAL_CREATED.value, LifecycleEventType.ENTRY_PENDING.value}
+    try:
+        return is_valid_lifecycle_transition(previous_state, next_state)
+    except ValueError:
+        return next_state in ALLOWED_LIFECYCLE_TRANSITIONS.get(previous_state, set())
