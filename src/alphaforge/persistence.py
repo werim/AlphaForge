@@ -72,9 +72,12 @@ def _timesfm_forecast_evidence_ddl() -> list[str]:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             forecast_id TEXT NOT NULL UNIQUE,
             timestamp INTEGER NOT NULL,
+            forecast_timestamp TEXT,
             symbol TEXT NOT NULL,
             timeframe TEXT NOT NULL,
             horizon INTEGER,
+            point_forecast REAL,
+            quantiles_json TEXT,
             current_price REAL,
             forecast_p10 REAL,
             forecast_p50 REAL,
@@ -343,6 +346,11 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
         "closed_trade_reviews": [
             ("execution_metrics", "execution_metrics TEXT"),
             ("review_payload", "review_payload TEXT"),
+        ],
+        "timesfm_forecast_evidence": [
+            ("forecast_timestamp", "forecast_timestamp TEXT"),
+            ("point_forecast", "point_forecast REAL"),
+            ("quantiles_json", "quantiles_json TEXT"),
         ],
     }
     for table_name, columns in required_columns.items():
