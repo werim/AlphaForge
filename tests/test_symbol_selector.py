@@ -85,3 +85,20 @@ def test_select_symbols_sorted_by_score():
     assert len(results) == 2
     assert results[0].symbol == "TOPUSDT"
     assert results[0].symbol_score >= results[1].symbol_score
+
+
+def test_liquidity_score_accepts_zero_to_ten_scale_without_threshold_mismatch():
+    result = select_symbol(
+        "BTCUSDT",
+        {
+            "volume_24h_usdt": 10_000_000,
+            "spread_pct": 0.001,
+            "liquidity_score": 4.6,
+            "volatility_pct": 1.0,
+            "trend_strength": 0.5,
+            "recent_volume_change_pct": 1.0,
+            "chop_score": 0.2,
+        },
+    )
+    assert "LOW_LIQUIDITY" not in result.reject_reasons
+    assert result.diagnostics["liquidity_score_normalized_from_0_10"] is True

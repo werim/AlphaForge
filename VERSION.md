@@ -1,3 +1,14 @@
+## 2026-06-24 Dashboard rejection diagnostics and gate mapping audit
+- **Current version:** 0.3.61-dev
+- **Current phase:** Dashboard BACKTEST rejection diagnostics and gate correctness hardening.
+- **Runtime maturity:** Dashboard BACKTEST results now expose rejection reason concentration, signal-vs-symbol-selector reject counts, score/RR/effective-RR distributions, and pre-later-gate pass counts from `rejected_orders.csv`.
+- **BACKTEST/PAPER/LIVE alignment:** BREAKOUT setup/regime mapping is corrected in shared trade-quality logic; execution-cost RR unit handling remains canonical through `build_execution_context()`/`calculate_effective_rr()` and tests now pin percent-point normalization.
+- **Lifecycle coverage:** Rejected rows remain first-class; diagnostics distinguish `SIGNAL_REJECTED` lifecycle rows from `SYMBOL_SELECTOR_REJECT` rows without dropping either.
+- **Execution realism coverage:** Missing costs remain unavailable/blocking rather than zero; effective RR penalties are verified against fractional vs percent-point spread/slippage inputs.
+- **Known critical risks:** Zero accepted trades may still be legitimate when effective RR is below minimum after real costs; dashboard backtests remain synchronous and Binance-dependent.
+- **Last audit date:** 2026-06-24.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; this patch improves diagnostics and rejects mapping only, and does not enable LIVE order placement.
+
 ## 2026-06-24 Dashboard BACKTEST historical kline pagination diagnostics
 - **Current version:** 0.3.60-dev
 - **Current phase:** Dashboard BACKTEST historical ingestion reliability hardening.

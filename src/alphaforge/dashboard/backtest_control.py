@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -48,6 +49,13 @@ class DashboardBacktestResult:
     execution_context_warning: str | None = None
     error_message: str | None = None
     command: list[str] = field(default_factory=list)
+    top_rejection_reasons: list[dict[str, Any]] = field(default_factory=list)
+    signal_rows_count: int | None = None
+    symbol_selector_reject_count: int | None = None
+    score_distribution: dict[str, Any] = field(default_factory=dict)
+    rr_distribution: dict[str, Any] = field(default_factory=dict)
+    effective_rr_distribution: dict[str, Any] = field(default_factory=dict)
+    pre_later_gate_pass_count: int | None = None
 
 
 def default_form_values() -> dict[str, Any]:
@@ -123,6 +131,49 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _safe_float_or_none(value: Any) -> float | None:
+    try:
+        if value in (None, "", "None", "null", "UNAVAILABLE_BACKTEST"):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _numeric_distribution(rows: list[dict[str, str]], field: str) -> dict[str, Any]:
+    values = [_safe_float_or_none(row.get(field)) for row in rows]
+    values = [v for v in values if v is not None]
+    if not values:
+        return {"count": 0, "min": None, "mean": None, "p50": None, "p90": None, "max": None}
+    ordered = sorted(values)
+    def pct(q: float) -> float:
+        idx = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * q))))
+        return round(ordered[idx], 6)
+    return {"count": len(values), "min": round(ordered[0], 6), "mean": round(sum(values) / len(values), 6), "p50": pct(0.5), "p90": pct(0.9), "max": round(ordered[-1], 6)}
+
+
+def _rejection_diagnostics(rows: list[dict[str, str]]) -> dict[str, Any]:
+    reasons = Counter((row.get("reject_reason") or row.get("reason") or "UNKNOWN").strip() or "UNKNOWN" for row in rows)
+    total = len(rows)
+    signal_rows = sum(1 for row in rows if str(row.get("lifecycle_state", "")).strip() == "SIGNAL_REJECTED")
+    selector_rows = sum(1 for row in rows if str(row.get("lifecycle_state", "")).strip() == "SYMBOL_SELECTOR_REJECT" or str(row.get("source", "")).strip() == "SYMBOL_SELECTOR")
+    def passes(row: dict[str, str]) -> bool:
+        score = _safe_float_or_none(row.get("score"))
+        rr = _safe_float_or_none(row.get("raw_rr") if row.get("raw_rr") not in (None, "") else row.get("rr"))
+        expectancy = _safe_float_or_none(row.get("expectancy") if row.get("expectancy") not in (None, "") else row.get("expectancy_bucket"))
+        min_score = _safe_float_or_none(row.get("min_required_score")) or 7.5
+        return score is not None and rr is not None and expectancy is not None and score >= min_score and rr >= 1.3 and expectancy >= 0.0
+    return {
+        "top_rejection_reasons": [{"reason": reason, "count": count, "ratio": (count / total if total else None)} for reason, count in reasons.most_common(8)],
+        "signal_rows_count": signal_rows,
+        "symbol_selector_reject_count": selector_rows,
+        "score_distribution": _numeric_distribution(rows, "score"),
+        "rr_distribution": _numeric_distribution(rows, "raw_rr") if any("raw_rr" in r for r in rows) else _numeric_distribution(rows, "rr"),
+        "effective_rr_distribution": _numeric_distribution(rows, "effective_rr"),
+        "pre_later_gate_pass_count": sum(1 for row in rows if passes(row)),
+    }
+
+
 def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBacktestResult:
     """Run the existing backtest_order.py pipeline with a BACKTEST-only command boundary."""
     cfg = load_config_from_env()
@@ -173,6 +224,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     rejected_path = output_dir / "rejected_orders.csv"
     summary = _read_first_csv_row(summary_path)
     lifecycle_rows = _read_csv_rows(lifecycle_path)
+    rejected_rows = _read_csv_rows(rejected_path)
     result.status = "COMPLETED"
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
@@ -186,6 +238,14 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.net_pnl = summary.get("total_net_pnl_usdt")
     result.total_return_pct = summary.get("total_pnl_pct")
     result.max_drawdown = None
+    diagnostics = _rejection_diagnostics(rejected_rows)
+    result.top_rejection_reasons = diagnostics["top_rejection_reasons"]
+    result.signal_rows_count = diagnostics["signal_rows_count"]
+    result.symbol_selector_reject_count = diagnostics["symbol_selector_reject_count"]
+    result.score_distribution = diagnostics["score_distribution"]
+    result.rr_distribution = diagnostics["rr_distribution"]
+    result.effective_rr_distribution = diagnostics["effective_rr_distribution"]
+    result.pre_later_gate_pass_count = diagnostics["pre_later_gate_pass_count"]
     if result.total_candidates is None or result.rejected_signals is None:
         result.lifecycle_warning = "Lifecycle/reject metrics unavailable from generated backtest artifacts; values are shown as unavailable, not zero."
     unavailable_markers = {"", "UNAVAILABLE_BACKTEST", "None", "null"}
