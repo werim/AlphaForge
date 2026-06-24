@@ -1,3 +1,58 @@
+## 2026-06-24 Dashboard rejection diagnostics and gate mapping audit
+
+### Why the patch was needed
+A completed dashboard BACKTEST for BTCUSDT over the last 10 days at 15m produced 958 candidates, 958 rejects, and zero accepted trades. Operators could see only aggregate counts, making it hard to separate low-score rejects from later gate failures or suspicious mapping/unit issues.
+
+### Root cause
+Dashboard result rendering did not inspect `rejected_orders.csv` beyond linking the artifact. Trade-quality regime alignment also treated BREAKOUT setups as compatible only with normal/high volatility labels, so a provider label of `breakout` could incorrectly surface as `REGIME_MISMATCH` even when setup and regime were aligned. Liquidity inputs accepted both 0..1 and 0..10-like values in different paths without an explicit normalization marker.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `src/alphaforge/order.py`
+- `src/alphaforge/symbol_selector.py`
+- `tests/test_dashboard_app.py`
+- `tests/test_trade_quality.py`
+- `tests/test_execution_layer.py`
+- `tests/test_symbol_selector.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Dashboard BACKTEST results now derive rejection diagnostics from `rejected_orders.csv`: top reasons, signal lifecycle reject count, symbol-selector reject count, score distribution, raw RR distribution, effective RR distribution, and rows that pass score/RR/expectancy before later gates. BREAKOUT_UP/BREAKOUT candidates are no longer rejected solely because volatility was labeled `breakout` rather than normal/high.
+
+### Lifecycle changes
+No lifecycle states are collapsed or removed. The dashboard explicitly counts `SIGNAL_REJECTED` and `SYMBOL_SELECTOR_REJECT` rows separately while retaining total rejected rows.
+
+### Persistence changes
+No database schema changes and no DB data is dropped, recreated, or truncated. Diagnostics are read from generated CSV artifacts only.
+
+### Export/schema changes
+No CSV schema changes. The dashboard consumes existing fields when present and reports unavailable numeric distributions as unavailable/null summaries rather than fake zeros.
+
+### Tests added
+Added regressions for dashboard rejection diagnostics, BREAKOUT_UP + BREAKOUT regime alignment, effective RR percent/fraction unit consistency, and liquidity-score 0..10 input normalization.
+
+### Tests executed
+- `python -m pytest -q tests/test_trade_quality.py tests/test_execution_layer.py tests/test_symbol_selector.py tests/test_dashboard_app.py` — 46 passed, 1 skipped.
+- `python -m pytest -q tests/test_dashboard_app.py` — skipped because `fastapi` is unavailable in this environment.
+- `python -m pytest -q -k backtest` — 94 passed, 3 skipped, 278 deselected.
+- `python -m pytest -q` — 365 passed, 10 skipped.
+- `python backtest_order.py --mode BACKTEST --last-n-days 10 --symbols BTCUSDT --top-n 1 --interval 15m --balance 10000 --output-dir data/backtest/manual_dashboard_verification_20260624 --force-refresh` — failed with Binance proxy tunnel 403 before data hydration.
+
+### Risks
+The dashboard pass-count diagnostic uses existing CSV fields and defaults the minimum score to 7.5 when a row does not export `min_required_score`; this is diagnostic-only and does not affect trading decisions. BREAKOUT mapping is intentionally minimal and does not loosen score, RR, expectancy, spread, slippage, stop-width, cooldown, or effective-RR gates.
+
+### Remaining limitations
+The observed zero-trade run may still be valid if effective RR never reaches the required threshold after execution costs. The manual BTCUSDT last-10-days 15m BACKTEST command was attempted, but Binance access failed in this environment with a proxy tunnel 403 before data hydration.
+
+### Migration concerns
+None. No schema migration or artifact migration is required.
+
+### Push recommendation
+Safe to push after full tests pass. Keep LIVE guarded / NOT READY.
+
 ## 2026-06-24 Dashboard BACKTEST historical kline pagination diagnostics
 
 ### Why the patch was needed
