@@ -1,3 +1,50 @@
+## 2026-06-24 Dashboard BACKTEST historical kline pagination diagnostics
+
+### Why the patch was needed
+Dashboard BACKTEST runs for BTCUSDT/ETHUSDT over the last 30 days at 1m could fail closed with a generic insufficient Binance historical data message even when the actionable problem was missing paginated coverage detail for a specific symbol/timeframe/request window.
+
+### Root cause
+The kline loader already used the Binance Futures public kline endpoint with `limit=1500` pagination, but coverage validation compared raw, non-timeframe-aligned request end timestamps against candle open timestamps. The dashboard then collapsed historical failures into a generic message, losing symbol, timeframe, expected count, and actual count context.
+
+### Files changed
+- `src/alphaforge/historical_market_data.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `tests/test_historical_market_data.py`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+BACKTEST historical hydration still uses public Binance USD-M Futures klines only and does not call live order/execution APIs. The loader now validates coverage against the first/last candle open expected within the requested period/timeframe and includes detailed expected/actual candle counts in `HistoricalDataError` messages.
+
+### Lifecycle changes
+No lifecycle transition semantics changed. Rejected/accepted signal flow and strategy logic are untouched.
+
+### Persistence changes
+No schema or database persistence behavior changed. Candle cache writing remains compatible; no fake candles or placeholder execution values are persisted.
+
+### Export/schema changes
+No CSV schema changes. Dashboard failed-result messaging now preserves detailed artifact/log reasons instead of hiding them behind an unavailable metric state.
+
+### Tests added
+Added focused historical ingestion/dashboard regressions for 30-day 1m pagination, clear insufficient-kline failures, multi-symbol failed-symbol diagnostics, and dashboard failure HTML preserving detailed historical-data reasons while metrics remain unavailable rather than silently zeroed.
+
+### Tests executed
+- `pytest tests/test_historical_market_data.py tests/test_dashboard_app.py -q` — 6 passed, 1 skipped.
+
+### Risks
+Low to medium. Validation is stricter and more explicit; genuine Binance gaps/rate-limit truncation still fail closed rather than fabricating missing candles.
+
+### Remaining limitations
+Funding-rate fetching remains a separate single call and was not expanded in this focused patch. Large synchronous dashboard 1m backtests can still be slow or fail if Binance is unavailable.
+
+### Migration concerns
+None. No schema, cache format, or strategy compatibility migration is required.
+
+### Push recommendation
+Safe to push after focused tests pass. Do not treat this as LIVE readiness; it only improves BACKTEST historical ingestion diagnostics and reliability.
+
 ## 2026-06-24 LIVE readiness input provenance hardening
 
 ### Why the patch was needed

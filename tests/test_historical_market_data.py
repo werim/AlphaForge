@@ -6,6 +6,7 @@ from alphaforge.historical_market_data import (
     HistoricalDataError,
     build_cache_metadata,
     cache_covers,
+    expected_candle_count,
     fetch_binance_klines_paginated,
     join_funding_to_candles,
 )
@@ -24,8 +25,38 @@ def test_paginated_klines_and_dedupe() -> None:
 
 
 def test_incomplete_coverage_fails() -> None:
-    with pytest.raises(HistoricalDataError):
-        fetch_binance_klines_paginated("BTCUSDT", "1m", 0, 180_000, fetcher=lambda _u: [[0,1,1,1,1,1]])
+    pages = iter([[[0,1,1,1,1,1]], []])
+    with pytest.raises(HistoricalDataError) as exc:
+        fetch_binance_klines_paginated("BTCUSDT", "1m", 0, 180_000, fetcher=lambda _url: next(pages))
+    message = str(exc.value)
+    assert "symbol=BTCUSDT" in message
+    assert "timeframe=1m" in message
+    assert "expected_candles=4" in message
+    assert "actual_candles=1" in message
+
+
+def test_thirty_days_one_minute_requires_pagination() -> None:
+    step = 60_000
+    start_ms = 0
+    end_ms = (30 * 24 * 60 * step) - 1
+    assert expected_candle_count(start_ms, end_ms, "1m") == 43_200
+    calls = []
+
+    def fetcher(url: str):
+        calls.append(url)
+        page_start = int(url.split("startTime=")[1].split("&")[0])
+        rows = []
+        for i in range(1500):
+            ts = page_start + i * step
+            if ts > end_ms:
+                break
+            rows.append([ts, 1, 1, 1, 1, 1])
+        return rows
+
+    rows = fetch_binance_klines_paginated("BTCUSDT", "1m", start_ms, end_ms, fetcher=fetcher)
+    assert len(rows) == 43_200
+    assert len(calls) > 1
+    assert all("limit=1500" in call for call in calls)
 
 
 def test_cache_coverage_detection() -> None:

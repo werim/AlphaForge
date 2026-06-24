@@ -1,3 +1,26 @@
+## 2026-06-24 Dashboard BACKTEST historical kline pagination diagnostics
+
+### Added
+- Added expected candle count helpers and regression coverage proving 30 days of 1m klines requires paginated Binance requests.
+- Added dashboard regressions that preserve symbol-specific historical failure detail for multi-symbol BACKTEST runs.
+
+### Changed
+- Historical kline coverage validation now uses timeframe-aligned candle boundaries and includes symbol, timeframe, requested start/end, expected count, actual count, and actual first/last timestamps in failures.
+- Dashboard historical-data failures now keep the detailed backend artifact/log reason instead of returning only the generic insufficient-data message.
+
+### Fixed
+- Fixed false insufficient-data failures caused by comparing arbitrary request end timestamps directly to candle open timestamps.
+- Fixed dashboard failure diagnostics that hid which symbol/timeframe/window failed during multi-symbol historical hydration.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Binance API availability/rate limits and long synchronous 1m dashboard runs can still fail closed; LIVE remains NOT READY by default.
+
 ## 2026-06-24 LIVE readiness input provenance hardening
 
 ### Added
