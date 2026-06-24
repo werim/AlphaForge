@@ -102,3 +102,21 @@ def test_liquidity_score_accepts_zero_to_ten_scale_without_threshold_mismatch():
     )
     assert "LOW_LIQUIDITY" not in result.reject_reasons
     assert result.diagnostics["liquidity_score_normalized_from_0_10"] is True
+
+
+def test_liquidity_score_result_uses_zero_to_one_contract_after_scoring():
+    result = select_symbol(
+        "BTCUSDT",
+        {
+            "volume_24h_usdt": 25_000_000,
+            "spread_pct": 0.001,
+            "liquidity_score": 0.82,
+            "volatility_pct": 1.0,
+            "trend_strength": 0.7,
+            "recent_volume_change_pct": 1.0,
+            "chop_score": 0.2,
+        },
+    )
+    assert 0.0 <= result.liquidity_score <= 1.0
+    assert result.liquidity_score == 0.82
+    assert result.diagnostics["sub_scores"]["liquidity_score"] == 8.2

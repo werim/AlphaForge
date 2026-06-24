@@ -1,3 +1,27 @@
+## 2026-06-24 Backtest order lifecycle diagnostics hardening
+
+### Added
+- Added canonical `SYMBOL_REJECTED` lifecycle state for selector-level rejects.
+- Added dashboard BACKTEST lifecycle state, lifecycle path, final reject reason, order reject reason, and symbol-selector reject diagnostics.
+- Added regression tests for liquidity-score scale consistency and selector reject export truth.
+
+### Changed
+- Symbol selector result liquidity now reports the normalized 0..1 contract; the 0..10 liquidity contribution remains available as a diagnostic sub-score.
+- BACKTEST rejected selector rows now export `source_stage=SYMBOL_SELECTOR` and `lifecycle_state=SYMBOL_REJECTED`.
+
+### Fixed
+- Fixed misleading selector rejects being normalized into `SIGNAL_REJECTED` lifecycle exports.
+- Fixed liquidity-score result scale ambiguity between selector diagnostics and execution/order gates.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None for runtime execution. CSV consumers should treat `SYMBOL_REJECTED` as the selector-level reject state instead of assuming all selector rejects are `SIGNAL_REJECTED`.
+
+### Known Issues
+- BACKTEST can still legitimately produce no `ORDER_PLACED` rows when execution-aware gates fail; LIVE remains NOT READY by default.
+
 ## 2026-06-24 Dashboard rejection diagnostics and gate mapping audit
 
 ### Added

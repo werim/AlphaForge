@@ -183,7 +183,7 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
         tradable=len(reject_reasons) == 0,
         symbol_score=symbol_score,
         regime_hint=regime_hint,
-        liquidity_score=round(liquidity_score, 2),
+        liquidity_score=round(max(0.0, min(1.0, liquidity_score_raw)), 6),
         volatility_score=round(volatility_score, 2),
         trend_score=round(trend_score, 2),
         spread_score=round(spread_score, 2),
