@@ -1093,3 +1093,62 @@ def test_backtest_rejected_rows_have_signal_id_effective_rr_and_export_parity():
     assert float(rejected[0]["raw_rr"]) != float(rejected[0]["effective_rr"])
     errors = bo.verify_export_integrity(persisted, rejected, list(persisted), list(rejected))
     assert not [error for error in errors if "rejected_orders.csv count mismatch" in error or "missing reject_reason" in error]
+
+
+def test_high_score_high_rr_candidate_with_valid_liquidity_not_low_liquidity():
+    effective_rr, flags, _ = bo._execution_reject_flags(
+        2.0,
+        {"spread_pct": 0.0002, "expected_slippage_pct": 0.0002, "liquidity_score": 0.8, "funding_rate_pct": 0.0},
+    )
+    assert effective_rr > 1.1
+    assert "LOW_LIQUIDITY" not in flags
+
+
+def test_selector_reject_persists_as_symbol_rejected_not_signal_rejected():
+    rows = [
+        bo.LifecycleRow(
+            1,
+            "ETHUSDT",
+            "N/A",
+            "",
+            "",
+            "CHOP",
+            2.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            "NONE",
+            "SYMBOL_REJECTED",
+            reject_reason="LOW_LIQUIDITY",
+            event_flags="SYMBOL_SELECTOR",
+            liquidity_score=0.1,
+        )
+    ]
+    persisted = bo._persist_lifecycle_rows(rows)
+    assert persisted[0]["lifecycle_state"] == "SYMBOL_REJECTED"
+    assert persisted[0]["decision"] == "REJECTED"
+    assert "SYMBOL_REJECTED" in persisted[0]["event_id"]
+
+
+def test_lifecycle_export_integrity_rejects_selector_mislabeled_as_signal_rejected():
+    errors = bo.verify_export_integrity(
+        persisted_lifecycle_rows=[
+            {
+                "event_id": "1:ETHUSDT:NONE:SYMBOL_REJECTED:0:0:0:1",
+                "signal_id": "ETHUSDT:1",
+                "lifecycle_state": "SIGNAL_REJECTED",
+                "decision": "REJECTED",
+                "reject_reason": "LOW_LIQUIDITY",
+                "score": 2.0,
+                "rr": 0.0,
+                "expectancy_bucket": "UNKNOWN",
+                "execution_ctx_missing": 0,
+                "execution_ctx": "{}",
+            }
+        ],
+        rejected_rows=[{"signal_id": "ETHUSDT:1", "lifecycle_state": "SIGNAL_REJECTED", "reject_reason": "LOW_LIQUIDITY"}],
+        lifecycle_csv_rows=[{"signal_id": "ETHUSDT:1", "lifecycle_state": "SIGNAL_REJECTED", "reject_reason": "LOW_LIQUIDITY"}],
+        rejected_csv_rows=[{"signal_id": "ETHUSDT:1", "lifecycle_state": "SIGNAL_REJECTED", "reject_reason": "LOW_LIQUIDITY"}],
+    )
+    assert any("mislabels selector reject" in e for e in errors)

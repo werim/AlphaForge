@@ -1,3 +1,52 @@
+## 2026-06-24 Backtest order lifecycle diagnostics hardening
+
+### Why the patch was needed
+New `order_lifecycle.csv` diagnostics showed selector-level `LOW_LIQUIDITY` rejects being exported as `SIGNAL_REJECTED`, while accepted-looking candidates stopped at `ORDER_REJECTED` and dashboard diagnostics could not separate selector rejects, signal rejects, and order rejects clearly.
+
+### Root cause
+`SYMBOL_REJECTED` was compatibility-mapped to `SIGNAL_REJECTED` in the canonical lifecycle contract, so selector rejects looked like signal-engine rejects after persistence. Separately, `SymbolSelectionResult.liquidity_score` returned a 0..10 sub-score while gates and execution contexts used a 0..1 threshold scale, creating a misleading scale surface even though the selector threshold itself normalized raw inputs before gating.
+
+### Files changed
+- `src/alphaforge/lifecycle_contract.py`
+- `src/alphaforge/symbol_selector.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `backtest_order.py`
+- `tests/test_symbol_selector.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+BACKTEST selector rejects now persist/export as `SYMBOL_REJECTED` with selector source evidence instead of being normalized into `SIGNAL_REJECTED`. The selector result liquidity field now reports the normalized 0..1 liquidity contract, while the 0..10 display contribution remains in diagnostics under `sub_scores.liquidity_score`.
+
+### Lifecycle changes
+Added explicit canonical `SYMBOL_REJECTED` lifecycle state. This prevents selector-level rejects from being mislabeled as signal-level rejects and keeps the canonical order lifecycle states available for later accepted candidates without bypassing any gates.
+
+### Persistence changes
+No destructive migration. In-memory BACKTEST lifecycle persistence now writes `SYMBOL_REJECTED` directly and includes `source_stage=SYMBOL_SELECTOR` in event payload/execution context for selector rejects. Existing legacy rows are not rewritten.
+
+### Export/schema changes
+`rejected_orders.csv` selector rows now include `signal_id`, `lifecycle_state=SYMBOL_REJECTED`, `source_stage=SYMBOL_SELECTOR`, execution fields, and RR parity fields when available. Dashboard result objects now include lifecycle state counts, lifecycle path counts, final reject reason counts, order reject reason counts, and symbol-selector reject counts.
+
+### Tests added
+Added regressions for 0..1 liquidity-score result consistency, valid-liquidity high RR candidates not becoming `LOW_LIQUIDITY`, selector rejects persisting as `SYMBOL_REJECTED`, and export integrity detecting misleading selector-as-signal rejects.
+
+### Tests executed
+- `pytest -q tests/test_symbol_selector.py tests/test_backtest_order_scanner.py -q` — passed.
+
+### Risks
+This does not guarantee accepted trades; strict score/RR/execution gates can still reject all candidates. The patch intentionally does not loosen strategy thresholds or assume missing spread/slippage/funding is zero.
+
+### Remaining limitations
+Manual dashboard BTCUSDT/ETHUSDT last-10-days 15m verification depends on Binance/network access and must be rerun in an environment with successful data hydration.
+
+### Migration concerns
+No migration required. Downstream consumers that previously expected selector rejects to appear as `SIGNAL_REJECTED` should read `SYMBOL_REJECTED` or `source_stage=SYMBOL_SELECTOR` instead.
+
+### Push recommendation
+Safe to push after the full requested test matrix is run. Keep LIVE guarded / NOT READY.
+
 ## 2026-06-24 Dashboard rejection diagnostics and gate mapping audit
 
 ### Why the patch was needed

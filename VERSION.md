@@ -1,3 +1,14 @@
+## 2026-06-24 Backtest order lifecycle diagnostics hardening
+- **Current version:** 0.3.62-dev
+- **Current phase:** BACKTEST order lifecycle liquidity-scale and selector-reject audit hardening.
+- **Runtime maturity:** BACKTEST lifecycle exports now keep symbol-selector rejects distinct as `SYMBOL_REJECTED`, preserve 0..1 liquidity-score contract at gates/exports, and expose lifecycle/reject path diagnostics for dashboard runs.
+- **BACKTEST/PAPER/LIVE alignment:** No strategy threshold was loosened; liquidity normalization is explicit and PAPER/LIVE remain guarded by existing readiness controls.
+- **Lifecycle coverage:** Canonical lifecycle now includes `SYMBOL_REJECTED` alongside `SIGNAL_CREATED`, `SIGNAL_REJECTED`, `WAITING_ENTRY_ZONE`, `ENTRY_TRIGGERED`, `ORDER_PLACED`, `ORDER_REJECTED`, `POSITION_OPENED`, `POSITION_CLOSED`, `ENTRY_TIMEOUT`, and `CANCELLED`.
+- **Execution realism coverage:** Unknown costs remain unavailable/null rather than zero; valid high-score/high-RR candidates with 0..1 valid liquidity are no longer mislabeled by a 0..10 selector display scale.
+- **Known critical risks:** Accepted orders still require real gates to pass; absence of `ORDER_PLACED` can still be legitimate if effective RR or other costs fail. Dashboard backtests remain Binance/network dependent.
+- **Last audit date:** 2026-06-24.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; this patch improves BACKTEST diagnostics and export truth only.
+
 ## 2026-06-24 Dashboard rejection diagnostics and gate mapping audit
 - **Current version:** 0.3.61-dev
 - **Current phase:** Dashboard BACKTEST rejection diagnostics and gate correctness hardening.
