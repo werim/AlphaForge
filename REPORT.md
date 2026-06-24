@@ -1,3 +1,50 @@
+## 2026-06-24 LIVE readiness input provenance hardening
+
+### Why the patch was needed
+LIVE readiness qualification still constructed some static reconciliation/observability truth inside `RuntimeOrchestrator._run_live_qualification_gate()`. That risked treating missing operational evidence as a configured readiness input.
+
+### Root cause
+The qualification bootstrap mixed real provider evidence with default dictionaries for reconciliation, observability, and rollback checks. Missing providers were not represented as first-class missing inputs with persisted provenance.
+
+### Files changed
+- `src/alphaforge/runtime.py`
+- `src/alphaforge/live_readiness.py`
+- `tests/test_live_readiness_security_regression.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+LIVE qualification now requires explicit exchange snapshot, observability, and rollback readiness providers. Missing providers produce fail-closed incomplete evidence rather than static passing values. Synthetic fixture-tagged inputs are rejected for LIVE readiness.
+
+### Lifecycle changes
+No lifecycle transition semantics changed. Existing lifecycle and reject-persistence gates remain part of readiness qualification.
+
+### Persistence changes
+`live_readiness_reports` is widened additively with nullable `readiness_inputs_json`. Each persisted report includes readiness input source/type/timestamp metadata in both the JSON payload and the new column.
+
+### Export/schema changes
+No CSV export behavior changed. SQLite schema change is additive and legacy report tables are repaired with `ALTER TABLE ... ADD COLUMN` when needed.
+
+### Tests added
+Added security regressions proving LIVE blocks when exchange snapshot, observability, or rollback probes are missing; LIVE pass wiring requires explicit non-synthetic providers and operator acknowledgement; and deterministic fixture inputs remain usable for offline PAPER/BACKTEST-style tests outside LIVE qualification.
+
+### Tests executed
+- `pytest -q tests/test_live_readiness_security_regression.py -q` — 10 passed.
+- `pytest -q tests/test_live_readiness.py tests/test_runtime.py tests/test_runtime_control.py tests/test_sqlite_schema_bootstrap.py` — 77 passed, 3 skipped, 54 warnings.
+
+### Risks
+Medium. External LIVE bootstrap code must now pass explicit observability and rollback probe objects. This is intentional fail-closed behavior and may surface missing operational integrations earlier.
+
+### Remaining limitations
+This patch does not make LIVE trading ready. Existing dashboard/RBAC, heartbeat, burn-in, full-test, exchange, lifecycle, persistence, and operator acknowledgement gates remain required.
+
+### Migration concerns
+Additive SQLite-only report column is nullable and backward-compatible. Existing readiness rows remain readable, but older rows will have null `readiness_inputs_json`.
+
+### Push recommendation
+Safe to push after focused tests pass. Do not enable LIVE unless all final readiness gates are independently satisfied with fresh non-synthetic evidence.
+
 ## 2026-06-23 Work 1.3 Core identifier normalization
 
 ### Why the patch was needed

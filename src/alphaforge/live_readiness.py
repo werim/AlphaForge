@@ -37,6 +37,7 @@ class QualificationReport:
     verdict: str = "NOT_LIVE_READY"
     gates: list[CheckResult] | None = None
     blockers: list[str] | None = None
+    readiness_inputs: dict[str, dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         gates = self.gates or []
@@ -50,6 +51,7 @@ class QualificationReport:
             "blockers": blockers,
             "checks": [{"name": c.name, "passed": c.passed, "details": c.details} for c in self.checks],
             "gates": [{"name": c.name, "passed": c.passed, "details": c.details} for c in gates],
+            "readiness_inputs": self.readiness_inputs or {},
         }
 
 
@@ -145,13 +147,17 @@ class LiveReadinessEvaluator:
                     qualified INTEGER NOT NULL,
                     deployment_state TEXT NOT NULL,
                     acknowledgement_required INTEGER NOT NULL,
-                    report_payload TEXT NOT NULL
+                    report_payload TEXT NOT NULL,
+                    readiness_inputs_json TEXT
                 )
             """))
+            cols = {str(r[1]) for r in conn.execute(text("PRAGMA table_info(live_readiness_reports)")).all()}
+            if "readiness_inputs_json" not in cols:
+                conn.execute(text("ALTER TABLE live_readiness_reports ADD COLUMN readiness_inputs_json TEXT"))
             conn.execute(text("""
-                INSERT INTO live_readiness_reports(generated_at, qualified, deployment_state, acknowledgement_required, report_payload)
-                VALUES (:generated_at, :qualified, :deployment_state, :ack, :payload)
-            """), {"generated_at": report.generated_at, "qualified": 1 if report.qualified else 0, "deployment_state": report.deployment_state, "ack": 1 if report.acknowledgement_required else 0, "payload": json.dumps(report.to_dict())})
+                INSERT INTO live_readiness_reports(generated_at, qualified, deployment_state, acknowledgement_required, report_payload, readiness_inputs_json)
+                VALUES (:generated_at, :qualified, :deployment_state, :ack, :payload, :inputs)
+            """), {"generated_at": report.generated_at, "qualified": 1 if report.qualified else 0, "deployment_state": report.deployment_state, "ack": 1 if report.acknowledgement_required else 0, "payload": json.dumps(report.to_dict()), "inputs": json.dumps(report.readiness_inputs or {}, sort_keys=True)})
 
     def write_forensic_snapshot(self, base_dir: str | Path, report: QualificationReport, runtime_snapshot: Mapping[str, Any]) -> Path:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
