@@ -1,3 +1,26 @@
+## 2026-06-24 Dashboard rejection diagnostics and gate mapping audit
+
+### Added
+- Added dashboard BACKTEST rejection diagnostics from `rejected_orders.csv`: top reasons, signal-row count, symbol-selector reject count, score/RR/effective-RR distributions, and pre-later-gate pass count.
+- Added regressions for dashboard rejection diagnostics, BREAKOUT_UP/BREAKOUT regime alignment, effective RR unit consistency, and liquidity score scale normalization.
+
+### Changed
+- BREAKOUT_UP/BREAKOUT_DOWN setup alignment now allows a `breakout` volatility label when the setup and regime are otherwise compatible.
+- Symbol selector liquidity diagnostics now explicitly normalize 0..10 liquidity inputs to the 0..1 threshold scale when the configured threshold is fractional.
+
+### Fixed
+- Fixed dashboard visibility gap where completed BACKTEST runs with zero accepted trades did not show rejection reason concentration or distributions.
+- Fixed a potential BREAKOUT regime gate mismatch for aligned BREAKOUT setups labeled with breakout volatility.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Effective RR can still legitimately reject all candidates when real execution costs reduce raw RR below threshold; LIVE remains NOT READY by default.
+
 ## 2026-06-24 Dashboard BACKTEST historical kline pagination diagnostics
 
 ### Added

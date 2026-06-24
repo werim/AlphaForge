@@ -115,3 +115,10 @@ def test_sl_streak_makes_threshold_binding():
     c.score = 8.0
     d = evaluate_trade_quality(c, base_market(), {"consecutive_sl_count": 5}, {})
     assert d.reject_reason == "LOW_SCORE"
+
+
+def test_breakout_up_breakout_regime_not_rejected_by_regime_mapping():
+    c = OrderCandidate(symbol="BTCUSDT", side="LONG", setup_type="BREAKOUT_UP", setup_reason="close_above_high", regime="BREAKOUT", score=8.5, rr=1.55, expectancy=0.2, entry=100.0, sl=99.0, tp=101.55)
+    d = evaluate_trade_quality(c, {**base_market(), "regime": "BREAKOUT", "volatility_regime": "breakout", "spread_pct": 0.001, "expected_slippage_pct": 0.001}, {}, {})
+    assert d.reject_reason != "REGIME_MISMATCH"
+    assert d.accepted is True

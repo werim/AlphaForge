@@ -174,3 +174,32 @@ def test_persistence_includes_effective_rr_penalty_breakdown() -> None:
         assert "funding_penalty" in breakdown
         assert "volatility_penalty" in breakdown
         assert breakdown["effective_rr"] < breakdown["raw_rr"]
+
+
+def test_effective_rr_penalty_units_treat_percent_points_and_fractions_consistently() -> None:
+    from alphaforge.effective_rr import calculate_effective_rr
+    from alphaforge.execution import build_execution_context
+
+    fractional = build_execution_context({
+        "spread_pct": 0.001,
+        "expected_slippage_pct": 0.001,
+        "market_data_latency_ms": 50,
+        "liquidity_score": 0.9,
+        "funding_rate_pct": 0.0,
+        "orderbook_imbalance": 0.1,
+        "volatility_regime": "normal",
+    })
+    percent_points = build_execution_context({
+        "spread_pct": 0.1,
+        "expected_slippage_pct": 0.1,
+        "market_data_latency_ms": 50,
+        "liquidity_score": 0.9,
+        "funding_rate_pct": 0.0,
+        "orderbook_imbalance": 0.1,
+        "volatility_regime": "normal",
+    })
+    a = calculate_effective_rr(2.0, fractional)
+    b = calculate_effective_rr(2.0, percent_points)
+    assert a.effective_rr == pytest.approx(b.effective_rr, rel=1e-9)
+    assert b.spread_penalty < 0.1
+    assert b.slippage_penalty < 0.1

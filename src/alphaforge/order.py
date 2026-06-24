@@ -187,10 +187,10 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     failed_filter = ""
     symbol = getattr(candidate, "symbol", "")
     side = getattr(candidate, "side", "")
-    setup_type = str(getattr(candidate, "setup_type", "") or "")
+    setup_type = str(getattr(candidate, "setup_type", "") or "").upper()
     setup_reason = str(getattr(candidate, "setup_reason", "") or "")
-    regime = str(getattr(candidate, "regime", "") or market_ctx.get("regime", "UNKNOWN"))
-    volatility_regime = str(market_ctx.get("volatility_regime", "unknown"))
+    regime = str(getattr(candidate, "regime", "") or market_ctx.get("regime", "UNKNOWN")).upper()
+    volatility_regime = str(market_ctx.get("volatility_regime", "unknown") or "unknown").lower()
     spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
     expected_slippage_pct = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
     atr_pct = market_ctx.get("atr_pct", recent_stats.get("atr_pct"))
@@ -230,7 +230,9 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     if "TREND_CONTINUATION" in setup_type or "PULLBACK_" in setup_type:
         regime_ok = regime == "TREND"
     elif "BREAKOUT_UP" in setup_type or "BREAKOUT_DOWN" in setup_type:
-        regime_ok = regime in {"TREND", "BREAKOUT"} and volatility_regime.lower() in {"normal", "high"}
+        # BREAKOUT setup/regime alignment must not be blocked because a data
+        # source labels volatility as BREAKOUT instead of normal/high.
+        regime_ok = regime in {"TREND", "BREAKOUT"} and volatility_regime in {"normal", "high", "breakout"}
     elif "RANGE_MEAN_REVERSION" in setup_type:
         regime_ok = regime == "RANGE"
     _check((not cfg["REQUIRE_REGIME_ALIGNMENT"]) or regime_ok, "regime")

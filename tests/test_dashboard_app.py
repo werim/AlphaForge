@@ -498,3 +498,50 @@ def test_dashboard_paper_switch_accepted_and_live_blocked_without_readiness(tmp_
     assert row[2] == 0
     assert "readiness evidence" in row[3]
     assert row[4] == 1
+
+
+def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import subprocess
+    import csv
+
+    import alphaforge.dashboard.backtest_control as backtest_control
+    from alphaforge.dashboard.backtest_control import DashboardBacktestRequest, run_dashboard_backtest
+
+    monkeypatch.setenv("ALPHAFORGE_BACKTEST_OUTPUT_DIR", str(tmp_path))
+
+    def fake_run(command, **kwargs):
+        out = command[command.index("--output-dir") + 1]
+        import os
+        os.makedirs(out, exist_ok=True)
+        with open(os.path.join(out, "order_backtest_summary.csv"), "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["total_candidates", "accepted_count", "rejected_count"])
+            writer.writeheader(); writer.writerow({"total_candidates": "3", "accepted_count": "0", "rejected_count": "3"})
+        with open(os.path.join(out, "order_lifecycle.csv"), "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["signal_id", "spread_pct"])
+            writer.writeheader(); writer.writerow({"signal_id": "s1", "spread_pct": "0.001"})
+        with open(os.path.join(out, "rejected_orders.csv"), "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["signal_id", "lifecycle_state", "source", "reject_reason", "score", "raw_rr", "effective_rr", "expectancy", "min_required_score"])
+            writer.writeheader()
+            writer.writerow({"signal_id": "s1", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "reject_reason": "LOW_SCORE", "score": "4", "raw_rr": "1.4", "effective_rr": "0.8", "expectancy": "0.1", "min_required_score": "7.5"})
+            writer.writerow({"signal_id": "s2", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "reject_reason": "LOW_SCORE", "score": "5", "raw_rr": "1.2", "effective_rr": "0.7", "expectancy": "0.1", "min_required_score": "7.5"})
+            writer.writerow({"signal_id": "s3", "lifecycle_state": "SYMBOL_SELECTOR_REJECT", "source": "SYMBOL_SELECTOR", "reject_reason": "LOW_LIQUIDITY", "score": "8", "raw_rr": "1.5", "effective_rr": "0.95", "expectancy": "0.2", "min_required_score": "7.5"})
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(backtest_control.subprocess, "run", fake_run)
+    result = run_dashboard_backtest(DashboardBacktestRequest(10, ["BTCUSDT"], "15m", 10000, 1))
+    assert result.top_rejection_reasons[0]["reason"] == "LOW_SCORE"
+    assert result.signal_rows_count == 2
+    assert result.symbol_selector_reject_count == 1
+    assert result.pre_later_gate_pass_count == 1
+
+    import alphaforge.dashboard.app as dashboard_app
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", lambda _request: result)
+    html = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'diag.db'}")).post(
+        "/backtest/run",
+        data={"last_days": "10", "symbols": "BTCUSDT", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "1"},
+    ).text
+    assert "Backtest Top Rejection Reasons" in html
+    assert "LOW_SCORE" in html
+    assert "LOW_LIQUIDITY" in html
+    assert "Signal rows / Symbol-selector rejects" in html
+    assert "Passed score/RR/expectancy before later gates" in html
