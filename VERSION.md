@@ -1,3 +1,14 @@
+## 2026-06-24 Dashboard BACKTEST historical kline pagination diagnostics
+- **Current version:** 0.3.60-dev
+- **Current phase:** Dashboard BACKTEST historical ingestion reliability hardening.
+- **Runtime maturity:** Binance USD-M Futures kline ingestion now validates paginated historical coverage against aligned timeframe candle boundaries and reports symbol-specific shortfalls.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST hydration reliability improved; PAPER/LIVE strategy, reject, lifecycle, and order paths are unchanged.
+- **Lifecycle coverage:** Unchanged; the patch only affects pre-simulation historical candle availability checks and dashboard failure diagnostics.
+- **Execution realism coverage:** Improved by failing closed with expected vs actual candle counts instead of masking incomplete history or inventing candles.
+- **Known critical risks:** Binance API availability/rate limits can still prevent dashboard backtests from completing; synchronous dashboard backtests may remain slow for large 1m multi-symbol windows.
+- **Last audit date:** 2026-06-24.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; historical ingestion hardening does not enable LIVE order placement.
+
 ## 2026-06-24 LIVE readiness input provenance hardening
 - **Current version:** 0.3.59-dev
 - **Current phase:** LIVE runtime bootstrap/readiness evidence provenance hardening.

@@ -161,8 +161,9 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     if completed.returncode != 0:
         result.status = "FAILED"
         stderr = (completed.stderr or completed.stdout or "BACKTEST_PROCESS_FAILED").strip()
-        if "HistoricalDataError" in stderr or "Historical coverage" in stderr or "No candles returned" in stderr:
-            result.error_message = INSUFFICIENT_BINANCE_DATA_MESSAGE
+        if "HistoricalDataError" in stderr or "Historical coverage" in stderr or "No candles returned" in stderr or "Insufficient candles" in stderr:
+            detail = stderr[-1200:]
+            result.error_message = f"{INSUFFICIENT_BINANCE_DATA_MESSAGE} Details: {detail}"
         else:
             result.error_message = stderr[-1200:]
         return result

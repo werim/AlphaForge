@@ -388,7 +388,50 @@ def test_backtest_historical_data_failure_uses_clean_dashboard_message(monkeypat
     request = DashboardBacktestRequest(last_days=30, symbols=["BTCUSDT"], timeframe="15m", initial_balance=10000.0, max_symbols=1)
     result = run_dashboard_backtest(request)
     assert result.status == "FAILED"
-    assert result.error_message == INSUFFICIENT_BINANCE_DATA_MESSAGE
+    assert result.error_message is not None
+    assert result.error_message.startswith(INSUFFICIENT_BINANCE_DATA_MESSAGE)
+    assert "HistoricalDataError" in result.error_message
+
+
+def test_dashboard_historical_failure_preserves_failed_symbol_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    import alphaforge.dashboard.backtest_control as backtest_control
+    from alphaforge.dashboard.backtest_control import DashboardBacktestRequest, run_dashboard_backtest
+
+    stderr = (
+        "HistoricalDataError: Historical coverage ends before requested end boundary: "
+        "symbol=ETHUSDT timeframe=1m requested_start=2026-05-25T00:00:00+00:00 "
+        "requested_end=2026-06-24T00:00:00+00:00 expected_candles=43201 actual_candles=1500"
+    )
+    monkeypatch.setattr(backtest_control.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", stderr))
+    request = DashboardBacktestRequest(last_days=30, symbols=["BTCUSDT", "ETHUSDT"], timeframe="1m", initial_balance=10000.0, max_symbols=2)
+    result = run_dashboard_backtest(request)
+    assert result.status == "FAILED"
+    assert result.error_message is not None
+    assert "symbol=ETHUSDT" in result.error_message
+    assert "timeframe=1m" in result.error_message
+    assert "expected_candles=43201" in result.error_message
+    assert "actual_candles=1500" in result.error_message
+
+
+def test_dashboard_failure_html_shows_detailed_reason(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import subprocess
+
+    import alphaforge.dashboard.backtest_control as backtest_control
+
+    stderr = "HistoricalDataError: No candles returned by Binance: symbol=BTCUSDT timeframe=1m requested_start=2026-05-25T00:00:00+00:00 requested_end=2026-06-24T00:00:00+00:00 expected_candles=43200 actual_candles=0"
+    monkeypatch.setattr(backtest_control.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", stderr))
+    client = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'detail.db'}"))
+    html = client.post(
+        "/backtest/run",
+        data={"last_days": "30", "symbols": "BTCUSDT,ETHUSDT", "timeframe": "1m", "initial_balance": "10000", "max_symbols": "2"},
+    ).text
+    assert "Backtest failed closed" in html
+    assert "symbol=BTCUSDT" in html
+    assert "expected_candles=43200" in html
+    assert "actual_candles=0" in html
+    assert "Unavailable" in html
 
 
 def test_dashboard_runtime_control_api_and_kill_switch(tmp_path) -> None:
