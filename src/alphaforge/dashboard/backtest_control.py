@@ -56,6 +56,11 @@ class DashboardBacktestResult:
     rr_distribution: dict[str, Any] = field(default_factory=dict)
     effective_rr_distribution: dict[str, Any] = field(default_factory=dict)
     pre_later_gate_pass_count: int | None = None
+    lifecycle_state_counts: list[dict[str, Any]] = field(default_factory=list)
+    lifecycle_path_counts: list[dict[str, Any]] = field(default_factory=list)
+    final_reject_reason_counts: list[dict[str, Any]] = field(default_factory=list)
+    order_reject_reason_counts: list[dict[str, Any]] = field(default_factory=list)
+    symbol_selector_reject_counts: list[dict[str, Any]] = field(default_factory=list)
 
 
 def default_form_values() -> dict[str, Any]:
@@ -152,11 +157,42 @@ def _numeric_distribution(rows: list[dict[str, str]], field: str) -> dict[str, A
     return {"count": len(values), "min": round(ordered[0], 6), "mean": round(sum(values) / len(values), 6), "p50": pct(0.5), "p90": pct(0.9), "max": round(ordered[-1], 6)}
 
 
+
+def _counter_rows(counter: Counter) -> list[dict[str, Any]]:
+    return [{"value": key, "count": count} for key, count in counter.most_common()]
+
+def _lifecycle_diagnostics(lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]]) -> dict[str, Any]:
+    state_counts = Counter((row.get("lifecycle_state") or "UNKNOWN").strip() or "UNKNOWN" for row in lifecycle_rows)
+    by_signal: dict[str, list[str]] = {}
+    for row in lifecycle_rows:
+        signal_id = (row.get("signal_id") or f"{row.get('symbol','')}:{row.get('event_ts','')}").strip()
+        by_signal.setdefault(signal_id, []).append((row.get("lifecycle_state") or "UNKNOWN").strip() or "UNKNOWN")
+    path_counts = Counter(" -> ".join(states) for states in by_signal.values())
+    final_reasons: Counter = Counter()
+    order_reasons: Counter = Counter()
+    selector_reasons: Counter = Counter()
+    for row in rejected_rows:
+        reason = (row.get("reject_reason") or row.get("reason") or "UNKNOWN").strip() or "UNKNOWN"
+        state = (row.get("lifecycle_state") or "").strip()
+        source = (row.get("source") or row.get("source_stage") or row.get("event_flags") or "").strip()
+        final_reasons[reason] += 1
+        if state == "ORDER_REJECTED":
+            order_reasons[reason] += 1
+        if state == "SYMBOL_REJECTED" or source == "SYMBOL_SELECTOR":
+            selector_reasons[reason] += 1
+    return {
+        "lifecycle_state_counts": _counter_rows(state_counts),
+        "lifecycle_path_counts": _counter_rows(path_counts),
+        "final_reject_reason_counts": _counter_rows(final_reasons),
+        "order_reject_reason_counts": _counter_rows(order_reasons),
+        "symbol_selector_reject_counts": _counter_rows(selector_reasons),
+    }
+
 def _rejection_diagnostics(rows: list[dict[str, str]]) -> dict[str, Any]:
     reasons = Counter((row.get("reject_reason") or row.get("reason") or "UNKNOWN").strip() or "UNKNOWN" for row in rows)
     total = len(rows)
     signal_rows = sum(1 for row in rows if str(row.get("lifecycle_state", "")).strip() == "SIGNAL_REJECTED")
-    selector_rows = sum(1 for row in rows if str(row.get("lifecycle_state", "")).strip() == "SYMBOL_SELECTOR_REJECT" or str(row.get("source", "")).strip() == "SYMBOL_SELECTOR")
+    selector_rows = sum(1 for row in rows if str(row.get("lifecycle_state", "")).strip() == "SYMBOL_REJECTED" or str(row.get("lifecycle_state", "")).strip() == "SYMBOL_SELECTOR_REJECT" or str(row.get("source", "")).strip() == "SYMBOL_SELECTOR" or str(row.get("event_flags", "")).strip() == "SYMBOL_SELECTOR")
     def passes(row: dict[str, str]) -> bool:
         score = _safe_float_or_none(row.get("score"))
         rr = _safe_float_or_none(row.get("raw_rr") if row.get("raw_rr") not in (None, "") else row.get("rr"))
@@ -246,6 +282,12 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.rr_distribution = diagnostics["rr_distribution"]
     result.effective_rr_distribution = diagnostics["effective_rr_distribution"]
     result.pre_later_gate_pass_count = diagnostics["pre_later_gate_pass_count"]
+    lifecycle_diagnostics = _lifecycle_diagnostics(lifecycle_rows, rejected_rows)
+    result.lifecycle_state_counts = lifecycle_diagnostics["lifecycle_state_counts"]
+    result.lifecycle_path_counts = lifecycle_diagnostics["lifecycle_path_counts"]
+    result.final_reject_reason_counts = lifecycle_diagnostics["final_reject_reason_counts"]
+    result.order_reject_reason_counts = lifecycle_diagnostics["order_reject_reason_counts"]
+    result.symbol_selector_reject_counts = lifecycle_diagnostics["symbol_selector_reject_counts"]
     if result.total_candidates is None or result.rejected_signals is None:
         result.lifecycle_warning = "Lifecycle/reject metrics unavailable from generated backtest artifacts; values are shown as unavailable, not zero."
     unavailable_markers = {"", "UNAVAILABLE_BACKTEST", "None", "null"}

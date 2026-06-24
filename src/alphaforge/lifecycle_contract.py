@@ -6,6 +6,7 @@ from enum import Enum
 class CanonicalLifecycleEvent(str, Enum):
     SIGNAL_CREATED = "SIGNAL_CREATED"
     SIGNAL_REJECTED = "SIGNAL_REJECTED"
+    SYMBOL_REJECTED = "SYMBOL_REJECTED"
     WAITING_ENTRY_ZONE = "WAITING_ENTRY_ZONE"
     ENTRY_TRIGGERED = "ENTRY_TRIGGERED"
     ORDER_PLACED = "ORDER_PLACED"
@@ -22,7 +23,6 @@ CANONICAL_LIFECYCLE_EVENT_SET: frozenset[str] = frozenset(CANONICAL_LIFECYCLE_EV
 LEGACY_LIFECYCLE_EVENT_MAP: dict[str, str] = {
     "CREATED": CanonicalLifecycleEvent.SIGNAL_CREATED.value,
     "SIGNAL_ACCEPTED": CanonicalLifecycleEvent.WAITING_ENTRY_ZONE.value,
-    "SYMBOL_REJECTED": CanonicalLifecycleEvent.SIGNAL_REJECTED.value,
     "ORDER_CANCELLED": CanonicalLifecycleEvent.CANCELLED.value,
     "CANCELED": CanonicalLifecycleEvent.CANCELLED.value,
     "EXPIRED": CanonicalLifecycleEvent.ENTRY_TIMEOUT.value,
@@ -59,6 +59,7 @@ CANONICAL_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
         CanonicalLifecycleEvent.CANCELLED.value,
     },
     CanonicalLifecycleEvent.SIGNAL_REJECTED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
+    CanonicalLifecycleEvent.SYMBOL_REJECTED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
     CanonicalLifecycleEvent.ORDER_REJECTED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
     CanonicalLifecycleEvent.POSITION_CLOSED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
     CanonicalLifecycleEvent.ENTRY_TIMEOUT.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},

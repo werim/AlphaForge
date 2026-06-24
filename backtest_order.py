@@ -178,7 +178,7 @@ def _bucket_expectancy(expectancy: Optional[float]) -> str:
 def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[float, list[str], dict[str, float]]:
     model = build_execution_cost_model(market_ctx, include_missing_penalty=False)
     effective = round(max(float(rr) - model.total_penalty, 0.0), 6)
-    liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
+    liquidity_score = min(1.0, max(0.0, float(market_ctx.get("liquidity_score", 1.0) or 1.0)))
     flags: list[str] = []
     if model.slippage_penalty >= 0.20:
         flags.append("HIGH_SLIPPAGE")
@@ -1212,6 +1212,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 for row_value in (row.volume_24h_usdt, row.spread_pct, row.funding_rate_pct, row.expected_slippage_pct, row.liquidity_score)
             )
             lifecycle_state = normalize_lifecycle_event(row.status_after)
+            source_stage = "SYMBOL_SELECTOR" if row.event_flags == "SYMBOL_SELECTOR" or lifecycle_state == "SYMBOL_REJECTED" else "SIGNAL_ENGINE"
             if lifecycle_state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}:
                 decision = "REJECTED"
             elif lifecycle_state == "SIGNAL_CREATED":
@@ -1240,11 +1241,13 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                     "volatility_regime": row.volatility_regime,
                     "liquidity_score": row.liquidity_score,
                     "close_reason": row.close_reason,
+                    "source_stage": source_stage,
                 },
                 execution_ctx_missing=execution_ctx_missing,
                 event_ts=str(row.timestamp),
                 lifecycle_seq=row.lifecycle_seq or (idx + 1),
                 lifecycle_id=row.lifecycle_id or f"{row.symbol}:{row.timestamp}",
+                payload={"source_stage": source_stage, "event_flags": row.event_flags},
             )
         persisted = session.execute(
             text(
@@ -1512,6 +1515,13 @@ def verify_export_integrity(
             errors.append(f"lifecycle row index={idx} missing lifecycle_state/status_after")
         if lifecycle_state == "CREATED" or status_after == "CREATED":
             errors.append(f"lifecycle row index={idx} uses legacy CREATED state")
+
+        if lifecycle_state == "SIGNAL_REJECTED" and "SYMBOL_REJECTED" in str(row.get("event_id", "") or "").upper():
+            errors.append(f"lifecycle row index={idx} mislabels selector reject as SIGNAL_REJECTED")
+        if lifecycle_state == "SYMBOL_REJECTED" and signal_id in score_by_signal:
+            errors.append(f"signal_id={signal_id} has SYMBOL_REJECTED after signal creation")
+        if lifecycle_state == "ORDER_REJECTED" and status_after == "SIGNAL_CREATED":
+            errors.append(f"lifecycle row index={idx} has impossible SIGNAL_CREATED -> ORDER_REJECTED status")
         decision = str(row.get("decision", "")).upper()
         reject_reason = str(row.get("reject_reason", "") or "").strip().upper()
         if (decision == "REJECTED" or lifecycle_state in rejected_states) and reject_reason in {"", "UNKNOWN"}:
@@ -2077,6 +2087,9 @@ def main():
                     )
                     rejected.append(
                         {
+                            "signal_id": f"{symbol}:{candles[i].timestamp}",
+                            "lifecycle_state": "SYMBOL_REJECTED",
+                            "source_stage": "SYMBOL_SELECTOR",
                             "timestamp": candles[i].timestamp,
                             "symbol": symbol,
                             "side": "N/A",
@@ -2098,6 +2111,11 @@ def main():
                                 sort_keys=True,
                             ),
                             "event_flags": "SYMBOL_SELECTOR",
+                            "volume_24h_usdt": selector_market.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
+                            "spread_pct": selector_market.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+                            "liquidity_score": selector_market.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+                            "raw_rr": 0.0,
+                            "effective_rr": 0.0,
                             **_low_score_rescue_watch_fields(reason, {}),
                         }
                     )
