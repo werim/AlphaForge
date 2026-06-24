@@ -1,3 +1,25 @@
+## 2026-06-24 LIVE readiness input provenance hardening
+- **Current version:** 0.3.59-dev
+- **Current phase:** LIVE runtime bootstrap/readiness evidence provenance hardening.
+- **Runtime maturity:** `RuntimeOrchestrator` now requires explicit exchange snapshot, observability, and rollback readiness providers for LIVE qualification and records readiness input provenance with each report.
+- **BACKTEST/PAPER/LIVE alignment:** LIVE fails closed on missing/synthetic providers; PAPER/BACKTEST may keep deterministic offline fixtures outside the LIVE qualification path.
+- **Lifecycle coverage:** Unchanged; readiness qualification still validates lifecycle/reject persistence before LIVE can proceed.
+- **Execution realism coverage:** Improved by removing static pass-biased reconciliation/observability truth from LIVE qualification inputs.
+- **Known critical risks:** LIVE remains blocked unless all final gates and explicit operator acknowledgement are satisfied with fresh, non-synthetic evidence.
+- **Last audit date:** 2026-06-24.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY by default**; missing or synthetic readiness providers now block qualification.
+
+## 2026-06-23 Work 1.3 Core identifier normalization
+- **Current version:** 0.3.58-dev
+- **Current phase:** SQL-first core lifecycle identifier normalization.
+- **Runtime maturity:** `init_db()` and Alembic now add stable nullable identifiers and safe join indexes across signal, decision, order, position, fill, PAPER, BACKTEST, snapshot, calibration, and optimizer tables.
+- **BACKTEST/PAPER/LIVE alignment:** Schema compatibility only; no trading strategy logic, reject thresholds, lifecycle decision logic, optimizer behavior, or LIVE enablement changed.
+- **Lifecycle coverage:** Lifecycle reconstruction is improved through additive join fields; lifecycle state semantics are unchanged and rejected rows remain first-class data.
+- **Execution realism coverage:** Unchanged; no fake execution values, fills, scores, RR values, IDs, or backfills were introduced.
+- **Known critical risks:** Existing legacy rows may still have null identifiers where no deterministic source existed; LIVE remains blocked by readiness gates.
+- **Last audit date:** 2026-06-23.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; identifier normalization does not enable LIVE order placement.
+
 ## 2026-06-23 Work 1.2 Alembic/init_db baseline schema alignment
 - **Current version:** 0.3.57-dev
 - **Current phase:** SQLite Alembic/bootstrap baseline schema convergence.

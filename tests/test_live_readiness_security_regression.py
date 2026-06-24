@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from alphaforge.live_readiness import LiveReadinessEvaluator
+from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
@@ -225,3 +225,144 @@ def test_mode_parity_evidence_uses_expected_mode_labels_for_paper_and_live_prech
     live_precheck_calls = [call for call in brain.calls if call == ("LIVE_PRECHECK", "LIVE_PRECHECK")]
     assert len(paper_calls) == 3
     assert len(live_precheck_calls) == 3
+
+class _ObservedProbe:
+    def probe(self):
+        return {
+            "input_source": "MEASURED_OBSERVABILITY_PROBE",
+            "input_type": "NON_SYNTHETIC_PROBE",
+            "input_timestamp": "2026-06-24T00:00:00+00:00",
+            "evidence_status": "COMPLETE",
+            "observability_evidence_source": "MEASURED_PROBE",
+            "observability_evidence_persisted": True,
+            "qualification_persistence_verified": True,
+            "incident_persistence_verified": True,
+            "forensic_export_verified": True,
+            "sensitive_data_redaction_verified": True,
+            "alert_delivery_verified": True,
+        }
+
+
+class _RollbackProbe:
+    def probe(self):
+        return {
+            "input_source": "MEASURED_ROLLBACK_PROBE",
+            "input_type": "NON_SYNTHETIC_PROBE",
+            "input_timestamp": "2026-06-24T00:00:01+00:00",
+            "rollback_evidence_status": "COMPLETE",
+            "rollback_evidence_source": "DETERMINISTIC_VALIDATION",
+            "rollback_evidence_persisted": True,
+            "rollback_evidence_verified": True,
+            "kill_switch_block_verified": True,
+            "no_submit_on_kill_switch_verified": True,
+            "fail_closed_reconciliation_verified": True,
+            "repair_actions_non_mutating_verified": True,
+            "execution_mutation_attempt_count": 0,
+        }
+
+
+class _ExplicitExchangeProvider:
+    def snapshot(self):
+        return {
+            "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT",
+            "input_type": "READ_ONLY_EXCHANGE_SNAPSHOT",
+            "input_timestamp": "2026-06-24T00:00:02+00:00",
+            "evidence_status": "COMPLETE",
+            "exchange_connectivity_healthy": True,
+            "authenticated": True,
+            "orders": [],
+            "positions": [],
+            "fills": [],
+        }
+
+
+def _live_runtime(engine, **overrides):
+    kwargs = dict(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        ai_brain=_AcceptBrain(Session(engine)),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=object(),
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+    )
+    kwargs.update(overrides)
+    return RuntimeOrchestrator(**kwargs)
+
+
+def _latest_readiness_inputs(engine):
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT readiness_inputs_json, report_payload FROM live_readiness_reports ORDER BY id DESC LIMIT 1")).mappings().one()
+    return json.loads(row["readiness_inputs_json"]), json.loads(row["report_payload"])
+
+
+@pytest.mark.parametrize(
+    ("missing", "expected_source"),
+    [
+        ("exchange", "MISSING"),
+        ("observability", "MISSING"),
+        ("rollback", "MISSING"),
+    ],
+)
+def test_live_qualification_blocks_when_required_readiness_provider_missing(missing, expected_source) -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        _seed_valid(session)
+    kwargs = {
+        "exchange_snapshot_provider": _ExplicitExchangeProvider(),
+        "observability_probe": _ObservedProbe(),
+        "rollback_readiness_probe": _RollbackProbe(),
+    }
+    kwargs[{"exchange": "exchange_snapshot_provider", "observability": "observability_probe", "rollback": "rollback_readiness_probe"}[missing]] = None
+    runtime = _live_runtime(engine, **kwargs)
+
+    with pytest.raises(RuntimeError, match="readiness qualification failed"):
+        asyncio.run(runtime._run_live_qualification_gate())
+
+    inputs, payload = _latest_readiness_inputs(engine)
+    key = {"exchange": "exchange_snapshot", "observability": "observability", "rollback": "rollback"}[missing]
+    assert inputs[key]["input_source"] == expected_source or inputs[key]["source"] == expected_source
+    assert payload["readiness_inputs"][key]
+
+
+def test_live_qualification_passes_only_with_explicit_non_synthetic_provider_results_and_operator_ack(monkeypatch) -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        _seed_valid(session)
+
+    def _ready_evaluate(self, *, mode_parity, reconciliation_snapshot, observability_snapshot, canary_enabled, shadow_mode_enabled, operator_ack, **kwargs):
+        assert operator_ack is True
+        assert reconciliation_snapshot["provider_configured"] is True
+        assert observability_snapshot["provider_configured"] is True
+        assert reconciliation_snapshot["input_source"] == "AUTHENTICATED_EXCHANGE_SNAPSHOT"
+        assert observability_snapshot["input_source"] == "MEASURED_ROLLBACK_PROBE"
+        assert not reconciliation_snapshot.get("synthetic", False)
+        return QualificationReport(
+            qualified=True,
+            checks=[],
+            generated_at="2026-06-24T00:00:03+00:00",
+            deployment_state="LIVE_REAL_ORDERS_READY",
+            acknowledgement_required=False,
+            verdict="LIVE_REAL_ORDERS_READY",
+            gates=[],
+            blockers=[],
+        )
+
+    monkeypatch.setattr("alphaforge.runtime.LiveReadinessEvaluator.evaluate", _ready_evaluate)
+    runtime = _live_runtime(
+        engine,
+        exchange_snapshot_provider=_ExplicitExchangeProvider(),
+        observability_probe=_ObservedProbe(),
+        rollback_readiness_probe=_RollbackProbe(),
+    )
+    asyncio.run(runtime._run_live_qualification_gate())
+    inputs, _payload = _latest_readiness_inputs(engine)
+    assert inputs["exchange_snapshot"]["source"] == "AUTHENTICATED_EXCHANGE_SNAPSHOT"
+    assert inputs["observability"]["source"] == "MEASURED_OBSERVABILITY_PROBE"
+    assert inputs["rollback"]["source"] == "MEASURED_ROLLBACK_PROBE"
+    assert all(inputs[name]["timestamp"] for name in ("exchange_snapshot", "observability", "rollback"))
+
+
+def test_paper_backtest_readiness_fixture_inputs_can_remain_deterministic_offline() -> None:
+    payload = {"input_source": "DETERMINISTIC_FIXTURE", "input_type": "FIXTURE", "evidence_status": "COMPLETE"}
+    assert RuntimeOrchestrator._reject_synthetic_live_input(dict(payload))["evidence_status"] == "INCOMPLETE"
+    assert payload["evidence_status"] == "COMPLETE"

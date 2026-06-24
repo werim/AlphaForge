@@ -45,8 +45,20 @@ class RealExecutionAdapter(Protocol):
     async def submit(self, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
-class LiveReconciliationProvider(Protocol):
+class ExchangeSnapshotProvider(Protocol):
     def snapshot(self) -> Mapping[str, Any]: ...
+
+
+class ObservabilityProbe(Protocol):
+    def probe(self) -> Mapping[str, Any]: ...
+
+
+class RollbackReadinessProbe(Protocol):
+    def probe(self) -> Mapping[str, Any]: ...
+
+
+class LiveReconciliationProvider(ExchangeSnapshotProvider, Protocol):
+    pass
 
 
 @dataclass(slots=True)
@@ -100,6 +112,9 @@ class RuntimeOrchestrator:
     scanner_source: str = "UNKNOWN"
     real_execution_adapter: RealExecutionAdapter | None = None
     live_reconciliation_provider: LiveReconciliationProvider | None = None
+    exchange_snapshot_provider: ExchangeSnapshotProvider | None = None
+    observability_probe: ObservabilityProbe | None = None
+    rollback_readiness_probe: RollbackReadinessProbe | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     paper_slippage_bps: float = 2.0
@@ -267,14 +282,17 @@ class RuntimeOrchestrator:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
         evaluator = LiveReadinessEvaluator(engine)
         mode_parity = self._build_mode_parity_evidence(min_sample_count=3)
-        reconciliation_snapshot = {
-            "provider_configured": self.live_reconciliation_provider is not None,
-            "evidence_status": "UNVERIFIED",
+        readiness_inputs: dict[str, dict[str, Any]] = {
+            "mode_parity": self._readiness_input_metadata("mode_parity", self, mode_parity),
         }
-        if self.live_reconciliation_provider is not None:
-            provider_snapshot = dict(self.live_reconciliation_provider.snapshot())
+        snapshot_provider = self.exchange_snapshot_provider or self.live_reconciliation_provider
+        reconciliation_snapshot = self._missing_readiness_input("exchange_snapshot", "EXCHANGE_SNAPSHOT_PROVIDER_MISSING")
+        if snapshot_provider is not None:
+            provider_snapshot = dict(snapshot_provider.snapshot())
+            readiness_inputs["exchange_snapshot"] = self._readiness_input_metadata("exchange_snapshot", snapshot_provider, provider_snapshot)
+            provider_snapshot = self._reject_synthetic_live_input(provider_snapshot)
             evidence_status = str(provider_snapshot.get("evidence_status") or "INCOMPLETE").upper()
-            reconciliation_snapshot["evidence_status"] = evidence_status
+            reconciliation_snapshot = {"provider_configured": True, **provider_snapshot, "evidence_status": evidence_status}
             if evidence_status == "COMPLETE":
                 snapshot = self._reconciliation_engine.snapshot_from_source(provider_snapshot)
                 findings, _recommendations, _metrics = self._reconciliation_engine.reconcile(
@@ -283,29 +301,26 @@ class RuntimeOrchestrator:
                     snapshot=snapshot,
                     mode=ExecutionMode.LIVE.value,
                 )
-                counters = summarize_findings(findings)
-                reconciliation_snapshot.update(counters)
-            else:
-                reconciliation_snapshot.update({
-                    "orphan_orders": 0,
-                    "orphan_positions": 0,
-                    "duplicate_fills": 0,
-                    "lifecycle_divergences": 0,
-                    "fail_closed_findings": 1,
-                })
-        observability_snapshot = {
-            "evidence_status": "INCOMPLETE",
-            "qualification_persistence_verified": True,
-            "incident_persistence_verified": False,
-            "forensic_export_verified": True,
-            "sensitive_data_redaction_verified": True,
-            "alert_delivery_verified": False,
-            "rollback_evidence_status": "INCOMPLETE",
-            "kill_switch_block_verified": True,
-            "no_submit_on_kill_switch_verified": True,
-            "fail_closed_reconciliation_verified": True,
-            "repair_actions_non_mutating_verified": True,
-        }
+                reconciliation_snapshot.update(summarize_findings(findings))
+        else:
+            readiness_inputs["exchange_snapshot"] = dict(reconciliation_snapshot)
+
+        observability_snapshot = self._missing_readiness_input("observability", "OBSERVABILITY_PROBE_MISSING")
+        if self.observability_probe is not None:
+            probed = self._reject_synthetic_live_input(dict(self.observability_probe.probe()))
+            readiness_inputs["observability"] = self._readiness_input_metadata("observability", self.observability_probe, probed)
+            observability_snapshot = {"provider_configured": True, **probed}
+        else:
+            readiness_inputs["observability"] = dict(observability_snapshot)
+
+        rollback_snapshot = self._missing_readiness_input("rollback", "ROLLBACK_READINESS_PROBE_MISSING")
+        if self.rollback_readiness_probe is not None:
+            probed = self._reject_synthetic_live_input(dict(self.rollback_readiness_probe.probe()))
+            readiness_inputs["rollback"] = self._readiness_input_metadata("rollback", self.rollback_readiness_probe, probed)
+            rollback_snapshot = {"provider_configured": True, **probed}
+        else:
+            readiness_inputs["rollback"] = dict(rollback_snapshot)
+        observability_snapshot = {**observability_snapshot, **rollback_snapshot}
         report = evaluator.evaluate(
             mode_parity=mode_parity,
             reconciliation_snapshot=reconciliation_snapshot,
@@ -315,12 +330,38 @@ class RuntimeOrchestrator:
             operator_ack=self.config.operator_live_acknowledged,
             kill_switch_active=self._kill_switch_active(),
         )
+        report.readiness_inputs = readiness_inputs
         evaluator.persist_report(report)
         self._qualification_report = report
         logger.warning("live_readiness_report=%s", report.to_dict())
         if report.verdict != "LIVE_REAL_ORDERS_READY":
             self._persist_runtime_heartbeat(runtime_state="STOPPING")
             raise RuntimeError(f"LIVE mode blocked: readiness qualification failed; verdict {report.verdict} is below LIVE_REAL_ORDERS_READY")
+
+
+    @staticmethod
+    def _readiness_input_metadata(name: str, provider: Any, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "name": name,
+            "source": str(payload.get("input_source") or payload.get("evidence_source") or payload.get("observability_evidence_source") or payload.get("rollback_evidence_source") or provider.__class__.__name__),
+            "type": str(payload.get("input_type") or payload.get("provider_type") or provider.__class__.__name__),
+            "timestamp": str(payload.get("input_timestamp") or payload.get("generated_at") or payload.get("recorded_at") or canonical_utc_timestamp()),
+        }
+
+    @staticmethod
+    def _missing_readiness_input(name: str, reason: str) -> dict[str, Any]:
+        return {"name": name, "provider_configured": False, "evidence_status": "INCOMPLETE", "input_source": "MISSING", "input_type": "MISSING", "input_timestamp": canonical_utc_timestamp(), "blocking_reasons": [reason]}
+
+    @staticmethod
+    def _reject_synthetic_live_input(payload: dict[str, Any]) -> dict[str, Any]:
+        source = str(payload.get("input_source") or payload.get("evidence_source") or payload.get("observability_evidence_source") or payload.get("rollback_evidence_source") or "").upper()
+        input_type = str(payload.get("input_type") or payload.get("provider_type") or "").upper()
+        synthetic = bool(payload.get("synthetic", False)) or source in {"SYNTHETIC", "FIXTURE", "DETERMINISTIC_FIXTURE"} or input_type in {"SYNTHETIC", "FIXTURE", "DETERMINISTIC_FIXTURE"}
+        if synthetic:
+            reasons = list(payload.get("blocking_reasons") or [])
+            reasons.append("SYNTHETIC_LIVE_READINESS_INPUT")
+            payload.update({"evidence_status": "INCOMPLETE", "blocking_reasons": reasons})
+        return payload
 
     def _evaluate_pre_submit(self, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any]) -> dict[str, Any]:
         score_ctx = self.ai_brain.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)

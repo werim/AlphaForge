@@ -1,3 +1,47 @@
+## 2026-06-24 LIVE readiness input provenance hardening
+
+### Added
+- Added explicit runtime protocols for exchange snapshots, observability probes, and rollback readiness probes.
+- Added `readiness_inputs_json` persistence for `live_readiness_reports` so every readiness input records source, type, and timestamp.
+- Added regression tests for missing LIVE providers, explicit non-synthetic provider pass wiring, and deterministic offline fixture preservation for PAPER/BACKTEST-style tests.
+
+### Changed
+- LIVE qualification now fails closed when exchange snapshot, observability, or rollback readiness providers are not configured.
+- Replaced static pass-biased observability/reconciliation defaults with explicit missing-evidence blockers.
+
+### Fixed
+- Removed synthetic/default truth from LIVE readiness qualification bootstrap.
+
+### Removed
+- Removed hardcoded LIVE qualification snapshots that implied clean reconciliation or operational readiness without providers.
+
+### Breaking Changes
+- LIVE qualification callers that relied on only `live_reconciliation_provider` plus static observability/rollback defaults must now configure observability and rollback probes explicitly.
+
+### Known Issues
+- LIVE remains NOT READY by default until all existing final gates, persisted operational evidence, and operator acknowledgement are satisfied.
+
+## 2026-06-23 Work 1.3 Core identifier normalization
+
+### Added
+- Added Alembic revision `0005_core_identifier_normalization` for nullable core identifier columns and safe join indexes.
+- Added bootstrap/migration tests for fresh `init_db()`, fresh Alembic, mixed ordering, indexes, and legacy insert compatibility.
+
+### Changed
+- Extended `init_db()` baseline DDL and SQLite additive repair logic so core lifecycle tables share stable identifiers where relevant.
+
+### Fixed
+- Reduced schema drift that prevented reliable joins across signals, decisions, orders, positions, PAPER events, BACKTEST events, calibration labels, and optimizer runs.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. Changes are additive and nullable; no destructive renames, drops, truncates, or fake backfills were introduced.
+
+### Known Issues
+- Legacy rows can still contain null identifiers where AlphaForge has no deterministic source; LIVE remains NOT READY by default.
+
 ## 2026-06-23 Work 1.2 Alembic/init_db baseline schema alignment
 
 ### Added
