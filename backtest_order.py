@@ -165,6 +165,11 @@ class LifecycleRow:
     order_id: str = ""
     position_id: str = ""
     lifecycle_seq: int = 0
+    shadow_outcome: str = ""
+    cost_penalty: float = 0.0
+    volatility_score: Any = "UNAVAILABLE_BACKTEST"
+    liquidity_ok: Optional[bool] = None
+    volatility_ok: Optional[bool] = None
 
 
 def _is_pre_signal_symbol_reject(row: LifecycleRow, lifecycle_state: str | None = None) -> bool:
@@ -239,7 +244,7 @@ def _build_market_ctx(
     if quote_volume in (None, "", 0, 0.0):
         quote_volume = now.volume * now.close * 1440.0
     candle_range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
-    liq = min(1.0, max(0.05, float(symbol_meta.get("quoteVolume", 0.0) or 0.0) / 100000000.0))
+    liq = min(1.0, max(0.05, float(quote_volume) / 100000000.0))
     spread_source = "ACTUAL" if symbol_meta.get("actual_spread_pct") not in (None, "") else "ESTIMATED_BACKTEST"
     raw_spread = symbol_meta.get("actual_spread_pct") or symbol_meta.get("estimated_spread_pct") or _estimate_backtest_spread_pct(liq, candle_range_pct)
     spread_pct, spread_unit_assumed = normalize_pct_input(raw_spread, field="spread_pct")
@@ -269,10 +274,7 @@ def _build_market_ctx(
             **base,
             "raw_spread_pct_input": raw_spread,
             "recent_klines": klines,
-            "liquidity_score": min(
-                1.0,
-                max(0.1, float(symbol_meta.get("quoteVolume", 0.0) or 0.0) / 100000000.0),
-            ),
+            "liquidity_score": liq,
         }
     )
     base.update(exec_ctx)
@@ -1258,6 +1260,11 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                     "expected_slippage_pct": row.expected_slippage_pct,
                     "volatility_regime": row.volatility_regime,
                     "liquidity_score": row.liquidity_score,
+                    "volatility_score": row.volatility_score,
+                    "liquidity_ok": row.liquidity_ok,
+                    "volatility_ok": row.volatility_ok,
+                    "shadow_outcome": row.shadow_outcome or None,
+                    "cost_penalty": row.cost_penalty,
                     "close_reason": row.close_reason,
                     "source_stage": source_stage,
                 },
@@ -1272,6 +1279,16 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 """
                 SELECT event_id, signal_id, order_id, symbol, mode, lifecycle_state, decision, reject_reason,
                        score, rr, effective_rr, expectancy_bucket, execution_ctx, execution_ctx_missing,
+                       json_extract(execution_ctx, '$.liquidity_score') AS liquidity_score,
+                       json_extract(execution_ctx, '$.volatility_score') AS volatility_score,
+                       json_extract(execution_ctx, '$.liquidity_ok') AS liquidity_ok,
+                       json_extract(execution_ctx, '$.volatility_ok') AS volatility_ok,
+                       json_extract(execution_ctx, '$.shadow_outcome') AS shadow_outcome,
+                       json_extract(execution_ctx, '$.cost_penalty') AS cost_penalty,
+                       json_extract(execution_ctx, '$.spread_pct') AS spread_pct,
+                       json_extract(execution_ctx, '$.expected_slippage_pct') AS expected_slippage_pct,
+                       json_extract(execution_ctx, '$.funding_rate_pct') AS funding_rate_pct,
+                       json_extract(execution_ctx, '$.volume_24h_usdt') AS volume_24h_usdt,
                        event_ts, created_at, lifecycle_seq, lifecycle_id
                 FROM trade_lifecycle_events
                 WHERE mode = 'BACKTEST'
@@ -1280,6 +1297,25 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
             )
         ).mappings().all()
     return [dict(row) for row in persisted]
+
+
+def _attach_rejected_shadow_to_lifecycle(rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation]) -> None:
+    """Annotate rejected lifecycle decisions with shadow labels without accepting them."""
+    shadow_by_key = {(s.symbol, int(s.timestamp)): s for s in shadows}
+    for row in rows:
+        if row.status_after not in {"SIGNAL_REJECTED", "ORDER_REJECTED"}:
+            continue
+        shadow = shadow_by_key.get((row.symbol, int(row.timestamp)))
+        if shadow is None:
+            continue
+        row.effective_rr = shadow.effective_rr
+        row.spread_pct = shadow.spread_pct
+        row.liquidity_score = shadow.liquidity_score
+        row.volatility_score = shadow.volatility_score
+        row.shadow_outcome = shadow.shadow_outcome
+        row.cost_penalty = shadow.cost_penalty
+        row.liquidity_ok = shadow.liquidity_ok
+        row.volatility_ok = shadow.volatility_ok
 
 
 def _derive_backtest_counts(lifecycle: List[LifecycleRow]) -> Dict[str, int]:
@@ -2288,6 +2324,7 @@ def main():
             "reject_correct": ev.reject_correct,
         }
         adaptive_scope_stats.append(scope_payload)
+    _attach_rejected_shadow_to_lifecycle(lifecycle, rejected_shadow)
     persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle)
     forward_eval_rows = build_forward_evaluation_rows(
         [{**row, "timestamp": _safe_float(row.get("event_ts"), 0.0)} for row in persisted_lifecycle_rows],

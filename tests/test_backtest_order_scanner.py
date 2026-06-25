@@ -1193,3 +1193,73 @@ def test_lifecycle_export_valid_state_transitions_only_for_dashboard_symbols():
     errors = bo.verify_export_integrity(persisted, rejected, list(persisted), list(rejected))
     assert not errors
     assert all(r["reject_reason"] for r in rejected)
+
+
+def test_rejected_shadow_rows_are_persisted_with_reject_reason_and_outcome():
+    lifecycle = [
+        bo.LifecycleRow(
+            timestamp=1,
+            symbol="BTCUSDT",
+            side="LONG",
+            setup_type="BREAKOUT_UP",
+            setup_reason="X",
+            regime="TREND",
+            score=4.0,
+            rr=1.5,
+            entry=100.0,
+            sl=99.0,
+            tp=101.5,
+            status_before="SIGNAL_CREATED",
+            status_after="SIGNAL_REJECTED",
+            reject_reason="LOW_SCORE",
+            liquidity_score=0.9,
+            spread_pct=0.01,
+        )
+    ]
+    shadows = [
+        bo.RejectedShadowEvaluation(
+            "BTCUSDT", 1, "LONG", 100.0, 99.0, 101.5, 1.5, 1.35, "LOW_SCORE", 4.0,
+            "TREND", 0.0001, 0.9, 0.5, "WOULD_TP", True, 0.15, True, True,
+        )
+    ]
+    bo._attach_rejected_shadow_to_lifecycle(lifecycle, shadows)
+    persisted = bo._persist_lifecycle_rows(lifecycle)
+
+    assert persisted[0]["decision"] == "REJECTED"
+    assert persisted[0]["lifecycle_state"] == "SIGNAL_REJECTED"
+    assert persisted[0]["reject_reason"] == "LOW_SCORE"
+    assert persisted[0]["effective_rr"] == pytest.approx(1.35)
+    assert persisted[0]["shadow_outcome"] == "WOULD_TP"
+    assert persisted[0]["liquidity_ok"] == 1
+
+
+def test_liquidity_score_uses_historical_volume_when_symbol_meta_missing():
+    ctx = bo._build_market_ctx(
+        bo.Candle(3, 100.0, 101.0, 99.5, 100.5, 2_000_000.0),
+        bo.Candle(2, 100.0, 100.5, 99.5, 100.0, 1_500_000.0),
+        {},
+        recent=[bo.Candle(1, 100.0, 101.0, 99.0, 100.0, 1_000_000.0)],
+    )
+
+    assert ctx["volume_24h_usdt"] > 100_000_000.0
+    assert ctx["liquidity_score"] > 0.1
+
+
+def test_liquidity_ok_can_be_true_when_liquidity_conditions_pass():
+    row = {"timestamp": 1, "symbol": "BTCUSDT", "side": "LONG", "entry": 10, "sl": 9, "tp": 12, "rr": 2.0, "reject_reason": "LOW_SCORE", "score": 4.0, "regime": "TREND", "spread_pct": 0.01, "liquidity_score": 0.75, "volatility_score": 1.0}
+    shadow = bo.evaluate_rejected_shadow(row, [bo.Candle(1, 10, 12.5, 9.8, 12, 10)], 0)
+    assert shadow.liquidity_ok is True
+
+
+def test_would_tp_shadow_does_not_inflate_accepted_count():
+    lifecycle = [
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "BREAKOUT_UP", "X", "TREND", 4.0, 1.5, 10.0, 9.0, 11.5, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "BREAKOUT_UP", "X", "TREND", 4.0, 1.5, 10.0, 9.0, 11.5, "SIGNAL_CREATED", "SIGNAL_REJECTED", reject_reason="LOW_SCORE"),
+    ]
+    shadows = [bo.RejectedShadowEvaluation("BTCUSDT", 1, "LONG", 10, 9, 11.5, 1.5, 1.4, "LOW_SCORE", 4.0, "TREND", 0.01, 0.9, 0.5, "WOULD_TP", True, 0.1, True, True)]
+    bo._attach_rejected_shadow_to_lifecycle(lifecycle, shadows)
+    counts = bo._derive_backtest_counts(lifecycle)
+    persisted = bo._persist_lifecycle_rows(lifecycle)
+
+    assert counts["accepted_count"] == 0
+    assert any(r["shadow_outcome"] == "WOULD_TP" and r["decision"] == "REJECTED" for r in persisted)

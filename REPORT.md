@@ -1,3 +1,47 @@
+
+## 2026-06-25 - Rejected Shadow Backtest Export Patch
+
+### Why the patch was needed
+Rejected shadow CSV exports showed 4,322 rejected candidates with constant `liquidity_score` around 0.1, universally false `liquidity_ok`, near-constant estimated spread, and shadow outcomes that were not represented in lifecycle SQL/export rows. These rows are counterfactual rejected signal/order candidates, not executed orders.
+
+### Root cause
+`backtest_order.py::_build_market_ctx` correctly derived `volume_24h_usdt` from historical candle volume when ticker metadata was unavailable, but the liquidity score passed into execution context still read directly from missing `symbol_meta.quoteVolume` and clamped to a minimum. That made explicit-symbol historical runs default to thin liquidity, which also made the estimated spread nearly constant. Rejected shadow labels were written to `rejected_shadow.csv` only and were not attached to persisted lifecycle rows.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+BACKTEST now derives liquidity score from available historical candle volume when exchange ticker quote volume is unavailable. Rejected shadow diagnostics are attached to matching rejected lifecycle decisions before SQL persistence.
+
+### Lifecycle changes
+Rejected rows remain `SIGNAL_REJECTED`/`ORDER_REJECTED`; `WOULD_TP` shadow outcomes are preserved only as counterfactual labels and do not approve execution or inflate accepted counts.
+
+### Persistence changes
+Lifecycle persistence execution context now includes rejected shadow outcome, cost penalty, liquidity/volatility scores, and liquidity/volatility gate booleans. The SQL lifecycle export projects these fields as CSV columns.
+
+### Export/schema changes
+No table migration was added. The in-memory SQL export query now exposes execution-context JSON fields as lifecycle CSV columns for rejected shadow analysis.
+
+### Tests added
+Added regression tests for rejected shadow lifecycle persistence, LOW_SCORE reject-reason retention, derived liquidity scoring, true liquidity gates, shadow outcome export preservation, WOULD_TP remaining rejected, and accepted-count invariance.
+
+### Tests executed
+- `pytest -q tests/test_backtest_order_scanner.py -q`
+- `python backtest_order.py --offline --output-dir /tmp/af_out`
+
+### Risks and remaining limitations
+Historical bid/ask spread is still unavailable in offline candle-only backtests, so spread remains an execution-aware proxy rather than a measured historical spread. Liquidity is still normalized from quote-volume proxy and should be audited against exchange-specific depth data before LIVE readiness claims.
+
+### Migration concerns
+No database migration required. CSV consumers should tolerate additional lifecycle export columns.
+
+### Push recommendation
+Safe to push as a minimal SQL/export and backtest-proxy correction. Not a LIVE readiness endorsement.
+
 ## 2026-06-24 Backtest SYMBOL_REJECTED lifecycle ordering fix
 
 ### Why the patch was needed
