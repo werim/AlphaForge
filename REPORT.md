@@ -1,3 +1,49 @@
+## 2026-06-24 Backtest SYMBOL_REJECTED lifecycle ordering fix
+
+### Why the patch was needed
+Dashboard BACKTEST runs for BTCUSDT/ETHUSDT 15m could fail closed because `SYMBOL_REJECTED` selector diagnostics were exported under the same `<symbol>:<timestamp>` identity used by signal lifecycle rows.
+
+### Root cause
+`SYMBOL_REJECTED` is a pre-signal symbol selector rejection. The persistence/export path reused the default signal id format for selector diagnostics, so lifecycle integrity checks could interpret a selector diagnostic as a post-`SIGNAL_CREATED` state for the same signal.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+BACKTEST selector rejects keep SQL-first persistence but use a `SYMBOL_SELECTOR:<symbol>:<timestamp>` diagnostic identity. If a `SYMBOL_REJECTED` row is produced after a signal exists, it is exported as `SIGNAL_REJECTED` with `reject_reason` preserved rather than as an invalid post-signal symbol state.
+
+### Lifecycle changes
+Valid pre-signal selector diagnostics remain visible as `SYMBOL_REJECTED`. Signal-level rejections after `SIGNAL_CREATED` export as `SIGNAL_REJECTED`. The validator remains fail-closed.
+
+### Persistence changes
+SQLite lifecycle persistence is preserved. No schema migration is required.
+
+### Export/schema changes
+`order_lifecycle.csv` and `rejected_orders.csv` may contain selector diagnostic ids prefixed with `SYMBOL_SELECTOR:`. No columns were added or removed.
+
+### Tests added
+Added tests for selector diagnostic ids, post-signal normalization, dashboard-symbol lifecycle validity, export transition validity, and reject-reason completeness.
+
+### Tests executed
+- `python -m pytest tests/test_backtest_order_scanner.py -q`
+- `python -m pytest -q`
+
+### Risks
+Downstream CSV consumers that assumed every lifecycle `signal_id` is orderable must ignore or separately bucket `SYMBOL_SELECTOR:*` diagnostics.
+
+### Remaining limitations
+The patch does not add live exchange calls or synthesize unavailable execution fields.
+
+### Migration concerns
+No database schema migration is needed. Historical exports with colliding selector ids may need regeneration for dashboard validation.
+
+### Push recommendation
+Safe to push after full test pass; this is a minimal producer/exporter fix and does not loosen lifecycle validation.
+
 ## 2026-06-24 Backtest order lifecycle diagnostics hardening
 
 ### Why the patch was needed

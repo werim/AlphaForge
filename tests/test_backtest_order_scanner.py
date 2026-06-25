@@ -1152,3 +1152,44 @@ def test_lifecycle_export_integrity_rejects_selector_mislabeled_as_signal_reject
         rejected_csv_rows=[{"signal_id": "ETHUSDT:1", "lifecycle_state": "SIGNAL_REJECTED", "reject_reason": "LOW_LIQUIDITY"}],
     )
     assert any("mislabels selector reject" in e for e in errors)
+
+
+def test_pre_signal_symbol_rejected_uses_selector_diagnostic_signal_id_and_validates():
+    rows = [
+        bo.LifecycleRow(
+            1, "ETHUSDT", "N/A", "", "", "CHOP", 2.0, 0.0, 0.0, 0.0, 0.0,
+            "NONE", "SYMBOL_REJECTED", reject_reason="LOW_LIQUIDITY", event_flags="SYMBOL_SELECTOR", liquidity_score=0.1,
+        )
+    ]
+    persisted = bo._persist_lifecycle_rows(rows)
+    assert persisted[0]["signal_id"] == "SYMBOL_SELECTOR:ETHUSDT:1"
+    assert persisted[0]["lifecycle_state"] == "SYMBOL_REJECTED"
+    errors = bo.verify_export_integrity(persisted, list(persisted), list(persisted), list(persisted))
+    assert not any("SYMBOL_REJECTED after signal creation" in e for e in errors)
+
+
+def test_post_signal_symbol_rejected_maps_to_signal_rejected_with_reason():
+    rows = [
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(1, "BTCUSDT", "LONG", "S", "R", "TREND", 8.0, 2.0, 10.0, 9.0, 12.0, "SIGNAL_CREATED", "SYMBOL_REJECTED", reject_reason="REGIME_MISMATCH"),
+    ]
+    persisted = bo._persist_lifecycle_rows(rows)
+    assert [r["lifecycle_state"] for r in persisted] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
+    assert persisted[1]["reject_reason"] == "REGIME_MISMATCH"
+    assert "SYMBOL_REJECTED" not in persisted[1]["event_id"]
+    errors = bo.verify_export_integrity(persisted, [persisted[1]], list(persisted), [persisted[1]])
+    assert not any("SYMBOL_REJECTED after signal creation" in e for e in errors)
+    assert not any("mislabels selector reject" in e for e in errors)
+
+
+def test_lifecycle_export_valid_state_transitions_only_for_dashboard_symbols():
+    rows = [
+        bo.LifecycleRow(1782308700000, "BTCUSDT", "LONG", "S", "R", "TREND", 8.1, 2.1, 10.0, 9.0, 12.0, "NONE", "SIGNAL_CREATED"),
+        bo.LifecycleRow(1782308700000, "BTCUSDT", "LONG", "S", "R", "TREND", 8.1, 2.1, 10.0, 9.0, 12.0, "SIGNAL_CREATED", "WAITING_ENTRY_ZONE"),
+        bo.LifecycleRow(1782312300000, "ETHUSDT", "N/A", "", "", "CHOP", 1.0, 0.0, 0.0, 0.0, 0.0, "NONE", "SYMBOL_REJECTED", reject_reason="LOW_LIQUIDITY", event_flags="SYMBOL_SELECTOR"),
+    ]
+    persisted = bo._persist_lifecycle_rows(rows)
+    rejected = [r for r in persisted if r["decision"] == "REJECTED"]
+    errors = bo.verify_export_integrity(persisted, rejected, list(persisted), list(rejected))
+    assert not errors
+    assert all(r["reject_reason"] for r in rejected)
