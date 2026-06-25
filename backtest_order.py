@@ -2401,6 +2401,25 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))
         w.writeheader()
         w.writerow(rejected_shadow_summary)
+    try:
+        import importlib.util
+
+        calibration_module_path = SRC_DIR / "alphaforge" / "dashboard" / "backtest_control.py"
+        spec = importlib.util.spec_from_file_location("alphaforge_dashboard_backtest_control", calibration_module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"unable to load {calibration_module_path}")
+        calibration_module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = calibration_module
+        spec.loader.exec_module(calibration_module)
+        calibration_module._write_calibration_artifacts(
+            Path(args.output_dir),
+            persisted_lifecycle_rows,
+            rejected,
+            summary,
+            [asdict(x) for x in rejected_shadow],
+        )
+    except Exception as exc:
+        raise ValueError(f"Lifecycle calibration artifact generation failed: {exc}") from exc
     with Session(init_db("sqlite+pysqlite:///:memory:")) as session:
         for row in forward_eval_rows:
             session.execute(

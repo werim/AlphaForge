@@ -1,3 +1,24 @@
+## 2026-06-25 - Dashboard Calibration Rejected-Shadow Source Fix
+
+### Added
+- Added dashboard calibration loading of `rejected_shadow.csv` and stable signal/composite lookup enrichment for shadow diagnostics.
+- Added regression fixtures where LOW_SCORE and later-gate rejects receive counterfactual shadow outcomes and cost penalties only from `rejected_shadow.csv`.
+
+### Changed
+- `lifecycle_calibration_summary.json` now computes cost-penalty, LOW_SCORE shadow comparison, later-gate shadow rates, and near-miss shadow fields from rejected-shadow diagnostics when available.
+
+### Fixed
+- Fixed incomplete calibration summaries where cost penalties and WOULD_TP/WOULD_SL counts stayed zero/null despite populated `rejected_shadow.csv` artifacts.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Calibration output is diagnostic only; it does not justify threshold changes or LIVE readiness. Local dashboard tests require optional FastAPI/httpx dependencies to run instead of being skipped.
+
 ## 2026-06-25 - Dashboard Calibration Test Import Fix
 
 ### Added
