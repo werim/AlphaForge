@@ -1,3 +1,24 @@
+## 2026-06-24 Backtest SYMBOL_REJECTED lifecycle ordering fix
+
+### Added
+- Added regression coverage for pre-signal selector rejects, post-signal SYMBOL_REJECTED normalization, BTCUSDT/ETHUSDT 15m lifecycle ordering, export transition validity, and reject-reason completeness.
+
+### Changed
+- BACKTEST pre-signal selector rejects now persist under `SYMBOL_SELECTOR:<symbol>:<timestamp>` diagnostic identities so they cannot collide with signal lifecycle identities.
+- Post-signal `SYMBOL_REJECTED` rows are normalized to `SIGNAL_REJECTED` with the original `reject_reason` preserved.
+
+### Fixed
+- Fixed dashboard backtests failing closed with `has SYMBOL_REJECTED after signal creation` when selector diagnostics shared a signal lifecycle identity.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for runtime trading paths. CSV consumers should not treat `SYMBOL_SELECTOR:*` diagnostic ids as orderable signal ids.
+
+### Known Issues
+- Selector diagnostics remain BACKTEST diagnostics and do not make missing exchange-context fields available when source data is unavailable.
+
 ## 2026-06-24 Backtest order lifecycle diagnostics hardening
 
 ### Added
