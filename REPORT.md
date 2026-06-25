@@ -1,3 +1,40 @@
+## 2026-06-25 - Lifecycle Calibration Later-Gate CI Fix
+
+### Why the patch was needed
+CI exposed a `ValueError: too many values to unpack` in the lifecycle calibration later-gate diagnostic loop when passed score/RR/expectancy rows existed.
+
+### Root cause
+The later-gate builder iterated over a set of `(reason, source_stage)` tuples but attempted to unpack each item as `((reason, stage), rows)`, even though no grouped row list existed.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+No trading thresholds, accepted trade counting, lifecycle states, or rejected-shadow semantics changed. Later-gate diagnostics now use an explicit grouped dictionary before computing counts and rates.
+
+### Lifecycle changes
+None. `WOULD_TP` rejected rows remain rejected counterfactual diagnostics.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+No artifact names or schemas were removed; later-gate summary rows now include grouped count fields without crashing.
+
+### Tests executed
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics -q` (environment skipped collection because FastAPI/httpx are not installed locally)
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py`
+- `pytest -q`
+
+### Risks and remaining limitations
+Dashboard-specific targeted tests require optional dashboard dependencies in this local container; full local pytest still passes with dashboard tests skipped by dependency guards. CI with dashboard dependencies should exercise the fixed test directly.
+
+### Push recommendation
+Safe to push as a minimal CI fix; no threshold or lifecycle acceptance behavior changed.
+
 ## 2026-06-25 - Lifecycle Calibration Dashboard Report Patch
 
 ### Why the patch was needed

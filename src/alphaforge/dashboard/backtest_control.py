@@ -4,7 +4,7 @@ import csv
 import json
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -291,11 +291,31 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
         })
     signal_rejected = [r for r in rejected_rows if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_REJECTED"]
     passed_later = [r for r in signal_rejected if _passes_score_rr_expectancy(r)]
+    later_gate_groups: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
+    for row in passed_later:
+        reason = str(row.get("reject_reason") or "UNKNOWN").strip() or "UNKNOWN"
+        later_gate_groups[(reason, _source_stage(row))].append(row)
     later_gate = []
-    for (reason, stage), rows in sorted({(str(r.get("reject_reason") or "UNKNOWN"), _source_stage(r)) for r in passed_later}):
-        gate_rows = [r for r in passed_later if str(r.get("reject_reason") or "UNKNOWN") == reason and _source_stage(r) == stage]
-        shadows = Counter(_shadow(r) for r in gate_rows)
-        later_gate.append({"reject_reason": reason, "source_stage": stage, "count": len(gate_rows), "avg_score": _summary_value(gate_rows, "score", "mean"), "avg_effective_rr": _summary_value(gate_rows, "effective_rr", "mean"), "would_tp_rate": round(shadows["WOULD_TP"] / len(gate_rows), 6), "would_sl_rate": round(shadows["WOULD_SL"] / len(gate_rows), 6), "avg_cost_penalty": _summary_value(gate_rows, "cost_penalty", "mean"), "liquidity_ok_rate": _rate(gate_rows, "liquidity_ok"), "volatility_ok_rate": _rate(gate_rows, "volatility_ok")})
+    for (reason, stage), rows in sorted(later_gate_groups.items()):
+        shadows = Counter(_shadow(row) for row in rows)
+        count = len(rows)
+        later_gate.append({
+            "reject_reason": reason,
+            "source_stage": stage,
+            "count": count,
+            "avg_score": _summary_value(rows, "score", "mean"),
+            "mean_score": _summary_value(rows, "score", "mean"),
+            "avg_effective_rr": _summary_value(rows, "effective_rr", "mean"),
+            "mean_effective_rr": _summary_value(rows, "effective_rr", "mean"),
+            "would_tp_count": shadows["WOULD_TP"],
+            "would_tp_rate": round(shadows["WOULD_TP"] / count, 6) if count else 0.0,
+            "would_sl_count": shadows["WOULD_SL"],
+            "would_sl_rate": round(shadows["WOULD_SL"] / count, 6) if count else 0.0,
+            "avg_cost_penalty": _summary_value(rows, "cost_penalty", "mean"),
+            "mean_cost_penalty": _summary_value(rows, "cost_penalty", "mean"),
+            "liquidity_ok_rate": _rate(rows, "liquidity_ok"),
+            "volatility_ok_rate": _rate(rows, "volatility_ok"),
+        })
     low = [r for r in signal_rejected if str(r.get("reject_reason") or "").upper() == "LOW_SCORE"]
     low_tp = [r for r in low if _shadow(r) == "WOULD_TP"]
     low_sl = [r for r in low if _shadow(r) == "WOULD_SL"]

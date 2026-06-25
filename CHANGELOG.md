@@ -1,3 +1,23 @@
+## 2026-06-25 - Lifecycle Calibration Later-Gate CI Fix
+
+### Added
+- None.
+
+### Changed
+- Later-gate calibration diagnostics now build an explicit grouped dictionary before iterating reason/source-stage groups.
+
+### Fixed
+- Fixed `ValueError: too many values to unpack` when passed score/RR/expectancy rows exist in lifecycle calibration output.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Local dashboard tests still require optional FastAPI/httpx dependencies to run instead of being skipped by dependency guards.
+
 ## 2026-06-25 - Lifecycle Calibration Dashboard Reports
 
 ### Added
