@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
 
 import pytest
 
@@ -517,22 +518,33 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
             writer = csv.DictWriter(fh, fieldnames=["total_candidates", "accepted_count", "rejected_count"])
             writer.writeheader(); writer.writerow({"total_candidates": "3", "accepted_count": "0", "rejected_count": "3"})
         with open(os.path.join(out, "order_lifecycle.csv"), "w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=["signal_id", "spread_pct"])
-            writer.writeheader(); writer.writerow({"signal_id": "s1", "spread_pct": "0.001"})
-        with open(os.path.join(out, "rejected_orders.csv"), "w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=["signal_id", "lifecycle_state", "source", "reject_reason", "score", "raw_rr", "effective_rr", "expectancy", "min_required_score"])
+            writer = csv.DictWriter(fh, fieldnames=["signal_id", "symbol", "lifecycle_state", "source_stage", "decision", "spread_pct", "spread_source"])
             writer.writeheader()
-            writer.writerow({"signal_id": "s1", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "reject_reason": "LOW_SCORE", "score": "4", "raw_rr": "1.4", "effective_rr": "0.8", "expectancy": "0.1", "min_required_score": "7.5"})
-            writer.writerow({"signal_id": "s2", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "reject_reason": "LOW_SCORE", "score": "5", "raw_rr": "1.2", "effective_rr": "0.7", "expectancy": "0.1", "min_required_score": "7.5"})
-            writer.writerow({"signal_id": "s3", "lifecycle_state": "SYMBOL_SELECTOR_REJECT", "source": "SYMBOL_SELECTOR", "reject_reason": "LOW_LIQUIDITY", "score": "8", "raw_rr": "1.5", "effective_rr": "0.95", "expectancy": "0.2", "min_required_score": "7.5"})
+            writer.writerow({"signal_id": "s1", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_CREATED", "source_stage": "SIGNAL_ENGINE", "decision": "PENDING", "spread_pct": "0.001", "spread_source": "ESTIMATED_BACKTEST"})
+            writer.writerow({"signal_id": "s4", "symbol": "BTCUSDT", "lifecycle_state": "WAITING_ENTRY_ZONE", "source_stage": "SIGNAL_ENGINE", "decision": "ACCEPTED", "spread_pct": "0.001", "spread_source": "ESTIMATED_BACKTEST"})
+        with open(os.path.join(out, "rejected_orders.csv"), "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["signal_id", "symbol", "lifecycle_state", "source", "source_stage", "reject_reason", "score", "raw_rr", "effective_rr", "expectancy", "expectancy_bucket", "min_required_score", "min_effective_rr", "shadow_outcome", "cost_penalty", "spread_pct", "expected_slippage_pct", "volume_24h_usdt", "liquidity_ok", "volatility_ok", "volatility_score"])
+            writer.writeheader()
+            writer.writerow({"signal_id": "s1", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "4", "raw_rr": "1.4", "effective_rr": "0.8", "expectancy": "0.1", "expectancy_bucket": "LOW", "min_required_score": "7.5", "min_effective_rr": "1.1", "shadow_outcome": "WOULD_TP", "cost_penalty": "0.12", "spread_pct": "0.0008", "expected_slippage_pct": "0.0004", "volume_24h_usdt": "1000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.2"})
+            writer.writerow({"signal_id": "s2", "symbol": "ETHUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "5", "raw_rr": "1.2", "effective_rr": "0.7", "expectancy": "0.1", "expectancy_bucket": "LOW", "min_required_score": "7.5", "min_effective_rr": "1.1", "shadow_outcome": "WOULD_SL", "cost_penalty": "0.13", "spread_pct": "0.0008", "expected_slippage_pct": "0.0005", "volume_24h_usdt": "2000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.5"})
+            writer.writerow({"signal_id": "s3", "symbol": "ETHUSDT", "lifecycle_state": "SYMBOL_SELECTOR_REJECT", "source": "SYMBOL_SELECTOR", "source_stage": "SYMBOL_SELECTOR", "reject_reason": "LOW_LIQUIDITY", "score": "8", "raw_rr": "1.5", "effective_rr": "0.95", "expectancy": "0.2", "expectancy_bucket": "MEDIUM", "min_required_score": "7.5", "min_effective_rr": "1.1", "shadow_outcome": "", "cost_penalty": "", "spread_pct": "", "expected_slippage_pct": "", "volume_24h_usdt": "", "liquidity_ok": "", "volatility_ok": "", "volatility_score": ""})
+            writer.writerow({"signal_id": "s5", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "REGIME_MISMATCH", "score": "8.5", "raw_rr": "1.8", "effective_rr": "1.5", "expectancy": "0.3", "expectancy_bucket": "HIGH", "min_required_score": "7.5", "min_effective_rr": "1.1", "shadow_outcome": "WOULD_TP", "cost_penalty": "0.12", "spread_pct": "0.0008", "expected_slippage_pct": "0.0004", "volume_24h_usdt": "1000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.0"})
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(backtest_control.subprocess, "run", fake_run)
     result = run_dashboard_backtest(DashboardBacktestRequest(10, ["BTCUSDT"], "15m", 10000, 1))
     assert result.top_rejection_reasons[0]["reason"] == "LOW_SCORE"
-    assert result.signal_rows_count == 2
+    assert result.signal_rows_count == 3
     assert result.symbol_selector_reject_count == 1
     assert result.pre_later_gate_pass_count == 1
+    assert result.rejection_funnel["symbol_selector_rejects"] == 1
+    assert result.rejection_funnel["signal_engine_signal_rejected"] == 3
+    assert result.later_gate_diagnostics[0]["reject_reason"] == "REGIME_MISMATCH"
+    assert result.low_score_shadow_comparison["would_tp_count"] == 1
+    assert result.low_score_shadow_comparison["would_sl_count"] == 1
+    assert "ESTIMATED_BACKTEST_SPREAD" in result.execution_cost_summary["spread_label"]
+    assert result.calibration_report_path and os.path.exists(result.calibration_report_path)
+    assert result.calibration_summary_path and os.path.exists(result.calibration_summary_path)
 
     import alphaforge.dashboard.app as dashboard_app
     monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", lambda _request: result)
@@ -543,5 +555,7 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert "Backtest Top Rejection Reasons" in html
     assert "LOW_SCORE" in html
     assert "LOW_LIQUIDITY" in html
-    assert "Signal rows / Symbol-selector rejects" in html
+    assert "Actionable signal rejects / Symbol-selector rejects / Order-lifecycle rejects" in html
     assert "Passed score/RR/expectancy before later gates" in html
+    assert "LOW_SCORE Shadow Comparison" in html
+    assert "Top Near-Miss Rejected Signals" in html

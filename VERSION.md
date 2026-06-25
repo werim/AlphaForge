@@ -1,3 +1,39 @@
+## 2026-06-25 Dashboard calibration test import fix
+
+- **Current version:** Dashboard calibration test import CI fix.
+- **Current phase:** BACKTEST dashboard calibration test stabilization.
+- **Runtime maturity:** Unchanged; test-only fix.
+- **BACKTEST/PAPER/LIVE alignment:** Unchanged; no runtime logic changed.
+- **Lifecycle coverage:** Unchanged.
+- **Execution realism coverage:** Unchanged.
+- **Known critical risks:** Calibration output remains diagnostic and must not be used alone to loosen thresholds.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this is a test-only CI fix.
+
+## 2026-06-25 Lifecycle calibration later-gate CI fix
+
+- **Current version:** Lifecycle calibration later-gate CI fix.
+- **Current phase:** BACKTEST dashboard calibration report stabilization.
+- **Runtime maturity:** Research/backtest; diagnostic reporting stabilized without changing thresholds.
+- **BACKTEST/PAPER/LIVE alignment:** No decision, reject, persistence, or execution logic changed.
+- **Lifecycle coverage:** Unchanged; rejected `WOULD_TP` shadow rows remain rejected diagnostics only.
+- **Execution realism coverage:** Unchanged; candle-only spread/slippage labeling remains estimated when bid/ask is unavailable.
+- **Known critical risks:** Calibration output remains diagnostic and must not be used alone to loosen thresholds.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this is a CI/reporting fix only.
+
+## 2026-06-25 Lifecycle calibration dashboard reports
+
+- **Current version:** Lifecycle calibration dashboard report patch.
+- **Current phase:** BACKTEST rejected-shadow analytics and dashboard calibration hardening.
+- **Runtime maturity:** Research/backtest; diagnostic reporting improved without changing acceptance thresholds.
+- **BACKTEST/PAPER/LIVE alignment:** No decision logic changed; BACKTEST dashboard now reports source-stage separation so selector diagnostics are not confused with actionable signal rejects.
+- **Lifecycle coverage:** Existing lifecycle states are unchanged; rejected shadow labels remain counterfactual diagnostics only and `WOULD_TP` is not execution approval.
+- **Execution realism coverage:** Candle-only spread/slippage are labeled as estimates when historical bid/ask is unavailable; cost-penalty/effective-RR reporting is audited for single application.
+- **Known critical risks:** Calibration report requires operator review before any regime/symbol/timeframe threshold experiment; no threshold loosening is included.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this patch adds diagnostics only and does not imply LIVE readiness.
+
 
 ## 2026-06-25
 
