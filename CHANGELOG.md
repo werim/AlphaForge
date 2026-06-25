@@ -1,3 +1,26 @@
+
+## 2026-06-25 - Rejected Shadow Lifecycle Export Integrity
+
+### Added
+- Persisted rejected shadow diagnostics into BACKTEST lifecycle SQL/export rows via execution context fields: `shadow_outcome`, `cost_penalty`, `liquidity_score`, `volatility_score`, `liquidity_ok`, and `volatility_ok`.
+- Regression tests covering rejected shadow persistence, LOW_SCORE reason retention, liquidity score derivation from candle volume, passing liquidity gates, shadow outcome export survival, WOULD_TP remaining rejected, and accepted-count protection.
+
+### Changed
+- BACKTEST liquidity scoring now uses derived historical candle quote volume when symbol metadata lacks quote volume instead of blindly clamping to the minimum value.
+- Estimated BACKTEST spread now varies with the corrected liquidity proxy, reducing constant fallback spread artifacts.
+
+### Fixed
+- Rejected shadow outcomes were previously written only to `rejected_shadow.csv`; lifecycle export rows now retain the counterfactual label without converting the signal into an accepted trade.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- BACKTEST spread remains an estimate when real historical bid/ask data is unavailable; the export marks it through existing spread source/context fields.
+
 ## 2026-06-24 Backtest SYMBOL_REJECTED lifecycle ordering fix
 
 ### Added
