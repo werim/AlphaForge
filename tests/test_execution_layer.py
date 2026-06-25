@@ -203,3 +203,22 @@ def test_effective_rr_penalty_units_treat_percent_points_and_fractions_consisten
     assert a.effective_rr == pytest.approx(b.effective_rr, rel=1e-9)
     assert b.spread_penalty < 0.1
     assert b.slippage_penalty < 0.1
+
+
+def test_effective_rr_cost_penalty_is_applied_once() -> None:
+    from alphaforge.effective_rr import calculate_effective_rr
+    from alphaforge.execution import build_execution_context
+
+    ctx = build_execution_context({
+        "spread_pct": 0.001,
+        "expected_slippage_pct": 0.001,
+        "market_data_latency_ms": 50,
+        "liquidity_score": 0.9,
+        "funding_rate_pct": 0.0,
+        "orderbook_imbalance": 0.1,
+        "volatility_regime": "normal",
+    })
+    result = calculate_effective_rr(2.0, ctx)
+
+    assert result.effective_rr == pytest.approx(2.0 - result.cost_penalty_total, rel=1e-9)
+    assert result.effective_rr != pytest.approx(2.0 - (2 * result.cost_penalty_total), rel=1e-9)

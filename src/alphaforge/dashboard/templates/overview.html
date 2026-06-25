@@ -81,21 +81,35 @@
         <tbody>
           <tr><th>Total candidates/signals</th><td>{{ backtest_result.total_candidates if backtest_result.total_candidates is not none else 'Unavailable' }}</td></tr>
           <tr><th>Accepted trades</th><td>{{ backtest_result.accepted_trades if backtest_result.accepted_trades is not none else 'Unavailable' }}</td></tr>
-          <tr><th>Rejected signals</th><td>{{ backtest_result.rejected_signals if backtest_result.rejected_signals is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Rejected signals (summary total)</th><td>{{ backtest_result.rejected_signals if backtest_result.rejected_signals is not none else 'Unavailable' }} — split below to avoid mixing pre-signal selector rejects with actionable signal rejects.</td></tr>
           <tr><th>Win / Loss / Open</th><td>{{ backtest_result.win_count if backtest_result.win_count is not none else 'Unavailable' }} / {{ backtest_result.loss_count if backtest_result.loss_count is not none else 'Unavailable' }} / {{ backtest_result.open_count if backtest_result.open_count is not none else 'Unavailable' }}</td></tr>
           <tr><th>Net PnL</th><td>{{ backtest_result.net_pnl if backtest_result.net_pnl is not none else 'Unavailable' }}</td></tr>
           <tr><th>Return / Max drawdown</th><td>{{ backtest_result.total_return_pct if backtest_result.total_return_pct is not none else 'Unavailable' }} / {{ backtest_result.max_drawdown if backtest_result.max_drawdown is not none else 'Unavailable' }}</td></tr>
-          <tr><th>Signal rows / Symbol-selector rejects</th><td>{{ backtest_result.signal_rows_count if backtest_result.signal_rows_count is not none else 'Unavailable' }} / {{ backtest_result.symbol_selector_reject_count if backtest_result.symbol_selector_reject_count is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Actionable signal rejects / Symbol-selector rejects / Order-lifecycle rejects</th><td>{{ backtest_result.signal_rows_count if backtest_result.signal_rows_count is not none else 'Unavailable' }} / {{ backtest_result.symbol_selector_reject_count if backtest_result.symbol_selector_reject_count is not none else 'Unavailable' }} / {{ backtest_result.order_reject_reason_counts|length }}</td></tr>
+          <tr><th>Rejection funnel</th><td>{{ backtest_result.rejection_funnel }}</td></tr>
           <tr><th>Score distribution</th><td>{{ backtest_result.score_distribution }}</td></tr>
           <tr><th>RR / Effective RR distribution</th><td>{{ backtest_result.rr_distribution }} / {{ backtest_result.effective_rr_distribution }}</td></tr>
           <tr><th>Passed score/RR/expectancy before later gates</th><td>{{ backtest_result.pre_later_gate_pass_count if backtest_result.pre_later_gate_pass_count is not none else 'Unavailable' }}</td></tr>
-          <tr><th>Artifacts</th><td>{{ backtest_result.output_dir or 'Unavailable' }}{% if backtest_result.summary_path %}<br>{{ backtest_result.summary_path }}{% endif %}{% if backtest_result.lifecycle_path %}<br>{{ backtest_result.lifecycle_path }}{% endif %}{% if backtest_result.rejected_path %}<br>{{ backtest_result.rejected_path }}{% endif %}</td></tr>
+          <tr><th>Execution cost summary</th><td>{{ backtest_result.execution_cost_summary }}</td></tr>
+          <tr><th>Artifacts</th><td>{{ backtest_result.output_dir or 'Unavailable' }}{% if backtest_result.summary_path %}<br>{{ backtest_result.summary_path }}{% endif %}{% if backtest_result.lifecycle_path %}<br>{{ backtest_result.lifecycle_path }}{% endif %}{% if backtest_result.rejected_path %}<br>{{ backtest_result.rejected_path }}{% endif %}{% if backtest_result.calibration_report_path %}<br>{{ backtest_result.calibration_report_path }}{% endif %}{% if backtest_result.calibration_summary_path %}<br>{{ backtest_result.calibration_summary_path }}{% endif %}</td></tr>
         </tbody>
       </table>
       <h3>Backtest Top Rejection Reasons</h3>
       <table>
         <thead><tr><th>Reason</th><th>Count</th><th>Ratio</th></tr></thead>
         <tbody>{% for row in backtest_result.top_rejection_reasons %}<tr><td>{{ row.reason }}</td><td>{{ row.count }}</td><td>{% if row.ratio is not none %}{{ '%.2f'|format(row.ratio * 100) }}%{% else %}N/A{% endif %}</td></tr>{% else %}<tr><td colspan="3" class="empty">No rejected_orders.csv diagnostics available.</td></tr>{% endfor %}</tbody>
+      </table>
+      <h3>Later Gate Diagnostics</h3>
+      <table>
+        <thead><tr><th>Gate</th><th>Stage</th><th>Count</th><th>Avg Score</th><th>Avg Effective RR</th><th>WOULD_TP Rate</th><th>WOULD_SL Rate</th></tr></thead>
+        <tbody>{% for row in backtest_result.later_gate_diagnostics %}<tr><td>{{ row.reject_reason }}</td><td>{{ row.source_stage }}</td><td>{{ row.count }}</td><td>{{ row.avg_score }}</td><td>{{ row.avg_effective_rr }}</td><td>{{ row.would_tp_rate }}</td><td>{{ row.would_sl_rate }}</td></tr>{% else %}<tr><td colspan="7" class="empty">No later-gate rejected near-pass rows found.</td></tr>{% endfor %}</tbody>
+      </table>
+      <h3>LOW_SCORE Shadow Comparison</h3>
+      <p>{{ backtest_result.low_score_shadow_comparison }}</p>
+      <h3>Top Near-Miss Rejected Signals</h3>
+      <table>
+        <thead><tr><th>Signal</th><th>Symbol</th><th>Reason</th><th>Score</th><th>Effective RR</th><th>Shadow</th><th>Cost Penalty</th></tr></thead>
+        <tbody>{% for row in backtest_result.near_miss_rejected_signals %}<tr><td>{{ row.signal_id }}</td><td>{{ row.symbol }}</td><td>{{ row.reject_reason }}</td><td>{{ row.score }}</td><td>{{ row.effective_rr }}</td><td>{{ row.shadow_outcome }}</td><td>{{ row.cost_penalty }}</td></tr>{% else %}<tr><td colspan="7" class="empty">No near-miss diagnostics available.</td></tr>{% endfor %}</tbody>
       </table>
     </section>
     {% endif %}

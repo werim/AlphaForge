@@ -1,3 +1,66 @@
+## 2026-06-25 - Dashboard Calibration Test Import Fix
+
+### Added
+- Added the missing `os` import required by dashboard calibration artifact path assertions.
+
+### Changed
+- None.
+
+### Fixed
+- Fixed CI `NameError: name 'os' is not defined` in `test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Local dashboard tests require optional FastAPI/httpx dependencies to run instead of being skipped by dependency guards.
+
+## 2026-06-25 - Lifecycle Calibration Later-Gate CI Fix
+
+### Added
+- None.
+
+### Changed
+- Later-gate calibration diagnostics now build an explicit grouped dictionary before iterating reason/source-stage groups.
+
+### Fixed
+- Fixed `ValueError: too many values to unpack` when passed score/RR/expectancy rows exist in lifecycle calibration output.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Local dashboard tests still require optional FastAPI/httpx dependencies to run instead of being skipped by dependency guards.
+
+## 2026-06-25 - Lifecycle Calibration Dashboard Reports
+
+### Added
+- Added `lifecycle_calibration_report.csv` grouped by source stage, lifecycle state, reject reason, symbol, regime/volatility regime, and expectancy bucket.
+- Added `lifecycle_calibration_summary.json` with rejection funnel, later-gate diagnostics, LOW_SCORE WOULD_TP vs WOULD_SL comparison, execution-cost summaries, and near-miss rejected signals.
+- Added regression coverage for calibration artifact generation, selector/actionable split, LOW_SCORE shadow comparison, later-gate traceability, estimated backtest spread labeling, and cost-penalty single application.
+
+### Changed
+- Dashboard BACKTEST wording now separates symbol-selector rejects from actionable signal rejects and order/lifecycle rejects.
+- Dashboard artifacts now make estimated candle-only spread/slippage diagnostics explicit without pretending historical bid/ask exists.
+
+### Fixed
+- Fixed misleading dashboard aggregation that could mix pre-signal selector filters with signal-engine rejection diagnostics.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Calibration output is diagnostic only; it does not prove LOW_SCORE is protective or justify threshold loosening. LIVE readiness remains unchanged.
+
 
 ## 2026-06-25 - Rejected Shadow Lifecycle Export Integrity
 
