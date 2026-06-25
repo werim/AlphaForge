@@ -1,3 +1,15 @@
+## 2026-06-25 Lifecycle calibration dashboard reports
+
+- **Current version:** Lifecycle calibration dashboard report patch.
+- **Current phase:** BACKTEST rejected-shadow analytics and dashboard calibration hardening.
+- **Runtime maturity:** Research/backtest; diagnostic reporting improved without changing acceptance thresholds.
+- **BACKTEST/PAPER/LIVE alignment:** No decision logic changed; BACKTEST dashboard now reports source-stage separation so selector diagnostics are not confused with actionable signal rejects.
+- **Lifecycle coverage:** Existing lifecycle states are unchanged; rejected shadow labels remain counterfactual diagnostics only and `WOULD_TP` is not execution approval.
+- **Execution realism coverage:** Candle-only spread/slippage are labeled as estimates when historical bid/ask is unavailable; cost-penalty/effective-RR reporting is audited for single application.
+- **Known critical risks:** Calibration report requires operator review before any regime/symbol/timeframe threshold experiment; no threshold loosening is included.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this patch adds diagnostics only and does not imply LIVE readiness.
+
 
 ## 2026-06-25
 

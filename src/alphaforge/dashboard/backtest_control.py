@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import subprocess
 import sys
 from collections import Counter
@@ -36,6 +37,8 @@ class DashboardBacktestResult:
     summary_path: str | None = None
     lifecycle_path: str | None = None
     rejected_path: str | None = None
+    calibration_report_path: str | None = None
+    calibration_summary_path: str | None = None
     total_candidates: Any = None
     accepted_trades: Any = None
     rejected_signals: Any = None
@@ -61,6 +64,11 @@ class DashboardBacktestResult:
     final_reject_reason_counts: list[dict[str, Any]] = field(default_factory=list)
     order_reject_reason_counts: list[dict[str, Any]] = field(default_factory=list)
     symbol_selector_reject_counts: list[dict[str, Any]] = field(default_factory=list)
+    rejection_funnel: dict[str, Any] = field(default_factory=dict)
+    later_gate_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    low_score_shadow_comparison: dict[str, Any] = field(default_factory=dict)
+    execution_cost_summary: dict[str, Any] = field(default_factory=dict)
+    near_miss_rejected_signals: list[dict[str, Any]] = field(default_factory=list)
 
 
 def default_form_values() -> dict[str, Any]:
@@ -198,7 +206,7 @@ def _rejection_diagnostics(rows: list[dict[str, str]]) -> dict[str, Any]:
         rr = _safe_float_or_none(row.get("raw_rr") if row.get("raw_rr") not in (None, "") else row.get("rr"))
         expectancy = _safe_float_or_none(row.get("expectancy") if row.get("expectancy") not in (None, "") else row.get("expectancy_bucket"))
         min_score = _safe_float_or_none(row.get("min_required_score")) or 7.5
-        return score is not None and rr is not None and expectancy is not None and score >= min_score and rr >= 1.3 and expectancy >= 0.0
+        return _source_stage(row) == "SIGNAL_ENGINE" and score is not None and rr is not None and expectancy is not None and score >= min_score and rr >= 1.3 and expectancy >= 0.0
     return {
         "top_rejection_reasons": [{"reason": reason, "count": count, "ratio": (count / total if total else None)} for reason, count in reasons.most_common(8)],
         "signal_rows_count": signal_rows,
@@ -208,6 +216,134 @@ def _rejection_diagnostics(rows: list[dict[str, str]]) -> dict[str, Any]:
         "effective_rr_distribution": _numeric_distribution(rows, "effective_rr"),
         "pre_later_gate_pass_count": sum(1 for row in rows if passes(row)),
     }
+
+
+def _source_stage(row: Mapping[str, Any]) -> str:
+    state = str(row.get("lifecycle_state", "") or "").strip().upper()
+    source = str(row.get("source_stage") or row.get("source") or row.get("event_flags") or "").strip().upper()
+    if state in {"SYMBOL_REJECTED", "SYMBOL_SELECTOR_REJECT"} or source == "SYMBOL_SELECTOR":
+        return "SYMBOL_SELECTOR"
+    return "SIGNAL_ENGINE"
+
+
+def _shadow(row: Mapping[str, Any]) -> str:
+    value = str(row.get("shadow_outcome") or "").strip().upper()
+    return value if value in {"WOULD_TP", "WOULD_SL", "WOULD_TIMEOUT"} else "UNKNOWN"
+
+
+def _rate(rows: list[dict[str, str]], field: str) -> float | None:
+    vals = [str(row.get(field, "")).strip().lower() for row in rows if row.get(field) not in (None, "")]
+    if not vals:
+        return None
+    return round(sum(1 for v in vals if v in {"1", "true", "yes"}) / len(vals), 6)
+
+
+def _summary_value(rows: list[dict[str, str]], field: str, metric: str) -> float | None:
+    dist = _numeric_distribution(rows, field)
+    return dist.get(metric)
+
+
+def _passes_score_rr_expectancy(row: Mapping[str, Any]) -> bool:
+    score = _safe_float_or_none(row.get("score"))
+    rr = _safe_float_or_none(row.get("raw_rr") if row.get("raw_rr") not in (None, "") else row.get("rr"))
+    effective_rr = _safe_float_or_none(row.get("effective_rr"))
+    expectancy_raw = row.get("expectancy") if row.get("expectancy") not in (None, "") else row.get("expectancy_value")
+    expectancy = _safe_float_or_none(expectancy_raw)
+    bucket = str(row.get("expectancy_bucket") or "").upper()
+    min_score = _safe_float_or_none(row.get("min_required_score")) or 7.5
+    min_effective_rr = _safe_float_or_none(row.get("min_effective_rr")) or 1.1
+    expectancy_ok = expectancy is None and bucket in {"LOW", "MEDIUM", "HIGH"} or (expectancy is not None and expectancy >= 0.0)
+    return score is not None and score >= min_score and rr is not None and rr >= 1.3 and effective_rr is not None and effective_rr >= min_effective_rr and expectancy_ok
+
+
+def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    combined = list(lifecycle_rows) + [r for r in rejected_rows if r not in lifecycle_rows]
+    groups: dict[tuple[str, str, str, str, str, str], list[dict[str, str]]] = {}
+    for row in combined:
+        key = (
+            _source_stage(row),
+            str(row.get("lifecycle_state") or "UNKNOWN").strip() or "UNKNOWN",
+            str(row.get("reject_reason") or row.get("reason") or "").strip() or "NONE",
+            str(row.get("symbol") or "UNKNOWN").strip() or "UNKNOWN",
+            str(row.get("regime") or row.get("volatility_regime") or "UNKNOWN").strip() or "UNKNOWN",
+            str(row.get("expectancy_bucket") or "UNKNOWN").strip() or "UNKNOWN",
+        )
+        groups.setdefault(key, []).append(row)
+    report_rows: list[dict[str, Any]] = []
+    for key, rows in sorted(groups.items()):
+        shadows = Counter(_shadow(row) for row in rows)
+        count = len(rows)
+        report_rows.append({
+            "source_stage": key[0], "lifecycle_state": key[1], "reject_reason": key[2], "symbol": key[3],
+            "regime": key[4], "expectancy_bucket": key[5], "count": count,
+            "mean_score": _summary_value(rows, "score", "mean"), "p50_score": _summary_value(rows, "score", "p50"), "p90_score": _summary_value(rows, "score", "p90"),
+            "mean_rr": _summary_value(rows, "raw_rr", "mean") if any("raw_rr" in r for r in rows) else _summary_value(rows, "rr", "mean"),
+            "p50_rr": _summary_value(rows, "raw_rr", "p50") if any("raw_rr" in r for r in rows) else _summary_value(rows, "rr", "p50"),
+            "p90_rr": _summary_value(rows, "raw_rr", "p90") if any("raw_rr" in r for r in rows) else _summary_value(rows, "rr", "p90"),
+            "mean_effective_rr": _summary_value(rows, "effective_rr", "mean"), "p50_effective_rr": _summary_value(rows, "effective_rr", "p50"), "p90_effective_rr": _summary_value(rows, "effective_rr", "p90"),
+            "mean_cost_penalty": _summary_value(rows, "cost_penalty", "mean"), "p50_cost_penalty": _summary_value(rows, "cost_penalty", "p50"), "p90_cost_penalty": _summary_value(rows, "cost_penalty", "p90"),
+            "mean_spread_pct": _summary_value(rows, "spread_pct", "mean"), "mean_expected_slippage_pct": _summary_value(rows, "expected_slippage_pct", "mean"), "mean_volume_24h_usdt": _summary_value(rows, "volume_24h_usdt", "mean"),
+            "liquidity_ok_rate": _rate(rows, "liquidity_ok"), "volatility_ok_rate": _rate(rows, "volatility_ok"),
+            "would_tp_count": shadows["WOULD_TP"], "would_tp_rate": round(shadows["WOULD_TP"] / count, 6),
+            "would_sl_count": shadows["WOULD_SL"], "would_sl_rate": round(shadows["WOULD_SL"] / count, 6),
+            "would_timeout_count": shadows["WOULD_TIMEOUT"], "would_timeout_rate": round(shadows["WOULD_TIMEOUT"] / count, 6),
+            "unknown_shadow_count": shadows["UNKNOWN"], "unknown_shadow_rate": round(shadows["UNKNOWN"] / count, 6),
+        })
+    signal_rejected = [r for r in rejected_rows if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_REJECTED"]
+    passed_later = [r for r in signal_rejected if _passes_score_rr_expectancy(r)]
+    later_gate = []
+    for (reason, stage), rows in sorted({(str(r.get("reject_reason") or "UNKNOWN"), _source_stage(r)) for r in passed_later}):
+        gate_rows = [r for r in passed_later if str(r.get("reject_reason") or "UNKNOWN") == reason and _source_stage(r) == stage]
+        shadows = Counter(_shadow(r) for r in gate_rows)
+        later_gate.append({"reject_reason": reason, "source_stage": stage, "count": len(gate_rows), "avg_score": _summary_value(gate_rows, "score", "mean"), "avg_effective_rr": _summary_value(gate_rows, "effective_rr", "mean"), "would_tp_rate": round(shadows["WOULD_TP"] / len(gate_rows), 6), "would_sl_rate": round(shadows["WOULD_SL"] / len(gate_rows), 6), "avg_cost_penalty": _summary_value(gate_rows, "cost_penalty", "mean"), "liquidity_ok_rate": _rate(gate_rows, "liquidity_ok"), "volatility_ok_rate": _rate(gate_rows, "volatility_ok")})
+    low = [r for r in signal_rejected if str(r.get("reject_reason") or "").upper() == "LOW_SCORE"]
+    low_tp = [r for r in low if _shadow(r) == "WOULD_TP"]
+    low_sl = [r for r in low if _shadow(r) == "WOULD_SL"]
+    low_cmp = {
+        "would_tp_count": len(low_tp), "would_sl_count": len(low_sl),
+        "mean_score_would_tp": _summary_value(low_tp, "score", "mean"), "mean_score_would_sl": _summary_value(low_sl, "score", "mean"),
+        "mean_effective_rr_would_tp": _summary_value(low_tp, "effective_rr", "mean"), "mean_effective_rr_would_sl": _summary_value(low_sl, "effective_rr", "mean"),
+        "mean_volatility_score_would_tp": _summary_value(low_tp, "volatility_score", "mean"), "mean_volatility_score_would_sl": _summary_value(low_sl, "volatility_score", "mean"),
+        "mean_cost_penalty_would_tp": _summary_value(low_tp, "cost_penalty", "mean"), "mean_cost_penalty_would_sl": _summary_value(low_sl, "cost_penalty", "mean"),
+        "symbol_breakdown": dict(Counter(str(r.get("symbol") or "UNKNOWN") for r in low)),
+        "expectancy_bucket_breakdown": dict(Counter(str(r.get("expectancy_bucket") or "UNKNOWN") for r in low)),
+        "diagnostic_answer": "LOW_SCORE calibration requires review if WOULD_TP has materially higher score/effective_rr than WOULD_SL; threshold is unchanged by this diagnostic.",
+    }
+    accepted_ids = {str(r.get("signal_id")) for r in lifecycle_rows if str(r.get("decision", "")).upper() == "ACCEPTED" or str(r.get("lifecycle_state", "")).upper() in {"WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED"}}
+    outcome_states = Counter(str(r.get("lifecycle_state") or "UNKNOWN").upper() for r in lifecycle_rows if str(r.get("lifecycle_state") or "").upper() in {"TP_HIT", "SL_HIT", "OPEN_AT_END", "POSITION_CLOSED"})
+    accepted_summary = _safe_int(summary.get("accepted_count"))
+    funnel = {
+        "symbol_selector_rejects": sum(1 for r in rejected_rows if _source_stage(r) == "SYMBOL_SELECTOR"),
+        "signal_engine_signal_created": sum(1 for r in lifecycle_rows if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_CREATED"),
+        "signal_engine_signal_rejected": len(signal_rejected),
+        "passed_score_rr_expectancy": len(passed_later),
+        "rejected_by_later_gates": len(passed_later),
+        "accepted_trades": accepted_summary if accepted_summary is not None else len(accepted_ids),
+        "executed_trade_outcomes": dict(outcome_states),
+        "note": "SYMBOL_SELECTOR rejects are pre-signal diagnostics; WOULD_TP/WOULD_SL rejected shadows are counterfactual labels and never acceptance approvals.",
+    }
+    near = sorted(passed_later, key=lambda r: ((_safe_float_or_none(r.get("score")) or 0.0), (_safe_float_or_none(r.get("effective_rr")) or 0.0), 1 if _shadow(r) == "WOULD_TP" else 0), reverse=True)[:20]
+    summary_out = {
+        "rejection_funnel": funnel,
+        "later_gate_diagnostics": later_gate,
+        "low_score_shadow_comparison": low_cmp,
+        "execution_cost_summary": {"cost_penalty": _numeric_distribution(signal_rejected, "cost_penalty"), "spread_pct": _numeric_distribution(signal_rejected, "spread_pct"), "expected_slippage_pct": _numeric_distribution(signal_rejected, "expected_slippage_pct"), "spread_label": "ESTIMATED_BACKTEST_SPREAD when spread_source/status is estimated and historical bid/ask is unavailable"},
+        "near_miss_rejected_signals": [{k: r.get(k) for k in ("signal_id", "symbol", "reject_reason", "score", "raw_rr", "rr", "effective_rr", "cost_penalty", "shadow_outcome", "spread_pct", "expected_slippage_pct", "liquidity_ok", "volatility_ok")} for r in near],
+    }
+    return report_rows, summary_out
+
+
+def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any]) -> tuple[Path, Path, dict[str, Any]]:
+    report_rows, summary_out = _build_calibration_outputs(lifecycle_rows, rejected_rows, summary)
+    report_path = output_dir / "lifecycle_calibration_report.csv"
+    summary_path = output_dir / "lifecycle_calibration_summary.json"
+    fieldnames = list(report_rows[0].keys()) if report_rows else ["source_stage", "lifecycle_state", "reject_reason", "symbol", "regime", "expectancy_bucket", "count"]
+    with report_path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(report_rows)
+    summary_path.write_text(json.dumps(summary_out, indent=2, sort_keys=True))
+    return report_path, summary_path, summary_out
 
 
 def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBacktestResult:
@@ -288,6 +424,14 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.final_reject_reason_counts = lifecycle_diagnostics["final_reject_reason_counts"]
     result.order_reject_reason_counts = lifecycle_diagnostics["order_reject_reason_counts"]
     result.symbol_selector_reject_counts = lifecycle_diagnostics["symbol_selector_reject_counts"]
+    calibration_report_path, calibration_summary_path, calibration_summary = _write_calibration_artifacts(output_dir, lifecycle_rows, rejected_rows, summary)
+    result.calibration_report_path = str(calibration_report_path)
+    result.calibration_summary_path = str(calibration_summary_path)
+    result.rejection_funnel = calibration_summary["rejection_funnel"]
+    result.later_gate_diagnostics = calibration_summary["later_gate_diagnostics"]
+    result.low_score_shadow_comparison = calibration_summary["low_score_shadow_comparison"]
+    result.execution_cost_summary = calibration_summary["execution_cost_summary"]
+    result.near_miss_rejected_signals = calibration_summary["near_miss_rejected_signals"]
     if result.total_candidates is None or result.rejected_signals is None:
         result.lifecycle_warning = "Lifecycle/reject metrics unavailable from generated backtest artifacts; values are shown as unavailable, not zero."
     unavailable_markers = {"", "UNAVAILABLE_BACKTEST", "None", "null"}

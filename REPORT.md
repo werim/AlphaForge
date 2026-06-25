@@ -1,3 +1,49 @@
+## 2026-06-25 - Lifecycle Calibration Dashboard Report Patch
+
+### Why the patch was needed
+Rejected shadow persistence made `order_lifecycle.csv` more truthful, but dashboard analytics still mixed pre-signal `SYMBOL_SELECTOR` rejects with actionable `SIGNAL_ENGINE` rejects and did not expose later-gate diagnostics for candidates that already passed score/RR/expectancy.
+
+### Root cause
+Dashboard BACKTEST summarization read `rejected_orders.csv` as a single rejection pool. That hid whether reasons such as `TOO_CHOPPY` and `WEAK_TREND_AND_NO_RANGE_EDGE` were pre-signal selector filters or final actionable signal rejects, and it provided no calibration artifact for LOW_SCORE shadows, execution-cost summaries, or near-miss later-gate rejects.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `tests/test_execution_layer.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+No threshold, scoring, reject, acceptance, or order execution logic was loosened. Dashboard BACKTEST completion now writes `lifecycle_calibration_report.csv` and `lifecycle_calibration_summary.json` next to existing artifacts.
+
+### Lifecycle changes
+Lifecycle state semantics are unchanged. `WOULD_TP`, `WOULD_SL`, and `WOULD_TIMEOUT` remain counterfactual rejected-shadow labels only and never convert a rejected row into an accepted trade.
+
+### Persistence changes
+No database migration or persistence schema change was added. The patch consumes existing CSV/export fields defensively and tolerates older rows with missing execution context fields.
+
+### Export/schema changes
+Added dashboard-generated calibration artifacts grouping by source stage, lifecycle state, reject reason, symbol, regime/volatility regime, and expectancy bucket. Dashboard wording now separates symbol-selector rejects, actionable signal rejects, and order/lifecycle rejects. Candle-only spread diagnostics are explicitly labeled as estimated when historical bid/ask is unavailable.
+
+### Tests added
+Added dashboard regression coverage for separated selector/actionable counts, LOW_SCORE WOULD_TP vs WOULD_SL comparison, later-gate traceability, calibration artifact generation, estimated spread labeling, and a cost-penalty/effective-RR single-application invariant.
+
+### Tests executed
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py`
+- `pytest tests/test_execution_layer.py::test_effective_rr_cost_penalty_is_applied_once -q`
+- `pytest -q`
+
+### Risks and remaining limitations
+The calibration report is diagnostic only; it does not decide whether LOW_SCORE is protective. Historical bid/ask is still unavailable in candle-only backtests, so spread/slippage remain estimates.
+
+### Migration concerns
+No migration required. CSV consumers can ignore the new dashboard-generated calibration artifacts.
+
+### Push recommendation
+Safe to push as a dashboard/reporting calibration patch; full local pytest passed. Not a LIVE readiness endorsement.
+
 
 ## 2026-06-25 - Rejected Shadow Backtest Export Patch
 
