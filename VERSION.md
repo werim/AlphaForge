@@ -1,3 +1,15 @@
+## 2026-06-25 Dashboard calibration test import fix
+
+- **Current version:** Dashboard calibration test import CI fix.
+- **Current phase:** BACKTEST dashboard calibration test stabilization.
+- **Runtime maturity:** Unchanged; test-only fix.
+- **BACKTEST/PAPER/LIVE alignment:** Unchanged; no runtime logic changed.
+- **Lifecycle coverage:** Unchanged.
+- **Execution realism coverage:** Unchanged.
+- **Known critical risks:** Calibration output remains diagnostic and must not be used alone to loosen thresholds.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this is a test-only CI fix.
+
 ## 2026-06-25 Lifecycle calibration later-gate CI fix
 
 - **Current version:** Lifecycle calibration later-gate CI fix.

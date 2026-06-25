@@ -1,3 +1,23 @@
+## 2026-06-25 - Dashboard Calibration Test Import Fix
+
+### Added
+- Added the missing `os` import required by dashboard calibration artifact path assertions.
+
+### Changed
+- None.
+
+### Fixed
+- Fixed CI `NameError: name 'os' is not defined` in `test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Local dashboard tests require optional FastAPI/httpx dependencies to run instead of being skipped by dependency guards.
+
 ## 2026-06-25 - Lifecycle Calibration Later-Gate CI Fix
 
 ### Added

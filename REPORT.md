@@ -1,3 +1,39 @@
+## 2026-06-25 - Dashboard Calibration Test Import CI Fix
+
+### Why the patch was needed
+CI exposed a `NameError: name 'os' is not defined` in the dashboard calibration regression test after calibration artifact path assertions were added.
+
+### Root cause
+`os` was imported only inside the mocked `fake_run()` helper, so the outer test assertion scope could not call `os.path.exists(...)`.
+
+### Files changed
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None. Production dashboard calibration logic, thresholds, lifecycle semantics, and accepted/rejected counts are unchanged.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+None.
+
+### Tests executed
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics -q` (local optional dashboard dependencies unavailable)
+- `pytest -q`
+
+### Risks and remaining limitations
+This is a test-only CI fix. Local targeted dashboard test execution still depends on optional FastAPI/httpx packages being installed.
+
+### Push recommendation
+Safe to push as a minimal test import fix.
+
 ## 2026-06-25 - Lifecycle Calibration Later-Gate CI Fix
 
 ### Why the patch was needed
