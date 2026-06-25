@@ -1,3 +1,16 @@
+
+## 2026-06-25
+
+- **Current version:** Rejected shadow lifecycle export integrity patch.
+- **Current phase:** BACKTEST persistence/export hardening.
+- **Runtime maturity:** Research/backtest; LIVE readiness not claimed.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST rejected shadow candidates now remain rejected lifecycle decisions while preserving counterfactual labels for learning/export.
+- **Lifecycle coverage:** `SIGNAL_REJECTED`/`ORDER_REJECTED` rows can carry `shadow_outcome`, reject reason, effective RR, cost penalty, and execution context without becoming accepted trades.
+- **Execution realism coverage:** Historical candle quote volume is used as the liquidity proxy when ticker quote volume is unavailable; spread remains estimated when real bid/ask data is missing.
+- **Known critical risks:** Candle-only spread/liquidity proxies are not a substitute for measured historical order book/depth data.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this patch improves rejected-shadow audit integrity only.
+
 ## 2026-06-24 Backtest SYMBOL_REJECTED lifecycle ordering fix
 
 - **Current version:** 2026-06-24 SYMBOL_REJECTED ordering hotfix.
