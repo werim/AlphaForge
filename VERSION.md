@@ -1,3 +1,15 @@
+## 2026-06-25 STOP_TOO_WIDE soft risk-control patch
+
+- **Current version:** STOP_TOO_WIDE soft risk-control patch.
+- **Current phase:** BACKTEST/PAPER decision-gate learning and diagnostics hardening.
+- **Runtime maturity:** Research/backtest; high-score wide-stop setups can continue only with bounded risk scale when effective RR remains acceptable.
+- **BACKTEST/PAPER/LIVE alignment:** Shared order-quality logic now treats qualifying non-extreme `STOP_TOO_WIDE` as a softened risk control while preserving other hard execution/data/risk gates.
+- **Lifecycle coverage:** Softened candidates keep normal accepted lifecycle progression and carry `stop_too_wide_softened`, original reject reason, softened reject reason, and risk scale diagnostics.
+- **Execution realism coverage:** Cost penalty is persisted for accepted and rejected BACKTEST lifecycle rows; STOP_TOO_WIDE hard rejects continue to receive counterfactual shadow outcomes.
+- **Known critical risks:** Softening is bounded but still increases candidate exposure for learning; extreme stop geometry, invalid levels, spread/slippage/volatility, and effective-RR gates remain critical safety controls.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this patch enables safer BACKTEST/PAPER learning only and does not authorize LIVE trading.
+
 ## 2026-06-25 Dashboard calibration rejected-shadow source fix
 
 - **Current version:** Dashboard calibration rejected-shadow source fix.

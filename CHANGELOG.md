@@ -1,3 +1,25 @@
+## 2026-06-25 - STOP_TOO_WIDE Soft Risk-Control Patch
+
+### Added
+- Added STOP_TOO_WIDE softening config defaults, risk-scale diagnostics, and backtest summary counters for softened/hard-rejected wide stops and STOP_TOO_WIDE shadow outcomes.
+- Added regression coverage for high-score softening, low effective-RR hard rejection, extreme stop protection, hard-reject disabled behavior, and spread-gate preservation.
+
+### Changed
+- Qualifying high-score, adequate effective-RR, non-extreme wide-stop signals now continue through the accepted lifecycle with reduced risk scale instead of being rejected solely by `STOP_TOO_WIDE`.
+- BACKTEST lifecycle rows now persist cost-penalty diagnostics for accepted and rejected decisions when available.
+
+### Fixed
+- Fixed incomplete STOP_TOO_WIDE learning visibility by preserving original reject diagnostics on softened candidates and retaining rejected-shadow labels for hard-rejected STOP_TOO_WIDE rows.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Defaults preserve hard rejection for low effective-RR or extreme wide stops.
+
+### Known Issues
+- Cost/spread diagnostics remain estimates when historical bid/ask/order-book data is unavailable. LIVE remains blocked by existing readiness gates.
+
 ## 2026-06-25 - Dashboard Calibration Rejected-Shadow Source Fix
 
 ### Added
