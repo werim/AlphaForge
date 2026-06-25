@@ -256,8 +256,63 @@ def _passes_score_rr_expectancy(row: Mapping[str, Any]) -> bool:
     return score is not None and score >= min_score and rr is not None and rr >= 1.3 and effective_rr is not None and effective_rr >= min_effective_rr and expectancy_ok
 
 
-def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    combined = list(lifecycle_rows) + [r for r in rejected_rows if r not in lifecycle_rows]
+def _identity_values(row: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(str(row.get(field) or "").strip() for field in ("symbol", "timestamp", "event_ts", "side", "entry", "stop_loss", "take_profit"))
+
+
+def _shadow_lookup_key(row: Mapping[str, Any]) -> tuple[str, ...] | None:
+    signal_id = str(row.get("signal_id") or "").strip()
+    if signal_id:
+        return ("signal_id", signal_id)
+    values = _identity_values(row)
+    if any(values):
+        return ("composite", *values)
+    return None
+
+
+def _build_shadow_lookup(shadow_rows: list[dict[str, str]]) -> dict[tuple[str, ...], dict[str, str]]:
+    lookup: dict[tuple[str, ...], dict[str, str]] = {}
+    for row in shadow_rows:
+        key = _shadow_lookup_key(row)
+        if key is not None:
+            lookup[key] = row
+        signal_id = str(row.get("signal_id") or "").strip()
+        if signal_id:
+            lookup[("signal_id", signal_id)] = row
+        composite = _identity_values(row)
+        if any(composite):
+            lookup[("composite", *composite)] = row
+    return lookup
+
+
+def _matching_shadow(row: Mapping[str, Any], lookup: Mapping[tuple[str, ...], dict[str, str]]) -> dict[str, str] | None:
+    signal_id = str(row.get("signal_id") or "").strip()
+    if signal_id and (match := lookup.get(("signal_id", signal_id))):
+        return match
+    composite = _identity_values(row)
+    if any(composite):
+        return lookup.get(("composite", *composite))
+    return None
+
+
+def _merge_shadow(row: dict[str, str], shadow: Mapping[str, str] | None) -> dict[str, str]:
+    if not shadow:
+        return dict(row)
+    merged = dict(row)
+    for field in ("shadow_outcome", "cost_penalty", "effective_tp_hit", "effective_sl_hit", "liquidity_ok", "volatility_ok", "volatility_score", "effective_rr", "raw_rr", "rr", "score", "reject_reason"):
+        value = shadow.get(field)
+        if value not in (None, ""):
+            merged[field] = value
+    return merged
+
+
+def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any], shadow_rows: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    shadow_source = list(shadow_rows or [])
+    shadow_lookup = _build_shadow_lookup(shadow_source)
+    enriched_rejected = [_merge_shadow(r, _matching_shadow(r, shadow_lookup)) for r in rejected_rows]
+    shadow_signal_rows = [r for r in shadow_source if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("reject_reason") or "").strip()]
+    shadow_diagnostic_rows = shadow_signal_rows or [r for r in enriched_rejected if _source_stage(r) == "SIGNAL_ENGINE"]
+    combined = list(lifecycle_rows) + [r for r in enriched_rejected if r not in lifecycle_rows]
     groups: dict[tuple[str, str, str, str, str, str], list[dict[str, str]]] = {}
     for row in combined:
         key = (
@@ -289,10 +344,14 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
             "would_timeout_count": shadows["WOULD_TIMEOUT"], "would_timeout_rate": round(shadows["WOULD_TIMEOUT"] / count, 6),
             "unknown_shadow_count": shadows["UNKNOWN"], "unknown_shadow_rate": round(shadows["UNKNOWN"] / count, 6),
         })
-    signal_rejected = [r for r in rejected_rows if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_REJECTED"]
+    signal_rejected = [r for r in enriched_rejected if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_REJECTED"]
     passed_later = [r for r in signal_rejected if _passes_score_rr_expectancy(r)]
+    later_gate_reasons = {"DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "RR_TOO_LOW", "STOP_TOO_WIDE"}
+    later_gate_source = [r for r in shadow_diagnostic_rows if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons]
+    if not later_gate_source:
+        later_gate_source = [r for r in passed_later if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons]
     later_gate_groups: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
-    for row in passed_later:
+    for row in later_gate_source:
         reason = str(row.get("reject_reason") or "UNKNOWN").strip() or "UNKNOWN"
         later_gate_groups[(reason, _source_stage(row))].append(row)
     later_gate = []
@@ -311,12 +370,13 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
             "would_tp_rate": round(shadows["WOULD_TP"] / count, 6) if count else 0.0,
             "would_sl_count": shadows["WOULD_SL"],
             "would_sl_rate": round(shadows["WOULD_SL"] / count, 6) if count else 0.0,
+            "would_timeout_count": shadows["WOULD_TIMEOUT"],
             "avg_cost_penalty": _summary_value(rows, "cost_penalty", "mean"),
             "mean_cost_penalty": _summary_value(rows, "cost_penalty", "mean"),
             "liquidity_ok_rate": _rate(rows, "liquidity_ok"),
             "volatility_ok_rate": _rate(rows, "volatility_ok"),
         })
-    low = [r for r in signal_rejected if str(r.get("reject_reason") or "").upper() == "LOW_SCORE"]
+    low = [r for r in shadow_diagnostic_rows if str(r.get("reject_reason") or "").upper() == "LOW_SCORE"]
     low_tp = [r for r in low if _shadow(r) == "WOULD_TP"]
     low_sl = [r for r in low if _shadow(r) == "WOULD_SL"]
     low_cmp = {
@@ -347,14 +407,14 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
         "rejection_funnel": funnel,
         "later_gate_diagnostics": later_gate,
         "low_score_shadow_comparison": low_cmp,
-        "execution_cost_summary": {"cost_penalty": _numeric_distribution(signal_rejected, "cost_penalty"), "spread_pct": _numeric_distribution(signal_rejected, "spread_pct"), "expected_slippage_pct": _numeric_distribution(signal_rejected, "expected_slippage_pct"), "spread_label": "ESTIMATED_BACKTEST_SPREAD when spread_source/status is estimated and historical bid/ask is unavailable"},
-        "near_miss_rejected_signals": [{k: r.get(k) for k in ("signal_id", "symbol", "reject_reason", "score", "raw_rr", "rr", "effective_rr", "cost_penalty", "shadow_outcome", "spread_pct", "expected_slippage_pct", "liquidity_ok", "volatility_ok")} for r in near],
+        "execution_cost_summary": {"cost_penalty": _numeric_distribution(shadow_source or signal_rejected, "cost_penalty"), "spread_pct": _numeric_distribution(signal_rejected, "spread_pct"), "expected_slippage_pct": _numeric_distribution(signal_rejected, "expected_slippage_pct"), "spread_label": "ESTIMATED_BACKTEST_SPREAD when spread_source/status is estimated and historical bid/ask is unavailable"},
+        "near_miss_rejected_signals": [dict({k: (r.get(k) if r.get(k) not in (None, "") else ("UNAVAILABLE" if k in {"shadow_outcome", "cost_penalty"} else r.get(k))) for k in ("signal_id", "symbol", "reject_reason", "score", "raw_rr", "rr", "effective_rr", "cost_penalty", "shadow_outcome", "spread_pct", "expected_slippage_pct", "liquidity_ok", "volatility_ok")}) for r in near],
     }
     return report_rows, summary_out
 
 
-def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any]) -> tuple[Path, Path, dict[str, Any]]:
-    report_rows, summary_out = _build_calibration_outputs(lifecycle_rows, rejected_rows, summary)
+def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any], shadow_rows: list[dict[str, str]] | None = None) -> tuple[Path, Path, dict[str, Any]]:
+    report_rows, summary_out = _build_calibration_outputs(lifecycle_rows, rejected_rows, summary, shadow_rows)
     report_path = output_dir / "lifecycle_calibration_report.csv"
     summary_path = output_dir / "lifecycle_calibration_summary.json"
     fieldnames = list(report_rows[0].keys()) if report_rows else ["source_stage", "lifecycle_state", "reject_reason", "symbol", "regime", "expectancy_bucket", "count"]
@@ -414,9 +474,11 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     summary_path = output_dir / "order_backtest_summary.csv"
     lifecycle_path = output_dir / "order_lifecycle.csv"
     rejected_path = output_dir / "rejected_orders.csv"
+    rejected_shadow_path = output_dir / "rejected_shadow.csv"
     summary = _read_first_csv_row(summary_path)
     lifecycle_rows = _read_csv_rows(lifecycle_path)
     rejected_rows = _read_csv_rows(rejected_path)
+    rejected_shadow_rows = _read_csv_rows(rejected_shadow_path)
     result.status = "COMPLETED"
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
@@ -444,7 +506,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.final_reject_reason_counts = lifecycle_diagnostics["final_reject_reason_counts"]
     result.order_reject_reason_counts = lifecycle_diagnostics["order_reject_reason_counts"]
     result.symbol_selector_reject_counts = lifecycle_diagnostics["symbol_selector_reject_counts"]
-    calibration_report_path, calibration_summary_path, calibration_summary = _write_calibration_artifacts(output_dir, lifecycle_rows, rejected_rows, summary)
+    calibration_report_path, calibration_summary_path, calibration_summary = _write_calibration_artifacts(output_dir, lifecycle_rows, rejected_rows, summary, rejected_shadow_rows)
     result.calibration_report_path = str(calibration_report_path)
     result.calibration_summary_path = str(calibration_summary_path)
     result.rejection_funnel = calibration_summary["rejection_funnel"]

@@ -1,3 +1,50 @@
+## 2026-06-25 - Dashboard Calibration Rejected-Shadow Source Fix
+
+### Why the patch was needed
+`lifecycle_calibration_summary.json` could be generated with empty shadow/cost diagnostics even when `rejected_shadow.csv` and `rejected_shadow_summary.csv` contained the counterfactual evidence.
+
+### Root cause
+Dashboard calibration artifacts were built from lifecycle/rejected-order exports only. Those rows can lack `shadow_outcome` and `cost_penalty`, so LOW_SCORE, later-gate, near-miss, and execution-cost summaries silently reported zero/null diagnostics.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `backtest_order.py`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Dashboard BACKTEST completion and direct `backtest_order.py` exports now write/read calibration artifacts; dashboard completion reads `rejected_shadow.csv` when present, builds a signal-id-first/composite fallback lookup, and uses rejected-shadow rows as the source of truth for shadow outcome, cost penalty, effective RR/RR, score, volatility/liquidity flags, volatility score, and reject reason diagnostics. No thresholds or accepted-trade semantics changed.
+
+### Lifecycle changes
+None to lifecycle progression. `WOULD_TP` and `WOULD_SL` remain rejected counterfactual labels. Near-miss summary rows explicitly emit `UNAVAILABLE` for missing shadow outcome or cost penalty instead of silent null/empty values.
+
+### Persistence changes
+No database schema changes. Existing CSV artifact names are preserved.
+
+### Export/schema changes
+`lifecycle_calibration_summary.json` is now emitted by direct `backtest_order.py` runs and populates execution cost distributions, LOW_SCORE shadow comparison, later-gate counts/rates, and near-miss shadow/cost fields from `rejected_shadow.csv` when available. `lifecycle_calibration_report.csv` remains written.
+
+### Tests added
+Updated the dashboard calibration regression fixture to write LOW_SCORE WOULD_TP/WOULD_SL and later-gate STOP_TOO_WIDE/REGIME_MISMATCH rejected-shadow rows with numeric cost penalties.
+
+### Tests executed
+- `python -m py_compile backtest_order.py src/alphaforge/dashboard/backtest_control.py tests/test_dashboard_app.py`
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics -q` (local optional dashboard dependencies unavailable; skipped collection)
+- `pytest -q`
+- `python backtest_order.py --offline --output-dir /tmp/af_calibration_check`
+- `python -m json.tool /tmp/af_calibration_check/lifecycle_calibration_summary.json`
+
+### Risks and remaining limitations
+If neither `signal_id` nor the fallback composite fields align between rejected orders and rejected-shadow rows, near-miss rows will explicitly show `UNAVAILABLE` for shadow/cost fields. Calibration remains diagnostic only.
+
+### Migration concerns
+None; this reads an existing optional CSV artifact and preserves behavior when it is absent.
+
+### Push recommendation
+Safe to push after full test/backtest verification; no LIVE readiness claim.
+
 ## 2026-06-25 - Dashboard Calibration Test Import CI Fix
 
 ### Why the patch was needed

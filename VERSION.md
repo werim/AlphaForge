@@ -1,3 +1,15 @@
+## 2026-06-25 Dashboard calibration rejected-shadow source fix
+
+- **Current version:** Dashboard calibration rejected-shadow source fix.
+- **Current phase:** BACKTEST dashboard calibration artifact integrity.
+- **Runtime maturity:** Research/backtest; diagnostic summaries now source shadow/cost fields from `rejected_shadow.csv` when available.
+- **BACKTEST/PAPER/LIVE alignment:** No threshold, acceptance, reject, or order execution logic changed.
+- **Lifecycle coverage:** Rejected shadow rows remain rejected counterfactual diagnostics; near-miss summaries explicitly mark missing shadow data as `UNAVAILABLE`.
+- **Execution realism coverage:** Cost-penalty distributions now use numeric rejected-shadow diagnostics instead of silently reporting empty lifecycle/reject exports.
+- **Known critical risks:** Calibration output remains diagnostic and must not be used alone to loosen thresholds.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this patch fixes BACKTEST diagnostics only.
+
 ## 2026-06-25 Dashboard calibration test import fix
 
 - **Current version:** Dashboard calibration test import CI fix.
