@@ -165,6 +165,20 @@ class LifecycleRow:
     order_id: str = ""
     position_id: str = ""
     lifecycle_seq: int = 0
+
+
+def _is_pre_signal_symbol_reject(row: LifecycleRow, lifecycle_state: str | None = None) -> bool:
+    state = (lifecycle_state or row.status_after or "").strip().upper()
+    return state == "SYMBOL_REJECTED" and row.status_before.strip().upper() in {"", "NONE"} and row.event_flags == "SYMBOL_SELECTOR"
+
+
+def _lifecycle_signal_id(row: LifecycleRow, lifecycle_state: str | None = None) -> str:
+    if row.signal_id:
+        return row.signal_id
+    if _is_pre_signal_symbol_reject(row, lifecycle_state):
+        return f"SYMBOL_SELECTOR:{row.symbol}:{row.timestamp}"
+    return f"{row.symbol}:{row.timestamp}"
+
 def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy is None:
         return "UNKNOWN"
@@ -1198,9 +1212,10 @@ def process_backtest_result(
         if sim_row.status_after == "POSITION_CLOSED":
             _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
     return cand
-def _lifecycle_event_id(row: LifecycleRow, index: int) -> str:
+def _lifecycle_event_id(row: LifecycleRow, index: int, lifecycle_state: str | None = None) -> str:
+    status_after = lifecycle_state or row.status_after
     return (
-        f"{row.timestamp}:{row.symbol}:{row.status_before}:{row.status_after}:"
+        f"{row.timestamp}:{row.symbol}:{row.status_before}:{status_after}:"
         f"{row.entry}:{row.sl}:{row.tp}:{index}"
     )
 def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
@@ -1212,7 +1227,10 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 for row_value in (row.volume_24h_usdt, row.spread_pct, row.funding_rate_pct, row.expected_slippage_pct, row.liquidity_score)
             )
             lifecycle_state = normalize_lifecycle_event(row.status_after)
-            source_stage = "SYMBOL_SELECTOR" if row.event_flags == "SYMBOL_SELECTOR" or lifecycle_state == "SYMBOL_REJECTED" else "SIGNAL_ENGINE"
+            pre_signal_symbol_reject = _is_pre_signal_symbol_reject(row, lifecycle_state)
+            if lifecycle_state == "SYMBOL_REJECTED" and not pre_signal_symbol_reject:
+                lifecycle_state = "SIGNAL_REJECTED"
+            source_stage = "SYMBOL_SELECTOR" if pre_signal_symbol_reject else "SIGNAL_ENGINE"
             if lifecycle_state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}:
                 decision = "REJECTED"
             elif lifecycle_state == "SIGNAL_CREATED":
@@ -1221,8 +1239,8 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 decision = "ACCEPTED"
             save_trade_lifecycle_event(
                 session,
-                event_id=_lifecycle_event_id(row, idx),
-                signal_id=row.signal_id or f"{row.symbol}:{row.timestamp}",
+                event_id=_lifecycle_event_id(row, idx, lifecycle_state),
+                signal_id=_lifecycle_signal_id(row, lifecycle_state),
                 order_id=row.order_id or None,
                 symbol=row.symbol,
                 mode="BACKTEST",
@@ -1509,6 +1527,7 @@ def verify_export_integrity(
     score_by_signal: dict[str, Any] = {}
     rr_by_signal: dict[str, Any] = {}
     for idx, row in enumerate(persisted_lifecycle_rows):
+        signal_id = str(row.get("signal_id", "") or f"idx:{idx}")
         lifecycle_state = str(row.get("lifecycle_state", "") or "").strip().upper()
         status_after = str(row.get("status_after", "") or lifecycle_state).strip().upper()
         if lifecycle_state == "" or status_after == "":
@@ -1529,7 +1548,6 @@ def verify_export_integrity(
         expectancy_bucket = str(row.get("expectancy_bucket", "") or "").strip().upper()
         if expectancy_bucket == "":
             errors.append(f"lifecycle row index={idx} missing expectancy_bucket")
-        signal_id = str(row.get("signal_id", "") or f"idx:{idx}")
         signal_terminals.setdefault(signal_id, set()).add(lifecycle_state)
         if lifecycle_state == "SIGNAL_CREATED":
             score_by_signal[signal_id] = row.get("score")
@@ -2087,7 +2105,7 @@ def main():
                     )
                     rejected.append(
                         {
-                            "signal_id": f"{symbol}:{candles[i].timestamp}",
+                            "signal_id": f"SYMBOL_SELECTOR:{symbol}:{candles[i].timestamp}",
                             "lifecycle_state": "SYMBOL_REJECTED",
                             "source_stage": "SYMBOL_SELECTOR",
                             "timestamp": candles[i].timestamp,

@@ -1,3 +1,15 @@
+## 2026-06-24 Backtest SYMBOL_REJECTED lifecycle ordering fix
+
+- **Current version:** 2026-06-24 SYMBOL_REJECTED ordering hotfix.
+- **Current phase:** BACKTEST lifecycle identity and selector diagnostic hardening.
+- **Runtime maturity:** BACKTEST keeps SQL-first lifecycle exports and separates pre-signal selector diagnostics from signal lifecycle rows.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST export identity handling changed only for selector diagnostics; PAPER/LIVE runtime decision and order paths are unchanged.
+- **Lifecycle coverage:** `SYMBOL_REJECTED` is treated as a pre-signal symbol-selector diagnostic. Post-signal symbol rejection is normalized to `SIGNAL_REJECTED` with `reject_reason` preserved.
+- **Execution realism coverage:** Unchanged; unavailable execution fields remain marked unavailable rather than faked.
+- **Known critical risks:** Historical exports generated before this patch can still contain colliding selector ids and should be regenerated for dashboard validation.
+- **Last audit date:** 2026-06-24.
+- **Live readiness verdict:** NOT LIVE READY; this patch fixes BACKTEST lifecycle export correctness only and does not certify LIVE execution readiness.
+
 ## 2026-06-24 Backtest order lifecycle diagnostics hardening
 - **Current version:** 0.3.62-dev
 - **Current phase:** BACKTEST order lifecycle liquidity-scale and selector-reject audit hardening.
