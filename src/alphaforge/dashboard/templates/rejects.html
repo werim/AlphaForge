@@ -9,7 +9,7 @@
   <section class="cards">
     <article class="metric"><label>Final Decisions</label><strong>{{ rejects.total_final_decisions if rejects.total_final_decisions is not none else 'N/A' }}</strong></article>
     <article class="metric"><label>Rejected</label><strong>{{ rejects.total_rejected if rejects.total_rejected is not none else 'N/A' }}</strong></article>
-    <article class="metric"><label>Reject Rate</label><strong>{% if rejects.rejection_rate is not none %}{{ '%.2f'|format(rejects.rejection_rate * 100) }}%{% else %}N/A{% endif %}</strong></article>
+    <article class="metric"><label>PAPER SQL Reject Rate</label><strong>{% if rejects.rejection_rate is not none %}{{ '%.2f'|format(rejects.rejection_rate * 100) }}%{% else %}N/A{% endif %}</strong></article>
   </section>
   <section class="panel">
     <h2>Reject Reasons</h2>

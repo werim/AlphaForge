@@ -1,3 +1,23 @@
+## 2026-06-25 - Dashboard Accepted-Trade Diagnostics and Backtest Reject-Rate Clarity
+
+### Added
+- Added selected-backtest accepted trade diagnostics, accepted score/effective-RR distributions, and near-miss score/effective-RR distributions to calibration summary output and dashboard rendering.
+
+### Changed
+- Labeled top-card rejection metrics as PAPER SQL state and added a selected-backtest reject-rate row using accepted plus rejected summary counts.
+
+### Fixed
+- Reduced dashboard ambiguity where PAPER runtime SQL reject rate could be mistaken for the selected BACKTEST artifact reject rate.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Existing artifacts without accepted lifecycle score/effective-RR fields remain partially unavailable until regenerated. Local dashboard tests require optional FastAPI/httpx dependencies to run instead of being skipped.
+
 ## 2026-06-25 - Dashboard Calibration Rejected-Shadow Source Fix
 
 ### Added
