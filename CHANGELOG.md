@@ -1,3 +1,26 @@
+## 2026-06-26 - BACKTEST_ONLY SHORT Breakdown Breakout Normal Stop Quality Gate
+
+### Added
+- Added opt-in `SHORT_BREAKDOWN_BREAKOUT_NORMAL_STOP_GATE` BACKTEST-only comparison metrics for SHORT + BREAKDOWN_DOWN + BREAKOUT + NORMAL stop-distance rejected-shadow candidates.
+- Added quality-gate summary/export fields for baseline metrics, candidate/accepted/rejected counts, WOULD_TP/WOULD_SL/UNKNOWN counts, TP rate, mean effective RR, expected effective expectancy, size multiplier, reason/symbol breakdowns, and daily trade-count distribution.
+- Added CLI flags for enabling and constraining the comparison lane without changing global thresholds.
+- Added regression coverage for disabled defaults, BACKTEST-only counting, LIVE/PAPER exclusion, eligibility constraints, and exclusion of WIDE stops, LONG rows, REGIME_MISMATCH, and PANIC/NEWS_DRIVEN regimes.
+
+### Changed
+- Backtest summary `accepted_reason_breakdown` now counts accepted lifecycle states instead of `SIGNAL_CREATED` rows, preventing pending/rejected created rows from inflating `BASELINE` counts.
+
+### Fixed
+- Fixed accepted-reason breakdown inflation where signal-created rows could report `{"BASELINE": 1043}` instead of unique accepted trade evidence such as `{"BASELINE": 4}`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. The quality gate is disabled by default, BACKTEST-only when enabled, reporting/comparison-only, and does not loosen global thresholds or baseline accepted trades.
+
+### Known Issues
+- This is not LIVE-ready and does not authorize LIVE acceptance. Quality-gate expectancy depends on rejected-shadow labels and available execution-cost fields.
+
 ## 2026-06-26 - Regime/Side/Setup Quality Gate Diagnostics
 
 ### Added

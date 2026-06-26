@@ -1,3 +1,46 @@
+## 2026-06-26 - BACKTEST_ONLY SHORT Breakdown Breakout Normal Stop Quality Gate
+
+### Why the patch was needed
+PR 222 diagnostics showed high effective RR alone was insufficient, while the strongest observed cluster was SHORT + BREAKDOWN_DOWN + BREAKOUT + NORMAL stop distance. The safe next step is a BACKTEST-only, opt-in comparison lane that measures this cluster without changing default strategy behavior.
+
+### Root cause
+Existing candidate gates reported broad quality hypotheses but did not isolate the best observed side/regime/setup/stop-distance cluster with execution-quality constraints, reduced-risk sizing, and baseline-plus-comparison metrics.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Default behavior is unchanged. The new gate is disabled by default and only computes comparison metrics when explicitly enabled for BACKTEST. LIVE mode cannot use the path and PAPER remains disabled by default. No global score, RR, effective-RR, spread, slippage, liquidity, volatility, risk, or trade-count thresholds were loosened.
+
+### Lifecycle changes
+No baseline lifecycle accepted trades are added. The comparison lane reads rejected-shadow evidence and exports metrics separately. Materialized comparison rows, if added in a future patch, must be clearly marked reporting-only with the original reject reason and reduced-size metadata.
+
+### Persistence changes
+No SQLite migration. CSV/JSON export schemas are additive through backtest summary and signal-quality summary fields.
+
+### Export/schema changes
+Added quality-gate metrics: baseline accepted trades, baseline net PnL, candidate/accepted/rejected counts, WOULD_TP/WOULD_SL/UNKNOWN counts, TP rate, mean effective RR, expected effective expectancy, baseline-plus-quality-gate net PnL, size multiplier, reason/symbol breakdowns, daily trade-count distribution, enabled flag, and gate mode.
+
+### Tests added
+Added regression tests for disabled default parity, enabled BACKTEST-only counting, LIVE/PAPER exclusion, allowed SHORT/BREAKDOWN_DOWN/BREAKOUT/NORMAL eligibility, and exclusion of WIDE stops, LONG rows, REGIME_MISMATCH, and PANIC/NEWS_DRIVEN regimes.
+
+### Tests executed
+- `python -m py_compile backtest_order.py`
+- `pytest tests/test_backtest_order_scanner.py -q`
+
+### Risks and remaining limitations
+The gate is a hypothesis test, not a production acceptance rule. Expected expectancy is derived from BACKTEST rejected-shadow labels and available execution context, so missing or estimated fields remain a risk. The patch does not optimize trade count and must not be interpreted as LIVE readiness.
+
+### Migration concerns
+Backward compatible. New fields are additive and can be ignored by existing consumers.
+
+### Push recommendation
+Safe to push as BACKTEST-only comparison evidence after tests pass. Do not enable LIVE trading or loosen thresholds based on this patch alone.
+
 ## 2026-06-26 - Regime/Side/Setup Quality Gate Diagnostics
 
 ### Why the patch was needed

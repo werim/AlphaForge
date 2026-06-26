@@ -1,3 +1,15 @@
+## 2026-06-26 BACKTEST_ONLY SHORT Breakdown Breakout Normal Stop Quality Gate
+
+- **Current version:** BACKTEST_ONLY SHORT breakdown/breakout NORMAL-stop quality-gate comparison patch.
+- **Current phase:** Phase 6 BACKTEST signal-quality hypothesis measurement before threshold changes.
+- **Runtime maturity:** Research/backtest diagnostics only; gate is disabled by default and exports comparison metrics without changing baseline accepted trades.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST can opt into comparison metrics; PAPER remains disabled by default; LIVE cannot use this path.
+- **Lifecycle coverage:** No baseline lifecycle transitions are added or reordered. If future materialized comparison rows are emitted they must carry `accepted_reason=SHORT_BREAKDOWN_BREAKOUT_NORMAL_STOP_GATE`, original reject reason, reporting-only metadata, and reduced size.
+- **Execution realism coverage:** Gate requires SHORT/BREAKDOWN_DOWN/BREAKOUT/NORMAL geometry, allowed reject reasons, effective RR floor, spread/slippage caps, liquidity/volatility OK when available, non-PANIC/non-NEWS regime, and reduced risk sizing.
+- **Known critical risks:** Comparison expectancy is not proof of production readiness; rejected-shadow outcomes and estimated BACKTEST execution fields may be incomplete.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; no LIVE quality-gate acceptance is permitted.
+
 ## 2026-06-26 Regime/Side/Setup Quality Gate Diagnostics Patch
 
 - **Current version:** Regime/Side/Setup Quality Gate Diagnostics patch.
