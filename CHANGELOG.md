@@ -1,3 +1,27 @@
+## 2026-06-26 - Dashboard Artifact Evidence Integrity Patch
+
+### Added
+- Added symbol/timestamp/side rejected-shadow fallback matching for near-miss rows.
+- Added accepted-trade diagnostic enrichment from `backtest_orders.csv` and lifecycle `execution_ctx`, including SL, TP, close reason, and `net_pnl_status`.
+- Added regression coverage for STOP_TOO_WIDE shadow counts, accepted diagnostic enrichment, explicit cost-penalty naming, and full lifecycle state counts.
+
+### Changed
+- Split ambiguous dashboard `cost_penalty` summary into `decision_cost_penalty` and `shadow_cost_penalty` with an explicit cost-basis note.
+- Accepted diagnostics table now displays SL, TP, close reason, and Net PnL export status.
+
+### Fixed
+- Fixed near-miss rows incorrectly showing `UNAVAILABLE` when matching `rejected_shadow.csv` rows contain `WOULD_TP`, `WOULD_SL`, `WOULD_TIMEOUT`, or `UNKNOWN`.
+- Fixed accepted diagnostics dropping side, entry, SL, TP, regime, and close reason when those fields are present in order artifacts or lifecycle execution context.
+
+### Removed
+- Removed the single ambiguous execution-cost summary metric that mixed decision and shadow cost penalties.
+
+### Breaking Changes
+- None for runtime trading behavior. Dashboard JSON consumers should read `decision_cost_penalty` and/or `shadow_cost_penalty` instead of the old ambiguous `cost_penalty` summary key.
+
+### Known Issues
+- Historical artifacts without exported PnL still report `net_pnl_status: NOT_EXPORTED`; this patch does not synthesize fake PnL.
+
 ## 2026-06-25 - STOP_TOO_WIDE Soft Risk-Control Patch
 
 ### Added

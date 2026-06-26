@@ -1,3 +1,46 @@
+## 2026-06-26 - Dashboard Artifact Evidence Integrity Patch
+
+### Why the patch was needed
+Latest BACKTEST artifacts contained usable `rejected_shadow.csv` outcomes, but dashboard `lifecycle_calibration_summary.json` near-miss rows could still show `shadow_outcome: UNAVAILABLE`. Accepted lifecycle/order artifacts also carried side, entry, SL, TP, regime, and close reason evidence that the accepted diagnostics summary did not surface.
+
+### Root cause
+Rejected-shadow enrichment depended on overly narrow identity matching when signal IDs were unavailable, and accepted diagnostics only read the terminal lifecycle CSV row. Execution-cost summaries used one ambiguous `cost_penalty` label even though rejected-order decision costs and rejected-shadow forward costs can differ.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+No trading thresholds, reject gates, acceptance rules, or order execution behavior changed. The patch only changes dashboard/export summarization of existing artifacts.
+
+### Lifecycle changes
+No lifecycle transitions changed. Dashboard lifecycle diagnostics continue to count accepted and rejected states; accepted diagnostics now use POSITION_CLOSED execution context for close reason when available.
+
+### Persistence changes
+No SQLite schema migration and no persistence contract changes. Existing CSV/JSON dashboard artifacts receive clearer populated diagnostic fields.
+
+### Export/schema changes
+`lifecycle_calibration_summary.json` now enriches near-miss rows from `rejected_shadow.csv` by signal ID or symbol + timestamp + side. `execution_cost_summary` now separates `decision_cost_penalty` from `shadow_cost_penalty` and documents the basis. Accepted diagnostics include `sl`, `tp`, `close_reason`, and `net_pnl_status`.
+
+### Tests added
+Added dashboard regressions verifying STOP_TOO_WIDE near-miss rows do not show `UNAVAILABLE` when rejected-shadow evidence exists, STOP_TOO_WIDE WOULD_TP/WOULD_SL counts come from `rejected_shadow.csv`, accepted diagnostics are enriched from orders/execution context, cost penalties are explicitly named, and lifecycle counts include SIGNAL_CREATED, SIGNAL_REJECTED, WAITING_ENTRY_ZONE, ENTRY_TRIGGERED, ORDER_PLACED, POSITION_OPENED, and POSITION_CLOSED.
+
+### Tests executed
+- `pytest tests/test_dashboard_app.py::test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics tests/test_dashboard_app.py::test_calibration_near_miss_uses_shadow_symbol_timestamp_side_match tests/test_dashboard_app.py::test_accepted_trade_diagnostics_enriches_orders_and_close_ctx tests/test_dashboard_app.py::test_lifecycle_state_counts_include_full_backtest_path -q`
+
+### Risks and remaining limitations
+If artifacts lack signal ID and symbol/timestamp/side alignment, near-miss shadow fields still honestly report unavailable. PnL is not fabricated; missing PnL is reported as `NOT_EXPORTED`.
+
+### Migration concerns
+Dashboard JSON consumers using `execution_cost_summary.cost_penalty` should migrate to `decision_cost_penalty` or `shadow_cost_penalty` depending on the evidence basis they need.
+
+### Push recommendation
+Safe to push after broader CI if desired. Do not claim LIVE readiness; this is reporting/evidence integrity only.
+
 ## 2026-06-25 - STOP_TOO_WIDE Soft Risk-Control Patch
 
 ### Why the patch was needed

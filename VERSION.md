@@ -1,3 +1,15 @@
+## 2026-06-26 Dashboard artifact evidence integrity patch
+
+- **Current version:** Dashboard artifact evidence integrity patch.
+- **Current phase:** BACKTEST dashboard summary/export integrity hardening.
+- **Runtime maturity:** Research/backtest; latest dashboard summaries now preserve rejected-shadow and accepted-trade evidence without changing strategy gates.
+- **BACKTEST/PAPER/LIVE alignment:** No thresholds, signal acceptance, reject decisions, or execution behavior changed.
+- **Lifecycle coverage:** Summary diagnostics preserve rejected shadow outcomes and accepted POSITION_CLOSED close reasons from lifecycle execution context; lifecycle counts include accepted and rejected path states.
+- **Execution realism coverage:** Decision and forward-shadow cost penalties are separated as `decision_cost_penalty` and `shadow_cost_penalty` so evidence is not mixed.
+- **Known critical risks:** Net PnL may still be `NOT_EXPORTED` in artifacts that do not contain PnL fields; dashboard diagnostics remain audit evidence, not LIVE readiness.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; reporting integrity improved only.
+
 ## 2026-06-25 STOP_TOO_WIDE soft risk-control patch
 
 - **Current version:** STOP_TOO_WIDE soft risk-control patch.
