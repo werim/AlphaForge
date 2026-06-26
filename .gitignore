@@ -19,3 +19,11 @@ data/*.sqlite3.env.*
 !.env.example
 
 reports/
+
+# Python package build metadata
+*.egg-info/
+src/*.egg-info/
+
+# Logs
+logs/
+*.log
