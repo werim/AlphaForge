@@ -1,3 +1,15 @@
+## 2026-06-26 High Effective-RR Rescue Acceptance Lane (BACKTEST-only experimental)
+
+- **Current version:** High Effective-RR Rescue Acceptance Lane patch.
+- **Current phase:** Phase 6 BACKTEST acceptance-quality experiment and export metric hardening.
+- **Runtime maturity:** Research/backtest only; rescue acceptance is opt-in and disabled by default.
+- **BACKTEST/PAPER/LIVE alignment:** Normal accept/reject thresholds remain unchanged. The rescue lane can run only in BACKTEST mode and never enables LIVE rescue acceptance.
+- **Lifecycle coverage:** Rescue-accepted orders emit the normal accepted lifecycle with explicit `accepted_reason=HIGH_EFFECTIVE_RR_RESCUE` and `original_reject_reason` metadata.
+- **Execution realism coverage:** Rescue requires high score/effective RR plus liquidity, volatility, spread, slippage, regime, daily rescue limit, max-concurrent, and reduced-size checks.
+- **Known critical risks:** Experimental lane is designed to measure whether high-effective-RR later-gate rejects contain recoverable expectancy; accepted diagnostics geometry issues remain a documented known issue where source artifacts lack fields.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; no LIVE rescue path is permitted.
+
 ## 2026-06-26 Accepted diagnostics synthetic-id export hardening patch
 
 - **Current version:** Accepted diagnostics synthetic-id export hardening patch.

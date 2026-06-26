@@ -3,7 +3,7 @@ import csv
 import json
 import os
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Mapping
@@ -67,6 +67,33 @@ class CandidateOrder:
     score: float
     order_type: str
     expectancy_bucket: str = "UNKNOWN"
+    accepted_reason: str = "BASELINE"
+    original_reject_reason: str = ""
+    rescue_size_multiplier: float = 1.0
+    rescue_effective_rr: float = 0.0
+    rescue_decision_context: str = ""
+@dataclass
+class RescueConfig:
+    enabled: bool = False
+    modes: tuple[str, ...] = ("BACKTEST",)
+    effective_rr_min: float = 1.90
+    score_min: float = 9.0
+    size_multiplier: float = 0.25
+    max_trades_per_day: int = 1
+    allowed_reasons: tuple[str, ...] = ("STOP_TOO_WIDE", "DAILY_SYMBOL_TRADE_LIMIT")
+    allow_regime_mismatch: bool = False
+    max_spread_pct: float = 0.0025
+    max_slippage_pct: float = 0.0020
+    allow_cooldown_bypass: bool = False
+    max_concurrent_positions: int = 3
+
+@dataclass
+class RescueStats:
+    candidate_count: int = 0
+    accepted_count: int = 0
+    rejected_count: int = 0
+    reject_reasons: Dict[str, int] = field(default_factory=dict)
+
 @dataclass
 class RejectedShadowEvaluation:
     symbol: str
@@ -174,6 +201,10 @@ class LifecycleRow:
     original_reject_reason: str = ""
     reject_reason_softened: str = ""
     risk_scale: float = 1.0
+    accepted_reason: str = "BASELINE"
+    rescue_size_multiplier: float = 1.0
+    rescue_effective_rr: float = 0.0
+    rescue_decision_context: str = ""
 
 
 def _is_pre_signal_symbol_reject(row: LifecycleRow, lifecycle_state: str | None = None) -> bool:
@@ -220,6 +251,67 @@ def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[f
         "funding_penalty": model.funding_penalty,
     }
     return effective, flags, breakdown
+
+
+def _rescue_config_from_args(args: Any, runtime_cfg: Any) -> RescueConfig:
+    return RescueConfig(
+        enabled=bool(getattr(args, "rescue_enabled", False)),
+        modes=tuple(str(getattr(args, "rescue_modes", "BACKTEST") or "BACKTEST").upper().replace(",", " ").split()),
+        effective_rr_min=float(getattr(args, "rescue_effective_rr_min", 1.90)),
+        score_min=float(getattr(args, "rescue_score_min", 9.0)),
+        size_multiplier=min(1.0, max(0.0, float(getattr(args, "rescue_size_multiplier", 0.25)))),
+        max_trades_per_day=int(getattr(args, "max_rescue_trades_per_day", 1)),
+        allowed_reasons=tuple(r.strip().upper() for r in str(getattr(args, "rescue_allowed_reasons", "STOP_TOO_WIDE,DAILY_SYMBOL_TRADE_LIMIT") or "").replace(",", " ").split() if r.strip()),
+        allow_regime_mismatch=bool(getattr(args, "rescue_allow_regime_mismatch", False)),
+        max_spread_pct=float(getattr(args, "rescue_max_spread_pct", 0.0025)),
+        max_slippage_pct=float(getattr(args, "rescue_max_slippage_pct", 0.0020)),
+        allow_cooldown_bypass=bool(getattr(args, "rescue_allow_cooldown_bypass", False)),
+        max_concurrent_positions=int(getattr(getattr(runtime_cfg, "runtime", runtime_cfg), "max_concurrent_positions", 3)),
+    )
+
+def _rescue_reject(stats: RescueStats, reason: str) -> tuple[bool, str]:
+    stats.rejected_count += 1
+    stats.reject_reasons[reason] = stats.reject_reasons.get(reason, 0) + 1
+    return False, reason
+
+def _rescue_acceptance_allowed(
+    *, mode: str, reason: str, score: float, effective_rr: float, regime: str, mctx: Mapping[str, Any],
+    cfg: RescueConfig, stats: RescueStats, recent_stats: Mapping[str, Any], open_rows: List[LifecycleRow], symbol: str,
+) -> tuple[bool, str]:
+    if not cfg.enabled:
+        return False, "RESCUE_DISABLED"
+    if str(mode).upper() not in cfg.modes or str(mode).upper() != "BACKTEST":
+        return _rescue_reject(stats, "MODE_NOT_BACKTEST")
+    reason = str(reason or "").upper()
+    if reason not in set(cfg.allowed_reasons):
+        return _rescue_reject(stats, "REASON_NOT_ALLOWED")
+    stats.candidate_count += 1
+    if score < cfg.score_min:
+        return _rescue_reject(stats, "SCORE_TOO_LOW")
+    if mctx.get("liquidity_ok") is False:
+        return _rescue_reject(stats, "LIQUIDITY_NOT_OK")
+    if mctx.get("volatility_ok") is False:
+        return _rescue_reject(stats, "VOLATILITY_NOT_OK")
+    spread = _safe_float(mctx.get("spread_pct"), -1.0)
+    slip = _safe_float(mctx.get("expected_slippage_pct"), -1.0)
+    if spread < 0.0 or spread > cfg.max_spread_pct:
+        return _rescue_reject(stats, "SPREAD_TOO_HIGH")
+    if slip < 0.0 or slip > cfg.max_slippage_pct:
+        return _rescue_reject(stats, "SLIPPAGE_TOO_HIGH")
+    if effective_rr < cfg.effective_rr_min:
+        return _rescue_reject(stats, "EFFECTIVE_RR_TOO_LOW")
+    if str(regime or mctx.get("regime", "")).upper() in {"PANIC", "NEWS_DRIVEN"}:
+        return _rescue_reject(stats, "REGIME_BLOCKED")
+    failed = {str(x).upper() for x in (mctx.get("all_failed_gates") or [])} if isinstance(mctx.get("all_failed_gates"), list) else set()
+    if not cfg.allow_regime_mismatch and (reason == "REGIME_MISMATCH" or "REGIME_MISMATCH" in failed):
+        return _rescue_reject(stats, "REGIME_MISMATCH")
+    if stats.accepted_count >= cfg.max_trades_per_day:
+        return _rescue_reject(stats, "DAILY_RESCUE_LIMIT")
+    if len(open_rows) >= cfg.max_concurrent_positions:
+        return _rescue_reject(stats, "MAX_CONCURRENT_POSITIONS")
+    if not cfg.allow_cooldown_bypass and reason == "SYMBOL_COOLDOWN_ACTIVE":
+        return _rescue_reject(stats, "COOLDOWN_ACTIVE")
+    return True, "HIGH_EFFECTIVE_RR_RESCUE"
 def _estimate_backtest_spread_pct(liquidity_score: float, volatility_pct: float) -> float:
     base_spread_pct = 0.0008 + (1.0 - liquidity_score) * 0.0012
     volatility_widening = min(0.0004, max(0.0, (volatility_pct - 2.0) * 0.00002))
@@ -490,6 +582,11 @@ def simulate_candidate(
     def _finalize_rows(out_rows: List[LifecycleRow]) -> List[LifecycleRow]:
         for seq, row in enumerate(out_rows, start=1):
             row.lifecycle_seq = seq
+            row.accepted_reason = str(market_ctx.get("accepted_reason", row.accepted_reason) or row.accepted_reason)
+            row.original_reject_reason = str(market_ctx.get("original_reject_reason", row.original_reject_reason) or row.original_reject_reason)
+            row.rescue_size_multiplier = _safe_float(market_ctx.get("rescue_size_multiplier"), row.rescue_size_multiplier)
+            row.rescue_effective_rr = _safe_float(market_ctx.get("rescue_effective_rr"), row.rescue_effective_rr)
+            row.rescue_decision_context = str(market_ctx.get("rescue_decision_context", row.rescue_decision_context) or row.rescue_decision_context)
             if row.signal_id == "":
                 row.signal_id = signal_id
             if row.lifecycle_id == "":
@@ -883,6 +980,10 @@ def finalize(
         original_reject_reason=str(market_ctx.get("original_reject_reason", "") or ""),
         reject_reason_softened=str(market_ctx.get("reject_reason_softened", "") or ""),
         risk_scale=_safe_float(market_ctx.get("risk_scale"), 1.0),
+        accepted_reason=str(market_ctx.get("accepted_reason", "BASELINE") or "BASELINE"),
+        rescue_size_multiplier=_safe_float(market_ctx.get("rescue_size_multiplier"), 1.0),
+        rescue_effective_rr=_safe_float(market_ctx.get("rescue_effective_rr"), 0.0),
+        rescue_decision_context=str(market_ctx.get("rescue_decision_context", "") or ""),
         mfe=mfe,
         mae=mae,
     )
@@ -990,7 +1091,12 @@ def process_backtest_result(
     rejection_counts: Dict[str, int],
     open_rows: List[LifecycleRow],
     recent_stats: Dict[str, Any],
+    rescue_config: Optional[RescueConfig] = None,
+    rescue_stats: Optional[RescueStats] = None,
+    mode: str = "BACKTEST",
 ) -> Optional[CandidateOrder]:
+    rescue_config = rescue_config or RescueConfig()
+    rescue_stats = rescue_stats or RescueStats()
     diagnostics = result.get("diagnostics", {})
     side = diagnostics.get("side") or "LONG"
     setup_type = diagnostics.get("setup_type", mctx.get("setup_type", ""))
@@ -1016,6 +1122,40 @@ def process_backtest_result(
             mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
         )
     )
+    def _try_rescue(reject_reason: str, effective_rr_value: float) -> Optional[CandidateOrder]:
+        ok, rescue_reason = _rescue_acceptance_allowed(
+            mode=mode, reason=reject_reason, score=score, effective_rr=effective_rr_value, regime=regime,
+            mctx=mctx, cfg=rescue_config, stats=rescue_stats, recent_stats=recent_stats, open_rows=open_rows, symbol=symbol,
+        )
+        if not ok:
+            return None
+        rescue_stats.accepted_count += 1
+        context = {
+            "accepted_reason": rescue_reason,
+            "original_reject_reason": reject_reason,
+            "rescue_size_multiplier": rescue_config.size_multiplier,
+            "rescue_effective_rr": effective_rr_value,
+            "rescue_score": score,
+            "rescue_mode": mode,
+        }
+        rescued = CandidateOrder(
+            candle.timestamp, symbol, side, entry, sl, tp, rr, setup_type, setup_reason, regime, score, order_type,
+            expectancy_bucket=expectancy_bucket, accepted_reason=rescue_reason, original_reject_reason=reject_reason,
+            rescue_size_multiplier=rescue_config.size_multiplier, rescue_effective_rr=effective_rr_value,
+            rescue_decision_context=json.dumps(context, sort_keys=True),
+        )
+        sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_config.size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True)}
+        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct * rescue_config.size_multiplier, market_ctx=sim_ctx)
+        lifecycle.extend(sim_rows)
+        recent_stats["last_trade_ts_by_symbol"][symbol] = candle.timestamp
+        recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
+        recent_stats["global_trades_today"] += 1
+        for sim_row in sim_rows:
+            if sim_row.close_reason == "TIMEOUT":
+                open_rows.append(sim_row)
+            if sim_row.status_after == "POSITION_CLOSED":
+                _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
+        return rescued
     lifecycle.append(
         LifecycleRow(
             timestamp=candle.timestamp,
@@ -1053,6 +1193,9 @@ def process_backtest_result(
         reason = str(result.get("reason") or result.get("reject_reason") or "").strip().upper()
         if not reason or reason == "UNKNOWN":
             reason = "REJECT_REASON_MISSING"
+        rescued = _try_rescue(reason, base_effective_rr)
+        if rescued is not None:
+            return rescued
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
         lifecycle.append(
             LifecycleRow(
@@ -1156,6 +1299,9 @@ def process_backtest_result(
     effective_rr, execution_flags, penalty_breakdown = _execution_reject_flags(cand.rr, mctx)
     if execution_flags:
         reason = execution_flags[0]
+        rescued = _try_rescue(reason, effective_rr)
+        if rescued is not None:
+            return rescued
         rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
         lifecycle.append(
             LifecycleRow(
@@ -1300,6 +1446,11 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                     "cost_penalty": row.cost_penalty,
                     "close_reason": row.close_reason,
                     "source_stage": source_stage,
+                    "accepted_reason": row.accepted_reason,
+                    "original_reject_reason": row.original_reject_reason,
+                    "rescue_size_multiplier": row.rescue_size_multiplier,
+                    "rescue_effective_rr": row.rescue_effective_rr,
+                    "rescue_decision_context": row.rescue_decision_context,
                 },
                 execution_ctx_missing=execution_ctx_missing,
                 event_ts=str(row.timestamp),
@@ -1322,6 +1473,11 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                        json_extract(execution_ctx, '$.expected_slippage_pct') AS expected_slippage_pct,
                        json_extract(execution_ctx, '$.funding_rate_pct') AS funding_rate_pct,
                        json_extract(execution_ctx, '$.volume_24h_usdt') AS volume_24h_usdt,
+                       json_extract(execution_ctx, '$.accepted_reason') AS accepted_reason,
+                       json_extract(execution_ctx, '$.original_reject_reason') AS original_reject_reason,
+                       json_extract(execution_ctx, '$.rescue_size_multiplier') AS rescue_size_multiplier,
+                       json_extract(execution_ctx, '$.rescue_effective_rr') AS rescue_effective_rr,
+                       json_extract(execution_ctx, '$.rescue_decision_context') AS rescue_decision_context,
                        event_ts, created_at, lifecycle_seq, lifecycle_id
                 FROM trade_lifecycle_events
                 WHERE mode = 'BACKTEST'
@@ -1517,10 +1673,26 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         r for r in rejected_rows
         if str(r.get("reject_reason", "")).upper() == "LOW_SCORE" and abs(_safe_float(r.get("score"), 0.0) - 7.5) <= 0.5
     ]
+    rescue_rows = [r for r in candidate_rows if str(r.get("accepted_reason", "")).upper() == "HIGH_EFFECTIVE_RR_RESCUE"]
+    rescue_closed = [r for r in rescue_rows if str(r.get("lifecycle_state", "")).upper() == "POSITION_CLOSED"]
+    baseline_closed = [r for r in candidate_rows if str(r.get("lifecycle_state", "")).upper() == "POSITION_CLOSED" and str(r.get("accepted_reason", "")).upper() != "HIGH_EFFECTIVE_RR_RESCUE"]
 
     return {
         "total_candidates": total,
         "accepted_count": len(accepted_rows),
+        "baseline_accepted_trades": max(len(accepted_rows) - len(rescue_rows), 0),
+        "rescue_candidate_count": len(rescue_rows),
+        "rescue_accepted_count": len(rescue_rows),
+        "rescue_rejected_count": 0,
+        "rescue_accepted_would_tp_count": sum(1 for r in rescue_closed if str(r.get("close_reason", "")).upper() == "TP_HIT"),
+        "rescue_accepted_would_sl_count": sum(1 for r in rescue_closed if str(r.get("close_reason", "")).upper() == "SL_HIT"),
+        "rescue_accepted_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in rescue_closed),
+        "baseline_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in baseline_closed),
+        "baseline_plus_rescue_net_pnl": sum(_safe_float(r.get("net_pnl_usdt"), 0.0) for r in baseline_closed + rescue_closed),
+        "rescue_avg_effective_rr": (sum(_safe_float(r.get("rescue_effective_rr"), 0.0) for r in rescue_rows) / len(rescue_rows)) if rescue_rows else 0.0,
+        "rescue_avg_score": (sum(_safe_float(r.get("score"), 0.0) for r in rescue_rows) / len(rescue_rows)) if rescue_rows else 0.0,
+        "rescue_reject_reasons": {},
+        "accepted_reason_breakdown": _distribution([r.get("accepted_reason", "BASELINE") for r in accepted_rows]),
         "rejected_count": len(rejected_rows),
         "reject_rate": (len(rejected_rows) / total) if total else 0.0,
         "reject_reason_distribution": _distribution([r.get("reject_reason", "") or "" for r in rejected_rows]),
@@ -2100,9 +2272,22 @@ def main():
     p.add_argument("--ci", action="store_true", help="CI-safe mode; implies --offline")
     p.add_argument("--symbols", default="", help="Comma-separated fixed symbol list for deterministic historical universe")
     p.add_argument("--force-refresh", action="store_true", help="Fetch the full requested Binance historical range before running")
+    p.add_argument("--rescue-enabled", action="store_true", help="Enable BACKTEST-only high effective-RR rescue acceptance lane")
+    p.add_argument("--rescue-modes", default="BACKTEST")
+    p.add_argument("--rescue-effective-rr-min", type=float, default=1.90)
+    p.add_argument("--rescue-score-min", type=float, default=9.0)
+    p.add_argument("--rescue-size-multiplier", type=float, default=0.25)
+    p.add_argument("--max-rescue-trades-per-day", type=int, default=1)
+    p.add_argument("--rescue-allowed-reasons", default="STOP_TOO_WIDE,DAILY_SYMBOL_TRADE_LIMIT")
+    p.add_argument("--rescue-allow-regime-mismatch", action="store_true")
+    p.add_argument("--rescue-max-spread-pct", type=float, default=0.0025)
+    p.add_argument("--rescue-max-slippage-pct", type=float, default=0.0020)
+    p.add_argument("--rescue-allow-cooldown-bypass", action="store_true")
     args = p.parse_args()
     if args.ci:
         args.offline = True
+    rescue_config = _rescue_config_from_args(args, cfg)
+    rescue_stats = RescueStats()
     now = datetime.now(timezone.utc)
     default_end = int(now.timestamp() * 1000)
     default_start = int((now.timestamp() - args.last_n_days * 86400) * 1000)
@@ -2235,6 +2420,9 @@ def main():
                     rejection_counts,
                     open_rows,
                     recent_stats,
+                    rescue_config=rescue_config,
+                    rescue_stats=rescue_stats,
+                    mode=args.mode,
                 )
                 if cand:
                     candidates.append(cand)
@@ -2392,10 +2580,27 @@ def main():
         "WOULD_SL": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_SL"),
         "WOULD_TIMEOUT": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_TIMEOUT"),
     }
+    rescue_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason == "HIGH_EFFECTIVE_RR_RESCUE"]
+    baseline_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason != "HIGH_EFFECTIVE_RR_RESCUE"]
+    rescue_accept_rows = [r for r in lifecycle if r.status_after == "SIGNAL_CREATED" and r.accepted_reason == "HIGH_EFFECTIVE_RR_RESCUE"]
+    accepted_reason_breakdown = _distribution([r.accepted_reason for r in lifecycle if r.status_after == "SIGNAL_CREATED"])
     summary = {
         "selected_symbols": len(universe),
         "total_candidates": counts["total_candidates"],
         "accepted_count": counts["accepted_count"],
+        "baseline_accepted_trades": counts["accepted_count"] - rescue_stats.accepted_count,
+        "rescue_candidate_count": rescue_stats.candidate_count,
+        "rescue_accepted_count": rescue_stats.accepted_count,
+        "rescue_rejected_count": rescue_stats.rejected_count,
+        "rescue_accepted_would_tp_count": sum(1 for r in rescue_closed if r.close_reason == "TP_HIT"),
+        "rescue_accepted_would_sl_count": sum(1 for r in rescue_closed if r.close_reason == "SL_HIT"),
+        "rescue_accepted_net_pnl": sum(r.net_pnl_usdt for r in rescue_closed),
+        "baseline_net_pnl": sum(r.net_pnl_usdt for r in baseline_closed),
+        "baseline_plus_rescue_net_pnl": sum(r.net_pnl_usdt for r in lifecycle if r.status_after == "POSITION_CLOSED"),
+        "rescue_avg_effective_rr": (sum(r.rescue_effective_rr for r in rescue_accept_rows) / len(rescue_accept_rows)) if rescue_accept_rows else 0.0,
+        "rescue_avg_score": (sum(r.score for r in rescue_accept_rows) / len(rescue_accept_rows)) if rescue_accept_rows else 0.0,
+        "rescue_reject_reasons": json.dumps(rescue_stats.reject_reasons, sort_keys=True),
+        "accepted_reason_breakdown": json.dumps(accepted_reason_breakdown, sort_keys=True),
         "rejected_count": counts["rejected_count"],
         "total_rejected": counts["rejected_count"],
         "stop_too_wide_softened_count": len({r.signal_id or f"{r.symbol}:{r.timestamp}" for r in softened_lifecycle_rows}),

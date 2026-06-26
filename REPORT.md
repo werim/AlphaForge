@@ -1,3 +1,47 @@
+## 2026-06-26 - High Effective-RR Rescue Acceptance Lane (BACKTEST-only)
+
+### Why the patch was needed
+The reject engine is intentionally selective, but rejected later-gate diagnostics showed some high effective-RR candidates, including STOP_TOO_WIDE rows that would have reached TP in counterfactual shadow evaluation. The goal is to measure recoverable expectancy without globally weakening the reject engine or optimizing for trade count.
+
+### Root cause
+Later-gate rejects were only available as diagnostics/shadow evidence. There was no separate, opt-in, reduced-size BACKTEST lane to test whether high score plus high effective RR and acceptable execution conditions can recover value while preserving normal thresholds.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Added an opt-in BACKTEST-only `HIGH_EFFECTIVE_RR_RESCUE` lane. Default behavior is unchanged because `rescue_enabled` defaults false. When enabled, rescue can only accept allowed later-gate reasons after score, effective RR, liquidity, volatility, spread, slippage, regime, daily rescue-limit, max-concurrent, and reduced-size checks pass. LIVE mode cannot rescue accept.
+
+### Lifecycle changes
+Rescue-accepted orders use the normal accepted lifecycle simulation and carry `accepted_reason=HIGH_EFFECTIVE_RR_RESCUE`, `original_reject_reason`, `rescue_size_multiplier`, `rescue_effective_rr`, and `rescue_decision_context` metadata. Rejected non-rescue rows remain rejected and auditable.
+
+### Persistence changes
+No SQLite migration. Rescue metadata is stored in the existing lifecycle `execution_ctx` payload and exported by the in-memory BACKTEST lifecycle persistence/export path.
+
+### Export/schema changes
+`order_backtest_summary.csv` and the backtest quality summary now include baseline-vs-rescue metrics: baseline accepted trades, rescue candidate/accepted/rejected counts, rescue TP/SL counts, rescue and baseline PnL, rescue average score/effective RR, rescue reject reasons, and accepted-reason breakdown.
+
+### Tests added
+Added regressions proving disabled rescue preserves baseline rejection behavior, rescue is BACKTEST-only, LIVE cannot rescue, rescue cannot bypass liquidity/spread/slippage/volatility/max-concurrent checks, rescue uses reduced size, rescue metadata exports, baseline/rescue metrics are shown, and global thresholds are not changed.
+
+### Tests executed
+- `python3 -m py_compile backtest_order.py`
+- `pytest -q tests/test_backtest_order_scanner.py -q`
+- `pytest -q`
+
+### Risks and remaining limitations
+Rescue is experimental and candle-simulation based; it is not proof of LIVE readiness. Daily rescue limits and reduced size protect against trade-count optimization, but results still require review under realistic historical liquidity/spread/slippage assumptions. Accepted diagnostics geometry remains a known documented issue where source artifacts do not export complete geometry/PNL.
+
+### Migration concerns
+Backward compatible. New fields are additive CSV/summary metadata and rescue remains disabled by default.
+
+### Push recommendation
+Safe to push as a BACKTEST-only experiment after CI. Do not enable for LIVE and do not loosen global reject thresholds based solely on this lane.
+
 ## 2026-06-26 - Accepted Diagnostics Synthetic-ID Export Hardening
 
 ### Why the patch was needed
