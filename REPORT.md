@@ -10,6 +10,19 @@ High-score signals with acceptable effective RR were being rejected solely by `S
 - `src/alphaforge/order.py`
 - `backtest_order.py`
 - `tests/test_trade_quality.py`
+## 2026-06-25 - Dashboard Accepted-Trade Diagnostics and Backtest Reject-Rate Clarity
+
+### Why the patch was needed
+The dashboard could show rejected and shadow calibration evidence without a comparable accepted-trade score/effective-RR view. The overview top cards also displayed PAPER runtime SQL reject rate next to selected BACKTEST output, which could be misread as the backtest reject rate.
+
+### Root cause
+Dashboard BACKTEST summarization only built rejected/near-miss distributions from `rejected_orders.csv` and `rejected_shadow.csv`. Accepted lifecycle rows were not summarized into calibration artifacts, and the overview metric label did not clearly separate runtime SQL state from the selected backtest result.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `src/alphaforge/dashboard/templates/rejects.html`
+- `tests/test_dashboard_app.py`
 - `VERSION.md`
 - `REPORT.md`
 - `CHANGELOG.md`
@@ -42,6 +55,32 @@ No database migration is included. New CSV/export columns are additive. Downstre
 
 ### Push recommendation
 Safe to push after full `pytest -q` verification; do not claim LIVE readiness.
+No trading, reject, threshold, or execution behavior changed. Completed dashboard BACKTEST runs now include accepted trade diagnostics and accepted/near-miss distributions in `lifecycle_calibration_summary.json` and the result panel.
+
+### Lifecycle changes
+No lifecycle progression changed. Accepted diagnostics are read from accepted lifecycle states only; rejected shadow outcomes remain rejected diagnostics and do not inflate accepted counts.
+
+### Persistence changes
+No database schema changes. CSV/JSON dashboard artifacts gain additional diagnostic keys only.
+
+### Export/schema changes
+`lifecycle_calibration_summary.json` now includes `accepted_trade_diagnostics`, `accepted_score_distribution`, `accepted_effective_rr_distribution`, `near_miss_score_distribution`, and `near_miss_effective_rr_distribution`.
+
+### Tests added
+Updated the dashboard regression fixture to include an accepted lifecycle row with score, raw RR, effective RR, regime, entry/exit/result, and net PnL; assertions verify accepted diagnostics and selected-backtest reject rate rendering.
+
+### Tests executed
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py`
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics` (optional dashboard dependency collection skipped in this environment)
+
+### Risks and remaining limitations
+Historical backtest artifacts may not contain accepted score/effective-RR fields, so accepted diagnostics can remain unavailable until rerun. This patch does not prove filters are too strict or too loose; loosening filters remains unsafe without cost-adjusted shadow expectancy evidence.
+
+### Migration concerns
+None. New JSON keys are additive and dashboard rendering handles empty diagnostics.
+
+### Push recommendation
+Safe to push after dependency-complete dashboard tests run in CI. No LIVE readiness claim.
 
 ## 2026-06-25 - Dashboard Calibration Rejected-Shadow Source Fix
 

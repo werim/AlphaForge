@@ -9,6 +9,17 @@
 - **Known critical risks:** Softening is bounded but still increases candidate exposure for learning; extreme stop geometry, invalid levels, spread/slippage/volatility, and effective-RR gates remain critical safety controls.
 - **Last audit date:** 2026-06-25.
 - **Live readiness verdict:** Not LIVE ready; this patch enables safer BACKTEST/PAPER learning only and does not authorize LIVE trading.
+## 2026-06-25 Dashboard accepted-trade diagnostics and backtest reject-rate clarity
+
+- **Current version:** Dashboard accepted-trade diagnostics and backtest reject-rate clarity.
+- **Current phase:** BACKTEST dashboard artifact quality auditability.
+- **Runtime maturity:** Research/backtest; selected backtest results now expose accepted-score/effective-RR diagnostics alongside rejected and near-miss distributions.
+- **BACKTEST/PAPER/LIVE alignment:** No threshold, reject, acceptance, order execution, or lifecycle decision logic changed.
+- **Lifecycle coverage:** Accepted diagnostics are derived from accepted lifecycle states without converting rejected shadow outcomes into trades.
+- **Execution realism coverage:** Effective-RR visibility is improved; dashboard still reports unavailable execution cost fields as diagnostic evidence, not zero-cost assumptions.
+- **Known critical risks:** Historical dashboard artifacts may still lack accepted score/cost fields until regenerated; calibration remains diagnostic and must not justify looser filters without cost-adjusted shadow proof.
+- **Last audit date:** 2026-06-25.
+- **Live readiness verdict:** Not LIVE ready; this patch improves BACKTEST dashboard diagnostics only.
 
 ## 2026-06-25 Dashboard calibration rejected-shadow source fix
 
