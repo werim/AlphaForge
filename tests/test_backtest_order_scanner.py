@@ -1263,3 +1263,132 @@ def test_would_tp_shadow_does_not_inflate_accepted_count():
 
     assert counts["accepted_count"] == 0
     assert any(r["shadow_outcome"] == "WOULD_TP" and r["decision"] == "REJECTED" for r in persisted)
+
+
+def _rescue_recent_stats():
+    return {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0, "outcomes": []}
+
+
+def _rescue_result(reason="STOP_TOO_WIDE", score=9.5, rr=2.2):
+    return {
+        "status": "rejected",
+        "reason": reason,
+        "diagnostics": {
+            "side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND",
+            "score": score, "rr": rr, "entry": 10.0, "sl": 9.5, "tp": 11.1, "order_type": "MARKET",
+        },
+    }
+
+
+def _rescue_mctx(score=9.5, rr=2.2, spread=0.001, slippage=0.001, liquidity_ok=True, volatility_ok=True, regime="TREND"):
+    return {
+        "entry": 10.0, "sl": 9.5, "tp": 11.1, "score": score, "rr": rr, "spread_pct": spread,
+        "expected_slippage_pct": slippage, "liquidity_score": 0.9, "liquidity_ok": liquidity_ok,
+        "volatility_ok": volatility_ok, "regime": regime, "volatility_regime": "NORMAL",
+    }
+
+
+def test_rescue_disabled_preserves_baseline_rejection(monkeypatch):
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 11.5, 9.8, 11, 1)]
+    called = {"n": 0}
+    monkeypatch.setattr(bo, "simulate_candidate", lambda *a, **k: called.__setitem__("n", called["n"] + 1) or [])
+
+    cand = bo.process_backtest_result("AAAUSDT", candles[0], 0, candles, _rescue_result(), _rescue_mctx(), 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats())
+
+    assert cand is None
+    assert called["n"] == 0
+    assert [r.status_after for r in lifecycle] == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
+    assert rejected[0]["reject_reason"] == "STOP_TOO_WIDE"
+
+
+def test_rescue_enabled_only_backtest_and_marks_reduced_size_exports():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 11.5, 9.8, 11, 1)]
+    stats = bo.RescueStats()
+    cand = bo.process_backtest_result(
+        "AAAUSDT", candles[0], 0, candles, _rescue_result(), _rescue_mctx(), 1000, 1.0,
+        lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(),
+        rescue_config=bo.RescueConfig(enabled=True), rescue_stats=stats, mode="BACKTEST",
+    )
+
+    assert cand is not None
+    assert cand.accepted_reason == "HIGH_EFFECTIVE_RR_RESCUE"
+    assert cand.original_reject_reason == "STOP_TOO_WIDE"
+    assert cand.rescue_size_multiplier == pytest.approx(0.25)
+    assert stats.accepted_count == 1
+    assert any(r.accepted_reason == "HIGH_EFFECTIVE_RR_RESCUE" and r.original_reject_reason == "STOP_TOO_WIDE" for r in lifecycle)
+    assert any(r.status_after == "POSITION_CLOSED" and r.net_pnl_usdt < 1.0 for r in lifecycle)
+    persisted = bo._persist_lifecycle_rows(lifecycle)
+    assert any(r.get("accepted_reason") == "HIGH_EFFECTIVE_RR_RESCUE" for r in persisted)
+    assert any(r.get("original_reject_reason") == "STOP_TOO_WIDE" for r in persisted)
+
+
+def test_rescue_cannot_accept_live_mode():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 11.5, 9.8, 11, 1)]
+    stats = bo.RescueStats()
+    cand = bo.process_backtest_result(
+        "AAAUSDT", candles[0], 0, candles, _rescue_result(), _rescue_mctx(), 1000, 1.0,
+        lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(),
+        rescue_config=bo.RescueConfig(enabled=True), rescue_stats=stats, mode="LIVE",
+    )
+    assert cand is None
+    assert stats.accepted_count == 0
+    assert stats.reject_reasons["MODE_NOT_BACKTEST"] == 1
+
+
+@pytest.mark.parametrize("kwargs,reason", [
+    ({"spread": 0.01}, "SPREAD_TOO_HIGH"),
+    ({"slippage": 0.01}, "SLIPPAGE_TOO_HIGH"),
+    ({"liquidity_ok": False}, "LIQUIDITY_NOT_OK"),
+    ({"volatility_ok": False}, "VOLATILITY_NOT_OK"),
+])
+def test_rescue_does_not_bypass_execution_quality_checks(kwargs, reason):
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 11.5, 9.8, 11, 1)]
+    stats = bo.RescueStats()
+    cand = bo.process_backtest_result(
+        "AAAUSDT", candles[0], 0, candles, _rescue_result(), _rescue_mctx(**kwargs), 1000, 1.0,
+        lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(),
+        rescue_config=bo.RescueConfig(enabled=True), rescue_stats=stats, mode="BACKTEST",
+    )
+    assert cand is None
+    assert stats.reject_reasons[reason] == 1
+
+
+def test_rescue_does_not_bypass_max_concurrent_positions():
+    lifecycle, rejected, rejection_counts = [], [], {}
+    open_rows = [bo.LifecycleRow(1, "OTHER", "LONG", "", "", "TREND", 9, 2, 10, 9, 12, "ORDER_PLACED", "POSITION_CLOSED")]
+    candles = [bo.Candle(1, 10, 11.5, 9.8, 11, 1)]
+    stats = bo.RescueStats()
+    cfg = bo.RescueConfig(enabled=True, max_concurrent_positions=1)
+    cand = bo.process_backtest_result(
+        "AAAUSDT", candles[0], 0, candles, _rescue_result(), _rescue_mctx(), 1000, 1.0,
+        lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(), rescue_config=cfg, rescue_stats=stats, mode="BACKTEST",
+    )
+    assert cand is None
+    assert stats.reject_reasons["MAX_CONCURRENT_POSITIONS"] == 1
+
+
+def test_backtest_quality_summary_exposes_rescue_metrics():
+    rows = [
+        {"decision": "ACCEPTED", "lifecycle_state": "SIGNAL_CREATED", "accepted_reason": "BASELINE", "score": 8, "rr": 2, "effective_rr": 2, "execution_ctx": "{}"},
+        {"decision": "ACCEPTED", "lifecycle_state": "SIGNAL_CREATED", "accepted_reason": "HIGH_EFFECTIVE_RR_RESCUE", "score": 9.5, "rr": 2.2, "effective_rr": 2.1, "rescue_effective_rr": 2.1, "execution_ctx": "{}"},
+    ]
+    summary = bo.build_backtest_quality_summary(rows)
+    assert summary["baseline_accepted_trades"] == 1
+    assert summary["rescue_accepted_count"] == 1
+    assert summary["accepted_reason_breakdown"]["HIGH_EFFECTIVE_RR_RESCUE"] == 1
+
+
+def test_rescue_config_does_not_change_global_order_thresholds():
+    import alphaforge.order as order
+
+    cfg = bo.RescueConfig(enabled=True)
+
+    assert cfg.score_min == pytest.approx(9.0)
+    assert cfg.effective_rr_min == pytest.approx(1.90)
+    assert order.MIN_SCORE_BASE == pytest.approx(7.5)
+    assert order.MIN_RR_BASE == pytest.approx(1.3)
+    assert order.MIN_RR_THRESHOLD == pytest.approx(1.1)
