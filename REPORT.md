@@ -1,3 +1,15 @@
+## 2026-06-25 - STOP_TOO_WIDE Soft Risk-Control Patch
+
+### Why the patch was needed
+High-score signals with acceptable effective RR were being rejected solely by `STOP_TOO_WIDE`, preventing BACKTEST/PAPER from learning whether those setups would reach TP, SL, timeout, or breakeven under reduced risk.
+
+### Root cause
+`STOP_TOO_WIDE` was a single hard quality-gate branch. It did not distinguish between invalid/extreme geometry and high-confidence, non-extreme setups that should be allowed to continue with reduced risk for learning.
+
+### Files changed
+- `src/alphaforge/order.py`
+- `backtest_order.py`
+- `tests/test_trade_quality.py`
 ## 2026-06-25 - Dashboard Accepted-Trade Diagnostics and Backtest Reject-Rate Clarity
 
 ### Why the patch was needed
@@ -16,6 +28,33 @@ Dashboard BACKTEST summarization only built rejected/near-miss distributions fro
 - `CHANGELOG.md`
 
 ### Runtime behavior changes
+`STOP_TOO_WIDE` now has safe config defaults. When hard rejection is enabled, non-extreme wide stops are softened only if score and effective RR meet configured minimums; otherwise they remain rejected. When hard rejection is disabled, STOP_TOO_WIDE alone does not reject the candidate, but risk scale is still reduced. Spread, slippage, volatility, stale/invalid geometry, and execution effective-RR gates are not bypassed.
+
+### Lifecycle changes
+Softened candidates proceed through normal accepted lifecycle states and carry diagnostics: `stop_too_wide_softened`, `original_reject_reason`, `reject_reason_softened`, and `risk_scale`. Rejected STOP_TOO_WIDE rows remain rejected and retain counterfactual shadow diagnostics.
+
+### Persistence changes
+BACKTEST lifecycle CSV rows now include cost penalty for accepted and rejected decisions when available. Softened STOP_TOO_WIDE lifecycle rows persist risk-scale and original-reason diagnostics via exported lifecycle fields.
+
+### Export/schema changes
+`order_backtest_summary.csv` now includes STOP_TOO_WIDE softening/hard-reject counters, STOP_TOO_WIDE shadow outcome counters, and average risk scale for softened wide-stop candidates. CSV field additions are backward-compatible for readers that ignore unknown columns.
+
+### Tests added
+Added order-quality regressions for high-score STOP_TOO_WIDE softening, low effective-RR rejection, extreme stop rejection, hard-reject-disabled risk scaling, and spread-gate non-bypass. Existing dashboard calibration fixtures already assert STOP_TOO_WIDE shadow/cost display from rejected-shadow diagnostics.
+
+### Tests executed
+- `pytest tests/test_trade_quality.py -q`
+- `pytest tests/test_backtest_order_scanner.py::test_rejected_shadow_summary_csv_created -q`
+- `pytest -q`
+
+### Risks and remaining limitations
+Risk scale reduces exposure but does not make wide stops intrinsically safe. Estimated backtest spread/slippage/costs remain inferior to measured historical execution data. LIVE remains not ready without full lifecycle, reconciliation, observability, exchange, and operator evidence.
+
+### Migration concerns
+No database migration is included. New CSV/export columns are additive. Downstream strict-schema readers may need to tolerate the additional fields.
+
+### Push recommendation
+Safe to push after full `pytest -q` verification; do not claim LIVE readiness.
 No trading, reject, threshold, or execution behavior changed. Completed dashboard BACKTEST runs now include accepted trade diagnostics and accepted/near-miss distributions in `lifecycle_calibration_summary.json` and the result panel.
 
 ### Lifecycle changes

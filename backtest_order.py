@@ -170,6 +170,10 @@ class LifecycleRow:
     volatility_score: Any = "UNAVAILABLE_BACKTEST"
     liquidity_ok: Optional[bool] = None
     volatility_ok: Optional[bool] = None
+    stop_too_wide_softened: bool = False
+    original_reject_reason: str = ""
+    reject_reason_softened: str = ""
+    risk_scale: float = 1.0
 
 
 def _is_pre_signal_symbol_reject(row: LifecycleRow, lifecycle_state: str | None = None) -> bool:
@@ -873,6 +877,12 @@ def finalize(
         expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
         volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
         liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+        effective_rr=_execution_reject_flags(candidate.rr, market_ctx)[0],
+        cost_penalty=_execution_reject_flags(candidate.rr, market_ctx)[2]["cost_penalty_total"],
+        stop_too_wide_softened=bool(market_ctx.get("stop_too_wide_softened", False)),
+        original_reject_reason=str(market_ctx.get("original_reject_reason", "") or ""),
+        reject_reason_softened=str(market_ctx.get("reject_reason_softened", "") or ""),
+        risk_scale=_safe_float(market_ctx.get("risk_scale"), 1.0),
         mfe=mfe,
         mae=mae,
     )
@@ -1030,6 +1040,11 @@ def process_backtest_result(
             volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
             liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
             effective_rr=base_effective_rr,
+            cost_penalty=_safe_float(_base_penalty_breakdown.get("cost_penalty_total"), 0.0),
+            stop_too_wide_softened=bool(diagnostics.get("stop_too_wide_softened", False)) if isinstance(diagnostics, dict) else False,
+            original_reject_reason=str(diagnostics.get("original_reject_reason", "") or "") if isinstance(diagnostics, dict) else "",
+            reject_reason_softened=str(diagnostics.get("reject_reason_softened", "") or "") if isinstance(diagnostics, dict) else "",
+            risk_scale=_safe_float(diagnostics.get("risk_scale"), 1.0) if isinstance(diagnostics, dict) else 1.0,
             signal_id=signal_id,
             lifecycle_id=signal_id,
         )
@@ -1064,6 +1079,11 @@ def process_backtest_result(
                 volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
                 liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 effective_rr=base_effective_rr,
+                cost_penalty=_safe_float(_base_penalty_breakdown.get("cost_penalty_total"), 0.0),
+                stop_too_wide_softened=bool(diagnostics.get("stop_too_wide_softened", False)) if isinstance(diagnostics, dict) else False,
+                original_reject_reason=str(diagnostics.get("original_reject_reason", "") or "") if isinstance(diagnostics, dict) else "",
+                reject_reason_softened=str(diagnostics.get("reject_reason_softened", "") or "") if isinstance(diagnostics, dict) else "",
+                risk_scale=_safe_float(diagnostics.get("risk_scale"), 1.0) if isinstance(diagnostics, dict) else 1.0,
                 signal_id=signal_id,
                 lifecycle_id=signal_id,
             )
@@ -1096,6 +1116,12 @@ def process_backtest_result(
                 "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
                 "raw_rr": rr,
                 "effective_rr": diagnostics.get("effective_rr", base_effective_rr),
+                **_base_penalty_breakdown,
+                "cost_penalty": _safe_float(_base_penalty_breakdown.get("cost_penalty_total"), 0.0),
+                "stop_too_wide_softened": bool(diagnostics.get("stop_too_wide_softened", False)) if isinstance(diagnostics, dict) else False,
+                "original_reject_reason": diagnostics.get("original_reject_reason", "") if isinstance(diagnostics, dict) else "",
+                "reject_reason_softened": diagnostics.get("reject_reason_softened", "") if isinstance(diagnostics, dict) else "",
+                "risk_scale": _safe_float(diagnostics.get("risk_scale"), 1.0) if isinstance(diagnostics, dict) else 1.0,
                 "min_required_score": ((diagnostics.get("adaptive_thresholds") or {}).get("min_score") if isinstance(diagnostics, dict) else None),
                 "trend_strength": mctx.get("trend_strength", "UNAVAILABLE_BACKTEST"),
                 "volatility_pct": mctx.get("volatility_pct", "UNAVAILABLE_BACKTEST"),
@@ -1156,6 +1182,7 @@ def process_backtest_result(
                 volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
                 liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 effective_rr=effective_rr,
+                cost_penalty=_safe_float(penalty_breakdown.get("cost_penalty_total"), 0.0),
                 signal_id=signal_id,
                 lifecycle_id=signal_id,
             )
@@ -1203,7 +1230,13 @@ def process_backtest_result(
             }
         )
         return None
-    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct, market_ctx=mctx)
+    risk_scale = min(1.0, max(0.0, _safe_float(diagnostics.get("risk_scale"), 1.0))) if isinstance(diagnostics, dict) else 1.0
+    sim_ctx = {**dict(mctx), "risk_scale": risk_scale}
+    if isinstance(diagnostics, dict):
+        for key in ("stop_too_wide_softened", "original_reject_reason", "reject_reason_softened"):
+            if key in diagnostics:
+                sim_ctx[key] = diagnostics[key]
+    sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct * risk_scale, market_ctx=sim_ctx)
     lifecycle.extend(sim_rows)
     recent_stats["last_trade_ts_by_symbol"][symbol] = candle.timestamp
     recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
@@ -2352,12 +2385,25 @@ def main():
             w.writeheader()
             w.writerows(rows)
     counts = _derive_backtest_counts(lifecycle)
+    softened_lifecycle_rows = [r for r in lifecycle if bool(getattr(r, "stop_too_wide_softened", False))]
+    softened_scales = [_safe_float(getattr(r, "risk_scale", 1.0), 1.0) for r in softened_lifecycle_rows]
+    stop_shadow_counts = {
+        "WOULD_TP": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_TP"),
+        "WOULD_SL": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_SL"),
+        "WOULD_TIMEOUT": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_TIMEOUT"),
+    }
     summary = {
         "selected_symbols": len(universe),
         "total_candidates": counts["total_candidates"],
         "accepted_count": counts["accepted_count"],
         "rejected_count": counts["rejected_count"],
         "total_rejected": counts["rejected_count"],
+        "stop_too_wide_softened_count": len({r.signal_id or f"{r.symbol}:{r.timestamp}" for r in softened_lifecycle_rows}),
+        "stop_too_wide_hard_reject_count": sum(1 for row in rejected if str(row.get("reject_reason", "")).upper() == "STOP_TOO_WIDE"),
+        "stop_too_wide_shadow_would_tp": stop_shadow_counts["WOULD_TP"],
+        "stop_too_wide_shadow_would_sl": stop_shadow_counts["WOULD_SL"],
+        "stop_too_wide_shadow_timeout": stop_shadow_counts["WOULD_TIMEOUT"],
+        "avg_risk_scale_for_softened_stop_too_wide": (sum(softened_scales) / len(softened_scales)) if softened_scales else 0.0,
         "rejection_rate": (
             0.0
             if counts["total_candidates"] == 0

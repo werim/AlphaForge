@@ -181,6 +181,9 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         "MAX_SPREAD_PCT": 0.05, "MAX_EXPECTED_SLIPPAGE_PCT": 0.05, "MIN_ATR_PCT": 0.25, "MAX_ATR_PCT": 3.0,
         "SYMBOL_LOSS_STREAK_LIMIT": 3, "SYMBOL_LOSS_STREAK_COOLDOWN_HOURS": 6, "GLOBAL_LOSS_STREAK_LIMIT": 5,
         "GLOBAL_LOSS_STREAK_COOLDOWN_HOURS": 3, "BLOCK_UNKNOWN_EXPECTANCY": True, "BLOCK_CHOP_MARKET": True, "REQUIRE_REGIME_ALIGNMENT": True,
+        "STOP_TOO_WIDE_HARD_REJECT": True, "STOP_TOO_WIDE_SOFTEN_FOR_HIGH_SCORE": True,
+        "STOP_TOO_WIDE_SOFT_SCORE_MIN": 9.0, "STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN": 1.75,
+        "STOP_TOO_WIDE_MAX_RISK_SCALE": 0.50, "STOP_TOO_WIDE_EXTREME_MULT": 1.50,
     }
     cfg.update(dict(config or {}))
     reject_reason = ""
@@ -270,7 +273,21 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     elif sl_pct < float(cfg["MIN_SL_PCT"]):
         reject_reason, failed_filter = "STOP_TOO_TIGHT", "sl_pct"
     elif sl_pct > float(cfg["MAX_SL_PCT"]):
-        reject_reason, failed_filter = "STOP_TOO_WIDE", "sl_pct"
+        effective_rr_for_stop = _nullable_float(market_ctx.get("effective_rr"))
+        if effective_rr_for_stop is None:
+            effective_rr_for_stop = rr
+        stop_limit = float(cfg["MAX_SL_PCT"])
+        is_extreme_stop = sl_pct > stop_limit * float(cfg["STOP_TOO_WIDE_EXTREME_MULT"])
+        hard_reject_enabled = bool(cfg["STOP_TOO_WIDE_HARD_REJECT"])
+        soft_eligible = (
+            bool(cfg["STOP_TOO_WIDE_SOFTEN_FOR_HIGH_SCORE"])
+            and score_eval >= float(cfg["STOP_TOO_WIDE_SOFT_SCORE_MIN"])
+            and effective_rr_for_stop >= float(cfg["STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN"])
+        )
+        if hard_reject_enabled and (is_extreme_stop or not soft_eligible):
+            reject_reason, failed_filter = "STOP_TOO_WIDE", "sl_pct"
+        else:
+            failed_filter = ""
     elif spread_pct > float(cfg["MAX_SPREAD_PCT"]):
         reject_reason, failed_filter = "SPREAD_TOO_HIGH", "spread_pct"
     elif expected_slippage_pct > float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]):
@@ -292,7 +309,39 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             reject_reason, failed_filter = "SYMBOL_LOSS_STREAK_BLOCK", "symbol_block"
         elif int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
             reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
+    if reject_reason == "":
+        if spread_pct > float(cfg["MAX_SPREAD_PCT"]):
+            reject_reason, failed_filter = "SPREAD_TOO_HIGH", "spread_pct"
+        elif expected_slippage_pct > float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]):
+            reject_reason, failed_filter = "SLIPPAGE_TOO_HIGH", "expected_slippage_pct"
+        elif atr_pct is not None and atr_pct < float(cfg["MIN_ATR_PCT"]):
+            reject_reason, failed_filter = "VOLATILITY_TOO_LOW", "atr_pct"
+        elif atr_pct is not None and atr_pct > float(cfg["MAX_ATR_PCT"]):
+            reject_reason, failed_filter = "VOLATILITY_TOO_HIGH", "atr_pct"
+        else:
+            now_ts = int(market_ctx.get("timestamp", 0) or 0)
+            last_ts = int((recent_stats.get("last_trade_ts_by_symbol", {}) or {}).get(symbol, 0) or 0)
+            if last_ts and now_ts and (now_ts - last_ts) < int(cfg["SYMBOL_COOLDOWN_MINUTES"]) * 60_000:
+                reject_reason, failed_filter = "SYMBOL_COOLDOWN_ACTIVE", "cooldown"
+            elif int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]):
+                reject_reason, failed_filter = "DAILY_SYMBOL_TRADE_LIMIT", "daily_symbol"
+            elif int(recent_stats.get("global_trades_today", 0) or 0) >= int(cfg["MAX_TRADES_GLOBAL_PER_DAY"]):
+                reject_reason, failed_filter = "DAILY_GLOBAL_TRADE_LIMIT", "daily_global"
+            elif int((recent_stats.get("symbol_loss_block_until", {}) or {}).get(symbol, 0) or 0) > now_ts:
+                reject_reason, failed_filter = "SYMBOL_LOSS_STREAK_BLOCK", "symbol_block"
+            elif int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
+                reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
+
+    stop_too_wide_softened = sl_pct > float(cfg["MAX_SL_PCT"]) and reject_reason == ""
     diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates}
+    if stop_too_wide_softened:
+        diagnostics.update({
+            "stop_too_wide_softened": True,
+            "original_reject_reason": "STOP_TOO_WIDE",
+            "reject_reason_softened": "STOP_TOO_WIDE",
+            "risk_scale": min(float(cfg["STOP_TOO_WIDE_MAX_RISK_SCALE"]), 1.0),
+            "stop_too_wide_hard_reject_enabled": bool(cfg["STOP_TOO_WIDE_HARD_REJECT"]),
+        })
     return TradeQualityDecision(accepted=(reject_reason == ""), reject_reason=reject_reason, quality_score=quality_score, diagnostics=diagnostics)
 
 
@@ -412,8 +461,9 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
         payload["reason"] = reason
         payload["reject_reason"] = reason
         return payload
+    ctx.diagnostics.update(quality.diagnostics)
     execution = execute_order_candidate(decision, ctx)
-    return {"status": "executed", "accepted": True, "candidate": decision, "reason": "", "reject_reason": "", "rejection_reason": "", "execution": execution}
+    return {"status": "executed", "accepted": True, "candidate": decision, "reason": "", "reject_reason": "", "rejection_reason": "", "execution": execution, "diagnostics": quality.diagnostics}
 
 
 def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[str, Any] | None = None, recent_stats: Mapping[str, Any] | None = None) -> dict[str, Any]:
