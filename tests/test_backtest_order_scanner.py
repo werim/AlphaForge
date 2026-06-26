@@ -1513,3 +1513,29 @@ def test_stop_too_wide_split_metrics_are_exported():
     assert summary["thresholds_changed"] is False
     assert summary["acceptance_logic_changed"] is False
     assert all(g["reporting_only"] is True for g in gates)
+
+
+def test_quality_gate_high_effective_rr_would_sl_is_not_rescued():
+    would_sl = _shadow_eval("AAAUSDT", "LOW_SCORE", 9.8, 3.0, "WOULD_SL", side="SHORT", regime="BREAKOUT", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+    would_sl.stop_distance_pct = 1.0
+
+    cfg = bo.QualityGateConfig(enabled=True, modes=("BACKTEST",), max_trades_per_day=10)
+    summary, *_ = bo.build_signal_quality_diagnostics([], [would_sl], "15m", quality_gate_config=cfg)
+
+    assert summary["quality_gate_candidate_count"] == 0
+    assert summary["quality_gate_would_sl_count"] == 0
+
+
+def test_quality_gate_stop_too_wide_not_allowed_by_default_when_would_sl_dominates():
+    rows = []
+    for idx, outcome in enumerate(["WOULD_SL", "WOULD_SL", "WOULD_SL", "WOULD_TP"]):
+        row = _shadow_eval(f"AAA{idx}USDT", "STOP_TOO_WIDE", 9.4, 2.4, outcome, side="SHORT", regime="BREAKOUT", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+        row.stop_distance_pct = 1.0
+        rows.append(row)
+
+    cfg = bo.QualityGateConfig(enabled=True, modes=("BACKTEST",), max_trades_per_day=10)
+    summary, *_ = bo.build_signal_quality_diagnostics([], rows, "15m", quality_gate_config=cfg)
+
+    assert "STOP_TOO_WIDE" not in cfg.allowed_reasons
+    assert summary["quality_gate_candidate_count"] == 0
+    assert summary["quality_gate_reason_breakdown"] == {}

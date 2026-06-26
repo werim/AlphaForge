@@ -1,3 +1,26 @@
+## 2026-06-26 - Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m
+
+### Added
+- Added `later_gate_breakdown.csv` dashboard artifact sourced from candidates that already passed score/RR/expectancy and were rejected by later BACKTEST gates.
+- Added regression coverage for accepted diagnostics order-field enrichment, later-gate grouping, high effective-RR WOULD_SL exclusion, and default STOP_TOO_WIDE quality-gate exclusion.
+
+### Changed
+- Quality-gate rescue/comparison remains disabled by default and now requires a counterfactual `WOULD_TP` outcome when enabled.
+- Default quality-gate allowed reasons exclude `STOP_TOO_WIDE`; it must be explicitly opted in only after positive calibration evidence exists.
+
+### Fixed
+- Accepted trade diagnostics now ignore placeholder `NOT_EXPORTED`/`UNAVAILABLE` values and backfill side, entry, SL, TP, exit, and net PnL from matched `backtest_orders.csv` / close execution context when exported.
+- Later-gate diagnostics now group only the passed-before-later-gates population instead of all same-reason shadow rows.
+
+### Removed
+- Removed `STOP_TOO_WIDE` from default quality-gate rescue reasons.
+
+### Breaking Changes
+- None for baseline BACKTEST acceptance; defaults are stricter for optional quality-gate diagnostics and do not loosen global acceptance.
+
+### Known Issues
+- Dashboard diagnostics remain dependent on exported artifact completeness; missing order/close fields are still surfaced as unavailable rather than fabricated.
+
 ## 2026-06-26 - BACKTEST_ONLY SHORT Breakdown Breakout Normal Stop Quality Gate
 
 ### Added

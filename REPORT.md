@@ -1,3 +1,69 @@
+## 2026-06-26 Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m
+
+### Why the patch was needed
+- The BTCUSDT 60d/15m dashboard run reported 5,758 candidates, only 2 accepted trades, 5,756 rejects, 0/2/0 win/loss/open, and negative net PnL.
+- The accepted diagnostics table showed accepted order fields as missing or `NOT_EXPORTED`, preventing audit of the two realized losses.
+- Thirty-one candidates passed score/RR/expectancy but were rejected by later gates; the dashboard needed an explicit artifact for this population.
+- STOP_TOO_WIDE later-gate evidence was dominated by WOULD_SL outcomes, so it must not remain in default quality-gate rescue reasons.
+
+### Root cause
+- Accepted dashboard diagnostics treated placeholder export markers as real values before consulting matched `backtest_orders.csv` and close execution context.
+- Later-gate diagnostics could source broader rejected-shadow rows by reason rather than strictly the passed-before-later-gates population.
+- The optional quality-gate default reason list still included STOP_TOO_WIDE even though current calibration evidence does not justify default rescue.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `backtest_order.py`
+- `tests/test_dashboard_app.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- BACKTEST dashboard artifact generation now writes `later_gate_breakdown.csv` next to the calibration report/summary.
+- Accepted diagnostics are reporting-only enriched from exported accepted order/close artifacts.
+- No baseline acceptance thresholds, accepted trade counts, trade sizing, or order lifecycle decisions were loosened.
+
+### Lifecycle changes
+- No lifecycle transitions were added, removed, or reordered.
+- Accepted diagnostics merge existing lifecycle/order evidence only for audit completeness.
+- Passed-before-later-gates candidates remain rejected and are grouped by later reject reason.
+
+### Persistence changes
+- No SQLite schema changes.
+- No live/paper persistence paths changed.
+
+### Export/schema changes
+- Added `later_gate_breakdown.csv` dashboard artifact with later-gate reason, stage, count, average score/effective RR, cost/liquidity/volatility rates, and WOULD_TP/WOULD_SL counts/rates.
+- `lifecycle_calibration_summary.json` keeps the same `later_gate_diagnostics` structure, now restricted to the passed-before-later-gates population when shadow rows are available.
+- Accepted diagnostic export values now prefer real order/close fields over placeholders.
+
+### Tests added
+- Accepted diagnostics populate fields when `backtest_orders.csv` has side/entry/SL/TP and close context has exit/net PnL.
+- Passed-before-later-gates candidates are grouped by later reject reason.
+- High effective-RR `WOULD_SL` rows are not rescued by the optional quality gate.
+- STOP_TOO_WIDE is not rescued by default when WOULD_SL dominates.
+
+### Tests executed
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py backtest_order.py` passed.
+- `pytest -q tests/test_backtest_order_scanner.py::test_short_breakdown_breakout_normal_stop_gate_counts_enabled_backtest_only tests/test_backtest_order_scanner.py::test_quality_gate_high_effective_rr_would_sl_is_not_rescued tests/test_backtest_order_scanner.py::test_quality_gate_stop_too_wide_not_allowed_by_default_when_would_sl_dominates` passed.
+- `pytest -q tests/test_dashboard_app.py::test_accepted_trade_diagnostics_enriches_orders_and_close_ctx tests/test_dashboard_app.py::test_later_gate_breakdown_uses_only_passed_before_later_gate_candidates` could not collect because dashboard dependencies are skipped in this container.
+
+### Risks
+- Dashboard diagnostics can only populate values that upstream artifacts export; missing fields are intentionally not fabricated.
+- Explicitly overriding quality-gate allowed reasons can still include STOP_TOO_WIDE, so such runs require external calibration review.
+
+### Remaining limitations
+- The BTCUSDT 60d/15m evidence remains negative expectancy and should not be interpreted as rescue approval.
+- Later-gate artifact quality depends on stable signal identifiers or symbol/timestamp/side matching across rejected and shadow exports.
+
+### Migration concerns
+- CSV addition only; no database migration. Existing dashboard consumers should tolerate the new artifact.
+
+### Push recommendation
+- Safe to push as BACKTEST-only diagnostics hardening. Do not enable LIVE trading or loosen baseline acceptance from this evidence.
+
 ## 2026-06-26 - BACKTEST_ONLY SHORT Breakdown Breakout Normal Stop Quality Gate
 
 ### Why the patch was needed
