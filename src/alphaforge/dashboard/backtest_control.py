@@ -74,6 +74,7 @@ class DashboardBacktestResult:
     accepted_effective_rr_distribution: dict[str, Any] = field(default_factory=dict)
     near_miss_score_distribution: dict[str, Any] = field(default_factory=dict)
     near_miss_effective_rr_distribution: dict[str, Any] = field(default_factory=dict)
+    stop_too_wide_rescue_diagnostics: dict[str, Any] = field(default_factory=dict)
     backtest_rejection_rate: float | None = None
 
 
@@ -218,18 +219,35 @@ def _match_by_signal_or_composite(row: Mapping[str, Any], lookup: Mapping[tuple[
 
 
 def _accepted_trade_rows(lifecycle_rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    accepted_states = {"WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED", "PARTIAL_FILL", "FILLED", "TP_HIT", "SL_HIT", "CANCELLED", "OPEN_AT_END", "POSITION_CLOSED"}
+    accepted_states = {
+        "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED", "PARTIAL_FILL", "FILLED",
+        "POSITION_OPENED", "TP_HIT", "SL_HIT", "CANCELLED", "OPEN_AT_END", "POSITION_CLOSED",
+    }
+    state_rank = {state: idx for idx, state in enumerate((
+        "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED", "PARTIAL_FILL", "FILLED",
+        "POSITION_OPENED", "TP_HIT", "SL_HIT", "CANCELLED", "OPEN_AT_END", "POSITION_CLOSED",
+    ), start=1)}
     by_signal: dict[str, dict[str, str]] = {}
-    state_rank = {state: idx for idx, state in enumerate(("WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED", "PARTIAL_FILL", "FILLED", "TP_HIT", "SL_HIT", "CANCELLED", "OPEN_AT_END", "POSITION_CLOSED"), start=1)}
     for row in lifecycle_rows:
         state = str(row.get("lifecycle_state") or row.get("status_after") or "").strip().upper()
         decision = str(row.get("decision") or "").strip().upper()
         if decision != "ACCEPTED" and state not in accepted_states:
             continue
         signal_id = str(row.get("signal_id") or f"{row.get('symbol','')}:{row.get('timestamp') or row.get('event_ts','')}").strip()
-        current = by_signal.get(signal_id)
-        if current is None or state_rank.get(state, 0) >= state_rank.get(str(current.get("lifecycle_state") or current.get("status_after") or "").upper(), 0):
-            by_signal[signal_id] = row
+        current = by_signal.setdefault(signal_id, {})
+        current_state = str(current.get("lifecycle_state") or current.get("status_after") or "").upper()
+        next_is_later = state_rank.get(state, 0) >= state_rank.get(current_state, 0)
+        # Preserve the most complete accepted trade record across lifecycle rows: early rows
+        # often carry score/geometry while POSITION_CLOSED carries close_reason/PnL in execution_ctx.
+        for key, value in row.items():
+            if key in {"lifecycle_state", "status_after"}:
+                continue
+            if value not in (None, "", "None", "null"):
+                current[key] = value
+        if next_is_later:
+            current["lifecycle_state"] = state
+            if row.get("status_after") not in (None, ""):
+                current["status_after"] = row["status_after"]
     return list(by_signal.values())
 
 
@@ -239,7 +257,7 @@ def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_o
     for row in _accepted_trade_rows(lifecycle_rows):
         ctx = _decode_execution_ctx(row.get("execution_ctx"))
         order_row = _match_by_signal_or_composite(row, order_lookup) or {}
-        net_pnl = _first_available(row.get("net_pnl"), row.get("net_pnl_usdt"), row.get("pnl"), row.get("pnl_usdt"), ctx.get("net_pnl"), ctx.get("net_pnl_usdt"), order_row.get("net_pnl"), order_row.get("net_pnl_usdt"), order_row.get("pnl"), order_row.get("pnl_usdt"))
+        net_pnl = _first_available(row.get("net_pnl"), row.get("net_pnl_usdt"), row.get("pnl"), row.get("pnl_usdt"), ctx.get("net_pnl"), ctx.get("net_pnl_usdt"), ctx.get("pnl"), ctx.get("pnl_usdt"), order_row.get("net_pnl"), order_row.get("net_pnl_usdt"), order_row.get("pnl"), order_row.get("pnl_usdt"))
         rows.append({
             "signal_id": row.get("signal_id"),
             "symbol": row.get("symbol"),
@@ -247,8 +265,10 @@ def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_o
             "score": _first_available(row.get("score"), order_row.get("score")),
             "raw_rr": _first_available(row.get("raw_rr"), row.get("rr"), order_row.get("raw_rr"), order_row.get("rr")),
             "effective_rr": _first_available(row.get("effective_rr"), order_row.get("effective_rr")),
-            "regime": _first_available(row.get("regime"), row.get("volatility_regime"), ctx.get("volatility_regime"), ctx.get("regime"), order_row.get("regime"), order_row.get("volatility_regime")),
-            "entry": _first_available(row.get("entry"), ctx.get("entry"), order_row.get("entry")),
+            "regime": _first_available(row.get("regime"), row.get("volatility_regime"), ctx.get("regime"), ctx.get("volatility_regime"), order_row.get("regime"), order_row.get("volatility_regime")),
+            "expectancy_bucket": _first_available(row.get("expectancy_bucket"), ctx.get("expectancy_bucket"), order_row.get("expectancy_bucket")),
+            "decision_cost_penalty": _first_available(row.get("decision_cost_penalty"), row.get("cost_penalty"), ctx.get("decision_cost_penalty"), ctx.get("cost_penalty"), order_row.get("decision_cost_penalty"), order_row.get("cost_penalty")),
+            "entry": _first_available(row.get("entry"), row.get("entry_price"), ctx.get("entry"), ctx.get("entry_price"), order_row.get("entry"), order_row.get("entry_price")),
             "sl": _first_available(row.get("sl"), row.get("stop_loss"), ctx.get("sl"), ctx.get("stop_loss"), order_row.get("sl"), order_row.get("stop_loss")),
             "tp": _first_available(row.get("tp"), row.get("take_profit"), ctx.get("tp"), ctx.get("take_profit"), order_row.get("tp"), order_row.get("take_profit")),
             "exit": _first_available(row.get("exit"), row.get("exit_price"), ctx.get("exit"), ctx.get("exit_price"), order_row.get("exit"), order_row.get("exit_price")),
@@ -258,6 +278,32 @@ def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_o
             "net_pnl_status": "EXPORTED" if net_pnl is not None else "NOT_EXPORTED",
         })
     return rows
+
+
+def _stop_too_wide_rescue_diagnostics(rows: list[dict[str, str]]) -> dict[str, Any]:
+    stop_rows = [r for r in rows if str(r.get("reject_reason") or "").strip().upper() == "STOP_TOO_WIDE"]
+    def reduced_size(row: Mapping[str, Any]) -> bool:
+        return _safe_float_or_none(row.get("effective_rr")) is not None and _safe_float_or_none(row.get("risk_scale")) != 0.0
+    def vol_norm(row: Mapping[str, Any]) -> bool:
+        return _first_available(row.get("volatility_score"), row.get("atr_pct"), row.get("atr"), row.get("volatility_regime")) is not None and _safe_float_or_none(row.get("effective_rr")) is not None
+    def alt_stop(row: Mapping[str, Any]) -> bool:
+        valid = str(_first_available(row.get("alternate_stop_valid"), row.get("structural_stop_valid"), row.get("alt_stop_structurally_valid")) or "").lower()
+        return valid in {"1", "true", "yes"} or _safe_float_or_none(_first_available(row.get("alternate_effective_rr"), row.get("alt_effective_rr"))) is not None
+    rescue_rows = [r for r in stop_rows if reduced_size(r) or vol_norm(r) or alt_stop(r)]
+    shadows = Counter(_shadow(r) for r in rescue_rows)
+    return {
+        "mode": "REPORTING_ONLY",
+        "thresholds_changed": False,
+        "accepted_trades_changed": False,
+        "stop_too_wide_reject_count": len(stop_rows),
+        "rescue_candidate_count": len(rescue_rows),
+        "reduced_position_size_candidate_count": sum(1 for r in stop_rows if reduced_size(r)),
+        "volatility_normalized_stop_candidate_count": sum(1 for r in stop_rows if vol_norm(r)),
+        "tighter_alternate_stop_candidate_count": sum(1 for r in stop_rows if alt_stop(r)),
+        "rescue_would_tp_count": shadows["WOULD_TP"],
+        "rescue_would_sl_count": shadows["WOULD_SL"],
+        "rescue_expected_effective_rr": _numeric_distribution(rescue_rows, "effective_rr")["mean"],
+    }
 
 def _counter_rows(counter: Counter) -> list[dict[str, Any]]:
     return [{"value": key, "count": count} for key, count in counter.most_common()]
@@ -516,6 +562,7 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
         "accepted_effective_rr_distribution": _numeric_distribution(accepted_rows, "effective_rr"),
         "near_miss_score_distribution": _numeric_distribution(near, "score"),
         "near_miss_effective_rr_distribution": _numeric_distribution(near, "effective_rr"),
+        "stop_too_wide_rescue_diagnostics": _stop_too_wide_rescue_diagnostics(later_gate_source),
     }
     return report_rows, summary_out
 
@@ -628,6 +675,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.accepted_effective_rr_distribution = calibration_summary["accepted_effective_rr_distribution"]
     result.near_miss_score_distribution = calibration_summary["near_miss_score_distribution"]
     result.near_miss_effective_rr_distribution = calibration_summary["near_miss_effective_rr_distribution"]
+    result.stop_too_wide_rescue_diagnostics = calibration_summary["stop_too_wide_rescue_diagnostics"]
     if result.rejected_signals is not None and result.accepted_trades is not None:
         denom = result.rejected_signals + result.accepted_trades
         result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None

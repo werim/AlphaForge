@@ -1,12 +1,12 @@
-## 2026-06-26 Dashboard artifact evidence integrity patch
+## 2026-06-26 Accepted diagnostics completeness and STOP_TOO_WIDE rescue-analysis patch
 
-- **Current version:** Dashboard artifact evidence integrity patch.
+- **Current version:** Accepted diagnostics completeness and STOP_TOO_WIDE rescue-analysis patch.
 - **Current phase:** BACKTEST dashboard summary/export integrity hardening.
-- **Runtime maturity:** Research/backtest; latest dashboard summaries now preserve rejected-shadow and accepted-trade evidence without changing strategy gates.
+- **Runtime maturity:** Research/backtest; latest dashboard summaries now preserve accepted trade geometry/close/PnL status and STOP_TOO_WIDE rescue-analysis evidence without changing strategy gates.
 - **BACKTEST/PAPER/LIVE alignment:** No thresholds, signal acceptance, reject decisions, or execution behavior changed.
-- **Lifecycle coverage:** Summary diagnostics preserve rejected shadow outcomes and accepted POSITION_CLOSED close reasons from lifecycle execution context; lifecycle counts include accepted and rejected path states.
-- **Execution realism coverage:** Decision and forward-shadow cost penalties are separated as `decision_cost_penalty` and `shadow_cost_penalty` so evidence is not mixed.
-- **Known critical risks:** Net PnL may still be `NOT_EXPORTED` in artifacts that do not contain PnL fields; dashboard diagnostics remain audit evidence, not LIVE readiness.
+- **Lifecycle coverage:** Summary diagnostics merge accepted lifecycle rows so early geometry and POSITION_CLOSED close context are both represented; lifecycle counts are not mutated by rescue analysis.
+- **Execution realism coverage:** Accepted diagnostics include decision cost penalty when exported, and STOP_TOO_WIDE rescue diagnostics report reduced-size, volatility-normalized, and structurally tighter-stop candidate counts without changing thresholds.
+- **Known critical risks:** Net PnL remains `NOT_EXPORTED` when artifacts do not contain PnL fields; rescue diagnostics are reporting-only and must not be interpreted as approval to loosen STOP_TOO_WIDE gates.
 - **Last audit date:** 2026-06-26.
 - **Live readiness verdict:** Not LIVE ready; reporting integrity improved only.
 
