@@ -1,3 +1,25 @@
+## 2026-06-26 - Accepted Diagnostics Completeness and STOP_TOO_WIDE Rescue Analysis
+
+### Added
+- Added STOP_TOO_WIDE rescue-analysis diagnostics for reduced position size, volatility-normalized stops, and structurally valid tighter alternate stops without changing thresholds or accepted trade counts.
+- Added accepted diagnostic regression coverage for source CSV geometry, POSITION_CLOSED close reason, explicit Net PnL export status, reporting-only rescue analysis, and unchanged lifecycle counts.
+
+### Changed
+- Accepted trade diagnostics now merge accepted lifecycle rows so early score/geometry fields and terminal execution context can both populate the same diagnostic row.
+- Accepted diagnostics now include `expectancy_bucket` and `decision_cost_penalty` when those fields are exported by lifecycle/order artifacts.
+
+### Fixed
+- Fixed accepted diagnostics losing side, entry, SL, TP, exit, close reason, and Net PnL evidence when the best available values were split between `backtest_orders.csv` and `order_lifecycle.csv` execution context.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Runtime thresholds, reject gates, lifecycle decisions, and trade counts are unchanged.
+
+### Known Issues
+- Rescue diagnostics are analysis-only and depend on exported artifact evidence; missing fields remain unavailable rather than being filled with fake assumptions.
+
 ## 2026-06-26 - Dashboard Artifact Evidence Integrity Patch
 
 ### Added

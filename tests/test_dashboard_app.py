@@ -632,6 +632,59 @@ def test_accepted_trade_diagnostics_enriches_orders_and_close_ctx() -> None:
     assert diag["net_pnl_status"] == "NOT_EXPORTED"
 
 
+
+def test_accepted_trade_diagnostics_completes_geometry_and_net_pnl_status() -> None:
+    from alphaforge.dashboard.backtest_control import _build_calibration_outputs
+
+    lifecycle_rows = [
+        {"signal_id": "a1", "symbol": "BTCUSDT", "timestamp": "1000", "lifecycle_state": "WAITING_ENTRY_ZONE", "decision": "ACCEPTED", "score": "9.1", "effective_rr": "1.9", "expectancy_bucket": "HIGH", "cost_penalty": "0.11"},
+        {"signal_id": "a1", "symbol": "BTCUSDT", "timestamp": "1000", "lifecycle_state": "POSITION_CLOSED", "decision": "ACCEPTED", "execution_ctx": json.dumps({"close_reason": "POSITION_CLOSED", "exit_price": "104", "net_pnl": "12.5"})},
+    ]
+    backtest_orders = [{"signal_id": "a1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "LONG", "entry": "100", "sl": "98", "tp": "105", "regime": "TREND"}]
+
+    _, summary = _build_calibration_outputs(lifecycle_rows, [], {"accepted_count": "1"}, [], backtest_orders)
+    diag = summary["accepted_trade_diagnostics"][0]
+
+    assert diag["side"] == "LONG"
+    assert diag["entry"] == "100"
+    assert diag["sl"] == "98"
+    assert diag["tp"] == "105"
+    assert diag["exit"] == "104"
+    assert diag["close_reason"] == "POSITION_CLOSED"
+    assert diag["expectancy_bucket"] == "HIGH"
+    assert diag["decision_cost_penalty"] == "0.11"
+    assert diag["net_pnl"] == "12.5"
+    assert diag["net_pnl_status"] == "EXPORTED"
+
+
+def test_stop_too_wide_rescue_diagnostics_reporting_only_keeps_counts() -> None:
+    from alphaforge.dashboard.backtest_control import _build_calibration_outputs, _lifecycle_diagnostics
+
+    lifecycle_rows = [
+        {"signal_id": "a1", "lifecycle_state": "WAITING_ENTRY_ZONE", "decision": "ACCEPTED"},
+        {"signal_id": "r1", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "10", "raw_rr": "2.2", "effective_rr": "1.8", "expectancy": "0.3", "min_required_score": "7.5", "min_effective_rr": "1.1"},
+    ]
+    rejected_rows = [lifecycle_rows[1]]
+    shadow_rows = [
+        {"signal_id": "r1", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "10", "raw_rr": "2.2", "effective_rr": "1.8", "shadow_outcome": "WOULD_TP", "volatility_score": "1.4"},
+        {"signal_id": "r2", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "8", "raw_rr": "1.6", "effective_rr": "1.2", "shadow_outcome": "WOULD_SL", "alternate_stop_valid": "true"},
+    ]
+
+    before_counts = _lifecycle_diagnostics(lifecycle_rows, rejected_rows)["lifecycle_state_counts"]
+    _, summary = _build_calibration_outputs(lifecycle_rows, rejected_rows, {"accepted_count": "1"}, shadow_rows)
+    after_counts = _lifecycle_diagnostics(lifecycle_rows, rejected_rows)["lifecycle_state_counts"]
+    rescue = summary["stop_too_wide_rescue_diagnostics"]
+
+    assert summary["rejection_funnel"]["accepted_trades"] == 1
+    assert rescue["mode"] == "REPORTING_ONLY"
+    assert rescue["thresholds_changed"] is False
+    assert rescue["accepted_trades_changed"] is False
+    assert rescue["rescue_candidate_count"] == 2
+    assert rescue["rescue_would_tp_count"] == 1
+    assert rescue["rescue_would_sl_count"] == 1
+    assert rescue["rescue_expected_effective_rr"] == 1.5
+    assert before_counts == after_counts
+
 def test_lifecycle_state_counts_include_full_backtest_path() -> None:
     from alphaforge.dashboard.backtest_control import _lifecycle_diagnostics
 

@@ -1,3 +1,47 @@
+## 2026-06-26 - Accepted Diagnostics Completeness and STOP_TOO_WIDE Rescue Analysis
+
+### Why the patch was needed
+Latest backtest artifacts contained accepted trade geometry and close evidence, but the accepted diagnostics row could still show nulls when data was split across lifecycle stages, `backtest_orders.csv`, and POSITION_CLOSED execution context. STOP_TOO_WIDE rejected-shadow outcomes also showed some WOULD_TP rows that needed bounded rescue analysis without weakening the protective gate.
+
+### Root cause
+Accepted diagnostics selected a single terminal accepted lifecycle row instead of merging non-empty accepted lifecycle evidence for the same signal. STOP_TOO_WIDE analysis reported WOULD_TP/WOULD_SL counts, but did not separately summarize which rejected rows had enough exported evidence for reduced-size, volatility-normalized, or structurally tighter-stop rescue review.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+No trading thresholds, acceptance rules, reject gates, order placement, or execution behavior changed. STOP_TOO_WIDE rescue diagnostics are marked `REPORTING_ONLY` and do not convert rejected rows into accepted trades.
+
+### Lifecycle changes
+No lifecycle transitions changed. Accepted diagnostics now merge accepted lifecycle rows so earlier geometry and terminal POSITION_CLOSED execution context can populate one diagnostic record. Lifecycle state counts remain computed from the original lifecycle rows.
+
+### Persistence changes
+No SQLite migration and no production persistence contract change. Dashboard calibration JSON gains diagnostic-only fields derived from existing CSV artifacts.
+
+### Export/schema changes
+`accepted_trade_diagnostics` now sources side, entry, SL, TP, exit, close reason, regime, expectancy bucket, decision cost penalty, and Net PnL status from lifecycle rows, lifecycle `execution_ctx`, and `backtest_orders.csv` where available. `lifecycle_calibration_summary.json` now includes `stop_too_wide_rescue_diagnostics` with rescue candidate and WOULD_TP/WOULD_SL counts plus expected effective RR.
+
+### Tests added
+Added regressions for accepted diagnostics geometry sourced from order CSV rows, POSITION_CLOSED close reason copied from execution context, numeric Net PnL versus explicit `NOT_EXPORTED` status, STOP_TOO_WIDE rescue analysis remaining reporting-only, unchanged accepted trade count, and unchanged lifecycle state counts.
+
+### Tests executed
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py`
+- `pytest tests/test_trade_quality.py -q`
+- `pytest tests/test_dashboard_app.py -q` (skipped because FastAPI/httpx dashboard dependencies are unavailable in this environment)
+
+### Risks and remaining limitations
+Rescue diagnostics are only as complete as the exported rejected-shadow/order-lifecycle evidence. Missing alternate-stop or volatility fields are not fabricated. These diagnostics should guide future analysis only and do not establish LIVE readiness.
+
+### Migration concerns
+Backward compatible for readers that ignore unknown JSON fields. Consumers may optionally read `stop_too_wide_rescue_diagnostics` and the expanded accepted diagnostic keys.
+
+### Push recommendation
+Safe to push after dependency-complete dashboard CI confirms the skipped FastAPI tests in an environment with dashboard dependencies installed.
+
 ## 2026-06-26 - Dashboard Artifact Evidence Integrity Patch
 
 ### Why the patch was needed
