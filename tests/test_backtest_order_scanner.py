@@ -1435,6 +1435,52 @@ def test_signal_quality_score_decile_grouping_and_missing_fields_unavailable():
     assert any(r["diagnostic"] == "d10_by_reject_reason" for r in calib)
 
 
+def test_short_breakdown_breakout_normal_stop_gate_disabled_preserves_baseline_metrics():
+    shadows = [
+        _shadow_eval("AAAUSDT", "LOW_SCORE", 6.0, 1.2, "WOULD_TP", side="SHORT", regime="BREAKOUT", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+    ]
+    shadows[0].stop_distance_pct = 1.0
+
+    summary, *_ = bo.build_signal_quality_diagnostics([], shadows, "15m")
+
+    assert summary["quality_gate_enabled"] is False
+    assert summary["quality_gate_candidate_count"] == 0
+    assert summary["acceptance_logic_changed"] is False
+
+
+def test_short_breakdown_breakout_normal_stop_gate_counts_enabled_backtest_only():
+    eligible = _shadow_eval("AAAUSDT", "LOW_SCORE", 6.0, 1.2, "WOULD_TP", side="SHORT", regime="BREAKOUT", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+    eligible.stop_distance_pct = 1.0
+    wide = _shadow_eval("BBBUSDT", "LOW_SCORE", 6.0, 1.2, "WOULD_TP", side="SHORT", regime="BREAKOUT", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+    wide.stop_distance_pct = 2.0
+    long_row = _shadow_eval("CCCUSDT", "LOW_SCORE", 6.0, 1.2, "WOULD_TP", side="LONG", regime="BREAKOUT", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+    long_row.stop_distance_pct = 1.0
+    mismatch = _shadow_eval("DDDUSDT", "REGIME_MISMATCH", 6.0, 1.2, "WOULD_TP", side="SHORT", regime="BREAKOUT", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+    mismatch.stop_distance_pct = 1.0
+    panic = _shadow_eval("EEEUSDT", "LOW_SCORE", 6.0, 1.2, "WOULD_TP", side="SHORT", regime="PANIC", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+    panic.stop_distance_pct = 1.0
+
+    cfg = bo.QualityGateConfig(enabled=True, modes=("BACKTEST",), max_trades_per_day=10)
+    summary, *_ = bo.build_signal_quality_diagnostics([], [eligible, wide, long_row, mismatch, panic], "15m", quality_gate_config=cfg, baseline_net_pnl=4.0)
+
+    assert summary["quality_gate_candidate_count"] == 1
+    assert summary["quality_gate_accepted_count"] == 1
+    assert summary["quality_gate_would_tp_count"] == 1
+    assert summary["quality_gate_reason_breakdown"] == {"LOW_SCORE": 1}
+    assert summary["baseline_plus_quality_gate_net_pnl"] > 4.0
+
+
+def test_short_breakdown_breakout_normal_stop_gate_live_and_paper_disabled():
+    eligible = _shadow_eval("AAAUSDT", "LOW_SCORE", 6.0, 1.2, "WOULD_TP", side="SHORT", regime="BREAKOUT", setup_type="BREAKDOWN_DOWN", spread_pct=0.001, expected_slippage_pct=0.001)
+    eligible.stop_distance_pct = 1.0
+
+    live = bo._quality_gate_metrics([bo._quality_record_from_shadow(eligible, "15m")], bo.QualityGateConfig(enabled=True, modes=("LIVE",)))
+    paper_default = bo._quality_gate_metrics([bo._quality_record_from_shadow(eligible, "15m")], bo.QualityGateConfig(enabled=False, modes=("PAPER",)))
+
+    assert live["quality_gate_candidate_count"] == 0
+    assert paper_default["quality_gate_candidate_count"] == 0
+
+
 def test_high_effective_rr_missed_alpha_counts_outcomes_correctly():
     shadows = [
         _shadow_eval("AAAUSDT", "LOW_SCORE", 8.0, 2.2, "WOULD_TP"),
