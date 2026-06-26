@@ -171,6 +171,50 @@ def _numeric_distribution(rows: list[dict[str, str]], field: str) -> dict[str, A
     return {"count": len(values), "min": round(ordered[0], 6), "mean": round(sum(values) / len(values), 6), "p50": pct(0.5), "p90": pct(0.9), "max": round(ordered[-1], 6)}
 
 
+def _decode_execution_ctx(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if value in (None, ""):
+        return {}
+    try:
+        decoded = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _first_available(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, "", "None", "null"):
+            return value
+    return None
+
+
+def _lookup_by_signal_or_composite(rows: list[dict[str, str]]) -> dict[tuple[str, ...], dict[str, str]]:
+    lookup: dict[tuple[str, ...], dict[str, str]] = {}
+    for row in rows:
+        signal_id = str(row.get("signal_id") or "").strip()
+        if signal_id:
+            lookup.setdefault(("signal_id", signal_id), row)
+        symbol = str(row.get("symbol") or "").strip()
+        timestamp = str(row.get("timestamp") or row.get("event_ts") or "").strip()
+        side = str(row.get("side") or "").strip().upper()
+        if symbol and timestamp and side:
+            lookup.setdefault(("symbol_ts_side", symbol, timestamp, side), row)
+    return lookup
+
+
+def _match_by_signal_or_composite(row: Mapping[str, Any], lookup: Mapping[tuple[str, ...], dict[str, str]]) -> dict[str, str] | None:
+    signal_id = str(row.get("signal_id") or "").strip()
+    if signal_id and (match := lookup.get(("signal_id", signal_id))):
+        return match
+    symbol = str(row.get("symbol") or "").strip()
+    timestamp = str(row.get("timestamp") or row.get("event_ts") or "").strip()
+    side = str(row.get("side") or "").strip().upper()
+    if symbol and timestamp and side:
+        return lookup.get(("symbol_ts_side", symbol, timestamp, side))
+    return None
+
 
 
 def _accepted_trade_rows(lifecycle_rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -189,21 +233,29 @@ def _accepted_trade_rows(lifecycle_rows: list[dict[str, str]]) -> list[dict[str,
     return list(by_signal.values())
 
 
-def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_order_rows: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
+    order_lookup = _lookup_by_signal_or_composite(backtest_order_rows or [])
     rows = []
     for row in _accepted_trade_rows(lifecycle_rows):
+        ctx = _decode_execution_ctx(row.get("execution_ctx"))
+        order_row = _match_by_signal_or_composite(row, order_lookup) or {}
+        net_pnl = _first_available(row.get("net_pnl"), row.get("net_pnl_usdt"), row.get("pnl"), row.get("pnl_usdt"), ctx.get("net_pnl"), ctx.get("net_pnl_usdt"), order_row.get("net_pnl"), order_row.get("net_pnl_usdt"), order_row.get("pnl"), order_row.get("pnl_usdt"))
         rows.append({
             "signal_id": row.get("signal_id"),
             "symbol": row.get("symbol"),
-            "side": row.get("side"),
-            "score": row.get("score"),
-            "raw_rr": row.get("raw_rr") if row.get("raw_rr") not in (None, "") else row.get("rr"),
-            "effective_rr": row.get("effective_rr"),
-            "regime": row.get("regime") or row.get("volatility_regime"),
-            "entry": row.get("entry"),
-            "exit": row.get("exit") or row.get("exit_price"),
-            "result": row.get("result") or row.get("outcome") or row.get("lifecycle_state") or row.get("status_after"),
-            "net_pnl": row.get("net_pnl") or row.get("net_pnl_usdt") or row.get("pnl") or row.get("pnl_usdt"),
+            "side": _first_available(row.get("side"), ctx.get("side"), order_row.get("side")),
+            "score": _first_available(row.get("score"), order_row.get("score")),
+            "raw_rr": _first_available(row.get("raw_rr"), row.get("rr"), order_row.get("raw_rr"), order_row.get("rr")),
+            "effective_rr": _first_available(row.get("effective_rr"), order_row.get("effective_rr")),
+            "regime": _first_available(row.get("regime"), row.get("volatility_regime"), ctx.get("volatility_regime"), ctx.get("regime"), order_row.get("regime"), order_row.get("volatility_regime")),
+            "entry": _first_available(row.get("entry"), ctx.get("entry"), order_row.get("entry")),
+            "sl": _first_available(row.get("sl"), row.get("stop_loss"), ctx.get("sl"), ctx.get("stop_loss"), order_row.get("sl"), order_row.get("stop_loss")),
+            "tp": _first_available(row.get("tp"), row.get("take_profit"), ctx.get("tp"), ctx.get("take_profit"), order_row.get("tp"), order_row.get("take_profit")),
+            "exit": _first_available(row.get("exit"), row.get("exit_price"), ctx.get("exit"), ctx.get("exit_price"), order_row.get("exit"), order_row.get("exit_price")),
+            "close_reason": _first_available(row.get("close_reason"), ctx.get("close_reason"), order_row.get("close_reason")),
+            "result": _first_available(row.get("result"), row.get("outcome"), row.get("lifecycle_state"), row.get("status_after")),
+            "net_pnl": net_pnl,
+            "net_pnl_status": "EXPORTED" if net_pnl is not None else "NOT_EXPORTED",
         })
     return rows
 
@@ -298,7 +350,7 @@ def _passes_score_rr_expectancy(row: Mapping[str, Any]) -> bool:
 
 
 def _identity_values(row: Mapping[str, Any]) -> tuple[str, ...]:
-    return tuple(str(row.get(field) or "").strip() for field in ("symbol", "timestamp", "event_ts", "side", "entry", "stop_loss", "take_profit"))
+    return tuple(str(row.get(field) or "").strip() for field in ("symbol", "timestamp", "event_ts", "side"))
 
 
 def _shadow_lookup_key(row: Mapping[str, Any]) -> tuple[str, ...] | None:
@@ -312,7 +364,7 @@ def _shadow_lookup_key(row: Mapping[str, Any]) -> tuple[str, ...] | None:
 
 
 def _build_shadow_lookup(shadow_rows: list[dict[str, str]]) -> dict[tuple[str, ...], dict[str, str]]:
-    lookup: dict[tuple[str, ...], dict[str, str]] = {}
+    lookup: dict[tuple[str, ...], dict[str, str]] = _lookup_by_signal_or_composite(shadow_rows)
     for row in shadow_rows:
         key = _shadow_lookup_key(row)
         if key is not None:
@@ -327,9 +379,9 @@ def _build_shadow_lookup(shadow_rows: list[dict[str, str]]) -> dict[tuple[str, .
 
 
 def _matching_shadow(row: Mapping[str, Any], lookup: Mapping[tuple[str, ...], dict[str, str]]) -> dict[str, str] | None:
-    signal_id = str(row.get("signal_id") or "").strip()
-    if signal_id and (match := lookup.get(("signal_id", signal_id))):
+    if match := _match_by_signal_or_composite(row, lookup):
         return match
+    signal_id = str(row.get("signal_id") or "").strip()
     composite = _identity_values(row)
     if any(composite):
         return lookup.get(("composite", *composite))
@@ -347,7 +399,7 @@ def _merge_shadow(row: dict[str, str], shadow: Mapping[str, str] | None) -> dict
     return merged
 
 
-def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any], shadow_rows: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any], shadow_rows: list[dict[str, str]] | None = None, backtest_order_rows: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     shadow_source = list(shadow_rows or [])
     shadow_lookup = _build_shadow_lookup(shadow_source)
     enriched_rejected = [_merge_shadow(r, _matching_shadow(r, shadow_lookup)) for r in rejected_rows]
@@ -386,6 +438,7 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
             "unknown_shadow_count": shadows["UNKNOWN"], "unknown_shadow_rate": round(shadows["UNKNOWN"] / count, 6),
         })
     signal_rejected = [r for r in enriched_rejected if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_REJECTED"]
+    raw_signal_rejected = [r for r in rejected_rows if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_REJECTED"]
     passed_later = [r for r in signal_rejected if _passes_score_rr_expectancy(r)]
     later_gate_reasons = {"DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "RR_TOO_LOW", "STOP_TOO_WIDE"}
     later_gate_source = [r for r in shadow_diagnostic_rows if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons]
@@ -449,9 +502,16 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
         "rejection_funnel": funnel,
         "later_gate_diagnostics": later_gate,
         "low_score_shadow_comparison": low_cmp,
-        "execution_cost_summary": {"cost_penalty": _numeric_distribution(shadow_source or signal_rejected, "cost_penalty"), "spread_pct": _numeric_distribution(signal_rejected, "spread_pct"), "expected_slippage_pct": _numeric_distribution(signal_rejected, "expected_slippage_pct"), "spread_label": "ESTIMATED_BACKTEST_SPREAD when spread_source/status is estimated and historical bid/ask is unavailable"},
+        "execution_cost_summary": {
+            "decision_cost_penalty": _numeric_distribution(raw_signal_rejected, "cost_penalty"),
+            "shadow_cost_penalty": _numeric_distribution(shadow_source, "cost_penalty"),
+            "cost_basis": "decision_cost_penalty comes from rejected_orders/order-decision context; shadow_cost_penalty comes from rejected_shadow.csv forward counterfactual evaluation. These are intentionally not mixed into one cost_penalty metric.",
+            "spread_pct": _numeric_distribution(signal_rejected, "spread_pct"),
+            "expected_slippage_pct": _numeric_distribution(signal_rejected, "expected_slippage_pct"),
+            "spread_label": "ESTIMATED_BACKTEST_SPREAD when spread_source/status is estimated and historical bid/ask is unavailable",
+        },
         "near_miss_rejected_signals": [dict({k: (r.get(k) if r.get(k) not in (None, "") else ("UNAVAILABLE" if k in {"shadow_outcome", "cost_penalty"} else r.get(k))) for k in ("signal_id", "symbol", "reject_reason", "score", "raw_rr", "rr", "effective_rr", "cost_penalty", "shadow_outcome", "spread_pct", "expected_slippage_pct", "liquidity_ok", "volatility_ok")}) for r in near],
-        "accepted_trade_diagnostics": _accepted_trade_diagnostics(lifecycle_rows),
+        "accepted_trade_diagnostics": _accepted_trade_diagnostics(lifecycle_rows, backtest_order_rows),
         "accepted_score_distribution": _numeric_distribution(accepted_rows, "score"),
         "accepted_effective_rr_distribution": _numeric_distribution(accepted_rows, "effective_rr"),
         "near_miss_score_distribution": _numeric_distribution(near, "score"),
@@ -460,8 +520,8 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
     return report_rows, summary_out
 
 
-def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any], shadow_rows: list[dict[str, str]] | None = None) -> tuple[Path, Path, dict[str, Any]]:
-    report_rows, summary_out = _build_calibration_outputs(lifecycle_rows, rejected_rows, summary, shadow_rows)
+def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any], shadow_rows: list[dict[str, str]] | None = None, backtest_order_rows: list[dict[str, str]] | None = None) -> tuple[Path, Path, dict[str, Any]]:
+    report_rows, summary_out = _build_calibration_outputs(lifecycle_rows, rejected_rows, summary, shadow_rows, backtest_order_rows)
     report_path = output_dir / "lifecycle_calibration_report.csv"
     summary_path = output_dir / "lifecycle_calibration_summary.json"
     fieldnames = list(report_rows[0].keys()) if report_rows else ["source_stage", "lifecycle_state", "reject_reason", "symbol", "regime", "expectancy_bucket", "count"]
@@ -522,10 +582,12 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     lifecycle_path = output_dir / "order_lifecycle.csv"
     rejected_path = output_dir / "rejected_orders.csv"
     rejected_shadow_path = output_dir / "rejected_shadow.csv"
+    backtest_orders_path = output_dir / "backtest_orders.csv"
     summary = _read_first_csv_row(summary_path)
     lifecycle_rows = _read_csv_rows(lifecycle_path)
     rejected_rows = _read_csv_rows(rejected_path)
     rejected_shadow_rows = _read_csv_rows(rejected_shadow_path)
+    backtest_order_rows = _read_csv_rows(backtest_orders_path)
     result.status = "COMPLETED"
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
@@ -553,7 +615,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.final_reject_reason_counts = lifecycle_diagnostics["final_reject_reason_counts"]
     result.order_reject_reason_counts = lifecycle_diagnostics["order_reject_reason_counts"]
     result.symbol_selector_reject_counts = lifecycle_diagnostics["symbol_selector_reject_counts"]
-    calibration_report_path, calibration_summary_path, calibration_summary = _write_calibration_artifacts(output_dir, lifecycle_rows, rejected_rows, summary, rejected_shadow_rows)
+    calibration_report_path, calibration_summary_path, calibration_summary = _write_calibration_artifacts(output_dir, lifecycle_rows, rejected_rows, summary, rejected_shadow_rows, backtest_order_rows)
     result.calibration_report_path = str(calibration_report_path)
     result.calibration_summary_path = str(calibration_summary_path)
     result.rejection_funnel = calibration_summary["rejection_funnel"]

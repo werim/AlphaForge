@@ -552,7 +552,8 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert later["STOP_TOO_WIDE"]["would_tp_count"] == 1
     assert result.low_score_shadow_comparison["would_tp_count"] == 1
     assert result.low_score_shadow_comparison["would_sl_count"] == 1
-    assert result.execution_cost_summary["cost_penalty"]["count"] == 4
+    assert result.execution_cost_summary["shadow_cost_penalty"]["count"] == 4
+    assert "not mixed" in result.execution_cost_summary["cost_basis"]
     assert result.near_miss_rejected_signals[0]["shadow_outcome"] == "WOULD_SL"
     assert result.near_miss_rejected_signals[0]["cost_penalty"] == "0.14"
     assert result.accepted_trade_diagnostics[0]["signal_id"] == "s4"
@@ -579,3 +580,73 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert "Passed score/RR/expectancy before later gates" in html
     assert "LOW_SCORE Shadow Comparison" in html
     assert "Top Near-Miss Rejected Signals" in html
+
+
+def test_calibration_near_miss_uses_shadow_symbol_timestamp_side_match() -> None:
+    from alphaforge.dashboard.backtest_control import _build_calibration_outputs
+
+    lifecycle_rows = [
+        {"signal_id": "a", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_CREATED", "source_stage": "SIGNAL_ENGINE"},
+        {"signal_id": "r1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "LONG", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "8.4", "raw_rr": "1.9", "effective_rr": "1.5", "expectancy": "0.2", "min_required_score": "7.5", "min_effective_rr": "1.1"},
+    ]
+    rejected_rows = [lifecycle_rows[1]]
+    shadow_rows = [
+        {"symbol": "BTCUSDT", "timestamp": "1000", "side": "LONG", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "8.4", "raw_rr": "1.9", "effective_rr": "1.5", "shadow_outcome": "WOULD_TP", "cost_penalty": "0.22"},
+        {"symbol": "ETHUSDT", "timestamp": "2000", "side": "SHORT", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "8.2", "raw_rr": "1.8", "effective_rr": "1.4", "shadow_outcome": "WOULD_SL", "cost_penalty": "0.20"},
+    ]
+
+    _, summary = _build_calibration_outputs(lifecycle_rows, rejected_rows, {"accepted_count": "0"}, shadow_rows)
+
+    assert summary["near_miss_rejected_signals"][0]["shadow_outcome"] == "WOULD_TP"
+    assert summary["near_miss_rejected_signals"][0]["cost_penalty"] == "0.22"
+    stop = {row["reject_reason"]: row for row in summary["later_gate_diagnostics"]}["STOP_TOO_WIDE"]
+    assert stop["would_tp_count"] == 1
+    assert stop["would_sl_count"] == 1
+    assert summary["execution_cost_summary"]["decision_cost_penalty"]["count"] == 0
+    assert summary["execution_cost_summary"]["shadow_cost_penalty"]["count"] == 2
+
+
+def test_accepted_trade_diagnostics_enriches_orders_and_close_ctx() -> None:
+    from alphaforge.dashboard.backtest_control import _build_calibration_outputs
+
+    lifecycle_rows = [
+        {"signal_id": "s1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING"},
+        {"signal_id": "s1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "", "lifecycle_state": "WAITING_ENTRY_ZONE", "decision": "ACCEPTED", "score": "8.7", "raw_rr": "2.0", "effective_rr": "1.7"},
+        {"signal_id": "s1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "", "lifecycle_state": "ENTRY_TRIGGERED", "decision": "ACCEPTED"},
+        {"signal_id": "s1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "", "lifecycle_state": "ORDER_PLACED", "decision": "ACCEPTED"},
+        {"signal_id": "s1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "", "lifecycle_state": "POSITION_OPENED", "decision": "ACCEPTED"},
+        {"signal_id": "s1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "", "lifecycle_state": "POSITION_CLOSED", "decision": "ACCEPTED", "execution_ctx": json.dumps({"close_reason": "TP_HIT", "volatility_regime": "TREND"})},
+        {"signal_id": "s2", "symbol": "ETHUSDT", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED"},
+    ]
+    backtest_orders = [{"signal_id": "s1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "LONG", "entry": "100", "sl": "98", "tp": "104", "regime": "TREND"}]
+
+    _, summary = _build_calibration_outputs(lifecycle_rows, [], {"accepted_count": "1"}, [], backtest_orders)
+    diag = summary["accepted_trade_diagnostics"][0]
+
+    assert diag["side"] == "LONG"
+    assert diag["entry"] == "100"
+    assert diag["sl"] == "98"
+    assert diag["tp"] == "104"
+    assert diag["regime"] == "TREND"
+    assert diag["close_reason"] == "TP_HIT"
+    assert diag["net_pnl_status"] == "NOT_EXPORTED"
+
+
+def test_lifecycle_state_counts_include_full_backtest_path() -> None:
+    from alphaforge.dashboard.backtest_control import _lifecycle_diagnostics
+
+    lifecycle_rows = [
+        {"signal_id": "s1", "lifecycle_state": "SIGNAL_CREATED"},
+        {"signal_id": "s2", "lifecycle_state": "SIGNAL_REJECTED"},
+        {"signal_id": "s3", "lifecycle_state": "WAITING_ENTRY_ZONE"},
+        {"signal_id": "s3", "lifecycle_state": "ENTRY_TRIGGERED"},
+        {"signal_id": "s3", "lifecycle_state": "ORDER_PLACED"},
+        {"signal_id": "s3", "lifecycle_state": "POSITION_OPENED"},
+        {"signal_id": "s3", "lifecycle_state": "POSITION_CLOSED"},
+    ]
+
+    diagnostics = _lifecycle_diagnostics(lifecycle_rows, [])
+    counts = {row["value"]: row["count"] for row in diagnostics["lifecycle_state_counts"]}
+
+    for state in ("SIGNAL_CREATED", "SIGNAL_REJECTED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED", "POSITION_OPENED", "POSITION_CLOSED"):
+        assert counts[state] >= 1
