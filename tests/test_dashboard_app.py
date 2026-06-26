@@ -516,19 +516,27 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
         os.makedirs(out, exist_ok=True)
         with open(os.path.join(out, "order_backtest_summary.csv"), "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=["total_candidates", "accepted_count", "rejected_count"])
-            writer.writeheader(); writer.writerow({"total_candidates": "3", "accepted_count": "0", "rejected_count": "3"})
+            writer.writeheader(); writer.writerow({"total_candidates": "4", "accepted_count": "1", "rejected_count": "3"})
         with open(os.path.join(out, "order_lifecycle.csv"), "w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=["signal_id", "symbol", "lifecycle_state", "source_stage", "decision", "spread_pct", "spread_source"])
+            writer = csv.DictWriter(fh, fieldnames=["signal_id", "symbol", "lifecycle_state", "source_stage", "decision", "side", "score", "raw_rr", "rr", "effective_rr", "regime", "entry", "exit", "result", "net_pnl", "spread_pct", "spread_source"])
             writer.writeheader()
             writer.writerow({"signal_id": "s1", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_CREATED", "source_stage": "SIGNAL_ENGINE", "decision": "PENDING", "spread_pct": "0.001", "spread_source": "ESTIMATED_BACKTEST"})
-            writer.writerow({"signal_id": "s4", "symbol": "BTCUSDT", "lifecycle_state": "WAITING_ENTRY_ZONE", "source_stage": "SIGNAL_ENGINE", "decision": "ACCEPTED", "spread_pct": "0.001", "spread_source": "ESTIMATED_BACKTEST"})
+            writer.writerow({"signal_id": "s4", "symbol": "BTCUSDT", "lifecycle_state": "WAITING_ENTRY_ZONE", "source_stage": "SIGNAL_ENGINE", "decision": "ACCEPTED", "side": "LONG", "score": "8.8", "raw_rr": "2.0", "rr": "2.0", "effective_rr": "1.7", "regime": "TREND", "entry": "100", "exit": "103", "result": "SL_HIT", "net_pnl": "-1.0", "spread_pct": "0.001", "spread_source": "ESTIMATED_BACKTEST"})
         with open(os.path.join(out, "rejected_orders.csv"), "w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=["signal_id", "symbol", "lifecycle_state", "source", "source_stage", "reject_reason", "score", "raw_rr", "effective_rr", "expectancy", "expectancy_bucket", "min_required_score", "min_effective_rr", "shadow_outcome", "cost_penalty", "spread_pct", "expected_slippage_pct", "volume_24h_usdt", "liquidity_ok", "volatility_ok", "volatility_score"])
+            writer = csv.DictWriter(fh, fieldnames=["signal_id", "symbol", "lifecycle_state", "source", "source_stage", "reject_reason", "score", "raw_rr", "effective_rr", "expectancy", "expectancy_bucket", "min_required_score", "min_effective_rr", "spread_pct", "expected_slippage_pct", "volume_24h_usdt", "liquidity_ok", "volatility_ok", "volatility_score"])
             writer.writeheader()
-            writer.writerow({"signal_id": "s1", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "4", "raw_rr": "1.4", "effective_rr": "0.8", "expectancy": "0.1", "expectancy_bucket": "LOW", "min_required_score": "7.5", "min_effective_rr": "1.1", "shadow_outcome": "WOULD_TP", "cost_penalty": "0.12", "spread_pct": "0.0008", "expected_slippage_pct": "0.0004", "volume_24h_usdt": "1000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.2"})
-            writer.writerow({"signal_id": "s2", "symbol": "ETHUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "5", "raw_rr": "1.2", "effective_rr": "0.7", "expectancy": "0.1", "expectancy_bucket": "LOW", "min_required_score": "7.5", "min_effective_rr": "1.1", "shadow_outcome": "WOULD_SL", "cost_penalty": "0.13", "spread_pct": "0.0008", "expected_slippage_pct": "0.0005", "volume_24h_usdt": "2000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.5"})
-            writer.writerow({"signal_id": "s3", "symbol": "ETHUSDT", "lifecycle_state": "SYMBOL_SELECTOR_REJECT", "source": "SYMBOL_SELECTOR", "source_stage": "SYMBOL_SELECTOR", "reject_reason": "LOW_LIQUIDITY", "score": "8", "raw_rr": "1.5", "effective_rr": "0.95", "expectancy": "0.2", "expectancy_bucket": "MEDIUM", "min_required_score": "7.5", "min_effective_rr": "1.1", "shadow_outcome": "", "cost_penalty": "", "spread_pct": "", "expected_slippage_pct": "", "volume_24h_usdt": "", "liquidity_ok": "", "volatility_ok": "", "volatility_score": ""})
-            writer.writerow({"signal_id": "s5", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "REGIME_MISMATCH", "score": "8.5", "raw_rr": "1.8", "effective_rr": "1.5", "expectancy": "0.3", "expectancy_bucket": "HIGH", "min_required_score": "7.5", "min_effective_rr": "1.1", "shadow_outcome": "WOULD_TP", "cost_penalty": "0.12", "spread_pct": "0.0008", "expected_slippage_pct": "0.0004", "volume_24h_usdt": "1000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.0"})
+            writer.writerow({"signal_id": "s1", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "4", "raw_rr": "1.4", "effective_rr": "0.8", "expectancy": "0.1", "expectancy_bucket": "LOW", "min_required_score": "7.5", "min_effective_rr": "1.1", "spread_pct": "0.0008", "expected_slippage_pct": "0.0004", "volume_24h_usdt": "1000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.2"})
+            writer.writerow({"signal_id": "s2", "symbol": "ETHUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "5", "raw_rr": "1.2", "effective_rr": "0.7", "expectancy": "0.1", "expectancy_bucket": "LOW", "min_required_score": "7.5", "min_effective_rr": "1.1", "spread_pct": "0.0008", "expected_slippage_pct": "0.0005", "volume_24h_usdt": "2000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.5"})
+            writer.writerow({"signal_id": "s3", "symbol": "ETHUSDT", "lifecycle_state": "SYMBOL_SELECTOR_REJECT", "source": "SYMBOL_SELECTOR", "source_stage": "SYMBOL_SELECTOR", "reject_reason": "LOW_LIQUIDITY", "score": "8", "raw_rr": "1.5", "effective_rr": "0.95", "expectancy": "0.2", "expectancy_bucket": "MEDIUM", "min_required_score": "7.5", "min_effective_rr": "1.1", "spread_pct": "", "expected_slippage_pct": "", "volume_24h_usdt": "", "liquidity_ok": "", "volatility_ok": "", "volatility_score": ""})
+            writer.writerow({"signal_id": "s5", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "REGIME_MISMATCH", "score": "8.5", "raw_rr": "1.8", "effective_rr": "1.5", "expectancy": "0.3", "expectancy_bucket": "HIGH", "min_required_score": "7.5", "min_effective_rr": "1.1", "spread_pct": "0.0008", "expected_slippage_pct": "0.0004", "volume_24h_usdt": "1000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.0"})
+
+        with open(os.path.join(out, "rejected_shadow.csv"), "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["signal_id", "symbol", "lifecycle_state", "source_stage", "reject_reason", "score", "raw_rr", "effective_rr", "expectancy_bucket", "shadow_outcome", "cost_penalty", "liquidity_ok", "volatility_ok", "volatility_score"])
+            writer.writeheader()
+            writer.writerow({"signal_id": "s1", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "4", "raw_rr": "1.4", "effective_rr": "0.8", "expectancy_bucket": "LOW", "shadow_outcome": "WOULD_TP", "cost_penalty": "0.12", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.2"})
+            writer.writerow({"signal_id": "s2", "symbol": "ETHUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "5", "raw_rr": "1.2", "effective_rr": "0.7", "expectancy_bucket": "LOW", "shadow_outcome": "WOULD_SL", "cost_penalty": "0.13", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.5"})
+            writer.writerow({"signal_id": "s5", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "REGIME_MISMATCH", "score": "8.5", "raw_rr": "1.8", "effective_rr": "1.5", "expectancy_bucket": "HIGH", "shadow_outcome": "WOULD_SL", "cost_penalty": "0.14", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.0"})
+            writer.writerow({"signal_id": "s6", "symbol": "SOLUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "8.2", "raw_rr": "1.7", "effective_rr": "1.4", "expectancy_bucket": "HIGH", "shadow_outcome": "WOULD_TP", "cost_penalty": "0.15", "liquidity_ok": "true", "volatility_ok": "false", "volatility_score": "2.0"})
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(backtest_control.subprocess, "run", fake_run)
@@ -539,9 +547,19 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert result.pre_later_gate_pass_count == 1
     assert result.rejection_funnel["symbol_selector_rejects"] == 1
     assert result.rejection_funnel["signal_engine_signal_rejected"] == 3
-    assert result.later_gate_diagnostics[0]["reject_reason"] == "REGIME_MISMATCH"
+    later = {row["reject_reason"]: row for row in result.later_gate_diagnostics}
+    assert later["REGIME_MISMATCH"]["would_sl_count"] == 1
+    assert later["STOP_TOO_WIDE"]["would_tp_count"] == 1
     assert result.low_score_shadow_comparison["would_tp_count"] == 1
     assert result.low_score_shadow_comparison["would_sl_count"] == 1
+    assert result.execution_cost_summary["cost_penalty"]["count"] == 4
+    assert result.near_miss_rejected_signals[0]["shadow_outcome"] == "WOULD_SL"
+    assert result.near_miss_rejected_signals[0]["cost_penalty"] == "0.14"
+    assert result.accepted_trade_diagnostics[0]["signal_id"] == "s4"
+    assert result.accepted_score_distribution["mean"] == 8.8
+    assert result.accepted_effective_rr_distribution["mean"] == 1.7
+    assert result.near_miss_score_distribution["count"] == 1
+    assert result.backtest_rejection_rate == 0.75
     assert "ESTIMATED_BACKTEST_SPREAD" in result.execution_cost_summary["spread_label"]
     assert result.calibration_report_path and os.path.exists(result.calibration_report_path)
     assert result.calibration_summary_path and os.path.exists(result.calibration_summary_path)
@@ -552,6 +570,8 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
         "/backtest/run",
         data={"last_days": "10", "symbols": "BTCUSDT", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "1"},
     ).text
+    assert "Backtest reject rate" in html
+    assert "Accepted Trade Diagnostics" in html
     assert "Backtest Top Rejection Reasons" in html
     assert "LOW_SCORE" in html
     assert "LOW_LIQUIDITY" in html

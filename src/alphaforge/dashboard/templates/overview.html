@@ -19,7 +19,7 @@
   <section class="cards">
     <article class="metric"><label>Final Decisions</label><strong>{{ rejects.total_final_decisions if rejects.total_final_decisions is not none else 'N/A' }}</strong></article>
     <article class="metric"><label>Rejected</label><strong>{{ rejects.total_rejected if rejects.total_rejected is not none else 'N/A' }}</strong></article>
-    <article class="metric"><label>Reject Rate</label><strong>{% if rejects.rejection_rate is not none %}{{ '%.2f'|format(rejects.rejection_rate * 100) }}%{% else %}N/A{% endif %}</strong></article>
+    <article class="metric"><label>PAPER SQL Reject Rate</label><strong>{% if rejects.rejection_rate is not none %}{{ '%.2f'|format(rejects.rejection_rate * 100) }}%{% else %}N/A{% endif %}</strong></article>
     <article class="metric"><label>Required Exchanges</label><strong>{{ status.required_live_exchanges|join(', ') }}</strong></article>
   </section>
 
@@ -82,17 +82,27 @@
           <tr><th>Total candidates/signals</th><td>{{ backtest_result.total_candidates if backtest_result.total_candidates is not none else 'Unavailable' }}</td></tr>
           <tr><th>Accepted trades</th><td>{{ backtest_result.accepted_trades if backtest_result.accepted_trades is not none else 'Unavailable' }}</td></tr>
           <tr><th>Rejected signals (summary total)</th><td>{{ backtest_result.rejected_signals if backtest_result.rejected_signals is not none else 'Unavailable' }} — split below to avoid mixing pre-signal selector rejects with actionable signal rejects.</td></tr>
+          <tr><th>Backtest reject rate</th><td>{% if backtest_result.backtest_rejection_rate is not none %}{{ '%.2f'|format(backtest_result.backtest_rejection_rate * 100) }}%{% else %}Unavailable{% endif %} — selected backtest only; top cards above are PAPER runtime SQL state.</td></tr>
           <tr><th>Win / Loss / Open</th><td>{{ backtest_result.win_count if backtest_result.win_count is not none else 'Unavailable' }} / {{ backtest_result.loss_count if backtest_result.loss_count is not none else 'Unavailable' }} / {{ backtest_result.open_count if backtest_result.open_count is not none else 'Unavailable' }}</td></tr>
           <tr><th>Net PnL</th><td>{{ backtest_result.net_pnl if backtest_result.net_pnl is not none else 'Unavailable' }}</td></tr>
           <tr><th>Return / Max drawdown</th><td>{{ backtest_result.total_return_pct if backtest_result.total_return_pct is not none else 'Unavailable' }} / {{ backtest_result.max_drawdown if backtest_result.max_drawdown is not none else 'Unavailable' }}</td></tr>
           <tr><th>Actionable signal rejects / Symbol-selector rejects / Order-lifecycle rejects</th><td>{{ backtest_result.signal_rows_count if backtest_result.signal_rows_count is not none else 'Unavailable' }} / {{ backtest_result.symbol_selector_reject_count if backtest_result.symbol_selector_reject_count is not none else 'Unavailable' }} / {{ backtest_result.order_reject_reason_counts|length }}</td></tr>
           <tr><th>Rejection funnel</th><td>{{ backtest_result.rejection_funnel }}</td></tr>
-          <tr><th>Score distribution</th><td>{{ backtest_result.score_distribution }}</td></tr>
-          <tr><th>RR / Effective RR distribution</th><td>{{ backtest_result.rr_distribution }} / {{ backtest_result.effective_rr_distribution }}</td></tr>
+          <tr><th>Rejected score distribution</th><td>{{ backtest_result.score_distribution }}</td></tr>
+          <tr><th>Accepted score distribution</th><td>{{ backtest_result.accepted_score_distribution }}</td></tr>
+          <tr><th>Near-miss score distribution</th><td>{{ backtest_result.near_miss_score_distribution }}</td></tr>
+          <tr><th>Rejected RR / Effective RR distribution</th><td>{{ backtest_result.rr_distribution }} / {{ backtest_result.effective_rr_distribution }}</td></tr>
+          <tr><th>Accepted Effective RR distribution</th><td>{{ backtest_result.accepted_effective_rr_distribution }}</td></tr>
+          <tr><th>Near-miss Effective RR distribution</th><td>{{ backtest_result.near_miss_effective_rr_distribution }}</td></tr>
           <tr><th>Passed score/RR/expectancy before later gates</th><td>{{ backtest_result.pre_later_gate_pass_count if backtest_result.pre_later_gate_pass_count is not none else 'Unavailable' }}</td></tr>
           <tr><th>Execution cost summary</th><td>{{ backtest_result.execution_cost_summary }}</td></tr>
           <tr><th>Artifacts</th><td>{{ backtest_result.output_dir or 'Unavailable' }}{% if backtest_result.summary_path %}<br>{{ backtest_result.summary_path }}{% endif %}{% if backtest_result.lifecycle_path %}<br>{{ backtest_result.lifecycle_path }}{% endif %}{% if backtest_result.rejected_path %}<br>{{ backtest_result.rejected_path }}{% endif %}{% if backtest_result.calibration_report_path %}<br>{{ backtest_result.calibration_report_path }}{% endif %}{% if backtest_result.calibration_summary_path %}<br>{{ backtest_result.calibration_summary_path }}{% endif %}</td></tr>
         </tbody>
+      </table>
+      <h3>Accepted Trade Diagnostics</h3>
+      <table>
+        <thead><tr><th>Signal</th><th>Symbol</th><th>Side</th><th>Score</th><th>Raw RR</th><th>Effective RR</th><th>Regime</th><th>Entry</th><th>Exit</th><th>Result</th><th>Net PnL</th></tr></thead>
+        <tbody>{% for row in backtest_result.accepted_trade_diagnostics %}<tr><td>{{ row.signal_id }}</td><td>{{ row.symbol }}</td><td>{{ row.side }}</td><td>{{ row.score }}</td><td>{{ row.raw_rr }}</td><td>{{ row.effective_rr }}</td><td>{{ row.regime }}</td><td>{{ row.entry }}</td><td>{{ row.exit }}</td><td>{{ row.result }}</td><td>{{ row.net_pnl }}</td></tr>{% else %}<tr><td colspan="11" class="empty">No accepted trade diagnostics available.</td></tr>{% endfor %}</tbody>
       </table>
       <h3>Backtest Top Rejection Reasons</h3>
       <table>

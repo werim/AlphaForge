@@ -122,3 +122,38 @@ def test_breakout_up_breakout_regime_not_rejected_by_regime_mapping():
     d = evaluate_trade_quality(c, {**base_market(), "regime": "BREAKOUT", "volatility_regime": "breakout", "spread_pct": 0.001, "expected_slippage_pct": 0.001}, {}, {})
     assert d.reject_reason != "REGIME_MISMATCH"
     assert d.accepted is True
+
+def test_stop_too_wide_high_score_softened_with_risk_scale():
+    c = base_candidate(); c.score = 10.0; c.rr = 2.5; c.sl = 98.0
+    d = evaluate_trade_quality(c, {**base_market(), "effective_rr": 2.5}, {}, {})
+    assert d.accepted is True
+    assert d.diagnostics["stop_too_wide_softened"] is True
+    assert d.diagnostics["original_reject_reason"] == "STOP_TOO_WIDE"
+    assert d.diagnostics["reject_reason_softened"] == "STOP_TOO_WIDE"
+    assert d.diagnostics["risk_scale"] <= 0.50
+
+
+def test_stop_too_wide_high_score_low_effective_rr_stays_rejected():
+    c = base_candidate(); c.score = 10.0; c.rr = 2.5; c.sl = 98.0
+    d = evaluate_trade_quality(c, {**base_market(), "effective_rr": 1.5}, {}, {})
+    assert d.reject_reason == "STOP_TOO_WIDE"
+
+
+def test_stop_too_wide_extreme_stays_rejected_when_hard_reject_enabled():
+    c = base_candidate(); c.score = 10.0; c.rr = 3.0; c.sl = 97.0
+    d = evaluate_trade_quality(c, {**base_market(), "effective_rr": 3.0}, {}, {})
+    assert d.reject_reason == "STOP_TOO_WIDE"
+
+
+def test_stop_too_wide_hard_reject_false_allows_wide_stop_with_risk_scale():
+    c = base_candidate(); c.score = 8.0; c.rr = 1.8; c.sl = 98.0
+    d = evaluate_trade_quality(c, base_market(), {}, {"STOP_TOO_WIDE_HARD_REJECT": False})
+    assert d.accepted is True
+    assert d.diagnostics["stop_too_wide_softened"] is True
+    assert d.diagnostics["risk_scale"] <= 0.50
+
+
+def test_stop_too_wide_softening_does_not_bypass_spread_gate():
+    c = base_candidate(); c.score = 10.0; c.rr = 2.5; c.sl = 98.0
+    d = evaluate_trade_quality(c, {**base_market(), "effective_rr": 2.5, "spread_pct": 0.2}, {}, {})
+    assert d.reject_reason == "SPREAD_TOO_HIGH"

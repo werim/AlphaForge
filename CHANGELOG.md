@@ -1,3 +1,60 @@
+## 2026-06-25 - STOP_TOO_WIDE Soft Risk-Control Patch
+
+### Added
+- Added STOP_TOO_WIDE softening config defaults, risk-scale diagnostics, and backtest summary counters for softened/hard-rejected wide stops and STOP_TOO_WIDE shadow outcomes.
+- Added regression coverage for high-score softening, low effective-RR hard rejection, extreme stop protection, hard-reject disabled behavior, and spread-gate preservation.
+
+### Changed
+- Qualifying high-score, adequate effective-RR, non-extreme wide-stop signals now continue through the accepted lifecycle with reduced risk scale instead of being rejected solely by `STOP_TOO_WIDE`.
+- BACKTEST lifecycle rows now persist cost-penalty diagnostics for accepted and rejected decisions when available.
+
+### Fixed
+- Fixed incomplete STOP_TOO_WIDE learning visibility by preserving original reject diagnostics on softened candidates and retaining rejected-shadow labels for hard-rejected STOP_TOO_WIDE rows.
+## 2026-06-25 - Dashboard Accepted-Trade Diagnostics and Backtest Reject-Rate Clarity
+
+### Added
+- Added selected-backtest accepted trade diagnostics, accepted score/effective-RR distributions, and near-miss score/effective-RR distributions to calibration summary output and dashboard rendering.
+
+### Changed
+- Labeled top-card rejection metrics as PAPER SQL state and added a selected-backtest reject-rate row using accepted plus rejected summary counts.
+
+### Fixed
+- Reduced dashboard ambiguity where PAPER runtime SQL reject rate could be mistaken for the selected BACKTEST artifact reject rate.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Defaults preserve hard rejection for low effective-RR or extreme wide stops.
+
+### Known Issues
+- Cost/spread diagnostics remain estimates when historical bid/ask/order-book data is unavailable. LIVE remains blocked by existing readiness gates.
+- None.
+
+### Known Issues
+- Existing artifacts without accepted lifecycle score/effective-RR fields remain partially unavailable until regenerated. Local dashboard tests require optional FastAPI/httpx dependencies to run instead of being skipped.
+
+## 2026-06-25 - Dashboard Calibration Rejected-Shadow Source Fix
+
+### Added
+- Added dashboard calibration loading of `rejected_shadow.csv` and stable signal/composite lookup enrichment for shadow diagnostics.
+- Added regression fixtures where LOW_SCORE and later-gate rejects receive counterfactual shadow outcomes and cost penalties only from `rejected_shadow.csv`.
+
+### Changed
+- `lifecycle_calibration_summary.json` now computes cost-penalty, LOW_SCORE shadow comparison, later-gate shadow rates, and near-miss shadow fields from rejected-shadow diagnostics when available.
+
+### Fixed
+- Fixed incomplete calibration summaries where cost penalties and WOULD_TP/WOULD_SL counts stayed zero/null despite populated `rejected_shadow.csv` artifacts.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Calibration output is diagnostic only; it does not justify threshold changes or LIVE readiness. Local dashboard tests require optional FastAPI/httpx dependencies to run instead of being skipped.
+
 ## 2026-06-25 - Dashboard Calibration Test Import Fix
 
 ### Added

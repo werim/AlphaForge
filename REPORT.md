@@ -1,3 +1,134 @@
+## 2026-06-25 - STOP_TOO_WIDE Soft Risk-Control Patch
+
+### Why the patch was needed
+High-score signals with acceptable effective RR were being rejected solely by `STOP_TOO_WIDE`, preventing BACKTEST/PAPER from learning whether those setups would reach TP, SL, timeout, or breakeven under reduced risk.
+
+### Root cause
+`STOP_TOO_WIDE` was a single hard quality-gate branch. It did not distinguish between invalid/extreme geometry and high-confidence, non-extreme setups that should be allowed to continue with reduced risk for learning.
+
+### Files changed
+- `src/alphaforge/order.py`
+- `backtest_order.py`
+- `tests/test_trade_quality.py`
+## 2026-06-25 - Dashboard Accepted-Trade Diagnostics and Backtest Reject-Rate Clarity
+
+### Why the patch was needed
+The dashboard could show rejected and shadow calibration evidence without a comparable accepted-trade score/effective-RR view. The overview top cards also displayed PAPER runtime SQL reject rate next to selected BACKTEST output, which could be misread as the backtest reject rate.
+
+### Root cause
+Dashboard BACKTEST summarization only built rejected/near-miss distributions from `rejected_orders.csv` and `rejected_shadow.csv`. Accepted lifecycle rows were not summarized into calibration artifacts, and the overview metric label did not clearly separate runtime SQL state from the selected backtest result.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `src/alphaforge/dashboard/templates/rejects.html`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+`STOP_TOO_WIDE` now has safe config defaults. When hard rejection is enabled, non-extreme wide stops are softened only if score and effective RR meet configured minimums; otherwise they remain rejected. When hard rejection is disabled, STOP_TOO_WIDE alone does not reject the candidate, but risk scale is still reduced. Spread, slippage, volatility, stale/invalid geometry, and execution effective-RR gates are not bypassed.
+
+### Lifecycle changes
+Softened candidates proceed through normal accepted lifecycle states and carry diagnostics: `stop_too_wide_softened`, `original_reject_reason`, `reject_reason_softened`, and `risk_scale`. Rejected STOP_TOO_WIDE rows remain rejected and retain counterfactual shadow diagnostics.
+
+### Persistence changes
+BACKTEST lifecycle CSV rows now include cost penalty for accepted and rejected decisions when available. Softened STOP_TOO_WIDE lifecycle rows persist risk-scale and original-reason diagnostics via exported lifecycle fields.
+
+### Export/schema changes
+`order_backtest_summary.csv` now includes STOP_TOO_WIDE softening/hard-reject counters, STOP_TOO_WIDE shadow outcome counters, and average risk scale for softened wide-stop candidates. CSV field additions are backward-compatible for readers that ignore unknown columns.
+
+### Tests added
+Added order-quality regressions for high-score STOP_TOO_WIDE softening, low effective-RR rejection, extreme stop rejection, hard-reject-disabled risk scaling, and spread-gate non-bypass. Existing dashboard calibration fixtures already assert STOP_TOO_WIDE shadow/cost display from rejected-shadow diagnostics.
+
+### Tests executed
+- `pytest tests/test_trade_quality.py -q`
+- `pytest tests/test_backtest_order_scanner.py::test_rejected_shadow_summary_csv_created -q`
+- `pytest -q`
+
+### Risks and remaining limitations
+Risk scale reduces exposure but does not make wide stops intrinsically safe. Estimated backtest spread/slippage/costs remain inferior to measured historical execution data. LIVE remains not ready without full lifecycle, reconciliation, observability, exchange, and operator evidence.
+
+### Migration concerns
+No database migration is included. New CSV/export columns are additive. Downstream strict-schema readers may need to tolerate the additional fields.
+
+### Push recommendation
+Safe to push after full `pytest -q` verification; do not claim LIVE readiness.
+No trading, reject, threshold, or execution behavior changed. Completed dashboard BACKTEST runs now include accepted trade diagnostics and accepted/near-miss distributions in `lifecycle_calibration_summary.json` and the result panel.
+
+### Lifecycle changes
+No lifecycle progression changed. Accepted diagnostics are read from accepted lifecycle states only; rejected shadow outcomes remain rejected diagnostics and do not inflate accepted counts.
+
+### Persistence changes
+No database schema changes. CSV/JSON dashboard artifacts gain additional diagnostic keys only.
+
+### Export/schema changes
+`lifecycle_calibration_summary.json` now includes `accepted_trade_diagnostics`, `accepted_score_distribution`, `accepted_effective_rr_distribution`, `near_miss_score_distribution`, and `near_miss_effective_rr_distribution`.
+
+### Tests added
+Updated the dashboard regression fixture to include an accepted lifecycle row with score, raw RR, effective RR, regime, entry/exit/result, and net PnL; assertions verify accepted diagnostics and selected-backtest reject rate rendering.
+
+### Tests executed
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py`
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics` (optional dashboard dependency collection skipped in this environment)
+
+### Risks and remaining limitations
+Historical backtest artifacts may not contain accepted score/effective-RR fields, so accepted diagnostics can remain unavailable until rerun. This patch does not prove filters are too strict or too loose; loosening filters remains unsafe without cost-adjusted shadow expectancy evidence.
+
+### Migration concerns
+None. New JSON keys are additive and dashboard rendering handles empty diagnostics.
+
+### Push recommendation
+Safe to push after dependency-complete dashboard tests run in CI. No LIVE readiness claim.
+
+## 2026-06-25 - Dashboard Calibration Rejected-Shadow Source Fix
+
+### Why the patch was needed
+`lifecycle_calibration_summary.json` could be generated with empty shadow/cost diagnostics even when `rejected_shadow.csv` and `rejected_shadow_summary.csv` contained the counterfactual evidence.
+
+### Root cause
+Dashboard calibration artifacts were built from lifecycle/rejected-order exports only. Those rows can lack `shadow_outcome` and `cost_penalty`, so LOW_SCORE, later-gate, near-miss, and execution-cost summaries silently reported zero/null diagnostics.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `backtest_order.py`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+Dashboard BACKTEST completion and direct `backtest_order.py` exports now write/read calibration artifacts; dashboard completion reads `rejected_shadow.csv` when present, builds a signal-id-first/composite fallback lookup, and uses rejected-shadow rows as the source of truth for shadow outcome, cost penalty, effective RR/RR, score, volatility/liquidity flags, volatility score, and reject reason diagnostics. No thresholds or accepted-trade semantics changed.
+
+### Lifecycle changes
+None to lifecycle progression. `WOULD_TP` and `WOULD_SL` remain rejected counterfactual labels. Near-miss summary rows explicitly emit `UNAVAILABLE` for missing shadow outcome or cost penalty instead of silent null/empty values.
+
+### Persistence changes
+No database schema changes. Existing CSV artifact names are preserved.
+
+### Export/schema changes
+`lifecycle_calibration_summary.json` is now emitted by direct `backtest_order.py` runs and populates execution cost distributions, LOW_SCORE shadow comparison, later-gate counts/rates, and near-miss shadow/cost fields from `rejected_shadow.csv` when available. `lifecycle_calibration_report.csv` remains written.
+
+### Tests added
+Updated the dashboard calibration regression fixture to write LOW_SCORE WOULD_TP/WOULD_SL and later-gate STOP_TOO_WIDE/REGIME_MISMATCH rejected-shadow rows with numeric cost penalties.
+
+### Tests executed
+- `python -m py_compile backtest_order.py src/alphaforge/dashboard/backtest_control.py tests/test_dashboard_app.py`
+- `pytest -q tests/test_dashboard_app.py::test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics -q` (local optional dashboard dependencies unavailable; skipped collection)
+- `pytest -q`
+- `python backtest_order.py --offline --output-dir /tmp/af_calibration_check`
+- `python -m json.tool /tmp/af_calibration_check/lifecycle_calibration_summary.json`
+
+### Risks and remaining limitations
+If neither `signal_id` nor the fallback composite fields align between rejected orders and rejected-shadow rows, near-miss rows will explicitly show `UNAVAILABLE` for shadow/cost fields. Calibration remains diagnostic only.
+
+### Migration concerns
+None; this reads an existing optional CSV artifact and preserves behavior when it is absent.
+
+### Push recommendation
+Safe to push after full test/backtest verification; no LIVE readiness claim.
+
 ## 2026-06-25 - Dashboard Calibration Test Import CI Fix
 
 ### Why the patch was needed
