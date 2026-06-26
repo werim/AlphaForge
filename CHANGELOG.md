@@ -1,3 +1,26 @@
+## 2026-06-26 - High Effective-RR Rescue Acceptance Lane (BACKTEST-only)
+
+### Added
+- Added opt-in `HIGH_EFFECTIVE_RR_RESCUE` acceptance lane for BACKTEST only, disabled by default.
+- Added reduced-size rescue metadata: `accepted_reason`, `original_reject_reason`, `rescue_size_multiplier`, `rescue_effective_rr`, and `rescue_decision_context`.
+- Added backtest summary/quality metrics comparing baseline accepted trades with rescue candidates, accepted/rejected rescue counts, rescue PnL, score/effective-RR averages, reject reasons, and accepted-reason breakdowns.
+- Added regression coverage for disabled baseline parity, BACKTEST-only gating, LIVE exclusion, execution-quality gates, max-concurrent protection, reduced sizing, exports, metrics, and unchanged global thresholds.
+
+### Changed
+- Rescue-accepted BACKTEST orders now follow normal lifecycle simulation with default 0.25x risk and explicit rescue metadata.
+
+### Fixed
+- None. This does not fix accepted diagnostics geometry unless source lifecycle/order artifacts already contain the required fields.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Rescue is disabled by default and does not loosen existing global reject thresholds.
+
+### Known Issues
+- Feature is BACKTEST_ONLY experimental and not LIVE-ready. Accepted diagnostics export geometry can still be incomplete when upstream artifacts omit geometry/PNL fields.
+
 ## 2026-06-26 - Accepted Diagnostics Synthetic-ID Export Hardening
 
 ### Added
