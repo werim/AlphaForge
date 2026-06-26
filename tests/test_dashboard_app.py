@@ -657,6 +657,31 @@ def test_accepted_trade_diagnostics_completes_geometry_and_net_pnl_status() -> N
     assert diag["net_pnl_status"] == "EXPORTED"
 
 
+def test_accepted_trade_diagnostics_matches_backtest_orders_with_synthetic_signal_id() -> None:
+    from alphaforge.dashboard.backtest_control import _build_calibration_outputs
+
+    lifecycle_rows = [
+        {"symbol": "BTCUSDT", "timestamp": "1000", "lifecycle_state": "WAITING_ENTRY_ZONE", "decision": "ACCEPTED", "score": "8.4", "effective_rr": "1.6", "expectancy_bucket": "MEDIUM", "decision_cost_penalty": "0.07"},
+        {"symbol": "BTCUSDT", "timestamp": "1000", "lifecycle_state": "ORDER_PLACED", "decision": "ACCEPTED", "regime": "TREND"},
+    ]
+    backtest_orders = [{"signal_id": "BTCUSDT:1000", "symbol": "BTCUSDT", "timestamp": "1000", "side": "LONG", "entry": "100", "sl": "97", "tp": "106"}]
+
+    _, summary = _build_calibration_outputs(lifecycle_rows, [], {"accepted_count": "1"}, [], backtest_orders)
+    diag = summary["accepted_trade_diagnostics"][0]
+
+    assert diag["signal_id"] == "BTCUSDT:1000"
+    assert diag["side"] == "LONG"
+    assert diag["entry"] == "100"
+    assert diag["sl"] == "97"
+    assert diag["tp"] == "106"
+    assert diag["expectancy_bucket"] == "MEDIUM"
+    assert diag["decision_cost_penalty"] == "0.07"
+    assert diag["exit"] is None
+    assert diag["exit_status"] == "NOT_EXPORTED"
+    assert diag["net_pnl"] is None
+    assert diag["net_pnl_status"] == "NOT_EXPORTED"
+
+
 def test_stop_too_wide_rescue_diagnostics_reporting_only_keeps_counts() -> None:
     from alphaforge.dashboard.backtest_control import _build_calibration_outputs, _lifecycle_diagnostics
 

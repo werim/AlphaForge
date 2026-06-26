@@ -207,6 +207,11 @@ def _lookup_by_signal_or_composite(rows: list[dict[str, str]]) -> dict[tuple[str
 
 def _match_by_signal_or_composite(row: Mapping[str, Any], lookup: Mapping[tuple[str, ...], dict[str, str]]) -> dict[str, str] | None:
     signal_id = str(row.get("signal_id") or "").strip()
+    if not signal_id:
+        symbol_for_id = str(row.get("symbol") or "").strip()
+        timestamp_for_id = str(row.get("timestamp") or row.get("event_ts") or "").strip()
+        if symbol_for_id and timestamp_for_id:
+            signal_id = f"{symbol_for_id}:{timestamp_for_id}"
     if signal_id and (match := lookup.get(("signal_id", signal_id))):
         return match
     symbol = str(row.get("symbol") or "").strip()
@@ -235,6 +240,8 @@ def _accepted_trade_rows(lifecycle_rows: list[dict[str, str]]) -> list[dict[str,
             continue
         signal_id = str(row.get("signal_id") or f"{row.get('symbol','')}:{row.get('timestamp') or row.get('event_ts','')}").strip()
         current = by_signal.setdefault(signal_id, {})
+        if signal_id and current.get("signal_id") in (None, "", "None", "null"):
+            current["signal_id"] = signal_id
         current_state = str(current.get("lifecycle_state") or current.get("status_after") or "").upper()
         next_is_later = state_rank.get(state, 0) >= state_rank.get(current_state, 0)
         # Preserve the most complete accepted trade record across lifecycle rows: early rows
@@ -258,6 +265,7 @@ def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_o
         ctx = _decode_execution_ctx(row.get("execution_ctx"))
         order_row = _match_by_signal_or_composite(row, order_lookup) or {}
         net_pnl = _first_available(row.get("net_pnl"), row.get("net_pnl_usdt"), row.get("pnl"), row.get("pnl_usdt"), ctx.get("net_pnl"), ctx.get("net_pnl_usdt"), ctx.get("pnl"), ctx.get("pnl_usdt"), order_row.get("net_pnl"), order_row.get("net_pnl_usdt"), order_row.get("pnl"), order_row.get("pnl_usdt"))
+        exit_price = _first_available(row.get("exit"), row.get("exit_price"), ctx.get("exit"), ctx.get("exit_price"), order_row.get("exit"), order_row.get("exit_price"))
         rows.append({
             "signal_id": row.get("signal_id"),
             "symbol": row.get("symbol"),
@@ -271,7 +279,8 @@ def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_o
             "entry": _first_available(row.get("entry"), row.get("entry_price"), ctx.get("entry"), ctx.get("entry_price"), order_row.get("entry"), order_row.get("entry_price")),
             "sl": _first_available(row.get("sl"), row.get("stop_loss"), ctx.get("sl"), ctx.get("stop_loss"), order_row.get("sl"), order_row.get("stop_loss")),
             "tp": _first_available(row.get("tp"), row.get("take_profit"), ctx.get("tp"), ctx.get("take_profit"), order_row.get("tp"), order_row.get("take_profit")),
-            "exit": _first_available(row.get("exit"), row.get("exit_price"), ctx.get("exit"), ctx.get("exit_price"), order_row.get("exit"), order_row.get("exit_price")),
+            "exit": exit_price,
+            "exit_status": "EXPORTED" if exit_price is not None else "NOT_EXPORTED",
             "close_reason": _first_available(row.get("close_reason"), ctx.get("close_reason"), order_row.get("close_reason")),
             "result": _first_available(row.get("result"), row.get("outcome"), row.get("lifecycle_state"), row.get("status_after")),
             "net_pnl": net_pnl,

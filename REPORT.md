@@ -1,3 +1,47 @@
+## 2026-06-26 - Accepted Diagnostics Synthetic-ID Export Hardening
+
+### Why the patch was needed
+`accepted_trade_diagnostics` could still show null side, entry, SL, and TP even when `backtest_orders.csv` contained that geometry for the accepted trade.
+
+### Root cause
+Accepted lifecycle rows may omit explicit `signal_id` and rely on the canonical `symbol:timestamp` identity. The diagnostic merger used that fallback as an internal grouping key but did not preserve it on the merged row before matching order artifacts, so order geometry could be missed.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+None. No thresholds, accepted trade counts, reject gates, strategy decisions, order placement, or execution behavior changed. This is Phase 6 evidence/export hardening only.
+
+### Lifecycle changes
+No lifecycle transitions or lifecycle counts changed. The patch only preserves the canonical signal identity in the diagnostic row used for export enrichment.
+
+### Persistence changes
+No SQLite migration and no persistence contract change. Existing CSV rows are read and summarized more completely.
+
+### Export/schema changes
+`accepted_trade_diagnostics` now matches `backtest_orders.csv` by explicit `signal_id` or generated `symbol:timestamp` signal ID. Side, entry, SL, and TP are populated when source order data exists. Missing exit and Net PnL remain explicit with `exit_status: NOT_EXPORTED` and `net_pnl_status: NOT_EXPORTED`.
+
+### Tests added
+Added a regression proving accepted diagnostics do not leave side, entry, SL, or TP null when matching `backtest_orders.csv` source data exists and lifecycle rows require synthetic signal-ID fallback.
+
+### Tests executed
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py`
+- `PYTHONPATH=src python - <<'PY' ... synthetic signal-id accepted diagnostics assertion ... PY`
+- `pytest tests/test_dashboard_app.py::test_accepted_trade_diagnostics_enriches_orders_and_close_ctx tests/test_dashboard_app.py::test_accepted_trade_diagnostics_completes_geometry_and_net_pnl_status tests/test_dashboard_app.py::test_accepted_trade_diagnostics_matches_backtest_orders_with_synthetic_signal_id -q` (blocked by missing FastAPI/httpx dashboard dependencies in this environment)
+
+### Risks and remaining limitations
+If neither explicit signal ID nor symbol/timestamp evidence is available, diagnostics still cannot safely infer order geometry. Exit/PnL are not fabricated when unavailable.
+
+### Migration concerns
+Backward compatible for JSON readers; `exit_status` is additive.
+
+### Push recommendation
+Safe to push after dependency-complete CI confirms the dashboard tests. Do not claim LIVE readiness; this patch hardens reporting evidence only.
+
 ## 2026-06-26 - Accepted Diagnostics Completeness and STOP_TOO_WIDE Rescue Analysis
 
 ### Why the patch was needed

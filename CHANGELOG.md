@@ -1,3 +1,24 @@
+## 2026-06-26 - Accepted Diagnostics Synthetic-ID Export Hardening
+
+### Added
+- Added regression coverage proving accepted diagnostics fill side, entry, SL, and TP from `backtest_orders.csv` when lifecycle rows require the canonical symbol/timestamp signal ID fallback.
+
+### Changed
+- Accepted diagnostics now preserve the canonical `symbol:timestamp` signal ID for accepted lifecycle rows with missing `signal_id`, enabling order-artifact matching without changing accepted trade count.
+- Accepted diagnostics now include explicit `exit_status` alongside `net_pnl_status` when exit/PnL source evidence is not exported.
+
+### Fixed
+- Fixed accepted diagnostics leaving side, entry, SL, and TP null when `backtest_orders.csv` contained matching order geometry but lifecycle rows omitted explicit `signal_id`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Thresholds, accepted counts, reject gates, lifecycle decisions, and strategy logic are unchanged.
+
+### Known Issues
+- Exit and Net PnL remain `NOT_EXPORTED` when source artifacts do not contain those fields.
+
 ## 2026-06-26 - Accepted Diagnostics Completeness and STOP_TOO_WIDE Rescue Analysis
 
 ### Added

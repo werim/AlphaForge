@@ -1,3 +1,15 @@
+## 2026-06-26 Accepted diagnostics synthetic-id export hardening patch
+
+- **Current version:** Accepted diagnostics synthetic-id export hardening patch.
+- **Current phase:** Phase 6 BACKTEST evidence/export completeness hardening.
+- **Runtime maturity:** Research/backtest; accepted diagnostic rows now use `backtest_orders.csv` geometry by generated signal ID when lifecycle rows omit explicit `signal_id`.
+- **BACKTEST/PAPER/LIVE alignment:** No thresholds, accepted trade counts, signal acceptance, reject decisions, strategy logic, or execution behavior changed.
+- **Lifecycle coverage:** Lifecycle rows are not mutated; accepted diagnostics preserve the accepted lifecycle evidence and only complete reporting fields from matching order artifacts.
+- **Execution realism coverage:** Side, entry, SL, and TP are copied from exported order evidence when available; missing exit/PnL remain explicit `NOT_EXPORTED` statuses instead of fake values.
+- **Known critical risks:** Exit and Net PnL can still be unavailable when source artifacts do not export them; this is evidence hardening only.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; reporting completeness improved only.
+
 ## 2026-06-26 Accepted diagnostics completeness and STOP_TOO_WIDE rescue-analysis patch
 
 - **Current version:** Accepted diagnostics completeness and STOP_TOO_WIDE rescue-analysis patch.
