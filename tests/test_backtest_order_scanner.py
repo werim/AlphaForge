@@ -1424,12 +1424,15 @@ def test_signal_quality_score_decile_grouping_and_missing_fields_unavailable():
     shadow.expected_slippage_pct = ""
     shadow.stop_distance_pct = ""
 
-    summary, groups, _ = bo.build_signal_quality_diagnostics([], [shadow], "1h")
+    summary, groups, _, combo, gates, calib = bo.build_signal_quality_diagnostics([], [shadow], "1h")
 
     assert summary["score_saturation"]["score_10_count"] == 1
     assert any(g["group_field"] == "score_decile" and g["group_value"] == "D10" and g["count"] == 1 for g in groups)
     assert any(g["group_field"] == "expected_slippage_pct_bucket" and g["group_value"] == "UNAVAILABLE" for g in groups)
     assert any(g["group_field"] == "stop_distance_pct_bucket" and g["group_value"] == "UNAVAILABLE" for g in groups)
+    assert any(r["grouping"] == "side+regime+setup_type+stop_distance_pct_bucket" for r in combo)
+    assert any(r["gate_name"] == "STOP_TOO_WIDE_RECOVERABLE_GATE" and r["reporting_only"] is True for r in gates)
+    assert any(r["diagnostic"] == "d10_by_reject_reason" for r in calib)
 
 
 def test_high_effective_rr_missed_alpha_counts_outcomes_correctly():
@@ -1439,7 +1442,7 @@ def test_high_effective_rr_missed_alpha_counts_outcomes_correctly():
         _shadow_eval("CCCUSDT", "LOW_SCORE", 8.0, 1.8, "WOULD_TP"),
     ]
 
-    _, _, missed = bo.build_signal_quality_diagnostics([], shadows, "15m")
+    _, _, missed, combo, gates, calib = bo.build_signal_quality_diagnostics([], shadows, "15m")
     by_threshold = {row["effective_rr_threshold"]: row for row in missed}
 
     assert by_threshold[1.9]["count"] == 2
@@ -1455,9 +1458,12 @@ def test_stop_too_wide_split_metrics_are_exported():
         _shadow_eval("BBBUSDT", "STOP_TOO_WIDE", 7.0, 1.1, "WOULD_SL", side="SHORT"),
     ]
 
-    summary, groups, _ = bo.build_signal_quality_diagnostics([], shadows, "15m")
+    summary, groups, _, combo, gates, calib = bo.build_signal_quality_diagnostics([], shadows, "15m")
 
     assert summary["stop_too_wide_split"]["would_tp"]["count"] == 1
     assert summary["stop_too_wide_split"]["would_sl"]["count"] == 1
     assert any(g["group_field"] == "side" and g["group_value"] == "LONG" for g in summary["stop_too_wide_split"]["metrics"])
     assert any(g["group_field"] == "reject_reason" and g["group_value"] == "STOP_TOO_WIDE" for g in groups)
+    assert summary["thresholds_changed"] is False
+    assert summary["acceptance_logic_changed"] is False
+    assert all(g["reporting_only"] is True for g in gates)

@@ -1,3 +1,26 @@
+## 2026-06-26 - Regime/Side/Setup Quality Gate Diagnostics
+
+### Added
+- Added `signal_quality_combo_groups.csv` for side/regime/setup/stop-distance/effective-RR combined signal-quality groups.
+- Added `candidate_quality_gates.csv` with reporting-only candidate gate evidence for SHORT breakdown breakout, strict LONG breakout, high-effective-RR SHORT, and recoverable STOP_TOO_WIDE hypotheses.
+- Added `score_calibration_diagnostics.csv` for score decile splits by side/regime/setup type plus D10 reject-reason and stop-distance outcome splits.
+- Added summary counts and candidate gate details into `signal_quality_summary.json`.
+
+### Changed
+- Signal-quality export writing now handles heterogeneous diagnostic rows safely.
+
+### Fixed
+- Fixed `accepted_reason_breakdown` in backtest quality summaries so lifecycle `SIGNAL_CREATED`/pending rows do not inflate accepted BASELINE counts.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Thresholds, strategy logic, reject decisions, and accepted trade counts are unchanged.
+
+### Known Issues
+- Candidate gates are diagnostics-only. LIVE remains not ready. Accepted diagnostic geometry may still be unavailable in separate dashboard summaries when source artifacts omit it.
+
 ## 2026-06-26 - Signal Quality Diagnostics Export Patch
 
 ### Added

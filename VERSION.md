@@ -1,3 +1,15 @@
+## 2026-06-26 Regime/Side/Setup Quality Gate Diagnostics Patch
+
+- **Current version:** Regime/Side/Setup Quality Gate Diagnostics patch.
+- **Current phase:** Phase 6 signal-quality evidence hardening before threshold changes.
+- **Runtime maturity:** Research/backtest diagnostics only; no thresholds, rescue acceptance, accepted trade counts, or strategy decision logic changed.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST now exports combined side/regime/setup/effective-RR/stop-distance quality evidence; PAPER/LIVE runtime behavior is unchanged.
+- **Lifecycle coverage:** Diagnostics consume unique signal-level accepted/rejected evidence without adding lifecycle states or mutating reject outcomes.
+- **Execution realism coverage:** Candidate-gate diagnostics include effective RR, shadow cost penalty, spread, expected slippage, and stop distance when available; unavailable fields remain explicit.
+- **Known critical risks:** Candidate gates are reporting-only and must not be treated as approval to accept more trades. Accepted diagnostics geometry nulls remain a known issue if source artifacts omit geometry.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; this patch is evidence-only.
+
 ## 2026-06-26 Signal Quality Diagnostics Export Patch
 
 - **Current version:** Signal Quality Diagnostics Export patch.

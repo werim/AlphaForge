@@ -1,3 +1,46 @@
+## 2026-06-26 - Regime/Side/Setup Quality Gate Diagnostics
+
+### Why the patch was needed
+PR 221 fixed candidate-level counts and showed high effective RR alone did not separate rejected winners from losers. The next safe step was evidence-only grouping across side, regime, setup type, stop distance, and effective RR before any threshold changes.
+
+### Root cause
+Existing signal-quality exports were mostly one-dimensional. They could show SHORT vs LONG or BREAKOUT vs TREND, but not whether combined side/regime/setup/geometry groups improved counterfactual signal quality. The backtest quality summary also still allowed lifecycle-created pending rows to inflate `accepted_reason_breakdown`.
+
+### Files changed
+- `backtest_order.py`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+No thresholds, accepted trade count rules, reject decisions, strategy logic, rescue acceptance, order placement, or lifecycle transitions changed. New candidate gates are explicitly reporting-only diagnostics generated after rejected shadow labels already exist.
+
+### Lifecycle changes
+None. The patch reads signal-level lifecycle evidence and rejected-shadow rows but does not create, remove, reorder, or mutate lifecycle states.
+
+### Persistence changes
+No SQLite migration or production persistence contract change. CSV/JSON diagnostic exports are additive.
+
+### Export/schema changes
+Added `signal_quality_combo_groups.csv`, `candidate_quality_gates.csv`, and `score_calibration_diagnostics.csv`. `signal_quality_summary.json` now includes candidate-gate details, combo group counts, score calibration diagnostic counts, and unchanged `thresholds_changed=false` / `acceptance_logic_changed=false` markers.
+
+### Tests added
+Updated regression coverage for unique signal-level accepted/rejected quality summary counting and for the expanded signal-quality diagnostic tuple/export path.
+
+### Tests executed
+- `python -m py_compile backtest_order.py`
+- `pytest tests/test_backtest_order_scanner.py -q`
+
+### Risks and remaining limitations
+Diagnostics depend on rejected-shadow labels and available execution context. Candidate gates report hypothesis quality only and must not be used as production acceptance gates without broader cost-adjusted validation.
+
+### Migration concerns
+Backward compatible. New exports are additive and existing consumers can ignore them.
+
+### Push recommendation
+Safe to push as PR 222 diagnostics-only evidence. Do not accept more trades or loosen thresholds from this patch alone.
+
 ## 2026-06-26 - Signal Quality Diagnostics Export Patch
 
 ### Why the patch was needed

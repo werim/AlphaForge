@@ -1626,16 +1626,42 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
     accepted_tokens = {"ACCEPTED", "EXECUTED", "ENTRY_TRIGGERED", "ORDER_PLACED", "PARTIAL_FILL", "FILLED", "TP_HIT", "SL_HIT", "OPEN_AT_END"}
 
     candidate_signal_ids = {str(r.get("signal_id", "")).strip() for r in candidate_rows_for_counts if str(r.get("signal_id", "")).strip()}
-    rejected_rows = [
-        r for r in candidate_rows
-        if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
-        and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
-    ]
-    accepted_rows = [
-        r for r in candidate_rows
-        if _normalized_decision(r) in accepted_tokens
-        and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
-    ]
+    if signal_created_rows:
+        rejected_signal_ids = {
+            str(r.get("signal_id", "")).strip()
+            for r in candidate_rows
+            if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
+            and str(r.get("signal_id", "")).strip()
+        }
+        rejected_rows = []
+        reject_reason_by_signal_id = {
+            str(r.get("signal_id", "")).strip(): str(r.get("reject_reason", "") or "").strip()
+            for r in candidate_rows
+            if str(r.get("signal_id", "")).strip() and str(r.get("reject_reason", "") or "").strip()
+        }
+        for r in signal_created_rows:
+            sid = str(r.get("signal_id", "")).strip()
+            if str(r.get("reject_reason", "") or "").strip() != "" or sid in rejected_signal_ids or _normalized_decision(r) in rejected_tokens:
+                if not str(r.get("reject_reason", "") or "").strip() and sid in reject_reason_by_signal_id:
+                    r = {**r, "reject_reason": reject_reason_by_signal_id[sid]}
+                rejected_rows.append(r)
+        accepted_rows = [
+            r for r in signal_created_rows
+            if str(r.get("reject_reason", "") or "").strip() == ""
+            and str(r.get("signal_id", "")).strip() not in rejected_signal_ids
+            and _normalized_decision(r) not in rejected_tokens
+        ]
+    else:
+        rejected_rows = [
+            r for r in candidate_rows
+            if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
+            and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
+        ]
+        accepted_rows = [
+            r for r in candidate_rows
+            if _normalized_decision(r) in accepted_tokens
+            and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
+        ]
     execution_ctx_missing_true = sum(1 for r in candidate_rows if bool(r.get("execution_ctx_missing")))
     effective_rr_diff_count = sum(
         1
@@ -2241,16 +2267,56 @@ def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows:
                 vals=[_quality_float(r.get(f)) for r in rows]; vals=[v for v in vals if v is not None]
                 return (sum(vals)/len(vals)) if vals else None
             group_rows.append({"group_field":dim,"group_value":key,"count":n, **{f"{o.lower()}_count":c for o,c in outcomes.items()}, **{f"{o.lower()}_rate":(c/n if n else 0.0) for o,c in outcomes.items()}, "mean_score":mean("score"), "mean_raw_rr":mean("raw_rr"), "mean_effective_rr":mean("effective_rr"), "mean_decision_cost_penalty":mean("decision_cost_penalty"), "mean_shadow_cost_penalty":mean("shadow_cost_penalty"), "mean_spread_pct":mean("spread_pct"), "mean_expected_slippage_pct":mean("expected_slippage_pct")})
-    score10=[r for r in records if _quality_float(r.get("score")) == 10.0]
     def split(rows): return {"count":len(rows), "would_tp_count":sum(1 for r in rows if r.get("outcome")=="WOULD_TP"), "would_sl_count":sum(1 for r in rows if r.get("outcome")=="WOULD_SL"), "would_timeout_count":sum(1 for r in rows if r.get("outcome")=="WOULD_TIMEOUT"), "unknown_count":sum(1 for r in rows if r.get("outcome") not in {"WOULD_TP","WOULD_SL","WOULD_TIMEOUT"})}
+    def mean(rows, f):
+        vals=[_quality_float(r.get(f)) for r in rows]; vals=[v for v in vals if v is not None]
+        return (sum(vals)/len(vals)) if vals else None
+    def outcome_metrics(rows):
+        n=len(rows); base=split(rows)
+        return {**base, "would_tp_rate":base["would_tp_count"]/n if n else 0.0, "would_sl_rate":base["would_sl_count"]/n if n else 0.0, "would_timeout_rate":base["would_timeout_count"]/n if n else 0.0, "unknown_rate":base["unknown_count"]/n if n else 0.0}
+    combo_rows=[]
+    combo_dims=[("side","regime"),("side","setup_type"),("regime","setup_type"),("side","regime","setup_type"),("side","regime","setup_type","stop_distance_pct_bucket"),("side","regime","setup_type","effective_rr_threshold_bucket")]
+    for r in records:
+        eff=_quality_float(r.get("effective_rr"))
+        r["effective_rr_threshold_bucket"] = "UNAVAILABLE" if eff is None else (">=2.3" if eff>=2.3 else ">=2.1" if eff>=2.1 else ">=1.9" if eff>=1.9 else ">=1.7" if eff>=1.7 else "<1.7")
+    for dims_tuple in combo_dims:
+        keys=sorted({tuple(str(r.get(d) or "UNAVAILABLE") for d in dims_tuple) for r in records})
+        for key in keys:
+            rows=[r for r in records if tuple(str(r.get(d) or "UNAVAILABLE") for d in dims_tuple)==key]
+            metrics=outcome_metrics(rows)
+            combo_rows.append({"grouping":"+".join(dims_tuple), **{d:v for d,v in zip(dims_tuple,key)}, "count":len(rows), **metrics, "mean_score":mean(rows,"score"), "mean_raw_rr":mean(rows,"raw_rr"), "mean_effective_rr":mean(rows,"effective_rr"), "mean_shadow_cost_penalty":mean(rows,"shadow_cost_penalty"), "mean_spread_pct":mean(rows,"spread_pct"), "mean_expected_slippage_pct":mean(rows,"expected_slippage_pct"), "mean_stop_distance_pct":mean(rows,"stop_distance_pct")})
+    rejected=[r for r in records if r.get("source")=="REJECTED_SHADOW"]
+    gate_defs={
+        "SHORT_BREAKDOWN_BREAKOUT_GATE": lambda r: r.get("side")=="SHORT" and r.get("setup_type")=="BREAKDOWN_DOWN" and r.get("regime")=="BREAKOUT",
+        "LONG_BREAKOUT_STRICT_GATE": lambda r: r.get("side")=="LONG" and r.get("setup_type")=="BREAKOUT_UP" and (_quality_float(r.get("effective_rr")) or 0)>=1.9 and (_quality_float(r.get("stop_distance_pct")) or 999)<=1.5,
+        "HIGH_EFFECTIVE_RR_SHORT_GATE": lambda r: r.get("side")=="SHORT" and (_quality_float(r.get("effective_rr")) or 0)>=1.9,
+        "STOP_TOO_WIDE_RECOVERABLE_GATE": lambda r: str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" and (_quality_float(r.get("effective_rr")) or 0)>=1.7 and (_quality_float(r.get("stop_distance_pct")) or 999)<=3.0,
+    }
+    gate_allowed={"SHORT_BREAKDOWN_BREAKOUT_GATE":["LOW_SCORE","STOP_TOO_WIDE","DAILY_SYMBOL_TRADE_LIMIT","REGIME_MISMATCH"],"LONG_BREAKOUT_STRICT_GATE":["LOW_SCORE","STOP_TOO_WIDE"],"HIGH_EFFECTIVE_RR_SHORT_GATE":["LOW_SCORE","STOP_TOO_WIDE","DAILY_SYMBOL_TRADE_LIMIT"],"STOP_TOO_WIDE_RECOVERABLE_GATE":["STOP_TOO_WIDE"]}
+    gate_rows=[]
+    for name, pred in gate_defs.items():
+        rows=[r for r in rejected if pred(r)]
+        metrics=outcome_metrics(rows)
+        gate_rows.append({"gate_name":name,"reporting_only":True,"candidate_count":len(rows),**{k:v for k,v in metrics.items() if k!="count"},"mean_effective_rr":mean(rows,"effective_rr"),"expected_effective_expectancy":(sum(((_quality_float(r.get("effective_rr")) or 0.0) if r.get("outcome")=="WOULD_TP" else (-1.0 if r.get("outcome")=="WOULD_SL" else 0.0)) for r in rows)/len(rows) if rows else 0.0),"allowed_reject_reasons":"|".join(gate_allowed[name]),"rejected_by_reason":json.dumps(_distribution([r.get("reject_reason") for r in rows]), sort_keys=True)})
+    calibration_rows=[]
+    for dims_tuple in [("score_decile","side"),("score_decile","regime"),("score_decile","setup_type")]:
+        keys=sorted({tuple(str(r.get(d) or "UNAVAILABLE") for d in dims_tuple) for r in records})
+        for key in keys:
+            rows=[r for r in records if tuple(str(r.get(d) or "UNAVAILABLE") for d in dims_tuple)==key]
+            calibration_rows.append({"diagnostic":"by_"+dims_tuple[1], **{d:v for d,v in zip(dims_tuple,key)}, **outcome_metrics(rows)})
+    d10=[r for r in records if r.get("score_decile")=="D10"]
+    for dim in ["reject_reason","stop_distance_pct_bucket"]:
+        for key in sorted({str(r.get(dim) or "UNAVAILABLE") for r in d10}):
+            rows=[r for r in d10 if str(r.get(dim) or "UNAVAILABLE")==key]
+            calibration_rows.append({"diagnostic":"d10_by_"+dim, dim:key, **outcome_metrics(rows)})
+    score10=[r for r in records if _quality_float(r.get("score")) == 10.0]
     stop=[r for r in records if str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE"]
     missed=[]
-    rejected=[r for r in records if r.get("source")=="REJECTED_SHADOW"]
     for t in thresholds:
         rows=[r for r in rejected if (_quality_float(r.get("effective_rr")) or -1) >= t]
         missed.append({"effective_rr_threshold":t, **split(rows)})
-    summary={"total_records":len(records), "accepted_records":sum(1 for r in records if r.get("source")=="ACCEPTED"), "rejected_shadow_records":len(shadows), "score_saturation":{"score_10_count":len(score10), "score_10_rate":len(score10)/len(records) if records else 0.0, "score_10_would_tp_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_TP"), "score_10_would_sl_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_SL"), "score_10_by_reject_reason":{k:split([r for r in score10 if str(r.get("reject_reason"))==k]) for k in sorted({str(r.get("reject_reason")) for r in score10})}, "score_10_by_regime":{k:split([r for r in score10 if str(r.get("regime"))==k]) for k in sorted({str(r.get("regime")) for r in score10})}}, "stop_too_wide_split":{"would_tp":split([r for r in stop if r.get("outcome")=="WOULD_TP"]), "would_sl":split([r for r in stop if r.get("outcome")=="WOULD_SL"]), "metrics":[g for g in group_rows if g["group_field"] in {"symbol","side","regime","effective_rr_decile","score_decile","volatility_score_bucket","liquidity_score_bucket","spread_pct_bucket","expected_slippage_pct_bucket","stop_distance_pct_bucket"} and any(str(r.get(g["group_field"]) or "UNAVAILABLE")==g["group_value"] and str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" for r in records)]}, "high_effective_rr_missed_alpha":missed, "top_quality_improvement_candidates": sorted([r for r in rejected if r.get("outcome")=="WOULD_TP"], key=lambda r:((_quality_float(r.get("effective_rr")) or 0), (_quality_float(r.get("score")) or 0)), reverse=True)[:20], "thresholds_changed": False, "acceptance_logic_changed": False}
-    return summary, group_rows, missed
+    summary={"total_records":len(records), "accepted_records":sum(1 for r in records if r.get("source")=="ACCEPTED"), "rejected_shadow_records":len(shadows), "score_saturation":{"score_10_count":len(score10), "score_10_rate":len(score10)/len(records) if records else 0.0, "score_10_would_tp_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_TP"), "score_10_would_sl_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_SL"), "score_10_by_reject_reason":{k:split([r for r in score10 if str(r.get("reject_reason"))==k]) for k in sorted({str(r.get("reject_reason")) for r in score10})}, "score_10_by_regime":{k:split([r for r in score10 if str(r.get("regime"))==k]) for k in sorted({str(r.get("regime")) for r in score10})}}, "stop_too_wide_split":{"would_tp":split([r for r in stop if r.get("outcome")=="WOULD_TP"]), "would_sl":split([r for r in stop if r.get("outcome")=="WOULD_SL"]), "metrics":[g for g in group_rows if g["group_field"] in {"symbol","side","regime","effective_rr_decile","score_decile","volatility_score_bucket","liquidity_score_bucket","spread_pct_bucket","expected_slippage_pct_bucket","stop_distance_pct_bucket"} and any(str(r.get(g["group_field"]) or "UNAVAILABLE")==g["group_value"] and str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" for r in records)]}, "high_effective_rr_missed_alpha":missed, "top_quality_improvement_candidates": sorted([r for r in rejected if r.get("outcome")=="WOULD_TP"], key=lambda r:((_quality_float(r.get("effective_rr")) or 0), (_quality_float(r.get("score")) or 0)), reverse=True)[:20], "combo_group_count": len(combo_rows), "candidate_quality_gates": gate_rows, "score_calibration_diagnostics_count": len(calibration_rows), "thresholds_changed": False, "acceptance_logic_changed": False}
+    return summary, group_rows, missed, combo_rows, gate_rows, calibration_rows
 
 def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Dict[str, Any]:
     total = len(shadows)
@@ -2742,7 +2808,14 @@ def main():
     ]
     if not accepted_quality_rows:
         accepted_quality_rows = [r for r in lifecycle if not r.reject_reason and r.status_after == "SIGNAL_CREATED"]
-    signal_quality_summary, signal_quality_group_rows, high_effective_rr_rows = build_signal_quality_diagnostics(
+    (
+        signal_quality_summary,
+        signal_quality_group_rows,
+        high_effective_rr_rows,
+        signal_quality_combo_rows,
+        candidate_quality_gate_rows,
+        score_calibration_rows,
+    ) = build_signal_quality_diagnostics(
         accepted_quality_rows, rejected_shadow, args.interval
     )
     with open(os.path.join(args.output_dir, "signal_quality_summary.json"), "w") as f:
@@ -2750,9 +2823,12 @@ def main():
     for name, rows, fallback_fields in [
         ("signal_quality_by_group.csv", signal_quality_group_rows, ["group_field", "group_value", "count"]),
         ("high_effective_rr_missed_alpha.csv", high_effective_rr_rows, ["effective_rr_threshold", "count", "would_tp_count", "would_sl_count"]),
+        ("signal_quality_combo_groups.csv", signal_quality_combo_rows, ["grouping", "count"]),
+        ("candidate_quality_gates.csv", candidate_quality_gate_rows, ["gate_name", "reporting_only", "candidate_count"]),
+        ("score_calibration_diagnostics.csv", score_calibration_rows, ["diagnostic", "count"]),
     ]:
         with open(os.path.join(args.output_dir, name), "w", newline="") as f:
-            fieldnames = list(rows[0].keys()) if rows else fallback_fields
+            fieldnames = resolve_csv_fieldnames(rows, list(rows[0].keys()) if rows else fallback_fields)
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows(rows)
