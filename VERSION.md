@@ -1,3 +1,15 @@
+## 2026-06-26 Signal Quality Diagnostics Export Patch
+
+- **Current version:** Signal Quality Diagnostics Export patch.
+- **Current phase:** BACKTEST signal-quality measurement before threshold changes.
+- **Runtime maturity:** Research/backtest diagnostics only; no threshold, rescue acceptance, or strategy decision logic changed.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST exports now measure accepted and rejected-shadow quality splits; PAPER/LIVE runtime behavior is unchanged.
+- **Lifecycle coverage:** Accepted and rejected lifecycle decisions are not mutated; rejected shadows remain rejected and exportable for audit.
+- **Execution realism coverage:** Diagnostics group by effective RR, score, spread, slippage, volatility, liquidity, and stop distance when available; missing optional fields are marked unavailable rather than fake-filled.
+- **Known critical risks:** Diagnostics identify candidate quality separators but do not prove threshold loosening is safe. STOP_TOO_WIDE and HIGH_EFFECTIVE_RR outputs are analysis-only.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; this patch measures signal quality only.
+
 ## 2026-06-26 High Effective-RR Rescue Acceptance Lane (BACKTEST-only experimental)
 
 - **Current version:** High Effective-RR Rescue Acceptance Lane patch.

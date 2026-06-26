@@ -99,6 +99,20 @@
           <tr><th>Artifacts</th><td>{{ backtest_result.output_dir or 'Unavailable' }}{% if backtest_result.summary_path %}<br>{{ backtest_result.summary_path }}{% endif %}{% if backtest_result.lifecycle_path %}<br>{{ backtest_result.lifecycle_path }}{% endif %}{% if backtest_result.rejected_path %}<br>{{ backtest_result.rejected_path }}{% endif %}{% if backtest_result.calibration_report_path %}<br>{{ backtest_result.calibration_report_path }}{% endif %}{% if backtest_result.calibration_summary_path %}<br>{{ backtest_result.calibration_summary_path }}{% endif %}</td></tr>
         </tbody>
       </table>
+
+      <h3>Signal Quality Diagnostics</h3>
+      <table>
+        <tbody>
+          <tr><th>Score saturation</th><td>{{ backtest_result.signal_quality_diagnostics.get('score_saturation', {}) }}</td></tr>
+          <tr><th>High effective-RR rejected outcome split</th><td>{{ backtest_result.high_effective_rr_missed_alpha }}</td></tr>
+          <tr><th>STOP_TOO_WIDE WOULD_TP vs WOULD_SL split</th><td>{{ backtest_result.stop_too_wide_quality_split }}</td></tr>
+        </tbody>
+      </table>
+      <h3>Top Quality-Improvement Candidates</h3>
+      <table>
+        <thead><tr><th>Symbol</th><th>Side</th><th>Reason</th><th>Score</th><th>Effective RR</th><th>Regime</th><th>Spread</th><th>Slippage</th></tr></thead>
+        <tbody>{% for row in backtest_result.top_quality_improvement_candidates %}<tr><td>{{ row.symbol }}</td><td>{{ row.side }}</td><td>{{ row.reject_reason }}</td><td>{{ row.score }}</td><td>{{ row.effective_rr }}</td><td>{{ row.regime }}</td><td>{{ row.spread_pct }}</td><td>{{ row.expected_slippage_pct }}</td></tr>{% else %}<tr><td colspan="8" class="empty">No signal quality candidates available.</td></tr>{% endfor %}</tbody>
+      </table>
       <h3>Accepted Trade Diagnostics</h3>
       <table>
         <thead><tr><th>Signal</th><th>Symbol</th><th>Side</th><th>Score</th><th>Raw RR</th><th>Effective RR</th><th>Regime</th><th>Entry</th><th>SL</th><th>TP</th><th>Exit</th><th>Close Reason</th><th>Result</th><th>Net PnL</th><th>Net PnL Status</th></tr></thead>
