@@ -21,5 +21,5 @@ Set-Location $RepoDir
 
 "[$(Get-Date -Format o)] Starting AlphaForge dashboard on http://127.0.0.1:$Port" | Out-File -FilePath $LogPath -Encoding utf8 -Append
 
-& $Uvicorn "alphaforge.dashboard.app:create_app" "--factory" "--host" "127.0.0.1" "--port" "$Port" >> $LogPath 2>&1
+python -m uvicorn alphaforge.dashboard.app:create_app --factory --host 127.0.0.1 --port 8000
 exit $LASTEXITCODE
