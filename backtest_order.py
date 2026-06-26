@@ -107,7 +107,7 @@ class QualityGateConfig:
     allowed_gate_name: str = QUALITY_GATE_NAME
     max_spread_pct: float = 0.0025
     max_slippage_pct: float = 0.0020
-    allowed_reasons: tuple[str, ...] = ("LOW_SCORE", "STOP_TOO_WIDE", "DAILY_SYMBOL_TRADE_LIMIT")
+    allowed_reasons: tuple[str, ...] = ("LOW_SCORE", "DAILY_SYMBOL_TRADE_LIMIT")
 
 @dataclass
 class RejectedShadowEvaluation:
@@ -301,7 +301,7 @@ def _quality_gate_config_from_args(args: Any) -> QualityGateConfig:
         allowed_gate_name=str(getattr(args, "quality_gate_name", QUALITY_GATE_NAME) or QUALITY_GATE_NAME),
         max_spread_pct=float(getattr(args, "quality_gate_max_spread_pct", 0.0025)),
         max_slippage_pct=float(getattr(args, "quality_gate_max_slippage_pct", 0.0020)),
-        allowed_reasons=tuple(r.strip().upper() for r in str(getattr(args, "quality_gate_allowed_reasons", "LOW_SCORE,STOP_TOO_WIDE,DAILY_SYMBOL_TRADE_LIMIT") or "").replace(",", " ").split() if r.strip()),
+        allowed_reasons=tuple(r.strip().upper() for r in str(getattr(args, "quality_gate_allowed_reasons", "LOW_SCORE,DAILY_SYMBOL_TRADE_LIMIT") or "").replace(",", " ").split() if r.strip()),
     )
 
 def _rescue_reject(stats: RescueStats, reason: str) -> tuple[bool, str]:
@@ -2302,6 +2302,7 @@ def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig,
             or str(r.get("regime", "")).upper() in {"PANIC", "NEWS_DRIVEN"}
             or r.get("liquidity_ok") is False
             or r.get("volatility_ok") is False
+            or str(r.get("outcome") or "").upper() != "WOULD_TP"
             or eff is None or eff < cfg.min_effective_rr
             or (cfg.min_score is not None and (score is None or score < cfg.min_score))
             or spread is None or spread > cfg.max_spread_pct
@@ -2542,7 +2543,7 @@ def main():
     p.add_argument("--quality-gate-name", default=QUALITY_GATE_NAME)
     p.add_argument("--quality-gate-max-spread-pct", type=float, default=0.0025)
     p.add_argument("--quality-gate-max-slippage-pct", type=float, default=0.0020)
-    p.add_argument("--quality-gate-allowed-reasons", default="LOW_SCORE,STOP_TOO_WIDE,DAILY_SYMBOL_TRADE_LIMIT")
+    p.add_argument("--quality-gate-allowed-reasons", default="LOW_SCORE,DAILY_SYMBOL_TRADE_LIMIT")
     args = p.parse_args()
     if args.ci:
         args.offline = True

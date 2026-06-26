@@ -1,3 +1,15 @@
+## 2026-06-26 Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m
+
+- **Current version:** Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m patch.
+- **Current phase:** Phase 6 BACKTEST evidence integrity and calibration safety.
+- **Runtime maturity:** BACKTEST diagnostics only; optional quality gate remains disabled by default and stricter when explicitly enabled.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST exports are more complete; PAPER/LIVE order behavior is unchanged and no LIVE order calls are introduced.
+- **Lifecycle coverage:** Accepted diagnostics merge lifecycle/order/close artifacts without mutating lifecycle states; rejected later-gate candidates remain rejected and grouped for audit.
+- **Execution realism coverage:** STOP_TOO_WIDE is excluded from default quality-gate rescue reasons, high effective-RR `WOULD_SL` rows cannot be rescued, and unavailable execution fields remain explicit.
+- **Known critical risks:** The BTCUSDT 60d/15m evidence shows accepted trades lost money and later-gate STOP_TOO_WIDE candidates were dominated by WOULD_SL; this is not positive calibration evidence.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; this patch is BACKTEST diagnostics/preservation only.
+
 ## 2026-06-26 BACKTEST_ONLY SHORT Breakdown Breakout Normal Stop Quality Gate
 
 - **Current version:** BACKTEST_ONLY SHORT breakdown/breakout NORMAL-stop quality-gate comparison patch.
