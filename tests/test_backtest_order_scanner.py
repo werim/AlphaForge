@@ -1392,3 +1392,72 @@ def test_rescue_config_does_not_change_global_order_thresholds():
     assert order.MIN_SCORE_BASE == pytest.approx(7.5)
     assert order.MIN_RR_BASE == pytest.approx(1.3)
     assert order.MIN_RR_THRESHOLD == pytest.approx(1.1)
+
+
+def _shadow_eval(symbol, reason, score, effective_rr, outcome, **kwargs):
+    return bo.RejectedShadowEvaluation(
+        symbol=symbol, timestamp=1, side=kwargs.get("side", "LONG"), entry=100, stop_loss=98,
+        take_profit=104, raw_rr=2.0, effective_rr=effective_rr, reject_reasons=reason,
+        score=score, regime=kwargs.get("regime", "TREND"), spread_pct=kwargs.get("spread_pct", 0.02),
+        liquidity_score=kwargs.get("liquidity_score", 0.8), volatility_score=kwargs.get("volatility_score", 0.2),
+        shadow_outcome=outcome, effective_tp_hit=(outcome == "WOULD_TP"), cost_penalty=0.1,
+        liquidity_ok=True, volatility_ok=True, setup_type=kwargs.get("setup_type", "BREAKOUT"),
+        expected_slippage_pct=kwargs.get("expected_slippage_pct", 0.01), stop_distance_pct=2.0,
+    )
+
+
+def test_signal_quality_diagnostics_do_not_change_trade_counts_or_rejects():
+    accepted = [bo.LifecycleRow(1, "AAAUSDT", "LONG", "BREAKOUT", "", "TREND", 8.0, 2.0, 100, 98, 104, "FILLED", "POSITION_CLOSED", close_reason="TP_HIT")]
+    shadows = [_shadow_eval("BBBUSDT", "LOW_SCORE", 6.0, 1.2, "WOULD_SL")]
+    accepted_before = len(accepted)
+    reject_reasons_before = [s.reject_reasons for s in shadows]
+
+    bo.build_signal_quality_diagnostics(accepted, shadows, "15m")
+
+    assert len(accepted) == accepted_before
+    assert [s.reject_reasons for s in shadows] == reject_reasons_before
+
+
+def test_signal_quality_score_decile_grouping_and_missing_fields_unavailable():
+    shadow = _shadow_eval("AAAUSDT", "LOW_SCORE", 10.0, 2.2, "WOULD_TP")
+    shadow.setup_type = ""
+    shadow.expected_slippage_pct = ""
+    shadow.stop_distance_pct = ""
+
+    summary, groups, _ = bo.build_signal_quality_diagnostics([], [shadow], "1h")
+
+    assert summary["score_saturation"]["score_10_count"] == 1
+    assert any(g["group_field"] == "score_decile" and g["group_value"] == "D10" and g["count"] == 1 for g in groups)
+    assert any(g["group_field"] == "expected_slippage_pct_bucket" and g["group_value"] == "UNAVAILABLE" for g in groups)
+    assert any(g["group_field"] == "stop_distance_pct_bucket" and g["group_value"] == "UNAVAILABLE" for g in groups)
+
+
+def test_high_effective_rr_missed_alpha_counts_outcomes_correctly():
+    shadows = [
+        _shadow_eval("AAAUSDT", "LOW_SCORE", 8.0, 2.2, "WOULD_TP"),
+        _shadow_eval("BBBUSDT", "STOP_TOO_WIDE", 8.0, 2.0, "WOULD_SL"),
+        _shadow_eval("CCCUSDT", "LOW_SCORE", 8.0, 1.8, "WOULD_TP"),
+    ]
+
+    _, _, missed = bo.build_signal_quality_diagnostics([], shadows, "15m")
+    by_threshold = {row["effective_rr_threshold"]: row for row in missed}
+
+    assert by_threshold[1.9]["count"] == 2
+    assert by_threshold[1.9]["would_tp_count"] == 1
+    assert by_threshold[1.9]["would_sl_count"] == 1
+    assert by_threshold[2.1]["count"] == 1
+    assert by_threshold[2.1]["would_tp_count"] == 1
+
+
+def test_stop_too_wide_split_metrics_are_exported():
+    shadows = [
+        _shadow_eval("AAAUSDT", "STOP_TOO_WIDE", 9.0, 2.4, "WOULD_TP", side="LONG"),
+        _shadow_eval("BBBUSDT", "STOP_TOO_WIDE", 7.0, 1.1, "WOULD_SL", side="SHORT"),
+    ]
+
+    summary, groups, _ = bo.build_signal_quality_diagnostics([], shadows, "15m")
+
+    assert summary["stop_too_wide_split"]["would_tp"]["count"] == 1
+    assert summary["stop_too_wide_split"]["would_sl"]["count"] == 1
+    assert any(g["group_field"] == "side" and g["group_value"] == "LONG" for g in summary["stop_too_wide_split"]["metrics"])
+    assert any(g["group_field"] == "reject_reason" and g["group_value"] == "STOP_TOO_WIDE" for g in groups)

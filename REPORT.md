@@ -1,3 +1,49 @@
+## 2026-06-26 - Signal Quality Diagnostics Export Patch
+
+### Why the patch was needed
+Latest BACKTEST artifacts showed high rejection, few accepted trades, score saturation at 10.0, and mixed WOULD_TP/WOULD_SL outcomes inside STOP_TOO_WIDE and LOW_SCORE rejects. The system needed measurement of what separates counterfactual winners from losers before any threshold changes.
+
+### Root cause
+Existing rejected-shadow and dashboard calibration outputs exposed useful summaries, but did not export a broad signal-quality grouping matrix across reject reason, symbol, side, regime, setup type, timeframe, score/effective-RR deciles, execution-cost buckets, and stop-distance buckets. High effective-RR missed-alpha review was also not separated as diagnostics-only evidence.
+
+### Files changed
+- `backtest_order.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_backtest_order_scanner.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+No thresholds, strategy logic, accepted trade count rules, reject decisions, rescue acceptance, order placement, or lifecycle progression changed. The new code only builds diagnostic records after candidates/rejected shadows/lifecycle rows already exist.
+
+### Lifecycle changes
+None. Accepted lifecycle rows and rejected-shadow lifecycle annotations remain unchanged. Rejected signals are still rejected and are not converted into trades.
+
+### Persistence changes
+No SQLite schema migration or production persistence contract change.
+
+### Export/schema changes
+Added BACKTEST artifacts: `signal_quality_summary.json`, `signal_quality_by_group.csv`, and `high_effective_rr_missed_alpha.csv`. Summary JSON includes score saturation diagnostics, STOP_TOO_WIDE WOULD_TP/WOULD_SL split evidence, high effective-RR missed-alpha distributions at 1.7/1.9/2.1/2.3, top quality-improvement candidates, and explicit `thresholds_changed=false` / `acceptance_logic_changed=false`. Optional unavailable fields are exported as `UNAVAILABLE` buckets rather than fabricated values.
+
+### Tests added
+Added regressions proving diagnostics do not change accepted counts or reject reasons, score decile grouping works, high effective-RR missed-alpha counts WOULD_TP/WOULD_SL correctly, STOP_TOO_WIDE split metrics are exported, and missing optional fields are marked unavailable.
+
+### Tests executed
+- `python -m py_compile backtest_order.py`
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py`
+- `pytest -q tests/test_backtest_order_scanner.py -q`
+
+### Risks and remaining limitations
+Quality diagnostics depend on rejected-shadow forward labels and available exported execution context. They are not permission to loosen LOW_SCORE, STOP_TOO_WIDE, effective-RR, spread, slippage, liquidity, or volatility gates.
+
+### Migration concerns
+Backward compatible. New CSV/JSON files are additive and existing artifact readers can ignore them.
+
+### Push recommendation
+Safe to push as diagnostics-only measurement. Do not change thresholds until these outputs demonstrate stable cost-adjusted separators across symbols/regimes/timeframes.
+
 ## 2026-06-26 - High Effective-RR Rescue Acceptance Lane (BACKTEST-only)
 
 ### Why the patch was needed

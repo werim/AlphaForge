@@ -75,6 +75,10 @@ class DashboardBacktestResult:
     near_miss_score_distribution: dict[str, Any] = field(default_factory=dict)
     near_miss_effective_rr_distribution: dict[str, Any] = field(default_factory=dict)
     stop_too_wide_rescue_diagnostics: dict[str, Any] = field(default_factory=dict)
+    signal_quality_diagnostics: dict[str, Any] = field(default_factory=dict)
+    high_effective_rr_missed_alpha: list[dict[str, Any]] = field(default_factory=list)
+    stop_too_wide_quality_split: dict[str, Any] = field(default_factory=dict)
+    top_quality_improvement_candidates: list[dict[str, Any]] = field(default_factory=list)
     backtest_rejection_rate: float | None = None
 
 
@@ -639,11 +643,13 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     rejected_path = output_dir / "rejected_orders.csv"
     rejected_shadow_path = output_dir / "rejected_shadow.csv"
     backtest_orders_path = output_dir / "backtest_orders.csv"
+    signal_quality_summary_path = output_dir / "signal_quality_summary.json"
     summary = _read_first_csv_row(summary_path)
     lifecycle_rows = _read_csv_rows(lifecycle_path)
     rejected_rows = _read_csv_rows(rejected_path)
     rejected_shadow_rows = _read_csv_rows(rejected_shadow_path)
     backtest_order_rows = _read_csv_rows(backtest_orders_path)
+    signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
     result.status = "COMPLETED"
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
@@ -685,6 +691,10 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.near_miss_score_distribution = calibration_summary["near_miss_score_distribution"]
     result.near_miss_effective_rr_distribution = calibration_summary["near_miss_effective_rr_distribution"]
     result.stop_too_wide_rescue_diagnostics = calibration_summary["stop_too_wide_rescue_diagnostics"]
+    result.signal_quality_diagnostics = signal_quality_summary
+    result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else []
+    result.stop_too_wide_quality_split = signal_quality_summary.get("stop_too_wide_split", {}) if isinstance(signal_quality_summary, dict) else {}
+    result.top_quality_improvement_candidates = signal_quality_summary.get("top_quality_improvement_candidates", []) if isinstance(signal_quality_summary, dict) else []
     if result.rejected_signals is not None and result.accepted_trades is not None:
         denom = result.rejected_signals + result.accepted_trades
         result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None

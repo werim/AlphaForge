@@ -1,3 +1,26 @@
+## 2026-06-26 - Signal Quality Diagnostics Export Patch
+
+### Added
+- Added `signal_quality_summary.json`, `signal_quality_by_group.csv`, and `high_effective_rr_missed_alpha.csv` BACKTEST exports for accepted and rejected-shadow signal quality analysis.
+- Added score saturation, STOP_TOO_WIDE WOULD_TP/WOULD_SL split, high effective-RR missed-alpha, and top quality-improvement candidate diagnostics.
+- Added dashboard rendering for Signal Quality Diagnostics.
+- Added regression coverage for unchanged counts/decisions, score deciles, high effective-RR splits, STOP_TOO_WIDE exports, and unavailable optional fields.
+
+### Changed
+- Rejected-shadow rows now carry diagnostic-only setup type, expected slippage, stop-distance, and timeframe-compatible fields when available.
+
+### Fixed
+- Fixed missing grouped visibility into what separates rejected WOULD_TP from WOULD_SL cases before threshold review.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Thresholds, rescue acceptance, and strategy logic are unchanged.
+
+### Known Issues
+- Diagnostics are only as complete as exported execution context and rejected-shadow labels; missing fields remain unavailable rather than fake-filled. LIVE remains not ready.
+
 ## 2026-06-26 - High Effective-RR Rescue Acceptance Lane (BACKTEST-only)
 
 ### Added

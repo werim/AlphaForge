@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Mapping
+from typing import Dict, List, Optional, Any, Mapping, Iterable
 # Allow running this script directly from the repo root without requiring
 # prior editable install.
 ROOT_DIR = Path(__file__).resolve().parent
@@ -122,6 +122,10 @@ class RejectedShadowEvaluation:
     rescued_effective_rr: float = 0.0
     rescued_size_multiplier: float = 0.0
     rescue_reject_reason: str = ""
+    setup_type: str = "UNAVAILABLE"
+    timeframe: str = "UNAVAILABLE"
+    expected_slippage_pct: Any = "UNAVAILABLE"
+    stop_distance_pct: Any = "UNAVAILABLE"
 @dataclass
 class ForwardWindowEvaluation:
     signal_id: str
@@ -2168,7 +2172,86 @@ def evaluate_rejected_shadow(
         rescued_effective_rr=rescued_effective_rr,
         rescued_size_multiplier=rescued_size_multiplier,
         rescue_reject_reason=rescue_reject_reason,
+        setup_type=str(candidate_row.get("setup_type") or "UNAVAILABLE"),
+        expected_slippage_pct=(candidate_row.get("expected_slippage_pct") if candidate_row.get("expected_slippage_pct") not in (None, "") else "UNAVAILABLE"),
+        stop_distance_pct=(abs(_safe_float(candidate_row.get("entry"), 0.0) - _safe_float(candidate_row.get("sl"), 0.0)) / max(_safe_float(candidate_row.get("entry"), 0.0), 1e-9) * 100.0 if _safe_float(candidate_row.get("entry"), 0.0) > 0.0 and _safe_float(candidate_row.get("sl"), 0.0) > 0.0 else "UNAVAILABLE"),
     )
+
+def _quality_float(value: Any) -> Optional[float]:
+    if value in (None, "", "None", "null", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def _decile(value: Any) -> str:
+    numeric = _quality_float(value)
+    if numeric is None:
+        return "UNAVAILABLE"
+    return f"D{min(10, max(1, int(numeric * 10) + 1))}" if 0.0 <= numeric <= 1.0 else f"D{min(10, max(1, int(numeric) + 1))}"
+
+def _bucket_quality(value: Any, cuts: Iterable[float], labels: List[str]) -> str:
+    numeric = _quality_float(value)
+    if numeric is None:
+        return "UNAVAILABLE"
+    for cut, label in zip(cuts, labels):
+        if numeric <= cut:
+            return label
+    return labels[-1]
+
+def _outcome_from_lifecycle(row: LifecycleRow) -> str:
+    reason = str(row.close_reason or row.status_after or "").upper()
+    if reason == "TP_HIT" or row.would_tp_hit:
+        return "WOULD_TP"
+    if reason == "SL_HIT" or row.would_sl_hit:
+        return "WOULD_SL"
+    if reason in {"OPEN_AT_END", "TIMEOUT"}:
+        return "WOULD_TIMEOUT"
+    return "UNKNOWN"
+
+def _quality_record_from_lifecycle(row: LifecycleRow, timeframe: str) -> Dict[str, Any]:
+    stop_distance = "UNAVAILABLE"
+    if row.entry > 0 and row.sl > 0:
+        stop_distance = abs(row.entry - row.sl) / row.entry * 100.0
+    return {"source": "ACCEPTED", "reject_reason": "ACCEPTED", "symbol": row.symbol or "UNKNOWN", "side": row.side or "UNKNOWN", "regime": row.regime or "UNKNOWN", "setup_type": row.setup_type or "UNAVAILABLE", "timeframe": timeframe, "score": row.score, "raw_rr": row.rr, "effective_rr": row.effective_rr if row.effective_rr is not None else row.rr, "decision_cost_penalty": row.cost_penalty, "shadow_cost_penalty": "UNAVAILABLE", "spread_pct": row.spread_pct, "expected_slippage_pct": row.expected_slippage_pct, "volatility_score": row.volatility_score, "liquidity_score": row.liquidity_score, "stop_distance_pct": stop_distance, "outcome": _outcome_from_lifecycle(row)}
+
+def _quality_record_from_shadow(s: RejectedShadowEvaluation, timeframe: str) -> Dict[str, Any]:
+    return {"source": "REJECTED_SHADOW", "reject_reason": s.reject_reasons or "UNKNOWN", "symbol": s.symbol or "UNKNOWN", "side": s.side or "UNKNOWN", "regime": s.regime or "UNKNOWN", "setup_type": s.setup_type or "UNAVAILABLE", "timeframe": timeframe, "score": s.score, "raw_rr": s.raw_rr, "effective_rr": s.effective_rr, "decision_cost_penalty": "UNAVAILABLE", "shadow_cost_penalty": s.cost_penalty, "spread_pct": s.spread_pct, "expected_slippage_pct": s.expected_slippage_pct, "volatility_score": s.volatility_score, "liquidity_score": s.liquidity_score, "stop_distance_pct": s.stop_distance_pct, "outcome": s.shadow_outcome or "UNKNOWN"}
+
+def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation], timeframe: str, thresholds: List[float] | None = None) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    thresholds = thresholds or [1.7, 1.9, 2.1, 2.3]
+    records = [_quality_record_from_lifecycle(r, timeframe) for r in accepted_rows] + [_quality_record_from_shadow(s, timeframe) for s in shadows]
+    for r in records:
+        r["score_decile"] = _decile(r.get("score"))
+        r["effective_rr_decile"] = _decile(r.get("effective_rr"))
+        r["volatility_score_bucket"] = _bucket_quality(r.get("volatility_score"), [0.3, 0.7], ["LOW", "MEDIUM", "HIGH"])
+        r["liquidity_score_bucket"] = _bucket_quality(r.get("liquidity_score"), [0.3, 0.7], ["THIN", "NORMAL", "DEEP"])
+        r["spread_pct_bucket"] = _bucket_quality(r.get("spread_pct"), [0.03, 0.08], ["TIGHT", "NORMAL", "WIDE"])
+        r["expected_slippage_pct_bucket"] = _bucket_quality(r.get("expected_slippage_pct"), [0.01, 0.05], ["LOW", "MEDIUM", "HIGH"])
+        r["stop_distance_pct_bucket"] = _bucket_quality(r.get("stop_distance_pct"), [0.75, 1.5], ["TIGHT", "NORMAL", "WIDE"])
+    dims = ["reject_reason", "symbol", "side", "regime", "setup_type", "timeframe", "score_decile", "effective_rr_decile", "volatility_score_bucket", "liquidity_score_bucket", "spread_pct_bucket", "expected_slippage_pct_bucket", "stop_distance_pct_bucket"]
+    group_rows=[]
+    for dim in dims:
+        keys=sorted({str(r.get(dim) or "UNAVAILABLE") for r in records})
+        for key in keys:
+            rows=[r for r in records if str(r.get(dim) or "UNAVAILABLE")==key]
+            n=len(rows); outcomes= {o: sum(1 for r in rows if r.get("outcome")==o) for o in ["WOULD_TP","WOULD_SL","WOULD_TIMEOUT","UNKNOWN"]}
+            def mean(f):
+                vals=[_quality_float(r.get(f)) for r in rows]; vals=[v for v in vals if v is not None]
+                return (sum(vals)/len(vals)) if vals else None
+            group_rows.append({"group_field":dim,"group_value":key,"count":n, **{f"{o.lower()}_count":c for o,c in outcomes.items()}, **{f"{o.lower()}_rate":(c/n if n else 0.0) for o,c in outcomes.items()}, "mean_score":mean("score"), "mean_raw_rr":mean("raw_rr"), "mean_effective_rr":mean("effective_rr"), "mean_decision_cost_penalty":mean("decision_cost_penalty"), "mean_shadow_cost_penalty":mean("shadow_cost_penalty"), "mean_spread_pct":mean("spread_pct"), "mean_expected_slippage_pct":mean("expected_slippage_pct")})
+    score10=[r for r in records if _quality_float(r.get("score")) == 10.0]
+    def split(rows): return {"count":len(rows), "would_tp_count":sum(1 for r in rows if r.get("outcome")=="WOULD_TP"), "would_sl_count":sum(1 for r in rows if r.get("outcome")=="WOULD_SL"), "would_timeout_count":sum(1 for r in rows if r.get("outcome")=="WOULD_TIMEOUT"), "unknown_count":sum(1 for r in rows if r.get("outcome") not in {"WOULD_TP","WOULD_SL","WOULD_TIMEOUT"})}
+    stop=[r for r in records if str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE"]
+    missed=[]
+    rejected=[r for r in records if r.get("source")=="REJECTED_SHADOW"]
+    for t in thresholds:
+        rows=[r for r in rejected if (_quality_float(r.get("effective_rr")) or -1) >= t]
+        missed.append({"effective_rr_threshold":t, **split(rows)})
+    summary={"total_records":len(records), "accepted_records":sum(1 for r in records if r.get("source")=="ACCEPTED"), "rejected_shadow_records":len(shadows), "score_saturation":{"score_10_count":len(score10), "score_10_rate":len(score10)/len(records) if records else 0.0, "score_10_would_tp_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_TP"), "score_10_would_sl_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_SL"), "score_10_by_reject_reason":{k:split([r for r in score10 if str(r.get("reject_reason"))==k]) for k in sorted({str(r.get("reject_reason")) for r in score10})}, "score_10_by_regime":{k:split([r for r in score10 if str(r.get("regime"))==k]) for k in sorted({str(r.get("regime")) for r in score10})}}, "stop_too_wide_split":{"would_tp":split([r for r in stop if r.get("outcome")=="WOULD_TP"]), "would_sl":split([r for r in stop if r.get("outcome")=="WOULD_SL"]), "metrics":[g for g in group_rows if g["group_field"] in {"symbol","side","regime","effective_rr_decile","score_decile","volatility_score_bucket","liquidity_score_bucket","spread_pct_bucket","expected_slippage_pct_bucket","stop_distance_pct_bucket"} and any(str(r.get(g["group_field"]) or "UNAVAILABLE")==g["group_value"] and str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" for r in records)]}, "high_effective_rr_missed_alpha":missed, "top_quality_improvement_candidates": sorted([r for r in rejected if r.get("outcome")=="WOULD_TP"], key=lambda r:((_quality_float(r.get("effective_rr")) or 0), (_quality_float(r.get("score")) or 0)), reverse=True)[:20], "thresholds_changed": False, "acceptance_logic_changed": False}
+    return summary, group_rows, missed
+
 def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Dict[str, Any]:
     total = len(shadows)
     counts = {
@@ -2652,6 +2735,27 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))
         w.writeheader()
         w.writerow(rejected_shadow_summary)
+
+    accepted_quality_rows = [
+        r for r in lifecycle
+        if not r.reject_reason and r.status_after in {"POSITION_CLOSED", "OPEN_AT_END", "TP_HIT", "SL_HIT"}
+    ]
+    if not accepted_quality_rows:
+        accepted_quality_rows = [r for r in lifecycle if not r.reject_reason and r.status_after == "SIGNAL_CREATED"]
+    signal_quality_summary, signal_quality_group_rows, high_effective_rr_rows = build_signal_quality_diagnostics(
+        accepted_quality_rows, rejected_shadow, args.interval
+    )
+    with open(os.path.join(args.output_dir, "signal_quality_summary.json"), "w") as f:
+        json.dump(signal_quality_summary, f, indent=2, sort_keys=True)
+    for name, rows, fallback_fields in [
+        ("signal_quality_by_group.csv", signal_quality_group_rows, ["group_field", "group_value", "count"]),
+        ("high_effective_rr_missed_alpha.csv", high_effective_rr_rows, ["effective_rr_threshold", "count", "would_tp_count", "would_sl_count"]),
+    ]:
+        with open(os.path.join(args.output_dir, name), "w", newline="") as f:
+            fieldnames = list(rows[0].keys()) if rows else fallback_fields
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
     try:
         import importlib.util
 
