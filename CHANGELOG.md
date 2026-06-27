@@ -3,6 +3,33 @@
 ## Unreleased
 
 ### Added
+- Added accepted-trade diagnostics aliases for stop loss, take profit, exit price, gross PnL, net PnL, and fee/cost evidence.
+- Added score saturation diagnostics with score-bucket WOULD_TP/WOULD_SL/TIMEOUT splits, score=10 TP/SL rates, accepted bucket splits, and rejected shadow bucket splits.
+- Added DAILY_GLOBAL_TRADE_LIMIT near-miss diagnostics with symbol, side, timestamp, effective RR, score, shadow outcome, net-outcome direction, and same-day accepted trade context.
+- Added a conservative dynamic trade-limit proposal artifact that is disabled by default.
+- Added regression coverage for accepted diagnostics population, score saturation exports, daily limit diagnostics, and no default opt-in trade-frequency increase.
+
+### Changed
+- BACKTEST lifecycle export now extracts accepted trade geometry and close/PnL evidence from lifecycle `execution_ctx` when available.
+- Dashboard accepted diagnostics now merge entry and close execution contexts so close rows do not erase side/entry/SL/TP evidence.
+
+### Fixed
+- Fixed accepted diagnostics reporting synthetic-empty `None` values when lifecycle/order artifacts contained accepted trade geometry or closed-trade PnL evidence.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; CSV/JSON changes are additive.
+
+### Known Issues
+- LOW_SCORE is not relaxed because current shadow comparison shows weak TP/SL separation.
+- High effective RR alone is not enough for acceptance because current near-miss evidence still skews WOULD_SL after costs.
+- LIVE remains NOT READY.
+
+## Unreleased
+
+### Added
 - Added `runtime_filter_config(...)` as the canonical shared filter map for BACKTEST/PAPER/LIVE runtime paths.
 - Added regression coverage proving env/config score, effective-RR, spread, funding, liquidity, stale-data, slippage, and max-symbol filters change real decisions or selection behavior.
 

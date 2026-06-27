@@ -1,11 +1,11 @@
 # AlphaForge Version
 
 - Current version: 0.1.0
-- Current phase: BACKTEST/PAPER/LIVE config-filter hardening
-- Runtime maturity: research/runtime integration with canonical env filter path for shared score/RR/execution/symbol gates
-- BACKTEST/PAPER/LIVE alignment: shared filters now flow through `RuntimeSettings` / `runtime_filter_config`; LIVE remains guarded by existing qualification and order-safety gates
-- Lifecycle coverage: shared reject reasons are emitted before order placement for score, raw RR, effective RR, spread, slippage, funding, liquidity, stale data, cooldown, and concurrent-position gates
-- Execution realism coverage: effective RR, spread, slippage, funding, stale market data, and liquidity settings are parsed from env and consumed by real selection/decision/runtime-risk paths
-- Known critical risks: direct legacy calls to `evaluate_trade_quality(..., config={})` retain compatibility defaults; historical execution context can still be unavailable and is fail-closed/flagged by execution evidence checks rather than treated as measured zero
+- Current phase: BACKTEST accepted-diagnostics and score-calibration hardening
+- Runtime maturity: research/runtime integration with artifact-first accepted-trade diagnostics and diagnostic-only score saturation reporting
+- BACKTEST/PAPER/LIVE alignment: BACKTEST exports now preserve accepted geometry/PnL evidence from lifecycle execution context; PAPER/LIVE order paths are unchanged
+- Lifecycle coverage: accepted rows retain side, entry, stop, target, close reason, exit, gross/net PnL, fee/cost evidence, and exported/not-exported status where lifecycle/order artifacts provide them
+- Execution realism coverage: high effective RR is treated as insufficient without score-bucket calibration, same-day degradation context, and execution-cost evidence
+- Known critical risks: score de-saturation and dynamic trade-limit logic are proposal/diagnostic-only and disabled by default; historical artifacts without lifecycle/order evidence still remain unavailable rather than synthetically filled
 - Last audit date: 2026-06-27
-- Live readiness verdict: NOT LIVE READY; this patch wires LIVE config paths but does not bypass live qualification, kill-switch, adapter, or reconciliation safety requirements
+- Live readiness verdict: NOT LIVE READY; accepted diagnostics and calibration guardrails improve BACKTEST auditability but do not validate live execution, reconciliation, or adapter readiness

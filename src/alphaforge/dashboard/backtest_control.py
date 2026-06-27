@@ -83,6 +83,9 @@ class DashboardBacktestResult:
     backtest_rejection_rate: float | None = None
     disabled_filters: list[str] = field(default_factory=list)
     filter_switch_experiment_active: bool = False
+    score_saturation_diagnostics: dict[str, Any] = field(default_factory=dict)
+    daily_global_trade_limit_diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    dynamic_trade_limit_proposal: dict[str, Any] = field(default_factory=dict)
 
 
 def default_form_values() -> dict[str, Any]:
@@ -269,7 +272,11 @@ def _accepted_trade_rows(lifecycle_rows: list[dict[str, str]]) -> list[dict[str,
             if key in {"lifecycle_state", "status_after"}:
                 continue
             if value not in (None, "", "None", "null"):
-                current[key] = value
+                if key == "execution_ctx" and current.get("execution_ctx") not in (None, "", "None", "null"):
+                    merged_ctx = {**_decode_execution_ctx(current.get("execution_ctx")), **_decode_execution_ctx(value)}
+                    current[key] = json.dumps(merged_ctx, sort_keys=True)
+                else:
+                    current[key] = value
         if next_is_later:
             current["lifecycle_state"] = state
             if row.get("status_after") not in (None, ""):
@@ -284,7 +291,9 @@ def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_o
         ctx = _decode_execution_ctx(row.get("execution_ctx"))
         order_row = _match_by_signal_or_composite(row, order_lookup) or {}
         net_pnl = _first_exported_available(row.get("net_pnl"), row.get("net_pnl_usdt"), row.get("pnl"), row.get("pnl_usdt"), ctx.get("net_pnl"), ctx.get("net_pnl_usdt"), ctx.get("pnl"), ctx.get("pnl_usdt"), order_row.get("net_pnl"), order_row.get("net_pnl_usdt"), order_row.get("pnl"), order_row.get("pnl_usdt"))
-        exit_price = _first_exported_available(row.get("exit"), row.get("exit_price"), ctx.get("exit"), ctx.get("exit_price"), order_row.get("exit"), order_row.get("exit_price"))
+        gross_pnl = _first_exported_available(row.get("gross_pnl"), row.get("gross_pnl_usdt"), ctx.get("gross_pnl"), ctx.get("gross_pnl_usdt"), order_row.get("gross_pnl"), order_row.get("gross_pnl_usdt"))
+        fees = _first_exported_available(row.get("fees"), row.get("fee"), row.get("cost_penalty"), ctx.get("fees"), ctx.get("fee"), ctx.get("cost_penalty"), order_row.get("fees"), order_row.get("fee"), order_row.get("cost_penalty"))
+        exit_price = _first_exported_available(row.get("exit"), row.get("exit_price"), row.get("close_price"), ctx.get("exit"), ctx.get("exit_price"), ctx.get("close_price"), order_row.get("exit"), order_row.get("exit_price"), order_row.get("close_price"))
         rows.append({
             "signal_id": row.get("signal_id"),
             "symbol": row.get("symbol"),
@@ -297,11 +306,17 @@ def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_o
             "decision_cost_penalty": _first_available(row.get("decision_cost_penalty"), row.get("cost_penalty"), ctx.get("decision_cost_penalty"), ctx.get("cost_penalty"), order_row.get("decision_cost_penalty"), order_row.get("cost_penalty")),
             "entry": _first_available(row.get("entry"), row.get("entry_price"), ctx.get("entry"), ctx.get("entry_price"), order_row.get("entry"), order_row.get("entry_price")),
             "sl": _first_available(row.get("sl"), row.get("stop_loss"), ctx.get("sl"), ctx.get("stop_loss"), order_row.get("sl"), order_row.get("stop_loss")),
+            "stop_loss": _first_available(row.get("stop_loss"), row.get("sl"), ctx.get("stop_loss"), ctx.get("sl"), order_row.get("stop_loss"), order_row.get("sl")),
             "tp": _first_available(row.get("tp"), row.get("take_profit"), ctx.get("tp"), ctx.get("take_profit"), order_row.get("tp"), order_row.get("take_profit")),
+            "take_profit": _first_available(row.get("take_profit"), row.get("tp"), ctx.get("take_profit"), ctx.get("tp"), order_row.get("take_profit"), order_row.get("tp")),
             "exit": exit_price,
+            "exit_price": exit_price,
             "exit_status": "EXPORTED" if exit_price is not None else "NOT_EXPORTED",
             "close_reason": _first_available(row.get("close_reason"), ctx.get("close_reason"), order_row.get("close_reason")),
             "result": _first_available(row.get("result"), row.get("outcome"), row.get("lifecycle_state"), row.get("status_after")),
+            "gross_pnl": gross_pnl,
+            "fees": fees,
+            "cost_penalty": fees,
             "net_pnl": net_pnl,
             "net_pnl_status": "EXPORTED" if net_pnl is not None else "NOT_EXPORTED",
         })
@@ -403,6 +418,80 @@ def _rate(rows: list[dict[str, str]], field: str) -> float | None:
     if not vals:
         return None
     return round(sum(1 for v in vals if v in {"1", "true", "yes"}) / len(vals), 6)
+
+
+def _score_bucket(row: Mapping[str, Any]) -> str:
+    score = _safe_float_or_none(row.get("score"))
+    if score is None:
+        return "UNAVAILABLE"
+    return "10" if score >= 10.0 else f"{int(score)}-{int(score) + 1}"
+
+
+def _outcome_split(rows: list[dict[str, str]]) -> dict[str, Any]:
+    count = len(rows)
+    shadows = Counter(_shadow(row) for row in rows)
+    return {
+        "count": count,
+        "would_tp_count": shadows["WOULD_TP"],
+        "would_sl_count": shadows["WOULD_SL"],
+        "would_timeout_count": shadows["WOULD_TIMEOUT"],
+        "unknown_count": shadows["UNKNOWN"],
+        "would_tp_rate": round(shadows["WOULD_TP"] / count, 6) if count else 0.0,
+        "would_sl_rate": round(shadows["WOULD_SL"] / count, 6) if count else 0.0,
+    }
+
+
+def _score_saturation_diagnostics(accepted_rows: list[dict[str, str]], shadow_rows: list[dict[str, str]]) -> dict[str, Any]:
+    accepted = [dict(row, score_bucket=_score_bucket(row)) for row in accepted_rows]
+    rejected = [dict(row, score_bucket=_score_bucket(row)) for row in shadow_rows if _source_stage(row) == "SIGNAL_ENGINE"]
+    all_rows = accepted + rejected
+    buckets = []
+    for bucket in sorted({str(row.get("score_bucket")) for row in all_rows}, key=lambda v: (v == "UNAVAILABLE", v)):
+        rows = [row for row in all_rows if row.get("score_bucket") == bucket]
+        buckets.append({"score_bucket": bucket, **_outcome_split(rows)})
+    score10 = [row for row in all_rows if _safe_float_or_none(row.get("score")) == 10.0]
+    return {
+        "mode": "DIAGNOSTIC_ONLY",
+        "thresholds_changed": False,
+        "acceptance_logic_changed": False,
+        "score_bucket_outcome_split": buckets,
+        "score_10": _outcome_split(score10),
+        "score_10_tp_rate": _outcome_split(score10)["would_tp_rate"],
+        "score_10_sl_rate": _outcome_split(score10)["would_sl_rate"],
+        "accepted_score_bucket_outcome_split": [{"score_bucket": b, **_outcome_split([r for r in accepted if r.get("score_bucket") == b])} for b in sorted({str(r.get("score_bucket")) for r in accepted})],
+        "rejected_score_bucket_shadow_split": [{"score_bucket": b, **_outcome_split([r for r in rejected if r.get("score_bucket") == b])} for b in sorted({str(r.get("score_bucket")) for r in rejected})],
+        "guardrail_proposal": {
+            "enabled_by_default": False,
+            "possible_reject_reasons": ["SCORE_SATURATION_RISK", "POOR_SCORE_BUCKET_CALIBRATION"],
+            "rule": "If explicitly enabled later, down-calibrate or reject score buckets whose shadow WOULD_SL rate materially exceeds WOULD_TP rate after execution costs.",
+        },
+    }
+
+
+def _daily_global_trade_limit_diagnostics(rows: list[dict[str, str]], accepted_rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    accepted_by_day: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in accepted_rows:
+        day = str(row.get("timestamp") or row.get("event_ts") or "")[:10]
+        accepted_by_day[day].append(row)
+    out = []
+    for row in rows:
+        if str(row.get("reject_reason") or "").upper() != "DAILY_GLOBAL_TRADE_LIMIT":
+            continue
+        day = str(row.get("timestamp") or row.get("event_ts") or "")[:10]
+        same_day = accepted_by_day.get(day, [])
+        shadow = _shadow(row)
+        out.append({
+            "symbol": row.get("symbol"),
+            "side": row.get("side"),
+            "timestamp": row.get("timestamp") or row.get("event_ts"),
+            "effective_rr": row.get("effective_rr"),
+            "score": row.get("score"),
+            "shadow_outcome": shadow,
+            "net_outcome_if_accepted": "IMPROVED" if shadow == "WOULD_TP" else ("WORSENED" if shadow == "WOULD_SL" else "UNKNOWN"),
+            "same_day_accepted_trade_count": len(same_day),
+            "same_day_accepted_trade_outcomes": dict(Counter(str(r.get("close_reason") or r.get("lifecycle_state") or "UNKNOWN") for r in same_day)),
+        })
+    return out[:50]
 
 
 def _summary_value(rows: list[dict[str, str]], field: str, metric: str) -> float | None:
@@ -585,6 +674,8 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
     }
     near = sorted(passed_later, key=lambda r: ((_safe_float_or_none(r.get("score")) or 0.0), (_safe_float_or_none(r.get("effective_rr")) or 0.0), 1 if _shadow(r) == "WOULD_TP" else 0), reverse=True)[:20]
     accepted_rows = _accepted_trade_rows(lifecycle_rows)
+    score_saturation = _score_saturation_diagnostics(accepted_rows, shadow_diagnostic_rows)
+    daily_global_limit = _daily_global_trade_limit_diagnostics(shadow_diagnostic_rows, accepted_rows)
     summary_out = {
         "rejection_funnel": funnel,
         "later_gate_diagnostics": later_gate,
@@ -599,6 +690,21 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
         },
         "near_miss_rejected_signals": [dict({k: (r.get(k) if r.get(k) not in (None, "") else ("UNAVAILABLE" if k in {"shadow_outcome", "cost_penalty"} else r.get(k))) for k in ("signal_id", "symbol", "reject_reason", "score", "raw_rr", "rr", "effective_rr", "cost_penalty", "shadow_outcome", "spread_pct", "expected_slippage_pct", "liquidity_ok", "volatility_ok")}) for r in near],
         "accepted_trade_diagnostics": _accepted_trade_diagnostics(lifecycle_rows, backtest_order_rows),
+        "score_saturation_diagnostics": score_saturation,
+        "daily_global_trade_limit_diagnostics": daily_global_limit,
+        "dynamic_trade_limit_proposal": {
+            "enabled": False,
+            "default_behavior_changed": False,
+            "mode": "PROPOSAL_ONLY",
+            "requirements": [
+                "effective_rr above a configurable high threshold",
+                "score bucket has historically positive shadow TP-vs-SL calibration after costs",
+                "same-day accepted trades are not degraded",
+                "symbol/session correlation exposure is acceptable",
+                "shadow diagnostics show WOULD_TP advantage over WOULD_SL in that bucket",
+            ],
+            "note": "DAILY_GLOBAL_TRADE_LIMIT is not disabled or relaxed by this proposal.",
+        },
         "accepted_score_distribution": _numeric_distribution(accepted_rows, "score"),
         "accepted_effective_rr_distribution": _numeric_distribution(accepted_rows, "effective_rr"),
         "near_miss_score_distribution": _numeric_distribution(near, "score"),
@@ -734,6 +840,9 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.near_miss_score_distribution = calibration_summary["near_miss_score_distribution"]
     result.near_miss_effective_rr_distribution = calibration_summary["near_miss_effective_rr_distribution"]
     result.stop_too_wide_rescue_diagnostics = calibration_summary["stop_too_wide_rescue_diagnostics"]
+    result.score_saturation_diagnostics = calibration_summary["score_saturation_diagnostics"]
+    result.daily_global_trade_limit_diagnostics = calibration_summary["daily_global_trade_limit_diagnostics"]
+    result.dynamic_trade_limit_proposal = calibration_summary["dynamic_trade_limit_proposal"]
     result.signal_quality_diagnostics = signal_quality_summary
     result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else []
     result.stop_too_wide_quality_split = signal_quality_summary.get("stop_too_wide_split", {}) if isinstance(signal_quality_summary, dict) else {}

@@ -1,3 +1,78 @@
+# AlphaForge Surgery Report — Accepted Diagnostics and Score Calibration Guardrails
+
+## Why this patch was needed
+
+The latest dashboard backtest showed negative expectancy despite a very high reject rate. Accepted Trade Diagnostics were also reporting core fields as `None`, so the dashboard could not prove whether accepted rows were connected to lifecycle/order artifacts or whether closed trades had exported PnL. Score=10 rows were mostly losing in shadow/accepted outcomes, so the immediate priority was diagnostics and calibration safeguards, not accepting more trades.
+
+## Root cause
+
+- Accepted-trade lifecycle persistence stored execution details inside `execution_ctx`, but the BACKTEST export query did not extract side, entry, SL, TP, exit, close reason, gross/net PnL, or fee evidence back into `order_lifecycle.csv`.
+- Dashboard accepted diagnostics merged lifecycle rows by signal, but a later close row could replace the earlier execution context, dropping geometry captured on the entry/waiting row.
+- Dashboard calibration artifacts did not expose score-bucket TP/SL saturation or DAILY_GLOBAL_TRADE_LIMIT near-miss context clearly enough to avoid blindly relaxing LOW_SCORE or daily limits.
+
+## Files changed
+
+- `backtest_order.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_backtest_diagnostics_calibration.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+## Runtime behavior changes
+
+- BACKTEST lifecycle exports now carry accepted trade geometry and realized outcome evidence when available in the real simulated lifecycle row.
+- Dashboard accepted diagnostics now preserve merged execution context across entry and close lifecycle rows instead of allowing close-only context to erase geometry.
+- Added diagnostic-only score saturation output and a disabled-by-default guardrail proposal for poor score-bucket calibration.
+- Added diagnostic-only DAILY_GLOBAL_TRADE_LIMIT near-miss rows showing shadow outcome and same-day accepted trade context.
+
+## Lifecycle changes
+
+- No lifecycle state machine semantics changed.
+- Accepted diagnostics remain derived from accepted lifecycle/order artifact rows and do not synthesize trades.
+
+## Persistence changes
+
+- No SQLite schema migration.
+- Additional accepted trade evidence is stored/exported through existing `execution_ctx` payloads and JSON extraction.
+
+## Export/schema changes
+
+- `order_lifecycle.csv` gains additive extracted fields when available: side, entry, sl, tp, exit_price, close_price, close_reason, gross_pnl, net_pnl, net_pnl_usdt, fees.
+- `lifecycle_calibration_summary.json` gains `score_saturation_diagnostics`, `daily_global_trade_limit_diagnostics`, and `dynamic_trade_limit_proposal`.
+- Accepted diagnostics include aliases for `stop_loss`, `take_profit`, `exit_price`, plus gross PnL and fee/cost evidence.
+
+## Tests added
+
+- `tests/test_backtest_diagnostics_calibration.py` verifies accepted diagnostics are connected to lifecycle evidence, closed trades export net PnL status, score saturation appears, DAILY_GLOBAL_TRADE_LIMIT near-miss diagnostics export, and dynamic trade-limit behavior stays disabled by default.
+
+## Tests executed
+
+- `pytest -q tests/test_backtest_diagnostics_calibration.py` — passed.
+- `pytest -q tests/test_dashboard_app.py::test_accepted_trade_diagnostics_completes_geometry_and_net_pnl_status ...` — skipped/collector unavailable because FastAPI is not installed in this container.
+
+## Risks
+
+- Existing historical artifacts that genuinely lack lifecycle/order evidence will still show unavailable fields; this is intentional and avoids fake diagnostics.
+- Score-bucket diagnostics are descriptive, not sufficient proof to alter thresholds. LOW_SCORE remains unchanged.
+- High effective RR alone is not enough because provided evidence shows high effective-RR near-misses and many score=10 rows still skew WOULD_SL after execution costs.
+
+## Remaining limitations
+
+- Score de-saturation and dynamic daily trade-limit rules are proposal-only and require additional out-of-sample evidence before enabling.
+- Symbol/session correlation exposure is listed as a proposal requirement but not enforced by default.
+
+## Migration concerns
+
+- Additive CSV/JSON fields only; no breaking schema migration.
+
+## Push recommendation
+
+- Safe to push for BACKTEST/dashboard diagnostics. Do not use this as LIVE readiness evidence.
+
+---
+
 # AlphaForge Surgery Report — Canonical Runtime Env Filters
 
 ## Why this patch was needed
