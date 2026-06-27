@@ -166,3 +166,33 @@ The latest dashboard backtest showed negative expectancy despite a very high rej
 ## Push recommendation
 
 - Safe to push for BACKTEST/PAPER hardening after review; LIVE remains NOT READY.
+
+## 2026-06-27 - Mode-aware Configuration Surgery Report
+
+### Why needed
+Runtime/session risk caps were mixed into shared order-quality defaults, so changing PAPER/LIVE limits could alter BACKTEST decisions.
+
+### Root cause
+`evaluate_trade_quality` built a local hardcoded threshold dictionary that included both trade-quality filters and runtime risk limits. Environment parsing was split between config, runtime, order logic, and dashboard forms.
+
+### Files changed
+- `src/alphaforge/config_registry.py` adds the typed registry, effective source resolution, dashboard override writer, and config snapshots.
+- `src/alphaforge/config/__init__.py` consumes the registry for runtime/backtest config.
+- `src/alphaforge/order.py` consumes typed decision filters and disables runtime limits for BACKTEST by default.
+- `src/alphaforge/dashboard/app.py` and templates add Settings.
+- `.env.example`, `.gitignore`, README, tests updated.
+
+### Runtime behavior
+BACKTEST uses shared quality filters and BACKTEST-specific caps. PAPER/LIVE keep runtime/session caps and live qualification guards.
+
+### Persistence/export
+Dashboard overrides are local-only in `config/runtime_overrides.json`; backtest dashboard runs export `config_snapshot.json` when enabled.
+
+### Tests executed
+Narrow registry, dashboard, order, and backtest isolation tests were added/executed. Full-suite execution remains environment-dependent because FastAPI is optional in this container.
+
+### Risks
+Long-running runtimes require restart for risk-critical config changes. Some legacy tests expected BACKTEST daily symbol limits from runtime counters; this patch intentionally isolates those by default.
+
+### Push recommendation
+Push after CI confirms optional dashboard dependencies and any legacy BACKTEST filter-switch expectations are updated to use BACKTEST_* caps.

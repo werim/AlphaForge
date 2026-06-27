@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alphaforge.config import load_config_from_env
+from alphaforge.config_registry import config_snapshot
 from alphaforge.contracts import canonical_utc_timestamp
 
 SUPPORTED_TIMEFRAMES: tuple[str, ...] = ("1m", "15m", "1h", "4h", "1d")
@@ -742,6 +743,9 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     cfg = load_config_from_env()
     timestamp = canonical_utc_timestamp().replace(":", "").replace("-", "").replace(".", "")
     output_dir = Path(cfg.backtest.output_dir) / "dashboard" / timestamp
+    if getattr(cfg.backtest, "export_config_snapshot", True):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "config_snapshot.json").write_text(json.dumps({"mode": "BACKTEST", "config_snapshot": config_snapshot(mode="BACKTEST")}, indent=2, sort_keys=True))
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "backtest_order.py"
     symbols = request.symbols[: request.max_symbols]

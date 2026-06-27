@@ -115,3 +115,9 @@ cp .env.example .env
 - AlphaForge now includes a deterministic, SQL-first adaptive learning foundation in `src/alphaforge/adaptive_learning.py`.
 - This patch adds passive review persistence/analytics only (closed trade + rejected signal reviews, adaptive stats, shadow threshold recommendations).
 - No unconstrained ML behavior is introduced; no active threshold application is enabled by default.
+
+## Mode-aware configuration and Dashboard Settings
+
+AlphaForge managed engine settings now have a typed source of truth in `src/alphaforge/config_registry.py`. Effective precedence is: process environment variables > Dashboard override file (`config/runtime_overrides.json`) > `.env.local` > `.env` > typed defaults. Dashboard Settings edits local override values only and does not write secrets.
+
+Settings are grouped as Trade Quality Filters, Execution Cost Filters, Runtime Risk Limits, Backtest Settings, and Mode / Safety. Trade-quality filters can affect BACKTEST/PAPER/LIVE. Runtime risk limits such as `ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY` and `ALPHAFORGE_MAX_TRADES_SYMBOL_PER_DAY` are PAPER/LIVE runtime/session controls and are ignored by BACKTEST by default; BACKTEST caps must use explicit `ALPHAFORGE_BACKTEST_*` settings. LIVE remains readiness-guarded and cannot be enabled from the generic Settings page.

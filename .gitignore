@@ -27,3 +27,8 @@ src/*.egg-info/
 # Logs
 logs/
 *.log
+*.session.sql
+alphadb.session.sql
+.env.local
+.env.backup.*
+config/runtime_overrides.json

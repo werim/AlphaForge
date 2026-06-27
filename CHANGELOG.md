@@ -1850,3 +1850,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - Forward outcome calibration is not implemented yet; TimesFM should remain isolated research evidence until calibrated.
 - LIVE readiness remains NOT READY and TimesFM has no order authority.
+
+## 2026-06-27 - Mode-aware config registry and Dashboard Settings
+
+### Added
+- Added typed managed config registry, Dashboard Settings page, local runtime override persistence, and config snapshot export support.
+
+### Changed
+- Moved order decision thresholds out of local fallback dictionaries and made PAPER/LIVE runtime daily caps inactive for BACKTEST by default.
+
+### Fixed
+- `ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY` no longer changes BACKTEST trade-quality decisions by default.
+
+### Removed
+- Hidden production threshold fallback dictionary in `order.py`.
+
+### Breaking Changes
+- BACKTEST daily caps must use explicit `ALPHAFORGE_BACKTEST_*` settings rather than PAPER/LIVE runtime caps.
+
+### Known Issues
+- Existing long-running PAPER/LIVE processes still require restart for risk-critical setting changes.

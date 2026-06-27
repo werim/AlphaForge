@@ -9,3 +9,14 @@
 - Known critical risks: score de-saturation and dynamic trade-limit logic are proposal/diagnostic-only and disabled by default; historical artifacts without lifecycle/order evidence still remain unavailable rather than synthetically filled
 - Last audit date: 2026-06-27
 - Live readiness verdict: NOT LIVE READY; accepted diagnostics and calibration guardrails improve BACKTEST auditability but do not validate live execution, reconciliation, or adapter readiness
+
+
+## 2026-06-27 Config Registry Audit
+- Current phase: mode-aware configuration hardening.
+- Runtime maturity: PAPER-oriented; LIVE remains guarded/not ready without qualification.
+- BACKTEST/PAPER/LIVE alignment: shared trade-quality evaluator with mode-aware runtime caps.
+- Lifecycle coverage: unchanged; rejects remain explicit.
+- Execution realism coverage: typed execution-cost filters; missing context must remain explicit.
+- Known critical risks: active runtimes require restart for risk-critical changes; LIVE cannot be enabled from Settings.
+- Last audit date: 2026-06-27.
+- Live readiness verdict: NOT READY by default.
