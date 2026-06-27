@@ -140,6 +140,17 @@
       </table>
       <h3>LOW_SCORE Shadow Comparison</h3>
       <p>{{ backtest_result.low_score_shadow_comparison }}</p>
+      <h3>Score Saturation Diagnostics</h3>
+      <p>Score=10 TP rate: {{ backtest_result.score_saturation_diagnostics.score_10_tp_rate }} | Score=10 SL rate: {{ backtest_result.score_saturation_diagnostics.score_10_sl_rate }} | Mode: diagnostic only.</p>
+      <table>
+        <thead><tr><th>Score Bucket</th><th>Count</th><th>WOULD_TP</th><th>WOULD_SL</th><th>TIMEOUT</th></tr></thead>
+        <tbody>{% for row in backtest_result.score_saturation_diagnostics.score_bucket_outcome_split %}<tr><td>{{ row.score_bucket }}</td><td>{{ row.count }}</td><td>{{ row.would_tp_count }}</td><td>{{ row.would_sl_count }}</td><td>{{ row.would_timeout_count }}</td></tr>{% else %}<tr><td colspan="5" class="empty">No score saturation diagnostics available.</td></tr>{% endfor %}</tbody>
+      </table>
+      <h3>DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics</h3>
+      <table>
+        <thead><tr><th>Symbol</th><th>Side</th><th>Timestamp</th><th>Score</th><th>Effective RR</th><th>Shadow</th><th>Net If Accepted</th><th>Same-Day Accepted</th></tr></thead>
+        <tbody>{% for row in backtest_result.daily_global_trade_limit_diagnostics %}<tr><td>{{ row.symbol }}</td><td>{{ row.side }}</td><td>{{ row.timestamp }}</td><td>{{ row.score }}</td><td>{{ row.effective_rr }}</td><td>{{ row.shadow_outcome }}</td><td>{{ row.net_outcome_if_accepted }}</td><td>{{ row.same_day_accepted_trade_count }}</td></tr>{% else %}<tr><td colspan="8" class="empty">No DAILY_GLOBAL_TRADE_LIMIT near-miss diagnostics available.</td></tr>{% endfor %}</tbody>
+      </table>
       <h3>Top Near-Miss Rejected Signals</h3>
       <table>
         <thead><tr><th>Signal</th><th>Symbol</th><th>Reason</th><th>Score</th><th>Effective RR</th><th>Shadow</th><th>Cost Penalty</th></tr></thead>
