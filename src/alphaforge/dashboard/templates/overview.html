@@ -62,6 +62,16 @@
       <div><label for="timeframe">Timeframe</label><select id="timeframe" name="timeframe">{% for tf in backtest_form.timeframes %}<option value="{{ tf }}" {% if tf == backtest_form.timeframe %}selected{% endif %}>{{ tf }}</option>{% endfor %}</select>{% if backtest_errors.timeframe %}<small class="field-error">{{ backtest_errors.timeframe }}</small>{% endif %}</div>
       <div><label for="initial_balance">Initial balance</label><input id="initial_balance" name="initial_balance" type="number" min="100" max="10000000" step="0.01" value="{{ backtest_form.initial_balance }}">{% if backtest_errors.initial_balance %}<small class="field-error">{{ backtest_errors.initial_balance }}</small>{% endif %}</div>
       <div><label for="max_symbols">Max symbols</label><input id="max_symbols" name="max_symbols" type="number" min="1" max="200" value="{{ backtest_form.max_symbols }}">{% if backtest_errors.max_symbols %}<small class="field-error">{{ backtest_errors.max_symbols }}</small>{% endif %}</div>
+
+      <fieldset class="filter-switches">
+        <legend>BACKTEST real filter switches</legend>
+        <p class="alert warn-box">Real BACKTEST decision switch. Unchecking can increase accepted trades and worsen expectancy. PAPER/LIVE unaffected.</p>
+        <div class="checkbox-grid">
+          {% for reason in backtest_form.filter_reasons %}
+          <label><input type="checkbox" name="filter_{{ reason }}" {% if backtest_form.filter_switches.get(reason, true) %}checked{% endif %}> {{ reason }}</label>
+          {% endfor %}
+        </div>
+      </fieldset>
       <button type="submit">Run Backtest</button>
     </form>
     <div class="alert warn-box"><strong>Safety boundary:</strong> This action forces mode BACKTEST and never invokes PAPER/LIVE runtime loops or live order submission controls.</div>

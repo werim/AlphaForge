@@ -139,7 +139,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
         rejects = fetch_reject_summary(app.state.engine)
         lifecycle = fetch_recent_lifecycle(app.state.engine, limit=10)
         form_values = default_form_values()
-        form_values.update({key: form_data.get(key, form_values.get(key)) for key in form_values.keys() if key != "timeframes"})
+        form_values.update({key: form_data.get(key, form_values.get(key)) for key in form_values.keys() if key not in {"timeframes", "filter_reasons", "filter_switches"}})
+        form_values["filter_switches"] = {reason: f"filter_{reason}" in form_data for reason in form_values.get("filter_reasons", [])}
         return TEMPLATES.TemplateResponse(
             request=request,
             name="overview.html",

@@ -1,3 +1,28 @@
+# Changelog
+
+## Unreleased
+
+### Added
+- Added real BACKTEST-only reject filter switches for LOW_SCORE, TOO_CHOPPY, WEAK_TREND_AND_NO_RANGE_EDGE, STOP_TOO_WIDE, RR_TOO_LOW, DAILY_SYMBOL_TRADE_LIMIT, REGIME_MISMATCH, and PANIC_CONDITIONS.
+- Added disabled-filter bypass evidence to BACKTEST summaries and calibration artifacts.
+- Added dashboard checkboxes that pass real BACKTEST decision switches into the backtest command.
+- Added regression tests proving the switches change decision flow rather than only dashboard display.
+
+### Changed
+- Hardened `.env.example` so the new active BACKTEST filter variables are wired to config and decision logic.
+
+### Fixed
+- Prevented experimental BACKTEST filter switches from affecting PAPER/LIVE decisions.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; BACKTEST artifact CSVs receive additive metadata columns only.
+
+### Known Issues
+- Disabling filters is experimental and can worsen expectancy; it is not LIVE readiness evidence.
+
 ## 2026-06-26 - Dashboard rejected-shadow aggregate diagnostics split
 
 ### Added
