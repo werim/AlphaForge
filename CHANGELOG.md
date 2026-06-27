@@ -1,3 +1,95 @@
+## 2026-06-26 - Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m
+
+### Added
+- Added `later_gate_breakdown.csv` dashboard artifact sourced from candidates that already passed score/RR/expectancy and were rejected by later BACKTEST gates.
+- Added regression coverage for accepted diagnostics order-field enrichment, later-gate grouping, high effective-RR WOULD_SL exclusion, and default STOP_TOO_WIDE quality-gate exclusion.
+
+### Changed
+- Quality-gate rescue/comparison remains disabled by default and now requires a counterfactual `WOULD_TP` outcome when enabled.
+- Default quality-gate allowed reasons exclude `STOP_TOO_WIDE`; it must be explicitly opted in only after positive calibration evidence exists.
+
+### Fixed
+- Accepted trade diagnostics now ignore placeholder `NOT_EXPORTED`/`UNAVAILABLE` values and backfill side, entry, SL, TP, exit, and net PnL from matched `backtest_orders.csv` / close execution context when exported.
+- Later-gate diagnostics now group only the passed-before-later-gates population instead of all same-reason shadow rows.
+
+### Removed
+- Removed `STOP_TOO_WIDE` from default quality-gate rescue reasons.
+
+### Breaking Changes
+- None for baseline BACKTEST acceptance; defaults are stricter for optional quality-gate diagnostics and do not loosen global acceptance.
+
+### Known Issues
+- Dashboard diagnostics remain dependent on exported artifact completeness; missing order/close fields are still surfaced as unavailable rather than fabricated.
+
+## 2026-06-26 - BACKTEST_ONLY SHORT Breakdown Breakout Normal Stop Quality Gate
+
+### Added
+- Added opt-in `SHORT_BREAKDOWN_BREAKOUT_NORMAL_STOP_GATE` BACKTEST-only comparison metrics for SHORT + BREAKDOWN_DOWN + BREAKOUT + NORMAL stop-distance rejected-shadow candidates.
+- Added quality-gate summary/export fields for baseline metrics, candidate/accepted/rejected counts, WOULD_TP/WOULD_SL/UNKNOWN counts, TP rate, mean effective RR, expected effective expectancy, size multiplier, reason/symbol breakdowns, and daily trade-count distribution.
+- Added CLI flags for enabling and constraining the comparison lane without changing global thresholds.
+- Added regression coverage for disabled defaults, BACKTEST-only counting, LIVE/PAPER exclusion, eligibility constraints, and exclusion of WIDE stops, LONG rows, REGIME_MISMATCH, and PANIC/NEWS_DRIVEN regimes.
+
+### Changed
+- Backtest summary `accepted_reason_breakdown` now counts accepted lifecycle states instead of `SIGNAL_CREATED` rows, preventing pending/rejected created rows from inflating `BASELINE` counts.
+
+### Fixed
+- Fixed accepted-reason breakdown inflation where signal-created rows could report `{"BASELINE": 1043}` instead of unique accepted trade evidence such as `{"BASELINE": 4}`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. The quality gate is disabled by default, BACKTEST-only when enabled, reporting/comparison-only, and does not loosen global thresholds or baseline accepted trades.
+
+### Known Issues
+- This is not LIVE-ready and does not authorize LIVE acceptance. Quality-gate expectancy depends on rejected-shadow labels and available execution-cost fields.
+
+## 2026-06-26 - Regime/Side/Setup Quality Gate Diagnostics
+
+### Added
+- Added `signal_quality_combo_groups.csv` for side/regime/setup/stop-distance/effective-RR combined signal-quality groups.
+- Added `candidate_quality_gates.csv` with reporting-only candidate gate evidence for SHORT breakdown breakout, strict LONG breakout, high-effective-RR SHORT, and recoverable STOP_TOO_WIDE hypotheses.
+- Added `score_calibration_diagnostics.csv` for score decile splits by side/regime/setup type plus D10 reject-reason and stop-distance outcome splits.
+- Added summary counts and candidate gate details into `signal_quality_summary.json`.
+
+### Changed
+- Signal-quality export writing now handles heterogeneous diagnostic rows safely.
+
+### Fixed
+- Fixed `accepted_reason_breakdown` in backtest quality summaries so lifecycle `SIGNAL_CREATED`/pending rows do not inflate accepted BASELINE counts.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Thresholds, strategy logic, reject decisions, and accepted trade counts are unchanged.
+
+### Known Issues
+- Candidate gates are diagnostics-only. LIVE remains not ready. Accepted diagnostic geometry may still be unavailable in separate dashboard summaries when source artifacts omit it.
+
+## 2026-06-26 - Signal Quality Diagnostics Export Patch
+
+### Added
+- Added `signal_quality_summary.json`, `signal_quality_by_group.csv`, and `high_effective_rr_missed_alpha.csv` BACKTEST exports for accepted and rejected-shadow signal quality analysis.
+- Added score saturation, STOP_TOO_WIDE WOULD_TP/WOULD_SL split, high effective-RR missed-alpha, and top quality-improvement candidate diagnostics.
+- Added dashboard rendering for Signal Quality Diagnostics.
+- Added regression coverage for unchanged counts/decisions, score deciles, high effective-RR splits, STOP_TOO_WIDE exports, and unavailable optional fields.
+
+### Changed
+- Rejected-shadow rows now carry diagnostic-only setup type, expected slippage, stop-distance, and timeframe-compatible fields when available.
+
+### Fixed
+- Fixed missing grouped visibility into what separates rejected WOULD_TP from WOULD_SL cases before threshold review.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Thresholds, rescue acceptance, and strategy logic are unchanged.
+
+### Known Issues
+- Diagnostics are only as complete as exported execution context and rejected-shadow labels; missing fields remain unavailable rather than fake-filled. LIVE remains not ready.
+
 ## 2026-06-26 - High Effective-RR Rescue Acceptance Lane (BACKTEST-only)
 
 ### Added

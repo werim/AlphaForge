@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Mapping
+from typing import Dict, List, Optional, Any, Mapping, Iterable
 # Allow running this script directly from the repo root without requiring
 # prior editable install.
 ROOT_DIR = Path(__file__).resolve().parent
@@ -94,6 +94,21 @@ class RescueStats:
     rejected_count: int = 0
     reject_reasons: Dict[str, int] = field(default_factory=dict)
 
+QUALITY_GATE_NAME = "SHORT_BREAKDOWN_BREAKOUT_NORMAL_STOP_GATE"
+
+@dataclass
+class QualityGateConfig:
+    enabled: bool = False
+    modes: tuple[str, ...] = ("BACKTEST",)
+    size_multiplier: float = 0.25
+    max_trades_per_day: int = 1
+    min_effective_rr: float = 1.10
+    min_score: Optional[float] = None
+    allowed_gate_name: str = QUALITY_GATE_NAME
+    max_spread_pct: float = 0.0025
+    max_slippage_pct: float = 0.0020
+    allowed_reasons: tuple[str, ...] = ("LOW_SCORE", "DAILY_SYMBOL_TRADE_LIMIT")
+
 @dataclass
 class RejectedShadowEvaluation:
     symbol: str
@@ -122,6 +137,10 @@ class RejectedShadowEvaluation:
     rescued_effective_rr: float = 0.0
     rescued_size_multiplier: float = 0.0
     rescue_reject_reason: str = ""
+    setup_type: str = "UNAVAILABLE"
+    timeframe: str = "UNAVAILABLE"
+    expected_slippage_pct: Any = "UNAVAILABLE"
+    stop_distance_pct: Any = "UNAVAILABLE"
 @dataclass
 class ForwardWindowEvaluation:
     signal_id: str
@@ -267,6 +286,22 @@ def _rescue_config_from_args(args: Any, runtime_cfg: Any) -> RescueConfig:
         max_slippage_pct=float(getattr(args, "rescue_max_slippage_pct", 0.0020)),
         allow_cooldown_bypass=bool(getattr(args, "rescue_allow_cooldown_bypass", False)),
         max_concurrent_positions=int(getattr(getattr(runtime_cfg, "runtime", runtime_cfg), "max_concurrent_positions", 3)),
+    )
+
+def _quality_gate_config_from_args(args: Any) -> QualityGateConfig:
+    min_score_raw = getattr(args, "quality_gate_min_score", None)
+    min_score = None if min_score_raw in (None, "") else float(min_score_raw)
+    return QualityGateConfig(
+        enabled=bool(getattr(args, "quality_gate_enabled", False)),
+        modes=tuple(str(getattr(args, "quality_gate_modes", "BACKTEST") or "BACKTEST").upper().replace(",", " ").split()),
+        size_multiplier=min(1.0, max(0.0, float(getattr(args, "quality_gate_size_multiplier", 0.25)))),
+        max_trades_per_day=int(getattr(args, "max_quality_gate_trades_per_day", 1)),
+        min_effective_rr=float(getattr(args, "quality_gate_min_effective_rr", 1.10)),
+        min_score=min_score,
+        allowed_gate_name=str(getattr(args, "quality_gate_name", QUALITY_GATE_NAME) or QUALITY_GATE_NAME),
+        max_spread_pct=float(getattr(args, "quality_gate_max_spread_pct", 0.0025)),
+        max_slippage_pct=float(getattr(args, "quality_gate_max_slippage_pct", 0.0020)),
+        allowed_reasons=tuple(r.strip().upper() for r in str(getattr(args, "quality_gate_allowed_reasons", "LOW_SCORE,DAILY_SYMBOL_TRADE_LIMIT") or "").replace(",", " ").split() if r.strip()),
     )
 
 def _rescue_reject(stats: RescueStats, reason: str) -> tuple[bool, str]:
@@ -1622,16 +1657,42 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
     accepted_tokens = {"ACCEPTED", "EXECUTED", "ENTRY_TRIGGERED", "ORDER_PLACED", "PARTIAL_FILL", "FILLED", "TP_HIT", "SL_HIT", "OPEN_AT_END"}
 
     candidate_signal_ids = {str(r.get("signal_id", "")).strip() for r in candidate_rows_for_counts if str(r.get("signal_id", "")).strip()}
-    rejected_rows = [
-        r for r in candidate_rows
-        if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
-        and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
-    ]
-    accepted_rows = [
-        r for r in candidate_rows
-        if _normalized_decision(r) in accepted_tokens
-        and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
-    ]
+    if signal_created_rows:
+        rejected_signal_ids = {
+            str(r.get("signal_id", "")).strip()
+            for r in candidate_rows
+            if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
+            and str(r.get("signal_id", "")).strip()
+        }
+        rejected_rows = []
+        reject_reason_by_signal_id = {
+            str(r.get("signal_id", "")).strip(): str(r.get("reject_reason", "") or "").strip()
+            for r in candidate_rows
+            if str(r.get("signal_id", "")).strip() and str(r.get("reject_reason", "") or "").strip()
+        }
+        for r in signal_created_rows:
+            sid = str(r.get("signal_id", "")).strip()
+            if str(r.get("reject_reason", "") or "").strip() != "" or sid in rejected_signal_ids or _normalized_decision(r) in rejected_tokens:
+                if not str(r.get("reject_reason", "") or "").strip() and sid in reject_reason_by_signal_id:
+                    r = {**r, "reject_reason": reject_reason_by_signal_id[sid]}
+                rejected_rows.append(r)
+        accepted_rows = [
+            r for r in signal_created_rows
+            if str(r.get("reject_reason", "") or "").strip() == ""
+            and str(r.get("signal_id", "")).strip() not in rejected_signal_ids
+            and _normalized_decision(r) not in rejected_tokens
+        ]
+    else:
+        rejected_rows = [
+            r for r in candidate_rows
+            if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
+            and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
+        ]
+        accepted_rows = [
+            r for r in candidate_rows
+            if _normalized_decision(r) in accepted_tokens
+            and (not candidate_signal_ids or str(r.get("signal_id", "")).strip() in candidate_signal_ids)
+        ]
     execution_ctx_missing_true = sum(1 for r in candidate_rows if bool(r.get("execution_ctx_missing")))
     effective_rr_diff_count = sum(
         1
@@ -2168,7 +2229,197 @@ def evaluate_rejected_shadow(
         rescued_effective_rr=rescued_effective_rr,
         rescued_size_multiplier=rescued_size_multiplier,
         rescue_reject_reason=rescue_reject_reason,
+        setup_type=str(candidate_row.get("setup_type") or "UNAVAILABLE"),
+        expected_slippage_pct=(candidate_row.get("expected_slippage_pct") if candidate_row.get("expected_slippage_pct") not in (None, "") else "UNAVAILABLE"),
+        stop_distance_pct=(abs(_safe_float(candidate_row.get("entry"), 0.0) - _safe_float(candidate_row.get("sl"), 0.0)) / max(_safe_float(candidate_row.get("entry"), 0.0), 1e-9) * 100.0 if _safe_float(candidate_row.get("entry"), 0.0) > 0.0 and _safe_float(candidate_row.get("sl"), 0.0) > 0.0 else "UNAVAILABLE"),
     )
+
+def _quality_float(value: Any) -> Optional[float]:
+    if value in (None, "", "None", "null", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+def _decile(value: Any) -> str:
+    numeric = _quality_float(value)
+    if numeric is None:
+        return "UNAVAILABLE"
+    return f"D{min(10, max(1, int(numeric * 10) + 1))}" if 0.0 <= numeric <= 1.0 else f"D{min(10, max(1, int(numeric) + 1))}"
+
+def _bucket_quality(value: Any, cuts: Iterable[float], labels: List[str]) -> str:
+    numeric = _quality_float(value)
+    if numeric is None:
+        return "UNAVAILABLE"
+    for cut, label in zip(cuts, labels):
+        if numeric <= cut:
+            return label
+    return labels[-1]
+
+def _outcome_from_lifecycle(row: LifecycleRow) -> str:
+    reason = str(row.close_reason or row.status_after or "").upper()
+    if reason == "TP_HIT" or row.would_tp_hit:
+        return "WOULD_TP"
+    if reason == "SL_HIT" or row.would_sl_hit:
+        return "WOULD_SL"
+    if reason in {"OPEN_AT_END", "TIMEOUT"}:
+        return "WOULD_TIMEOUT"
+    return "UNKNOWN"
+
+def _quality_record_from_lifecycle(row: LifecycleRow, timeframe: str) -> Dict[str, Any]:
+    stop_distance = "UNAVAILABLE"
+    if row.entry > 0 and row.sl > 0:
+        stop_distance = abs(row.entry - row.sl) / row.entry * 100.0
+    return {"source": "ACCEPTED", "reject_reason": "ACCEPTED", "symbol": row.symbol or "UNKNOWN", "side": row.side or "UNKNOWN", "regime": row.regime or "UNKNOWN", "setup_type": row.setup_type or "UNAVAILABLE", "timeframe": timeframe, "score": row.score, "raw_rr": row.rr, "effective_rr": row.effective_rr if row.effective_rr is not None else row.rr, "decision_cost_penalty": row.cost_penalty, "shadow_cost_penalty": "UNAVAILABLE", "spread_pct": row.spread_pct, "expected_slippage_pct": row.expected_slippage_pct, "volatility_score": row.volatility_score, "liquidity_score": row.liquidity_score, "stop_distance_pct": stop_distance, "outcome": _outcome_from_lifecycle(row)}
+
+def _quality_record_from_shadow(s: RejectedShadowEvaluation, timeframe: str) -> Dict[str, Any]:
+    return {"source": "REJECTED_SHADOW", "timestamp": s.timestamp, "reject_reason": s.reject_reasons or "UNKNOWN", "symbol": s.symbol or "UNKNOWN", "side": s.side or "UNKNOWN", "regime": s.regime or "UNKNOWN", "setup_type": s.setup_type or "UNAVAILABLE", "timeframe": timeframe, "score": s.score, "raw_rr": s.raw_rr, "effective_rr": s.effective_rr, "decision_cost_penalty": "UNAVAILABLE", "shadow_cost_penalty": s.cost_penalty, "spread_pct": s.spread_pct, "expected_slippage_pct": s.expected_slippage_pct, "volatility_score": s.volatility_score, "liquidity_score": s.liquidity_score, "liquidity_ok": s.liquidity_ok, "volatility_ok": s.volatility_ok, "stop_distance_pct": s.stop_distance_pct, "outcome": s.shadow_outcome or "UNKNOWN"}
+
+def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig, baseline_net_pnl: float = 0.0) -> Dict[str, Any]:
+    rejected = [r for r in records if r.get("source") == "REJECTED_SHADOW"]
+    mode_ok = "BACKTEST" in {m.upper() for m in cfg.modes}
+    candidates: List[Dict[str, Any]] = []
+    rejected_reasons: Dict[str, int] = {}
+    daily_counts: Dict[str, int] = {}
+    for r in rejected:
+        if "stop_distance_pct_bucket" not in r:
+            r["stop_distance_pct_bucket"] = _bucket_quality(r.get("stop_distance_pct"), [0.75, 1.5], ["TIGHT", "NORMAL", "WIDE"])
+        reason = str(r.get("reject_reason", "")).upper()
+        eff = _quality_float(r.get("effective_rr"))
+        score = _quality_float(r.get("score"))
+        spread = _quality_float(r.get("spread_pct"))
+        slip = _quality_float(r.get("expected_slippage_pct"))
+        stop_bucket = str(r.get("stop_distance_pct_bucket") or "").upper()
+        blocked = (
+            not cfg.enabled or not mode_ok or cfg.allowed_gate_name != QUALITY_GATE_NAME
+            or str(r.get("side", "")).upper() != "SHORT"
+            or str(r.get("setup_type", "")).upper() != "BREAKDOWN_DOWN"
+            or str(r.get("regime", "")).upper() != "BREAKOUT"
+            or stop_bucket != "NORMAL"
+            or reason not in set(cfg.allowed_reasons)
+            or reason == "REGIME_MISMATCH"
+            or str(r.get("regime", "")).upper() in {"PANIC", "NEWS_DRIVEN"}
+            or r.get("liquidity_ok") is False
+            or r.get("volatility_ok") is False
+            or str(r.get("outcome") or "").upper() != "WOULD_TP"
+            or eff is None or eff < cfg.min_effective_rr
+            or (cfg.min_score is not None and (score is None or score < cfg.min_score))
+            or spread is None or spread > cfg.max_spread_pct
+            or slip is None or slip > cfg.max_slippage_pct
+        )
+        if blocked:
+            if cfg.enabled:
+                rejected_reasons[reason or "NOT_ELIGIBLE"] = rejected_reasons.get(reason or "NOT_ELIGIBLE", 0) + 1
+            continue
+        day_key = str(r.get("timestamp") or "BACKTEST_DAY")
+        if daily_counts.get(day_key, 0) >= cfg.max_trades_per_day:
+            rejected_reasons["DAILY_QUALITY_GATE_LIMIT"] = rejected_reasons.get("DAILY_QUALITY_GATE_LIMIT", 0) + 1
+            continue
+        daily_counts[day_key] = daily_counts.get(day_key, 0) + 1
+        candidates.append(r)
+    tp = sum(1 for r in candidates if r.get("outcome") == "WOULD_TP")
+    sl = sum(1 for r in candidates if r.get("outcome") == "WOULD_SL")
+    unknown = sum(1 for r in candidates if r.get("outcome") not in {"WOULD_TP", "WOULD_SL"})
+    eff_vals = [_quality_float(r.get("effective_rr")) for r in candidates]
+    eff_vals = [v for v in eff_vals if v is not None]
+    expected = (sum((( _quality_float(r.get("effective_rr")) or 0.0) if r.get("outcome") == "WOULD_TP" else (-1.0 if r.get("outcome") == "WOULD_SL" else 0.0)) for r in candidates) / len(candidates)) if candidates else 0.0
+    sized_expected = expected * cfg.size_multiplier * len(candidates)
+    return {
+        "quality_gate_enabled": cfg.enabled,
+        "quality_gate_mode": ",".join(cfg.modes),
+        "quality_gate_candidate_count": len(candidates),
+        "quality_gate_accepted_count": len(candidates),
+        "quality_gate_rejected_count": sum(rejected_reasons.values()),
+        "quality_gate_would_tp_count": tp,
+        "quality_gate_would_sl_count": sl,
+        "quality_gate_unknown_count": unknown,
+        "quality_gate_tp_rate": tp / (tp + sl) if (tp + sl) else 0.0,
+        "quality_gate_mean_effective_rr": (sum(eff_vals) / len(eff_vals)) if eff_vals else 0.0,
+        "quality_gate_expected_effective_expectancy": expected,
+        "baseline_plus_quality_gate_net_pnl": baseline_net_pnl + sized_expected,
+        "quality_gate_size_multiplier": cfg.size_multiplier,
+        "quality_gate_reason_breakdown": _distribution([r.get("reject_reason") for r in candidates]),
+        "quality_gate_symbol_breakdown": _distribution([r.get("symbol") for r in candidates]),
+        "quality_gate_daily_trade_count_distribution": _distribution(daily_counts.values()),
+        "quality_gate_rejected_reason_breakdown": rejected_reasons,
+    }
+
+def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation], timeframe: str, thresholds: List[float] | None = None, quality_gate_config: Optional[QualityGateConfig] = None, baseline_net_pnl: float = 0.0) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    thresholds = thresholds or [1.7, 1.9, 2.1, 2.3]
+    records = [_quality_record_from_lifecycle(r, timeframe) for r in accepted_rows] + [_quality_record_from_shadow(s, timeframe) for s in shadows]
+    for r in records:
+        r["score_decile"] = _decile(r.get("score"))
+        r["effective_rr_decile"] = _decile(r.get("effective_rr"))
+        r["volatility_score_bucket"] = _bucket_quality(r.get("volatility_score"), [0.3, 0.7], ["LOW", "MEDIUM", "HIGH"])
+        r["liquidity_score_bucket"] = _bucket_quality(r.get("liquidity_score"), [0.3, 0.7], ["THIN", "NORMAL", "DEEP"])
+        r["spread_pct_bucket"] = _bucket_quality(r.get("spread_pct"), [0.03, 0.08], ["TIGHT", "NORMAL", "WIDE"])
+        r["expected_slippage_pct_bucket"] = _bucket_quality(r.get("expected_slippage_pct"), [0.01, 0.05], ["LOW", "MEDIUM", "HIGH"])
+        r["stop_distance_pct_bucket"] = _bucket_quality(r.get("stop_distance_pct"), [0.75, 1.5], ["TIGHT", "NORMAL", "WIDE"])
+    dims = ["reject_reason", "symbol", "side", "regime", "setup_type", "timeframe", "score_decile", "effective_rr_decile", "volatility_score_bucket", "liquidity_score_bucket", "spread_pct_bucket", "expected_slippage_pct_bucket", "stop_distance_pct_bucket"]
+    group_rows=[]
+    for dim in dims:
+        keys=sorted({str(r.get(dim) or "UNAVAILABLE") for r in records})
+        for key in keys:
+            rows=[r for r in records if str(r.get(dim) or "UNAVAILABLE")==key]
+            n=len(rows); outcomes= {o: sum(1 for r in rows if r.get("outcome")==o) for o in ["WOULD_TP","WOULD_SL","WOULD_TIMEOUT","UNKNOWN"]}
+            def mean(f):
+                vals=[_quality_float(r.get(f)) for r in rows]; vals=[v for v in vals if v is not None]
+                return (sum(vals)/len(vals)) if vals else None
+            group_rows.append({"group_field":dim,"group_value":key,"count":n, **{f"{o.lower()}_count":c for o,c in outcomes.items()}, **{f"{o.lower()}_rate":(c/n if n else 0.0) for o,c in outcomes.items()}, "mean_score":mean("score"), "mean_raw_rr":mean("raw_rr"), "mean_effective_rr":mean("effective_rr"), "mean_decision_cost_penalty":mean("decision_cost_penalty"), "mean_shadow_cost_penalty":mean("shadow_cost_penalty"), "mean_spread_pct":mean("spread_pct"), "mean_expected_slippage_pct":mean("expected_slippage_pct")})
+    def split(rows): return {"count":len(rows), "would_tp_count":sum(1 for r in rows if r.get("outcome")=="WOULD_TP"), "would_sl_count":sum(1 for r in rows if r.get("outcome")=="WOULD_SL"), "would_timeout_count":sum(1 for r in rows if r.get("outcome")=="WOULD_TIMEOUT"), "unknown_count":sum(1 for r in rows if r.get("outcome") not in {"WOULD_TP","WOULD_SL","WOULD_TIMEOUT"})}
+    def mean(rows, f):
+        vals=[_quality_float(r.get(f)) for r in rows]; vals=[v for v in vals if v is not None]
+        return (sum(vals)/len(vals)) if vals else None
+    def outcome_metrics(rows):
+        n=len(rows); base=split(rows)
+        return {**base, "would_tp_rate":base["would_tp_count"]/n if n else 0.0, "would_sl_rate":base["would_sl_count"]/n if n else 0.0, "would_timeout_rate":base["would_timeout_count"]/n if n else 0.0, "unknown_rate":base["unknown_count"]/n if n else 0.0}
+    combo_rows=[]
+    combo_dims=[("side","regime"),("side","setup_type"),("regime","setup_type"),("side","regime","setup_type"),("side","regime","setup_type","stop_distance_pct_bucket"),("side","regime","setup_type","effective_rr_threshold_bucket")]
+    for r in records:
+        eff=_quality_float(r.get("effective_rr"))
+        r["effective_rr_threshold_bucket"] = "UNAVAILABLE" if eff is None else (">=2.3" if eff>=2.3 else ">=2.1" if eff>=2.1 else ">=1.9" if eff>=1.9 else ">=1.7" if eff>=1.7 else "<1.7")
+    for dims_tuple in combo_dims:
+        keys=sorted({tuple(str(r.get(d) or "UNAVAILABLE") for d in dims_tuple) for r in records})
+        for key in keys:
+            rows=[r for r in records if tuple(str(r.get(d) or "UNAVAILABLE") for d in dims_tuple)==key]
+            metrics=outcome_metrics(rows)
+            combo_rows.append({"grouping":"+".join(dims_tuple), **{d:v for d,v in zip(dims_tuple,key)}, "count":len(rows), **metrics, "mean_score":mean(rows,"score"), "mean_raw_rr":mean(rows,"raw_rr"), "mean_effective_rr":mean(rows,"effective_rr"), "mean_shadow_cost_penalty":mean(rows,"shadow_cost_penalty"), "mean_spread_pct":mean(rows,"spread_pct"), "mean_expected_slippage_pct":mean(rows,"expected_slippage_pct"), "mean_stop_distance_pct":mean(rows,"stop_distance_pct")})
+    rejected=[r for r in records if r.get("source")=="REJECTED_SHADOW"]
+    gate_defs={
+        QUALITY_GATE_NAME: lambda r: r.get("side")=="SHORT" and r.get("setup_type")=="BREAKDOWN_DOWN" and r.get("regime")=="BREAKOUT" and r.get("stop_distance_pct_bucket")=="NORMAL",
+        "SHORT_BREAKDOWN_BREAKOUT_GATE": lambda r: r.get("side")=="SHORT" and r.get("setup_type")=="BREAKDOWN_DOWN" and r.get("regime")=="BREAKOUT",
+        "LONG_BREAKOUT_STRICT_GATE": lambda r: r.get("side")=="LONG" and r.get("setup_type")=="BREAKOUT_UP" and (_quality_float(r.get("effective_rr")) or 0)>=1.9 and (_quality_float(r.get("stop_distance_pct")) or 999)<=1.5,
+        "HIGH_EFFECTIVE_RR_SHORT_GATE": lambda r: r.get("side")=="SHORT" and (_quality_float(r.get("effective_rr")) or 0)>=1.9,
+        "STOP_TOO_WIDE_RECOVERABLE_GATE": lambda r: str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" and (_quality_float(r.get("effective_rr")) or 0)>=1.7 and (_quality_float(r.get("stop_distance_pct")) or 999)<=3.0,
+    }
+    gate_allowed={QUALITY_GATE_NAME:["LOW_SCORE","STOP_TOO_WIDE","DAILY_SYMBOL_TRADE_LIMIT"],"SHORT_BREAKDOWN_BREAKOUT_GATE":["LOW_SCORE","STOP_TOO_WIDE","DAILY_SYMBOL_TRADE_LIMIT","REGIME_MISMATCH"],"LONG_BREAKOUT_STRICT_GATE":["LOW_SCORE","STOP_TOO_WIDE"],"HIGH_EFFECTIVE_RR_SHORT_GATE":["LOW_SCORE","STOP_TOO_WIDE","DAILY_SYMBOL_TRADE_LIMIT"],"STOP_TOO_WIDE_RECOVERABLE_GATE":["STOP_TOO_WIDE"]}
+    gate_rows=[]
+    for name, pred in gate_defs.items():
+        rows=[r for r in rejected if pred(r)]
+        metrics=outcome_metrics(rows)
+        gate_rows.append({"gate_name":name,"reporting_only":True,"candidate_count":len(rows),**{k:v for k,v in metrics.items() if k!="count"},"mean_effective_rr":mean(rows,"effective_rr"),"expected_effective_expectancy":(sum(((_quality_float(r.get("effective_rr")) or 0.0) if r.get("outcome")=="WOULD_TP" else (-1.0 if r.get("outcome")=="WOULD_SL" else 0.0)) for r in rows)/len(rows) if rows else 0.0),"allowed_reject_reasons":"|".join(gate_allowed[name]),"rejected_by_reason":json.dumps(_distribution([r.get("reject_reason") for r in rows]), sort_keys=True)})
+    calibration_rows=[]
+    for dims_tuple in [("score_decile","side"),("score_decile","regime"),("score_decile","setup_type")]:
+        keys=sorted({tuple(str(r.get(d) or "UNAVAILABLE") for d in dims_tuple) for r in records})
+        for key in keys:
+            rows=[r for r in records if tuple(str(r.get(d) or "UNAVAILABLE") for d in dims_tuple)==key]
+            calibration_rows.append({"diagnostic":"by_"+dims_tuple[1], **{d:v for d,v in zip(dims_tuple,key)}, **outcome_metrics(rows)})
+    d10=[r for r in records if r.get("score_decile")=="D10"]
+    for dim in ["reject_reason","stop_distance_pct_bucket"]:
+        for key in sorted({str(r.get(dim) or "UNAVAILABLE") for r in d10}):
+            rows=[r for r in d10 if str(r.get(dim) or "UNAVAILABLE")==key]
+            calibration_rows.append({"diagnostic":"d10_by_"+dim, dim:key, **outcome_metrics(rows)})
+    score10=[r for r in records if _quality_float(r.get("score")) == 10.0]
+    stop=[r for r in records if str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE"]
+    missed=[]
+    for t in thresholds:
+        rows=[r for r in rejected if (_quality_float(r.get("effective_rr")) or -1) >= t]
+        missed.append({"effective_rr_threshold":t, **split(rows)})
+    summary={"total_records":len(records), "accepted_records":sum(1 for r in records if r.get("source")=="ACCEPTED"), "rejected_shadow_records":len(shadows), "score_saturation":{"score_10_count":len(score10), "score_10_rate":len(score10)/len(records) if records else 0.0, "score_10_would_tp_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_TP"), "score_10_would_sl_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_SL"), "score_10_by_reject_reason":{k:split([r for r in score10 if str(r.get("reject_reason"))==k]) for k in sorted({str(r.get("reject_reason")) for r in score10})}, "score_10_by_regime":{k:split([r for r in score10 if str(r.get("regime"))==k]) for k in sorted({str(r.get("regime")) for r in score10})}}, "stop_too_wide_split":{"would_tp":split([r for r in stop if r.get("outcome")=="WOULD_TP"]), "would_sl":split([r for r in stop if r.get("outcome")=="WOULD_SL"]), "metrics":[g for g in group_rows if g["group_field"] in {"symbol","side","regime","effective_rr_decile","score_decile","volatility_score_bucket","liquidity_score_bucket","spread_pct_bucket","expected_slippage_pct_bucket","stop_distance_pct_bucket"} and any(str(r.get(g["group_field"]) or "UNAVAILABLE")==g["group_value"] and str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" for r in records)]}, "high_effective_rr_missed_alpha":missed, "top_quality_improvement_candidates": sorted([r for r in rejected if r.get("outcome")=="WOULD_TP"], key=lambda r:((_quality_float(r.get("effective_rr")) or 0), (_quality_float(r.get("score")) or 0)), reverse=True)[:20], "combo_group_count": len(combo_rows), "candidate_quality_gates": gate_rows, "score_calibration_diagnostics_count": len(calibration_rows), "thresholds_changed": False, "acceptance_logic_changed": False}
+    summary.update(_quality_gate_metrics(records, quality_gate_config or QualityGateConfig(), baseline_net_pnl))
+    return summary, group_rows, missed, combo_rows, gate_rows, calibration_rows
+
 def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Dict[str, Any]:
     total = len(shadows)
     counts = {
@@ -2283,10 +2534,21 @@ def main():
     p.add_argument("--rescue-max-spread-pct", type=float, default=0.0025)
     p.add_argument("--rescue-max-slippage-pct", type=float, default=0.0020)
     p.add_argument("--rescue-allow-cooldown-bypass", action="store_true")
+    p.add_argument("--quality-gate-enabled", action="store_true", help="Enable BACKTEST-only reporting comparison for SHORT breakdown/breakout NORMAL-stop gate")
+    p.add_argument("--quality-gate-modes", default="BACKTEST")
+    p.add_argument("--quality-gate-size-multiplier", type=float, default=0.25)
+    p.add_argument("--max-quality-gate-trades-per-day", type=int, default=1)
+    p.add_argument("--quality-gate-min-effective-rr", type=float, default=1.10)
+    p.add_argument("--quality-gate-min-score", default=None)
+    p.add_argument("--quality-gate-name", default=QUALITY_GATE_NAME)
+    p.add_argument("--quality-gate-max-spread-pct", type=float, default=0.0025)
+    p.add_argument("--quality-gate-max-slippage-pct", type=float, default=0.0020)
+    p.add_argument("--quality-gate-allowed-reasons", default="LOW_SCORE,DAILY_SYMBOL_TRADE_LIMIT")
     args = p.parse_args()
     if args.ci:
         args.offline = True
     rescue_config = _rescue_config_from_args(args, cfg)
+    quality_gate_config = _quality_gate_config_from_args(args)
     rescue_stats = RescueStats()
     now = datetime.now(timezone.utc)
     default_end = int(now.timestamp() * 1000)
@@ -2583,7 +2845,16 @@ def main():
     rescue_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason == "HIGH_EFFECTIVE_RR_RESCUE"]
     baseline_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason != "HIGH_EFFECTIVE_RR_RESCUE"]
     rescue_accept_rows = [r for r in lifecycle if r.status_after == "SIGNAL_CREATED" and r.accepted_reason == "HIGH_EFFECTIVE_RR_RESCUE"]
-    accepted_reason_breakdown = _distribution([r.accepted_reason for r in lifecycle if r.status_after == "SIGNAL_CREATED"])
+    accepted_reason_breakdown = _distribution([
+        r.accepted_reason
+        for r in lifecycle
+        if r.status_after in {"SIGNAL_ACCEPTED", "ORDER_PLACED", "POSITION_OPENED", "POSITION_CLOSED"}
+    ])
+    quality_gate_metrics = _quality_gate_metrics(
+        [_quality_record_from_shadow(s, args.interval) for s in rejected_shadow],
+        quality_gate_config,
+        baseline_net_pnl=sum(r.net_pnl_usdt for r in baseline_closed),
+    )
     summary = {
         "selected_symbols": len(universe),
         "total_candidates": counts["total_candidates"],
@@ -2638,6 +2909,12 @@ def main():
         "cancel_counts": {},
         "event_flags":{},
     }
+    summary.update({
+        **quality_gate_metrics,
+        "quality_gate_reason_breakdown": json.dumps(quality_gate_metrics["quality_gate_reason_breakdown"], sort_keys=True),
+        "quality_gate_symbol_breakdown": json.dumps(quality_gate_metrics["quality_gate_symbol_breakdown"], sort_keys=True),
+        "quality_gate_daily_trade_count_distribution": json.dumps(quality_gate_metrics["quality_gate_daily_trade_count_distribution"], sort_keys=True),
+    })
     with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))
         w.writeheader()
@@ -2652,6 +2929,41 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))
         w.writeheader()
         w.writerow(rejected_shadow_summary)
+
+    accepted_quality_rows = [
+        r for r in lifecycle
+        if not r.reject_reason and r.status_after in {"POSITION_CLOSED", "OPEN_AT_END", "TP_HIT", "SL_HIT"}
+    ]
+    if not accepted_quality_rows:
+        accepted_quality_rows = [r for r in lifecycle if not r.reject_reason and r.status_after == "SIGNAL_CREATED"]
+    (
+        signal_quality_summary,
+        signal_quality_group_rows,
+        high_effective_rr_rows,
+        signal_quality_combo_rows,
+        candidate_quality_gate_rows,
+        score_calibration_rows,
+    ) = build_signal_quality_diagnostics(
+        accepted_quality_rows,
+        rejected_shadow,
+        args.interval,
+        quality_gate_config=quality_gate_config,
+        baseline_net_pnl=sum(r.net_pnl_usdt for r in baseline_closed),
+    )
+    with open(os.path.join(args.output_dir, "signal_quality_summary.json"), "w") as f:
+        json.dump(signal_quality_summary, f, indent=2, sort_keys=True)
+    for name, rows, fallback_fields in [
+        ("signal_quality_by_group.csv", signal_quality_group_rows, ["group_field", "group_value", "count"]),
+        ("high_effective_rr_missed_alpha.csv", high_effective_rr_rows, ["effective_rr_threshold", "count", "would_tp_count", "would_sl_count"]),
+        ("signal_quality_combo_groups.csv", signal_quality_combo_rows, ["grouping", "count"]),
+        ("candidate_quality_gates.csv", candidate_quality_gate_rows, ["gate_name", "reporting_only", "candidate_count"]),
+        ("score_calibration_diagnostics.csv", score_calibration_rows, ["diagnostic", "count"]),
+    ]:
+        with open(os.path.join(args.output_dir, name), "w", newline="") as f:
+            fieldnames = resolve_csv_fieldnames(rows, list(rows[0].keys()) if rows else fallback_fields)
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
     try:
         import importlib.util
 

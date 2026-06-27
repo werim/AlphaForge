@@ -75,6 +75,10 @@ class DashboardBacktestResult:
     near_miss_score_distribution: dict[str, Any] = field(default_factory=dict)
     near_miss_effective_rr_distribution: dict[str, Any] = field(default_factory=dict)
     stop_too_wide_rescue_diagnostics: dict[str, Any] = field(default_factory=dict)
+    signal_quality_diagnostics: dict[str, Any] = field(default_factory=dict)
+    high_effective_rr_missed_alpha: list[dict[str, Any]] = field(default_factory=list)
+    stop_too_wide_quality_split: dict[str, Any] = field(default_factory=dict)
+    top_quality_improvement_candidates: list[dict[str, Any]] = field(default_factory=list)
     backtest_rejection_rate: float | None = None
 
 
@@ -191,6 +195,14 @@ def _first_available(*values: Any) -> Any:
     return None
 
 
+def _first_exported_available(*values: Any) -> Any:
+    unavailable = {None, "", "None", "null", "NOT_EXPORTED", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"}
+    for value in values:
+        if value not in unavailable:
+            return value
+    return None
+
+
 def _lookup_by_signal_or_composite(rows: list[dict[str, str]]) -> dict[tuple[str, ...], dict[str, str]]:
     lookup: dict[tuple[str, ...], dict[str, str]] = {}
     for row in rows:
@@ -264,8 +276,8 @@ def _accepted_trade_diagnostics(lifecycle_rows: list[dict[str, str]], backtest_o
     for row in _accepted_trade_rows(lifecycle_rows):
         ctx = _decode_execution_ctx(row.get("execution_ctx"))
         order_row = _match_by_signal_or_composite(row, order_lookup) or {}
-        net_pnl = _first_available(row.get("net_pnl"), row.get("net_pnl_usdt"), row.get("pnl"), row.get("pnl_usdt"), ctx.get("net_pnl"), ctx.get("net_pnl_usdt"), ctx.get("pnl"), ctx.get("pnl_usdt"), order_row.get("net_pnl"), order_row.get("net_pnl_usdt"), order_row.get("pnl"), order_row.get("pnl_usdt"))
-        exit_price = _first_available(row.get("exit"), row.get("exit_price"), ctx.get("exit"), ctx.get("exit_price"), order_row.get("exit"), order_row.get("exit_price"))
+        net_pnl = _first_exported_available(row.get("net_pnl"), row.get("net_pnl_usdt"), row.get("pnl"), row.get("pnl_usdt"), ctx.get("net_pnl"), ctx.get("net_pnl_usdt"), ctx.get("pnl"), ctx.get("pnl_usdt"), order_row.get("net_pnl"), order_row.get("net_pnl_usdt"), order_row.get("pnl"), order_row.get("pnl_usdt"))
+        exit_price = _first_exported_available(row.get("exit"), row.get("exit_price"), ctx.get("exit"), ctx.get("exit_price"), order_row.get("exit"), order_row.get("exit_price"))
         rows.append({
             "signal_id": row.get("signal_id"),
             "symbol": row.get("symbol"),
@@ -496,7 +508,11 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
     raw_signal_rejected = [r for r in rejected_rows if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_REJECTED"]
     passed_later = [r for r in signal_rejected if _passes_score_rr_expectancy(r)]
     later_gate_reasons = {"DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "RR_TOO_LOW", "STOP_TOO_WIDE"}
-    later_gate_source = [r for r in shadow_diagnostic_rows if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons]
+    passed_keys = {(str(r.get("signal_id") or f"{r.get('symbol','')}:{r.get('timestamp') or r.get('event_ts','')}").strip(), str(r.get("symbol") or "").strip(), str(r.get("timestamp") or r.get("event_ts") or "").strip(), str(r.get("side") or "").strip().upper()) for r in passed_later}
+    def _matches_passed(row: Mapping[str, Any]) -> bool:
+        key = (str(row.get("signal_id") or f"{row.get('symbol','')}:{row.get('timestamp') or row.get('event_ts','')}").strip(), str(row.get("symbol") or "").strip(), str(row.get("timestamp") or row.get("event_ts") or "").strip(), str(row.get("side") or "").strip().upper())
+        return key in passed_keys
+    later_gate_source = [r for r in shadow_diagnostic_rows if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons and _matches_passed(r)]
     if not later_gate_source:
         later_gate_source = [r for r in passed_later if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons]
     later_gate_groups: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
@@ -586,6 +602,13 @@ def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str
         writer.writeheader()
         writer.writerows(report_rows)
     summary_path.write_text(json.dumps(summary_out, indent=2, sort_keys=True))
+    later_gate_path = output_dir / "later_gate_breakdown.csv"
+    later_gate_rows = list(summary_out.get("later_gate_diagnostics", [])) if isinstance(summary_out, Mapping) else []
+    later_gate_fields = list(later_gate_rows[0].keys()) if later_gate_rows else ["reject_reason", "source_stage", "count", "avg_score", "avg_effective_rr", "would_tp_rate", "would_sl_rate"]
+    with later_gate_path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=later_gate_fields)
+        writer.writeheader()
+        writer.writerows(later_gate_rows)
     return report_path, summary_path, summary_out
 
 
@@ -639,11 +662,13 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     rejected_path = output_dir / "rejected_orders.csv"
     rejected_shadow_path = output_dir / "rejected_shadow.csv"
     backtest_orders_path = output_dir / "backtest_orders.csv"
+    signal_quality_summary_path = output_dir / "signal_quality_summary.json"
     summary = _read_first_csv_row(summary_path)
     lifecycle_rows = _read_csv_rows(lifecycle_path)
     rejected_rows = _read_csv_rows(rejected_path)
     rejected_shadow_rows = _read_csv_rows(rejected_shadow_path)
     backtest_order_rows = _read_csv_rows(backtest_orders_path)
+    signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
     result.status = "COMPLETED"
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
@@ -685,6 +710,10 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.near_miss_score_distribution = calibration_summary["near_miss_score_distribution"]
     result.near_miss_effective_rr_distribution = calibration_summary["near_miss_effective_rr_distribution"]
     result.stop_too_wide_rescue_diagnostics = calibration_summary["stop_too_wide_rescue_diagnostics"]
+    result.signal_quality_diagnostics = signal_quality_summary
+    result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else []
+    result.stop_too_wide_quality_split = signal_quality_summary.get("stop_too_wide_split", {}) if isinstance(signal_quality_summary, dict) else {}
+    result.top_quality_improvement_candidates = signal_quality_summary.get("top_quality_improvement_candidates", []) if isinstance(signal_quality_summary, dict) else []
     if result.rejected_signals is not None and result.accepted_trades is not None:
         denom = result.rejected_signals + result.accepted_trades
         result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None

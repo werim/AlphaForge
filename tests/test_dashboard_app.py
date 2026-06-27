@@ -728,3 +728,26 @@ def test_lifecycle_state_counts_include_full_backtest_path() -> None:
 
     for state in ("SIGNAL_CREATED", "SIGNAL_REJECTED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED", "POSITION_OPENED", "POSITION_CLOSED"):
         assert counts[state] >= 1
+
+
+def test_later_gate_breakdown_uses_only_passed_before_later_gate_candidates() -> None:
+    from alphaforge.dashboard.backtest_control import _build_calibration_outputs
+
+    rejected_rows = [
+        {"signal_id": "p1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "LONG", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "9.4", "raw_rr": "2.0", "effective_rr": "1.5", "expectancy": "0.2", "min_required_score": "7.5", "min_effective_rr": "1.1"},
+        {"signal_id": "p2", "symbol": "BTCUSDT", "timestamp": "2000", "side": "LONG", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "REGIME_MISMATCH", "score": "8.4", "raw_rr": "1.8", "effective_rr": "1.4", "expectancy": "0.1", "min_required_score": "7.5", "min_effective_rr": "1.1"},
+        {"signal_id": "f1", "symbol": "BTCUSDT", "timestamp": "3000", "side": "LONG", "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "6.0", "raw_rr": "2.0", "effective_rr": "1.5", "expectancy": "0.2", "min_required_score": "7.5", "min_effective_rr": "1.1"},
+    ]
+    shadow_rows = [
+        {"signal_id": "p1", "symbol": "BTCUSDT", "timestamp": "1000", "side": "LONG", "reject_reason": "STOP_TOO_WIDE", "score": "9.4", "effective_rr": "1.5", "shadow_outcome": "WOULD_SL"},
+        {"signal_id": "p2", "symbol": "BTCUSDT", "timestamp": "2000", "side": "LONG", "reject_reason": "REGIME_MISMATCH", "score": "8.4", "effective_rr": "1.4", "shadow_outcome": "WOULD_TP"},
+        {"signal_id": "f1", "symbol": "BTCUSDT", "timestamp": "3000", "side": "LONG", "reject_reason": "STOP_TOO_WIDE", "score": "6.0", "effective_rr": "1.5", "shadow_outcome": "WOULD_TP"},
+    ]
+
+    _, summary = _build_calibration_outputs([], rejected_rows, {"accepted_count": "0"}, shadow_rows, [])
+    by_reason = {row["reject_reason"]: row for row in summary["later_gate_diagnostics"]}
+
+    assert summary["rejection_funnel"]["passed_score_rr_expectancy"] == 2
+    assert by_reason["STOP_TOO_WIDE"]["count"] == 1
+    assert by_reason["STOP_TOO_WIDE"]["would_sl_count"] == 1
+    assert by_reason["REGIME_MISMATCH"]["count"] == 1

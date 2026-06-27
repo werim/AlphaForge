@@ -1,3 +1,51 @@
+## 2026-06-26 Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m
+
+- **Current version:** Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m patch.
+- **Current phase:** Phase 6 BACKTEST evidence integrity and calibration safety.
+- **Runtime maturity:** BACKTEST diagnostics only; optional quality gate remains disabled by default and stricter when explicitly enabled.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST exports are more complete; PAPER/LIVE order behavior is unchanged and no LIVE order calls are introduced.
+- **Lifecycle coverage:** Accepted diagnostics merge lifecycle/order/close artifacts without mutating lifecycle states; rejected later-gate candidates remain rejected and grouped for audit.
+- **Execution realism coverage:** STOP_TOO_WIDE is excluded from default quality-gate rescue reasons, high effective-RR `WOULD_SL` rows cannot be rescued, and unavailable execution fields remain explicit.
+- **Known critical risks:** The BTCUSDT 60d/15m evidence shows accepted trades lost money and later-gate STOP_TOO_WIDE candidates were dominated by WOULD_SL; this is not positive calibration evidence.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; this patch is BACKTEST diagnostics/preservation only.
+
+## 2026-06-26 BACKTEST_ONLY SHORT Breakdown Breakout Normal Stop Quality Gate
+
+- **Current version:** BACKTEST_ONLY SHORT breakdown/breakout NORMAL-stop quality-gate comparison patch.
+- **Current phase:** Phase 6 BACKTEST signal-quality hypothesis measurement before threshold changes.
+- **Runtime maturity:** Research/backtest diagnostics only; gate is disabled by default and exports comparison metrics without changing baseline accepted trades.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST can opt into comparison metrics; PAPER remains disabled by default; LIVE cannot use this path.
+- **Lifecycle coverage:** No baseline lifecycle transitions are added or reordered. If future materialized comparison rows are emitted they must carry `accepted_reason=SHORT_BREAKDOWN_BREAKOUT_NORMAL_STOP_GATE`, original reject reason, reporting-only metadata, and reduced size.
+- **Execution realism coverage:** Gate requires SHORT/BREAKDOWN_DOWN/BREAKOUT/NORMAL geometry, allowed reject reasons, effective RR floor, spread/slippage caps, liquidity/volatility OK when available, non-PANIC/non-NEWS regime, and reduced risk sizing.
+- **Known critical risks:** Comparison expectancy is not proof of production readiness; rejected-shadow outcomes and estimated BACKTEST execution fields may be incomplete.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; no LIVE quality-gate acceptance is permitted.
+
+## 2026-06-26 Regime/Side/Setup Quality Gate Diagnostics Patch
+
+- **Current version:** Regime/Side/Setup Quality Gate Diagnostics patch.
+- **Current phase:** Phase 6 signal-quality evidence hardening before threshold changes.
+- **Runtime maturity:** Research/backtest diagnostics only; no thresholds, rescue acceptance, accepted trade counts, or strategy decision logic changed.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST now exports combined side/regime/setup/effective-RR/stop-distance quality evidence; PAPER/LIVE runtime behavior is unchanged.
+- **Lifecycle coverage:** Diagnostics consume unique signal-level accepted/rejected evidence without adding lifecycle states or mutating reject outcomes.
+- **Execution realism coverage:** Candidate-gate diagnostics include effective RR, shadow cost penalty, spread, expected slippage, and stop distance when available; unavailable fields remain explicit.
+- **Known critical risks:** Candidate gates are reporting-only and must not be treated as approval to accept more trades. Accepted diagnostics geometry nulls remain a known issue if source artifacts omit geometry.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; this patch is evidence-only.
+
+## 2026-06-26 Signal Quality Diagnostics Export Patch
+
+- **Current version:** Signal Quality Diagnostics Export patch.
+- **Current phase:** BACKTEST signal-quality measurement before threshold changes.
+- **Runtime maturity:** Research/backtest diagnostics only; no threshold, rescue acceptance, or strategy decision logic changed.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST exports now measure accepted and rejected-shadow quality splits; PAPER/LIVE runtime behavior is unchanged.
+- **Lifecycle coverage:** Accepted and rejected lifecycle decisions are not mutated; rejected shadows remain rejected and exportable for audit.
+- **Execution realism coverage:** Diagnostics group by effective RR, score, spread, slippage, volatility, liquidity, and stop distance when available; missing optional fields are marked unavailable rather than fake-filled.
+- **Known critical risks:** Diagnostics identify candidate quality separators but do not prove threshold loosening is safe. STOP_TOO_WIDE and HIGH_EFFECTIVE_RR outputs are analysis-only.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; this patch measures signal quality only.
+
 ## 2026-06-26 High Effective-RR Rescue Acceptance Lane (BACKTEST-only experimental)
 
 - **Current version:** High Effective-RR Rescue Acceptance Lane patch.
