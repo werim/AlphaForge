@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Settings · AlphaForge{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Settings</h1>
+  <p>Effective mode-aware configuration. Precedence: environment variables &gt; dashboard override &gt; .env.local &gt; .env &gt; typed defaults.</p>
+  {% if message %}<div class="notice">{{ message }}</div>{% endif %}
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post" action="/settings/save">
+  {% for category, rows in grouped.items() %}
+    <h2>{{ category }}</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Setting</th><th>Current Value</th><th>Default</th><th>Type</th><th>Applies To</th><th>Source</th><th>Restart</th><th>Active</th><th>Description</th><th>Reset</th></tr></thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td><code>{{ row.env_name }}</code></td>
+          <td>{% if row.dashboard_editable %}<input name="{{ row.env_name }}" value="{{ row.current_value }}">{% else %}<code>{{ row.current_value }}</code>{% endif %}</td>
+          <td><code>{{ row.default }}</code></td><td>{{ row.type }}</td><td>{{ row.applies_to|join(', ') }}</td><td>{{ row.source }}</td><td>{{ row.restart_required }}</td><td>{{ row.active }}</td><td>{{ row.description }}</td>
+          <td>{% if row.dashboard_editable %}<button name="reset" value="{{ row.env_name }}" formaction="/settings/reset" formmethod="post">Reset</button>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  {% endfor %}
+  <button type="submit">Save</button>
+  <button formaction="/settings" formmethod="get">Reload config</button>
+  <button formaction="/settings/export" formmethod="get">Export config snapshot</button>
+  </form>
+</section>
+{% endblock %}

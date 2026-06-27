@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
+from alphaforge.config_registry import decision_filter_config, effective_config_values
+
 
 def _clean_env_value(raw: str | None) -> str | None:
     if raw is None:
@@ -81,6 +83,21 @@ class RuntimeSettings:
     max_expected_slippage_pct: float = 0.0020
     max_abs_funding_rate_pct: float = 0.0010
     min_liquidity_usd: float = 5_000_000.0
+    max_trades_global_per_day: int = 10
+    max_trades_symbol_per_day: int = 2
+    min_sl_pct: float = 0.15
+    max_sl_pct: float = 1.5
+    min_atr_pct: float = 0.25
+    max_atr_pct: float = 3.0
+    block_unknown_expectancy: bool = True
+    block_chop_market: bool = True
+    require_regime_alignment: bool = True
+    stop_too_wide_hard_reject: bool = True
+    stop_too_wide_soft_score_min: float = 9.0
+    stop_too_wide_soft_effective_rr_min: float = 1.75
+    stop_too_wide_max_risk_scale: float = 0.50
+    stop_too_wide_extreme_mult: float = 1.50
+    max_latency_ms: int = 2500
     global_kill_switch: bool = False
     require_live_qualification: bool = True
     enable_shadow_mode: bool = False
@@ -140,6 +157,12 @@ class BacktestSettings:
     output_dir: str = "data/backtest"
     initial_balance: float = 1000.0
     risk_pct: float = 1.0
+    max_trades: int = 0
+    max_accepted_trades_per_day: int = 0
+    max_symbol_trades_per_day: int = 0
+    use_execution_costs: bool = True
+    export_config_snapshot: bool = True
+    days: int = 7
     filter_switches: BacktestFilterSwitches = field(default_factory=BacktestFilterSwitches)
 
 @dataclass(slots=True)
@@ -175,19 +198,28 @@ class AlphaForgeConfig:
 
 
 def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) -> dict[str, object]:
-    """Return the single canonical runtime filter map consumed by all modes.
-
-    Keys intentionally match the legacy decision-engine names so existing
-    BACKTEST/PAPER call sites can opt in without maintaining mode-local copies.
-    """
-    cfg: dict[str, object] = {
-        "MODE": (mode or runtime.execution_mode).upper(),
+    cfg = decision_filter_config(mode or runtime.execution_mode)
+    cfg.update({
         "MIN_TRADE_SCORE": runtime.min_signal_score,
         "MIN_RR": runtime.min_rr,
         "MIN_EFFECTIVE_RR": runtime.min_effective_rr,
         "MAX_SPREAD_PCT": runtime.max_spread_pct,
         "MAX_EXPECTED_SLIPPAGE_PCT": runtime.max_expected_slippage_pct,
+        "MIN_SL_PCT": getattr(runtime, "min_sl_pct", 0.15),
+        "MAX_SL_PCT": getattr(runtime, "max_sl_pct", 1.5),
+        "MIN_ATR_PCT": getattr(runtime, "min_atr_pct", 0.25),
+        "MAX_ATR_PCT": getattr(runtime, "max_atr_pct", 3.0),
+        "BLOCK_UNKNOWN_EXPECTANCY": getattr(runtime, "block_unknown_expectancy", True),
+        "BLOCK_CHOP_MARKET": getattr(runtime, "block_chop_market", True),
+        "REQUIRE_REGIME_ALIGNMENT": getattr(runtime, "require_regime_alignment", True),
+        "STOP_TOO_WIDE_HARD_REJECT": getattr(runtime, "stop_too_wide_hard_reject", True),
+        "STOP_TOO_WIDE_SOFT_SCORE_MIN": getattr(runtime, "stop_too_wide_soft_score_min", 9.0),
+        "STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN": getattr(runtime, "stop_too_wide_soft_effective_rr_min", 1.75),
+        "STOP_TOO_WIDE_MAX_RISK_SCALE": getattr(runtime, "stop_too_wide_max_risk_scale", 0.50),
+        "STOP_TOO_WIDE_EXTREME_MULT": getattr(runtime, "stop_too_wide_extreme_mult", 1.50),
         "SYMBOL_COOLDOWN_MINUTES": runtime.symbol_cooldown_sec / 60.0,
+        "MAX_TRADES_PER_SYMBOL_PER_DAY": getattr(runtime, "max_trades_symbol_per_day", 2),
+        "MAX_TRADES_GLOBAL_PER_DAY": getattr(runtime, "max_trades_global_per_day", 10),
         "STALE_MARKET_DATA_SEC": runtime.stale_market_data_sec,
         "MAX_CONCURRENT_POSITIONS": runtime.max_concurrent_positions,
         "MAX_ABS_FUNDING_RATE_PCT": runtime.max_abs_funding_rate_pct,
@@ -195,31 +227,42 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         "min_volume_24h_usdt": runtime.min_liquidity_usd,
         "max_spread_pct": runtime.max_spread_pct,
         "max_abs_funding_rate_pct": runtime.max_abs_funding_rate_pct,
-    }
+    })
     return cfg
 
 def load_config_from_env() -> AlphaForgeConfig:
     env = os.environ
+    managed = effective_config_values(env=env)
+    val = lambda name: managed[name]["value"]
     runtime = RuntimeSettings(
-        execution_mode=(_alias(env, "ALPHAFORGE_EXECUTION_MODE", "EXECUTION_MODE") or "PAPER").upper(),
-        min_signal_score=float(_alias(env, "ALPHAFORGE_MIN_SIGNAL_SCORE", "ALPHAFORGE_MIN_ACCEPT_SCORE") or "0.62"),
+        execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
+        min_signal_score=val("ALPHAFORGE_MIN_SIGNAL_SCORE"),
         scan_interval_sec=_float_env(env, "ALPHAFORGE_SCAN_INTERVAL_SEC", 1.0),
         heartbeat_interval_sec=_float_env(env, "ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", 30.0),
         max_symbols_per_scan=_int_env(env, "ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", 5),
         max_reject_log_entries=_int_env(env, "ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", 1000),
         max_concurrent_positions=int(_alias(env, "ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "ALPHAFORGE_MAX_OPEN_POSITIONS") or "3"),
-        symbol_cooldown_sec=_float_env(env, "ALPHAFORGE_SYMBOL_COOLDOWN_SEC", 120.0),
+        symbol_cooldown_sec=val("ALPHAFORGE_SYMBOL_COOLDOWN_SEC"),
         max_notional_exposure=_float_env(env, "ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", 100_000.0),
         max_symbol_notional=_float_env(env, "ALPHAFORGE_MAX_SYMBOL_NOTIONAL", 50_000.0),
         stale_market_data_sec=_float_env(env, "ALPHAFORGE_STALE_MARKET_DATA_SEC", 15.0),
-        min_rr=_float_env(env, "ALPHAFORGE_MIN_RR", 1.20),
-        min_effective_rr=float(_alias(env, "MIN_EFFECTIVE_RR", "ALPHAFORGE_MIN_EFFECTIVE_RR") or "1.10"),
-        max_spread_pct=float(_alias(env, "ALPHAFORGE_MAX_SPREAD_PCT", "MAX_SPREAD_PCT") or (_float_env(env, "MAX_SPREAD_BPS", 25.0) / 10_000.0)),
-        max_expected_slippage_pct=float(_alias(env, "ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT", "MAX_EXPECTED_SLIPPAGE_PCT") or (_float_env(env, "MAX_SLIPPAGE_BPS", 20.0) / 10_000.0)),
-        max_abs_funding_rate_pct=_float_env(env, "ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT", 0.0010),
-        min_liquidity_usd=_float_env(env, "MIN_LIQUIDITY_USD", 5_000_000.0),
-        global_kill_switch=_bool_env(env, "ALPHAFORGE_GLOBAL_KILL_SWITCH", False),
-        require_live_qualification=_bool_env(env, "ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION", True),
+        min_rr=val("ALPHAFORGE_MIN_RR"),
+        min_effective_rr=val("MIN_EFFECTIVE_RR"),
+        max_spread_pct=val("ALPHAFORGE_MAX_SPREAD_PCT"),
+        max_expected_slippage_pct=val("ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT"),
+        max_abs_funding_rate_pct=val("ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT"),
+        min_liquidity_usd=val("MIN_LIQUIDITY_USD"),
+        max_trades_global_per_day=val("ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY"),
+        max_trades_symbol_per_day=val("ALPHAFORGE_MAX_TRADES_SYMBOL_PER_DAY"),
+        min_sl_pct=val("ALPHAFORGE_MIN_SL_PCT"), max_sl_pct=val("ALPHAFORGE_MAX_SL_PCT"),
+        min_atr_pct=val("ALPHAFORGE_MIN_ATR_PCT"), max_atr_pct=val("ALPHAFORGE_MAX_ATR_PCT"),
+        block_unknown_expectancy=val("ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY"), block_chop_market=val("ALPHAFORGE_BLOCK_CHOP_MARKET"),
+        require_regime_alignment=val("ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT"), stop_too_wide_hard_reject=val("ALPHAFORGE_STOP_TOO_WIDE_HARD_REJECT"),
+        stop_too_wide_soft_score_min=val("ALPHAFORGE_STOP_TOO_WIDE_SOFT_SCORE_MIN"), stop_too_wide_soft_effective_rr_min=val("ALPHAFORGE_STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN"),
+        stop_too_wide_max_risk_scale=val("ALPHAFORGE_STOP_TOO_WIDE_MAX_RISK_SCALE"), stop_too_wide_extreme_mult=val("ALPHAFORGE_STOP_TOO_WIDE_EXTREME_MULT"),
+        max_latency_ms=val("ALPHAFORGE_MAX_LATENCY_MS"),
+        global_kill_switch=val("ALPHAFORGE_GLOBAL_KILL_SWITCH"),
+        require_live_qualification=val("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION"),
         enable_shadow_mode=_bool_env(env, "ALPHAFORGE_ENABLE_SHADOW_MODE", False),
         enable_canary_mode=_bool_env(env, "ALPHAFORGE_ENABLE_CANARY_MODE", False),
         operator_live_acknowledged=_bool_env(env, "ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", False),
@@ -241,11 +284,17 @@ def load_config_from_env() -> AlphaForgeConfig:
         runtime=runtime,
         exchange=exchange,
         backtest=BacktestSettings(
-            top_n=_int_env(env, "ALPHAFORGE_BACKTEST_TOP_N", 100),
-            timeframe=_string_env(env, "ALPHAFORGE_BACKTEST_TIMEFRAME", "1m"),
+            top_n=val("ALPHAFORGE_BACKTEST_TOP_N"),
+            timeframe=val("ALPHAFORGE_BACKTEST_TIMEFRAME"),
             output_dir=_string_env(env, "ALPHAFORGE_BACKTEST_OUTPUT_DIR", "data/backtest"),
             initial_balance=_float_env(env, "ALPHAFORGE_BACKTEST_INITIAL_BALANCE", 1000.0),
             risk_pct=_float_env(env, "ALPHAFORGE_BACKTEST_RISK_PCT", 1.0),
+            max_trades=val("ALPHAFORGE_BACKTEST_MAX_TRADES"),
+            max_accepted_trades_per_day=val("ALPHAFORGE_BACKTEST_MAX_ACCEPTED_TRADES_PER_DAY"),
+            max_symbol_trades_per_day=val("ALPHAFORGE_BACKTEST_MAX_SYMBOL_TRADES_PER_DAY"),
+            use_execution_costs=val("ALPHAFORGE_BACKTEST_USE_EXECUTION_COSTS"),
+            export_config_snapshot=val("ALPHAFORGE_BACKTEST_EXPORT_CONFIG_SNAPSHOT"),
+            days=val("ALPHAFORGE_BACKTEST_LAST_N_DAYS"),
             filter_switches=BacktestFilterSwitches(
                 low_score_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED", True),
                 too_choppy_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED", True),

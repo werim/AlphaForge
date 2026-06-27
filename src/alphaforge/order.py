@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from alphaforge.ai_brain import AIBrain
 from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
 from alphaforge.effective_rr import calculate_effective_rr
+from alphaforge.config_registry import decision_filter_config
 from alphaforge.persistence import (
     fetch_expectancy_stat,
     save_ai_decision_features,
@@ -22,7 +23,7 @@ from alphaforge.persistence import (
 )
 
 logger = logging.getLogger(__name__)
-MIN_RR_THRESHOLD = 1.1  # compatibility default; canonical runtime config overrides via MIN_EFFECTIVE_RR.
+MIN_RR_THRESHOLD = float(decision_filter_config("PAPER")["MIN_EFFECTIVE_RR"])
 MIN_SCORE_BASE = 7.5
 MIN_RR_BASE = 1.3
 
@@ -174,18 +175,15 @@ def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Ma
 
 
 def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, Any], recent_stats: Mapping[str, Any], config: Mapping[str, Any]) -> TradeQualityDecision:
-    adaptive = compute_adaptive_thresholds(recent_stats)
-    cfg = {
-        "MIN_TRADE_SCORE": adaptive["min_score"], "MIN_RR": adaptive["min_rr"], "MIN_EFFECTIVE_RR": MIN_RR_THRESHOLD, "MIN_EXPECTANCY": 0.0, "SYMBOL_COOLDOWN_MINUTES": 60,
-        "MAX_TRADES_PER_SYMBOL_PER_DAY": 2, "MAX_TRADES_GLOBAL_PER_DAY": 10, "MIN_SL_PCT": 0.15, "MAX_SL_PCT": 1.5,
-        "MAX_SPREAD_PCT": 0.05, "MAX_EXPECTED_SLIPPAGE_PCT": 0.05, "MIN_ATR_PCT": 0.25, "MAX_ATR_PCT": 3.0,
-        "SYMBOL_LOSS_STREAK_LIMIT": 3, "SYMBOL_LOSS_STREAK_COOLDOWN_HOURS": 6, "GLOBAL_LOSS_STREAK_LIMIT": 5,
-        "GLOBAL_LOSS_STREAK_COOLDOWN_HOURS": 3, "BLOCK_UNKNOWN_EXPECTANCY": True, "BLOCK_CHOP_MARKET": True, "REQUIRE_REGIME_ALIGNMENT": True,
-        "STOP_TOO_WIDE_HARD_REJECT": True, "STOP_TOO_WIDE_SOFTEN_FOR_HIGH_SCORE": True,
-        "STOP_TOO_WIDE_SOFT_SCORE_MIN": 9.0, "STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN": 1.75,
-        "STOP_TOO_WIDE_MAX_RISK_SCALE": 0.50, "STOP_TOO_WIDE_EXTREME_MULT": 1.50,
-    }
-    cfg.update(dict(config or {}))
+    supplied_config = dict(config or {})
+    mode = str(supplied_config.get("MODE", supplied_config.get("mode", "PAPER"))).upper()
+    adaptive = compute_adaptive_thresholds(recent_stats, config=supplied_config)
+    cfg = decision_filter_config(mode)
+    cfg["MIN_TRADE_SCORE"] = adaptive["min_score"]
+    cfg["MIN_RR"] = adaptive["min_rr"]
+    cfg.update(supplied_config)
+    if mode == "BACKTEST" and "RUNTIME_LIMITS_ACTIVE" not in supplied_config:
+        cfg["RUNTIME_LIMITS_ACTIVE"] = False
     reject_reason = ""
     failed_filter = ""
     symbol = getattr(candidate, "symbol", "")
@@ -313,15 +311,15 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     else:
         now_ts = int(market_ctx.get("timestamp", 0) or 0)
         last_ts = int((recent_stats.get("last_trade_ts_by_symbol", {}) or {}).get(symbol, 0) or 0)
-        if last_ts and now_ts and (now_ts - last_ts) < int(cfg["SYMBOL_COOLDOWN_MINUTES"]) * 60_000:
+        if bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and last_ts and now_ts and (now_ts - last_ts) < int(cfg["SYMBOL_COOLDOWN_MINUTES"]) * 60_000:
             reject_reason, failed_filter = "SYMBOL_COOLDOWN_ACTIVE", "cooldown"
-        elif int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]) and not _bypass("DAILY_SYMBOL_TRADE_LIMIT"):
+        elif (bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) or mode == "BACKTEST") and int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]) and not _bypass("DAILY_SYMBOL_TRADE_LIMIT"):
             reject_reason, failed_filter = "DAILY_SYMBOL_TRADE_LIMIT", "daily_symbol"
-        elif int(recent_stats.get("global_trades_today", 0) or 0) >= int(cfg["MAX_TRADES_GLOBAL_PER_DAY"]):
+        elif bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and int(recent_stats.get("global_trades_today", 0) or 0) >= int(cfg["MAX_TRADES_GLOBAL_PER_DAY"]):
             reject_reason, failed_filter = "DAILY_GLOBAL_TRADE_LIMIT", "daily_global"
-        elif int((recent_stats.get("symbol_loss_block_until", {}) or {}).get(symbol, 0) or 0) > now_ts:
+        elif bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and int((recent_stats.get("symbol_loss_block_until", {}) or {}).get(symbol, 0) or 0) > now_ts:
             reject_reason, failed_filter = "SYMBOL_LOSS_STREAK_BLOCK", "symbol_block"
-        elif int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
+        elif bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
             reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
     if reject_reason == "":
         if spread_pct > float(cfg["MAX_SPREAD_PCT"]):
@@ -335,15 +333,15 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         else:
             now_ts = int(market_ctx.get("timestamp", 0) or 0)
             last_ts = int((recent_stats.get("last_trade_ts_by_symbol", {}) or {}).get(symbol, 0) or 0)
-            if last_ts and now_ts and (now_ts - last_ts) < int(cfg["SYMBOL_COOLDOWN_MINUTES"]) * 60_000:
+            if bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and last_ts and now_ts and (now_ts - last_ts) < int(cfg["SYMBOL_COOLDOWN_MINUTES"]) * 60_000:
                 reject_reason, failed_filter = "SYMBOL_COOLDOWN_ACTIVE", "cooldown"
-            elif int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]) and not _bypass("DAILY_SYMBOL_TRADE_LIMIT"):
+            elif (bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) or mode == "BACKTEST") and int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]) and not _bypass("DAILY_SYMBOL_TRADE_LIMIT"):
                 reject_reason, failed_filter = "DAILY_SYMBOL_TRADE_LIMIT", "daily_symbol"
-            elif int(recent_stats.get("global_trades_today", 0) or 0) >= int(cfg["MAX_TRADES_GLOBAL_PER_DAY"]):
+            elif bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and int(recent_stats.get("global_trades_today", 0) or 0) >= int(cfg["MAX_TRADES_GLOBAL_PER_DAY"]):
                 reject_reason, failed_filter = "DAILY_GLOBAL_TRADE_LIMIT", "daily_global"
-            elif int((recent_stats.get("symbol_loss_block_until", {}) or {}).get(symbol, 0) or 0) > now_ts:
+            elif bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and int((recent_stats.get("symbol_loss_block_until", {}) or {}).get(symbol, 0) or 0) > now_ts:
                 reject_reason, failed_filter = "SYMBOL_LOSS_STREAK_BLOCK", "symbol_block"
-            elif int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
+            elif bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
                 reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
 
     stop_too_wide_softened = sl_pct > float(cfg["MAX_SL_PCT"]) and reject_reason == ""
@@ -359,27 +357,33 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     return TradeQualityDecision(accepted=(reject_reason == ""), reject_reason=reject_reason, quality_score=quality_score, diagnostics=diagnostics)
 
 
-def compute_adaptive_thresholds(stats: Mapping[str, Any]) -> dict[str, float]:
-    min_score = MIN_SCORE_BASE
-    min_rr = MIN_RR_BASE
+def compute_adaptive_thresholds(stats: Mapping[str, Any], config: Mapping[str, Any] | None = None) -> dict[str, float]:
+    provided = dict(config or {})
+    cfg = decision_filter_config(str(provided.get("MODE", provided.get("mode", "PAPER"))).upper())
+    cfg.update(provided)
+    min_score = float(provided.get("MIN_TRADE_SCORE", MIN_SCORE_BASE))
+    min_rr = float(provided.get("MIN_RR", MIN_RR_BASE))
     consecutive_sl = int(stats.get("consecutive_sl_count", 0) or 0)
     consecutive_tp = int(stats.get("consecutive_tp_count", 0) or 0)
 
     if consecutive_sl >= 5:
-        min_score = MIN_SCORE_BASE + 1.5
-        min_rr = MIN_RR_BASE + 0.5
+        min_score = min_score + 1.5
+        min_rr = min_rr + 0.5
     elif consecutive_sl >= 3:
-        min_score = MIN_SCORE_BASE + 1.0
-        min_rr = MIN_RR_BASE + 0.3
+        min_score = min_score + 1.0
+        min_rr = min_rr + 0.3
 
     if consecutive_tp >= 5:
-        min_score = MIN_SCORE_BASE - 1.0
-        min_rr = MIN_RR_BASE - 0.3
+        min_score = min_score - 1.0
+        min_rr = min_rr - 0.3
     elif consecutive_tp >= 3:
-        min_score = MIN_SCORE_BASE - 0.5
-        min_rr = MIN_RR_BASE - 0.2
+        min_score = min_score - 0.5
+        min_rr = min_rr - 0.2
 
-    min_score = max(6.0, min(9.5, min_score))
+    if min_score <= 1.0:
+        min_score = max(0.0, min(1.0, min_score))
+    else:
+        min_score = max(6.0, min(9.5, min_score))
     min_rr = max(1.2, min(3.0, min_rr))
     return {"min_score": min_score, "min_rr": min_rr}
 

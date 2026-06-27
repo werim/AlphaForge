@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import create_engine
@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 
 from alphaforge.config import load_config_from_env
+from alphaforge.config_registry import config_snapshot, write_dashboard_overrides, reset_dashboard_override
 from alphaforge.contracts import canonical_utc_timestamp
 from alphaforge.runtime import _build_runtime_from_env
 from alphaforge.runtime_control import RuntimeControlStore, RuntimeSupervisor
@@ -218,6 +219,43 @@ def create_app(database_url: str | None = None) -> FastAPI:
             name="lifecycle.html",
             context={"events": events, "timeline": timeline, "signal_id": signal_id or "", "symbol": symbol or "", "page": "lifecycle"},
         )
+
+
+    def _settings_context(message: str = "", error: str = "") -> dict[str, Any]:
+        rows = config_snapshot(mode=load_config_from_env().runtime.execution_mode)
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(row["category"], []).append(row)
+        return {"grouped": grouped, "page": "settings", "message": message, "error": error}
+
+    @app.get("/settings", response_class=HTMLResponse)
+    async def settings(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(request=request, name="settings.html", context=_settings_context())
+
+    @app.post("/settings/save", response_class=HTMLResponse)
+    async def settings_save(request: Request) -> HTMLResponse:
+        form = await _form_dict(request)
+        try:
+            updates = {k: v for k, v in form.items() if k.startswith("ALPHAFORGE_") or k in {"MIN_EFFECTIVE_RR", "MIN_LIQUIDITY_USD"}}
+            write_dashboard_overrides(updates)
+            ctx = _settings_context(message="Settings saved to config/runtime_overrides.json. Restart may be required for active runtimes.")
+        except Exception as exc:
+            ctx = _settings_context(error=str(exc))
+        return TEMPLATES.TemplateResponse(request=request, name="settings.html", context=ctx)
+
+    @app.post("/settings/reset", response_class=HTMLResponse)
+    async def settings_reset(request: Request) -> HTMLResponse:
+        form = await _form_dict(request)
+        try:
+            reset_dashboard_override(str(form.get("reset", "")))
+            ctx = _settings_context(message="Setting reset to typed/default lower-precedence source.")
+        except Exception as exc:
+            ctx = _settings_context(error=str(exc))
+        return TEMPLATES.TemplateResponse(request=request, name="settings.html", context=ctx)
+
+    @app.get("/settings/export")
+    async def settings_export() -> JSONResponse:
+        return JSONResponse({"config_snapshot": config_snapshot(mode=load_config_from_env().runtime.execution_mode)})
 
     @app.get("/readiness", response_class=HTMLResponse)
     async def readiness(request: Request) -> HTMLResponse:
