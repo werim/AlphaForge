@@ -416,42 +416,55 @@ def _passes_score_rr_expectancy(row: Mapping[str, Any]) -> bool:
     return score is not None and score >= min_score and rr is not None and rr >= 1.3 and effective_rr is not None and effective_rr >= min_effective_rr and expectancy_ok
 
 
+def _passes_aggregate_shadow_later_gate(row: Mapping[str, Any]) -> bool:
+    score = _safe_float_or_none(row.get("score"))
+    rr = _safe_float_or_none(row.get("raw_rr") if row.get("raw_rr") not in (None, "") else row.get("rr"))
+    effective_rr = _safe_float_or_none(row.get("effective_rr"))
+    min_score = _safe_float_or_none(row.get("min_required_score")) or 7.5
+    min_effective_rr = _safe_float_or_none(row.get("min_effective_rr")) or 1.1
+    return score is not None and score >= min_score and rr is not None and rr >= 1.3 and effective_rr is not None and effective_rr >= min_effective_rr
+
+
 def _identity_values(row: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(str(row.get(field) or "").strip() for field in ("symbol", "timestamp", "event_ts", "side"))
 
 
-def _shadow_lookup_key(row: Mapping[str, Any]) -> tuple[str, ...] | None:
+def _strict_shadow_lookup_key(row: Mapping[str, Any]) -> tuple[str, ...] | None:
     signal_id = str(row.get("signal_id") or "").strip()
     if signal_id:
         return ("signal_id", signal_id)
-    values = _identity_values(row)
-    if any(values):
-        return ("composite", *values)
+    symbol = str(row.get("symbol") or "").strip()
+    timestamp = str(row.get("timestamp") or row.get("event_ts") or "").strip()
+    side = str(row.get("side") or "").strip().upper()
+    if symbol and timestamp and side:
+        return ("symbol_ts_side", symbol, timestamp, side)
     return None
 
 
-def _build_shadow_lookup(shadow_rows: list[dict[str, str]]) -> dict[tuple[str, ...], dict[str, str]]:
-    lookup: dict[tuple[str, ...], dict[str, str]] = _lookup_by_signal_or_composite(shadow_rows)
+def _build_strict_shadow_lookup(shadow_rows: list[dict[str, str]]) -> dict[tuple[str, ...], dict[str, str]]:
+    """Build the per-row enrichment lookup for rejected shadow outcomes.
+
+    This lookup is intentionally strict because it attaches counterfactual
+    shadow fields to a specific rejected row. Aggregate diagnostics must use
+    the raw shadow rows instead so shadow-only rows are not filtered out.
+    """
+    lookup: dict[tuple[str, ...], dict[str, str]] = {}
     for row in shadow_rows:
-        key = _shadow_lookup_key(row)
+        key = _strict_shadow_lookup_key(row)
         if key is not None:
-            lookup[key] = row
-        signal_id = str(row.get("signal_id") or "").strip()
-        if signal_id:
-            lookup[("signal_id", signal_id)] = row
-        composite = _identity_values(row)
-        if any(composite):
-            lookup[("composite", *composite)] = row
+            lookup.setdefault(key, row)
     return lookup
 
 
-def _matching_shadow(row: Mapping[str, Any], lookup: Mapping[tuple[str, ...], dict[str, str]]) -> dict[str, str] | None:
-    if match := _match_by_signal_or_composite(row, lookup):
-        return match
+def _strict_matching_shadow(row: Mapping[str, Any], lookup: Mapping[tuple[str, ...], dict[str, str]]) -> dict[str, str] | None:
     signal_id = str(row.get("signal_id") or "").strip()
-    composite = _identity_values(row)
-    if any(composite):
-        return lookup.get(("composite", *composite))
+    if signal_id and (match := lookup.get(("signal_id", signal_id))):
+        return match
+    symbol = str(row.get("symbol") or "").strip()
+    timestamp = str(row.get("timestamp") or row.get("event_ts") or "").strip()
+    side = str(row.get("side") or "").strip().upper()
+    if symbol and timestamp and side:
+        return lookup.get(("symbol_ts_side", symbol, timestamp, side))
     return None
 
 
@@ -468,10 +481,10 @@ def _merge_shadow(row: dict[str, str], shadow: Mapping[str, str] | None) -> dict
 
 def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_rows: list[dict[str, str]], summary: Mapping[str, Any], shadow_rows: list[dict[str, str]] | None = None, backtest_order_rows: list[dict[str, str]] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     shadow_source = list(shadow_rows or [])
-    shadow_lookup = _build_shadow_lookup(shadow_source)
-    enriched_rejected = [_merge_shadow(r, _matching_shadow(r, shadow_lookup)) for r in rejected_rows]
-    shadow_signal_rows = [r for r in shadow_source if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("reject_reason") or "").strip()]
-    shadow_diagnostic_rows = shadow_signal_rows or [r for r in enriched_rejected if _source_stage(r) == "SIGNAL_ENGINE"]
+    strict_shadow_lookup = _build_strict_shadow_lookup(shadow_source)
+    enriched_rejected = [_merge_shadow(r, _strict_matching_shadow(r, strict_shadow_lookup)) for r in rejected_rows]
+    aggregate_shadow_rows = [r for r in shadow_source if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("reject_reason") or "").strip()]
+    shadow_diagnostic_rows = aggregate_shadow_rows or [r for r in enriched_rejected if _source_stage(r) == "SIGNAL_ENGINE"]
     combined = list(lifecycle_rows) + [r for r in enriched_rejected if r not in lifecycle_rows]
     groups: dict[tuple[str, str, str, str, str, str], list[dict[str, str]]] = {}
     for row in combined:
@@ -508,11 +521,7 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
     raw_signal_rejected = [r for r in rejected_rows if _source_stage(r) == "SIGNAL_ENGINE" and str(r.get("lifecycle_state", "")).upper() == "SIGNAL_REJECTED"]
     passed_later = [r for r in signal_rejected if _passes_score_rr_expectancy(r)]
     later_gate_reasons = {"DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "RR_TOO_LOW", "STOP_TOO_WIDE"}
-    passed_keys = {(str(r.get("signal_id") or f"{r.get('symbol','')}:{r.get('timestamp') or r.get('event_ts','')}").strip(), str(r.get("symbol") or "").strip(), str(r.get("timestamp") or r.get("event_ts") or "").strip(), str(r.get("side") or "").strip().upper()) for r in passed_later}
-    def _matches_passed(row: Mapping[str, Any]) -> bool:
-        key = (str(row.get("signal_id") or f"{row.get('symbol','')}:{row.get('timestamp') or row.get('event_ts','')}").strip(), str(row.get("symbol") or "").strip(), str(row.get("timestamp") or row.get("event_ts") or "").strip(), str(row.get("side") or "").strip().upper())
-        return key in passed_keys
-    later_gate_source = [r for r in shadow_diagnostic_rows if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons and _matches_passed(r)]
+    later_gate_source = [r for r in shadow_diagnostic_rows if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons and _passes_aggregate_shadow_later_gate(r)]
     if not later_gate_source:
         later_gate_source = [r for r in passed_later if str(r.get("reject_reason") or "").strip().upper() in later_gate_reasons]
     later_gate_groups: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
