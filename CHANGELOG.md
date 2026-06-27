@@ -1,3 +1,30 @@
+
+## 2026-06-27 - Dashboard Settings hardening
+
+### Added
+- Added canonical `ALPHAFORGE_MIN_EFFECTIVE_RR` and `ALPHAFORGE_MIN_LIQUIDITY_USD` dashboard/env names with deprecated alias compatibility.
+- Added explicit current-mode active state plus BACKTEST/PAPER/LIVE applicability evidence for Settings rows.
+- Added BACKTEST config snapshot evidence for active/disabled filters, BACKTEST caps, sources, and runtime-limit isolation notes.
+
+### Changed
+- Raised survival defaults to `ALPHAFORGE_MIN_EFFECTIVE_RR=1.60` and `ALPHAFORGE_MIN_RR=1.70`; these prioritize capital preservation over trade count.
+- Clarified `*_PCT` settings use percent units (`0.05` means `0.05%`).
+- Boolean Settings inputs now render as true/false selects and invalid bool strings are rejected server-side.
+
+### Fixed
+- Environment-sourced Settings are dashboard read-only and cannot be overwritten by dashboard saves.
+- LIVE enable remains locked in Settings unless persisted readiness evidence is PASS.
+- Dashboard backtest form defaults now consume BACKTEST-specific horizon, timeframe, and top-N settings even when runtime mode is PAPER.
+
+### Removed
+- Removed non-canonical Settings display for legacy `MIN_EFFECTIVE_RR` and `MIN_LIQUIDITY_USD` names.
+
+### Breaking Changes
+- None; deprecated aliases still parse, with canonical names taking precedence on conflict.
+
+### Known Issues
+- LIVE is still not recommended without complete readiness, persistence, and execution evidence.
+
 # Changelog
 
 ## Unreleased

@@ -30,7 +30,8 @@ def test_registry_fields_complete_for_managed_env_example():
 
 def test_dashboard_managed_settings_are_registry_backed_and_secrets_not_editable():
     rows = config_snapshot(mode='PAPER')
-    assert any(r['env_name'] == 'MIN_EFFECTIVE_RR' and r['dashboard_editable'] for r in rows)
+    assert any(r['env_name'] == 'ALPHAFORGE_MIN_EFFECTIVE_RR' and r['dashboard_editable'] for r in rows)
+    assert not any(r['env_name'] == 'MIN_EFFECTIVE_RR' for r in rows)
     for row in rows:
         assert row['env_name'] in REGISTRY_BY_ENV
         if row['secret']:
@@ -38,14 +39,25 @@ def test_dashboard_managed_settings_are_registry_backed_and_secrets_not_editable
 
 
 def test_deprecated_alias_parses(monkeypatch):
-    monkeypatch.setenv('ALPHAFORGE_MIN_EFFECTIVE_RR', '1.9')
+    monkeypatch.setenv('MIN_EFFECTIVE_RR', '1.9')
     assert decision_filter_config('PAPER')['MIN_EFFECTIVE_RR'] == pytest.approx(1.9)
 
 
 def test_dashboard_override_validation(tmp_path):
-    write_dashboard_overrides({'MIN_EFFECTIVE_RR': '1.4'}, root=tmp_path)
+    write_dashboard_overrides({'ALPHAFORGE_MIN_EFFECTIVE_RR': '1.7'}, root=tmp_path)
     assert (tmp_path / 'config/runtime_overrides.json').exists()
     with pytest.raises(ValueError):
         write_dashboard_overrides({'UNKNOWN_SETTING': '1'}, root=tmp_path)
     with pytest.raises(ValueError):
         write_dashboard_overrides({'ALPHAFORGE_ENABLE_LIVE_TRADING': 'true'}, root=tmp_path)
+
+
+def test_canonical_wins_over_deprecated_alias(monkeypatch):
+    monkeypatch.setenv('MIN_EFFECTIVE_RR', '1.2')
+    monkeypatch.setenv('ALPHAFORGE_MIN_EFFECTIVE_RR', '1.9')
+    assert decision_filter_config('PAPER')['MIN_EFFECTIVE_RR'] == pytest.approx(1.9)
+
+
+def test_invalid_bool_rejected():
+    with pytest.raises(ValueError):
+        REGISTRY_BY_ENV['ALPHAFORGE_BLOCK_CHOP_MARKET'].parse('maybe')

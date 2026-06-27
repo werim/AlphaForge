@@ -35,7 +35,13 @@ class ConfigSetting:
             if isinstance(raw, bool):
                 value = raw
             else:
-                value = str(raw).lower() in {"1", "true", "yes", "on"}
+                lowered = str(raw).lower()
+                if lowered in {"1", "true", "yes", "on"}:
+                    value = True
+                elif lowered in {"0", "false", "no", "off"}:
+                    value = False
+                else:
+                    raise ValueError(f"{self.env_name} invalid bool: {raw}")
         elif self.value_type == "int":
             value = int(raw)
         elif self.value_type == "float":
@@ -61,8 +67,8 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_GLOBAL_KILL_SWITCH", "global_kill_switch", "bool", False, "Runtime Risk Limits", ("PAPER", "LIVE"), "Emergency stop for runtime order flow."),
     _s("ALPHAFORGE_DATABASE_URL", "database_url", "str", "sqlite:///./alphaforge.db", "Mode / Safety", MODES, "Runtime persistence database URL.", dashboard_editable=False, deprecated_aliases=("ALPHAFORGE_DB_URL", "DATABASE_URL")),
     _s("ALPHAFORGE_MIN_SIGNAL_SCORE", "min_signal_score", "float", 0.62, "Trade Quality Filters", MODES, "Minimum normalized signal score.", 0.0, 10.0, deprecated_aliases=("ALPHAFORGE_MIN_ACCEPT_SCORE",)),
-    _s("ALPHAFORGE_MIN_RR", "min_rr", "float", 1.20, "Trade Quality Filters", MODES, "Minimum raw risk/reward.", 0.0, 10.0),
-    _s("MIN_EFFECTIVE_RR", "min_effective_rr", "float", 1.10, "Trade Quality Filters", MODES, "Minimum execution-adjusted RR.", 0.0, 10.0, deprecated_aliases=("ALPHAFORGE_MIN_EFFECTIVE_RR",)),
+    _s("ALPHAFORGE_MIN_RR", "min_rr", "float", 1.70, "Trade Quality Filters", MODES, "Minimum raw risk/reward.", 0.0, 10.0),
+    _s("ALPHAFORGE_MIN_EFFECTIVE_RR", "min_effective_rr", "float", 1.60, "Trade Quality Filters", MODES, "Minimum execution-adjusted RR survival default; deprecated alias MIN_EFFECTIVE_RR remains supported.", 0.0, 10.0, deprecated_aliases=("MIN_EFFECTIVE_RR",)),
     _s("ALPHAFORGE_MIN_SL_PCT", "min_sl_pct", "float", 0.15, "Trade Quality Filters", MODES, "Minimum stop distance percent.", 0.0, 100.0),
     _s("ALPHAFORGE_MAX_SL_PCT", "max_sl_pct", "float", 1.5, "Trade Quality Filters", MODES, "Maximum stop distance percent.", 0.0, 100.0),
     _s("ALPHAFORGE_MIN_ATR_PCT", "min_atr_pct", "float", 0.25, "Trade Quality Filters", MODES, "Minimum ATR percent when ATR exists.", 0.0, 100.0),
@@ -75,11 +81,11 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN", "stop_too_wide_soft_effective_rr_min", "float", 1.75, "Trade Quality Filters", MODES, "Minimum effective RR for wide-stop softening.", 0.0, 10.0),
     _s("ALPHAFORGE_STOP_TOO_WIDE_MAX_RISK_SCALE", "stop_too_wide_max_risk_scale", "float", 0.50, "Trade Quality Filters", MODES, "Maximum risk scale for softened wide stops.", 0.0, 1.0),
     _s("ALPHAFORGE_STOP_TOO_WIDE_EXTREME_MULT", "stop_too_wide_extreme_mult", "float", 1.50, "Trade Quality Filters", MODES, "Extreme wide-stop multiple.", 1.0, 10.0),
-    _s("ALPHAFORGE_MAX_SPREAD_PCT", "max_spread_pct", "float", 0.05, "Execution Cost Filters", MODES, "Maximum spread percent.", 0.0, 1.0, deprecated_aliases=("MAX_SPREAD_PCT",)),
-    _s("ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT", "max_expected_slippage_pct", "float", 0.05, "Execution Cost Filters", MODES, "Maximum expected slippage percent.", 0.0, 1.0, deprecated_aliases=("MAX_EXPECTED_SLIPPAGE_PCT",)),
+    _s("ALPHAFORGE_MAX_SPREAD_PCT", "max_spread_pct", "float", 0.05, "Execution Cost Filters", MODES, "Maximum spread in percent units; 0.05 means 0.05% and 0.0025 means 0.0025%.", 0.0, 1.0, deprecated_aliases=("MAX_SPREAD_PCT",)),
+    _s("ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT", "max_expected_slippage_pct", "float", 0.05, "Execution Cost Filters", MODES, "Maximum expected slippage in percent units; 0.05 means 0.05% and 0.0020 means 0.0020%.", 0.0, 1.0, deprecated_aliases=("MAX_EXPECTED_SLIPPAGE_PCT",)),
     _s("ALPHAFORGE_MAX_LATENCY_MS", "max_latency_ms", "int", 2500, "Execution Cost Filters", ("PAPER", "LIVE"), "Maximum market-data/execution latency when available.", 0),
     _s("ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT", "max_abs_funding_rate_pct", "float", 0.0010, "Execution Cost Filters", MODES, "Maximum absolute funding-rate percent.", 0.0, 1.0),
-    _s("MIN_LIQUIDITY_USD", "min_liquidity_usd", "float", 5_000_000.0, "Execution Cost Filters", MODES, "Minimum 24h liquidity.", 0.0),
+    _s("ALPHAFORGE_MIN_LIQUIDITY_USD", "min_liquidity_usd", "float", 5_000_000.0, "Execution Cost Filters", MODES, "Minimum 24h liquidity; deprecated alias MIN_LIQUIDITY_USD remains supported.", 0.0, deprecated_aliases=("MIN_LIQUIDITY_USD",)),
     _s("ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY", "max_trades_global_per_day", "int", 10, "Runtime Risk Limits", ("PAPER", "LIVE"), "Runtime global daily trade cap; ignored by BACKTEST by default.", 0),
     _s("ALPHAFORGE_MAX_TRADES_SYMBOL_PER_DAY", "max_trades_symbol_per_day", "int", 2, "Runtime Risk Limits", ("PAPER", "LIVE"), "Runtime per-symbol daily trade cap; ignored by BACKTEST by default.", 0),
     _s("ALPHAFORGE_SYMBOL_COOLDOWN_SEC", "symbol_cooldown_sec", "float", 120.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Runtime symbol cooldown seconds.", 0.0),
@@ -146,7 +152,7 @@ def decision_filter_config(mode: str, *, env: Mapping[str, str] | None = None, r
         "MODE": mode_u,
         "MIN_TRADE_SCORE": val("ALPHAFORGE_MIN_SIGNAL_SCORE"),
         "MIN_RR": val("ALPHAFORGE_MIN_RR"),
-        "MIN_EFFECTIVE_RR": val("MIN_EFFECTIVE_RR"),
+        "MIN_EFFECTIVE_RR": val("ALPHAFORGE_MIN_EFFECTIVE_RR"),
         "MIN_EXPECTANCY": 0.0,
         "MIN_SL_PCT": val("ALPHAFORGE_MIN_SL_PCT"),
         "MAX_SL_PCT": val("ALPHAFORGE_MAX_SL_PCT"),
@@ -179,11 +185,12 @@ def config_snapshot(mode: str | None = None, *, env: Mapping[str, str] | None = 
     for name, item in snap.items():
         s: ConfigSetting = item["setting"]
         value = "********" if s.secret else item["value"]
-        rows.append({"env_name": name, "field_name": s.field_name, "current_value": value, "default": s.default, "type": s.value_type, "applies_to": list(s.applies_to), "category": s.category, "description": s.description, "source": item["source"], "restart_required": s.restart_required, "dashboard_editable": s.dashboard_editable and not s.secret, "secret": s.secret, "active": mode_u in s.applies_to})
+        rows.append({"env_name": name, "field_name": s.field_name, "current_value": value, "default": s.default, "type": s.value_type, "applies_to": list(s.applies_to), "category": s.category, "description": s.description, "source": item["source"], "restart_required": s.restart_required, "dashboard_editable": s.dashboard_editable and not s.secret and not str(item["source"]).startswith("environment"), "env_locked": str(item["source"]).startswith("environment"), "secret": s.secret, "active_in_current_mode": mode_u in s.applies_to, "active": mode_u in s.applies_to})
     return rows
 
-def write_dashboard_overrides(updates: Mapping[str, Any], *, root: Path | None = None) -> None:
+def write_dashboard_overrides(updates: Mapping[str, Any], *, root: Path | None = None, env: Mapping[str, str] | None = None, live_readiness_pass: bool = False) -> None:
     root = root or Path.cwd()
+    env = env or os.environ
     path = root / "config" / "runtime_overrides.json"
     current = {}
     if path.exists():
@@ -194,8 +201,10 @@ def write_dashboard_overrides(updates: Mapping[str, Any], *, root: Path | None =
         setting = REGISTRY_BY_ENV[name]
         if setting.secret or not setting.dashboard_editable:
             raise ValueError(f"Setting is not dashboard editable: {name}")
-        if name == "ALPHAFORGE_ENABLE_LIVE_TRADING" and setting.parse(raw) is True:
-            raise ValueError("Dashboard Settings cannot enable LIVE; use readiness-gated runtime controls")
+        if any(env_name in env for env_name in (setting.env_name, *setting.deprecated_aliases)):
+            raise ValueError(f"Setting is environment-locked and cannot be overridden from dashboard: {name}")
+        if name == "ALPHAFORGE_ENABLE_LIVE_TRADING" and setting.parse(raw) is True and not live_readiness_pass:
+            raise ValueError("Dashboard Settings cannot enable LIVE unless readiness evidence is PASS")
         current[name] = setting.parse(raw)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")

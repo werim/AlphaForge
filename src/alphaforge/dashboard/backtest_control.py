@@ -93,7 +93,7 @@ def default_form_values() -> dict[str, Any]:
     cfg = load_config_from_env()
     default_timeframe = cfg.backtest.timeframe if cfg.backtest.timeframe in SUPPORTED_TIMEFRAMES else "15m"
     return {
-        "last_days": 30,
+        "last_days": int(cfg.backtest.days),
         "symbols": "BTCUSDT,ETHUSDT",
         "timeframe": default_timeframe,
         "initial_balance": 10000,
@@ -129,7 +129,7 @@ def parse_backtest_form(form: Mapping[str, Any]) -> tuple[DashboardBacktestReque
             errors[name] = f"{name} must be between {min_value:g} and {max_value:g}."
         return value
 
-    last_days = parse_int("last_days", 30, 1, 730)
+    last_days = parse_int("last_days", default_form_values()["last_days"], 1, 730)
     initial_balance = parse_float("initial_balance", 10000.0, 100.0, 10_000_000.0)
     max_symbols = parse_int("max_symbols", default_form_values()["max_symbols"], 1, 200)
     symbols = [item.strip().upper() for item in str(form.get("symbols", "")).split(",") if item.strip()]
@@ -745,7 +745,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     output_dir = Path(cfg.backtest.output_dir) / "dashboard" / timestamp
     if getattr(cfg.backtest, "export_config_snapshot", True):
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "config_snapshot.json").write_text(json.dumps({"mode": "BACKTEST", "config_snapshot": config_snapshot(mode="BACKTEST")}, indent=2, sort_keys=True))
+        (output_dir / "config_snapshot.json").write_text(json.dumps({"mode": "BACKTEST", "active_filters": [reason for reason, enabled in request.filter_switches.items() if enabled], "disabled_filters": [reason for reason, enabled in request.filter_switches.items() if not enabled], "runtime_limit_note": "PAPER/LIVE runtime limits such as ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY are ignored by BACKTEST by default; BACKTEST_* caps are used.", "backtest_caps": {"ALPHAFORGE_BACKTEST_MAX_TRADES": cfg.backtest.max_trades, "ALPHAFORGE_BACKTEST_MAX_ACCEPTED_TRADES_PER_DAY": cfg.backtest.max_accepted_trades_per_day, "ALPHAFORGE_BACKTEST_MAX_SYMBOL_TRADES_PER_DAY": cfg.backtest.max_symbol_trades_per_day}, "config_snapshot": config_snapshot(mode="BACKTEST")}, indent=2, sort_keys=True))
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "backtest_order.py"
     symbols = request.symbols[: request.max_symbols]

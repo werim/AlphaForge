@@ -14,7 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 
 from alphaforge.config import load_config_from_env
-from alphaforge.config_registry import config_snapshot, write_dashboard_overrides, reset_dashboard_override
+from alphaforge.config_registry import REGISTRY_BY_ENV, config_snapshot, write_dashboard_overrides, reset_dashboard_override
 from alphaforge.contracts import canonical_utc_timestamp
 from alphaforge.runtime import _build_runtime_from_env
 from alphaforge.runtime_control import RuntimeControlStore, RuntimeSupervisor
@@ -222,11 +222,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
 
     def _settings_context(message: str = "", error: str = "") -> dict[str, Any]:
+        readiness = fetch_latest_readiness(app.state.engine)
         rows = config_snapshot(mode=load_config_from_env().runtime.execution_mode)
+        live_ready = readiness.get("status") == "PASS"
+        for row in rows:
+            if row["env_name"] == "ALPHAFORGE_ENABLE_LIVE_TRADING" and not live_ready:
+                row["dashboard_editable"] = False
+                row["live_locked"] = True
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             grouped.setdefault(row["category"], []).append(row)
-        return {"grouped": grouped, "page": "settings", "message": message, "error": error}
+        return {"grouped": grouped, "page": "settings", "message": message, "error": error, "live_readiness": readiness}
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings(request: Request) -> HTMLResponse:
@@ -236,8 +242,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
     async def settings_save(request: Request) -> HTMLResponse:
         form = await _form_dict(request)
         try:
-            updates = {k: v for k, v in form.items() if k.startswith("ALPHAFORGE_") or k in {"MIN_EFFECTIVE_RR", "MIN_LIQUIDITY_USD"}}
-            write_dashboard_overrides(updates)
+            allowed = set(REGISTRY_BY_ENV)
+            unknown = [k for k in form if k not in allowed]
+            if unknown:
+                raise ValueError(f"Unknown managed setting: {unknown[0]}")
+            updates = {k: v for k, v in form.items() if k in allowed}
+            live_ready = fetch_latest_readiness(app.state.engine).get("status") == "PASS"
+            write_dashboard_overrides(updates, live_readiness_pass=live_ready)
             ctx = _settings_context(message="Settings saved to config/runtime_overrides.json. Restart may be required for active runtimes.")
         except Exception as exc:
             ctx = _settings_context(error=str(exc))

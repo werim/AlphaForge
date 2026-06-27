@@ -30,3 +30,27 @@ def test_min_effective_rr_and_slippage_filters_change_decision():
     strict = evaluate_trade_quality(candidate(), market(), {}, {'MODE': 'BACKTEST', 'MAX_EXPECTED_SLIPPAGE_PCT': 0.0001})
     assert loose.accepted
     assert strict.reject_reason == 'SLIPPAGE_TOO_HIGH'
+
+
+def test_dashboard_backtest_defaults_consume_backtest_settings(monkeypatch):
+    import pytest
+    pytest.importorskip('fastapi')
+    from alphaforge.dashboard.backtest_control import default_form_values, parse_backtest_form
+    monkeypatch.setenv('ALPHAFORGE_BACKTEST_LAST_N_DAYS', '12')
+    monkeypatch.setenv('ALPHAFORGE_BACKTEST_TIMEFRAME', '15m')
+    monkeypatch.setenv('ALPHAFORGE_BACKTEST_TOP_N', '7')
+    defaults = default_form_values()
+    assert defaults['last_days'] == 12
+    assert defaults['timeframe'] == '15m'
+    assert defaults['max_symbols'] == 7
+    req, errors = parse_backtest_form({'symbols': 'BTCUSDT', 'timeframe': defaults['timeframe']})
+    assert not errors
+    assert req.last_days == 12
+    assert req.max_symbols == 7
+
+
+def test_low_effective_rr_threshold_is_conservative_by_default():
+    from alphaforge.config_registry import decision_filter_config
+    cfg = decision_filter_config('BACKTEST')
+    assert cfg['MIN_EFFECTIVE_RR'] >= 1.6
+    assert cfg['MIN_RR'] >= 1.7
