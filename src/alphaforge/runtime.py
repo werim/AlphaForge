@@ -26,7 +26,7 @@ from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconcilia
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
-from alphaforge.config import load_config_from_env
+from alphaforge.config import load_config_from_env, runtime_filter_config
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
@@ -64,6 +64,7 @@ class LiveReconciliationProvider(ExchangeSnapshotProvider, Protocol):
 @dataclass(slots=True)
 class RuntimeConfig:
     execution_mode: ExecutionMode = ExecutionMode.PAPER
+    min_signal_score: float = 0.62
     scan_interval_sec: float = 1.0
     heartbeat_interval_sec: float = 30.0
     max_symbols_per_scan: int = 5
@@ -73,8 +74,12 @@ class RuntimeConfig:
     max_notional_exposure: float = 100_000.0
     max_symbol_notional: float = 50_000.0
     stale_market_data_sec: float = 15.0
+    min_rr: float = 1.20
+    min_effective_rr: float = 1.10
     max_spread_pct: float = 0.0025
+    max_expected_slippage_pct: float = 0.0020
     max_abs_funding_rate_pct: float = 0.0010
+    min_liquidity_usd: float = 5_000_000.0
     global_kill_switch: bool = False
     require_live_qualification: bool = True
     enable_shadow_mode: bool = False
@@ -459,6 +464,9 @@ class RuntimeOrchestrator:
             logger.exception("market_scan_loop_failed")
             self.shutdown()
 
+    def _canonical_filter_config(self) -> dict[str, Any]:
+        return runtime_filter_config(self.config, mode=self.config.execution_mode.value)
+
     async def _scan_once(self) -> None:
         if self._kill_switch_active():
             self._last_scan_gate_blockers = ["KILL_SWITCH_ACTIVE"]
@@ -466,7 +474,7 @@ class RuntimeOrchestrator:
         self.metrics.scans += 1
         candidates = await self.market_scanner()
         self.metrics.last_scan_ts = canonical_utc_timestamp()
-        pre_selection = select_symbols(candidates, {"include_rejected": True})
+        pre_selection = select_symbols(candidates, {**self._canonical_filter_config(), "include_rejected": True})
         selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
         reject_reasons: dict[str, int] = {}
         for row in pre_selection:
@@ -558,6 +566,13 @@ class RuntimeOrchestrator:
                 "effective_rr": effective_rr,
                 "execution_ctx": execution_ctx,
             })
+            return
+
+        if effective_rr < self.config.min_effective_rr:
+            reject_reason = "LOW_EFFECTIVE_RR"
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            await self._persist_reject(reject_payload)
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
             return
 
         if self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
@@ -745,15 +760,22 @@ class RuntimeOrchestrator:
             return "MAX_CONCURRENT_POSITIONS"
         if now < self._symbol_cooldown_until.get(symbol, 0.0):
             return "SYMBOL_COOLDOWN"
-        market_ts = float(market_ctx.get("market_ts", now) or now)
+        market_ts_raw = market_ctx.get("market_ts", now)
+        market_ts = float(now if market_ts_raw in (None, "") else market_ts_raw)
         if (now - market_ts) > self.config.stale_market_data_sec:
             return "STALE_MARKET_DATA"
         spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
         if spread_pct > self.config.max_spread_pct:
-            return "HIGH_SPREAD"
+            return "SPREAD_TOO_HIGH"
+        slippage = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
+        if slippage > self.config.max_expected_slippage_pct:
+            return "SLIPPAGE_TOO_HIGH"
         funding = abs(float(market_ctx.get("funding_rate_pct", 0.0) or 0.0))
         if funding > self.config.max_abs_funding_rate_pct:
-            return "FUNDING_SANITY_REJECT"
+            return "FUNDING_TOO_HIGH"
+        liquidity = float(market_ctx.get("volume_24h_usdt", self.config.min_liquidity_usd) or 0.0)
+        if liquidity < self.config.min_liquidity_usd:
+            return "THIN_LIQUIDITY"
         if symbol in self._active_positions:
             return "DUPLICATE_POSITION"
         return None
@@ -894,7 +916,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd)
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         now_ts = time.time()

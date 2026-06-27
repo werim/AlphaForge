@@ -3,6 +3,28 @@
 ## Unreleased
 
 ### Added
+- Added `runtime_filter_config(...)` as the canonical shared filter map for BACKTEST/PAPER/LIVE runtime paths.
+- Added regression coverage proving env/config score, effective-RR, spread, funding, liquidity, stale-data, slippage, and max-symbol filters change real decisions or selection behavior.
+
+### Changed
+- Runtime symbol selection and runtime-risk gates now consume canonical spread, slippage, funding, liquidity, stale-data, cooldown, concurrent-position, raw-RR, and effective-RR settings.
+- LIVE config wiring now follows the same canonical fields while preserving existing live qualification and no-unsafe-order safety guards.
+
+### Fixed
+- Wired `MIN_EFFECTIVE_RR`, `MAX_SPREAD_BPS`, `MAX_SLIPPAGE_BPS`, `ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT`, and `MIN_LIQUIDITY_USD` into real runtime selection/decision/risk consumers instead of leaving them as partial conventions.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; direct legacy order-quality calls retain compatibility defaults, while runtime paths use stricter canonical filters.
+
+### Known Issues
+- Historical execution context can still be unavailable; missing evidence is flagged/fail-closed rather than backfilled with fake measured zeros.
+
+## Unreleased
+
+### Added
 - Added real BACKTEST-only reject filter switches for LOW_SCORE, TOO_CHOPPY, WEAK_TREND_AND_NO_RANGE_EDGE, STOP_TOO_WIDE, RR_TOO_LOW, DAILY_SYMBOL_TRADE_LIMIT, REGIME_MISMATCH, and PANIC_CONDITIONS.
 - Added disabled-filter bypass evidence to BACKTEST summaries and calibration artifacts.
 - Added dashboard checkboxes that pass real BACKTEST decision switches into the backtest command.
