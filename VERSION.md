@@ -1,3 +1,15 @@
+## 2026-06-26 Dashboard rejected-shadow aggregate diagnostics split
+
+- **Current version:** Dashboard rejected-shadow aggregate diagnostics split patch.
+- **Current phase:** Phase 6 BACKTEST dashboard calibration integrity and CI stabilization.
+- **Runtime maturity:** BACKTEST reporting-only diagnostics; PAPER/LIVE order behavior and acceptance thresholds are unchanged.
+- **BACKTEST/PAPER/LIVE alignment:** BACKTEST dashboard summaries now separate strict row enrichment from aggregate shadow diagnostics without altering runtime decision flow.
+- **Lifecycle coverage:** Rejected shadow-only rows remain rejected counterfactual evidence; no lifecycle states are added, reordered, or converted into accepted trades.
+- **Execution realism coverage:** STOP_TOO_WIDE WOULD_TP/WOULD_SL aggregates include all exported rejected-shadow evidence, while per-row near-miss shadow attachment remains identity-safe.
+- **Known critical risks:** Diagnostics depend on stable `signal_id` or symbol/timestamp/side exports; missing FastAPI test dependencies in this container prevented dashboard test execution.
+- **Last audit date:** 2026-06-26.
+- **Live readiness verdict:** Not LIVE ready; this patch is BACKTEST diagnostics/reporting-only and does not authorize threshold loosening.
+
 ## 2026-06-26 Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m
 
 - **Current version:** Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m patch.

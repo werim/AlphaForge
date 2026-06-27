@@ -1,3 +1,62 @@
+## 2026-06-26 Dashboard rejected-shadow aggregate diagnostics split
+
+### Why the patch was needed
+- PR 224 did not resolve CI because STOP_TOO_WIDE diagnostics were still filtered through strict rejected-row matching.
+- Shadow-only rows in `rejected_shadow.csv` were valid reporting evidence but were excluded from later-gate and rescue aggregates when they did not also exist in `rejected_orders.csv` or lifecycle rows.
+
+### Root cause
+- A single shadow path was being used for both per-row near-miss enrichment and aggregate/reporting diagnostics.
+- Strict identity matching is appropriate when attaching a `shadow_outcome` to one rejected row, but it is too restrictive for aggregate diagnostics that must count all exported rejected-shadow evidence.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+- BACKTEST dashboard calibration now builds a strict shadow lookup only for row-level near-miss enrichment.
+- Aggregate/reporting diagnostics now use aggregate shadow rows sourced directly from `rejected_shadow.csv`, including rows that are shadow-only.
+- No acceptance thresholds, rescue thresholds, order placement logic, trade sizing, or PAPER/LIVE runtime behavior changed.
+
+### Lifecycle changes
+- No lifecycle transitions were added, removed, or reordered.
+- Shadow-only STOP_TOO_WIDE rows remain reporting-only rejected counterfactual diagnostics and are not converted into trades.
+
+### Persistence changes
+- No SQLite schema changes.
+- No production persistence contracts changed.
+- Existing CSV inputs are read with stricter separation of per-row enrichment and aggregate reporting responsibilities.
+
+### Export/schema changes
+- `lifecycle_calibration_summary.json` and `later_gate_breakdown.csv` can now include later-gate aggregate counts from shadow-only `rejected_shadow.csv` rows.
+- The exported schema is unchanged; count values are corrected to include complete rejected-shadow evidence.
+
+### Tests added
+- No new tests were added in this patch because the requested failing regression tests already exist in `tests/test_dashboard_app.py`.
+
+### Tests executed
+- `python -m py_compile src/alphaforge/dashboard/backtest_control.py` passed.
+- `pytest tests/test_dashboard_app.py::test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics -q` could not collect because dashboard dependencies are skipped in this container (`fastapi` and `httpx` unavailable).
+- `pytest tests/test_dashboard_app.py::test_calibration_near_miss_uses_shadow_symbol_timestamp_side_match -q` could not collect because dashboard dependencies are skipped in this container (`fastapi` and `httpx` unavailable).
+- `pytest tests/test_dashboard_app.py::test_stop_too_wide_rescue_diagnostics_reporting_only_keeps_counts -q` could not collect because dashboard dependencies are skipped in this container (`fastapi` and `httpx` unavailable).
+- `PYTHONPATH=src python - <<'PY' ...` direct shadow aggregate regression probe passed for the three failing scenarios.
+- `pytest -q` passed with 401 tests passed and 10 skipped.
+
+### Risks
+- Aggregate diagnostics intentionally include shadow-only rows, so counts may exceed the number of rows in `rejected_orders.csv`; this is expected and must be interpreted as rejected-shadow reporting evidence, not accepted trade evidence.
+- If upstream exports omit `signal_id`, near-miss row enrichment still requires symbol + timestamp + side to avoid attaching unrelated shadow outcomes.
+
+### Remaining limitations
+- Dashboard test execution was not possible in this container due missing FastAPI/httpx dependencies.
+- Diagnostics remain dependent on rejected-shadow export completeness and should not be used to loosen STOP_TOO_WIDE gates without broader cost-adjusted validation.
+
+### Migration concerns
+- None. This is backward-compatible reporting logic with unchanged file schemas.
+
+### Push recommendation
+- Safe to push as BACKTEST dashboard diagnostic integrity fix after CI with dashboard dependencies verifies the existing regression tests. Do not alter LIVE readiness or acceptance thresholds from this patch.
+
 ## 2026-06-26 Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m
 
 ### Why the patch was needed

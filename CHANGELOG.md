@@ -1,3 +1,27 @@
+## 2026-06-26 - Dashboard rejected-shadow aggregate diagnostics split
+
+### Added
+- Added separate strict shadow matching semantics for per-row near-miss rejected-signal enrichment.
+- Added aggregate shadow-row handling so reporting diagnostics include shadow-only rows from `rejected_shadow.csv`.
+
+### Changed
+- Later-gate diagnostics, LOW_SCORE shadow comparison, STOP_TOO_WIDE rescue diagnostics, and STOP_TOO_WIDE WOULD_TP/WOULD_SL reporting now use aggregate shadow rows instead of strict matched rejected rows.
+- Strict near-miss enrichment now prioritizes explicit `signal_id` and falls back only to symbol + timestamp + side.
+
+### Fixed
+- Fixed missing STOP_TOO_WIDE later-gate diagnostics when STOP_TOO_WIDE exists only in `rejected_shadow.csv`.
+- Fixed STOP_TOO_WIDE WOULD_SL aggregate counts being dropped when the shadow row has no matching rejected row.
+- Fixed STOP_TOO_WIDE rescue candidate counts being underreported when shadow-only rejected-shadow rows are present.
+
+### Removed
+- Removed aggregate/reporting dependence on strict rejected-row shadow matches.
+
+### Breaking Changes
+- None. The patch changes BACKTEST dashboard diagnostics only; thresholds, accepted trade counts, and PAPER/LIVE behavior are unchanged.
+
+### Known Issues
+- Dashboard tests require FastAPI/httpx, which are unavailable in this container; module compilation passed but targeted tests were skipped by missing dependencies.
+
 ## 2026-06-26 - Dashboard/backtest diagnostics hardening after BTCUSDT 60d/15m
 
 ### Added
