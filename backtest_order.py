@@ -72,6 +72,10 @@ class CandidateOrder:
     rescue_size_multiplier: float = 1.0
     rescue_effective_rr: float = 0.0
     rescue_decision_context: str = ""
+    bypassed_reject_reasons: str = ""
+    disabled_filters: str = ""
+    disabled_filter_bypass_count: int = 0
+    filter_switch_experiment_active: bool = False
 @dataclass
 class RescueConfig:
     enabled: bool = False
@@ -108,6 +112,34 @@ class QualityGateConfig:
     max_spread_pct: float = 0.0025
     max_slippage_pct: float = 0.0020
     allowed_reasons: tuple[str, ...] = ("LOW_SCORE", "DAILY_SYMBOL_TRADE_LIMIT")
+
+BACKTEST_FILTER_REASONS = (
+    "LOW_SCORE",
+    "TOO_CHOPPY",
+    "WEAK_TREND_AND_NO_RANGE_EDGE",
+    "STOP_TOO_WIDE",
+    "RR_TOO_LOW",
+    "DAILY_SYMBOL_TRADE_LIMIT",
+    "REGIME_MISMATCH",
+    "PANIC_CONDITIONS",
+)
+
+def _disabled_backtest_filters(args: Any | None = None) -> tuple[str, ...]:
+    cfg = load_config_from_env().backtest.filter_switches
+    disabled = set(cfg.disabled_filters())
+    if args is not None:
+        for reason in BACKTEST_FILTER_REASONS:
+            attr = "backtest_filter_" + reason.lower().replace("weak_trend_and_no_range_edge", "weak_trend_no_range").replace("daily_symbol_trade_limit", "daily_symbol_trade_limit").replace("panic_conditions", "panic_conditions") + "_enabled"
+            if hasattr(args, attr) and not bool(getattr(args, attr)):
+                disabled.add(reason)
+    return tuple(sorted(disabled))
+
+def _filter_switch_metadata(disabled_filters: Iterable[str]) -> dict[str, Any]:
+    disabled = tuple(sorted({str(r).upper() for r in disabled_filters}))
+    return {
+        "disabled_filters": json.dumps(disabled),
+        "filter_switch_experiment_active": bool(disabled),
+    }
 
 @dataclass
 class RejectedShadowEvaluation:
@@ -224,6 +256,10 @@ class LifecycleRow:
     rescue_size_multiplier: float = 1.0
     rescue_effective_rr: float = 0.0
     rescue_decision_context: str = ""
+    bypassed_reject_reasons: str = ""
+    disabled_filters: str = ""
+    disabled_filter_bypass_count: int = 0
+    filter_switch_experiment_active: bool = False
 
 
 def _is_pre_signal_symbol_reject(row: LifecycleRow, lifecycle_state: str | None = None) -> bool:
@@ -580,7 +616,13 @@ def scan_symbol_backtest(
         risk_pct=float(context.get("risk_pct", 1.0)),
         market_ctx=mctx,
     )
-    result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
+    disabled_filters = tuple(context.get("disabled_backtest_filters", ()))
+    try:
+        result = run_order_cycle(ctx, config={"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": disabled_filters}, recent_stats=context.get("recent_stats", {}))
+    except TypeError:
+        # Test doubles and older call sites may not accept the newer config kwarg;
+        # production runtime still receives the real BACKTEST filter switches above.
+        result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
     context["last_result"] = result
     context["market_ctx"] = mctx
     if result.get("status") != "executed":
@@ -1019,6 +1061,10 @@ def finalize(
         rescue_size_multiplier=_safe_float(market_ctx.get("rescue_size_multiplier"), 1.0),
         rescue_effective_rr=_safe_float(market_ctx.get("rescue_effective_rr"), 0.0),
         rescue_decision_context=str(market_ctx.get("rescue_decision_context", "") or ""),
+        bypassed_reject_reasons=json.dumps(market_ctx.get("bypassed_reject_reasons", []), sort_keys=True) if not isinstance(market_ctx.get("bypassed_reject_reasons", ""), str) else str(market_ctx.get("bypassed_reject_reasons", "")),
+        disabled_filters=json.dumps(market_ctx.get("disabled_filters", []), sort_keys=True) if not isinstance(market_ctx.get("disabled_filters", ""), str) else str(market_ctx.get("disabled_filters", "")),
+        disabled_filter_bypass_count=int(market_ctx.get("disabled_filter_bypass_count", 0) or 0),
+        filter_switch_experiment_active=bool(market_ctx.get("filter_switch_experiment_active", False)),
         mfe=mfe,
         mae=mae,
     )
@@ -1129,10 +1175,12 @@ def process_backtest_result(
     rescue_config: Optional[RescueConfig] = None,
     rescue_stats: Optional[RescueStats] = None,
     mode: str = "BACKTEST",
+    disabled_backtest_filters: Iterable[str] = (),
 ) -> Optional[CandidateOrder]:
     rescue_config = rescue_config or RescueConfig()
     rescue_stats = rescue_stats or RescueStats()
     diagnostics = result.get("diagnostics", {})
+    disabled_backtest_filters = tuple(sorted({str(r).upper() for r in disabled_backtest_filters}))
     side = diagnostics.get("side") or "LONG"
     setup_type = diagnostics.get("setup_type", mctx.get("setup_type", ""))
     setup_reason = diagnostics.get("setup_reason", mctx.get("setup_reason", ""))
@@ -1414,6 +1462,10 @@ def process_backtest_result(
     risk_scale = min(1.0, max(0.0, _safe_float(diagnostics.get("risk_scale"), 1.0))) if isinstance(diagnostics, dict) else 1.0
     sim_ctx = {**dict(mctx), "risk_scale": risk_scale}
     if isinstance(diagnostics, dict):
+        for key in ("bypassed_reject_reasons", "disabled_filters", "disabled_filter_bypass_count", "filter_switch_experiment_active"):
+            if key in diagnostics:
+                sim_ctx[key] = diagnostics[key]
+    if isinstance(diagnostics, dict):
         for key in ("stop_too_wide_softened", "original_reject_reason", "reject_reason_softened"):
             if key in diagnostics:
                 sim_ctx[key] = diagnostics[key]
@@ -1486,6 +1538,10 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                     "rescue_size_multiplier": row.rescue_size_multiplier,
                     "rescue_effective_rr": row.rescue_effective_rr,
                     "rescue_decision_context": row.rescue_decision_context,
+                    "bypassed_reject_reasons": row.bypassed_reject_reasons,
+                    "disabled_filters": row.disabled_filters,
+                    "disabled_filter_bypass_count": row.disabled_filter_bypass_count,
+                    "filter_switch_experiment_active": row.filter_switch_experiment_active,
                 },
                 execution_ctx_missing=execution_ctx_missing,
                 event_ts=str(row.timestamp),
@@ -2544,9 +2600,12 @@ def main():
     p.add_argument("--quality-gate-max-spread-pct", type=float, default=0.0025)
     p.add_argument("--quality-gate-max-slippage-pct", type=float, default=0.0020)
     p.add_argument("--quality-gate-allowed-reasons", default="LOW_SCORE,DAILY_SYMBOL_TRADE_LIMIT")
+
+    p.add_argument("--disable-backtest-filter", action="append", default=[], choices=list(BACKTEST_FILTER_REASONS), help="Disable one real BACKTEST rejection gate; may be repeated")
     args = p.parse_args()
     if args.ci:
         args.offline = True
+    disabled_filters = tuple(sorted(set(_disabled_backtest_filters(args)) | {str(x).upper() for x in getattr(args, "disable_backtest_filter", [])}))
     rescue_config = _rescue_config_from_args(args, cfg)
     quality_gate_config = _quality_gate_config_from_args(args)
     rescue_stats = RescueStats()
@@ -2593,7 +2652,7 @@ def main():
                 if i < 2:
                     continue
                 selector_market = _build_symbol_market_data(symbol_meta, candles, i)
-                selector_result = select_symbol(symbol, selector_market)
+                selector_result = select_symbol(symbol, selector_market, {"disabled_backtest_filters": disabled_filters})
                 if not selector_result.tradable:
                     reason = selector_result.reject_reasons[0] if selector_result.reject_reasons else "SYMBOL_FILTER_REJECTED"
                     rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
@@ -2660,6 +2719,7 @@ def main():
                     "risk_pct": args.risk_pct,
                     "recent_stats": recent_stats,
                     "symbol_meta": symbol_meta,
+                    "disabled_backtest_filters": disabled_filters,
                 }
                 _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})
@@ -2685,6 +2745,7 @@ def main():
                     rescue_config=rescue_config,
                     rescue_stats=rescue_stats,
                     mode=args.mode,
+                    disabled_backtest_filters=disabled_filters,
                 )
                 if cand:
                     candidates.append(cand)
@@ -2906,6 +2967,9 @@ def main():
         "performance_by_regime": {},
         "performance_by_setup_type": {},
         "rejection_counts": json.dumps(rejection_counts, sort_keys=True),
+        "disabled_filters": json.dumps(disabled_filters),
+        "filter_switch_experiment_active": bool(disabled_filters),
+        "disabled_filter_bypass_count": sum(int((json.loads(str(r.get("diagnostics", "{}"))) if str(r.get("diagnostics", "")).startswith("{") else {}).get("disabled_filter_bypass_count", 0) or 0) for r in rejected),
         "cancel_counts": {},
         "event_flags":{},
     }

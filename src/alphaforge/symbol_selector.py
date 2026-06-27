@@ -59,6 +59,16 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
     warnings: list[str] = []
     reject_reasons: list[str] = []
 
+    disabled = {str(r).upper() for r in cfg.get("disabled_backtest_filters", [])}
+    bypassed_reject_reasons: list[str] = []
+
+    def _append_reject(reason: str) -> None:
+        normalized = str(reason).upper()
+        if normalized in disabled:
+            bypassed_reject_reasons.append(normalized)
+        else:
+            reject_reasons.append(normalized)
+
     volume_24h_usdt = _safe_float(market_data, "volume_24h_usdt", cfg["min_volume_24h_usdt"] * 0.5, diagnostics, warnings)
     spread_pct = _safe_float(market_data, "spread_pct", cfg["max_spread_pct"] * 1.1, diagnostics, warnings)
     if spread_pct > max(cfg["max_spread_pct"] * 2.0, 0.005):
@@ -80,32 +90,32 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
     orderbook_imbalance = _safe_float(market_data, "orderbook_imbalance", 0.0, diagnostics, warnings) if "orderbook_imbalance" in market_data else 0.0
 
     if volume_24h_usdt < cfg["min_volume_24h_usdt"]:
-        reject_reasons.append("LOW_VOLUME")
+        _append_reject("LOW_VOLUME")
     if spread_pct > cfg["max_spread_pct"]:
-        reject_reasons.append("WIDE_SPREAD")
+        _append_reject("WIDE_SPREAD")
     if liquidity_score_raw < cfg["min_liquidity_score"]:
-        reject_reasons.append("LOW_LIQUIDITY")
+        _append_reject("LOW_LIQUIDITY")
     if volatility_pct > cfg["max_volatility_pct"]:
-        reject_reasons.append("EXCESSIVE_VOLATILITY")
+        _append_reject("EXCESSIVE_VOLATILITY")
     if chop_score > cfg["max_chop_score"]:
-        reject_reasons.append("TOO_CHOPPY")
+        _append_reject("TOO_CHOPPY")
     if panic_score >= cfg["panic_score_reject"]:
-        reject_reasons.append("PANIC_CONDITIONS")
+        _append_reject("PANIC_CONDITIONS")
     if spoof_risk > cfg["max_spoof_risk"]:
-        reject_reasons.append("SPOOF_RISK")
+        _append_reject("SPOOF_RISK")
     if fakeout_risk > cfg["max_fakeout_risk"]:
-        reject_reasons.append("FAKEOUT_RISK")
+        _append_reject("FAKEOUT_RISK")
     if abs(funding_rate_pct) > cfg["max_abs_funding_rate_pct"]:
-        reject_reasons.append("FUNDING_ANOMALY")
+        _append_reject("FUNDING_ANOMALY")
     if correlation_exposure > cfg["max_correlation_exposure"]:
-        reject_reasons.append("CORRELATION_OVEREXPOSURE")
+        _append_reject("CORRELATION_OVEREXPOSURE")
     if abs(orderbook_imbalance) < cfg["min_abs_orderbook_imbalance"]:
-        reject_reasons.append("LOW_ORDERBOOK_ALIGNMENT")
+        _append_reject("LOW_ORDERBOOK_ALIGNMENT")
 
     has_clean_trend = trend_strength >= cfg["min_trend_strength"] and chop_score <= cfg["max_chop_score"]
     has_range_edge = chop_score <= cfg["range_edge_bonus_chop_limit"] and abs(recent_volume_change_pct) <= 20.0
     if not has_clean_trend and not has_range_edge:
-        reject_reasons.append("WEAK_TREND_AND_NO_RANGE_EDGE")
+        _append_reject("WEAK_TREND_AND_NO_RANGE_EDGE")
 
     volume_score = max(0.0, min(10.0, (volume_24h_usdt / cfg["min_volume_24h_usdt"]) * 5.0))
     spread_ratio = spread_pct / max(cfg["max_spread_pct"], 1e-9)
@@ -152,6 +162,10 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
 
     diagnostics.update(
         {
+            "disabled_filters": sorted(disabled),
+            "bypassed_reject_reasons": bypassed_reject_reasons,
+            "disabled_filter_bypass_count": len(bypassed_reject_reasons),
+            "filter_switch_experiment_active": bool(disabled),
             "metrics": {
                 "volume_24h_usdt": volume_24h_usdt,
                 "spread_pct": spread_pct,

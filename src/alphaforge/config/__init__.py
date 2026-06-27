@@ -106,12 +106,37 @@ class ExchangeSettings:
     hyperliquid: HyperliquidSettings = field(default_factory=HyperliquidSettings)
 
 @dataclass(slots=True)
+class BacktestFilterSwitches:
+    low_score_enabled: bool = True
+    too_choppy_enabled: bool = True
+    weak_trend_no_range_enabled: bool = True
+    stop_too_wide_enabled: bool = True
+    rr_too_low_enabled: bool = True
+    daily_symbol_trade_limit_enabled: bool = True
+    regime_mismatch_enabled: bool = True
+    panic_conditions_enabled: bool = True
+
+    def disabled_filters(self) -> tuple[str, ...]:
+        mapping = {
+            "LOW_SCORE": self.low_score_enabled,
+            "TOO_CHOPPY": self.too_choppy_enabled,
+            "WEAK_TREND_AND_NO_RANGE_EDGE": self.weak_trend_no_range_enabled,
+            "STOP_TOO_WIDE": self.stop_too_wide_enabled,
+            "RR_TOO_LOW": self.rr_too_low_enabled,
+            "DAILY_SYMBOL_TRADE_LIMIT": self.daily_symbol_trade_limit_enabled,
+            "REGIME_MISMATCH": self.regime_mismatch_enabled,
+            "PANIC_CONDITIONS": self.panic_conditions_enabled,
+        }
+        return tuple(reason for reason, enabled in mapping.items() if not enabled)
+
+@dataclass(slots=True)
 class BacktestSettings:
     top_n: int = 100
     timeframe: str = "1m"
     output_dir: str = "data/backtest"
     initial_balance: float = 1000.0
     risk_pct: float = 1.0
+    filter_switches: BacktestFilterSwitches = field(default_factory=BacktestFilterSwitches)
 
 @dataclass(slots=True)
 class RiskSettings: pass
@@ -188,6 +213,16 @@ def load_config_from_env() -> AlphaForgeConfig:
             output_dir=_string_env(env, "ALPHAFORGE_BACKTEST_OUTPUT_DIR", "data/backtest"),
             initial_balance=_float_env(env, "ALPHAFORGE_BACKTEST_INITIAL_BALANCE", 1000.0),
             risk_pct=_float_env(env, "ALPHAFORGE_BACKTEST_RISK_PCT", 1.0),
+            filter_switches=BacktestFilterSwitches(
+                low_score_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED", True),
+                too_choppy_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED", True),
+                weak_trend_no_range_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_WEAK_TREND_NO_RANGE_ENABLED", True),
+                stop_too_wide_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_STOP_TOO_WIDE_ENABLED", True),
+                rr_too_low_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_RR_TOO_LOW_ENABLED", True),
+                daily_symbol_trade_limit_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_DAILY_SYMBOL_TRADE_LIMIT_ENABLED", True),
+                regime_mismatch_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_REGIME_MISMATCH_ENABLED", True),
+                panic_conditions_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED", True),
+            ),
         ),
         persistence=PersistenceSettings(database_url=_resolve_database_url(env), enabled=_bool_env(env, "ALPHAFORGE_PERSISTENCE_ENABLED", True)),
         logging=LoggingSettings(level=_string_env(env, "ALPHAFORGE_LOG_LEVEL", "INFO")),

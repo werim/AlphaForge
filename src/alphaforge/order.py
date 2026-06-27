@@ -256,11 +256,25 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     vol_comp = (10.0 if (micro_ok and vol_ok) else 0.0)
     hygiene_comp = 10.0
     quality_score = round(score_comp + exp_comp + rr_comp + regime_comp + vol_comp + hygiene_comp, 2)
+    backtest_disabled = set()
+    if str(cfg.get("MODE", cfg.get("mode", ""))).upper() == "BACKTEST":
+        backtest_disabled = {str(r).upper() for r in cfg.get("DISABLED_BACKTEST_FILTERS", [])}
+    bypassed_reject_reasons: list[str] = []
+
+    def _gate_enabled(reason: str) -> bool:
+        return str(reason).upper() not in backtest_disabled
+
+    def _bypass(reason: str) -> bool:
+        if _gate_enabled(reason):
+            return False
+        bypassed_reject_reasons.append(str(reason).upper())
+        return True
+
     if not candidate or not getattr(candidate, "symbol", None):
         reject_reason, failed_filter = "INVALID_CANDIDATE", "candidate"
-    elif score_eval < min_trade_score:
+    elif score_eval < min_trade_score and not _bypass("LOW_SCORE"):
         reject_reason, failed_filter = "LOW_SCORE", "score"
-    elif rr < float(cfg["MIN_RR"]):
+    elif rr < float(cfg["MIN_RR"]) and not _bypass("RR_TOO_LOW"):
         reject_reason, failed_filter = "RR_TOO_LOW", "rr"
     elif cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
         reject_reason, failed_filter = "EXPECTANCY_MISSING", "expectancy"
@@ -268,7 +282,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         reject_reason, failed_filter = "NEGATIVE_EXPECTANCY", "expectancy"
     elif cfg["BLOCK_CHOP_MARKET"] and any("CHOP" in f for f in pattern_flags):
         reject_reason, failed_filter = "CHOP_MARKET_BLOCK", "pattern_flags"
-    elif cfg["REQUIRE_REGIME_ALIGNMENT"] and not regime_ok:
+    elif cfg["REQUIRE_REGIME_ALIGNMENT"] and not regime_ok and not _bypass("REGIME_MISMATCH"):
         reject_reason, failed_filter = "REGIME_MISMATCH", "regime"
     elif sl_pct < float(cfg["MIN_SL_PCT"]):
         reject_reason, failed_filter = "STOP_TOO_TIGHT", "sl_pct"
@@ -284,7 +298,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             and score_eval >= float(cfg["STOP_TOO_WIDE_SOFT_SCORE_MIN"])
             and effective_rr_for_stop >= float(cfg["STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN"])
         )
-        if hard_reject_enabled and (is_extreme_stop or not soft_eligible):
+        if hard_reject_enabled and (is_extreme_stop or not soft_eligible) and not _bypass("STOP_TOO_WIDE"):
             reject_reason, failed_filter = "STOP_TOO_WIDE", "sl_pct"
         else:
             failed_filter = ""
@@ -301,7 +315,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         last_ts = int((recent_stats.get("last_trade_ts_by_symbol", {}) or {}).get(symbol, 0) or 0)
         if last_ts and now_ts and (now_ts - last_ts) < int(cfg["SYMBOL_COOLDOWN_MINUTES"]) * 60_000:
             reject_reason, failed_filter = "SYMBOL_COOLDOWN_ACTIVE", "cooldown"
-        elif int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]):
+        elif int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]) and not _bypass("DAILY_SYMBOL_TRADE_LIMIT"):
             reject_reason, failed_filter = "DAILY_SYMBOL_TRADE_LIMIT", "daily_symbol"
         elif int(recent_stats.get("global_trades_today", 0) or 0) >= int(cfg["MAX_TRADES_GLOBAL_PER_DAY"]):
             reject_reason, failed_filter = "DAILY_GLOBAL_TRADE_LIMIT", "daily_global"
@@ -323,7 +337,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             last_ts = int((recent_stats.get("last_trade_ts_by_symbol", {}) or {}).get(symbol, 0) or 0)
             if last_ts and now_ts and (now_ts - last_ts) < int(cfg["SYMBOL_COOLDOWN_MINUTES"]) * 60_000:
                 reject_reason, failed_filter = "SYMBOL_COOLDOWN_ACTIVE", "cooldown"
-            elif int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]):
+            elif int((recent_stats.get("trades_today_by_symbol", {}) or {}).get(symbol, 0) or 0) >= int(cfg["MAX_TRADES_PER_SYMBOL_PER_DAY"]) and not _bypass("DAILY_SYMBOL_TRADE_LIMIT"):
                 reject_reason, failed_filter = "DAILY_SYMBOL_TRADE_LIMIT", "daily_symbol"
             elif int(recent_stats.get("global_trades_today", 0) or 0) >= int(cfg["MAX_TRADES_GLOBAL_PER_DAY"]):
                 reject_reason, failed_filter = "DAILY_GLOBAL_TRADE_LIMIT", "daily_global"
@@ -333,7 +347,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
                 reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
 
     stop_too_wide_softened = sl_pct > float(cfg["MAX_SL_PCT"]) and reject_reason == ""
-    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates}
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
     if stop_too_wide_softened:
         diagnostics.update({
             "stop_too_wide_softened": True,

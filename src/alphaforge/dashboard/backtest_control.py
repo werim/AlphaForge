@@ -23,6 +23,7 @@ class DashboardBacktestRequest:
     timeframe: str
     initial_balance: float
     max_symbols: int
+    filter_switches: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -80,6 +81,8 @@ class DashboardBacktestResult:
     stop_too_wide_quality_split: dict[str, Any] = field(default_factory=dict)
     top_quality_improvement_candidates: list[dict[str, Any]] = field(default_factory=list)
     backtest_rejection_rate: float | None = None
+    disabled_filters: list[str] = field(default_factory=list)
+    filter_switch_experiment_active: bool = False
 
 
 def default_form_values() -> dict[str, Any]:
@@ -92,6 +95,8 @@ def default_form_values() -> dict[str, Any]:
         "initial_balance": 10000,
         "max_symbols": max(1, min(int(cfg.backtest.top_n), 200)),
         "timeframes": SUPPORTED_TIMEFRAMES,
+        "filter_reasons": ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"],
+        "filter_switches": {reason: True for reason in ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"]},
     }
 
 
@@ -129,9 +134,11 @@ def parse_backtest_form(form: Mapping[str, Any]) -> tuple[DashboardBacktestReque
     timeframe = str(form.get("timeframe", "")).strip()
     if timeframe not in SUPPORTED_TIMEFRAMES:
         errors["timeframe"] = f"timeframe must be one of: {', '.join(SUPPORTED_TIMEFRAMES)}."
+    filter_reasons = default_form_values()["filter_reasons"]
+    filter_switches = {reason: str(form.get(f"filter_{reason}", "")).lower() in {"1", "true", "on", "yes"} for reason in filter_reasons}
     if errors:
         return None, errors
-    return DashboardBacktestRequest(last_days=last_days, symbols=symbols, timeframe=timeframe, initial_balance=initial_balance, max_symbols=max_symbols), {}
+    return DashboardBacktestRequest(last_days=last_days, symbols=symbols, timeframe=timeframe, initial_balance=initial_balance, max_symbols=max_symbols, filter_switches=filter_switches), {}
 
 
 def _read_first_csv_row(path: Path) -> dict[str, str]:
@@ -597,6 +604,9 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
         "near_miss_score_distribution": _numeric_distribution(near, "score"),
         "near_miss_effective_rr_distribution": _numeric_distribution(near, "effective_rr"),
         "stop_too_wide_rescue_diagnostics": _stop_too_wide_rescue_diagnostics(later_gate_source),
+        "disabled_filters": summary.get("disabled_filters", "[]"),
+        "filter_switch_experiment_active": str(summary.get("filter_switch_experiment_active", "False")).lower() in {"1", "true", "yes", "on"},
+        "disabled_filter_bypass_count": _safe_int(summary.get("disabled_filter_bypass_count")) or 0,
     }
     return report_rows, summary_out
 
@@ -648,8 +658,13 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         str(output_dir),
         "--force-refresh",
     ]
+    for reason, enabled in request.filter_switches.items():
+        if not enabled:
+            command.extend(["--disable-backtest-filter", reason])
     period = f"last {request.last_days} days"
     result = DashboardBacktestResult("RUNNING", period, symbols, request.timeframe, request.initial_balance, request.max_symbols, output_dir=str(output_dir), command=command)
+    result.disabled_filters = [reason for reason, enabled in request.filter_switches.items() if not enabled]
+    result.filter_switch_experiment_active = bool(result.disabled_filters)
     try:
         completed = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=600, check=False)
     except Exception as exc:  # subprocess/environment failure, not strategy logic
@@ -723,6 +738,12 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else []
     result.stop_too_wide_quality_split = signal_quality_summary.get("stop_too_wide_split", {}) if isinstance(signal_quality_summary, dict) else {}
     result.top_quality_improvement_candidates = signal_quality_summary.get("top_quality_improvement_candidates", []) if isinstance(signal_quality_summary, dict) else []
+    if summary.get("disabled_filters"):
+        try:
+            result.disabled_filters = list(json.loads(summary.get("disabled_filters", "[]")))
+        except Exception:
+            pass
+    result.filter_switch_experiment_active = str(summary.get("filter_switch_experiment_active", result.filter_switch_experiment_active)).lower() in {"1", "true", "yes", "on"}
     if result.rejected_signals is not None and result.accepted_trades is not None:
         denom = result.rejected_signals + result.accepted_trades
         result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None
