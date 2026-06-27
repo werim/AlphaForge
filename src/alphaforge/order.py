@@ -22,7 +22,7 @@ from alphaforge.persistence import (
 )
 
 logger = logging.getLogger(__name__)
-MIN_RR_THRESHOLD = 1.1
+MIN_RR_THRESHOLD = 1.1  # compatibility default; canonical runtime config overrides via MIN_EFFECTIVE_RR.
 MIN_SCORE_BASE = 7.5
 MIN_RR_BASE = 1.3
 
@@ -176,7 +176,7 @@ def build_order_candidate(symbol: str, market_ctx: Mapping[str, Any], config: Ma
 def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, Any], recent_stats: Mapping[str, Any], config: Mapping[str, Any]) -> TradeQualityDecision:
     adaptive = compute_adaptive_thresholds(recent_stats)
     cfg = {
-        "MIN_TRADE_SCORE": adaptive["min_score"], "MIN_RR": adaptive["min_rr"], "MIN_EXPECTANCY": 0.0, "SYMBOL_COOLDOWN_MINUTES": 60,
+        "MIN_TRADE_SCORE": adaptive["min_score"], "MIN_RR": adaptive["min_rr"], "MIN_EFFECTIVE_RR": MIN_RR_THRESHOLD, "MIN_EXPECTANCY": 0.0, "SYMBOL_COOLDOWN_MINUTES": 60,
         "MAX_TRADES_PER_SYMBOL_PER_DAY": 2, "MAX_TRADES_GLOBAL_PER_DAY": 10, "MIN_SL_PCT": 0.15, "MAX_SL_PCT": 1.5,
         "MAX_SPREAD_PCT": 0.05, "MAX_EXPECTED_SLIPPAGE_PCT": 0.05, "MIN_ATR_PCT": 0.25, "MAX_ATR_PCT": 3.0,
         "SYMBOL_LOSS_STREAK_LIMIT": 3, "SYMBOL_LOSS_STREAK_COOLDOWN_HOURS": 6, "GLOBAL_LOSS_STREAK_LIMIT": 5,
@@ -520,7 +520,7 @@ def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[
     if not isinstance(execution_ctx, Mapping):
         execution_ctx = build_execution_context(ctx.market_ctx)
     order_payload = {"risk_reward": decision.rr, "rr": decision.rr}
-    effective_rr, execution_flags, rr_breakdown = _effective_rr(order_payload, execution_ctx, mode="paper")
+    effective_rr, execution_flags, rr_breakdown = _effective_rr(order_payload, execution_ctx, mode="paper", min_effective_rr=float(config.get("MIN_EFFECTIVE_RR", MIN_RR_THRESHOLD)))
     diagnostics = {
         **quality.diagnostics,
         "effective_rr": effective_rr,
@@ -584,12 +584,13 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
         enriched_market_ctx = {**ctx, **execution_ctx}
 
         score, plan, explanation = brain.before_real_order(signal, enriched_market_ctx, regime_ctx, stats_ctx)
-        effective_rr, execution_flags, rr_breakdown = _effective_rr(order, execution_ctx, mode=mode)
+        min_eff = float(ctx.get("MIN_EFFECTIVE_RR", market_ctx.get("MIN_EFFECTIVE_RR", MIN_RR_THRESHOLD)) if isinstance(market_ctx, Mapping) else MIN_RR_THRESHOLD)
+        effective_rr, execution_flags, rr_breakdown = _effective_rr(order, execution_ctx, mode=mode, min_effective_rr=min_eff)
         if missing_execution_ctx:
             execution_flags.append("EXECUTION_CTX_MISSING")
             execution_flags.append("UNKNOWN_EXECUTION_CONTEXT")
             effective_rr = round(max(float(order.get("risk_reward", 1.0) or 1.0) - 0.6, 0.0), 6)
-        blocked = _is_blocked(score, regime_ctx, stats_ctx) or effective_rr < MIN_RR_THRESHOLD
+        blocked = _is_blocked(score, regime_ctx, stats_ctx) or effective_rr < min_eff
 
         qty = float(order.get("quantity", 0.0)) * _position_mult(score.total_score)
         slippage_penalty_factor = min(float(execution_ctx.get("expected_slippage_pct") or 0.0) * 10.0, 0.9)
@@ -653,7 +654,7 @@ def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any
     return normalize_execution_ctx(neutral_execution_context()), True
 
 
-def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any], *, mode: str = "live") -> tuple[float, list[str], dict[str, Any]]:
+def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any], *, mode: str = "live", min_effective_rr: float | None = None) -> tuple[float, list[str], dict[str, Any]]:
     rr = float(order.get("risk_reward", 1.0) or 1.0)
     require_measured = str(mode).upper() in {"LIVE", "LIVE_PRECHECK", "PAPER"}
     evidence_status = classify_execution_evidence(execution_ctx, require_measured=require_measured)
@@ -680,7 +681,9 @@ def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any], *,
         flags.append("BAD_EXECUTION")
     if str(execution_ctx.get("volatility_regime", "")).lower() == "high" and (model.spread_penalty + model.slippage_penalty) >= 0.25:
         flags.append("EXCESSIVE_VOLATILITY")
-    if effective < MIN_RR_THRESHOLD:
+    threshold = MIN_RR_THRESHOLD if min_effective_rr is None else float(min_effective_rr)
+    breakdown["min_effective_rr"] = threshold
+    if effective < threshold:
         flags.append("LOW_EFFECTIVE_RR")
     return effective, sorted(set(flags)), breakdown
 

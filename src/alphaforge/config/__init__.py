@@ -75,8 +75,12 @@ class RuntimeSettings:
     max_notional_exposure: float = 100_000.0
     max_symbol_notional: float = 50_000.0
     stale_market_data_sec: float = 15.0
+    min_rr: float = 1.20
+    min_effective_rr: float = 1.10
     max_spread_pct: float = 0.0025
+    max_expected_slippage_pct: float = 0.0020
     max_abs_funding_rate_pct: float = 0.0010
+    min_liquidity_usd: float = 5_000_000.0
     global_kill_switch: bool = False
     require_live_qualification: bool = True
     enable_shadow_mode: bool = False
@@ -169,6 +173,31 @@ class AlphaForgeConfig:
     feature_flags: FeatureFlags = field(default_factory=FeatureFlags)
 
 
+
+def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) -> dict[str, object]:
+    """Return the single canonical runtime filter map consumed by all modes.
+
+    Keys intentionally match the legacy decision-engine names so existing
+    BACKTEST/PAPER call sites can opt in without maintaining mode-local copies.
+    """
+    cfg: dict[str, object] = {
+        "MODE": (mode or runtime.execution_mode).upper(),
+        "MIN_TRADE_SCORE": runtime.min_signal_score,
+        "MIN_RR": runtime.min_rr,
+        "MIN_EFFECTIVE_RR": runtime.min_effective_rr,
+        "MAX_SPREAD_PCT": runtime.max_spread_pct,
+        "MAX_EXPECTED_SLIPPAGE_PCT": runtime.max_expected_slippage_pct,
+        "SYMBOL_COOLDOWN_MINUTES": runtime.symbol_cooldown_sec / 60.0,
+        "STALE_MARKET_DATA_SEC": runtime.stale_market_data_sec,
+        "MAX_CONCURRENT_POSITIONS": runtime.max_concurrent_positions,
+        "MAX_ABS_FUNDING_RATE_PCT": runtime.max_abs_funding_rate_pct,
+        "MIN_LIQUIDITY_USD": runtime.min_liquidity_usd,
+        "min_volume_24h_usdt": runtime.min_liquidity_usd,
+        "max_spread_pct": runtime.max_spread_pct,
+        "max_abs_funding_rate_pct": runtime.max_abs_funding_rate_pct,
+    }
+    return cfg
+
 def load_config_from_env() -> AlphaForgeConfig:
     env = os.environ
     runtime = RuntimeSettings(
@@ -183,8 +212,12 @@ def load_config_from_env() -> AlphaForgeConfig:
         max_notional_exposure=_float_env(env, "ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", 100_000.0),
         max_symbol_notional=_float_env(env, "ALPHAFORGE_MAX_SYMBOL_NOTIONAL", 50_000.0),
         stale_market_data_sec=_float_env(env, "ALPHAFORGE_STALE_MARKET_DATA_SEC", 15.0),
-        max_spread_pct=_float_env(env, "ALPHAFORGE_MAX_SPREAD_PCT", 0.0025),
+        min_rr=_float_env(env, "ALPHAFORGE_MIN_RR", 1.20),
+        min_effective_rr=float(_alias(env, "MIN_EFFECTIVE_RR", "ALPHAFORGE_MIN_EFFECTIVE_RR") or "1.10"),
+        max_spread_pct=float(_alias(env, "ALPHAFORGE_MAX_SPREAD_PCT", "MAX_SPREAD_PCT") or (_float_env(env, "MAX_SPREAD_BPS", 25.0) / 10_000.0)),
+        max_expected_slippage_pct=float(_alias(env, "ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT", "MAX_EXPECTED_SLIPPAGE_PCT") or (_float_env(env, "MAX_SLIPPAGE_BPS", 20.0) / 10_000.0)),
         max_abs_funding_rate_pct=_float_env(env, "ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT", 0.0010),
+        min_liquidity_usd=_float_env(env, "MIN_LIQUIDITY_USD", 5_000_000.0),
         global_kill_switch=_bool_env(env, "ALPHAFORGE_GLOBAL_KILL_SWITCH", False),
         require_live_qualification=_bool_env(env, "ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION", True),
         enable_shadow_mode=_bool_env(env, "ALPHAFORGE_ENABLE_SHADOW_MODE", False),
