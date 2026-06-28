@@ -295,7 +295,8 @@ def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[f
         flags.append("HIGH_SPREAD")
     if liquidity_score < 0.3:
         flags.append("LOW_LIQUIDITY")
-    if effective < 1.1:
+    min_effective_rr = float(market_ctx.get("MIN_EFFECTIVE_RR", market_ctx.get("min_effective_rr", 1.60)) or 1.60)
+    if effective < min_effective_rr:
         flags.append("LOW_EFFECTIVE_RR")
     breakdown = {
         "cost_penalty_total": model.total_penalty,
@@ -608,6 +609,8 @@ def scan_symbol_backtest(
     now = candles[idx]
     prev = candles[idx - 1]
     mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx - 20):idx + 1])
+    if "min_effective_rr" in context:
+        mctx["MIN_EFFECTIVE_RR"] = context["min_effective_rr"]
     ctx = OrderExecutionContext(
         mode=TradingMode.BACKTEST,
         timestamp=now.timestamp,
@@ -1853,8 +1856,113 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         "rejection_reason_by_setup_type": _distribution([f"{r.get('setup_type','UNKNOWN')}::{r.get('reject_reason','UNKNOWN')}" for r in rejected_rows]),
         "rejection_reason_by_regime": _distribution([f"{r.get('regime','UNKNOWN')}::{r.get('reject_reason','UNKNOWN')}" for r in rejected_rows]),
         "acceptance_candidates_near_threshold_count": len(near_threshold),
+        "accepted_trade_quality_diagnostics": _accepted_quality_diagnostics(accepted_rows, candidate_rows),
+        "score_calibration_diagnostics": _score_calibration_diagnostics(candidate_rows),
+        "disabled_filter_acceptance_evidence": {"disabled_filters": _distribution([r.get("disabled_filters", "") for r in candidate_rows if str(r.get("disabled_filters", "")) not in {"", "[]"}]), "accepted_because_filter_disabled_count": sum(int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) for r in accepted_rows), "estimated_pnl_impact_usdt": sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0) for r in accepted_rows if int(_safe_float(r.get("disabled_filter_bypass_count"), 0.0)) > 0)},
     }
 
+
+
+def _accepted_quality_diagnostics(accepted_rows: List[Mapping[str, Any]], candidate_rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    closed = [r for r in candidate_rows if str(r.get("lifecycle_state", r.get("status_after", ""))).upper() == "POSITION_CLOSED"]
+    accepted_ids = {str(r.get("signal_id", "")).strip() for r in accepted_rows if str(r.get("signal_id", "")).strip()}
+    if accepted_ids:
+        closed = [r for r in closed if str(r.get("signal_id", "")).strip() in accepted_ids]
+    result_rows = closed or accepted_rows
+
+    def outcome(row: Mapping[str, Any]) -> str:
+        return str(row.get("close_reason") or row.get("result") or row.get("lifecycle_state") or row.get("status_after") or "UNKNOWN").upper()
+
+    def bucket_eff(row: Mapping[str, Any]) -> str:
+        eff = _safe_float(row.get("effective_rr"), -1.0)
+        if eff < 0:
+            return "UNAVAILABLE"
+        if eff < 1.6:
+            return "<1.6"
+        if eff < 1.9:
+            return "1.6-1.9"
+        if eff < 2.3:
+            return "1.9-2.3"
+        return ">=2.3"
+
+    def score_bucket(row: Mapping[str, Any]) -> str:
+        score = _safe_float(row.get("score"), -1.0)
+        if score < 0:
+            return "UNAVAILABLE"
+        return "10" if score >= 10.0 else f"{int(score)}-{int(score)+1}"
+
+    def hour_bucket(row: Mapping[str, Any]) -> str:
+        raw = row.get("timestamp") or row.get("event_ts") or row.get("created_at")
+        try:
+            value = int(float(raw))
+            if value > 10_000_000_000:
+                value //= 1000
+            return f"{datetime.fromtimestamp(value, tz=timezone.utc).hour:02d}:00Z"
+        except Exception:
+            return "UNAVAILABLE"
+
+    def group(field: str, rows: List[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            key = str(r.get(field) or "UNKNOWN")
+            b = out.setdefault(key, {"count": 0, "tp": 0, "sl": 0, "open": 0, "net_pnl": 0.0})
+            b["count"] += 1
+            o = outcome(r)
+            b["tp"] += int(o == "TP_HIT")
+            b["sl"] += int(o == "SL_HIT")
+            b["open"] += int(o in {"OPEN_AT_END", "OPEN", "CANCELLED", "UNKNOWN"})
+            b["net_pnl"] += _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+        for b in out.values():
+            n = max(1, int(b["count"]))
+            b["tp_rate"] = b["tp"] / n
+            b["sl_rate"] = b["sl"] / n
+            b["expectancy"] = b["net_pnl"] / n
+        return out
+
+    enriched = []
+    for r in result_rows:
+        enriched.append({**dict(r), "score_bucket": score_bucket(r), "effective_rr_bucket": bucket_eff(r), "hour_session": hour_bucket(r)})
+    total = len(enriched)
+    tp = sum(1 for r in enriched if outcome(r) == "TP_HIT")
+    sl = sum(1 for r in enriched if outcome(r) == "SL_HIT")
+    return {
+        "accepted_tp_rate": tp / total if total else 0.0,
+        "accepted_sl_rate": sl / total if total else 0.0,
+        "by_score_bucket": group("score_bucket", enriched),
+        "by_regime": group("regime", enriched),
+        "by_effective_rr_bucket": group("effective_rr_bucket", enriched),
+        "by_side": group("side", enriched),
+        "by_symbol": group("symbol", enriched),
+        "by_hour_session": group("hour_session", enriched),
+        "expectancy_bucket_distribution": _distribution([r.get("expectancy_bucket", "UNKNOWN") for r in enriched]),
+        "negative_expectancy_accepted_count": sum(1 for r in accepted_rows if str(r.get("expectancy_bucket", "")).upper() == "NEGATIVE"),
+    }
+
+def _score_calibration_diagnostics(candidate_rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    rows = [r for r in candidate_rows if str(r.get("score", "")) not in {"", "None", "null"}]
+    def bucket(r: Mapping[str, Any]) -> str:
+        score = _safe_float(r.get("score"), -1.0)
+        if score < 0: return "UNAVAILABLE"
+        return "10" if score >= 10.0 else f"{int(score)}-{int(score)+1}"
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        b = out.setdefault(bucket(r), {"count": 0, "tp": 0, "sl": 0, "timeout": 0, "net_pnl": 0.0, "effective_rr_sum": 0.0, "effective_rr_count": 0, "expectancy_buckets": {}})
+        b["count"] += 1
+        outcome = str(r.get("close_reason") or r.get("shadow_outcome") or r.get("lifecycle_state") or r.get("status_after") or "UNKNOWN").upper()
+        b["tp"] += int(outcome in {"TP_HIT", "WOULD_TP"})
+        b["sl"] += int(outcome in {"SL_HIT", "WOULD_SL"})
+        b["timeout"] += int(outcome in {"WOULD_TIMEOUT", "OPEN_AT_END"})
+        b["net_pnl"] += _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+        eff = _safe_float(r.get("effective_rr"), -1.0)
+        if eff >= 0:
+            b["effective_rr_sum"] += eff; b["effective_rr_count"] += 1
+        eb = str(r.get("expectancy_bucket") or "UNKNOWN")
+        b["expectancy_buckets"][eb] = b["expectancy_buckets"].get(eb, 0) + 1
+    for b in out.values():
+        n = max(1, int(b["count"]))
+        b["tp_rate"] = b["tp"] / n; b["sl_rate"] = b["sl"] / n; b["net_pnl_per_signal"] = b["net_pnl"] / n
+        b["mean_effective_rr"] = b["effective_rr_sum"] / b["effective_rr_count"] if b["effective_rr_count"] else None
+    return {"score_10_saturation_count": sum(1 for r in rows if _safe_float(r.get("score"), -1.0) >= 10.0), "by_score_bucket": out}
 
 def write_backtest_quality_summary(path: str, summary: Mapping[str, Any]) -> None:
     with open(path, "w", newline="") as f:
@@ -2744,6 +2852,7 @@ def main():
                     "recent_stats": recent_stats,
                     "symbol_meta": symbol_meta,
                     "disabled_backtest_filters": disabled_filters,
+                    "min_effective_rr": getattr(getattr(cfg, "runtime", cfg), "min_effective_rr", 1.60),
                 }
                 _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})
@@ -2783,6 +2892,7 @@ def main():
             {"quoteVolume": 100000000.0},
             fixture_candles[:7],
         )
+        mctx["MIN_EFFECTIVE_RR"] = getattr(getattr(cfg, "runtime", cfg), "min_effective_rr", 1.60)
         synthetic = CandidateOrder(
             c0.timestamp,
             symbol,

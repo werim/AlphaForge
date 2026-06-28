@@ -49,3 +49,9 @@ def test_dashboard_override_validation(tmp_path):
         write_dashboard_overrides({'UNKNOWN_SETTING': '1'}, root=tmp_path)
     with pytest.raises(ValueError):
         write_dashboard_overrides({'ALPHAFORGE_ENABLE_LIVE_TRADING': 'true'}, root=tmp_path)
+
+
+def test_all_dashboard_editable_managed_settings_are_documented_in_env_example():
+    env_names = _env_names_from_example()
+    editable = {s.env_name for s in CONFIG_REGISTRY if s.dashboard_editable and not s.secret}
+    assert editable.issubset(env_names)

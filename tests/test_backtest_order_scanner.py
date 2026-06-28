@@ -645,13 +645,13 @@ def test_rejected_signal_lifecycle_precedes_any_trade_simulation(monkeypatch):
     rejected_result = {
         "status": "rejected",
         "reason": "LOW_SCORE",
-        "diagnostics": {"side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "score": 2.0, "rr": 1.2, "entry": 10.0, "sl": 9.5, "tp": 11.0},
+        "diagnostics": {"side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "X", "regime": "TREND", "score": 2.0, "rr": 1.7, "entry": 10.0, "sl": 9.5, "tp": 11.0},
     }
     bo.process_backtest_result("AAAUSDT", candles[0], 0, candles, rejected_result, {"entry": 10.0, "sl": 9.5, "tp": 11.0}, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
 
     executed_result = {
         "status": "executed",
-        "candidate": type("X", (), {"side": "LONG", "entry": 10.0, "sl": 9.5, "tp": 10.8, "rr": 1.6, "setup_type": "BREAKOUT_UP", "setup_reason": "Y", "regime": "TREND", "score": 8.0, "order_type": "MARKET"})(),
+        "candidate": type("X", (), {"side": "LONG", "entry": 10.0, "sl": 9.5, "tp": 11.0, "rr": 2.0, "setup_type": "BREAKOUT_UP", "setup_reason": "Y", "regime": "TREND", "score": 8.0, "order_type": "MARKET"})(),
         "diagnostics": {"expectancy": 0.12},
     }
     bo.process_backtest_result("AAAUSDT", candles[1], 1, candles, executed_result, {"entry": 10.0, "sl": 9.5, "tp": 10.8, "expected_slippage_pct": 0.0, "spread_pct": 0.0, "liquidity_score": 1.0}, 1000, 1.0, lifecycle, rejected, rejection_counts, open_rows, recent_stats)
@@ -1391,7 +1391,7 @@ def test_rescue_config_does_not_change_global_order_thresholds():
     assert cfg.effective_rr_min == pytest.approx(1.90)
     assert order.MIN_SCORE_BASE == pytest.approx(7.5)
     assert order.MIN_RR_BASE == pytest.approx(1.3)
-    assert order.MIN_RR_THRESHOLD == pytest.approx(1.1)
+    assert order.MIN_RR_THRESHOLD == pytest.approx(1.6)
 
 
 def _shadow_eval(symbol, reason, score, effective_rr, outcome, **kwargs):
@@ -1539,3 +1539,27 @@ def test_quality_gate_stop_too_wide_not_allowed_by_default_when_would_sl_dominat
     assert "STOP_TOO_WIDE" not in cfg.allowed_reasons
     assert summary["quality_gate_candidate_count"] == 0
     assert summary["quality_gate_reason_breakdown"] == {}
+
+
+def test_backtest_quality_summary_includes_accepted_quality_and_score_calibration():
+    rows = [
+        {"signal_id":"a","decision":"ACCEPTED","lifecycle_state":"POSITION_CLOSED","close_reason":"SL_HIT","symbol":"BTCUSDT","side":"LONG","regime":"TREND","score":10.0,"rr":2.0,"effective_rr":1.7,"expectancy_bucket":"LOW","net_pnl_usdt":-1.0,"timestamp":1700000000000},
+        {"signal_id":"b","decision":"ACCEPTED","lifecycle_state":"POSITION_CLOSED","close_reason":"TP_HIT","symbol":"ETHUSDT","side":"SHORT","regime":"BREAKOUT","score":8.0,"rr":2.2,"effective_rr":2.0,"expectancy_bucket":"HIGH","net_pnl_usdt":2.0,"timestamp":1700003600000},
+    ]
+    summary = bo.build_backtest_quality_summary(rows)
+    q = summary["accepted_trade_quality_diagnostics"]
+    assert q["accepted_tp_rate"] == 0.5
+    assert q["accepted_sl_rate"] == 0.5
+    assert q["by_score_bucket"]["10"]["sl"] == 1
+    assert q["by_effective_rr_bucket"]["1.6-1.9"]["count"] == 1
+    assert q["by_symbol"]["BTCUSDT"]["net_pnl"] == -1.0
+    cal = summary["score_calibration_diagnostics"]
+    assert cal["score_10_saturation_count"] == 1
+    assert cal["by_score_bucket"]["10"]["sl"] == 1
+
+
+def test_quality_summary_records_disabled_filter_acceptance_evidence():
+    rows = [{"decision":"ACCEPTED","symbol":"BTCUSDT","score":9,"rr":2,"effective_rr":2,"disabled_filters":"[\"RR_TOO_LOW\"]","disabled_filter_bypass_count":1,"net_pnl_usdt":-3.0}]
+    evidence = bo.build_backtest_quality_summary(rows)["disabled_filter_acceptance_evidence"]
+    assert evidence["accepted_because_filter_disabled_count"] == 1
+    assert evidence["estimated_pnl_impact_usdt"] == -3.0
