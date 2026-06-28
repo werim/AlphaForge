@@ -3,6 +3,29 @@
 ## Unreleased
 
 ### Added
+- Added accepted-trade quality diagnostics for TP/SL rate and expectancy by score bucket, regime, effective-RR bucket, side, symbol, and hour/session.
+- Added score calibration diagnostics comparing score buckets to TP/SL/TIMEOUT, net PnL, effective RR, and expectancy buckets.
+- Added disabled-filter acceptance evidence to quality summaries, including accepted-because-disabled count and estimated PnL impact when exported.
+- Added regression tests for effective-RR `RR_TOO_LOW` gating, default regime mismatch safety, accepted quality diagnostics, score=10 saturation diagnostics, and disabled-filter metadata.
+
+### Changed
+- Raised the typed default `MIN_EFFECTIVE_RR` from 1.10 to 1.60 so accepted BACKTEST/PAPER/LIVE decisions require stronger execution-adjusted reward before trade count can increase.
+- Made `RR_TOO_LOW` explicitly evaluate execution-adjusted RR, not only raw RR, while preserving BACKTEST-only disabled-filter experiments.
+
+### Fixed
+- Fixed the backtest execution reject path so `LOW_EFFECTIVE_RR` uses the configured minimum effective RR instead of a hardcoded 1.10 threshold.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Conservative default quality tightening may reduce accepted trades in BACKTEST/PAPER/LIVE when overrides are not set.
+
+### Known Issues
+- Score calibration remains diagnostic-only; no curve-fit score bucket filter was added from the 90d BTC/ETH run.
+- LIVE readiness remains rejected until lifecycle, persistence, execution realism, and stable PAPER expectancy are proven.
+
+### Added
 - Added accepted-trade diagnostics aliases for stop loss, take profit, exit price, gross PnL, net PnL, and fee/cost evidence.
 - Added score saturation diagnostics with score-bucket WOULD_TP/WOULD_SL/TIMEOUT splits, score=10 TP/SL rates, accepted bucket splits, and rejected shadow bucket splits.
 - Added DAILY_GLOBAL_TRADE_LIMIT near-miss diagnostics with symbol, side, timestamp, effective RR, score, shadow outcome, net-outcome direction, and same-day accepted trade context.

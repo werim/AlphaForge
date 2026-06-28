@@ -62,7 +62,7 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_DATABASE_URL", "database_url", "str", "sqlite:///./alphaforge.db", "Mode / Safety", MODES, "Runtime persistence database URL.", dashboard_editable=False, deprecated_aliases=("ALPHAFORGE_DB_URL", "DATABASE_URL")),
     _s("ALPHAFORGE_MIN_SIGNAL_SCORE", "min_signal_score", "float", 0.62, "Trade Quality Filters", MODES, "Minimum normalized signal score.", 0.0, 10.0, deprecated_aliases=("ALPHAFORGE_MIN_ACCEPT_SCORE",)),
     _s("ALPHAFORGE_MIN_RR", "min_rr", "float", 1.20, "Trade Quality Filters", MODES, "Minimum raw risk/reward.", 0.0, 10.0),
-    _s("MIN_EFFECTIVE_RR", "min_effective_rr", "float", 1.10, "Trade Quality Filters", MODES, "Minimum execution-adjusted RR.", 0.0, 10.0, deprecated_aliases=("ALPHAFORGE_MIN_EFFECTIVE_RR",)),
+    _s("MIN_EFFECTIVE_RR", "min_effective_rr", "float", 1.60, "Trade Quality Filters", MODES, "Minimum execution-adjusted RR.", 0.0, 10.0, deprecated_aliases=("ALPHAFORGE_MIN_EFFECTIVE_RR",)),
     _s("ALPHAFORGE_MIN_SL_PCT", "min_sl_pct", "float", 0.15, "Trade Quality Filters", MODES, "Minimum stop distance percent.", 0.0, 100.0),
     _s("ALPHAFORGE_MAX_SL_PCT", "max_sl_pct", "float", 1.5, "Trade Quality Filters", MODES, "Maximum stop distance percent.", 0.0, 100.0),
     _s("ALPHAFORGE_MIN_ATR_PCT", "min_atr_pct", "float", 0.25, "Trade Quality Filters", MODES, "Minimum ATR percent when ATR exists.", 0.0, 100.0),

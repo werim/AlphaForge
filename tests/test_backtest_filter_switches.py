@@ -73,3 +73,20 @@ def test_backtest_symbol_selector_switches_are_real_decision_gates():
     assert not {"TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "PANIC_CONDITIONS"}.intersection(disabled.reject_reasons)
     assert set(disabled.diagnostics["bypassed_reject_reasons"]) == {"TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "PANIC_CONDITIONS"}
 
+
+
+def test_rr_too_low_uses_effective_rr_and_can_only_be_bypassed_in_backtest():
+    c = _candidate(rr=2.2)
+    market = {"effective_rr": 1.2, "spread_pct": 0.001, "expected_slippage_pct": 0.001, "atr_pct": 1.0, "volatility_regime": "normal"}
+    enabled = evaluate_trade_quality(c, market, {}, {"MODE": "BACKTEST", "MIN_EFFECTIVE_RR": 1.6})
+    disabled = evaluate_trade_quality(c, market, {}, {"MODE": "BACKTEST", "MIN_EFFECTIVE_RR": 1.6, "DISABLED_BACKTEST_FILTERS": ["RR_TOO_LOW"]})
+    paper = evaluate_trade_quality(c, market, {}, {"MODE": "PAPER", "MIN_EFFECTIVE_RR": 1.6, "DISABLED_BACKTEST_FILTERS": ["RR_TOO_LOW"]})
+    assert enabled.reject_reason == "RR_TOO_LOW"
+    assert disabled.accepted
+    assert "RR_TOO_LOW" in disabled.diagnostics["bypassed_reject_reasons"]
+    assert paper.reject_reason == "RR_TOO_LOW"
+
+
+def test_regime_mismatch_enabled_by_default():
+    c = _candidate(setup_type="RANGE_MEAN_REVERSION", regime="TREND")
+    assert evaluate_trade_quality(c, {}, {}, {"MODE": "BACKTEST"}).reject_reason == "REGIME_MISMATCH"

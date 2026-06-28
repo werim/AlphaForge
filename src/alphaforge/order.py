@@ -212,6 +212,9 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         expectancy_val = None
     score = float(getattr(candidate, "score", 0.0) or 0.0)
     rr = float(getattr(candidate, "rr", 0.0) or 0.0)
+    effective_rr = _nullable_float(market_ctx.get("effective_rr"))
+    if effective_rr is None:
+        effective_rr = rr
     min_trade_score = float(cfg["MIN_TRADE_SCORE"])
     score_eval = score if min_trade_score <= 1.0 else (score * 10.0 if 0.0 <= score < 1.0 else score)
     pattern_flags = [str(f).upper() for f in (market_ctx.get("pattern_flags", []) or [])]
@@ -223,7 +226,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         return True
 
     _check(score_eval >= min_trade_score, "score")
-    _check(rr >= float(cfg["MIN_RR"]), "rr")
+    _check(rr >= float(cfg["MIN_RR"]) and effective_rr >= float(cfg["MIN_EFFECTIVE_RR"]), "rr")
     _check((not cfg["BLOCK_UNKNOWN_EXPECTANCY"]) or expectancy_val is not None, "expectancy_present")
     _check(expectancy_val is None or expectancy_val >= float(cfg["MIN_EXPECTANCY"]), "expectancy_non_negative")
     _check((not cfg["BLOCK_CHOP_MARKET"]) or (not any("CHOP" in f for f in pattern_flags)), "pattern_flags")
@@ -272,7 +275,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         reject_reason, failed_filter = "INVALID_CANDIDATE", "candidate"
     elif score_eval < min_trade_score and not _bypass("LOW_SCORE"):
         reject_reason, failed_filter = "LOW_SCORE", "score"
-    elif rr < float(cfg["MIN_RR"]) and not _bypass("RR_TOO_LOW"):
+    elif (rr < float(cfg["MIN_RR"]) or effective_rr < float(cfg["MIN_EFFECTIVE_RR"])) and not _bypass("RR_TOO_LOW"):
         reject_reason, failed_filter = "RR_TOO_LOW", "rr"
     elif cfg["BLOCK_UNKNOWN_EXPECTANCY"] and expectancy_val is None:
         reject_reason, failed_filter = "EXPECTANCY_MISSING", "expectancy"
@@ -345,7 +348,7 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
                 reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
 
     stop_too_wide_softened = sl_pct > float(cfg["MAX_SL_PCT"]) and reject_reason == ""
-    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "effective_rr": effective_rr, "min_effective_rr": float(cfg["MIN_EFFECTIVE_RR"]), "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
     if stop_too_wide_softened:
         diagnostics.update({
             "stop_too_wide_softened": True,

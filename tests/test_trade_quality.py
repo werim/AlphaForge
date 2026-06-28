@@ -118,7 +118,7 @@ def test_sl_streak_makes_threshold_binding():
 
 
 def test_breakout_up_breakout_regime_not_rejected_by_regime_mapping():
-    c = OrderCandidate(symbol="BTCUSDT", side="LONG", setup_type="BREAKOUT_UP", setup_reason="close_above_high", regime="BREAKOUT", score=8.5, rr=1.55, expectancy=0.2, entry=100.0, sl=99.0, tp=101.55)
+    c = OrderCandidate(symbol="BTCUSDT", side="LONG", setup_type="BREAKOUT_UP", setup_reason="close_above_high", regime="BREAKOUT", score=8.5, rr=1.65, expectancy=0.2, entry=100.0, sl=99.0, tp=101.55)
     d = evaluate_trade_quality(c, {**base_market(), "regime": "BREAKOUT", "volatility_regime": "breakout", "spread_pct": 0.001, "expected_slippage_pct": 0.001}, {}, {})
     assert d.reject_reason != "REGIME_MISMATCH"
     assert d.accepted is True
@@ -136,7 +136,7 @@ def test_stop_too_wide_high_score_softened_with_risk_scale():
 def test_stop_too_wide_high_score_low_effective_rr_stays_rejected():
     c = base_candidate(); c.score = 10.0; c.rr = 2.5; c.sl = 98.0
     d = evaluate_trade_quality(c, {**base_market(), "effective_rr": 1.5}, {}, {})
-    assert d.reject_reason == "STOP_TOO_WIDE"
+    assert d.reject_reason == "RR_TOO_LOW"
 
 
 def test_stop_too_wide_extreme_stays_rejected_when_hard_reject_enabled():
