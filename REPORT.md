@@ -1,3 +1,46 @@
+## 2026-06-30 - BACKTEST daily timeframe support and truthful interval errors
+
+### Why the patch was needed
+Dashboard-launched BACKTEST runs for `Timeframe=1d` failed closed with `Unsupported interval=1d`, but the dashboard mapped that backend capability error to a misleading Binance data-shortage message.
+
+### Root cause
+The historical data interval map only recognized intraday intervals up to `1h`, while the dashboard allowed `4h` and `1d`. The dashboard error classifier treated all historical data exceptions as insufficient-data failures and did not persist enough failed-run metadata to audit the requested timeframe or filter state.
+
+### Files changed
+- `src/alphaforge/historical_market_data.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `backtest_order.py`
+- `tests/test_historical_market_data.py`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+BACKTEST historical loading now supports Binance-compatible `4h` and `1d` klines. Unsupported intervals raise `UNSUPPORTED_TIMEFRAME` with the requested interval, supported intervals, and source function. Dashboard validation remains BACKTEST-scoped and uses backend-supported intervals. PAPER/LIVE behavior is unchanged.
+
+### Lifecycle changes
+No lifecycle state transition semantics changed. Failed pre-run BACKTEST panels now show `SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE` instead of implying selected BACKTEST diagnostics exist.
+
+### Persistence changes
+No SQLite schema migration. Dashboard BACKTEST runs now write additive `backtest_run_metadata.json` evidence containing requested/effective timeframe, last-n-days, effective start/end, symbols, failure reason, requested profile, enabled/disabled optional filters, and whether filter state was applied before failure.
+
+### Export/schema changes
+Successful summary CSV rows now include additive requested/effective timeframe/window/symbol fields. Coverage errors include returned and required candle counts.
+
+### Tests added/executed
+Added regression tests for `_interval_ms("1d")`, `4h`, daily pagination, unsupported timeframe classification, dashboard failed metadata, and failed-dashboard diagnostic isolation.
+
+### Risks and limitations
+This patch does not tune strategy thresholds, weaken safety gates, or increase accepted trade count. Network-dependent live Binance validation remains environment-sensitive.
+
+### Migration concerns
+None for SQLite. Artifact consumers should tolerate additive metadata keys.
+
+### Push recommendation
+Safe to push after full pytest and requested smoke BACKTEST commands complete. LIVE remains NOT READY.
+
 
 ## 2026-06-30 - BACKTEST profile comparison runner
 

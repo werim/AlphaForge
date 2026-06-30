@@ -3310,6 +3310,13 @@ def main():
     )
     summary = {
         "selected_symbols": len(universe),
+        "requested_timeframe": args.interval,
+        "effective_timeframe": args.interval,
+        "requested_last_n_days": args.last_n_days,
+        "effective_start": start_ms,
+        "effective_end": end_ms,
+        "symbols": json.dumps([row.get("symbol") for row in universe], sort_keys=True),
+        "failure_reason": "",
         "total_candidates": counts["total_candidates"],
         "accepted_count": counts["accepted_count"],
         "baseline_accepted_trades": counts["accepted_count"] - rescue_stats.accepted_count,

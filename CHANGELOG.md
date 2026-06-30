@@ -1,3 +1,28 @@
+## 2026-06-30 - BACKTEST daily timeframe support and truthful failures
+
+### Added
+- Added Binance historical candle support for BACKTEST `4h` and `1d` intervals.
+- Added dashboard run metadata artifacts with requested/effective timeframe, requested window, symbols, failure reason, and filter-state evidence.
+- Added regression coverage for daily pagination, unsupported timeframe classification, failed metadata, and failed-dashboard diagnostic isolation.
+
+### Changed
+- Dashboard-supported BACKTEST timeframe choices now derive from backend historical interval support for `1m`, `15m`, `1h`, `4h`, and `1d`.
+- Historical coverage failures now include requested_start, requested_end, symbol, interval, returned_count, and required_min_count.
+
+### Fixed
+- Unsupported historical intervals now report `UNSUPPORTED_TIMEFRAME` with requested interval, supported intervals, and source function instead of being mapped to not-enough-data messaging.
+- Failed BACKTEST rendering now marks selected diagnostics unavailable and does not substitute stale PAPER diagnostics.
+- Failed-run filter metadata no longer falsely implies all optional filters were disabled when the default profile was requested.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; artifact fields are additive. PAPER/LIVE behavior is unchanged.
+
+### Known Issues
+- LIVE readiness is unchanged and remains NOT READY.
+
 
 ## 2026-06-30 - BACKTEST profile comparison runner
 
