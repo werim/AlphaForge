@@ -579,7 +579,19 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert "Actionable signal rejects / Symbol-selector rejects / Order-lifecycle rejects" in html
     assert "Passed score/RR/expectancy before later gates" in html
     assert "LOW_SCORE Shadow Comparison" in html
+    assert "WOULD_TP" in html
+    assert "WOULD_SL" in html
     assert "Top Near-Miss Rejected Signals" in html
+    assert "Accepted Trade Diagnostics" in html
+    assert "s4" in html
+    assert "BTCUSDT" in html
+    assert "SL_HIT" in html
+    assert "REGIME_MISMATCH" in html
+    assert "0.14" in html
+    assert "Signal Quality Diagnostics" in html
+    assert "Later Gate Diagnostics" in html
+    assert "Score Saturation Diagnostics" in html
+    assert "DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics" in html
 
 
 def test_calibration_near_miss_uses_shadow_symbol_timestamp_side_match() -> None:
@@ -792,4 +804,11 @@ def test_failed_backtest_html_does_not_substitute_stale_paper_diagnostics(monkey
         data={"last_days": "90", "symbols": "BTCUSDT", "timeframe": "1d", "initial_balance": "10000", "max_symbols": "1"},
     ).text
     assert "SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE" in html
+    assert "Accepted Trade Diagnostics" not in html
+    assert "Backtest Top Rejection Reasons" not in html
     assert "Signal Quality Diagnostics" not in html
+    assert "Later Gate Diagnostics" not in html
+    assert "LOW_SCORE Shadow Comparison" not in html
+    assert "Top Near-Miss Rejected Signals" not in html
+    assert "Score Saturation Diagnostics" not in html
+    assert "DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics" not in html

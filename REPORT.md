@@ -1,3 +1,43 @@
+## 2026-06-30 - BACKTEST evidence rendering contract replacement
+
+### Why the patch was needed
+PR 239 was not merged because its table-by-table dashboard edits caused ping-pong regressions where completed BACKTEST evidence was hidden and failed BACKTEST runs could render misleading diagnostic evidence.
+
+### Root cause
+The selected BACKTEST template section did not have one explicit completed-vs-failed rendering contract. Individual diagnostic blocks were guarded independently, so later edits could hide completed-run headings or leak empty diagnostics into failed runs.
+
+### Files changed
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+The dashboard selected BACKTEST panel now has one top-level contract: completed runs render the full selected BACKTEST evidence chain, while failed/non-completed runs render only `SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE` plus failure details/warnings when available. PAPER SQL panels remain outside that selected BACKTEST evidence section.
+
+### Lifecycle changes
+No lifecycle state transition logic changed. Completed-run lifecycle-derived diagnostics remain visible; failed-run selected diagnostics are explicitly unavailable.
+
+### Persistence changes
+No SQLite schema or artifact persistence behavior changed.
+
+### Export/schema changes
+No artifact parsing semantics, CSV exports, or schema fields changed.
+
+### Tests added/executed
+Updated dashboard regression coverage to assert completed selected BACKTEST HTML includes accepted trade diagnostics, rejection reasons, shadow comparison, near-miss evidence, and required diagnostic headings. Updated failed selected BACKTEST coverage to assert diagnostic headings are absent when the selected run fails.
+
+### Risks and limitations
+This is a dashboard template/rendering patch only. It does not prove strategy expectancy, tune thresholds, weaken gates, or alter accepted trade counts.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push as a clean replacement PR for the BACKTEST Evidence Rendering Contract Phase after dependency-complete dashboard test execution. LIVE remains NOT READY.
+
+
 ## 2026-06-30 - BACKTEST daily timeframe support and truthful interval errors
 
 ### Why the patch was needed
