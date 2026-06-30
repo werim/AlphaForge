@@ -87,6 +87,13 @@ class DashboardBacktestResult:
     score_saturation_diagnostics: dict[str, Any] = field(default_factory=dict)
     daily_global_trade_limit_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     dynamic_trade_limit_proposal: dict[str, Any] = field(default_factory=dict)
+    filter_profile: str = "DEFAULT"
+    enabled_filters: list[str] = field(default_factory=list)
+    hard_safety_gates: list[str] = field(default_factory=list)
+    filter_state_path: str | None = None
+    filter_warning: str = ""
+    filter_profile_comparison_path: str | None = None
+    accepted_loss_diagnostics_path: str | None = None
 
 
 def default_form_values() -> dict[str, Any]:
@@ -797,12 +804,16 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     rejected_shadow_path = output_dir / "rejected_shadow.csv"
     backtest_orders_path = output_dir / "backtest_orders.csv"
     signal_quality_summary_path = output_dir / "signal_quality_summary.json"
+    filter_state_path = output_dir / "backtest_filter_state.json"
+    filter_comparison_path = output_dir / "backtest_filter_profile_comparison.json"
+    accepted_loss_path = output_dir / "accepted_trade_loss_diagnostics.json"
     summary = _read_first_csv_row(summary_path)
     lifecycle_rows = _read_csv_rows(lifecycle_path)
     rejected_rows = _read_csv_rows(rejected_path)
     rejected_shadow_rows = _read_csv_rows(rejected_shadow_path)
     backtest_order_rows = _read_csv_rows(backtest_orders_path)
     signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
+    filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() and filter_state_path.stat().st_size else {}
     result.status = "COMPLETED"
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
@@ -851,12 +862,22 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else []
     result.stop_too_wide_quality_split = signal_quality_summary.get("stop_too_wide_split", {}) if isinstance(signal_quality_summary, dict) else {}
     result.top_quality_improvement_candidates = signal_quality_summary.get("top_quality_improvement_candidates", []) if isinstance(signal_quality_summary, dict) else []
+    if isinstance(filter_state, dict) and filter_state:
+        result.filter_state_path = str(filter_state_path)
+        result.filter_profile = str(filter_state.get("filter_profile", result.filter_profile))
+        result.enabled_filters = list(filter_state.get("enabled_filters", []))
+        result.disabled_filters = list(filter_state.get("disabled_filters", result.disabled_filters))
+        result.hard_safety_gates = [str(g.get("filter_name")) for g in filter_state.get("hard_safety_gates", []) if isinstance(g, dict)]
+        result.filter_warning = str(filter_state.get("all_off_warning", "") or "")
+    result.filter_profile_comparison_path = str(filter_comparison_path) if filter_comparison_path.exists() else None
+    result.accepted_loss_diagnostics_path = str(accepted_loss_path) if accepted_loss_path.exists() else None
     if summary.get("disabled_filters"):
         try:
             result.disabled_filters = list(json.loads(summary.get("disabled_filters", "[]")))
         except Exception:
             pass
     result.filter_switch_experiment_active = str(summary.get("filter_switch_experiment_active", result.filter_switch_experiment_active)).lower() in {"1", "true", "yes", "on"}
+    result.filter_profile = str(summary.get("filter_profile", result.filter_profile) or result.filter_profile)
     if result.rejected_signals is not None and result.accepted_trades is not None:
         denom = result.rejected_signals + result.accepted_trades
         result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None

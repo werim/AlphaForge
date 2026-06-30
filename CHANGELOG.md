@@ -1,3 +1,27 @@
+## 2026-06-30 - BACKTEST filter-state audit and filters-off damage diagnostics
+
+### Added
+- Added machine-readable `backtest_filter_state.json` / `.csv` artifacts identifying optional BACKTEST filters, enabled/disabled state, source, affected reject reasons, hard safety gates, and ALL_OFF warnings.
+- Added `backtest_filter_profile_comparison.json` scaffold for DEFAULT / ALL_OFF / CUSTOM artifact-only comparison.
+- Added accepted-trade loss diagnostics by score bucket, regime, side, symbol, effective-RR bucket, high effective-RR accepted outcomes, and score=10 accepted net PnL.
+- Added `docs/backtest_filter_switch_audit.md` with switch mapping, hard safety gates, naming notes, and filters-off interpretation.
+
+### Changed
+- Dashboard backtest results now label filter profile (`ALL_OFF`, `DEFAULT`, `CUSTOM`), enabled/disabled optional filters, hard safety gates, and all-off diagnostic warning.
+- Score saturation and filters-off evidence remain diagnostic-only; default thresholds are unchanged.
+
+### Fixed
+- Backtest artifacts now prove that accepted diagnostics remain exportable while filter-state evidence is attached to each run.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. BACKTEST-only diagnostics; PAPER/LIVE behavior is unchanged.
+
+### Known Issues
+- Profile comparison is artifact-first: operators must run DEFAULT, ALL_OFF, and CUSTOM profiles to fill all comparison cells across 30/90/180/365 days. LIVE remains NOT READY.
+
 # Changelog
 
 ## Unreleased

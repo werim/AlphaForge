@@ -1,5 +1,47 @@
 # AlphaForge Technical Surgery Report
 
+## 2026-06-30 - BACKTEST filter-state audit and filters-off damage diagnostics
+
+### Why this patch was needed
+The latest dashboard run intentionally unchecked every optional BACKTEST filter and showed high acceptance with severe negative expectancy. The dashboard did not yet make the run profile, hard safety gates, or switch-to-reject mapping auditable in every artifact.
+
+### Root cause
+Optional BACKTEST switches were real decision switches, but generated artifacts did not explicitly distinguish optional filters from always-on hard safety gates. A filters-off diagnostic could therefore be misread as strategy performance instead of damage attribution.
+
+### Files changed
+- `backtest_order.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_backtest_filter_switches.py`
+- `docs/backtest_filter_switch_audit.md`
+- `CHANGELOG.md`
+- `VERSION.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+BACKTEST writes filter-state and diagnostic artifacts for each run. Default filter thresholds are unchanged. PAPER/LIVE switch behavior is unchanged.
+
+### Lifecycle changes
+No lifecycle transition semantics changed. Rejected rows and accepted diagnostics remain persisted/exported through existing lifecycle artifacts.
+
+### Persistence/export/schema changes
+CSV/JSON artifacts are append-only additions: `backtest_filter_state.json`, `backtest_filter_state.csv`, `backtest_filter_profile_comparison.json`, `accepted_trade_loss_diagnostics.json`, and `accepted_trade_loss_diagnostics.csv`. No SQLite schema migration is required.
+
+### Tests added/executed
+Added regression tests for all-off filter-state recording, `NEGATIVE_EXPECTANCY` hard safety persistence, artifact-only comparison scaffolding, and accepted loss diagnostics.
+
+### Risks and limitations
+The comparison artifact records the current run and marks other profiles as not run; a complete 30/90/180/365 comparison still requires separate profile runs. Score=10 saturation remains diagnostic-only and does not tune thresholds.
+
+### Migration concerns
+None for SQLite. Consumers may optionally read the new JSON/CSV artifacts.
+
+### Push recommendation
+Safe to push for BACKTEST diagnostic transparency. Do not treat filters-off results as LIVE readiness.
+
+---
+
+
 ## Why this patch was needed
 The latest dashboard BACKTEST diagnostics showed very high rejection, but accepted BTC/ETH 90d 15m trades still had negative net PnL and many SL_HIT outcomes. Accepted effective RR averaged only about 1.58, score=10 was not reliably predictive, and disabling or weakening gates could hide low-quality acceptance.
 

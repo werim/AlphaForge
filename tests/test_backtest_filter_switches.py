@@ -90,3 +90,55 @@ def test_rr_too_low_uses_effective_rr_and_can_only_be_bypassed_in_backtest():
 def test_regime_mismatch_enabled_by_default():
     c = _candidate(setup_type="RANGE_MEAN_REVERSION", regime="TREND")
     assert evaluate_trade_quality(c, {}, {}, {"MODE": "BACKTEST"}).reject_reason == "REGIME_MISMATCH"
+
+import importlib.util
+
+_BO_SPEC = importlib.util.spec_from_file_location("backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py")
+bo = importlib.util.module_from_spec(_BO_SPEC)
+assert _BO_SPEC.loader is not None
+_BO_SPEC.loader.exec_module(bo)
+
+
+def test_filter_state_artifact_records_all_disabled_filters(tmp_path):
+    state = bo.build_backtest_filter_state(
+        disabled_filters=bo.BACKTEST_FILTER_REASONS,
+        source="dashboard",
+        timestamp="2026-06-30T00:00:00+00:00",
+        symbols=["BTCUSDT", "ETHUSDT"],
+        timeframe="1h",
+        last_days=30,
+    )
+    bo.write_backtest_filter_state_artifacts(str(tmp_path), state)
+    assert state["filter_profile"] == "ALL_OFF"
+    assert set(state["disabled_filters"]) == set(bo.BACKTEST_FILTER_REASONS)
+    assert "diagnostic stress test" in state["all_off_warning"]
+    assert (tmp_path / "backtest_filter_state.json").exists()
+    assert "LOW_SCORE" in (tmp_path / "backtest_filter_state.csv").read_text()
+
+
+def test_negative_expectancy_remains_hard_safety_when_all_optional_filters_disabled():
+    c = _candidate(score=10.0, rr=3.0, expectancy=-0.2)
+    decision = evaluate_trade_quality(c, {"effective_rr": 3.0}, {}, {"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": list(bo.BACKTEST_FILTER_REASONS)})
+    assert decision.reject_reason == "NEGATIVE_EXPECTANCY"
+    assert "NEGATIVE_EXPECTANCY" in {reason for gate in bo.HARD_SAFETY_GATES for reason in gate["affected_reject_reasons"]}
+
+
+def test_filter_profile_comparison_artifact_is_backtest_only_scaffold():
+    state = bo.build_backtest_filter_state(disabled_filters=[], source="default", timestamp="now", symbols=["BTCUSDT"], timeframe="1h", last_days=30)
+    artifact = bo.build_filter_profile_comparison_artifact({"total_candidates": 3, "accepted_count": 1, "rejected_count": 2}, {}, state)
+    assert artifact["mode"] == "BACKTEST"
+    assert artifact["artifact_only"] is True
+    assert artifact["profiles"]["DEFAULT"]["accepted_trades"] == 1
+    assert artifact["profiles"]["ALL_OFF"]["status"] == "NOT_RUN_IN_THIS_ARTIFACT"
+
+
+def test_accepted_loss_diagnostics_exports_required_buckets():
+    rows = [
+        {"decision": "ACCEPTED", "lifecycle_state": "POSITION_CLOSED", "close_reason": "TP_HIT", "score": 10, "effective_rr": 2.5, "net_pnl_usdt": 3, "regime": "TREND", "side": "LONG", "symbol": "BTCUSDT"},
+        {"decision": "ACCEPTED", "lifecycle_state": "POSITION_CLOSED", "close_reason": "SL_HIT", "score": 10, "effective_rr": 2.6, "net_pnl_usdt": -5, "regime": "TREND", "side": "SHORT", "symbol": "ETHUSDT"},
+    ]
+    diag = bo.build_accepted_loss_diagnostics(rows)
+    assert diag["accepted_count"] == 2
+    assert diag["by"]["score_bucket"]["10"]["losses"] == 1
+    assert diag["score_10_accepted_net_pnl"] == -2
+    assert diag["high_effective_rr_accepted_outcome_split"] == {"TP_HIT": 1, "SL_HIT": 1}
