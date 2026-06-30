@@ -139,6 +139,10 @@
         </tbody>
       </table>
 
+      {% if backtest_result.status != 'COMPLETED' %}
+      <div class="alert warn-box"><strong>SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE.</strong> Selected BACKTEST diagnostics are unavailable because this run failed closed; PAPER runtime diagnostics are not substituted.</div>
+      {% endif %}
+      {% if backtest_result.status == 'COMPLETED' %}
       <h3>Accepted Trade Diagnostics</h3>
       <table>
         <thead><tr><th>Signal</th><th>Symbol</th><th>Side</th><th>Score</th><th>Raw RR</th><th>Effective RR</th><th>Regime</th><th>Entry</th><th>SL</th><th>TP</th><th>Exit</th><th>Close Reason</th><th>Result</th><th>Net PnL</th><th>Net PnL Status</th></tr></thead>
@@ -163,9 +167,6 @@
           {% endif %}
         </tbody>
       </table>
-      {% if backtest_result.status != 'COMPLETED' %}
-      <div class="alert warn-box"><strong>SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE.</strong> Selected BACKTEST diagnostics are unavailable because this run failed closed; PAPER runtime diagnostics are not substituted.</div>
-      {% endif %}
       <h3>Signal Quality Diagnostics</h3>
       <table>
         <tbody>
@@ -201,6 +202,7 @@
         <thead><tr><th>Signal</th><th>Symbol</th><th>Reason</th><th>Score</th><th>Effective RR</th><th>Shadow</th><th>Cost Penalty</th></tr></thead>
         <tbody>{% for row in backtest_result.near_miss_rejected_signals %}<tr><td>{{ row.signal_id }}</td><td>{{ row.symbol }}</td><td>{{ row.reject_reason }}</td><td>{{ row.score }}</td><td>{{ row.effective_rr }}</td><td>{{ row.shadow_outcome }}</td><td>{{ row.cost_penalty }}</td></tr>{% else %}<tr><td colspan="7" class="empty">No near-miss diagnostics available.</td></tr>{% endfor %}</tbody>
       </table>
+      {% endif %}
     </section>
     {% endif %}
   </section>

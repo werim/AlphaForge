@@ -1,3 +1,23 @@
+## 2026-06-30 - Failed BACKTEST diagnostic rendering guard
+
+### Added
+- Added failed BACKTEST HTML regression assertions that selected BACKTEST diagnostic sections do not render when the selected run failed closed.
+
+### Changed
+- The full selected BACKTEST diagnostic evidence chain now renders only when `backtest_result.status == "COMPLETED"`, while the failure warning remains visible for non-completed selected BACKTEST runs.
+
+### Fixed
+- Fixed failed BACKTEST HTML rendering so empty diagnostic evidence tables are not shown after `SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE`, preventing stale or implied selected BACKTEST diagnostics.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; dashboard rendering only.
+
+### Known Issues
+- LIVE readiness remains NOT READY. Failed selected BACKTEST runs intentionally show unavailable diagnostics rather than substituting PAPER/runtime evidence.
+
 ## 2026-06-30 - Dashboard complete BACKTEST diagnostics visibility fix
 
 ### Added

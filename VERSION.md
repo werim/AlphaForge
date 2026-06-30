@@ -1,3 +1,15 @@
+## 2026-06-30 Failed BACKTEST diagnostic rendering guard
+
+- Current version: unreleased dashboard failed-BACKTEST evidence guard increment
+- Current phase: BACKTEST Evidence Consistency Phase UI completion
+- Runtime maturity: BACKTEST dashboard rendering improved; PAPER/LIVE unchanged
+- BACKTEST/PAPER/LIVE alignment: template-only display guard; no decision, artifact parser, persistence, runtime loop, or order-path behavior changed
+- Lifecycle coverage: no lifecycle semantics changed; failed selected BACKTEST runs show diagnostics unavailable instead of empty selected-evidence tables
+- Execution realism coverage: no execution model changes; completed-run diagnostics remain evidence-only
+- Known critical risks: LIVE readiness remains fail-closed; failed BACKTEST diagnostics are unavailable and never replaced by PAPER/runtime data
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 Dashboard complete BACKTEST diagnostics visibility fix
 
 - Current version: unreleased dashboard BACKTEST evidence chain rendering increment

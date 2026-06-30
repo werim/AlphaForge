@@ -800,3 +800,8 @@ def test_failed_backtest_html_does_not_substitute_stale_paper_diagnostics(monkey
     ).text
     assert "SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE" in html
     assert "Signal Quality Diagnostics" not in html
+    assert "Top Near-Miss Rejected Signals" not in html
+    assert "Later Gate Diagnostics" not in html
+    assert "Accepted Trade Diagnostics" not in html
+    assert "Backtest Top Rejection Reasons" not in html
+    assert "LOW_SCORE Shadow Comparison" not in html

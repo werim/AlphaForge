@@ -1,3 +1,45 @@
+## 2026-06-30 - Failed BACKTEST diagnostic rendering guard
+
+### Why the patch was needed
+After the diagnostic evidence chain was ungated for completed BACKTEST visibility, failed selected BACKTEST pages rendered empty selected diagnostic sections alongside `SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE`. That implied selected BACKTEST diagnostics existed when the run had failed closed.
+
+### Root cause
+The template fix removed the completed-run gate too broadly. Successful runs need the full evidence chain, but failed selected BACKTEST runs must show only the failure warning and must not render selected BACKTEST diagnostic sections or substitute PAPER/runtime evidence.
+
+### Exact template condition changed
+The selected BACKTEST diagnostic evidence chain is wrapped in `{% if backtest_result.status == 'COMPLETED' %}`. The failure warning remains in a separate `{% if backtest_result.status != 'COMPLETED' %}` block.
+
+### Files changed
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+No BACKTEST decision behavior changed. Completed selected BACKTEST runs render the full evidence chain. Failed selected BACKTEST runs render `SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE` and do not render selected BACKTEST diagnostic evidence tables.
+
+### Lifecycle changes
+No lifecycle state-machine changes.
+
+### Persistence changes
+None. No SQLite or artifact schema changes.
+
+### Export/schema changes
+None.
+
+### Tests added/executed
+Extended the failed BACKTEST HTML regression to assert absent sections: Signal Quality Diagnostics, Top Near-Miss Rejected Signals, Later Gate Diagnostics, Accepted Trade Diagnostics, Backtest Top Rejection Reasons, and LOW_SCORE Shadow Comparison.
+
+### Risks and limitations
+This is a dashboard-template-only rendering fix. It does not tune thresholds, weaken gates, change artifact parsing, or alter PAPER/LIVE runtime behavior.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after dashboard and full pytest validation. LIVE remains NOT READY.
+
 ## 2026-06-30 - Dashboard complete BACKTEST diagnostics visibility fix
 
 ### Why the patch was needed
