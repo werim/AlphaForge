@@ -1,3 +1,26 @@
+## 2026-06-30 - BACKTEST SHORT Breakdown Rescue Reporting Experiment
+
+### Added
+- Added disabled-by-default BACKTEST-only `SHORT_BREAKDOWN_RESCUE` activation path with conservative 0.25x default sizing and export-visible rescue metadata.
+- Added `.env.example` controls for SHORT breakdown rescue enablement, max-per-day, allowed reasons, minimum effective RR, minimum shadow expectancy, and size multiplier.
+- Added dashboard separation for BASELINE accepted trades, RESCUE accepted trades, and reporting-only quality gates.
+- Added regression coverage for disabled baseline parity, enabled rescue rows, SHORT-only eligibility, LOW_SCORE LONG exclusion, metadata population, BACKTEST-only filter-state marking, and PAPER/LIVE non-activation.
+
+### Changed
+- `backtest_filter_state` now records BACKTEST-only experiment switches separately from standard optional filters.
+
+### Fixed
+- None.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; artifacts receive additive fields only.
+
+### Known Issues
+- Rescue remains BACKTEST-only and experimental; rejected-shadow expectancy is diagnostic evidence, not LIVE readiness.
+
 ## 2026-06-30 - BACKTEST filter-state audit and filters-off damage diagnostics
 
 ### Added

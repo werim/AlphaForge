@@ -1563,3 +1563,89 @@ def test_quality_summary_records_disabled_filter_acceptance_evidence():
     evidence = bo.build_backtest_quality_summary(rows)["disabled_filter_acceptance_evidence"]
     assert evidence["accepted_because_filter_disabled_count"] == 1
     assert evidence["estimated_pnl_impact_usdt"] == -3.0
+
+def _short_breakdown_result(reason="LOW_SCORE", side="SHORT", setup_type="BREAKDOWN_DOWN", regime="BREAKOUT"):
+    return {
+        "status": "rejected",
+        "reason": reason,
+        "diagnostics": {
+            "side": side, "setup_type": setup_type, "setup_reason": "SHORT_BREAKDOWN", "regime": regime,
+            "score": 6.0, "rr": 1.4, "entry": 10.0, "sl": 10.5, "tp": 9.3, "order_type": "MARKET",
+            "failed_filter": reason,
+        },
+    }
+
+
+def _short_breakdown_mctx():
+    return {
+        "entry": 10.0, "sl": 10.5, "tp": 9.3, "score": 6.0, "rr": 1.4,
+        "spread_pct": 0.001, "expected_slippage_pct": 0.001,
+        "liquidity_score": 0.9, "liquidity_ok": True, "volatility_ok": "UNAVAILABLE_BACKTEST",
+        "regime": "BREAKOUT", "volatility_regime": "NORMAL",
+    }
+
+
+def test_short_breakdown_rescue_disabled_preserves_baseline_rejection():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 10.6, 9.2, 9.5, 1), bo.Candle(2, 9.5, 10.0, 9.0, 9.2, 1)]
+    cand = bo.process_backtest_result(
+        "AAAUSDT", candles[0], 0, candles, _short_breakdown_result(), _short_breakdown_mctx(), 1000, 1.0,
+        lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(),
+        short_breakdown_rescue_config=bo.ShortBreakdownRescueConfig(enabled=False), mode="BACKTEST",
+    )
+    assert cand is None
+    assert len([r for r in lifecycle if r.status_after in {"SIGNAL_ACCEPTED", "ORDER_PLACED", "POSITION_CLOSED"}]) == 0
+    assert rejected[0]["reject_reason"] == "LOW_SCORE"
+
+
+def test_short_breakdown_rescue_enabled_marks_rows_and_original_reason():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 10.6, 9.2, 9.5, 1), bo.Candle(2, 9.5, 9.8, 9.0, 9.1, 1)]
+    stats = bo.RescueStats()
+    cand = bo.process_backtest_result(
+        "AAAUSDT", candles[0], 0, candles, _short_breakdown_result(), _short_breakdown_mctx(), 1000, 1.0,
+        lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(), rescue_stats=stats,
+        short_breakdown_rescue_config=bo.ShortBreakdownRescueConfig(enabled=True, max_trades_per_day=3), mode="BACKTEST",
+    )
+    assert cand is not None
+    assert cand.side == "SHORT"
+    assert cand.accepted_reason == "SHORT_BREAKDOWN_RESCUE"
+    assert cand.original_reject_reason == "LOW_SCORE"
+    persisted = bo._persist_lifecycle_rows(lifecycle)
+    assert any(r["accepted_reason"] == "SHORT_BREAKDOWN_RESCUE" and r["original_reject_reason"] == "LOW_SCORE" for r in persisted)
+
+
+def test_short_breakdown_rescue_is_short_only_and_does_not_rescue_low_score_long():
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    candles = [bo.Candle(1, 10, 10.6, 9.2, 9.5, 1)]
+    stats = bo.RescueStats()
+    cand = bo.process_backtest_result(
+        "AAAUSDT", candles[0], 0, candles,
+        _short_breakdown_result(side="LONG", setup_type="BREAKOUT_UP"), _short_breakdown_mctx(), 1000, 1.0,
+        lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(), rescue_stats=stats,
+        short_breakdown_rescue_config=bo.ShortBreakdownRescueConfig(enabled=True), mode="BACKTEST",
+    )
+    assert cand is None
+    assert rejected[0]["side"] == "LONG"
+    assert not any(r.accepted_reason == "SHORT_BREAKDOWN_RESCUE" for r in lifecycle)
+
+
+def test_backtest_filter_state_marks_short_breakdown_rescue_backtest_only():
+    state = bo.build_backtest_filter_state(disabled_filters=[], source="default", timestamp="now", symbols=["BTCUSDT"], timeframe="15m", last_days=30, short_breakdown_rescue_enabled=True)
+    exp = state["backtest_only_experiments"][0]
+    assert exp["name"] == "SHORT_BREAKDOWN_RESCUE"
+    assert exp["enabled"] is True
+    assert exp["mode"] == "BACKTEST only"
+
+
+def test_short_breakdown_rescue_paper_live_untouched():
+    for mode in ("PAPER", "LIVE"):
+        lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+        candles = [bo.Candle(1, 10, 10.6, 9.2, 9.5, 1)]
+        cand = bo.process_backtest_result(
+            "AAAUSDT", candles[0], 0, candles, _short_breakdown_result(), _short_breakdown_mctx(), 1000, 1.0,
+            lifecycle, rejected, rejection_counts, open_rows, _rescue_recent_stats(),
+            short_breakdown_rescue_config=bo.ShortBreakdownRescueConfig(enabled=True), mode=mode,
+        )
+        assert cand is None
+        assert rejected[0]["reject_reason"] == "LOW_SCORE"

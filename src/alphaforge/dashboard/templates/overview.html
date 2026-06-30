@@ -108,6 +108,8 @@
           <tr><th>Backtest reject rate</th><td>{% if backtest_result.backtest_rejection_rate is not none %}{{ '%.2f'|format(backtest_result.backtest_rejection_rate * 100) }}%{% else %}Unavailable{% endif %} — selected backtest only; top cards above are PAPER runtime SQL state.</td></tr>
           <tr><th>Win / Loss / Open</th><td>{{ backtest_result.win_count if backtest_result.win_count is not none else 'Unavailable' }} / {{ backtest_result.loss_count if backtest_result.loss_count is not none else 'Unavailable' }} / {{ backtest_result.open_count if backtest_result.open_count is not none else 'Unavailable' }}</td></tr>
           <tr><th>Net PnL</th><td>{{ backtest_result.net_pnl if backtest_result.net_pnl is not none else 'Unavailable' }}</td></tr>
+          <tr><th>BASELINE accepted trades</th><td>{{ backtest_result.baseline_accepted_trades if backtest_result.baseline_accepted_trades is not none else 'Unavailable' }} | Baseline PnL: {{ backtest_result.baseline_net_pnl if backtest_result.baseline_net_pnl is not none else 'Unavailable' }}</td></tr>
+          <tr><th>RESCUE accepted trades</th><td>{{ backtest_result.rescue_accepted_count if backtest_result.rescue_accepted_count is not none else 'Unavailable' }} / candidates {{ backtest_result.rescue_candidate_count if backtest_result.rescue_candidate_count is not none else 'Unavailable' }} | Rescue PnL: {{ backtest_result.rescue_accepted_net_pnl if backtest_result.rescue_accepted_net_pnl is not none else 'Unavailable' }} | Baseline+Rescue PnL: {{ backtest_result.baseline_plus_rescue_net_pnl if backtest_result.baseline_plus_rescue_net_pnl is not none else 'Unavailable' }}</td></tr>
           <tr><th>Return / Max drawdown</th><td>{{ backtest_result.total_return_pct if backtest_result.total_return_pct is not none else 'Unavailable' }} / {{ backtest_result.max_drawdown if backtest_result.max_drawdown is not none else 'Unavailable' }}</td></tr>
           <tr><th>Actionable signal rejects / Symbol-selector rejects / Order-lifecycle rejects</th><td>{{ backtest_result.signal_rows_count if backtest_result.signal_rows_count is not none else 'Unavailable' }} / {{ backtest_result.symbol_selector_reject_count if backtest_result.symbol_selector_reject_count is not none else 'Unavailable' }} / {{ backtest_result.order_reject_reason_counts|length }}</td></tr>
           <tr><th>Rejection funnel</th><td>{{ backtest_result.rejection_funnel }}</td></tr>
@@ -129,6 +131,7 @@
           <tr><th>Score saturation</th><td>{{ backtest_result.signal_quality_diagnostics.get('score_saturation', {}) }}</td></tr>
           <tr><th>High effective-RR rejected outcome split</th><td>{{ backtest_result.high_effective_rr_missed_alpha }}</td></tr>
           <tr><th>STOP_TOO_WIDE WOULD_TP vs WOULD_SL split</th><td>{{ backtest_result.stop_too_wide_quality_split }}</td></tr>
+          <tr><th>Reporting-only gates</th><td>{{ backtest_result.signal_quality_diagnostics.get('candidate_quality_gates', []) }}</td></tr>
         </tbody>
       </table>
       <h3>Top Quality-Improvement Candidates</h3>
