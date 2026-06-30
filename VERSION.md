@@ -1,3 +1,15 @@
+## 2026-06-30 Dashboard accepted diagnostics rendering fix
+
+- Current version: unreleased dashboard BACKTEST evidence rendering increment
+- Current phase: BACKTEST Evidence Consistency Phase UI completion
+- Runtime maturity: BACKTEST dashboard rendering improved; PAPER/LIVE unchanged
+- BACKTEST/PAPER/LIVE alignment: template-only display fix; no decision, persistence, runtime loop, or order-path behavior changed
+- Lifecycle coverage: populated accepted trade diagnostics are now visible in rendered `/backtest/run` evidence
+- Execution realism coverage: no execution model changes; existing execution/cost diagnostics remain evidence-only
+- Known critical risks: LIVE readiness remains fail-closed; rendered BACKTEST evidence does not prove positive expectancy
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 Dashboard selected profile artifact parsing and metric consistency
 
 - Current version: unreleased dashboard BACKTEST profile artifact consistency increment

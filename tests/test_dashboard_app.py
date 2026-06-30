@@ -573,6 +573,9 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     ).text
     assert "Backtest reject rate" in html
     assert "Accepted Trade Diagnostics" in html
+    assert "s4" in html
+    assert "BTCUSDT" in html
+    assert "SL_HIT" in html
     assert "Backtest Top Rejection Reasons" in html
     assert "LOW_SCORE" in html
     assert "LOW_LIQUIDITY" in html

@@ -1,3 +1,23 @@
+## 2026-06-30 - Dashboard accepted diagnostics rendering fix
+
+### Added
+- Added focused dashboard HTML assertions that accepted trade diagnostics render the heading, accepted signal ID, symbol, and accepted result.
+
+### Changed
+- Accepted Trade Diagnostics now renders immediately after the main Backtest Result artifact table whenever a result object is present, preserving the existing empty state when no accepted diagnostics exist.
+
+### Fixed
+- Fixed the remaining dashboard rendering regression where populated `accepted_trade_diagnostics` could be absent from the rendered `/backtest/run` HTML due to completed-diagnostics section gating.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; dashboard rendering only.
+
+### Known Issues
+- LIVE readiness remains NOT READY. BACKTEST evidence rendering does not change decision logic or runtime safety gates.
+
 ## 2026-06-30 - Dashboard selected profile artifact parsing and metric consistency
 
 ### Added

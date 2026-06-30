@@ -1,3 +1,42 @@
+## 2026-06-30 - Dashboard accepted diagnostics rendering fix
+
+### Why the patch was needed
+The BACKTEST artifact/model hydration path populated `result.accepted_trade_diagnostics`, including accepted signal `s4`, but the rendered `/backtest/run` HTML could still omit the `Accepted Trade Diagnostics` section.
+
+### Root cause
+The accepted diagnostics table lived inside the completed diagnostics branch. The BACKTEST result summary table rendered regardless, so core metrics such as reject rate appeared, but accepted diagnostics were still coupled to broader completed-only diagnostic rendering instead of the presence of accepted diagnostics/empty-state dashboard evidence.
+
+### Files changed
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+No BACKTEST decision behavior changed. The dashboard now renders the Accepted Trade Diagnostics table immediately after the main Backtest Result artifact table, with the existing empty-state row when no accepted diagnostics are available.
+
+### Lifecycle changes
+No lifecycle state machine changes. Existing accepted lifecycle diagnostics are displayed more reliably.
+
+### Persistence changes
+None. No SQLite or artifact schema changes.
+
+### Export/schema changes
+None.
+
+### Tests added/executed
+Added focused rendered HTML assertions for `Accepted Trade Diagnostics`, accepted signal `s4`, accepted symbol `BTCUSDT`, and accepted result `SL_HIT`.
+
+### Risks and limitations
+This is a dashboard-template-only fix. It does not tune thresholds, weaken gates, or alter PAPER/LIVE runtime behavior.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after dashboard and full pytest validation. LIVE remains NOT READY.
+
 ## 2026-06-30 - Dashboard selected profile artifact parsing and metric consistency
 
 ### Why the patch was needed
