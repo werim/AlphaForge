@@ -1,3 +1,15 @@
+## 2026-06-30 Dashboard selected profile artifact parsing and metric consistency
+
+- Current version: unreleased dashboard BACKTEST profile artifact consistency increment
+- Current phase: BACKTEST dashboard comparison-result parsing hardening
+- Runtime maturity: BACKTEST dashboard artifact parsing improved; PAPER/LIVE unchanged
+- BACKTEST/PAPER/LIVE alignment: patch is confined to BACKTEST/dashboard artifacts and quality summaries; no PAPER/LIVE runtime loops or order paths changed
+- Lifecycle coverage: selected comparison profile now surfaces existing per-profile lifecycle/reject/calibration diagnostics; unique accepted-trade reason counting avoids lifecycle-event inflation
+- Execution realism coverage: selected profile execution-cost summaries and effective-RR/score distributions are loaded from profile artifacts; unavailable values remain explicit
+- Known critical risks: LIVE readiness remains fail-closed; comparison diagnostics do not prove positive expectancy or relax safety gates
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 BACKTEST daily timeframe support and truthful interval errors
 
 - Current version: unreleased BACKTEST interval/reporting integrity increment

@@ -790,6 +790,114 @@ def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str
         writer.writerows(later_gate_rows)
     return report_path, summary_path, summary_out
 
+
+
+def _load_dashboard_result_artifacts(result: DashboardBacktestResult, artifact_dir: Path, *, write_calibration: bool = True) -> None:
+    summary_path = artifact_dir / "order_backtest_summary.csv"
+    lifecycle_path = artifact_dir / "order_lifecycle.csv"
+    rejected_path = artifact_dir / "rejected_orders.csv"
+    rejected_shadow_path = artifact_dir / "rejected_shadow.csv"
+    backtest_orders_path = artifact_dir / "backtest_orders.csv"
+    signal_quality_summary_path = artifact_dir / "signal_quality_summary.json"
+    filter_state_path = artifact_dir / "backtest_filter_state.json"
+    accepted_loss_path = artifact_dir / "accepted_trade_loss_diagnostics.json"
+    summary = _read_first_csv_row(summary_path)
+    lifecycle_rows = _read_csv_rows(lifecycle_path)
+    rejected_rows = _read_csv_rows(rejected_path)
+    rejected_shadow_rows = _read_csv_rows(rejected_shadow_path)
+    backtest_order_rows = _read_csv_rows(backtest_orders_path)
+    signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
+    filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() and filter_state_path.stat().st_size else {}
+
+    result.summary_path = str(summary_path) if summary_path.exists() else None
+    result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
+    result.rejected_path = str(rejected_path) if rejected_path.exists() else None
+    result.total_candidates = _safe_int(summary.get("total_candidates"))
+    result.accepted_trades = _safe_int(summary.get("accepted_count"))
+    result.rejected_signals = _safe_int(summary.get("rejected_count") or summary.get("total_rejected"))
+    result.win_count = _safe_int(summary.get("tp_hits"))
+    result.loss_count = _safe_int(summary.get("sl_hits"))
+    result.open_count = _safe_int(summary.get("open_at_end"))
+    result.net_pnl = summary.get("total_net_pnl_usdt")
+    result.baseline_accepted_count = _safe_int(summary.get("baseline_accepted_trades"))
+    result.rescue_accepted_count = _safe_int(summary.get("rescue_accepted_count"))
+    result.baseline_net_pnl = summary.get("baseline_net_pnl")
+    result.rescue_net_pnl = summary.get("rescue_accepted_net_pnl")
+    result.baseline_plus_rescue_net_pnl = summary.get("baseline_plus_rescue_net_pnl")
+    try:
+        result.accepted_reason_breakdown = json.loads(summary.get("accepted_reason_breakdown", "{}") or "{}")
+    except Exception:
+        result.accepted_reason_breakdown = {}
+    result.short_breakdown_rescue_enabled = str(summary.get("short_breakdown_rescue_enabled", result.short_breakdown_rescue_enabled)).lower() in {"1", "true", "yes", "on"}
+    result.total_return_pct = summary.get("total_pnl_pct")
+    result.max_drawdown = None
+    diagnostics = _rejection_diagnostics(rejected_rows)
+    result.top_rejection_reasons = diagnostics["top_rejection_reasons"]
+    result.signal_rows_count = diagnostics["signal_rows_count"]
+    result.symbol_selector_reject_count = diagnostics["symbol_selector_reject_count"]
+    result.score_distribution = diagnostics["score_distribution"]
+    result.rr_distribution = diagnostics["rr_distribution"]
+    result.effective_rr_distribution = diagnostics["effective_rr_distribution"]
+    result.pre_later_gate_pass_count = diagnostics["pre_later_gate_pass_count"]
+    lifecycle_diagnostics = _lifecycle_diagnostics(lifecycle_rows, rejected_rows)
+    result.lifecycle_state_counts = lifecycle_diagnostics["lifecycle_state_counts"]
+    result.lifecycle_path_counts = lifecycle_diagnostics["lifecycle_path_counts"]
+    result.final_reject_reason_counts = lifecycle_diagnostics["final_reject_reason_counts"]
+    result.order_reject_reason_counts = lifecycle_diagnostics["order_reject_reason_counts"]
+    result.symbol_selector_reject_counts = lifecycle_diagnostics["symbol_selector_reject_counts"]
+    if write_calibration:
+        calibration_report_path, calibration_summary_path, calibration_summary = _write_calibration_artifacts(artifact_dir, lifecycle_rows, rejected_rows, summary, rejected_shadow_rows, backtest_order_rows)
+    else:
+        calibration_summary_path = artifact_dir / "lifecycle_calibration_summary.json"
+        calibration_report_path = artifact_dir / "lifecycle_calibration_report.csv"
+        calibration_summary = json.loads(calibration_summary_path.read_text()) if calibration_summary_path.exists() and calibration_summary_path.stat().st_size else _build_calibration_outputs(lifecycle_rows, rejected_rows, summary, rejected_shadow_rows, backtest_order_rows)[1]
+    result.calibration_report_path = str(calibration_report_path) if calibration_report_path.exists() else None
+    result.calibration_summary_path = str(calibration_summary_path) if calibration_summary_path.exists() else None
+    result.rejection_funnel = calibration_summary.get("rejection_funnel", {})
+    result.later_gate_diagnostics = calibration_summary.get("later_gate_diagnostics", [])
+    result.low_score_shadow_comparison = calibration_summary.get("low_score_shadow_comparison", {})
+    result.execution_cost_summary = calibration_summary.get("execution_cost_summary", {})
+    result.near_miss_rejected_signals = calibration_summary.get("near_miss_rejected_signals", [])
+    result.accepted_trade_diagnostics = calibration_summary.get("accepted_trade_diagnostics", [])
+    result.accepted_score_distribution = calibration_summary.get("accepted_score_distribution", {})
+    result.accepted_effective_rr_distribution = calibration_summary.get("accepted_effective_rr_distribution", {})
+    result.near_miss_score_distribution = calibration_summary.get("near_miss_score_distribution", {})
+    result.near_miss_effective_rr_distribution = calibration_summary.get("near_miss_effective_rr_distribution", {})
+    result.stop_too_wide_rescue_diagnostics = calibration_summary.get("stop_too_wide_rescue_diagnostics", {})
+    result.score_saturation_diagnostics = calibration_summary.get("score_saturation_diagnostics", {})
+    result.daily_global_trade_limit_diagnostics = calibration_summary.get("daily_global_trade_limit_diagnostics", [])
+    result.dynamic_trade_limit_proposal = calibration_summary.get("dynamic_trade_limit_proposal", {})
+    result.signal_quality_diagnostics = signal_quality_summary if isinstance(signal_quality_summary, dict) else {}
+    result.high_effective_rr_missed_alpha = result.signal_quality_diagnostics.get("high_effective_rr_missed_alpha", [])
+    result.stop_too_wide_quality_split = result.signal_quality_diagnostics.get("stop_too_wide_split", {})
+    result.top_quality_improvement_candidates = result.signal_quality_diagnostics.get("top_quality_improvement_candidates", [])
+    if isinstance(filter_state, dict) and filter_state:
+        result.filter_state_path = str(filter_state_path)
+        result.filter_profile = str(filter_state.get("filter_profile", result.filter_profile))
+        result.enabled_filters = list(filter_state.get("enabled_filters", []))
+        result.disabled_filters = list(filter_state.get("disabled_filters", result.disabled_filters))
+        result.hard_safety_gates = [str(g.get("filter_name")) for g in filter_state.get("hard_safety_gates", []) if isinstance(g, dict)]
+        result.filter_warning = str(filter_state.get("all_off_warning", "") or "")
+        experiment_state = filter_state.get("experiments", {}).get("SHORT_BREAKDOWN_RESCUE", {}) if isinstance(filter_state.get("experiments", {}), dict) else {}
+        if experiment_state:
+            result.short_breakdown_rescue_enabled = str(experiment_state.get("enabled", result.short_breakdown_rescue_enabled)).lower() in {"1", "true", "yes", "on"}
+    result.accepted_loss_diagnostics_path = str(accepted_loss_path) if accepted_loss_path.exists() else None
+    if summary.get("disabled_filters"):
+        try:
+            result.disabled_filters = list(json.loads(summary.get("disabled_filters", "[]")))
+        except Exception:
+            pass
+    result.filter_switch_experiment_active = str(summary.get("filter_switch_experiment_active", result.filter_switch_experiment_active)).lower() in {"1", "true", "yes", "on"}
+    result.filter_profile = str(summary.get("filter_profile", result.filter_profile) or result.filter_profile)
+    if result.rejected_signals is not None and result.accepted_trades is not None:
+        denom = result.rejected_signals + result.accepted_trades
+        result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None
+    if result.total_candidates is None or result.rejected_signals is None:
+        result.lifecycle_warning = "Lifecycle/reject metrics unavailable from generated backtest artifacts; values are shown as unavailable, not zero."
+    unavailable_markers = {"", "UNAVAILABLE_BACKTEST", "None", "null"}
+    if not lifecycle_rows or any(str(row.get("spread_pct", "")).strip() in unavailable_markers for row in lifecycle_rows[:50]):
+        result.execution_context_warning = "Execution context is incomplete for at least part of this backtest; unknown spread/slippage/funding is unavailable, not assumed zero."
+
 PROFILE_FILTERS: dict[str, list[str]] = {
     "DEFAULT_FILTERS": [],
     "ALL_FILTERS_OFF": list(default_form_values()["filter_reasons"]),
@@ -870,7 +978,7 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
     rejected_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected")) or len(rejected)
     max_dd = _safe_float_or_none(summary.get("max_drawdown"))
     max_losses = _max_consecutive_losses(accepted)
-    avg_per_day = accepted_count / max(1, _safe_int(summary.get("last_days")) or 1)
+    avg_per_day = accepted_count / max(1, _safe_int(summary.get("requested_last_n_days")) or _safe_int(summary.get("last_days")) or 1)
     drawdown_penalty = abs(max_dd) if max_dd is not None else 0.0
     components = {
         "raw_net_pnl": net,
@@ -1045,6 +1153,11 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         result.profile_leaderboard = sorted(leaderboard, key=lambda r: r["objective_score_rank"])
         result.filter_profile_comparison_path = str(output_dir / "backtest_filter_profile_comparison.json")
         result.profile_leaderboard_path = str(output_dir / "backtest_profile_leaderboard.json")
+        selected_profile = "DEFAULT_FILTERS"
+        selected_dir = profiles_root / selected_profile
+        result.output_dir = str(selected_dir)
+        _load_dashboard_result_artifacts(result, selected_dir, write_calibration=False)
+        result.filter_profile = selected_profile
         return result
     try:
         run_env = os.environ.copy()
@@ -1066,107 +1179,6 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
             result.execution_context_warning = "SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE"
         return result
 
-    summary_path = output_dir / "order_backtest_summary.csv"
-    lifecycle_path = output_dir / "order_lifecycle.csv"
-    rejected_path = output_dir / "rejected_orders.csv"
-    rejected_shadow_path = output_dir / "rejected_shadow.csv"
-    backtest_orders_path = output_dir / "backtest_orders.csv"
-    signal_quality_summary_path = output_dir / "signal_quality_summary.json"
-    filter_state_path = output_dir / "backtest_filter_state.json"
-    filter_comparison_path = output_dir / "backtest_filter_profile_comparison.json"
-    accepted_loss_path = output_dir / "accepted_trade_loss_diagnostics.json"
-    summary = _read_first_csv_row(summary_path)
-    lifecycle_rows = _read_csv_rows(lifecycle_path)
-    rejected_rows = _read_csv_rows(rejected_path)
-    rejected_shadow_rows = _read_csv_rows(rejected_shadow_path)
-    backtest_order_rows = _read_csv_rows(backtest_orders_path)
-    signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
-    filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() and filter_state_path.stat().st_size else {}
-    result.status = "COMPLETED"
-    run_metadata.update({"status": "COMPLETED", "failure_reason": None})
-    _write_backtest_run_metadata(run_metadata_path, run_metadata)
-    result.summary_path = str(summary_path) if summary_path.exists() else None
-    result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
-    result.rejected_path = str(rejected_path) if rejected_path.exists() else None
-    result.total_candidates = _safe_int(summary.get("total_candidates"))
-    result.accepted_trades = _safe_int(summary.get("accepted_count"))
-    result.rejected_signals = _safe_int(summary.get("rejected_count") or summary.get("total_rejected"))
-    result.win_count = _safe_int(summary.get("tp_hits"))
-    result.loss_count = _safe_int(summary.get("sl_hits"))
-    result.open_count = _safe_int(summary.get("open_at_end"))
-    result.net_pnl = summary.get("total_net_pnl_usdt")
-    result.baseline_accepted_count = _safe_int(summary.get("baseline_accepted_trades"))
-    result.rescue_accepted_count = _safe_int(summary.get("rescue_accepted_count"))
-    result.baseline_net_pnl = summary.get("baseline_net_pnl")
-    result.rescue_net_pnl = summary.get("rescue_accepted_net_pnl")
-    result.baseline_plus_rescue_net_pnl = summary.get("baseline_plus_rescue_net_pnl")
-    try:
-        result.accepted_reason_breakdown = json.loads(summary.get("accepted_reason_breakdown", "{}") or "{}")
-    except Exception:
-        result.accepted_reason_breakdown = {}
-    result.short_breakdown_rescue_enabled = str(summary.get("short_breakdown_rescue_enabled", result.short_breakdown_rescue_enabled)).lower() in {"1", "true", "yes", "on"}
-    result.total_return_pct = summary.get("total_pnl_pct")
-    result.max_drawdown = None
-    diagnostics = _rejection_diagnostics(rejected_rows)
-    result.top_rejection_reasons = diagnostics["top_rejection_reasons"]
-    result.signal_rows_count = diagnostics["signal_rows_count"]
-    result.symbol_selector_reject_count = diagnostics["symbol_selector_reject_count"]
-    result.score_distribution = diagnostics["score_distribution"]
-    result.rr_distribution = diagnostics["rr_distribution"]
-    result.effective_rr_distribution = diagnostics["effective_rr_distribution"]
-    result.pre_later_gate_pass_count = diagnostics["pre_later_gate_pass_count"]
-    lifecycle_diagnostics = _lifecycle_diagnostics(lifecycle_rows, rejected_rows)
-    result.lifecycle_state_counts = lifecycle_diagnostics["lifecycle_state_counts"]
-    result.lifecycle_path_counts = lifecycle_diagnostics["lifecycle_path_counts"]
-    result.final_reject_reason_counts = lifecycle_diagnostics["final_reject_reason_counts"]
-    result.order_reject_reason_counts = lifecycle_diagnostics["order_reject_reason_counts"]
-    result.symbol_selector_reject_counts = lifecycle_diagnostics["symbol_selector_reject_counts"]
-    calibration_report_path, calibration_summary_path, calibration_summary = _write_calibration_artifacts(output_dir, lifecycle_rows, rejected_rows, summary, rejected_shadow_rows, backtest_order_rows)
-    result.calibration_report_path = str(calibration_report_path)
-    result.calibration_summary_path = str(calibration_summary_path)
-    result.rejection_funnel = calibration_summary["rejection_funnel"]
-    result.later_gate_diagnostics = calibration_summary["later_gate_diagnostics"]
-    result.low_score_shadow_comparison = calibration_summary["low_score_shadow_comparison"]
-    result.execution_cost_summary = calibration_summary["execution_cost_summary"]
-    result.near_miss_rejected_signals = calibration_summary["near_miss_rejected_signals"]
-    result.accepted_trade_diagnostics = calibration_summary["accepted_trade_diagnostics"]
-    result.accepted_score_distribution = calibration_summary["accepted_score_distribution"]
-    result.accepted_effective_rr_distribution = calibration_summary["accepted_effective_rr_distribution"]
-    result.near_miss_score_distribution = calibration_summary["near_miss_score_distribution"]
-    result.near_miss_effective_rr_distribution = calibration_summary["near_miss_effective_rr_distribution"]
-    result.stop_too_wide_rescue_diagnostics = calibration_summary["stop_too_wide_rescue_diagnostics"]
-    result.score_saturation_diagnostics = calibration_summary["score_saturation_diagnostics"]
-    result.daily_global_trade_limit_diagnostics = calibration_summary["daily_global_trade_limit_diagnostics"]
-    result.dynamic_trade_limit_proposal = calibration_summary["dynamic_trade_limit_proposal"]
-    result.signal_quality_diagnostics = signal_quality_summary
-    result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else []
-    result.stop_too_wide_quality_split = signal_quality_summary.get("stop_too_wide_split", {}) if isinstance(signal_quality_summary, dict) else {}
-    result.top_quality_improvement_candidates = signal_quality_summary.get("top_quality_improvement_candidates", []) if isinstance(signal_quality_summary, dict) else []
-    if isinstance(filter_state, dict) and filter_state:
-        result.filter_state_path = str(filter_state_path)
-        result.filter_profile = str(filter_state.get("filter_profile", result.filter_profile))
-        result.enabled_filters = list(filter_state.get("enabled_filters", []))
-        result.disabled_filters = list(filter_state.get("disabled_filters", result.disabled_filters))
-        result.hard_safety_gates = [str(g.get("filter_name")) for g in filter_state.get("hard_safety_gates", []) if isinstance(g, dict)]
-        result.filter_warning = str(filter_state.get("all_off_warning", "") or "")
-        experiment_state = filter_state.get("experiments", {}).get("SHORT_BREAKDOWN_RESCUE", {}) if isinstance(filter_state.get("experiments", {}), dict) else {}
-        if experiment_state:
-            result.short_breakdown_rescue_enabled = str(experiment_state.get("enabled", result.short_breakdown_rescue_enabled)).lower() in {"1", "true", "yes", "on"}
-    result.filter_profile_comparison_path = str(filter_comparison_path) if filter_comparison_path.exists() else None
-    result.accepted_loss_diagnostics_path = str(accepted_loss_path) if accepted_loss_path.exists() else None
-    if summary.get("disabled_filters"):
-        try:
-            result.disabled_filters = list(json.loads(summary.get("disabled_filters", "[]")))
-        except Exception:
-            pass
-    result.filter_switch_experiment_active = str(summary.get("filter_switch_experiment_active", result.filter_switch_experiment_active)).lower() in {"1", "true", "yes", "on"}
-    result.filter_profile = str(summary.get("filter_profile", result.filter_profile) or result.filter_profile)
-    if result.rejected_signals is not None and result.accepted_trades is not None:
-        denom = result.rejected_signals + result.accepted_trades
-        result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None
-    if result.total_candidates is None or result.rejected_signals is None:
-        result.lifecycle_warning = "Lifecycle/reject metrics unavailable from generated backtest artifacts; values are shown as unavailable, not zero."
-    unavailable_markers = {"", "UNAVAILABLE_BACKTEST", "None", "null"}
-    if not lifecycle_rows or any(str(row.get("spread_pct", "")).strip() in unavailable_markers for row in lifecycle_rows[:50]):
-        result.execution_context_warning = "Execution context is incomplete for at least part of this backtest; unknown spread/slippage/funding is unavailable, not assumed zero."
+    _load_dashboard_result_artifacts(result, output_dir, write_calibration=True)
+    result.filter_profile_comparison_path = str(output_dir / "backtest_filter_profile_comparison.json") if (output_dir / "backtest_filter_profile_comparison.json").exists() else None
     return result

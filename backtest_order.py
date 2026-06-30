@@ -1890,11 +1890,17 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
 
     candidate_signal_ids = {str(r.get("signal_id", "")).strip() for r in candidate_rows_for_counts if str(r.get("signal_id", "")).strip()}
     if signal_created_rows:
+        accepted_signal_ids = {
+            str(r.get("signal_id", "")).strip()
+            for r in candidate_rows
+            if _normalized_decision(r) in accepted_tokens and str(r.get("signal_id", "")).strip()
+        }
         rejected_signal_ids = {
             str(r.get("signal_id", "")).strip()
             for r in candidate_rows
             if (_normalized_decision(r) in rejected_tokens or str(r.get("reject_reason", "") or "").strip() != "")
             and str(r.get("signal_id", "")).strip()
+            and str(r.get("signal_id", "")).strip() not in accepted_signal_ids
         }
         rejected_rows = []
         reject_reason_by_signal_id = {
@@ -1911,8 +1917,11 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         accepted_rows = [
             r for r in signal_created_rows
             if str(r.get("reject_reason", "") or "").strip() == ""
+            and (
+                (str(r.get("signal_id", "")).strip() and str(r.get("signal_id", "")).strip() in accepted_signal_ids)
+                or (not str(r.get("signal_id", "")).strip() and _normalized_decision(r) in accepted_tokens)
+            )
             and str(r.get("signal_id", "")).strip() not in rejected_signal_ids
-            and _normalized_decision(r) not in rejected_tokens
         ]
     else:
         rejected_rows = [
@@ -3298,11 +3307,12 @@ def main():
     rescue_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason in rescue_reason_names]
     baseline_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason not in rescue_reason_names]
     rescue_accept_rows = [r for r in lifecycle if r.status_after == "SIGNAL_CREATED" and r.accepted_reason in rescue_reason_names]
-    accepted_reason_breakdown = _distribution([
-        r.accepted_reason
-        for r in lifecycle
-        if r.status_after in {"SIGNAL_ACCEPTED", "ORDER_PLACED", "POSITION_OPENED", "POSITION_CLOSED"}
-    ])
+    accepted_reason_by_trade: dict[str, str] = {}
+    for r in lifecycle:
+        if r.status_after in {"SIGNAL_ACCEPTED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED", "POSITION_OPENED", "POSITION_CLOSED"}:
+            trade_key = r.signal_id or f"{r.symbol}:{r.timestamp}:{r.side}"
+            accepted_reason_by_trade.setdefault(trade_key, r.accepted_reason or "BASELINE")
+    accepted_reason_breakdown = _distribution(list(accepted_reason_by_trade.values()))
     quality_gate_metrics = _quality_gate_metrics(
         [_quality_record_from_shadow(s, args.interval) for s in rejected_shadow],
         quality_gate_config,

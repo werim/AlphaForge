@@ -1,3 +1,43 @@
+## 2026-06-30 - Dashboard selected profile artifact parsing and metric consistency
+
+### Why the patch was needed
+The latest dashboard profile-comparison run wrote valid DEFAULT_FILTERS artifacts under `profiles/DEFAULT_FILTERS/`, but the main Backtest Result panel returned early after writing leaderboard artifacts and therefore never parsed the selected profile directory for accepted/rejected counts, win/loss/open, net PnL, reject reasons, calibration diagnostics, distributions, or execution-cost summaries.
+
+### Root cause
+Comparison mode produced per-profile artifacts and leaderboard metrics but did not hydrate the primary dashboard result object from the selected profile artifact directory. Average trades/day also used a missing/legacy `last_days` field and defaulted to a one-day denominator. Separately, accepted reason counting in `backtest_order.py` counted accepted lifecycle events rather than unique accepted trades, and lifecycle-based quality summaries could miss accepted lifecycle IDs when `SIGNAL_CREATED` rows existed.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `backtest_order.py`
+- `tests/test_backtest_profile_comparison.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+Comparison-mode dashboard runs still execute BACKTEST-only profile sub-runs. After writing comparison and leaderboard artifacts, the main result panel now defaults to `DEFAULT_FILTERS` and parses `profiles/DEFAULT_FILTERS/` for the same metrics used by single-profile runs. PAPER/LIVE runtime loops and live order paths are unchanged.
+
+### Lifecycle changes
+No lifecycle state-machine transitions changed. Dashboard parsing now surfaces selected-profile lifecycle calibration summaries and reject diagnostics instead of leaving them unavailable. Accepted reason summaries now count unique accepted trade/signal IDs, avoiding repeated lifecycle-event inflation.
+
+### Persistence changes
+No SQLite schema migration. The patch reads existing per-profile CSV/JSON artifacts and continues to write existing dashboard comparison artifacts. Quality-summary fields are corrected to align with canonical order summary counts.
+
+### Export/schema changes
+No breaking artifact schema changes. `accepted_reason_breakdown` semantics are corrected to unique accepted trades/signals. Profile comparison `avg_trades_per_day` now uses the requested/effective full window when present.
+
+### Tests added/executed
+Added targeted regression tests for selected-profile main-panel hydration, profile rejected-order diagnostics, profile calibration accepted diagnostics, requested-window average trades/day, lifecycle quality-summary canonical accepted counts, and unique accepted-reason breakdown.
+
+### Risks and limitations
+The selected profile currently defaults to `DEFAULT_FILTERS`; an explicit dashboard selector can be added later without changing artifact parsing. This patch does not tune thresholds, weaken hard gates, or assert LIVE readiness.
+
+### Migration concerns
+None for SQLite. Downstream artifact consumers should interpret `accepted_reason_breakdown` as unique accepted trade/signal counts rather than lifecycle-event counts.
+
+### Push recommendation
+Safe to push after targeted dashboard/backtest tests pass. LIVE remains NOT READY.
+
 ## 2026-06-30 - BACKTEST daily timeframe support and truthful interval errors
 
 ### Why the patch was needed

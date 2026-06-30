@@ -1,6 +1,9 @@
 import csv
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
@@ -34,6 +37,13 @@ def _write_profile_artifacts(profile_dir: Path, disabled: list[str], accepted: i
         writer = csv.DictWriter(fh, fieldnames=list(rejected_rows[0].keys())); writer.writeheader(); writer.writerows(rejected_rows)
     state = {"filter_profile": "ALL_OFF" if disabled else "DEFAULT", "enabled_filters": [], "disabled_filters": disabled, "hard_safety_gates": [{"filter_name": "NEGATIVE_EXPECTANCY"}]}
     (profile_dir / "backtest_filter_state.json").write_text(json.dumps(state))
+    (profile_dir / "lifecycle_calibration_summary.json").write_text(json.dumps({
+        "rejection_funnel": {"accepted_trades": accepted, "signal_engine_signal_rejected": 2},
+        "accepted_trade_diagnostics": [{"symbol": "BTCUSDT", "score": "10", "effective_rr": "2.0"}] if accepted else [],
+        "accepted_score_distribution": {"count": accepted},
+        "accepted_effective_rr_distribution": {"count": accepted},
+        "execution_cost_summary": {"spread_pct": {"count": 2}},
+    }))
 
 
 def test_profile_comparison_runner_writes_real_metrics_and_leaderboard(monkeypatch, tmp_path):
@@ -130,3 +140,73 @@ def test_dashboard_renders_profile_comparison_warning(monkeypatch, tmp_path):
     assert "Backtest Profile Comparison" in response.text
     assert "Diagnostic stress test, not strategy performance" in response.text
     assert "FILTERS_OFF_STRESS_TEST" in response.text
+
+
+def test_profile_comparison_main_result_uses_default_profile_artifacts(monkeypatch, tmp_path):
+    class BacktestCfg:
+        output_dir = str(tmp_path)
+        export_config_snapshot = False
+        top_n = 1
+        timeframe = "1h"
+    class Cfg:
+        backtest = BacktestCfg()
+    monkeypatch.setattr(bc, "load_config_from_env", lambda: Cfg())
+    monkeypatch.setattr(bc, "config_snapshot", lambda mode: {})
+    monkeypatch.setattr(bc, "canonical_utc_timestamp", lambda: "2026-06-30T14:27:38Z")
+
+    def fake_run(command, cwd, text, capture_output, timeout, check, env):
+        profile_dir = Path(command[command.index("--output-dir") + 1])
+        accepted = 4 if profile_dir.name == "DEFAULT_FILTERS" else 9
+        net = 1.0938092385903218 if profile_dir.name == "DEFAULT_FILTERS" else -99.0
+        _write_profile_artifacts(profile_dir, [], accepted, net)
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(bc.subprocess, "run", fake_run)
+    result = bc.run_dashboard_backtest(bc.DashboardBacktestRequest(90, ["BTCUSDT"], "1h", 10000.0, 1, run_profile_comparison=True))
+
+    assert result.status == "COMPLETED"
+    assert result.filter_profile == "DEFAULT_FILTERS"
+    assert result.accepted_trades == 4
+    assert result.rejected_signals == 2
+    assert result.win_count == 3
+    assert result.loss_count == 1
+    assert result.open_count == 0
+    assert result.net_pnl == "1.0938092385903218"
+    assert result.top_rejection_reasons[0]["reason"] == "NEGATIVE_EXPECTANCY"
+    assert result.rejection_funnel["accepted_trades"] == 4
+    assert result.accepted_trade_diagnostics
+    assert result.score_distribution["count"] == 2
+    assert result.accepted_effective_rr_distribution["count"] == 4
+    assert result.execution_cost_summary
+    assert str(Path(result.summary_path).parent).endswith("profiles/DEFAULT_FILTERS")
+
+
+def test_profile_avg_trades_per_day_uses_requested_window(tmp_path):
+    profile_dir = tmp_path / "DEFAULT_FILTERS"
+    _write_profile_artifacts(profile_dir, [], 4, 1.0)
+    # Simulate canonical summary using requested_last_n_days rather than legacy last_days.
+    row = bc._read_first_csv_row(profile_dir / "order_backtest_summary.csv")
+    row["requested_last_n_days"] = "90"
+    row.pop("last_days", None)
+    with (profile_dir / "order_backtest_summary.csv").open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(row.keys()))
+        writer.writeheader(); writer.writerow(row)
+
+    metrics = bc._comparison_metrics("DEFAULT_FILTERS", profile_dir, 10000.0)
+    assert metrics["avg_trades_per_day"] == pytest.approx(4 / 90)
+
+
+def test_backtest_quality_summary_counts_unique_accepted_lifecycle_signals():
+    import backtest_order as bo
+    rows = [
+        {"signal_id": "a", "lifecycle_state": "SIGNAL_CREATED", "accepted_reason": "BASELINE"},
+        {"signal_id": "a", "lifecycle_state": "ORDER_PLACED", "accepted_reason": "BASELINE"},
+        {"signal_id": "a", "lifecycle_state": "POSITION_CLOSED", "accepted_reason": "BASELINE", "net_pnl_usdt": "1"},
+        {"signal_id": "b", "lifecycle_state": "SIGNAL_CREATED", "accepted_reason": "BASELINE", "reject_reason": "LOW_SCORE"},
+        {"signal_id": "b", "lifecycle_state": "SIGNAL_REJECTED", "reject_reason": "LOW_SCORE"},
+    ]
+    summary = bo.build_backtest_quality_summary(rows)
+    assert summary["total_candidates"] == 2
+    assert summary["accepted_count"] == 1
+    assert summary["rejected_count"] == 1
+    assert summary["accepted_reason_breakdown"] == {"BASELINE": 1}

@@ -1,3 +1,27 @@
+## 2026-06-30 - Dashboard selected profile artifact parsing and metric consistency
+
+### Added
+- Added regression coverage for comparison-mode main panel metrics, profile-directory rejected-order diagnostics, profile calibration summaries, requested-window average trades/day, quality-summary contradiction prevention, and unique accepted-reason counting.
+
+### Changed
+- Dashboard comparison mode now loads the selected profile artifact directory for the main Backtest Result panel, defaulting to `DEFAULT_FILTERS`.
+- Profile leaderboard average trades/day now uses `requested_last_n_days` before legacy `last_days`.
+- Backtest quality summary lifecycle handling now treats accepted lifecycle IDs as canonical when `SIGNAL_CREATED` rows are present.
+
+### Fixed
+- Fixed comparison-mode main panel `Unavailable` metrics when artifacts exist under `profiles/<selected_profile>/`.
+- Fixed `accepted_reason_breakdown` inflation from counting multiple lifecycle events for one accepted trade.
+- Fixed quality-summary accepted counts so they cannot contradict canonical accepted lifecycle evidence from order summaries.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; parsing and summary semantics are corrected without SQLite schema changes.
+
+### Known Issues
+- LIVE readiness remains NOT READY. Profile comparison remains BACKTEST-only evidence and does not validate expectancy by itself.
+
 ## 2026-06-30 - BACKTEST daily timeframe support and truthful failures
 
 ### Added
