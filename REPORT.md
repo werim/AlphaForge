@@ -1,3 +1,52 @@
+## 2026-06-30 - Dashboard complete BACKTEST diagnostics visibility fix
+
+### Why the patch was needed
+After accepted diagnostics, top rejection reasons, and LOW_SCORE shadow comparison were restored, the same BACKTEST evidence test exposed the next hidden populated section: Top Near-Miss Rejected Signals. The model already contained near-miss rows with `WOULD_SL` and cost penalty `0.14`.
+
+### Root cause
+A completed-only template branch still wrapped the remaining BACKTEST diagnostic chain. Moving individual tables out one at a time only exposed the next hidden table. The branch needed to stop gating diagnostic evidence tables while preserving the failure warning for failed runs and each table's empty state.
+
+### Exact template sections moved / ungated
+- Signal Quality Diagnostics
+- Top Quality-Improvement Candidates
+- Later Gate Diagnostics
+- Score Saturation Diagnostics
+- DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics
+- Top Near-Miss Rejected Signals
+
+Accepted Trade Diagnostics, Backtest Top Rejection Reasons, and LOW_SCORE Shadow Comparison were already in the visible evidence area and remain there.
+
+### Files changed
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+No BACKTEST decision behavior changed. The dashboard now keeps the selected-backtest failure warning but renders all BACKTEST diagnostic evidence sections in the visible Backtest Result path, relying on their existing empty-state rows when data is absent.
+
+### Lifecycle changes
+No lifecycle state-machine changes.
+
+### Persistence changes
+None. No SQLite or artifact schema changes.
+
+### Export/schema changes
+None.
+
+### Tests added/executed
+Kept the existing Top Near-Miss Rejected Signals assertion and added focused rendered HTML assertions for `WOULD_SL` and `0.14`.
+
+### Risks and limitations
+This is a dashboard-template-only rendering fix. It does not tune thresholds, weaken gates, change artifact parsing, or alter PAPER/LIVE runtime behavior.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after dashboard and full pytest validation. LIVE remains NOT READY.
+
 ## 2026-06-30 - Dashboard LOW_SCORE shadow comparison rendering fix
 
 ### Why the patch was needed

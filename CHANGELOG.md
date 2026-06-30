@@ -1,3 +1,23 @@
+## 2026-06-30 - Dashboard complete BACKTEST diagnostics visibility fix
+
+### Added
+- Added focused dashboard HTML assertions that Top Near-Miss Rejected Signals render `WOULD_SL` and cost penalty `0.14` evidence.
+
+### Changed
+- Removed the remaining completed-only template gate around BACKTEST diagnostic evidence so Signal Quality Diagnostics, Top Quality-Improvement Candidates, Later Gate Diagnostics, Score Saturation Diagnostics, DAILY_GLOBAL_TRADE_LIMIT diagnostics, and Top Near-Miss Rejected Signals render in the visible Backtest Result area with their existing empty states.
+
+### Fixed
+- Fixed the remaining BACKTEST evidence UI rendering chain where populated near-miss diagnostics could be absent from `/backtest/run` HTML after earlier sections were restored.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; dashboard rendering only.
+
+### Known Issues
+- LIVE readiness remains NOT READY. BACKTEST evidence remains diagnostic/reporting-only and does not change thresholds or gates.
+
 ## 2026-06-30 - Dashboard LOW_SCORE shadow comparison rendering fix
 
 ### Added
