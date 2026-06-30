@@ -4,6 +4,7 @@
 - Current version: unreleased dashboard BACKTEST profile comparison increment
 - Current phase: BACKTEST artifact-first profile comparison and leaderboard diagnostics
 - Runtime maturity: BACKTEST comparison improved; PAPER/LIVE unchanged
+- Pre-merge safety audit correction: comparison sub-runs now use an isolated base command with a fixed start/end window; UI-disabled filters apply only to CUSTOM_CURRENT_UI or normal single-profile runs.
 - BACKTEST/PAPER/LIVE alignment: comparison runner is BACKTEST-only and does not add PAPER/LIVE order paths
 - Lifecycle coverage: comparison consumes existing lifecycle exports; no lifecycle state changes
 - Execution realism coverage: objective score penalizes overtrading, loss streaks, execution costs, low samples, and unavailable drawdown is marked rather than fabricated

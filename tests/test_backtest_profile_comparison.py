@@ -48,7 +48,10 @@ def test_profile_comparison_runner_writes_real_metrics_and_leaderboard(monkeypat
     monkeypatch.setattr(bc, "config_snapshot", lambda mode: {})
     monkeypatch.setattr(bc, "canonical_utc_timestamp", lambda: "2026-06-30T00:00:00Z")
 
+    seen_commands = []
+
     def fake_run(command, cwd, text, capture_output, timeout, check, env):
+        seen_commands.append(list(command))
         profile_dir = Path(command[command.index("--output-dir") + 1])
         disabled = [command[i + 1] for i, arg in enumerate(command) if arg == "--disable-backtest-filter"]
         accepted = 4 + len(disabled)
@@ -57,10 +60,17 @@ def test_profile_comparison_runner_writes_real_metrics_and_leaderboard(monkeypat
         return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(bc.subprocess, "run", fake_run)
-    request = bc.DashboardBacktestRequest(30, ["BTCUSDT"], "1h", 10000.0, 1, run_profile_comparison=True)
+    request = bc.DashboardBacktestRequest(30, ["BTCUSDT"], "1h", 10000.0, 1, filter_switches={"LOW_SCORE": False}, run_profile_comparison=True)
     result = bc.run_dashboard_backtest(request)
 
     assert result.status == "COMPLETED"
+    starts = {cmd[cmd.index("--start") + 1] for cmd in seen_commands}
+    ends = {cmd[cmd.index("--end") + 1] for cmd in seen_commands}
+    assert len(starts) == 1 and len(ends) == 1
+    by_profile = {Path(cmd[cmd.index("--output-dir") + 1]).name: cmd for cmd in seen_commands}
+    assert "--disable-backtest-filter" not in by_profile["DEFAULT_FILTERS"]
+    assert "--disable-backtest-filter" in by_profile["CUSTOM_CURRENT_UI"]
+    assert all(cmd[cmd.index("--mode") + 1] == "BACKTEST" for cmd in seen_commands)
     comparison = json.loads(Path(result.filter_profile_comparison_path).read_text())
     assert comparison["comparison_mode"] is True
     for name in ["DEFAULT_FILTERS", "ALL_FILTERS_OFF", "STRICT_FILTERS", "CUSTOM_CURRENT_UI"]:
@@ -78,3 +88,45 @@ def test_profile_comparison_checkbox_parse_and_default_single_profile_unchanged(
     assert not errors
     assert parsed.run_profile_comparison is True
     assert bc.default_form_values()["run_profile_comparison"] is False
+
+
+def test_dashboard_renders_profile_comparison_warning(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    import alphaforge.dashboard.app as dashboard_app
+    from alphaforge.dashboard.app import create_app
+
+    def fake_runner(request):
+        return bc.DashboardBacktestResult(
+            "COMPLETED",
+            "last 30 days",
+            request.symbols,
+            request.timeframe,
+            request.initial_balance,
+            request.max_symbols,
+            profile_leaderboard=[{
+                "profile_name": "ALL_FILTERS_OFF",
+                "raw_net_pnl_rank": 1,
+                "objective_score_rank": 2,
+                "raw_net_pnl": "10",
+                "final_objective_score": "1",
+                "accepted_trades": 9,
+                "win_count": 3,
+                "loss_count": 6,
+                "open_count": 0,
+                "avg_trades_per_day": 3,
+                "score_10_tp_count": 1,
+                "score_10_sl_count": 2,
+                "warnings": ["FILTERS_OFF_STRESS_TEST"],
+            }],
+            filter_profile_comparison_path="comparison.json",
+            profile_leaderboard_path="leaderboard.json",
+        )
+
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", fake_runner)
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'profile-render.db'}")).post("/backtest/run", data={"last_days": "30", "symbols": "BTCUSDT", "timeframe": "1h", "initial_balance": "10000", "max_symbols": "1", "run_profile_comparison": "true"})
+    assert response.status_code == 200
+    assert "Backtest Profile Comparison" in response.text
+    assert "Diagnostic stress test, not strategy performance" in response.text
+    assert "FILTERS_OFF_STRESS_TEST" in response.text

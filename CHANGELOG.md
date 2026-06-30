@@ -11,6 +11,8 @@
 
 ### Fixed
 - Replaced comparison-mode placeholder semantics with real per-profile metrics when comparison mode is selected.
+- Fixed comparison runner isolation so DEFAULT/STRICT/diagnostic profiles no longer inherit current UI-disabled filters, and all sub-runs receive a fixed start/end window for input parity.
+- Added regression coverage for no filter leakage, stable date-window parity, BACKTEST-only command mode, and dashboard warning rendering.
 
 ### Removed
 - Nothing.

@@ -12,7 +12,7 @@ AlphaForge now supports an optional **BACKTEST-only** profile comparison runner 
 - `STOP_WIDTH_GUARD_DIAGNOSTIC`: default filters with diagnostic labeling for stop-width review.
 - `TRADE_FREQUENCY_GUARD_DIAGNOSTIC`: default filters plus exported diagnostic throttle labels for max 1/2/3 trades per day and pause-after-2-SL review. The scaffold is diagnostic and does not change default thresholds.
 
-Each profile runs under `data/backtest/dashboard/<run_id>/profiles/<profile>/` over the same symbols, timeframe, date window, balance, max-symbol limit, and historical data source selected by the dashboard request.
+Each profile runs under `data/backtest/dashboard/<run_id>/profiles/<profile>/` over the same symbols, timeframe, fixed `--start`/`--end` date window, balance, max-symbol limit, and historical data source selected by the dashboard request. The runner builds an isolated base command and appends profile-specific optional filter switches per sub-run so UI custom filters do not leak into DEFAULT, STRICT, or diagnostic profiles.
 
 ## Artifacts
 

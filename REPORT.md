@@ -30,6 +30,10 @@ Added `backtest_filter_profile_comparison.json`, `backtest_profile_leaderboard.j
 ### Tests added/executed
 Local validation included Python compilation and targeted pytest execution.
 
+
+### Pre-merge safety audit correction
+The initial comparison coordinator copied the single-profile command after UI filter disables had been appended, which could contaminate DEFAULT/STRICT/diagnostic profile sub-runs when the dashboard UI had custom disabled filters. It also relied on each subprocess computing `last_n_days` relative to its own clock. The patch now builds an immutable base BACKTEST command, appends profile-specific filter switches only per profile, and passes one fixed `--start`/`--end` window to every sub-run.
+
 ### Risks and limitations
 The 30/90/180/365 multi-window matrix is scaffolded only; non-selected windows are marked NOT_RUN. Diagnostic guard profiles currently preserve default thresholds and export warnings/labels rather than changing global config. Drawdown is not fabricated when unavailable.
 

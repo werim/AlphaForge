@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -203,6 +204,13 @@ def _safe_float_or_none(value: Any) -> float | None:
 def _safe_float(value: Any, default: float = 0.0) -> float:
     parsed = _safe_float_or_none(value)
     return default if parsed is None else parsed
+
+
+def parse_dashboard_window_start_ms(end_iso: str, last_days: int) -> int:
+    """Return a stable BACKTEST window start for all comparison sub-runs."""
+    end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+    start_dt = end_dt - timedelta(days=int(last_days))
+    return int(start_dt.timestamp() * 1000)
 
 
 def _numeric_distribution(rows: list[dict[str, str]], field: str) -> dict[str, Any]:
@@ -911,13 +919,19 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "backtest_order.py"
     symbols = request.symbols[: request.max_symbols]
-    command = [
+    fixed_end = canonical_utc_timestamp()
+    fixed_start_ms = parse_dashboard_window_start_ms(fixed_end, request.last_days)
+    base_command = [
         sys.executable,
         str(script),
         "--mode",
         "BACKTEST",
         "--last-n-days",
         str(request.last_days),
+        "--start",
+        str(fixed_start_ms),
+        "--end",
+        fixed_end,
         "--symbols",
         ",".join(symbols),
         "--top-n",
@@ -930,6 +944,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         str(output_dir),
         "--force-refresh",
     ]
+    command = list(base_command)
     for reason, enabled in request.filter_switches.items():
         if not enabled:
             command.extend(["--disable-backtest-filter", reason])
@@ -957,9 +972,11 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
                 warnings.append("FILTERS_OFF_STRESS_TEST")
             if profile == "TRADE_FREQUENCY_GUARD_DIAGNOSTIC":
                 warnings.extend(["DIAGNOSTIC_MAX_1_TRADE_PER_DAY_NOT_ENFORCED", "DIAGNOSTIC_MAX_2_TRADES_PER_DAY_NOT_ENFORCED", "DIAGNOSTIC_MAX_3_TRADES_PER_DAY_NOT_ENFORCED", "DIAGNOSTIC_PAUSE_AFTER_2_CONSECUTIVE_SL_NOT_ENFORCED"])
-            profile_command = [arg if arg != str(output_dir) else str(profile_dir) for arg in command]
+            profile_command = [arg if arg != str(output_dir) else str(profile_dir) for arg in base_command]
             for reason in disabled:
                 profile_command.extend(["--disable-backtest-filter", reason])
+            if request.short_breakdown_rescue_enabled:
+                profile_command.append("--rescue-enabled")
             completed = subprocess.run(profile_command, cwd=repo_root, text=True, capture_output=True, timeout=600, check=False, env=base_env)
             if completed.returncode != 0:
                 result.status = "FAILED"
