@@ -57,3 +57,25 @@ def test_env_example_contains_strategy_quality_guardrails():
     text = Path(".env.example").read_text()
     for name in ["ALPHAFORGE_BACKTEST_MAX_ACCEPTED_TRADES_PER_DAY", "ALPHAFORGE_BACKTEST_MAX_CONSECUTIVE_SL_PAUSE", "ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", "ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD", "ALPHAFORGE_BACKTEST_MIN_PROFIT_FACTOR_FOR_PROFILE_PASS", "ALPHAFORGE_BACKTEST_MAX_LOSS_STREAK_FOR_PROFILE_PASS", "ALPHAFORGE_BACKTEST_MAX_DRAWDOWN_PCT_FOR_PROFILE_PASS"]:
         assert name in text
+
+
+def test_guardrail_evidence_exports_reason_breakdown_and_examples():
+    import backtest_order as bo
+    cfg = _cfg()
+    evidence = bo.build_strategy_quality_evidence([], [
+        {"reject_reason": "SCORE_SATURATION_GUARD", "symbol": "BTCUSDT", "side": "LONG", "timestamp": "1", "score": "10", "effective_rr": "1.9", "regime": "RANGE", "cost_penalty": "0.2", "shadow_outcome": "WOULD_SL"},
+        {"reject_reason": "SCORE_SATURATION_GUARD", "symbol": "ETHUSDT", "side": "SHORT", "timestamp": "2", "score": "10", "effective_rr": "1.8", "regime": "RANGE", "cost_penalty": "0.3", "shadow_outcome": "WOULD_TP"},
+        {"reject_reason": "LOW_SCORE", "symbol": "SOLUSDT"},
+    ], {"total_net_pnl_usdt": "0", "requested_last_n_days": "30"}, cfg)
+    assert evidence["rejected_by_new_guardrails"] == 2
+    assert evidence["guardrail_reject_breakdown"] == {"SCORE_SATURATION_GUARD": 2}
+    assert evidence["top_guardrail_reject_reasons"][0] == {"reason": "SCORE_SATURATION_GUARD", "count": 2}
+    assert evidence["representative_guardrail_reject_examples"][0]["symbol"] == "BTCUSDT"
+
+
+def test_default_gate_funnel_exposes_scope_when_gate_not_comparable():
+    import backtest_order as bo
+    rows = bo.build_default_gate_funnel([], [])
+    assert rows[0]["zero_reject_warning"] is True
+    assert rows[0]["funnel_scope"] == "rejected_orders_plus_executed_terminal_rows"
+    assert "pre-funnel" in rows[0]["comparability_note"]

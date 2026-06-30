@@ -229,3 +229,81 @@ def test_selected_default_profile_artifact_schema_20260630_loads_main_panel(tmp_
     assert highlighted
     assert {row["shadow_outcome_bucket"] for row in highlighted} == {"would_sl", "would_tp"}
     assert all(row["symbol"] == "BTCUSDT" for row in highlighted)
+
+
+def _write_csv(path, rows, fieldnames=None):
+    import csv
+    fieldnames = fieldnames or sorted({k for row in rows for k in row})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('w', newline='') as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_profile_comparison_uses_summary_zero_not_lifecycle_event_count(tmp_path):
+    from alphaforge.dashboard import backtest_control as bc
+    profile_dir = tmp_path / 'DEFAULT_FILTERS'
+    summary_fields = ['total_candidates','accepted_count','total_orders','triggered_orders','tp_hits','sl_hits','open_at_end','total_net_pnl_usdt','rejected_count']
+    _write_csv(profile_dir / 'order_backtest_summary.csv', [{
+        'total_candidates':'7180','accepted_count':'0','total_orders':'0','triggered_orders':'0','tp_hits':'0','sl_hits':'0','open_at_end':'0','total_net_pnl_usdt':'0','rejected_count':'225'
+    }], summary_fields)
+    lifecycle_rows = []
+    for i in range(12000):
+        lifecycle_rows.append({'signal_id':f's{i}','timestamp':str(i),'symbol':'BTCUSDT','side':'LONG','lifecycle_state':'SIGNAL_CREATED','decision':'CREATED','effective_rr':'2.0'})
+    lifecycle_rows += [
+        {'signal_id':'rej1','timestamp':'1','symbol':'ETHUSDT','side':'LONG','lifecycle_state':'SIGNAL_REJECTED','decision':'REJECTED','reject_reason':'LOW_SCORE','effective_rr':'1.8'},
+        {'signal_id':'rej2','timestamp':'2','symbol':'SOLUSDT','side':'LONG','lifecycle_state':'SYMBOL_REJECTED','decision':'REJECTED','reject_reason':'SYMBOL_SELECTOR','effective_rr':'1.9'},
+        {'signal_id':'rej3','timestamp':'3','symbol':'BNBUSDT','side':'LONG','lifecycle_state':'ORDER_REJECTED','decision':'REJECTED','reject_reason':'HIGH_SPREAD','effective_rr':'2.1'},
+    ]
+    _write_csv(profile_dir / 'order_lifecycle.csv', lifecycle_rows)
+    _write_csv(profile_dir / 'rejected_orders.csv', [{'reject_reason':'LOW_SCORE','lifecycle_state':'SIGNAL_REJECTED','effective_rr':'1.8'}])
+
+    row = bc._comparison_metrics('DEFAULT_FILTERS', profile_dir, 10000, window_days=30)
+
+    assert row['accepted_trades'] == 0
+    assert row['win_count'] == row['loss_count'] == row['open_count'] == 0
+    assert row['avg_trades_per_day'] == 0
+    assert row['objective_score']['raw_net_pnl'] == 0
+    assert row['accepted_effective_rr_distribution']['count'] == 0
+    assert 'OVERTRADE_RISK' not in row['warnings']
+    assert {'NO_EXECUTED_TRADES', 'NO_ACCEPTED_TRADES'}.issubset(row['warnings'])
+    assert row['lifecycle_event_count'] == 12003
+
+
+def test_profile_comparison_counts_all_filters_off_executed_summary_and_orders(tmp_path):
+    from alphaforge.dashboard import backtest_control as bc
+    profile_dir = tmp_path / 'ALL_FILTERS_OFF'
+    _write_csv(profile_dir / 'order_backtest_summary.csv', [{
+        'accepted_count':'23','tp_hits':'10','sl_hits':'9','open_at_end':'4','total_net_pnl_usdt':'12.5','rejected_count':'0'
+    }])
+    orders = []
+    for i in range(23):
+        close = 'TP_HIT' if i < 10 else ('SL_HIT' if i < 19 else 'OPEN_AT_END')
+        orders.append({'signal_id':f'o{i}','symbol':'BTCUSDT','side':'LONG','effective_rr':str(1.5+i/100),'score':'8','close_reason':close,'net_pnl_usdt':'1' if close == 'TP_HIT' else '-1'})
+    _write_csv(profile_dir / 'backtest_orders.csv', orders)
+    _write_csv(profile_dir / 'order_lifecycle.csv', [{'signal_id':'created','lifecycle_state':'SIGNAL_CREATED','decision':'CREATED','effective_rr':'9'}])
+    _write_csv(profile_dir / 'rejected_orders.csv', [])
+
+    row = bc._comparison_metrics('ALL_FILTERS_OFF', profile_dir, 10000, window_days=30)
+
+    assert row['accepted_trades'] == 23
+    assert (row['win_count'], row['loss_count'], row['open_count']) == (10, 9, 4)
+    assert row['objective_score']['raw_net_pnl'] == 12.5
+    assert row['accepted_effective_rr_distribution']['count'] == 23
+
+
+def test_leaderboard_ranking_prefers_executed_profiles_over_no_trade_zero_pnl(tmp_path):
+    from alphaforge.dashboard import backtest_control as bc
+    no_trade = tmp_path / 'DEFAULT_FILTERS'
+    trade = tmp_path / 'ALL_FILTERS_OFF'
+    _write_csv(no_trade / 'order_backtest_summary.csv', [{'accepted_count':'0','total_net_pnl_usdt':'0','tp_hits':'0','sl_hits':'0','open_at_end':'0'}])
+    _write_csv(no_trade / 'order_lifecycle.csv', [{'signal_id':'s','lifecycle_state':'SIGNAL_CREATED','decision':'CREATED'}])
+    _write_csv(no_trade / 'rejected_orders.csv', [])
+    _write_csv(trade / 'order_backtest_summary.csv', [{'accepted_count':'23','total_net_pnl_usdt':'-1','tp_hits':'11','sl_hits':'12','open_at_end':'0'}])
+    _write_csv(trade / 'backtest_orders.csv', [{'signal_id':str(i),'effective_rr':'2','close_reason':'TP_HIT' if i < 11 else 'SL_HIT','net_pnl_usdt':'-0.05'} for i in range(23)])
+    _write_csv(trade / 'order_lifecycle.csv', [])
+    _write_csv(trade / 'rejected_orders.csv', [])
+    rows = [bc._comparison_metrics('DEFAULT_FILTERS', no_trade, 10000, window_days=30), bc._comparison_metrics('ALL_FILTERS_OFF', trade, 10000, window_days=30)]
+    ranked = sorted(rows, key=lambda r: (int(r.get('accepted_trades') or 0) > 0, r.get('objective_score', {}).get('final_objective_score', 0.0)), reverse=True)
+    assert ranked[0]['profile_name'] == 'ALL_FILTERS_OFF'

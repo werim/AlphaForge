@@ -128,6 +128,10 @@ class DashboardBacktestResult:
     selected_profile_dir: str | None = None
     artifact_warnings: list[str] = field(default_factory=list)
     blocking_warnings: list[str] = field(default_factory=list)
+    strategy_quality_guardrails: dict[str, Any] = field(default_factory=dict)
+    guardrail_reject_breakdown: dict[str, Any] = field(default_factory=dict)
+    top_guardrail_reject_reasons: list[dict[str, Any]] = field(default_factory=list)
+    representative_guardrail_reject_examples: list[dict[str, Any]] = field(default_factory=list)
     top_quality_improvement_note: str = ""
     gate_funnel: list[dict[str, Any]] = field(default_factory=list)
     risk_metrics: dict[str, Any] = field(default_factory=dict)
@@ -1049,6 +1053,7 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     later_gate_path = artifact_dir / "later_gate_breakdown.csv"
     gate_funnel_path = artifact_dir / "default_gate_funnel.csv"
     equity_curve_path = artifact_dir / "equity_curve.csv"
+    strategy_quality_path = artifact_dir / "strategy_quality_guardrails.json"
 
     summary = _read_first_csv_row(summary_path)
     lifecycle_rows = _read_csv_rows(lifecycle_path)
@@ -1058,6 +1063,7 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     calibration_summary = json.loads(calibration_summary_path.read_text()) if calibration_summary_path.exists() and calibration_summary_path.stat().st_size else {}
     signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
     filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() and filter_state_path.stat().st_size else {}
+    strategy_quality = json.loads(strategy_quality_path.read_text()) if strategy_quality_path.exists() and strategy_quality_path.stat().st_size else {}
 
     for path, fallbacks in (
         (summary_path, []),
@@ -1076,14 +1082,20 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.rejected_path = str(rejected_path) if rejected_path.exists() else None
     result.calibration_summary_path = str(calibration_summary_path) if calibration_summary_path.exists() else None
     result.total_candidates = _safe_int(summary.get("total_candidates"))
-    result.accepted_trades = _safe_int(summary.get("accepted_count")) or len(backtest_order_rows) or None
-    result.rejected_signals = _safe_int(summary.get("rejected_count") or summary.get("total_rejected")) or len(rejected_rows) or None
+    accepted_summary_count = _safe_int(summary.get("accepted_count"))
+    result.accepted_trades = accepted_summary_count if accepted_summary_count is not None else (len(backtest_order_rows) or None)
+    rejected_summary_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected"))
+    result.rejected_signals = rejected_summary_count if rejected_summary_count is not None else (len(rejected_rows) or None)
     result.win_count = _safe_int(summary.get("tp_hits"))
     result.loss_count = _safe_int(summary.get("sl_hits"))
     result.open_count = _safe_int(summary.get("open_at_end"))
     result.net_pnl = summary.get("total_net_pnl_usdt")
     result.total_return_pct = summary.get("total_pnl_pct")
     result.max_drawdown = summary.get("max_drawdown")
+    result.strategy_quality_guardrails = strategy_quality if isinstance(strategy_quality, dict) else {}
+    result.guardrail_reject_breakdown = result.strategy_quality_guardrails.get("guardrail_reject_breakdown", {})
+    result.top_guardrail_reject_reasons = result.strategy_quality_guardrails.get("top_guardrail_reject_reasons", [])
+    result.representative_guardrail_reject_examples = result.strategy_quality_guardrails.get("representative_guardrail_reject_examples", [])
     result.risk_metrics = {
         "return_unit": summary.get("return_unit", "pct"),
         "net_pnl_unit": summary.get("net_pnl_unit", "USDT"),
@@ -1209,17 +1221,41 @@ def _bucket_diagnostics(rows: list[dict[str, str]]) -> dict[str, list[dict[str, 
     return out
 
 
+def _canonical_profile_accepted_rows(summary: Mapping[str, Any], lifecycle: list[dict[str, str]], backtest_orders: list[dict[str, str]]) -> tuple[int, list[dict[str, str]], str]:
+    for field in ("accepted_count", "total_orders", "triggered_orders"):
+        value = _safe_int(summary.get(field))
+        if value is not None:
+            if value <= 0:
+                return 0, [], f"order_backtest_summary.csv:{field}"
+            lifecycle_exec_rows = _accepted_trade_rows(lifecycle)
+            if not lifecycle_exec_rows:
+                lifecycle_exec_rows = [r for r in lifecycle if _safe_float_or_none(r.get("net_pnl_usdt", r.get("net_pnl"))) is not None and str(r.get("reject_reason") or "").strip() == ""]
+            rows = backtest_orders[:value] if backtest_orders else lifecycle_exec_rows[:value]
+            return value, rows, f"order_backtest_summary.csv:{field}"
+    executed_states = {"POSITION_CLOSED", "POSITION_OPENED", "ORDER_PLACED", "ENTRY_TRIGGERED"}
+    disallowed_states = {"SIGNAL_CREATED", "SIGNAL_REJECTED", "SYMBOL_REJECTED", "ORDER_REJECTED"}
+    rows = []
+    for row in _accepted_trade_rows(lifecycle):
+        state = str(row.get("lifecycle_state") or row.get("status_after") or "").strip().upper()
+        decision = str(row.get("decision") or row.get("status") or "").strip().upper()
+        rejected = bool(str(row.get("reject_reason") or row.get("cancel_reason") or "").strip())
+        if state in executed_states and state not in disallowed_states and decision in {"ACCEPTED", "EXECUTED"} and not rejected:
+            rows.append(row)
+    return len(rows), rows, "order_lifecycle.csv:accepted_executed_states"
+
+
 def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float, warnings: list[str] | None = None, window_days: float | None = None) -> dict[str, Any]:
     summary = _read_first_csv_row(profile_dir / "order_backtest_summary.csv")
     lifecycle = _read_csv_rows(profile_dir / "order_lifecycle.csv")
     rejected = _read_csv_rows(profile_dir / "rejected_orders.csv")
+    backtest_orders = _read_csv_rows(profile_dir / "backtest_orders.csv")
     filter_state_path = profile_dir / "backtest_filter_state.json"
     filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() else {}
-    accepted = [r for r in lifecycle if _safe_float_or_none(r.get("net_pnl_usdt", r.get("net_pnl"))) is not None]
-    net = _safe_float(summary.get("total_net_pnl_usdt"), 0.0)
-    accepted_count = _safe_int(summary.get("accepted_count")) or len(accepted)
-    loss_count = _safe_int(summary.get("sl_hits")) or 0
-    win_count = _safe_int(summary.get("tp_hits")) or 0
+    accepted_count, accepted, accepted_source = _canonical_profile_accepted_rows(summary, lifecycle, backtest_orders)
+    no_trades = accepted_count == 0
+    net = 0.0 if no_trades else _safe_float(summary.get("total_net_pnl_usdt"), 0.0)
+    loss_count = 0 if no_trades else (_safe_int(summary.get("sl_hits")) or 0)
+    win_count = 0 if no_trades else (_safe_int(summary.get("tp_hits")) or 0)
     rejected_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected")) or len(rejected)
     max_dd = _safe_float_or_none(summary.get("max_drawdown"))
     max_losses = _max_consecutive_losses(accepted)
@@ -1232,6 +1268,7 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
         "overtrade_penalty": max(0.0, avg_per_day - 3.0) * max(abs(net) * 0.02, 1.0),
         "execution_cost_penalty": abs(_summary_value(accepted, "cost_penalty", "mean") or 0.0) * accepted_count,
         "low_sample_penalty": max(0, 5 - accepted_count) * 2.0,
+        "no_executed_trade_penalty": 1000000.0 if no_trades else 0.0,
     }
     components["final_objective_score"] = components["raw_net_pnl"] - sum(v for k, v in components.items() if k != "raw_net_pnl")
     score10 = [r for r in accepted if (_safe_float_or_none(r.get("score")) or 0) >= 10]
@@ -1240,9 +1277,11 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
         warn.append("FILTERS_OFF_STRESS_TEST")
     if max_dd is None:
         warn.append("DRAWDOWN_UNAVAILABLE")
-    if accepted_count < 5:
+    if no_trades:
+        warn.extend(["NO_EXECUTED_TRADES", "NO_ACCEPTED_TRADES"])
+    elif accepted_count < 5:
         warn.append("LOW_SAMPLE_RISK")
-    if avg_per_day > 3:
+    if accepted_count > 0 and avg_per_day > 3:
         warn.append("OVERTRADE_RISK")
     if max_losses >= 3:
         warn.append("HIGH_LOSS_STREAK_RISK")
@@ -1253,8 +1292,9 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
         "profile_name": profile, "filter_profile": filter_state.get("filter_profile", profile),
         "enabled_filters": filter_state.get("enabled_filters", []), "disabled_filters": filter_state.get("disabled_filters", []),
         "hard_safety_gates": filter_state.get("hard_safety_gates", []), "candidates": _safe_int(summary.get("total_candidates")),
-        "accepted_trades": accepted_count, "rejected_signals": rejected_count, "reject_rate": rejected_count / max(1, accepted_count + rejected_count),
-        "win_count": win_count, "loss_count": loss_count, "open_count": _safe_int(summary.get("open_at_end")) or 0, "timeout_count": _safe_int(summary.get("timeout_count")),
+        "accepted_trades": accepted_count, "accepted_trades_source": accepted_source, "lifecycle_event_count": len(lifecycle), "rejected_row_count": len(rejected),
+        "rejected_signals": rejected_count, "reject_rate": rejected_count / max(1, accepted_count + rejected_count),
+        "win_count": win_count, "loss_count": loss_count, "open_count": 0 if no_trades else (_safe_int(summary.get("open_at_end")) or 0), "timeout_count": 0 if no_trades else _safe_int(summary.get("timeout_count")),
         "gross_pnl": _safe_float_or_none(summary.get("total_gross_pnl_usdt")), "net_pnl": net, "return_pct": _safe_float_or_none(summary.get("total_pnl_pct")), "return": _safe_float_or_none(summary.get("total_pnl_pct")),
         "max_drawdown": max_dd, "max_drawdown_status": "AVAILABLE" if max_dd is not None else "UNAVAILABLE", "max_consecutive_losses": max_losses,
         "profit_factor": _profit_factor(accepted), "avg_win": _avg_net([r for r in accepted if _safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) > 0]),
@@ -1373,8 +1413,8 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
                 result.error_message = (completed.stderr or completed.stdout or f"{profile} failed")[-1200:]
                 return result
             comparison_profiles[profile] = _comparison_metrics(profile, profile_dir, request.initial_balance, warnings, window_days=request.last_days)
-        raw_sorted = sorted(comparison_profiles.values(), key=lambda r: r.get("objective_score", {}).get("raw_net_pnl", 0.0), reverse=True)
-        obj_sorted = sorted(comparison_profiles.values(), key=lambda r: r.get("objective_score", {}).get("final_objective_score", 0.0), reverse=True)
+        raw_sorted = sorted(comparison_profiles.values(), key=lambda r: (int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("raw_net_pnl", 0.0)), reverse=True)
+        obj_sorted = sorted(comparison_profiles.values(), key=lambda r: (int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("final_objective_score", 0.0)), reverse=True)
         raw_rank = {r["profile_name"]: i + 1 for i, r in enumerate(raw_sorted)}
         obj_rank = {r["profile_name"]: i + 1 for i, r in enumerate(obj_sorted)}
         leaderboard = []

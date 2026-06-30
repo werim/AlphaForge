@@ -1,3 +1,16 @@
+## 2026-06-30 BACKTEST profile metric integrity
+
+- Current version: unreleased BACKTEST profile comparison integrity increment
+- Current phase: dashboard/profile artifact accounting correction
+- Runtime maturity: reporting improved; trading decision logic and live order paths unchanged
+- BACKTEST/PAPER/LIVE alignment: BACKTEST comparison now separates lifecycle event rows, rejected diagnostics, accepted trade counts, and executed outcomes without loosening filters
+- Lifecycle coverage: lifecycle rows remain exported, but SIGNAL_CREATED/SIGNAL_REJECTED/SYMBOL_REJECTED/ORDER_REJECTED are not counted as accepted trades
+- Execution realism coverage: accepted effective RR distributions now require accepted/executed trade evidence; guardrail rejects expose reason breakdowns and examples
+- Known critical risks: no-trade profiles remain NOT strategy-quality evidence; LIVE readiness remains blocked
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
+
 ## 2026-06-30 Purpose-specific environment profiles
 
 - Current version: unreleased environment profile separation increment
