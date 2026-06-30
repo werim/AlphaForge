@@ -151,6 +151,7 @@
           <tr><th>Score saturation</th><td>{{ backtest_result.signal_quality_diagnostics.get('score_saturation', {}) }}</td></tr>
           <tr><th>High effective-RR rejected outcome split</th><td>{{ backtest_result.high_effective_rr_missed_alpha }}</td></tr>
           <tr><th>STOP_TOO_WIDE WOULD_TP vs WOULD_SL split</th><td>{{ backtest_result.stop_too_wide_quality_split }}</td></tr>
+          <tr><th>STOP_TOO_WIDE recoverable candidates (diagnostic only)</th><td>{{ backtest_result.signal_quality_diagnostics.get('stop_too_wide_recoverable_candidates', {}) }}</td></tr>
           <tr><th>Reporting-only gates</th><td>{{ backtest_result.signal_quality_diagnostics.get('candidate_quality_gates', []) }}</td></tr>
         </tbody>
       </table>

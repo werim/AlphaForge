@@ -154,6 +154,7 @@ def test_selected_default_profile_artifact_schema_20260630_loads_main_panel(tmp_
         "baseline_accepted_trades": "9", "rescue_accepted_count": "1",
         "baseline_net_pnl": "4.227490671865697", "rescue_accepted_net_pnl": "-0.2711897444266122",
         "baseline_plus_rescue_net_pnl": "3.9563009274390843", "short_breakdown_rescue_enabled": "True",
+        "accepted_reason_breakdown": json.dumps({"BASELINE": 36, "SHORT_BREAKDOWN_RESCUE": 4}),
         "rejection_counts": json.dumps({"LOW_SCORE": 703, "RR_TOO_LOW": 4, "STOP_TOO_WIDE": 130, "TOO_CHOPPY": 206, "WEAK_TREND_AND_NO_RANGE_EDGE": 23}),
     }
     with (default_dir / "order_backtest_summary.csv").open("w", newline="") as fh:
@@ -165,6 +166,10 @@ def test_selected_default_profile_artifact_schema_20260630_loads_main_panel(tmp_
     with (default_dir / "backtest_orders.csv").open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(orders[0].keys()))
         writer.writeheader(); writer.writerows(orders)
+    all_off_orders = [{**orders[i % len(orders)], "signal_id": f"all{i}", "accepted_reason": "BASELINE" if i < 36 else "SHORT_BREAKDOWN_RESCUE"} for i in range(40)]
+    with (all_off_dir / "backtest_orders.csv").open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(all_off_orders[0].keys()))
+        writer.writeheader(); writer.writerows(all_off_orders)
     rejected = (
         [{"reject_reason": "LOW_SCORE", "lifecycle_state": "SIGNAL_REJECTED", "score": "4", "effective_rr": "0.7"}] * 703
         + [{"reject_reason": "TOO_CHOPPY", "lifecycle_state": "SIGNAL_REJECTED", "score": "6", "effective_rr": "1.0"}] * 206
@@ -179,6 +184,14 @@ def test_selected_default_profile_artifact_schema_20260630_loads_main_panel(tmp_
     (default_dir / "lifecycle_calibration_summary.json").write_text(json.dumps(calibration))
     (default_dir / "backtest_filter_state.json").write_text(json.dumps({"filter_profile": "DEFAULT_FILTERS", "enabled_filters": ["LOW_SCORE"], "disabled_filters": [], "hard_safety_gates": []}))
     (default_dir / "signal_quality_summary.json").write_text(json.dumps({"high_effective_rr_missed_alpha": []}))
+    with (default_dir / "rejected_shadow.csv").open("w", newline="") as fh:
+        shadow_rows = [
+            {"signal_id": "stp1", "symbol": "BTCUSDT", "side": "LONG", "regime": "TREND", "reject_reason": "STOP_TOO_WIDE", "score": "9.6", "effective_rr": "2.1", "shadow_outcome": "WOULD_TP"},
+            {"signal_id": "stp2", "symbol": "BTCUSDT", "side": "LONG", "regime": "TREND", "reject_reason": "STOP_TOO_WIDE", "score": "9.7", "effective_rr": "2.2", "shadow_outcome": "WOULD_SL"},
+            {"signal_id": "stp3", "symbol": "ETHUSDT", "side": "SHORT", "regime": "CHOP", "reject_reason": "STOP_TOO_WIDE", "score": "8.0", "effective_rr": "1.8", "shadow_outcome": "WOULD_TP"},
+        ]
+        writer = csv.DictWriter(fh, fieldnames=list(shadow_rows[0].keys()))
+        writer.writeheader(); writer.writerows(shadow_rows)
     with (default_dir / "rejected_shadow_summary.csv").open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=["reject_reason", "count"])
         writer.writeheader(); writer.writerow({"reject_reason": "LOW_SCORE", "count": "703"})
@@ -198,6 +211,7 @@ def test_selected_default_profile_artifact_schema_20260630_loads_main_panel(tmp_
     assert result.baseline_net_pnl == "4.227490671865697"
     assert result.rescue_net_pnl == "-0.2711897444266122"
     assert result.baseline_plus_rescue_net_pnl == "3.9563009274390843"
+    assert result.accepted_reason_breakdown == {"BASELINE": 9, "SHORT_BREAKDOWN_RESCUE": 1}
     assert result.accepted_trade_diagnostics
     assert result.accepted_score_distribution["count"] == 10
     assert result.accepted_effective_rr_distribution["count"] == 10
@@ -208,3 +222,10 @@ def test_selected_default_profile_artifact_schema_20260630_loads_main_panel(tmp_
     assert "OVERTRADE_RISK" not in by_profile["DEFAULT_FILTERS"]["warnings"]
     assert "FILTERS_OFF_STRESS_TEST" in by_profile["ALL_FILTERS_OFF"]["warnings"]
     assert result.selected_profile_name != "ALL_FILTERS_OFF"
+    assert result.accepted_reason_breakdown != {"BASELINE": 36, "SHORT_BREAKDOWN_RESCUE": 4}
+    stop_diag = result.signal_quality_diagnostics["stop_too_wide_recoverable_candidates"]
+    assert stop_diag["decision_logic_changed"] is False
+    highlighted = stop_diag["highlighted_candidates"]
+    assert highlighted
+    assert {row["shadow_outcome_bucket"] for row in highlighted} == {"would_sl", "would_tp"}
+    assert all(row["symbol"] == "BTCUSDT" for row in highlighted)
