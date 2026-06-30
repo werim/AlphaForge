@@ -1,3 +1,23 @@
+## 2026-06-30 - Dashboard LOW_SCORE shadow comparison rendering fix
+
+### Added
+- Added focused dashboard HTML assertions that LOW_SCORE shadow comparison renders `WOULD_TP` and `WOULD_SL` evidence.
+
+### Changed
+- LOW_SCORE Shadow Comparison now renders in the visible Backtest Result evidence area alongside accepted diagnostics and top rejection reasons, while preserving diagnostic-only labeling and an empty-state row.
+
+### Fixed
+- Fixed the remaining BACKTEST evidence UI regression where populated `low_score_shadow_comparison` could be absent from rendered `/backtest/run` HTML due to completed-diagnostics section gating.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; dashboard rendering only.
+
+### Known Issues
+- LIVE readiness remains NOT READY. BACKTEST shadow evidence remains diagnostic-only and does not change thresholds or gates.
+
 ## 2026-06-30 - Dashboard top rejection reasons rendering fix
 
 ### Added

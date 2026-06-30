@@ -583,6 +583,8 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert "Actionable signal rejects / Symbol-selector rejects / Order-lifecycle rejects" in html
     assert "Passed score/RR/expectancy before later gates" in html
     assert "LOW_SCORE Shadow Comparison" in html
+    assert "WOULD_TP" in html
+    assert "WOULD_SL" in html
     assert "Top Near-Miss Rejected Signals" in html
 
 

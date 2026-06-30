@@ -1,3 +1,42 @@
+## 2026-06-30 - Dashboard LOW_SCORE shadow comparison rendering fix
+
+### Why the patch was needed
+After accepted diagnostics and top rejection reasons were restored, the same BACKTEST evidence test still showed that populated `result.low_score_shadow_comparison` was missing from rendered `/backtest/run` HTML even though the model contained WOULD_TP and WOULD_SL counts.
+
+### Root cause
+The LOW_SCORE Shadow Comparison section was still inside the completed-only diagnostics branch. The populated model data was therefore not guaranteed to render in the same always-visible Backtest Result evidence path as summary metrics, accepted diagnostics, and top rejection reasons.
+
+### Files changed
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+No BACKTEST decision behavior changed. The dashboard now renders LOW_SCORE Shadow Comparison immediately after Backtest Top Rejection Reasons in the visible Backtest Result evidence area. The section explicitly labels rows diagnostic-only and keeps an empty-state row when no LOW_SCORE shadow diagnostics exist.
+
+### Lifecycle changes
+No lifecycle state-machine changes.
+
+### Persistence changes
+None. No SQLite or artifact schema changes.
+
+### Export/schema changes
+None.
+
+### Tests added/executed
+Kept the existing `LOW_SCORE Shadow Comparison` rendered HTML assertion and added focused assertions for `WOULD_TP` and `WOULD_SL`.
+
+### Risks and limitations
+This is a dashboard-template-only rendering fix. It does not tune thresholds, weaken gates, or alter PAPER/LIVE runtime behavior. LOW_SCORE shadow evidence remains diagnostic-only.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after dashboard and full pytest validation. LIVE remains NOT READY.
+
 ## 2026-06-30 - Dashboard top rejection reasons rendering fix
 
 ### Why the patch was needed
