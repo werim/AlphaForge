@@ -254,10 +254,10 @@ def test_dashboard_rejects_empty_symbols(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", lambda _request: pytest.fail("runner must not be called"))
     response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'empty-symbols.db'}")).post(
         "/backtest/run",
-        data={"last_days": "30", "symbols": " , ", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "2"},
+        data={"last_days": "30", "symbols": " , ", "timeframe": "15m", "initial_balance": "10000", "max_symbols": ""},
     )
     assert response.status_code == 200
-    assert "symbols must contain at least one non-empty symbol" in response.text
+    assert "Provide at least one symbol or set MAX SYMBOLS greater than 0 for dynamic universe selection." in response.text
 
 
 def test_backtest_endpoint_calls_runner_with_backtest_only_request(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

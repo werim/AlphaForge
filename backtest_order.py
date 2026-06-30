@@ -2933,7 +2933,7 @@ def main():
     p.add_argument("--start")
     p.add_argument("--end")
     p.add_argument("--last-n-days", type=int, default=7)
-    p.add_argument("--top-n", type=int, default=cfg.backtest.top_n)
+    p.add_argument("--top-n", "--max-symbols", dest="top_n", type=int, default=cfg.backtest.top_n)
     p.add_argument("--quote", default="USDT")
     p.add_argument("--interval", default=cfg.backtest.timeframe)
     p.add_argument("--output-dir", default=cfg.backtest.output_dir)

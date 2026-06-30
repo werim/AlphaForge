@@ -1,3 +1,15 @@
+## 2026-06-30 BACKTEST dashboard dynamic top-volume universe validation
+
+- Current version: unreleased BACKTEST dashboard dynamic-universe validation increment
+- Current phase: BACKTEST form validation and command-boundary hardening
+- Runtime maturity: BACKTEST dashboard request handling improved; PAPER/LIVE runtime and order paths unchanged
+- BACKTEST/PAPER/LIVE alignment: dashboard BACKTEST form now accepts either explicit symbols or MAX_SYMBOLS-driven dynamic top-volume selection while preserving the existing BACKTEST runner universe logic
+- Lifecycle coverage: no lifecycle transition or persistence lifecycle semantics changed
+- Execution realism coverage: dynamic selection delegates to existing top-volume eligible universe selection; no fake symbols, filters, scores, RR, or fills introduced
+- Known critical risks: dynamic universe runs still depend on available exchange metadata and historical data; LIVE readiness remains blocked
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 DEFAULT_FILTERS accepted-reason scope and STOP_TOO_WIDE diagnostics
 
 - Current version: unreleased BACKTEST dashboard selected-profile consistency increment

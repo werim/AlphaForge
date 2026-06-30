@@ -160,6 +160,20 @@ def parse_backtest_form(form: Mapping[str, Any]) -> tuple[DashboardBacktestReque
             errors[name] = f"{name} must be between {min_value} and {max_value}."
         return value
 
+    def parse_optional_int(name: str, default: int, min_value: int, max_value: int) -> tuple[int, bool]:
+        raw = form.get(name, "")
+        text = str(raw).strip() if raw is not None else ""
+        if text == "":
+            return default, False
+        try:
+            value = int(text)
+        except (TypeError, ValueError):
+            errors[name] = f"{name} must be an integer."
+            return default, True
+        if value < min_value or value > max_value:
+            errors[name] = f"{name} must be between {min_value} and {max_value}."
+        return value, True
+
     def parse_float(name: str, default: float, min_value: float, max_value: float) -> float:
         raw = form.get(name, default)
         try:
@@ -173,10 +187,11 @@ def parse_backtest_form(form: Mapping[str, Any]) -> tuple[DashboardBacktestReque
 
     last_days = parse_int("last_days", 30, 1, 730)
     initial_balance = parse_float("initial_balance", 10000.0, 100.0, 10_000_000.0)
-    max_symbols = parse_int("max_symbols", default_form_values()["max_symbols"], 1, 200)
+    max_symbols, max_symbols_provided = parse_optional_int("max_symbols", default_form_values()["max_symbols"], 1, 200)
     symbols = [item.strip().upper() for item in str(form.get("symbols", "")).split(",") if item.strip()]
-    if not symbols:
-        errors["symbols"] = "symbols must contain at least one non-empty symbol."
+    dynamic_universe_requested = not symbols and max_symbols_provided and max_symbols > 0 and "max_symbols" not in errors
+    if not symbols and not dynamic_universe_requested:
+        errors["symbols"] = "Provide at least one symbol or set MAX SYMBOLS greater than 0 for dynamic universe selection."
     timeframe = str(form.get("timeframe", "")).strip()
     if timeframe not in SUPPORTED_TIMEFRAMES:
         errors["timeframe"] = f"timeframe must be one of: {', '.join(SUPPORTED_TIMEFRAMES)}."
@@ -188,6 +203,19 @@ def parse_backtest_form(form: Mapping[str, Any]) -> tuple[DashboardBacktestReque
         return None, errors
     return DashboardBacktestRequest(last_days=last_days, symbols=symbols, timeframe=timeframe, initial_balance=initial_balance, max_symbols=max_symbols, filter_switches=filter_switches, short_breakdown_rescue_enabled=short_breakdown_rescue_enabled, run_profile_comparison=run_profile_comparison), {}
 
+
+
+def _selected_symbols_from_summary(summary: Mapping[str, Any]) -> list[str]:
+    raw = summary.get("symbols")
+    if raw in (None, "", "None", "null"):
+        return []
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = str(raw).split(",")
+    if not isinstance(parsed, list):
+        return []
+    return [str(symbol).strip().upper() for symbol in parsed if str(symbol).strip()]
 
 def _read_first_csv_row(path: Path) -> dict[str, str]:
     if not path.exists() or path.stat().st_size == 0:
@@ -1005,6 +1033,9 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
         if not path.exists():
             result.artifact_warnings.append(_artifact_missing_message(path, fallbacks))
 
+    exported_symbols = _selected_symbols_from_summary(summary)
+    if exported_symbols:
+        result.symbols = exported_symbols
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
     result.rejected_path = str(rejected_path) if rejected_path.exists() else None
@@ -1196,7 +1227,8 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         (output_dir / "config_snapshot.json").write_text(json.dumps({"mode": "BACKTEST", "config_snapshot": config_snapshot(mode="BACKTEST")}, indent=2, sort_keys=True))
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "backtest_order.py"
-    symbols = request.symbols[: request.max_symbols]
+    explicit_symbols = [symbol for symbol in request.symbols if str(symbol).strip()]
+    symbols = explicit_symbols[: request.max_symbols]
     fixed_end = canonical_utc_timestamp()
     fixed_start_ms = parse_dashboard_window_start_ms(fixed_end, request.last_days)
     base_command = [
@@ -1210,9 +1242,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         str(fixed_start_ms),
         "--end",
         fixed_end,
-        "--symbols",
-        ",".join(symbols),
-        "--top-n",
+        "--max-symbols",
         str(request.max_symbols),
         "--interval",
         request.timeframe,
@@ -1224,6 +1254,8 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     ]
     effective_filter_switches = request.filter_switches or dict(default_form_values()["filter_switches"])
     command = list(base_command)
+    if symbols:
+        command.extend(["--symbols", ",".join(symbols)])
     for reason, enabled in effective_filter_switches.items():
         if not enabled:
             command.extend(["--disable-backtest-filter", reason])
@@ -1245,6 +1277,8 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         "effective_start": fixed_start_ms,
         "effective_end": fixed_end,
         "symbols": symbols,
+        "symbol_universe_mode": "EXPLICIT" if symbols else "DYNAMIC_TOP_VOLUME",
+        "requested_max_symbols": request.max_symbols,
         "requested_profile": "CUSTOM" if result.disabled_filters else "DEFAULT",
         "enabled_optional_filters": result.enabled_filters,
         "disabled_optional_filters": result.disabled_filters,
@@ -1350,6 +1384,9 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.status = "COMPLETED"
     run_metadata.update({"status": "COMPLETED", "failure_reason": None})
     _write_backtest_run_metadata(run_metadata_path, run_metadata)
+    exported_symbols = _selected_symbols_from_summary(summary)
+    if exported_symbols:
+        result.symbols = exported_symbols
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
     result.rejected_path = str(rejected_path) if rejected_path.exists() else None
