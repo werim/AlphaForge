@@ -1,3 +1,23 @@
+## 2026-06-30 - Normalized BACKTEST evidence render contract
+
+### Added
+- Added failed-run absence assertions for Score Saturation Diagnostics and DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics.
+
+### Changed
+- The dashboard now uses one normalized `selected_backtest_completed` Jinja condition for the selected BACKTEST evidence chain, treating completed status case-insensitively while keeping failed-run diagnostics unavailable.
+
+### Fixed
+- Fixed completed fake BACKTEST rendering so populated evidence sections are not hidden by brittle status comparison/gating, while failed runs still suppress diagnostic tables.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; dashboard rendering only.
+
+### Known Issues
+- LIVE readiness remains NOT READY. Failed selected BACKTEST runs intentionally show unavailable diagnostics rather than substituting PAPER/runtime evidence.
+
 ## 2026-06-30 - Failed BACKTEST diagnostic rendering guard
 
 ### Added

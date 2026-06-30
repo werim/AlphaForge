@@ -805,3 +805,5 @@ def test_failed_backtest_html_does_not_substitute_stale_paper_diagnostics(monkey
     assert "Accepted Trade Diagnostics" not in html
     assert "Backtest Top Rejection Reasons" not in html
     assert "LOW_SCORE Shadow Comparison" not in html
+    assert "Score Saturation Diagnostics" not in html
+    assert "DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics" not in html

@@ -139,10 +139,11 @@
         </tbody>
       </table>
 
-      {% if backtest_result.status != 'COMPLETED' %}
+      {% set selected_backtest_completed = (backtest_result.status|string|upper) == 'COMPLETED' %}
+      {% if not selected_backtest_completed %}
       <div class="alert warn-box"><strong>SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE.</strong> Selected BACKTEST diagnostics are unavailable because this run failed closed; PAPER runtime diagnostics are not substituted.</div>
       {% endif %}
-      {% if backtest_result.status == 'COMPLETED' %}
+      {% if selected_backtest_completed %}
       <h3>Accepted Trade Diagnostics</h3>
       <table>
         <thead><tr><th>Signal</th><th>Symbol</th><th>Side</th><th>Score</th><th>Raw RR</th><th>Effective RR</th><th>Regime</th><th>Entry</th><th>SL</th><th>TP</th><th>Exit</th><th>Close Reason</th><th>Result</th><th>Net PnL</th><th>Net PnL Status</th></tr></thead>

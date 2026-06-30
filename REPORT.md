@@ -1,3 +1,59 @@
+## 2026-06-30 - Normalized BACKTEST evidence render contract
+
+### Why the patch was needed
+The completed-run regression returned after restoring the failed-run guard: the populated successful fake BACKTEST result could still miss `Accepted Trade Diagnostics` in rendered HTML. The template needed one explicit selected-BACKTEST completion condition rather than fragile repeated status comparisons.
+
+### Root cause
+The evidence rendering logic had been edited incrementally, causing ping-pong behavior between completed-run visibility and failed-run suppression. The fix is a single normalized Jinja condition that gates the evidence chain for completed selected BACKTEST runs and a separate failure warning for non-completed runs.
+
+### Exact template condition changed
+The template now sets `selected_backtest_completed = (backtest_result.status|string|upper) == 'COMPLETED'`. Non-completed runs render `SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE`; completed runs render the full selected BACKTEST evidence chain.
+
+### Exact sections under completed-run gate
+- Accepted Trade Diagnostics
+- Backtest Top Rejection Reasons
+- LOW_SCORE Shadow Comparison
+- Signal Quality Diagnostics
+- Top Quality-Improvement Candidates
+- Later Gate Diagnostics
+- Score Saturation Diagnostics
+- DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics
+- Top Near-Miss Rejected Signals
+
+### Exact sections suppressed for failed-run gate
+The same selected BACKTEST evidence sections above are suppressed for failed/non-completed runs; no empty selected diagnostic evidence tables are shown.
+
+### Files changed
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+No BACKTEST decision behavior changed. This is a dashboard render contract fix only.
+
+### Lifecycle changes
+No lifecycle state-machine changes.
+
+### Persistence changes
+None. No SQLite or artifact schema changes.
+
+### Export/schema changes
+None.
+
+### Tests added/executed
+Extended the failed BACKTEST HTML regression to assert Score Saturation Diagnostics and DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics are also absent on failed selected BACKTEST runs.
+
+### Risks and limitations
+This is a dashboard-template-only rendering fix. It does not tune thresholds, weaken gates, change artifact parsing, or alter PAPER/LIVE runtime behavior.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after dashboard and full pytest validation. LIVE remains NOT READY.
+
 ## 2026-06-30 - Failed BACKTEST diagnostic rendering guard
 
 ### Why the patch was needed

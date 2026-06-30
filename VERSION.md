@@ -1,3 +1,15 @@
+## 2026-06-30 Normalized BACKTEST evidence render contract
+
+- Current version: unreleased dashboard selected-BACKTEST evidence render contract increment
+- Current phase: BACKTEST Evidence Consistency Phase UI completion
+- Runtime maturity: BACKTEST dashboard rendering improved; PAPER/LIVE unchanged
+- BACKTEST/PAPER/LIVE alignment: template-only display contract; no decision, artifact parser, persistence, runtime loop, or order-path behavior changed
+- Lifecycle coverage: no lifecycle semantics changed; completed selected BACKTEST runs render evidence, failed selected BACKTEST runs show diagnostics unavailable
+- Execution realism coverage: no execution model changes; completed-run diagnostics remain evidence-only
+- Known critical risks: LIVE readiness remains fail-closed; failed BACKTEST diagnostics are unavailable and never replaced by PAPER/runtime data
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 Failed BACKTEST diagnostic rendering guard
 
 - Current version: unreleased dashboard failed-BACKTEST evidence guard increment
