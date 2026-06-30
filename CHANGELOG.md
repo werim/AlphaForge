@@ -1,3 +1,28 @@
+
+## 2026-06-30 - BACKTEST profile comparison runner
+
+### Added
+- Added optional dashboard BACKTEST profile comparison for DEFAULT_FILTERS, ALL_FILTERS_OFF, STRICT_FILTERS, CUSTOM_CURRENT_UI, and diagnostic guard profiles.
+- Added comparison and leaderboard artifacts with raw net PnL and risk-adjusted objective-score rankings plus bucket-level net-PnL diagnostics.
+- Added documentation for BACKTEST-only comparison behavior and filters-off stress-test semantics.
+
+### Changed
+- Dashboard backtest form now has an opt-in Run profile comparison checkbox; default single-profile behavior remains unchanged.
+
+### Fixed
+- Replaced comparison-mode placeholder semantics with real per-profile metrics when comparison mode is selected.
+- Fixed comparison runner isolation so DEFAULT/STRICT/diagnostic profiles no longer inherit current UI-disabled filters, and all sub-runs receive a fixed start/end window for input parity.
+- Added regression coverage for no filter leakage, stable date-window parity, BACKTEST-only command mode, and dashboard warning rendering.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Multi-window 30/90/180/365 support is scaffolded; non-selected windows are marked NOT_RUN. LIVE remains NOT READY.
+
 ## 2026-06-30 - BACKTEST SHORT Breakdown Rescue Reporting Experiment
 
 ### Added

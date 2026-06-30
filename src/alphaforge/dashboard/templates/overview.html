@@ -77,6 +77,11 @@
         <p class="alert warn-box"><strong>BACKTEST-only</strong> experiment, <strong>disabled by default</strong>, and <strong>does not affect PAPER/LIVE</strong>. Enable only for baseline-vs-rescue comparison runs.</p>
         <label><input type="checkbox" name="short_breakdown_rescue_enabled" value="true" {% if backtest_form.short_breakdown_rescue_enabled %}checked{% endif %}> SHORT_BREAKDOWN_RESCUE experiment</label>
       </fieldset>
+      <fieldset class="filter-switches">
+        <legend>Profile comparison runner</legend>
+        <p class="alert warn-box"><strong>BACKTEST-only</strong>. Runs DEFAULT_FILTERS, ALL_FILTERS_OFF, STRICT_FILTERS, CUSTOM_CURRENT_UI, and diagnostic guard profiles over the same symbols/timeframe/window. ALL_FILTERS_OFF is a diagnostic stress test, not strategy performance.</p>
+        <label><input type="checkbox" name="run_profile_comparison" value="true" {% if backtest_form.run_profile_comparison %}checked{% endif %}> Run profile comparison</label>
+      </fieldset>
       <button type="submit">Run Backtest</button>
     </form>
     <div class="alert warn-box"><strong>Safety boundary:</strong> This action forces mode BACKTEST and never invokes PAPER/LIVE runtime loops or live order submission controls.</div>
@@ -92,6 +97,15 @@
       {% if backtest_result.error_message %}<div class="alert fail-box"><strong>Backtest failed closed.</strong> {{ backtest_result.error_message }}</div>{% endif %}
       {% if backtest_result.lifecycle_warning %}<div class="alert warn-box">{{ backtest_result.lifecycle_warning }}</div>{% endif %}
       {% if backtest_result.execution_context_warning %}<div class="alert warn-box">{{ backtest_result.execution_context_warning }}</div>{% endif %}
+      {% if backtest_result.profile_leaderboard %}
+      <h3>Backtest Profile Comparison</h3>
+      <p class="alert warn-box"><strong>ALL_FILTERS_OFF:</strong> Diagnostic stress test, not strategy performance. Objective score penalizes drawdown fallback, loss streaks, overtrading, execution cost, and low sample size.</p>
+      <table>
+        <thead><tr><th>Profile</th><th>Raw net PnL rank</th><th>Objective rank</th><th>Raw net PnL</th><th>Objective score</th><th>Accepted</th><th>Win/Loss/Open</th><th>Avg trades/day</th><th>Score=10 TP/SL</th><th>Warnings</th></tr></thead>
+        <tbody>{% for row in backtest_result.profile_leaderboard %}<tr><td>{{ row.profile_name }}</td><td>{{ row.raw_net_pnl_rank }}</td><td>{{ row.objective_score_rank }}</td><td>{{ row.raw_net_pnl }}</td><td>{{ row.final_objective_score }}</td><td>{{ row.accepted_trades }}</td><td>{{ row.win_count }}/{{ row.loss_count }}/{{ row.open_count }}</td><td>{{ row.avg_trades_per_day }}</td><td>{{ row.score_10_tp_count }}/{{ row.score_10_sl_count }}</td><td>{{ row.warnings|join(', ') }}</td></tr>{% endfor %}</tbody>
+      </table>
+      <p>Artifacts: {% if backtest_result.filter_profile_comparison_path %}{{ backtest_result.filter_profile_comparison_path }}{% endif %}{% if backtest_result.profile_leaderboard_path %}<br>{{ backtest_result.profile_leaderboard_path }}{% endif %}</p>
+      {% endif %}
       <table>
         <tbody>
           <tr><th>Filter profile</th><td><strong>{{ backtest_result.filter_profile }}</strong>{% if backtest_result.filter_warning %}<div class="alert warn-box">{{ backtest_result.filter_warning }}</div>{% endif %}</td></tr>

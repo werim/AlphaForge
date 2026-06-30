@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -27,6 +28,7 @@ class DashboardBacktestRequest:
     max_symbols: int
     filter_switches: dict[str, bool] = field(default_factory=dict)
     short_breakdown_rescue_enabled: bool = False
+    run_profile_comparison: bool = False
 
 
 @dataclass(slots=True)
@@ -104,6 +106,9 @@ class DashboardBacktestResult:
     rescue_net_pnl: Any = None
     baseline_plus_rescue_net_pnl: Any = None
     accepted_reason_breakdown: dict[str, Any] = field(default_factory=dict)
+    profile_comparison: dict[str, Any] = field(default_factory=dict)
+    profile_leaderboard: list[dict[str, Any]] = field(default_factory=list)
+    profile_leaderboard_path: str | None = None
 
 
 def default_form_values() -> dict[str, Any]:
@@ -119,6 +124,7 @@ def default_form_values() -> dict[str, Any]:
         "filter_reasons": ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"],
         "filter_switches": {reason: True for reason in ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"]},
         "short_breakdown_rescue_enabled": False,
+        "run_profile_comparison": False,
     }
 
 
@@ -159,9 +165,10 @@ def parse_backtest_form(form: Mapping[str, Any]) -> tuple[DashboardBacktestReque
     filter_reasons = default_form_values()["filter_reasons"]
     filter_switches = {reason: str(form.get(f"filter_{reason}", "")).lower() in {"1", "true", "on", "yes"} for reason in filter_reasons}
     short_breakdown_rescue_enabled = str(form.get("short_breakdown_rescue_enabled", "")).lower() in {"1", "true", "on", "yes"}
+    run_profile_comparison = str(form.get("run_profile_comparison", "")).lower() in {"1", "true", "on", "yes"}
     if errors:
         return None, errors
-    return DashboardBacktestRequest(last_days=last_days, symbols=symbols, timeframe=timeframe, initial_balance=initial_balance, max_symbols=max_symbols, filter_switches=filter_switches, short_breakdown_rescue_enabled=short_breakdown_rescue_enabled), {}
+    return DashboardBacktestRequest(last_days=last_days, symbols=symbols, timeframe=timeframe, initial_balance=initial_balance, max_symbols=max_symbols, filter_switches=filter_switches, short_breakdown_rescue_enabled=short_breakdown_rescue_enabled, run_profile_comparison=run_profile_comparison), {}
 
 
 def _read_first_csv_row(path: Path) -> dict[str, str]:
@@ -192,6 +199,18 @@ def _safe_float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    parsed = _safe_float_or_none(value)
+    return default if parsed is None else parsed
+
+
+def parse_dashboard_window_start_ms(end_iso: str, last_days: int) -> int:
+    """Return a stable BACKTEST window start for all comparison sub-runs."""
+    end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+    start_dt = end_dt - timedelta(days=int(last_days))
+    return int(start_dt.timestamp() * 1000)
 
 
 def _numeric_distribution(rows: list[dict[str, str]], field: str) -> dict[str, Any]:
@@ -756,6 +775,138 @@ def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str
         writer.writerows(later_gate_rows)
     return report_path, summary_path, summary_out
 
+PROFILE_FILTERS: dict[str, list[str]] = {
+    "DEFAULT_FILTERS": [],
+    "ALL_FILTERS_OFF": list(default_form_values()["filter_reasons"]),
+    "STRICT_FILTERS": [],
+    "SCORE_SATURATION_GUARD_DIAGNOSTIC": [],
+    "STOP_WIDTH_GUARD_DIAGNOSTIC": [],
+    "TRADE_FREQUENCY_GUARD_DIAGNOSTIC": [],
+}
+
+
+def _profit_factor(rows: list[Mapping[str, Any]]) -> float | None:
+    wins = sum(max(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0), 0.0) for r in rows)
+    losses = abs(sum(min(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0), 0.0) for r in rows))
+    if losses == 0:
+        return None if wins == 0 else float("inf")
+    return wins / losses
+
+
+def _avg_net(rows: list[Mapping[str, Any]]) -> float | None:
+    if not rows:
+        return None
+    return sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) for r in rows) / len(rows)
+
+
+def _bucket(value: Any, step: float = 1.0) -> str:
+    val = _safe_float_or_none(value)
+    if val is None:
+        return "UNAVAILABLE"
+    lo = int(val // step) * step
+    hi = lo + step
+    return f"{lo:g}-{hi:g}"
+
+
+def _bucket_diagnostics(rows: list[dict[str, str]]) -> dict[str, list[dict[str, Any]]]:
+    specs = {
+        "symbol": lambda r: r.get("symbol") or "UNKNOWN",
+        "side": lambda r: r.get("side") or "UNKNOWN",
+        "regime": lambda r: r.get("regime") or "UNKNOWN",
+        "score_bucket": lambda r: _bucket(r.get("score"), 1.0),
+        "effective_rr_bucket": lambda r: _bucket(r.get("effective_rr"), 0.5),
+        "raw_rr_bucket": lambda r: _bucket(r.get("raw_rr") or r.get("rr"), 0.5),
+        "volatility_bucket": lambda r: _bucket(r.get("volatility_score") or r.get("volatility_pct"), 0.25),
+        "liquidity_bucket": lambda r: _bucket(r.get("liquidity_score") or r.get("volume_24h_usdt"), 1.0),
+        "spread_bucket": lambda r: _bucket(r.get("spread_pct"), 0.001),
+        "expected_slippage_bucket": lambda r: _bucket(r.get("expected_slippage_pct"), 0.001),
+        "stop_distance_pct_bucket": lambda r: _bucket(r.get("stop_distance_pct"), 0.005),
+        "hour_session": lambda r: str(r.get("entry_time") or r.get("timestamp") or r.get("event_ts") or "UNAVAILABLE")[:13],
+    }
+    out: dict[str, list[dict[str, Any]]] = {}
+    for name, keyfn in specs.items():
+        groups: dict[str, list[dict[str, str]]] = defaultdict(list)
+        for row in rows:
+            groups[str(keyfn(row))].append(row)
+        bucket_rows = []
+        for bucket_name, bucket_rows_source in sorted(groups.items()):
+            count = len(bucket_rows_source)
+            win_count = sum(1 for r in bucket_rows_source if str(r.get("close_reason") or r.get("result")).upper() in {"TP_HIT", "WIN"})
+            loss_count = sum(1 for r in bucket_rows_source if str(r.get("close_reason") or r.get("result")).upper() in {"SL_HIT", "LOSS"})
+            timeout_count = sum(1 for r in bucket_rows_source if "TIMEOUT" in str(r.get("close_reason") or r.get("result")).upper())
+            net = sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) for r in bucket_rows_source)
+            recommendation = "INSUFFICIENT_SAMPLE" if count < 3 else ("KEEP" if net > 0 else ("PENALIZE" if win_count else "REJECT"))
+            bucket_rows.append({"bucket": bucket_name, "count": count, "win_count": win_count, "loss_count": loss_count, "timeout_count": timeout_count, "net_pnl": net, "avg_net_pnl": net / count if count else 0.0, "profit_factor": _profit_factor(bucket_rows_source), "avg_effective_rr": _summary_value(bucket_rows_source, "effective_rr", "mean"), "avg_score": _summary_value(bucket_rows_source, "score", "mean"), "recommendation": recommendation})
+        out[name] = bucket_rows
+    return out
+
+
+def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float, warnings: list[str] | None = None) -> dict[str, Any]:
+    summary = _read_first_csv_row(profile_dir / "order_backtest_summary.csv")
+    lifecycle = _read_csv_rows(profile_dir / "order_lifecycle.csv")
+    rejected = _read_csv_rows(profile_dir / "rejected_orders.csv")
+    filter_state_path = profile_dir / "backtest_filter_state.json"
+    filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() else {}
+    accepted = [r for r in lifecycle if _safe_float_or_none(r.get("net_pnl_usdt", r.get("net_pnl"))) is not None]
+    net = _safe_float(summary.get("total_net_pnl_usdt"), 0.0)
+    accepted_count = _safe_int(summary.get("accepted_count")) or len(accepted)
+    loss_count = _safe_int(summary.get("sl_hits")) or 0
+    win_count = _safe_int(summary.get("tp_hits")) or 0
+    rejected_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected")) or len(rejected)
+    max_dd = _safe_float_or_none(summary.get("max_drawdown"))
+    max_losses = _max_consecutive_losses(accepted)
+    avg_per_day = accepted_count / max(1, _safe_int(summary.get("last_days")) or 1)
+    drawdown_penalty = abs(max_dd) if max_dd is not None else 0.0
+    components = {
+        "raw_net_pnl": net,
+        "max_drawdown_penalty": drawdown_penalty,
+        "loss_streak_penalty": max(0, max_losses - 2) * max(abs(net) * 0.05, 1.0),
+        "overtrade_penalty": max(0.0, avg_per_day - 3.0) * max(abs(net) * 0.02, 1.0),
+        "execution_cost_penalty": abs(_summary_value(accepted, "cost_penalty", "mean") or 0.0) * accepted_count,
+        "low_sample_penalty": max(0, 5 - accepted_count) * 2.0,
+    }
+    components["final_objective_score"] = components["raw_net_pnl"] - sum(v for k, v in components.items() if k != "raw_net_pnl")
+    score10 = [r for r in accepted if (_safe_float_or_none(r.get("score")) or 0) >= 10]
+    warn = list(warnings or [])
+    if profile == "ALL_FILTERS_OFF":
+        warn.append("FILTERS_OFF_STRESS_TEST")
+    if max_dd is None:
+        warn.append("DRAWDOWN_UNAVAILABLE")
+    if accepted_count < 5:
+        warn.append("LOW_SAMPLE_RISK")
+    if avg_per_day > 3:
+        warn.append("OVERTRADE_RISK")
+    if max_losses >= 3:
+        warn.append("HIGH_LOSS_STREAK_RISK")
+    if len(score10) >= max(3, accepted_count * 0.5):
+        warn.append("SCORE_SATURATION_RISK")
+    diagnostics = _rejection_diagnostics(rejected)
+    return {
+        "profile_name": profile, "filter_profile": filter_state.get("filter_profile", profile),
+        "enabled_filters": filter_state.get("enabled_filters", []), "disabled_filters": filter_state.get("disabled_filters", []),
+        "hard_safety_gates": filter_state.get("hard_safety_gates", []), "candidates": _safe_int(summary.get("total_candidates")),
+        "accepted_trades": accepted_count, "rejected_signals": rejected_count, "reject_rate": rejected_count / max(1, accepted_count + rejected_count),
+        "win_count": win_count, "loss_count": loss_count, "open_count": _safe_int(summary.get("open_at_end")) or 0, "timeout_count": _safe_int(summary.get("timeout_count")),
+        "gross_pnl": _safe_float_or_none(summary.get("total_gross_pnl_usdt")), "net_pnl": net, "return_pct": _safe_float_or_none(summary.get("total_pnl_pct")), "return": _safe_float_or_none(summary.get("total_pnl_pct")),
+        "max_drawdown": max_dd, "max_drawdown_status": "AVAILABLE" if max_dd is not None else "UNAVAILABLE", "max_consecutive_losses": max_losses,
+        "profit_factor": _profit_factor(accepted), "avg_win": _avg_net([r for r in accepted if _safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) > 0]),
+        "avg_loss": _avg_net([r for r in accepted if _safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) < 0]),
+        "expectancy_per_trade": net / accepted_count if accepted_count else 0.0, "avg_trades_per_day": avg_per_day,
+        "accepted_effective_rr_distribution": _numeric_distribution(accepted, "effective_rr"), "rejected_effective_rr_distribution": _numeric_distribution(rejected, "effective_rr"),
+        "score_10_count": len(score10), "score_10_tp_count": sum(1 for r in score10 if str(r.get("close_reason")).upper() == "TP_HIT"), "score_10_sl_count": sum(1 for r in score10 if str(r.get("close_reason")).upper() == "SL_HIT"), "score_10_timeout_count": sum(1 for r in score10 if "TIMEOUT" in str(r.get("close_reason")).upper()), "score_10_net_pnl": sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) for r in score10),
+        "top_reject_reasons": diagnostics["top_rejection_reasons"], "objective_score": components, "warnings": sorted(set(warn)),
+        "bucket_diagnostics": _bucket_diagnostics(accepted), "artifact_paths": {"directory": str(profile_dir), "summary": str(profile_dir / "order_backtest_summary.csv"), "lifecycle": str(profile_dir / "order_lifecycle.csv"), "rejected": str(profile_dir / "rejected_orders.csv")},
+    }
+
+
+def _max_consecutive_losses(rows: list[Mapping[str, Any]]) -> int:
+    best = cur = 0
+    for row in rows:
+        is_loss = str(row.get("close_reason") or row.get("result")).upper() in {"SL_HIT", "LOSS"}
+        cur = cur + 1 if is_loss else 0
+        best = max(best, cur)
+    return best
+
 
 def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBacktestResult:
     """Run the existing backtest_order.py pipeline with a BACKTEST-only command boundary."""
@@ -768,13 +919,19 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "backtest_order.py"
     symbols = request.symbols[: request.max_symbols]
-    command = [
+    fixed_end = canonical_utc_timestamp()
+    fixed_start_ms = parse_dashboard_window_start_ms(fixed_end, request.last_days)
+    base_command = [
         sys.executable,
         str(script),
         "--mode",
         "BACKTEST",
         "--last-n-days",
         str(request.last_days),
+        "--start",
+        str(fixed_start_ms),
+        "--end",
+        fixed_end,
         "--symbols",
         ",".join(symbols),
         "--top-n",
@@ -787,6 +944,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         str(output_dir),
         "--force-refresh",
     ]
+    command = list(base_command)
     for reason, enabled in request.filter_switches.items():
         if not enabled:
             command.extend(["--disable-backtest-filter", reason])
@@ -797,6 +955,61 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.disabled_filters = [reason for reason, enabled in request.filter_switches.items() if not enabled]
     result.short_breakdown_rescue_enabled = bool(request.short_breakdown_rescue_enabled)
     result.filter_switch_experiment_active = bool(result.disabled_filters)
+    if request.run_profile_comparison:
+        profiles_root = output_dir / "profiles"
+        comparison_profiles: dict[str, Any] = {}
+        profile_sequence = ["DEFAULT_FILTERS", "ALL_FILTERS_OFF", "STRICT_FILTERS", "CUSTOM_CURRENT_UI", "SCORE_SATURATION_GUARD_DIAGNOSTIC", "STOP_WIDTH_GUARD_DIAGNOSTIC", "TRADE_FREQUENCY_GUARD_DIAGNOSTIC"]
+        base_env = os.environ.copy()
+        base_env["ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED"] = "true" if request.short_breakdown_rescue_enabled else "false"
+        for profile in profile_sequence:
+            profile_dir = profiles_root / profile
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            disabled = PROFILE_FILTERS.get(profile, [])
+            warnings: list[str] = []
+            if profile == "CUSTOM_CURRENT_UI":
+                disabled = [reason for reason, enabled in request.filter_switches.items() if not enabled]
+            if profile == "ALL_FILTERS_OFF":
+                warnings.append("FILTERS_OFF_STRESS_TEST")
+            if profile == "TRADE_FREQUENCY_GUARD_DIAGNOSTIC":
+                warnings.extend(["DIAGNOSTIC_MAX_1_TRADE_PER_DAY_NOT_ENFORCED", "DIAGNOSTIC_MAX_2_TRADES_PER_DAY_NOT_ENFORCED", "DIAGNOSTIC_MAX_3_TRADES_PER_DAY_NOT_ENFORCED", "DIAGNOSTIC_PAUSE_AFTER_2_CONSECUTIVE_SL_NOT_ENFORCED"])
+            profile_command = [arg if arg != str(output_dir) else str(profile_dir) for arg in base_command]
+            for reason in disabled:
+                profile_command.extend(["--disable-backtest-filter", reason])
+            if request.short_breakdown_rescue_enabled:
+                profile_command.append("--rescue-enabled")
+            completed = subprocess.run(profile_command, cwd=repo_root, text=True, capture_output=True, timeout=600, check=False, env=base_env)
+            if completed.returncode != 0:
+                result.status = "FAILED"
+                result.error_message = (completed.stderr or completed.stdout or f"{profile} failed")[-1200:]
+                return result
+            comparison_profiles[profile] = _comparison_metrics(profile, profile_dir, request.initial_balance, warnings)
+        raw_sorted = sorted(comparison_profiles.values(), key=lambda r: r.get("objective_score", {}).get("raw_net_pnl", 0.0), reverse=True)
+        obj_sorted = sorted(comparison_profiles.values(), key=lambda r: r.get("objective_score", {}).get("final_objective_score", 0.0), reverse=True)
+        raw_rank = {r["profile_name"]: i + 1 for i, r in enumerate(raw_sorted)}
+        obj_rank = {r["profile_name"]: i + 1 for i, r in enumerate(obj_sorted)}
+        leaderboard = []
+        for row in comparison_profiles.values():
+            leaderboard.append({
+                "profile_name": row["profile_name"], "raw_net_pnl": row["objective_score"]["raw_net_pnl"], "final_objective_score": row["objective_score"]["final_objective_score"],
+                "raw_net_pnl_rank": raw_rank[row["profile_name"]], "objective_score_rank": obj_rank[row["profile_name"]],
+                "accepted_trades": row["accepted_trades"], "win_count": row["win_count"], "loss_count": row["loss_count"], "open_count": row["open_count"],
+                "avg_trades_per_day": row["avg_trades_per_day"], "score_10_tp_count": row["score_10_tp_count"], "score_10_sl_count": row["score_10_sl_count"], "warnings": row["warnings"],
+            })
+        comparison = {"mode": "BACKTEST", "comparison_mode": True, "windows": {"30": "RUN" if request.last_days == 30 else "NOT_RUN", "90": "RUN" if request.last_days == 90 else "NOT_RUN", "180": "RUN" if request.last_days == 180 else "NOT_RUN", "365": "RUN" if request.last_days == 365 else "NOT_RUN"}, "profiles": comparison_profiles}
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "backtest_filter_profile_comparison.json").write_text(json.dumps(comparison, indent=2, sort_keys=True))
+        (output_dir / "backtest_profile_leaderboard.json").write_text(json.dumps({"mode": "BACKTEST", "leaderboard": leaderboard}, indent=2, sort_keys=True))
+        with (output_dir / "backtest_profile_leaderboard.csv").open("w", newline="") as fh:
+            fields = ["profile_name", "raw_net_pnl", "final_objective_score", "raw_net_pnl_rank", "objective_score_rank", "accepted_trades", "win_count", "loss_count", "open_count", "avg_trades_per_day", "score_10_tp_count", "score_10_sl_count", "warnings"]
+            writer = csv.DictWriter(fh, fieldnames=fields); writer.writeheader()
+            for row in leaderboard:
+                writer.writerow({**row, "warnings": json.dumps(row["warnings"], sort_keys=True)})
+        result.status = "COMPLETED"
+        result.profile_comparison = comparison
+        result.profile_leaderboard = sorted(leaderboard, key=lambda r: r["objective_score_rank"])
+        result.filter_profile_comparison_path = str(output_dir / "backtest_filter_profile_comparison.json")
+        result.profile_leaderboard_path = str(output_dir / "backtest_profile_leaderboard.json")
+        return result
     try:
         run_env = os.environ.copy()
         run_env["ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED"] = "true" if request.short_breakdown_rescue_enabled else "false"

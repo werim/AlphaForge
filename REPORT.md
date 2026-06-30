@@ -1,3 +1,48 @@
+
+## 2026-06-30 - BACKTEST profile comparison runner
+
+### Why the patch was needed
+The existing comparison artifact could only describe the current run and marked other profiles as not run. That was sufficient for switch audit evidence but could not compare filter profiles over the same BACKTEST inputs.
+
+### Root cause
+The dashboard had a single BACKTEST subprocess path and no artifact-first coordinator for repeated profile executions.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `docs/backtest_profile_comparison.md`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+Added an opt-in BACKTEST-only comparison runner that executes profile sub-runs under `profiles/<profile>/` with the same symbols, timeframe, balance, max-symbol cap, date window, and data source. Default single-profile dashboard behavior is unchanged when the checkbox is not selected.
+
+### Lifecycle changes
+No lifecycle state machine changes. Comparison artifacts consume existing per-profile lifecycle exports.
+
+### Persistence changes
+No SQLite schema migration. New JSON/CSV artifacts are written under the dashboard BACKTEST output directory.
+
+### Export/schema changes
+Added `backtest_filter_profile_comparison.json`, `backtest_profile_leaderboard.json`, and `backtest_profile_leaderboard.csv` for comparison mode, including objective-score components, warnings, artifact paths, and bucket diagnostics.
+
+### Tests added/executed
+Local validation included Python compilation and targeted pytest execution.
+
+
+### Pre-merge safety audit correction
+The initial comparison coordinator copied the single-profile command after UI filter disables had been appended, which could contaminate DEFAULT/STRICT/diagnostic profile sub-runs when the dashboard UI had custom disabled filters. It also relied on each subprocess computing `last_n_days` relative to its own clock. The patch now builds an immutable base BACKTEST command, appends profile-specific filter switches only per profile, and passes one fixed `--start`/`--end` window to every sub-run.
+
+### Risks and limitations
+The 30/90/180/365 multi-window matrix is scaffolded only; non-selected windows are marked NOT_RUN. Diagnostic guard profiles currently preserve default thresholds and export warnings/labels rather than changing global config. Drawdown is not fabricated when unavailable.
+
+### Migration concerns
+None for SQLite. Artifact consumers should tolerate new comparison keys.
+
+### Push recommendation
+Safe to push after targeted dashboard/backtest tests pass. LIVE remains NOT READY.
+
 # AlphaForge Technical Surgery Report
 
 ## 2026-06-30 - Dashboard BACKTEST SHORT_BREAKDOWN_RESCUE switch
