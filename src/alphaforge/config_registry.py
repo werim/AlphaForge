@@ -92,6 +92,7 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_BACKTEST_MAX_ACCEPTED_TRADES_PER_DAY", "backtest_max_accepted_trades_per_day", "int", 0, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST accepted/day cap; 0 disables.", 0),
     _s("ALPHAFORGE_BACKTEST_MAX_SYMBOL_TRADES_PER_DAY", "backtest_max_symbol_trades_per_day", "int", 0, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST symbol/day cap; 0 disables.", 0),
     _s("ALPHAFORGE_BACKTEST_USE_EXECUTION_COSTS", "backtest_use_execution_costs", "bool", True, "Backtest Settings", ("BACKTEST",), "Use execution-cost context in backtests when available."),
+    _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", "backtest_short_breakdown_rescue_enabled", "bool", False, "Backtest Settings", ("BACKTEST",), "BACKTEST-only SHORT_BREAKDOWN_RESCUE experiment; disabled by default and does not affect PAPER/LIVE."),
     _s("ALPHAFORGE_BACKTEST_EXPORT_CONFIG_SNAPSHOT", "backtest_export_config_snapshot", "bool", True, "Backtest Settings", ("BACKTEST",), "Export config_snapshot.json with backtest runs."),
 )
 

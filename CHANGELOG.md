@@ -24,6 +24,29 @@
 
 # Changelog
 
+## 2026-06-30 - Dashboard BACKTEST SHORT_BREAKDOWN_RESCUE switch
+
+### Added
+- Added a dashboard BACKTEST-only `SHORT_BREAKDOWN_RESCUE experiment` toggle that defaults off and passes `ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED` as a scoped run environment override.
+- Added rescue experiment state and baseline/rescue accepted-count, net-PnL, combined-PnL, and accepted-reason breakdown display in dashboard backtest results.
+- Added `backtest_filter_state.json` / `.csv` experiment evidence marking SHORT_BREAKDOWN_RESCUE as BACKTEST-only, disabled by default, and PAPER/LIVE-neutral.
+- Documented the supported dashboard runner path as `backtest_order.py`; no `python -m alphaforge.backtest.runner` package entrypoint exists in this repo.
+
+### Changed
+- The dashboard package now lazily imports the FastAPI app factory so non-web backtest-control helpers remain importable without optional FastAPI dependencies.
+
+### Fixed
+- Dashboard-launched baseline runs now explicitly scope the rescue env value to `false`, while rescue comparison runs scope it to `true` without mutating `.env`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. BACKTEST-only experiment wiring; PAPER/LIVE behavior is unchanged.
+
+### Known Issues
+- Dashboard HTML rendering tests still skip when optional FastAPI/httpx dependencies are unavailable. LIVE remains NOT READY.
+
 ## Unreleased
 
 ### Added
