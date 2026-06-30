@@ -1,98 +1,49 @@
 # AlphaForge Technical Surgery Report
 
-## 2026-06-30 - BACKTEST filter-state audit and filters-off damage diagnostics
+## 2026-06-30 - BACKTEST SHORT Breakdown Rescue Reporting Experiment
 
-### Why this patch was needed
-The latest dashboard run intentionally unchecked every optional BACKTEST filter and showed high acceptance with severe negative expectancy. The dashboard did not yet make the run profile, hard safety gates, or switch-to-reject mapping auditable in every artifact.
-
-### Root cause
-Optional BACKTEST switches were real decision switches, but generated artifacts did not explicitly distinguish optional filters from always-on hard safety gates. A filters-off diagnostic could therefore be misread as strategy performance instead of damage attribution.
-
-### Files changed
-- `backtest_order.py`
-- `src/alphaforge/dashboard/backtest_control.py`
-- `src/alphaforge/dashboard/templates/overview.html`
-- `tests/test_backtest_filter_switches.py`
-- `docs/backtest_filter_switch_audit.md`
-- `CHANGELOG.md`
-- `VERSION.md`
-- `REPORT.md`
-
-### Runtime behavior changes
-BACKTEST writes filter-state and diagnostic artifacts for each run. Default filter thresholds are unchanged. PAPER/LIVE switch behavior is unchanged.
-
-### Lifecycle changes
-No lifecycle transition semantics changed. Rejected rows and accepted diagnostics remain persisted/exported through existing lifecycle artifacts.
-
-### Persistence/export/schema changes
-CSV/JSON artifacts are append-only additions: `backtest_filter_state.json`, `backtest_filter_state.csv`, `backtest_filter_profile_comparison.json`, `accepted_trade_loss_diagnostics.json`, and `accepted_trade_loss_diagnostics.csv`. No SQLite schema migration is required.
-
-### Tests added/executed
-Added regression tests for all-off filter-state recording, `NEGATIVE_EXPECTANCY` hard safety persistence, artifact-only comparison scaffolding, and accepted loss diagnostics.
-
-### Risks and limitations
-The comparison artifact records the current run and marks other profiles as not run; a complete 30/90/180/365 comparison still requires separate profile runs. Score=10 saturation remains diagnostic-only and does not tune thresholds.
-
-### Migration concerns
-None for SQLite. Consumers may optionally read the new JSON/CSV artifacts.
-
-### Push recommendation
-Safe to push for BACKTEST diagnostic transparency. Do not treat filters-off results as LIVE readiness.
-
----
-
-
-## Why this patch was needed
-The latest dashboard BACKTEST diagnostics showed very high rejection, but accepted BTC/ETH 90d 15m trades still had negative net PnL and many SL_HIT outcomes. Accepted effective RR averaged only about 1.58, score=10 was not reliably predictive, and disabling or weakening gates could hide low-quality acceptance.
+## Why the patch was needed
+The latest DEFAULT all-filters-on BACKTEST produced only 11 accepted trades from 1,436 candidates, while `candidate_quality_gates` showed a concentrated SHORT + BREAKDOWN_DOWN + BREAKOUT/NORMAL-stop cluster with positive rejected-shadow expectancy. A global filter loosen would be unsafe, so the patch adds a reporting-first, opt-in rescue path for that narrow hypothesis only.
 
 ## Root cause
-Accepted quality was not hardened enough after execution costs: raw RR could satisfy the `RR_TOO_LOW` branch while effective RR stayed near the old 1.10 floor, and the backtest execution reject helper still had a hardcoded 1.10 LOW_EFFECTIVE_RR threshold. Score saturation is diagnostic evidence, not proof of expectancy. REGIME_MISMATCH near-miss diagnostics indicate the regime gate is protective and should stay enabled by default.
+The dashboard/export layer already exposed the SHORT breakdown quality gate as reporting-only evidence, but there was no controlled way to test reduced-size activation without disabling broad reject filters or changing baseline behavior.
 
 ## Files changed
 - `.env.example`
-- `src/alphaforge/config_registry.py`
-- `src/alphaforge/order.py`
 - `backtest_order.py`
-- `tests/test_backtest_filter_switches.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
 - `tests/test_backtest_order_scanner.py`
 - `VERSION.md`
 - `REPORT.md`
 - `CHANGELOG.md`
 
 ## Runtime behavior changes
-- Raised typed default `MIN_EFFECTIVE_RR` to 1.60 across BACKTEST/PAPER/LIVE unless explicitly overridden.
-- `RR_TOO_LOW` now rejects when either raw RR is below `MIN_RR` or execution-adjusted RR is below `MIN_EFFECTIVE_RR`.
-- BACKTEST-only disabled-filter experiments still work, but diagnostics now expose disabled-filter acceptance evidence.
+DEFAULT BACKTEST behavior remains unchanged because `ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED=false`. When explicitly enabled, BACKTEST may rescue only SHORT `BREAKDOWN_DOWN` candidates in BREAKOUT/NORMAL-compatible conditions whose first reject reason/gate is allowed and whose execution context passes conservative checks.
 
 ## Lifecycle changes
-No lifecycle state was removed. The patch preserves SIGNAL_CREATED, SIGNAL_REJECTED, accepted diagnostics, rejected distributions, near-miss diagnostics, execution-cost summaries, and config snapshots.
+Rescued trades use the normal simulation lifecycle and are marked with `accepted_reason=SHORT_BREAKDOWN_RESCUE`, `original_reject_reason`, `rescue_size_multiplier`, `rescue_effective_rr`, and JSON `rescue_decision_context`.
 
 ## Persistence changes
-No SQLite schema migration was introduced. New diagnostics are summary/export fields derived from existing lifecycle/order rows.
+No SQLite migration is required. Existing lifecycle/export metadata fields carry rescue evidence. Summary exports include rescue diagnostics and baseline-vs-rescue PnL separation.
 
 ## Export/schema changes
-`backtest_quality_summary.csv` can now include accepted-trade quality diagnostics, score calibration diagnostics, and disabled-filter acceptance evidence as serialized summary values. Existing CSV columns remain append-style summary metrics.
+`.env.example` adds the BACKTEST-only rescue variables. `backtest_filter_state` now includes a `backtest_only_experiments` section identifying the rescue switch as BACKTEST-only. The dashboard summary separates BASELINE accepted trades, RESCUE accepted trades, and reporting-only gates.
 
 ## Tests added
-- Effective-RR-aware RR_TOO_LOW gating and BACKTEST-only bypass behavior.
-- REGIME_MISMATCH enabled by default.
-- Accepted quality diagnostics by score/effective-RR/symbol and score=10 saturation evidence.
-- Disabled-filter acceptance evidence in quality summaries.
+Regression tests prove disabled baseline rejection, enabled rescue rows, SHORT-only eligibility, LOW_SCORE LONG exclusion, metadata population, filter-state BACKTEST-only labeling, and PAPER/LIVE non-activation.
 
 ## Tests executed
-- `python -m pytest -q`
+- `pytest -q tests/test_backtest_order_scanner.py -k 'short_breakdown_rescue or rescue_enabled_only_backtest or rescue_disabled'`
 
 ## Risks
-- The stricter default can reduce accepted trades materially. This is intentional and aligned with capital preservation.
-- Score calibration remains weak; this patch exposes diagnostics rather than overfitting new score filters to one BTC/ETH run.
-- Existing local/dashboard overrides can still set lower thresholds; config snapshots must be reviewed for override evidence.
+The rescue gate is still experimental and depends on rejected-shadow/backtest diagnostics. Spread/slippage may be estimated. Enabling the rescue can change accepted count and PnL in BACKTEST only.
 
 ## Remaining limitations
-- No new curve-fit filters were added for side, symbol, hour, or specific score buckets.
-- Full dashboard smoke results depend on available Binance/network data and runtime fixture duration.
+`ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_SHADOW_EXPECTANCY` is exported/configured for operator audit but live per-candidate activation currently gates on candidate execution context rather than recomputing a per-run shadow aggregate inside the decision loop.
 
 ## Migration concerns
-Operators relying on previous default `MIN_EFFECTIVE_RR=1.10` must explicitly override it if they want legacy behavior. Such loosening should be treated as an experiment and documented in config snapshots.
+No database migration required. Artifact consumers should tolerate additive JSON/CSV fields.
 
 ## Push recommendation
-Push after the full test suite passes and a dashboard BACKTEST smoke run confirms accepted count, win/loss/open, net PnL, disabled filters, config snapshot path, accepted loss clusters, and score calibration summary are visible.
+Safe to push as a BACKTEST-only reporting-first experiment. Do not enable for LIVE; LIVE remains not ready.
