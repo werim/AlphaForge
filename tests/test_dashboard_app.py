@@ -578,6 +578,7 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert "SL_HIT" in html
     assert "Backtest Top Rejection Reasons" in html
     assert "LOW_SCORE" in html
+    assert "REGIME_MISMATCH" in html
     assert "LOW_LIQUIDITY" in html
     assert "Actionable signal rejects / Symbol-selector rejects / Order-lifecycle rejects" in html
     assert "Passed score/RR/expectancy before later gates" in html

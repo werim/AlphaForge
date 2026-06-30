@@ -1,3 +1,42 @@
+## 2026-06-30 - Dashboard top rejection reasons rendering fix
+
+### Why the patch was needed
+After accepted diagnostics rendering was restored, the same BACKTEST evidence test still showed that populated `result.top_rejection_reasons` were missing from rendered `/backtest/run` HTML even though the main reject-rate summary and accepted diagnostics were visible.
+
+### Root cause
+The Backtest Top Rejection Reasons table was still inside the completed-only diagnostics branch. The populated model data was therefore not guaranteed to render in the same always-visible Backtest Result evidence path as the summary metrics and accepted diagnostics.
+
+### Files changed
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+No BACKTEST decision behavior changed. The dashboard now renders the Backtest Top Rejection Reasons table immediately after Accepted Trade Diagnostics in the visible Backtest Result evidence area, with the existing `No rejected_orders.csv diagnostics available.` empty state preserved.
+
+### Lifecycle changes
+No lifecycle state-machine changes.
+
+### Persistence changes
+None. No SQLite or artifact schema changes.
+
+### Export/schema changes
+None.
+
+### Tests added/executed
+Kept existing assertions for `Backtest Top Rejection Reasons` and `LOW_SCORE`, and added a focused rendered HTML assertion for `REGIME_MISMATCH` from the fixture.
+
+### Risks and limitations
+This is a dashboard-template-only rendering fix. It does not tune thresholds, weaken gates, or alter PAPER/LIVE runtime behavior.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after dashboard and full pytest validation. LIVE remains NOT READY.
+
 ## 2026-06-30 - Dashboard accepted diagnostics rendering fix
 
 ### Why the patch was needed

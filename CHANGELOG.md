@@ -1,3 +1,23 @@
+## 2026-06-30 - Dashboard top rejection reasons rendering fix
+
+### Added
+- Added a focused dashboard HTML assertion that the rendered BACKTEST evidence includes `REGIME_MISMATCH` from the populated top rejection reasons fixture.
+
+### Changed
+- Backtest Top Rejection Reasons now renders immediately in the visible Backtest Result evidence area, alongside Accepted Trade Diagnostics, while preserving the existing empty-state row.
+
+### Fixed
+- Fixed the remaining BACKTEST evidence UI regression where populated `top_rejection_reasons` could be absent from rendered `/backtest/run` HTML due to completed-diagnostics section gating.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; dashboard rendering only.
+
+### Known Issues
+- LIVE readiness remains NOT READY. BACKTEST evidence rendering does not change decision logic or runtime safety gates.
+
 ## 2026-06-30 - Dashboard accepted diagnostics rendering fix
 
 ### Added
