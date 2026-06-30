@@ -1,3 +1,26 @@
+## 2026-06-30 - BACKTEST profile metric integrity
+
+### Added
+- Added canonical accepted-trade source tracking, lifecycle/rejected row counts, no-trade warnings, guardrail reject breakdowns, top guardrail reasons, and representative guardrail reject examples.
+- Added regression tests for zero-accepted profiles with large lifecycle exports, rejected lifecycle states, accepted effective RR isolation, no-trade overtrade warnings, ALL_FILTERS_OFF executed summaries, and gate-funnel comparability labeling.
+
+### Changed
+- Profile comparison and leaderboard ranking now prefer canonical executed trade evidence over lifecycle row counts and rank no-trade profiles below profiles with executed trades.
+- `default_gate_funnel.csv` rows now expose scope/comparability notes when gate rejects are absent or not directly comparable to summary rejection counts.
+
+### Fixed
+- Fixed profile comparison accepted trade inflation caused by treating lifecycle diagnostic rows as accepted trades.
+- Fixed accepted effective RR distributions for no-trade profiles so rejected/lifecycle diagnostic rows do not populate accepted distributions.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Dashboard comparison artifacts may show lower accepted trade counts where previous outputs incorrectly counted lifecycle events.
+
+### Known Issues
+- This is a reporting integrity patch only; it does not prove strategy expectancy or LIVE readiness.
+
 ## 2026-06-30 - Purpose-specific environment profiles
 
 ### Added

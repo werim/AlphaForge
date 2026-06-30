@@ -1,3 +1,49 @@
+## 2026-06-30 - BACKTEST profile metric integrity surgery report
+
+### Why this patch was needed
+The latest dashboard artifact showed DEFAULT_FILTERS with `accepted_count=0` and zero orders in `order_backtest_summary.csv`, while root comparison/leaderboard outputs reported 12,221 accepted trades and `OVERTRADE_RISK`. That contradicted canonical order evidence and could rank a no-trade profile as strategy performance.
+
+### Root cause
+Profile comparison fell back to lifecycle-derived rows when summary values were zero or when lifecycle diagnostic exports contained many rows. That blurred lifecycle event count, rejected signal count, accepted trade count, and executed outcome count.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`: added canonical accepted-trade selection from summary/order evidence, no-trade handling, accepted distribution isolation, and leaderboard ranking safeguards.
+- `backtest_order.py`: added guardrail reject reason breakdown/examples and gate-funnel comparability labels.
+- `tests/test_backtest_profile_comparison.py`: added regression coverage for metric integrity and no-trade leaderboard behavior.
+- `tests/test_strategy_quality_guardrails.py`: added guardrail explainability and gate-funnel labeling coverage.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: documented behavior, risks, and validation.
+
+### Runtime behavior changes
+BACKTEST dashboard/profile reporting now uses canonical executed trade evidence only. No trading gates were loosened and no PAPER/LIVE order path was changed.
+
+### Lifecycle changes
+Lifecycle exports remain intact. Reporting now explicitly separates lifecycle event count from accepted trade count and never counts `SIGNAL_CREATED`, `SIGNAL_REJECTED`, `SYMBOL_REJECTED`, or `ORDER_REJECTED` as accepted trades.
+
+### Persistence changes
+No database migration. CSV/JSON artifacts gain explanatory fields but existing core files remain in place.
+
+### Export/schema changes
+Profile comparison JSON includes `accepted_trades_source`, `lifecycle_event_count`, and `rejected_row_count`. Guardrail evidence includes `guardrail_reject_breakdown`, `top_guardrail_reject_reasons`, and `representative_guardrail_reject_examples`. Gate-funnel rows include scope/comparability notes.
+
+### Tests added
+Added tests for zero accepted count with 12k lifecycle rows, rejected lifecycle states not counted, accepted effective RR distribution count zero for no-trade profiles, no `OVERTRADE_RISK` from lifecycle rows, ALL_FILTERS_OFF executed count/outcomes/PnL, and default gate funnel comparability disclosure.
+
+### Tests executed
+- `pytest -q tests/test_backtest_profile_comparison.py -q`
+- `pytest -q tests/test_strategy_quality_guardrails.py tests/test_backtest_profile_comparison.py -q`
+
+### Risks
+Existing downstream consumers may see accepted trade counts drop to zero where previous artifacts were inflated by lifecycle events. This is intended and safer.
+
+### Remaining limitations
+The patch does not replay guardrail-rejected candidates as trades, because that would create fake counterfactual PnL.
+
+### Migration concerns
+Consumers should read accepted counts from summary/order evidence and treat lifecycle row counts as diagnostics only.
+
+### Push recommendation
+Safe to push after tests pass; do not claim LIVE readiness.
+
 ## 2026-06-30 - Purpose-specific environment profiles surgery report
 
 ### Why this patch was needed

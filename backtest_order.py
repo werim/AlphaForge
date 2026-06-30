@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import sys
+from collections import Counter
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from datetime import datetime, timezone
@@ -2374,6 +2375,15 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
     guard_reasons = {"DAILY_TRADE_FREQUENCY_GUARD", "LOSS_STREAK_PAUSE", "SYMBOL_CLUSTER_GUARD", "SCORE_SATURATION_GUARD", "HIGH_VOL_GUARD", "HIGH_VOL_OVERTRADE", "HIGH_VOL_EXECUTION_COST"}
     accepted_after = _accepted_terminal_rows_for_risk(lifecycle_rows)
     guard_rejects = [r for r in rejected_rows if str(r.get("reject_reason", "")).upper() in guard_reasons]
+    guardrail_reject_breakdown = dict(Counter(str(r.get("reject_reason", "UNKNOWN")).upper() or "UNKNOWN" for r in guard_rejects))
+    representative_examples = []
+    for r in guard_rejects[:25]:
+        representative_examples.append({
+            "symbol": r.get("symbol"), "side": r.get("side"), "timestamp": r.get("timestamp") or r.get("event_ts"),
+            "reject_reason": str(r.get("reject_reason", "UNKNOWN")).upper() or "UNKNOWN",
+            "score": r.get("score"), "effective_rr": r.get("effective_rr"), "regime": r.get("regime"),
+            "cost_penalty": r.get("cost_penalty"), "shadow_outcome": r.get("shadow_outcome"),
+        })
     before_count = len(accepted_after) + len(guard_rejects)
     score10_after = [r for r in accepted_after if float(r.score or 0.0) >= cfg.saturated_score_threshold]
     high_vol_after = [r for r in accepted_after if _is_high_vol_context(r.regime, {"volatility_regime": r.volatility_regime})]
@@ -2398,6 +2408,9 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
         "thresholds_used": asdict(cfg),
         "accepted_before_guardrails": before_count, "accepted_after_guardrails": len(accepted_after),
         "rejected_by_new_guardrails": len(guard_rejects),
+        "guardrail_reject_breakdown": guardrail_reject_breakdown,
+        "top_guardrail_reject_reasons": [{"reason": reason, "count": count} for reason, count in Counter(guardrail_reject_breakdown).most_common()],
+        "representative_guardrail_reject_examples": representative_examples,
         "pnl_before_guardrails": None, "pnl_after_guardrails": net,
         "trade_count_before_after": {"before": before_count, "after": len(accepted_after)},
         "loss_streak_before_after": {"before": None, "after": loss},
@@ -2428,6 +2441,8 @@ def build_default_gate_funnel(rejected: List[Dict[str, Any]], accepted_rows: Lis
             **split, "unknown_count": unknown,
             "expected_effective_expectancy": (exp / len(gate_rows) if gate_rows else 0.0),
             "gate_visible": True, "zero_reject_warning": len(gate_rows) == 0,
+            "funnel_scope": "rejected_orders_plus_executed_terminal_rows",
+            "comparability_note": "Matches rejection_counts when rejected_orders.csv contains canonical reject_reason values; zero rows indicate no exported reject rows for this gate or pre-funnel/profile-disabled filtering, not accepted trades.",
         })
         remaining = max(accepted_count, remaining - len(gate_rows))
     return rows
