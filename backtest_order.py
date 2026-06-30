@@ -184,6 +184,7 @@ def build_backtest_filter_state(*, disabled_filters: Iterable[str], source: str,
         "disabled_filters": [f["filter_name"] for f in filters if not f["enabled"]],
         "filters": filters,
         "hard_safety_gates": list(HARD_SAFETY_GATES),
+        "experiments": {"SHORT_BREAKDOWN_RESCUE": {"env_var": "ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", "dashboard_field": "short_breakdown_rescue_enabled", "enabled": bool(short_breakdown_rescue_enabled), "default": False, "mode": "BACKTEST only", "paper_live_effect": "does not affect PAPER/LIVE", "description": "SHORT_BREAKDOWN_RESCUE experiment"}},
         "all_off_warning": "This is a diagnostic stress test. It can increase accepted trades and destroy expectancy. Do not treat as strategy performance." if filter_profile_name(disabled) == "ALL_OFF" else "",
         "backtest_only_experiments": [{"name": SHORT_BREAKDOWN_RESCUE_REASON, "enabled": bool(short_breakdown_rescue_enabled), "mode": "BACKTEST only", "default_behavior": "unchanged when disabled", "accepted_reason": SHORT_BREAKDOWN_RESCUE_REASON}],
     }
@@ -209,6 +210,8 @@ def write_backtest_filter_state_artifacts(output_dir: str, state: Mapping[str, A
             "env_var": row.get("env_var"),
             "dashboard_field": row.get("dashboard_field"),
             "internal_flag": row.get("internal_flag"),
+            "experiment_SHORT_BREAKDOWN_RESCUE_enabled": state.get("experiments", {}).get("SHORT_BREAKDOWN_RESCUE", {}).get("enabled"),
+            "experiment_SHORT_BREAKDOWN_RESCUE_mode": state.get("experiments", {}).get("SHORT_BREAKDOWN_RESCUE", {}).get("mode"),
         })
     with (path / "backtest_filter_state.csv").open("w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()) if rows else ["filter_name"])
@@ -399,9 +402,16 @@ def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[f
     return effective, flags, breakdown
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def _rescue_config_from_args(args: Any, runtime_cfg: Any) -> RescueConfig:
     return RescueConfig(
-        enabled=bool(getattr(args, "rescue_enabled", False)),
+        enabled=bool(getattr(args, "rescue_enabled", False)) or _env_bool("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", False),
         modes=tuple(str(getattr(args, "rescue_modes", "BACKTEST") or "BACKTEST").upper().replace(",", " ").split()),
         effective_rr_min=float(getattr(args, "rescue_effective_rr_min", 1.90)),
         score_min=float(getattr(args, "rescue_score_min", 9.0)),
@@ -2990,7 +3000,7 @@ def main():
         symbols=fixed_symbols_for_state,
         timeframe=args.interval,
         last_days=args.last_n_days,
-        short_breakdown_rescue_enabled=short_breakdown_rescue_config.enabled,
+        short_breakdown_rescue_enabled=rescue_config.enabled and str(args.mode).upper() == "BACKTEST",
     )
     write_backtest_filter_state_artifacts(args.output_dir, filter_state)
     if args.offline:
@@ -3314,6 +3324,8 @@ def main():
         "rescue_avg_effective_rr": (sum(r.rescue_effective_rr for r in rescue_accept_rows) / len(rescue_accept_rows)) if rescue_accept_rows else 0.0,
         "rescue_avg_score": (sum(r.score for r in rescue_accept_rows) / len(rescue_accept_rows)) if rescue_accept_rows else 0.0,
         "rescue_reject_reasons": json.dumps(rescue_stats.reject_reasons, sort_keys=True),
+        "short_breakdown_rescue_enabled": bool(rescue_config.enabled and str(args.mode).upper() == "BACKTEST"),
+        "short_breakdown_rescue_scope": "BACKTEST-only",
         "accepted_reason_breakdown": json.dumps(accepted_reason_breakdown, sort_keys=True),
         "rejected_count": counts["rejected_count"],
         "total_rejected": counts["rejected_count"],

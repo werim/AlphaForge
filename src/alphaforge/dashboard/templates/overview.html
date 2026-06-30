@@ -55,7 +55,7 @@
 
   <section class="panel" id="run-backtest">
     <div class="panel-head"><h2>Run Backtest</h2><span class="badge neutral">BACKTEST ONLY</span></div>
-    <p>Backtest only. Does not place orders.</p>
+    <p>Backtest only. Does not place orders. Dashboard launches the supported repo runner: <code>python backtest_order.py --mode BACKTEST</code>; this repo does not provide <code>python -m alphaforge.backtest.runner</code>.</p>
     <form class="backtest-form" method="post" action="/backtest/run">
       <div><label for="last_days">Last N days</label><input id="last_days" name="last_days" type="number" min="1" max="730" value="{{ backtest_form.last_days }}">{% if backtest_errors.last_days %}<small class="field-error">{{ backtest_errors.last_days }}</small>{% endif %}</div>
       <div><label for="symbols">Symbols</label><input id="symbols" name="symbols" value="{{ backtest_form.symbols }}" placeholder="BTCUSDT,ETHUSDT">{% if backtest_errors.symbols %}<small class="field-error">{{ backtest_errors.symbols }}</small>{% endif %}</div>
@@ -71,6 +71,11 @@
           <label><input type="checkbox" name="filter_{{ reason }}" {% if backtest_form.filter_switches.get(reason, true) %}checked{% endif %}> {{ reason }}</label>
           {% endfor %}
         </div>
+      </fieldset>
+      <fieldset class="filter-switches">
+        <legend>SHORT_BREAKDOWN_RESCUE experiment</legend>
+        <p class="alert warn-box"><strong>BACKTEST-only</strong> experiment, <strong>disabled by default</strong>, and <strong>does not affect PAPER/LIVE</strong>. Enable only for baseline-vs-rescue comparison runs.</p>
+        <label><input type="checkbox" name="short_breakdown_rescue_enabled" value="true" {% if backtest_form.short_breakdown_rescue_enabled %}checked{% endif %}> SHORT_BREAKDOWN_RESCUE experiment</label>
       </fieldset>
       <button type="submit">Run Backtest</button>
     </form>
@@ -90,6 +95,10 @@
       <table>
         <tbody>
           <tr><th>Filter profile</th><td><strong>{{ backtest_result.filter_profile }}</strong>{% if backtest_result.filter_warning %}<div class="alert warn-box">{{ backtest_result.filter_warning }}</div>{% endif %}</td></tr>
+          <tr><th>SHORT_BREAKDOWN_RESCUE experiment</th><td><strong>{{ 'enabled' if backtest_result.short_breakdown_rescue_enabled else 'disabled' }}</strong> · {{ backtest_result.short_breakdown_rescue_scope }} · disabled by default · does not affect PAPER/LIVE</td></tr>
+          <tr><th>Baseline / Rescue accepted count</th><td>{{ backtest_result.baseline_accepted_count if backtest_result.baseline_accepted_count is not none else 'Unavailable' }} / {{ backtest_result.rescue_accepted_count if backtest_result.rescue_accepted_count is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Baseline / Rescue / Combined net PnL</th><td>{{ backtest_result.baseline_net_pnl if backtest_result.baseline_net_pnl is not none else 'Unavailable' }} / {{ backtest_result.rescue_net_pnl if backtest_result.rescue_net_pnl is not none else 'Unavailable' }} / {{ backtest_result.baseline_plus_rescue_net_pnl if backtest_result.baseline_plus_rescue_net_pnl is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Accepted reason breakdown</th><td>{{ backtest_result.accepted_reason_breakdown if backtest_result.accepted_reason_breakdown else 'Unavailable' }}</td></tr>
           <tr><th>Enabled optional BACKTEST filters</th><td>{{ backtest_result.enabled_filters|join(', ') if backtest_result.enabled_filters else 'None' }}</td></tr>
           <tr><th>Disabled optional BACKTEST filters</th><td>{{ backtest_result.disabled_filters|join(', ') if backtest_result.disabled_filters else 'None' }}</td></tr>
           <tr><th>Always-on hard safety/runtime gates</th><td>{{ backtest_result.hard_safety_gates|join(', ') if backtest_result.hard_safety_gates else 'Unavailable' }}</td></tr>

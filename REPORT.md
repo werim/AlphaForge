@@ -1,5 +1,50 @@
 # AlphaForge Technical Surgery Report
 
+## 2026-06-30 - Dashboard BACKTEST SHORT_BREAKDOWN_RESCUE switch
+
+### Why this patch was needed
+Operators had to manually set `ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED` outside the dashboard to compare baseline and rescue-enabled BACKTEST runs. That made dashboard evidence incomplete and increased the risk of stale shell state contaminating comparisons.
+
+### Root cause
+The rescue experiment existed in the backtest runner but the dashboard request model, form, subprocess environment, filter-state artifacts, and result rendering did not carry or show the selected experiment state.
+
+### Files changed
+- `.env.example`
+- `backtest_order.py`
+- `src/alphaforge/config_registry.py`
+- `src/alphaforge/dashboard/__init__.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_rescue_switch.py`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `VERSION.md`
+- `REPORT.md`
+
+### Runtime behavior changes
+Dashboard BACKTEST requests now include a disabled-by-default `SHORT_BREAKDOWN_RESCUE experiment` checkbox. Launching a dashboard backtest passes a scoped subprocess environment override: `false` for baseline and `true` only when selected. The command also adds `--rescue-enabled` when selected. The supported dashboard runner remains `backtest_order.py`; no `python -m alphaforge.backtest.runner` module exists in this repository.
+
+### Lifecycle changes
+No lifecycle transition semantics changed. Rescue remains constrained by existing BACKTEST-only acceptance checks and does not activate in PAPER/LIVE.
+
+### Persistence/export/schema changes
+No SQLite schema migration. `backtest_filter_state.json` and `.csv` now include SHORT_BREAKDOWN_RESCUE experiment evidence, including BACKTEST-only scope and default-off status. Summary CSV metadata includes the selected rescue state and dashboard result rendering exposes baseline/rescue accepted counts, PnL, combined PnL, and accepted-reason breakdown.
+
+### Tests added/executed
+Added dashboard rescue-switch tests for disabled/enabled scoped env values, default-off behavior, BACKTEST-only settings scope, filter-state artifact evidence, dashboard result rendering, and existing rescue-disabled/rescue-enabled baseline behavior.
+
+### Risks and limitations
+Rescue-enabled BACKTEST results are experimental comparison evidence, not production readiness. Candidate quality gate CSV behavior remains reporting-only. Optional FastAPI/httpx absence still skips HTML rendering coverage in minimal environments.
+
+### Migration concerns
+None for SQLite. Existing artifact consumers should tolerate the added JSON fields and CSV columns.
+
+### Push recommendation
+Safe to push after the targeted tests pass. Do not promote rescue to PAPER/LIVE and do not infer LIVE readiness from rescue-enabled BACKTEST acceptance.
+
+---
+
+## 2026-06-30 - BACKTEST filter-state audit and filters-off damage diagnostics
 ## 2026-06-30 - BACKTEST SHORT Breakdown Rescue Reporting Experiment
 
 ## Why the patch was needed

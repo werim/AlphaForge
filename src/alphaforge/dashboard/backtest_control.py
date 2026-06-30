@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -25,6 +26,7 @@ class DashboardBacktestRequest:
     initial_balance: float
     max_symbols: int
     filter_switches: dict[str, bool] = field(default_factory=dict)
+    short_breakdown_rescue_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -94,12 +96,14 @@ class DashboardBacktestResult:
     filter_warning: str = ""
     filter_profile_comparison_path: str | None = None
     accepted_loss_diagnostics_path: str | None = None
-    baseline_accepted_trades: int | None = None
-    rescue_accepted_count: int | None = None
-    rescue_candidate_count: int | None = None
-    rescue_accepted_net_pnl: Any = None
+    short_breakdown_rescue_enabled: bool = False
+    short_breakdown_rescue_scope: str = "BACKTEST-only"
+    baseline_accepted_count: Any = None
+    rescue_accepted_count: Any = None
     baseline_net_pnl: Any = None
+    rescue_net_pnl: Any = None
     baseline_plus_rescue_net_pnl: Any = None
+    accepted_reason_breakdown: dict[str, Any] = field(default_factory=dict)
 
 
 def default_form_values() -> dict[str, Any]:
@@ -114,6 +118,7 @@ def default_form_values() -> dict[str, Any]:
         "timeframes": SUPPORTED_TIMEFRAMES,
         "filter_reasons": ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"],
         "filter_switches": {reason: True for reason in ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"]},
+        "short_breakdown_rescue_enabled": False,
     }
 
 
@@ -153,9 +158,10 @@ def parse_backtest_form(form: Mapping[str, Any]) -> tuple[DashboardBacktestReque
         errors["timeframe"] = f"timeframe must be one of: {', '.join(SUPPORTED_TIMEFRAMES)}."
     filter_reasons = default_form_values()["filter_reasons"]
     filter_switches = {reason: str(form.get(f"filter_{reason}", "")).lower() in {"1", "true", "on", "yes"} for reason in filter_reasons}
+    short_breakdown_rescue_enabled = str(form.get("short_breakdown_rescue_enabled", "")).lower() in {"1", "true", "on", "yes"}
     if errors:
         return None, errors
-    return DashboardBacktestRequest(last_days=last_days, symbols=symbols, timeframe=timeframe, initial_balance=initial_balance, max_symbols=max_symbols, filter_switches=filter_switches), {}
+    return DashboardBacktestRequest(last_days=last_days, symbols=symbols, timeframe=timeframe, initial_balance=initial_balance, max_symbols=max_symbols, filter_switches=filter_switches, short_breakdown_rescue_enabled=short_breakdown_rescue_enabled), {}
 
 
 def _read_first_csv_row(path: Path) -> dict[str, str]:
@@ -784,12 +790,17 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     for reason, enabled in request.filter_switches.items():
         if not enabled:
             command.extend(["--disable-backtest-filter", reason])
+    if request.short_breakdown_rescue_enabled:
+        command.append("--rescue-enabled")
     period = f"last {request.last_days} days"
     result = DashboardBacktestResult("RUNNING", period, symbols, request.timeframe, request.initial_balance, request.max_symbols, output_dir=str(output_dir), command=command)
     result.disabled_filters = [reason for reason, enabled in request.filter_switches.items() if not enabled]
+    result.short_breakdown_rescue_enabled = bool(request.short_breakdown_rescue_enabled)
     result.filter_switch_experiment_active = bool(result.disabled_filters)
     try:
-        completed = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=600, check=False)
+        run_env = os.environ.copy()
+        run_env["ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED"] = "true" if request.short_breakdown_rescue_enabled else "false"
+        completed = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=600, check=False, env=run_env)
     except Exception as exc:  # subprocess/environment failure, not strategy logic
         result.status = "FAILED"
         result.error_message = f"Backtest failed before completion: {exc}"
@@ -831,12 +842,16 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.loss_count = _safe_int(summary.get("sl_hits"))
     result.open_count = _safe_int(summary.get("open_at_end"))
     result.net_pnl = summary.get("total_net_pnl_usdt")
-    result.baseline_accepted_trades = _safe_int(summary.get("baseline_accepted_trades"))
-    result.rescue_candidate_count = _safe_int(summary.get("rescue_candidate_count"))
+    result.baseline_accepted_count = _safe_int(summary.get("baseline_accepted_trades"))
     result.rescue_accepted_count = _safe_int(summary.get("rescue_accepted_count"))
-    result.rescue_accepted_net_pnl = summary.get("rescue_accepted_net_pnl")
     result.baseline_net_pnl = summary.get("baseline_net_pnl")
+    result.rescue_net_pnl = summary.get("rescue_accepted_net_pnl")
     result.baseline_plus_rescue_net_pnl = summary.get("baseline_plus_rescue_net_pnl")
+    try:
+        result.accepted_reason_breakdown = json.loads(summary.get("accepted_reason_breakdown", "{}") or "{}")
+    except Exception:
+        result.accepted_reason_breakdown = {}
+    result.short_breakdown_rescue_enabled = str(summary.get("short_breakdown_rescue_enabled", result.short_breakdown_rescue_enabled)).lower() in {"1", "true", "yes", "on"}
     result.total_return_pct = summary.get("total_pnl_pct")
     result.max_drawdown = None
     diagnostics = _rejection_diagnostics(rejected_rows)
@@ -881,6 +896,9 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         result.disabled_filters = list(filter_state.get("disabled_filters", result.disabled_filters))
         result.hard_safety_gates = [str(g.get("filter_name")) for g in filter_state.get("hard_safety_gates", []) if isinstance(g, dict)]
         result.filter_warning = str(filter_state.get("all_off_warning", "") or "")
+        experiment_state = filter_state.get("experiments", {}).get("SHORT_BREAKDOWN_RESCUE", {}) if isinstance(filter_state.get("experiments", {}), dict) else {}
+        if experiment_state:
+            result.short_breakdown_rescue_enabled = str(experiment_state.get("enabled", result.short_breakdown_rescue_enabled)).lower() in {"1", "true", "yes", "on"}
     result.filter_profile_comparison_path = str(filter_comparison_path) if filter_comparison_path.exists() else None
     result.accepted_loss_diagnostics_path = str(accepted_loss_path) if accepted_loss_path.exists() else None
     if summary.get("disabled_filters"):

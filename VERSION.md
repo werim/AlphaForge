@@ -1,11 +1,11 @@
 # AlphaForge Version
 
-- Current version: 2026.06.30-short-breakdown-rescue-experiment
-- Current phase: BACKTEST-only SHORT breakdown rescue reporting/activation experiment
-- Runtime maturity: research/backtest diagnostics; defensive runtime preservation remains priority
-- BACKTEST/PAPER/LIVE alignment: DEFAULT behavior unchanged; SHORT_BREAKDOWN_RESCUE is explicitly BACKTEST-only and disabled by default; PAPER/LIVE decision paths are not activated by the switch.
-- Lifecycle coverage: rescued BACKTEST trades follow normal lifecycle simulation and carry `accepted_reason`, `original_reject_reason`, sizing, effective-RR, and decision-context metadata.
-- Execution realism coverage: rescue eligibility requires execution-adjusted RR, acceptable liquidity, acceptable or explicitly unavailable BACKTEST volatility, spread/slippage caps, and conservative 0.25x default sizing.
-- Known critical risks: rescue quality is based on BACKTEST diagnostics and rejected-shadow evidence, not LIVE execution proof; score calibration remains imperfect; historical spread/slippage are still estimates when real data is unavailable.
+- Current version: 0.1.0
+- Current phase: dashboard BACKTEST rescue experiment controls
+- Runtime maturity: research/PAPER validation; not LIVE-ready
+- BACKTEST/PAPER/LIVE alignment: shared typed defaults now require `MIN_EFFECTIVE_RR=1.60`; `RR_TOO_LOW` uses execution-adjusted RR consistently, with BACKTEST-only filter and SHORT_BREAKDOWN_RESCUE experiments recorded; PAPER/LIVE controls remain separate.
+- Lifecycle coverage: preserves SIGNAL_CREATED, SIGNAL_REJECTED, accepted lifecycle diagnostics, rejected distributions, near-miss diagnostics, execution-cost summaries, and config snapshot export.
+- Execution realism coverage: conservative effective-RR default, configured LOW_EFFECTIVE_RR reject threshold, spread/slippage/liquidity/funding evidence remains explicit or unavailable.
+- Known critical risks: score=10 saturation remains weakly calibrated; accepted-trade expectancy is not yet proven positive; dashboard BACKTEST filter/rescue switches can produce unsafe experiments if misread as strategy quality.
 - Last audit date: 2026-06-30
-- Live readiness verdict: NOT LIVE READY. The rescue lane is an opt-in BACKTEST experiment and must not be treated as PAPER/LIVE readiness.
+- Live readiness verdict: NOT LIVE READY. Filters-off damage diagnostics are BACKTEST-only evidence; capital preservation remains mandatory and PAPER/LIVE behavior is unchanged.
