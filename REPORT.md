@@ -1,3 +1,39 @@
+
+## 2026-06-30 Strategy Quality Guardrails Surgery Report
+
+### Why this patch was needed
+Recent DEFAULT/DYNAMIC BACKTEST diagnostics showed excessive accepted trades, long loss streaks, score=10 saturation, STOP_TOO_WIDE softening leakage, and high-vol variance. Raw positive PnL alone was insufficient because score=10 no longer separated winners from losers and late daily-symbol caps hid weaker near-miss quality.
+
+### Root cause
+DEFAULT_FILTERS had evidence exports but lacked acceptance-time strategy-quality controls for same-day clusters, realized SL streaks, score saturation, and high-vol cost/variance.
+
+### Files changed
+- `backtest_order.py`: BACKTEST strategy-quality guardrail config, acceptance checks, explicit reject evidence, and profile-quality evidence exports.
+- `.env.example`: documented guardrail and profile PASS/FAIL thresholds.
+- `tests/test_strategy_quality_guardrails.py`: regression coverage.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: operational documentation.
+
+### Runtime behavior changes
+DEFAULT_FILTERS BACKTEST now rejects overactive daily/symbol/regime clusters, pauses after consecutive SLs, applies secondary checks to score>=9.8 candidates, and restricts high-vol acceptance. LIVE order placement is unchanged.
+
+### Lifecycle changes
+New guardrail rejections are persisted/exported as `SIGNAL_REJECTED` rows with `DAILY_TRADE_FREQUENCY_GUARD`, `LOSS_STREAK_PAUSE`, `SYMBOL_CLUSTER_GUARD`, `SCORE_SATURATION_GUARD`, `HIGH_VOL_GUARD`, `HIGH_VOL_OVERTRADE`, or `HIGH_VOL_EXECUTION_COST`.
+
+### Persistence/export changes
+Added `strategy_quality_guardrails.json/csv` plus summary fields for `profile_quality_status`, `profile_quality_reasons`, thresholds, and accepted before/after counts. No DB schema migration is required.
+
+### Tests added/executed
+Added unit tests for trade-frequency, loss-streak, score-saturation, high-vol, profile PASS/FAIL, diagnostic-only profile, and env coverage.
+
+### Risks and limitations
+Before-guardrail PnL/profit-factor/drawdown are exported as null because replaying rejected trades as accepted would create fake counterfactual performance. PAPER remains reject-heavy by design until calibrated evidence improves; this patch does not force PAPER trades.
+
+### Migration concerns
+Existing dashboards consuming `order_backtest_summary.csv` should tolerate appended columns. New guardrail reject reasons should be added to downstream reason allowlists if any exist.
+
+### Push recommendation
+Push after tests pass; do not claim LIVE readiness.
+
 ## 2026-06-30 - RejectedShadowEvaluation fixture alignment
 
 ### Why the patch was needed

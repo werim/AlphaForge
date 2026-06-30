@@ -126,6 +126,59 @@ class QualityGateConfig:
     max_slippage_pct: float = 0.0020
     allowed_reasons: tuple[str, ...] = ("LOW_SCORE", "DAILY_SYMBOL_TRADE_LIMIT")
 
+
+@dataclass
+class StrategyQualityGuardrailConfig:
+    enabled: bool = True
+    profile: str = "DEFAULT_FILTERS"
+    max_accepted_trades_per_day: int = 6
+    max_symbol_trades_per_day: int = 2
+    max_symbol_regime_trades_per_day: int = 1
+    max_consecutive_sl_pause: int = 4
+    score10_sl_dominance_guard: bool = True
+    high_vol_acceptance_guard: bool = True
+    saturated_score_threshold: float = 9.8
+    saturated_min_effective_rr: float = 2.20
+    saturated_max_cost_penalty: float = 0.20
+    high_vol_min_effective_rr: float = 2.30
+    high_vol_max_cost_penalty: float = 0.18
+    high_vol_max_trades_per_day: int = 2
+    min_profit_factor_for_profile_pass: float = 1.20
+    max_loss_streak_for_profile_pass: int = 6
+    max_drawdown_pct_for_profile_pass: float = 12.0
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return str(os.getenv(name, str(default))).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def strategy_guardrail_config_from_env(profile: str = "DEFAULT_FILTERS") -> StrategyQualityGuardrailConfig:
+    return StrategyQualityGuardrailConfig(
+        enabled=_env_bool("ALPHAFORGE_BACKTEST_STRATEGY_GUARDRAILS_ENABLED", True),
+        profile=str(os.getenv("ALPHAFORGE_BACKTEST_STRATEGY_PROFILE", profile) or profile).upper(),
+        max_accepted_trades_per_day=_env_int("ALPHAFORGE_BACKTEST_MAX_ACCEPTED_TRADES_PER_DAY", 6),
+        max_consecutive_sl_pause=_env_int("ALPHAFORGE_BACKTEST_MAX_CONSECUTIVE_SL_PAUSE", 4),
+        score10_sl_dominance_guard=_env_bool("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", True),
+        high_vol_acceptance_guard=_env_bool("ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD", True),
+        min_profit_factor_for_profile_pass=_env_float("ALPHAFORGE_BACKTEST_MIN_PROFIT_FACTOR_FOR_PROFILE_PASS", 1.20),
+        max_loss_streak_for_profile_pass=_env_int("ALPHAFORGE_BACKTEST_MAX_LOSS_STREAK_FOR_PROFILE_PASS", 6),
+        max_drawdown_pct_for_profile_pass=_env_float("ALPHAFORGE_BACKTEST_MAX_DRAWDOWN_PCT_FOR_PROFILE_PASS", 12.0),
+    )
+
 BACKTEST_FILTER_REASONS = (
     "LOW_SCORE",
     "TOO_CHOPPY",
@@ -1293,7 +1346,9 @@ def process_backtest_result(
     short_breakdown_rescue_config: Optional[ShortBreakdownRescueConfig] = None,
     mode: str = "BACKTEST",
     disabled_backtest_filters: Iterable[str] = (),
+    strategy_guardrail_config: Optional[StrategyQualityGuardrailConfig] = None,
 ) -> Optional[CandidateOrder]:
+    strategy_guardrail_config = strategy_guardrail_config or strategy_guardrail_config_from_env()
     rescue_config = rescue_config or RescueConfig()
     short_breakdown_rescue_config = short_breakdown_rescue_config or ShortBreakdownRescueConfig()
     rescue_stats = rescue_stats or RescueStats()
@@ -1611,6 +1666,11 @@ def process_backtest_result(
             }
         )
         return None
+    guard_reason = _guardrail_rejection_reason(symbol, candle.timestamp, cand.regime, cand.score, effective_rr, {**dict(mctx), **penalty_breakdown, **({"stop_too_wide_softened": diagnostics.get("stop_too_wide_softened", False)} if isinstance(diagnostics, dict) else {})}, recent_stats, strategy_guardrail_config)
+    if guard_reason:
+        _append_guardrail_reject(guard_reason, symbol, candle, cand, mctx, effective_rr, diagnostics if isinstance(diagnostics, dict) else {}, lifecycle, rejected, rejection_counts, execution_ctx_missing, _safe_float(penalty_breakdown.get("cost_penalty_total"), 0.0))
+        return None
+
     risk_scale = min(1.0, max(0.0, _safe_float(diagnostics.get("risk_scale"), 1.0))) if isinstance(diagnostics, dict) else 1.0
     sim_ctx = {**dict(mctx), "risk_scale": risk_scale}
     if isinstance(diagnostics, dict):
@@ -1626,12 +1686,74 @@ def process_backtest_result(
     recent_stats["last_trade_ts_by_symbol"][symbol] = candle.timestamp
     recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
     recent_stats["global_trades_today"] += 1
+    _record_guardrail_acceptance(recent_stats, symbol, candle.timestamp, cand.regime, sim_ctx)
     for sim_row in sim_rows:
         if sim_row.close_reason == "TIMEOUT":
             open_rows.append(sim_row)
         if sim_row.status_after == "POSITION_CLOSED":
             _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
     return cand
+
+
+def _day_key(ts: int) -> str:
+    try:
+        return datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        return "UNKNOWN"
+
+
+def _is_high_vol_context(regime: str, mctx: Mapping[str, Any]) -> bool:
+    text = " ".join([str(regime or ""), str(mctx.get("regime", "")), str(mctx.get("volatility_regime", ""))]).upper()
+    return "HIGH" in text or "VOL" in text or "BREAKOUT" in text
+
+
+def _guardrail_rejection_reason(symbol: str, timestamp: int, regime: str, score: float, effective_rr: float, mctx: Mapping[str, Any], recent_stats: Mapping[str, Any], cfg: StrategyQualityGuardrailConfig) -> str:
+    if not cfg.enabled or cfg.profile == "HIGH_VOL_MOMENTUM_DIAGNOSTIC":
+        return ""
+    day = _day_key(timestamp)
+    daily = recent_stats.get("accepted_trades_by_day", {}) or {}
+    sym_daily = recent_stats.get("accepted_trades_by_symbol_day", {}) or {}
+    sym_regime_daily = recent_stats.get("accepted_trades_by_symbol_regime_day", {}) or {}
+    if int(recent_stats.get("consecutive_sl_count", 0) or 0) >= cfg.max_consecutive_sl_pause:
+        return "LOSS_STREAK_PAUSE"
+    if int(daily.get(day, 0) or 0) >= cfg.max_accepted_trades_per_day:
+        return "DAILY_TRADE_FREQUENCY_GUARD"
+    if int(sym_daily.get(f"{symbol}:{day}", 0) or 0) >= cfg.max_symbol_trades_per_day:
+        return "SYMBOL_CLUSTER_GUARD"
+    if int(sym_regime_daily.get(f"{symbol}:{str(regime).upper()}:{day}", 0) or 0) >= cfg.max_symbol_regime_trades_per_day:
+        return "SYMBOL_CLUSTER_GUARD"
+    cost = _safe_float(mctx.get("cost_penalty_total", mctx.get("cost_penalty")), 0.0)
+    high_vol = _is_high_vol_context(regime, mctx)
+    if high_vol and cfg.high_vol_acceptance_guard:
+        hv_daily = recent_stats.get("high_vol_accepted_trades_by_day", {}) or {}
+        if int(hv_daily.get(day, 0) or 0) >= cfg.high_vol_max_trades_per_day:
+            return "HIGH_VOL_OVERTRADE"
+        if cost > cfg.high_vol_max_cost_penalty:
+            return "HIGH_VOL_EXECUTION_COST"
+        if effective_rr < cfg.high_vol_min_effective_rr or bool(mctx.get("stop_too_wide_softened", False)):
+            return "HIGH_VOL_GUARD"
+    if cfg.score10_sl_dominance_guard and score >= cfg.saturated_score_threshold:
+        regime_ok = str(regime or "").upper() in {"TREND", "BREAKOUT"}
+        if effective_rr < cfg.saturated_min_effective_rr or not regime_ok or high_vol or cost > cfg.saturated_max_cost_penalty:
+            return "SCORE_SATURATION_GUARD"
+    return ""
+
+
+def _append_guardrail_reject(reason: str, symbol: str, candle: Candle, cand: CandidateOrder, mctx: Mapping[str, Any], effective_rr: float, diagnostics: Mapping[str, Any], lifecycle: List[LifecycleRow], rejected: List[Dict[str, Any]], rejection_counts: Dict[str, int], execution_ctx_missing: bool, cost_penalty: float) -> None:
+    rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+    signal_id = f"{symbol}:{candle.timestamp}"
+    lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), effective_rr=effective_rr, cost_penalty=cost_penalty, signal_id=signal_id, lifecycle_id=signal_id))
+    rejected.append({"signal_id": signal_id, "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "STRATEGY_QUALITY_GUARDRAIL", "execution_ctx_missing": execution_ctx_missing, "expectancy_bucket": cand.expectancy_bucket, "timestamp": candle.timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "gate_score": cand.score, "rr": cand.rr, "expectancy": mctx.get("expectancy"), "quality_score": diagnostics.get("quality_score", ""), "reject_reason": reason, "diagnostics": json.dumps({**dict(diagnostics), "strategy_quality_guardrail": reason}, sort_keys=True), "entry": cand.entry, "sl": cand.sl, "tp": cand.tp, "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")), "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), "raw_rr": cand.rr, "effective_rr": effective_rr, "cost_penalty": cost_penalty, "first_blocking_gate": reason, "all_failed_gates": json.dumps([reason]), **_low_score_rescue_watch_fields(reason, {})})
+
+
+def _record_guardrail_acceptance(recent_stats: Dict[str, Any], symbol: str, timestamp: int, regime: str, mctx: Mapping[str, Any]) -> None:
+    day = _day_key(timestamp)
+    recent_stats.setdefault("accepted_trades_by_day", {})[day] = int(recent_stats.setdefault("accepted_trades_by_day", {}).get(day, 0) or 0) + 1
+    recent_stats.setdefault("accepted_trades_by_symbol_day", {})[f"{symbol}:{day}"] = int(recent_stats.setdefault("accepted_trades_by_symbol_day", {}).get(f"{symbol}:{day}", 0) or 0) + 1
+    recent_stats.setdefault("accepted_trades_by_symbol_regime_day", {})[f"{symbol}:{str(regime).upper()}:{day}"] = int(recent_stats.setdefault("accepted_trades_by_symbol_regime_day", {}).get(f"{symbol}:{str(regime).upper()}:{day}", 0) or 0) + 1
+    if _is_high_vol_context(regime, mctx):
+        recent_stats.setdefault("high_vol_accepted_trades_by_day", {})[day] = int(recent_stats.setdefault("high_vol_accepted_trades_by_day", {}).get(day, 0) or 0) + 1
+
 def _lifecycle_event_id(row: LifecycleRow, index: int, lifecycle_state: str | None = None) -> str:
     status_after = lifecycle_state or row.status_after
     return (
@@ -2245,6 +2367,45 @@ def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balan
     }
     return curve, metrics
 
+
+
+
+def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected_rows: List[Mapping[str, Any]], summary: Mapping[str, Any], cfg: StrategyQualityGuardrailConfig) -> Dict[str, Any]:
+    guard_reasons = {"DAILY_TRADE_FREQUENCY_GUARD", "LOSS_STREAK_PAUSE", "SYMBOL_CLUSTER_GUARD", "SCORE_SATURATION_GUARD", "HIGH_VOL_GUARD", "HIGH_VOL_OVERTRADE", "HIGH_VOL_EXECUTION_COST"}
+    accepted_after = _accepted_terminal_rows_for_risk(lifecycle_rows)
+    guard_rejects = [r for r in rejected_rows if str(r.get("reject_reason", "")).upper() in guard_reasons]
+    before_count = len(accepted_after) + len(guard_rejects)
+    score10_after = [r for r in accepted_after if float(r.score or 0.0) >= cfg.saturated_score_threshold]
+    high_vol_after = [r for r in accepted_after if _is_high_vol_context(r.regime, {"volatility_regime": r.volatility_regime})]
+    reasons = []
+    net = _safe_float(summary.get("total_net_pnl_usdt"), 0.0)
+    pf = _safe_float(summary.get("profit_factor"), 0.0)
+    dd = abs(_safe_float(summary.get("max_drawdown_pct"), 0.0))
+    loss = int(_safe_float(summary.get("longest_loss_streak"), 0.0))
+    avg_day = before_count / max(1, int(_safe_float(summary.get("requested_last_n_days"), 1.0)))
+    score10_tp = sum(1 for r in score10_after if r.close_reason == "TP_HIT")
+    score10_sl = sum(1 for r in score10_after if r.close_reason == "SL_HIT")
+    if net <= 0: reasons.append("NET_PNL_NOT_POSITIVE")
+    if pf < cfg.min_profit_factor_for_profile_pass: reasons.append("PROFIT_FACTOR_BELOW_MIN")
+    if dd > cfg.max_drawdown_pct_for_profile_pass: reasons.append("MAX_DRAWDOWN_TOO_HIGH")
+    if loss > cfg.max_loss_streak_for_profile_pass: reasons.append("LOSS_STREAK_TOO_HIGH")
+    if avg_day > cfg.max_accepted_trades_per_day: reasons.append("OVERTRADE_RISK")
+    if score10_sl > score10_tp: reasons.append("SCORE_SATURATION_RISK")
+    if cfg.profile == "HIGH_VOL_MOMENTUM_DIAGNOSTIC": reasons.append("DIAGNOSTIC_ONLY_PROFILE")
+    status = "PASS" if not reasons else "FAIL"
+    return {
+        "profile_quality_status": status, "profile_quality_reasons": reasons,
+        "thresholds_used": asdict(cfg),
+        "accepted_before_guardrails": before_count, "accepted_after_guardrails": len(accepted_after),
+        "rejected_by_new_guardrails": len(guard_rejects),
+        "pnl_before_guardrails": None, "pnl_after_guardrails": net,
+        "trade_count_before_after": {"before": before_count, "after": len(accepted_after)},
+        "loss_streak_before_after": {"before": None, "after": loss},
+        "profit_factor_before_after": {"before": None, "after": pf},
+        "max_drawdown_before_after": {"before": None, "after": _safe_float(summary.get("max_drawdown_pct"), 0.0)},
+        "score10_tp_sl_before_after": {"before": None, "after": {"tp": score10_tp, "sl": score10_sl}},
+        "high_vol_trade_count_before_after": {"before": None, "after": len(high_vol_after)},
+    }
 
 def build_default_gate_funnel(rejected: List[Dict[str, Any]], accepted_rows: List[LifecycleRow]) -> List[Dict[str, Any]]:
     gate_order = ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"]
@@ -3091,6 +3252,7 @@ def main():
     rescue_config = _rescue_config_from_args(args, cfg)
     quality_gate_config = _quality_gate_config_from_args(args)
     short_breakdown_rescue_config = _short_breakdown_rescue_config_from_args(args)
+    strategy_guardrail_config = strategy_guardrail_config_from_env()
     rescue_stats = RescueStats()
     now = datetime.now(timezone.utc)
     default_end = int(now.timestamp() * 1000)
@@ -3137,6 +3299,10 @@ def main():
         "consecutive_tp_count": 0,
         "rolling_winrate": 0.0,
         "outcomes": [],
+        "accepted_trades_by_day": {},
+        "accepted_trades_by_symbol_day": {},
+        "accepted_trades_by_symbol_regime_day": {},
+        "high_vol_accepted_trades_by_day": {},
     }
     rejection_counts: Dict[str, int] = {}
     if not args.offline:
@@ -3242,6 +3408,7 @@ def main():
                     short_breakdown_rescue_config=short_breakdown_rescue_config,
                     mode=args.mode,
                     disabled_backtest_filters=disabled_filters,
+                    strategy_guardrail_config=strategy_guardrail_config,
                 )
                 if cand:
                     candidates.append(cand)
@@ -3494,6 +3661,21 @@ def main():
         "quality_gate_symbol_breakdown": json.dumps(quality_gate_metrics["quality_gate_symbol_breakdown"], sort_keys=True),
         "quality_gate_daily_trade_count_distribution": json.dumps(quality_gate_metrics["quality_gate_daily_trade_count_distribution"], sort_keys=True),
     })
+    strategy_quality_evidence = build_strategy_quality_evidence(lifecycle, rejected, summary, strategy_guardrail_config)
+    summary.update({
+        "profile_quality_status": strategy_quality_evidence["profile_quality_status"],
+        "profile_quality_reasons": json.dumps(strategy_quality_evidence["profile_quality_reasons"], sort_keys=True),
+        "profile_quality_thresholds_used": json.dumps(strategy_quality_evidence["thresholds_used"], sort_keys=True),
+        "accepted_before_guardrails": strategy_quality_evidence["accepted_before_guardrails"],
+        "accepted_after_guardrails": strategy_quality_evidence["accepted_after_guardrails"],
+        "rejected_by_new_guardrails": strategy_quality_evidence["rejected_by_new_guardrails"],
+    })
+    with open(os.path.join(args.output_dir, "strategy_quality_guardrails.json"), "w") as f:
+        json.dump(strategy_quality_evidence, f, indent=2, sort_keys=True)
+    with open(os.path.join(args.output_dir, "strategy_quality_guardrails.csv"), "w", newline="") as f:
+        flat = {k: (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v) for k, v in strategy_quality_evidence.items()}
+        w = csv.DictWriter(f, fieldnames=list(flat.keys())); w.writeheader(); w.writerow(flat)
+
     with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))
         w.writeheader()

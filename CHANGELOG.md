@@ -18,6 +18,29 @@
 ### Known Issues
 - Dashboard-specific tests remain import-skipped when optional dashboard dependencies are unavailable in the environment.
 
+## 2026-06-30 - Strategy Quality Guardrails phase
+
+### Added
+- Added BACKTEST-only DEFAULT_FILTERS strategy-quality guardrails for trade frequency, loss-streak pauses, score saturation, and high-vol acceptance.
+- Added `strategy_quality_guardrails.json/csv` evidence exports with accepted before/after, rejected-by-guardrails, PnL, profit factor, drawdown, loss-streak, score=10 TP/SL, and high-vol before/after fields.
+- Added profile-quality PASS/FAIL fields and threshold exports to `order_backtest_summary.csv`.
+- Added regression tests for overtrade reduction, loss-streak pause, score saturation, high-vol flooding, diagnostic-only high-vol profile labeling, and env coverage.
+
+### Changed
+- `DEFAULT_FILTERS` is now conservative and strategy-quality oriented; high-vol momentum exploration is explicitly diagnostic-only unless thresholds pass.
+
+### Fixed
+- Prevented score=10 candidates from being accepted solely because raw score is saturated when secondary execution/regime/RR quality is weak.
+
+### Removed
+- None.
+
+### Breaking Changes
+- BACKTEST DEFAULT_FILTERS accepted trade counts may decrease because weak clusters and high-variance saturated-score candidates are now rejected with auditable guardrail reasons.
+
+### Known Issues
+- Before-guardrail PnL/profit-factor/drawdown remain unavailable unless rejected candidates are separately replayed; the export preserves nulls instead of fake counterfactual PnL.
+
 ## 2026-06-30 - DEFAULT_FILTERS overtrade diagnostics and drawdown exports
 
 ### Added
