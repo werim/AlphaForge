@@ -124,6 +124,82 @@ BACKTEST_FILTER_REASONS = (
     "PANIC_CONDITIONS",
 )
 
+
+FILTER_SWITCH_SPECS: tuple[dict[str, Any], ...] = (
+    {"filter_name": "LOW_SCORE", "env_var": "ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED", "dashboard_field": "filter_LOW_SCORE", "internal_flag": "DISABLED_BACKTEST_FILTERS / disabled_backtest_filters", "affected_reject_reasons": ["LOW_SCORE"], "application": "src/alphaforge/order.py:evaluate_trade_quality", "optional_or_hard_safety": "optional", "mode": "BACKTEST only"},
+    {"filter_name": "TOO_CHOPPY", "env_var": "ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED", "dashboard_field": "filter_TOO_CHOPPY", "internal_flag": "disabled_backtest_filters", "affected_reject_reasons": ["TOO_CHOPPY"], "application": "src/alphaforge/symbol_selector.py:select_symbol", "optional_or_hard_safety": "optional", "mode": "BACKTEST only"},
+    {"filter_name": "WEAK_TREND_AND_NO_RANGE_EDGE", "env_var": "ALPHAFORGE_BACKTEST_FILTER_WEAK_TREND_NO_RANGE_ENABLED", "dashboard_field": "filter_WEAK_TREND_AND_NO_RANGE_EDGE", "internal_flag": "disabled_backtest_filters", "affected_reject_reasons": ["WEAK_TREND_AND_NO_RANGE_EDGE"], "application": "src/alphaforge/symbol_selector.py:select_symbol", "optional_or_hard_safety": "optional", "mode": "BACKTEST only"},
+    {"filter_name": "STOP_TOO_WIDE", "env_var": "ALPHAFORGE_BACKTEST_FILTER_STOP_TOO_WIDE_ENABLED", "dashboard_field": "filter_STOP_TOO_WIDE", "internal_flag": "DISABLED_BACKTEST_FILTERS / disabled_backtest_filters", "affected_reject_reasons": ["STOP_TOO_WIDE"], "application": "src/alphaforge/order.py:evaluate_trade_quality", "optional_or_hard_safety": "optional", "mode": "BACKTEST only"},
+    {"filter_name": "RR_TOO_LOW", "env_var": "ALPHAFORGE_BACKTEST_FILTER_RR_TOO_LOW_ENABLED", "dashboard_field": "filter_RR_TOO_LOW", "internal_flag": "DISABLED_BACKTEST_FILTERS / disabled_backtest_filters", "affected_reject_reasons": ["RR_TOO_LOW"], "application": "src/alphaforge/order.py:evaluate_trade_quality", "optional_or_hard_safety": "optional", "mode": "BACKTEST only"},
+    {"filter_name": "DAILY_SYMBOL_TRADE_LIMIT", "env_var": "ALPHAFORGE_BACKTEST_FILTER_DAILY_SYMBOL_TRADE_LIMIT_ENABLED", "dashboard_field": "filter_DAILY_SYMBOL_TRADE_LIMIT", "internal_flag": "DISABLED_BACKTEST_FILTERS / disabled_backtest_filters", "affected_reject_reasons": ["DAILY_SYMBOL_TRADE_LIMIT"], "application": "src/alphaforge/order.py:evaluate_trade_quality", "optional_or_hard_safety": "optional", "mode": "BACKTEST only", "naming_note": "DAILY_GLOBAL_TRADE_LIMIT is an always-on runtime gate when runtime limits are active and is not controlled by this switch."},
+    {"filter_name": "REGIME_MISMATCH", "env_var": "ALPHAFORGE_BACKTEST_FILTER_REGIME_MISMATCH_ENABLED", "dashboard_field": "filter_REGIME_MISMATCH", "internal_flag": "DISABLED_BACKTEST_FILTERS / disabled_backtest_filters", "affected_reject_reasons": ["REGIME_MISMATCH"], "application": "src/alphaforge/order.py:evaluate_trade_quality", "optional_or_hard_safety": "optional", "mode": "BACKTEST only"},
+    {"filter_name": "PANIC_CONDITIONS", "env_var": "ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED", "dashboard_field": "filter_PANIC_CONDITIONS", "internal_flag": "disabled_backtest_filters", "affected_reject_reasons": ["PANIC_CONDITIONS"], "application": "src/alphaforge/symbol_selector.py:select_symbol", "optional_or_hard_safety": "optional", "mode": "BACKTEST only"},
+)
+
+HARD_SAFETY_GATES: tuple[dict[str, Any], ...] = (
+    {"filter_name": "NEGATIVE_EXPECTANCY", "affected_reject_reasons": ["NEGATIVE_EXPECTANCY"], "optional_or_hard_safety": "hard_safety", "mode": "BACKTEST/PAPER/LIVE", "application": "src/alphaforge/order.py:evaluate_trade_quality"},
+    {"filter_name": "EXPECTANCY_MISSING", "affected_reject_reasons": ["EXPECTANCY_MISSING"], "optional_or_hard_safety": "hard_safety", "mode": "BACKTEST/PAPER/LIVE", "application": "src/alphaforge/order.py:evaluate_trade_quality"},
+    {"filter_name": "INVALID_CANDIDATE", "affected_reject_reasons": ["INVALID_CANDIDATE", "REJECT_REASON_MISSING"], "optional_or_hard_safety": "hard_safety", "mode": "BACKTEST/PAPER/LIVE", "application": "src/alphaforge/order.py:evaluate_trade_quality / backtest_order.py:process_backtest_result"},
+    {"filter_name": "EXECUTION_COST_SANITY", "affected_reject_reasons": ["LOW_EFFECTIVE_RR", "HIGH_SPREAD", "HIGH_SLIPPAGE", "EXECUTION_RISK", "SPREAD_TOO_HIGH", "SLIPPAGE_TOO_HIGH", "VOLATILITY_TOO_HIGH", "VOLATILITY_TOO_LOW"], "optional_or_hard_safety": "hard_safety", "mode": "BACKTEST/PAPER/LIVE where applicable", "application": "backtest_order.py:_execution_reject_flags and src/alphaforge/order.py:evaluate_trade_quality"},
+    {"filter_name": "ORDER_GEOMETRY", "affected_reject_reasons": ["STOP_TOO_TIGHT", "INVALID_ENTRY_SL_TP", "IMPOSSIBLE_RR"], "optional_or_hard_safety": "hard_safety", "mode": "BACKTEST/PAPER/LIVE", "application": "candidate construction and trade-quality validation"},
+    {"filter_name": "DAILY_GLOBAL_TRADE_LIMIT", "affected_reject_reasons": ["DAILY_GLOBAL_TRADE_LIMIT"], "optional_or_hard_safety": "runtime_gate", "mode": "PAPER/LIVE and BACKTEST when runtime limits are active", "application": "src/alphaforge/order.py:evaluate_trade_quality"},
+)
+
+def filter_profile_name(disabled_filters: Iterable[str]) -> str:
+    disabled = {str(r).upper() for r in disabled_filters}
+    all_filters = {spec["filter_name"] for spec in FILTER_SWITCH_SPECS}
+    if disabled == all_filters:
+        return "ALL_OFF"
+    if not disabled:
+        return "DEFAULT"
+    return "CUSTOM"
+
+def build_backtest_filter_state(*, disabled_filters: Iterable[str], source: str, timestamp: str, symbols: Iterable[str], timeframe: str, last_days: int) -> dict[str, Any]:
+    disabled = {str(r).upper() for r in disabled_filters}
+    filters = []
+    for spec in FILTER_SWITCH_SPECS:
+        name = str(spec["filter_name"])
+        filters.append({**spec, "enabled": name not in disabled, "source": source})
+    return {
+        "timestamp": timestamp,
+        "symbols": list(symbols),
+        "timeframe": timeframe,
+        "last_days": last_days,
+        "mode": "BACKTEST",
+        "filter_profile": filter_profile_name(disabled),
+        "enabled_filters": [f["filter_name"] for f in filters if f["enabled"]],
+        "disabled_filters": [f["filter_name"] for f in filters if not f["enabled"]],
+        "filters": filters,
+        "hard_safety_gates": list(HARD_SAFETY_GATES),
+        "all_off_warning": "This is a diagnostic stress test. It can increase accepted trades and destroy expectancy. Do not treat as strategy performance." if filter_profile_name(disabled) == "ALL_OFF" else "",
+    }
+
+def write_backtest_filter_state_artifacts(output_dir: str, state: Mapping[str, Any]) -> None:
+    path = Path(output_dir)
+    (path / "backtest_filter_state.json").write_text(json.dumps(state, indent=2, sort_keys=True))
+    rows = []
+    for row in state.get("filters", []):
+        rows.append({
+            "timestamp": state.get("timestamp"),
+            "symbols": ",".join(str(x) for x in state.get("symbols", [])),
+            "timeframe": state.get("timeframe"),
+            "last_days": state.get("last_days"),
+            "mode": state.get("mode"),
+            "filter_profile": state.get("filter_profile"),
+            "filter_name": row.get("filter_name"),
+            "enabled": row.get("enabled"),
+            "source": row.get("source"),
+            "affected_reject_reasons": json.dumps(row.get("affected_reject_reasons", []), sort_keys=True),
+            "optional_or_hard_safety": row.get("optional_or_hard_safety"),
+            "application": row.get("application"),
+            "env_var": row.get("env_var"),
+            "dashboard_field": row.get("dashboard_field"),
+            "internal_flag": row.get("internal_flag"),
+        })
+    with (path / "backtest_filter_state.csv").open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0].keys()) if rows else ["filter_name"])
+        writer.writeheader(); writer.writerows(rows)
+
 def _disabled_backtest_filters(args: Any | None = None) -> tuple[str, ...]:
     cfg = load_config_from_env().backtest.filter_switches
     disabled = set(cfg.disabled_filters())
@@ -1964,6 +2040,91 @@ def _score_calibration_diagnostics(candidate_rows: List[Mapping[str, Any]]) -> D
         b["mean_effective_rr"] = b["effective_rr_sum"] / b["effective_rr_count"] if b["effective_rr_count"] else None
     return {"score_10_saturation_count": sum(1 for r in rows if _safe_float(r.get("score"), -1.0) >= 10.0), "by_score_bucket": out}
 
+
+def build_accepted_loss_diagnostics(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    accepted = [r for r in rows if str(r.get("decision", "")).upper() == "ACCEPTED" and str(r.get("lifecycle_state", "")).upper() in {"POSITION_CLOSED", "OPEN_AT_END", "TP_HIT", "SL_HIT"}]
+    if not accepted:
+        accepted = [r for r in rows if str(r.get("reject_reason", "") or "") == "" and str(r.get("lifecycle_state", "")).upper() in {"POSITION_CLOSED", "OPEN_AT_END"}]
+
+    def outcome(row: Mapping[str, Any]) -> str:
+        return str(row.get("close_reason") or row.get("lifecycle_state") or "UNKNOWN").upper()
+
+    def score_bucket(row: Mapping[str, Any]) -> str:
+        score = _safe_float(row.get("score"), -1.0)
+        if score < 0: return "UNAVAILABLE"
+        return "10" if score >= 10.0 else f"{int(score)}-{int(score)+1}"
+
+    def eff_bucket(row: Mapping[str, Any]) -> str:
+        eff = _safe_float(row.get("effective_rr"), -1.0)
+        if eff < 0: return "UNAVAILABLE"
+        if eff < 1.6: return "<1.6"
+        if eff < 1.9: return "1.6-1.9"
+        if eff < 2.3: return "1.9-2.3"
+        return ">=2.3"
+
+    enriched = []
+    for r in accepted:
+        enriched.append({**dict(r), "score_bucket": score_bucket(r), "effective_rr_bucket": eff_bucket(r)})
+
+    flat_rows: List[Dict[str, Any]] = []
+    def add_group(grouping: str, key_func) -> Dict[str, Dict[str, Any]]:
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for r in enriched:
+            key = str(key_func(r) or "UNKNOWN")
+            b = grouped.setdefault(key, {"count": 0, "wins": 0, "losses": 0, "open": 0, "net_pnl": 0.0, "tp_gain_sum": 0.0, "tp_count": 0, "sl_loss_sum": 0.0, "sl_count": 0})
+            pnl = _safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0)
+            o = outcome(r)
+            b["count"] += 1; b["net_pnl"] += pnl
+            b["wins"] += int(o == "TP_HIT"); b["losses"] += int(o == "SL_HIT"); b["open"] += int(o not in {"TP_HIT", "SL_HIT"})
+            if o == "TP_HIT": b["tp_gain_sum"] += pnl; b["tp_count"] += 1
+            if o == "SL_HIT": b["sl_loss_sum"] += pnl; b["sl_count"] += 1
+        for key, b in grouped.items():
+            n = max(1, int(b["count"]))
+            b["win_rate"] = b["wins"] / n; b["loss_rate"] = b["losses"] / n
+            b["avg_tp_gain"] = b["tp_gain_sum"] / b["tp_count"] if b["tp_count"] else 0.0
+            b["avg_sl_loss"] = b["sl_loss_sum"] / b["sl_count"] if b["sl_count"] else 0.0
+            flat_rows.append({"grouping": grouping, "bucket": key, **b})
+        return grouped
+
+    by = {
+        "score_bucket": add_group("score_bucket", lambda r: r.get("score_bucket")),
+        "regime": add_group("regime", lambda r: r.get("regime")),
+        "side": add_group("side", lambda r: r.get("side")),
+        "symbol": add_group("symbol", lambda r: r.get("symbol")),
+        "effective_rr_bucket": add_group("effective_rr_bucket", lambda r: r.get("effective_rr_bucket")),
+    }
+    high_rr = [r for r in enriched if _safe_float(r.get("effective_rr"), 0.0) >= 2.3]
+    score10 = [r for r in enriched if _safe_float(r.get("score"), -1.0) >= 10.0]
+    return {
+        "accepted_count": len(enriched),
+        "by": by,
+        "rows": flat_rows,
+        "high_effective_rr_accepted_outcome_split": _distribution([outcome(r) for r in high_rr]),
+        "score_10_accepted_net_pnl": sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl", 0.0)), 0.0) for r in score10),
+    }
+
+def build_filter_profile_comparison_artifact(summary: Mapping[str, Any], quality_summary: Mapping[str, Any], filter_state: Mapping[str, Any]) -> Dict[str, Any]:
+    current = {
+        "profile": filter_state.get("filter_profile", "CUSTOM"),
+        "candidates": _safe_float(summary.get("total_candidates"), 0.0),
+        "accepted_trades": _safe_float(summary.get("accepted_count"), 0.0),
+        "rejected_signals": _safe_float(summary.get("rejected_count", summary.get("total_rejected")), 0.0),
+        "reject_rate": _safe_float(summary.get("rejection_rate"), 0.0),
+        "win": _safe_float(summary.get("tp_hits"), 0.0),
+        "loss": _safe_float(summary.get("sl_hits"), 0.0),
+        "open": _safe_float(summary.get("open_at_end"), 0.0),
+        "net_pnl": _safe_float(summary.get("total_net_pnl_usdt"), 0.0),
+        "return": _safe_float(summary.get("total_pnl_pct"), 0.0),
+        "accepted_effective_rr_distribution": quality_summary.get("accepted_trade_quality_diagnostics", {}).get("by_effective_rr_bucket", {}),
+        "score_calibration": quality_summary.get("score_calibration_diagnostics", {}),
+        "top_reject_reasons": quality_summary.get("reject_reason_distribution", {}),
+        "expectancy_bucket_split": quality_summary.get("expectancy_bucket_distribution", {}),
+    }
+    empty = {"status": "NOT_RUN_IN_THIS_ARTIFACT", "reason": "Run DEFAULT, ALL_OFF, and CUSTOM profiles separately; this artifact is BACKTEST-only and does not mutate PAPER/LIVE."}
+    profiles = {"DEFAULT": dict(empty), "ALL_OFF": dict(empty), "CUSTOM": dict(empty)}
+    profiles[str(current["profile"])] = current
+    return {"mode": "BACKTEST", "artifact_only": True, "profiles": profiles}
+
 def write_backtest_quality_summary(path: str, summary: Mapping[str, Any]) -> None:
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["metric", "value"])
@@ -2734,6 +2895,7 @@ def main():
     p.add_argument("--quality-gate-allowed-reasons", default="LOW_SCORE,DAILY_SYMBOL_TRADE_LIMIT")
 
     p.add_argument("--disable-backtest-filter", action="append", default=[], choices=list(BACKTEST_FILTER_REASONS), help="Disable one real BACKTEST rejection gate; may be repeated")
+    p.add_argument("--compare-filter-profiles", action="store_true", help="Write BACKTEST-only filter profile comparison artifact scaffold for DEFAULT/ALL_OFF/CUSTOM; does not change decisions")
     args = p.parse_args()
     if args.ci:
         args.offline = True
@@ -2747,6 +2909,16 @@ def main():
     start_ms = parse_ts(args.start) if args.start else default_start
     end_ms = parse_ts(args.end) if args.end else default_end
     os.makedirs(args.output_dir, exist_ok=True)
+    fixed_symbols_for_state = [x.strip().upper() for x in str(args.symbols or "").split(",") if x.strip()]
+    filter_state = build_backtest_filter_state(
+        disabled_filters=disabled_filters,
+        source=("dashboard/env/default" if disabled_filters else "default"),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        symbols=fixed_symbols_for_state,
+        timeframe=args.interval,
+        last_days=args.last_n_days,
+    )
+    write_backtest_filter_state_artifacts(args.output_dir, filter_state)
     if args.offline:
         universe, candles_by_symbol = _offline_fixture(start_ms)
     else:
@@ -3103,6 +3275,8 @@ def main():
         "rejection_counts": json.dumps(rejection_counts, sort_keys=True),
         "disabled_filters": json.dumps(disabled_filters),
         "filter_switch_experiment_active": bool(disabled_filters),
+        "filter_profile": filter_state.get("filter_profile"),
+        "hard_safety_gates_active": json.dumps([g.get("filter_name") for g in HARD_SAFETY_GATES], sort_keys=True),
         "disabled_filter_bypass_count": sum(int((json.loads(str(r.get("diagnostics", "{}"))) if str(r.get("diagnostics", "")).startswith("{") else {}).get("disabled_filter_bypass_count", 0) or 0) for r in rejected),
         "cancel_counts": {},
         "event_flags":{},
@@ -3122,6 +3296,17 @@ def main():
         os.path.join(args.output_dir, "backtest_quality_summary.csv"),
         quality_summary,
     )
+    accepted_loss_diagnostics = build_accepted_loss_diagnostics(persisted_lifecycle_rows)
+    with open(os.path.join(args.output_dir, "accepted_trade_loss_diagnostics.json"), "w") as f:
+        json.dump(accepted_loss_diagnostics, f, indent=2, sort_keys=True)
+    with open(os.path.join(args.output_dir, "accepted_trade_loss_diagnostics.csv"), "w", newline="") as f:
+        loss_rows = accepted_loss_diagnostics.get("rows", [])
+        fields = resolve_csv_fieldnames(loss_rows, list(loss_rows[0].keys()) if loss_rows else ["grouping", "bucket", "count"])
+        w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(loss_rows)
+    comparison = build_filter_profile_comparison_artifact(summary, quality_summary, filter_state)
+    with open(os.path.join(args.output_dir, "backtest_filter_profile_comparison.json"), "w") as f:
+        json.dump(comparison, f, indent=2, sort_keys=True)
+
     rejected_shadow_summary = build_rejected_shadow_summary(rejected_shadow)
     with open(os.path.join(args.output_dir, "rejected_shadow_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rejected_shadow_summary.keys()))

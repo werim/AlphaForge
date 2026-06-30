@@ -65,7 +65,7 @@
 
       <fieldset class="filter-switches">
         <legend>BACKTEST real filter switches</legend>
-        <p class="alert warn-box">Real BACKTEST decision switch. Unchecking can increase accepted trades and worsen expectancy. PAPER/LIVE unaffected.</p>
+        <p class="alert warn-box">Optional BACKTEST decision switches only. Unchecking can increase accepted trades and worsen expectancy. Always-on hard safety gates (negative expectancy, invalid order geometry, execution/cost sanity, missing expectancy where configured) remain active. PAPER/LIVE runtime gates are unaffected.</p>
         <div class="checkbox-grid">
           {% for reason in backtest_form.filter_reasons %}
           <label><input type="checkbox" name="filter_{{ reason }}" {% if backtest_form.filter_switches.get(reason, true) %}checked{% endif %}> {{ reason }}</label>
@@ -89,6 +89,10 @@
       {% if backtest_result.execution_context_warning %}<div class="alert warn-box">{{ backtest_result.execution_context_warning }}</div>{% endif %}
       <table>
         <tbody>
+          <tr><th>Filter profile</th><td><strong>{{ backtest_result.filter_profile }}</strong>{% if backtest_result.filter_warning %}<div class="alert warn-box">{{ backtest_result.filter_warning }}</div>{% endif %}</td></tr>
+          <tr><th>Enabled optional BACKTEST filters</th><td>{{ backtest_result.enabled_filters|join(', ') if backtest_result.enabled_filters else 'None' }}</td></tr>
+          <tr><th>Disabled optional BACKTEST filters</th><td>{{ backtest_result.disabled_filters|join(', ') if backtest_result.disabled_filters else 'None' }}</td></tr>
+          <tr><th>Always-on hard safety/runtime gates</th><td>{{ backtest_result.hard_safety_gates|join(', ') if backtest_result.hard_safety_gates else 'Unavailable' }}</td></tr>
           <tr><th>Total candidates/signals</th><td>{{ backtest_result.total_candidates if backtest_result.total_candidates is not none else 'Unavailable' }}</td></tr>
           <tr><th>Accepted trades</th><td>{{ backtest_result.accepted_trades if backtest_result.accepted_trades is not none else 'Unavailable' }}</td></tr>
           <tr><th>Rejected signals (summary total)</th><td>{{ backtest_result.rejected_signals if backtest_result.rejected_signals is not none else 'Unavailable' }} — split below to avoid mixing pre-signal selector rejects with actionable signal rejects.</td></tr>
@@ -106,7 +110,7 @@
           <tr><th>Near-miss Effective RR distribution</th><td>{{ backtest_result.near_miss_effective_rr_distribution }}</td></tr>
           <tr><th>Passed score/RR/expectancy before later gates</th><td>{{ backtest_result.pre_later_gate_pass_count if backtest_result.pre_later_gate_pass_count is not none else 'Unavailable' }}</td></tr>
           <tr><th>Execution cost summary</th><td>{{ backtest_result.execution_cost_summary }}</td></tr>
-          <tr><th>Artifacts</th><td>{{ backtest_result.output_dir or 'Unavailable' }}{% if backtest_result.summary_path %}<br>{{ backtest_result.summary_path }}{% endif %}{% if backtest_result.lifecycle_path %}<br>{{ backtest_result.lifecycle_path }}{% endif %}{% if backtest_result.rejected_path %}<br>{{ backtest_result.rejected_path }}{% endif %}{% if backtest_result.calibration_report_path %}<br>{{ backtest_result.calibration_report_path }}{% endif %}{% if backtest_result.calibration_summary_path %}<br>{{ backtest_result.calibration_summary_path }}{% endif %}</td></tr>
+          <tr><th>Artifacts</th><td>{{ backtest_result.output_dir or 'Unavailable' }}{% if backtest_result.summary_path %}<br>{{ backtest_result.summary_path }}{% endif %}{% if backtest_result.lifecycle_path %}<br>{{ backtest_result.lifecycle_path }}{% endif %}{% if backtest_result.rejected_path %}<br>{{ backtest_result.rejected_path }}{% endif %}{% if backtest_result.calibration_report_path %}<br>{{ backtest_result.calibration_report_path }}{% endif %}{% if backtest_result.calibration_summary_path %}<br>{{ backtest_result.calibration_summary_path }}{% endif %}{% if backtest_result.filter_state_path %}<br>{{ backtest_result.filter_state_path }}{% endif %}{% if backtest_result.filter_profile_comparison_path %}<br>{{ backtest_result.filter_profile_comparison_path }}{% endif %}{% if backtest_result.accepted_loss_diagnostics_path %}<br>{{ backtest_result.accepted_loss_diagnostics_path }}{% endif %}</td></tr>
         </tbody>
       </table>
 
