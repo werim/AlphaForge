@@ -97,7 +97,7 @@
       <div class="cards">
         <article class="metric"><label>Status</label><strong class="badge {% if backtest_result.status == 'COMPLETED' %}pass{% else %}fail{% endif %}">{{ backtest_result.status }}</strong></article>
         <article class="metric"><label>Period</label><strong>{{ backtest_result.period }}</strong></article>
-        <article class="metric"><label>Symbols</label><strong class="small-value">{{ backtest_result.symbols|join(', ') }}</strong></article>
+        <article class="metric"><label>Symbols</label><strong class="small-value">{% if backtest_result.symbols %}{{ backtest_result.symbols|join(', ') }}{% else %}selected by MAX_SYMBOLS={{ backtest_result.max_symbols }}{% endif %}</strong></article>
         <article class="metric"><label>Timeframe</label><strong>{{ backtest_result.timeframe }}</strong></article>
       </div>
       {% if backtest_result.error_message %}<div class="alert fail-box"><strong>Backtest failed closed.</strong> {{ backtest_result.error_message }}</div>{% endif %}

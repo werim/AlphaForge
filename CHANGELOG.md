@@ -1,3 +1,26 @@
+## 2026-06-30 - BACKTEST dashboard dynamic top-volume universe validation
+
+### Added
+- Added dashboard validation coverage for blank SYMBOLS with positive MAX SYMBOLS dynamic universe selection.
+- Added `--max-symbols` as a BACKTEST runner alias for the existing top-volume universe cap.
+
+### Changed
+- BACKTEST dashboard command construction now omits `--symbols` for dynamic universe runs and passes the MAX SYMBOLS cap explicitly.
+- Backtest result rendering labels dynamic runs as selected by MAX_SYMBOLS until exported selected symbols are available.
+
+### Fixed
+- Fixed dashboard validation incorrectly rejecting blank SYMBOLS when MAX SYMBOLS is greater than 0.
+- Fixed invalid blank/zero dynamic universe requests to return a clear operator-facing validation message.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. BACKTEST dashboard/form boundary only; PAPER/LIVE runtime and safety gates are unchanged.
+
+### Known Issues
+- Dynamic universe runs still require available top-volume metadata and sufficient historical candles from the existing BACKTEST runner path.
+
 ## 2026-06-30 - DEFAULT_FILTERS accepted-reason scope and STOP_TOO_WIDE recoverable diagnostics
 
 ### Added

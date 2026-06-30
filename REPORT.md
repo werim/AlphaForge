@@ -1,3 +1,51 @@
+## 2026-06-30 - BACKTEST dashboard dynamic top-volume universe validation
+
+### Why the patch was needed
+Leaving SYMBOLS blank with MAX SYMBOLS set failed dashboard validation even though the BACKTEST runner already supports selecting a top-volume universe when no fixed symbols are provided.
+
+### Root cause
+The dashboard form required at least one parsed symbol before considering MAX SYMBOLS, and command construction always emitted `--symbols` with the parsed symbol list. That made dynamic universe requests fail early or risk passing an invalid empty fixed-symbol argument.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `backtest_order.py`
+- `tests/test_dashboard_backtest_dynamic_universe.py`
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+The BACKTEST dashboard now accepts explicit symbols, or blank symbols with a positive MAX SYMBOLS for dynamic top-volume universe selection. Dynamic requests omit `--symbols` and pass `--max-symbols` to the BACKTEST runner. Explicit symbol requests still pass the fixed symbol list.
+
+### Lifecycle changes
+None. No lifecycle states, reject decisions, or order lifecycle transitions changed.
+
+### Persistence changes
+No SQLite schema, CSV export contract, PAPER persistence, or LIVE persistence changes. Dashboard run metadata now records dynamic-vs-explicit universe mode for BACKTEST runs.
+
+### Export/schema changes
+No required exporter schema changes. Dashboard reporting can replace the placeholder dynamic symbol display with actual exported selected symbols when the summary metadata includes them.
+
+### Tests added
+Added BACKTEST dashboard validation and command-boundary tests for dynamic universe acceptance, invalid blank/zero MAX SYMBOLS, explicit symbols with MAX SYMBOLS, omission of empty `--symbols`, `--max-symbols 20`, and BACKTEST-only mode preservation.
+
+### Tests executed
+- `pytest -q tests/test_dashboard_backtest_dynamic_universe.py`
+
+### Risks
+Dynamic universe selection depends on existing runner/exchange metadata behavior and historical data availability. The patch does not weaken filters, does not touch PAPER/LIVE runtime, and does not add Binance live order calls.
+
+### Remaining limitations
+If the exporter omits selected symbol metadata, the dashboard displays the dynamic MAX_SYMBOLS label rather than reconstructing symbols.
+
+### Migration concerns
+None. `backtest_order.py` keeps `--top-n` and adds `--max-symbols` as an alias for dashboard clarity.
+
+### Push recommendation
+Safe to push after targeted BACKTEST dashboard tests. LIVE remains NOT READY.
+
 ## 2026-06-30 - DEFAULT_FILTERS accepted-reason scope and STOP_TOO_WIDE recoverable diagnostics
 
 ### Why the patch was needed
