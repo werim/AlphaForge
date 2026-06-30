@@ -1,3 +1,16 @@
+
+## 2026-06-30 Strategy Quality Guardrails
+
+- Current version: Strategy Quality Guardrails phase
+- Current phase: conservative DEFAULT_FILTERS BACKTEST guardrails for overtrade, score saturation, and high-vol acceptance
+- Runtime maturity: BACKTEST improved; PAPER reject reasons remain shared gate outputs; LIVE order placement unchanged
+- BACKTEST/PAPER/LIVE alignment: guardrails are BACKTEST acceptance controls first and do not loosen PAPER/LIVE; PAPER retains granular LOW_SCORE/NEGATIVE_EXPECTANCY/EXPECTANCY_MISSING/execution rejects from shared decision gates
+- Lifecycle coverage: new guardrail rejects are persisted as SIGNAL_REJECTED evidence rows with explicit reasons
+- Execution realism coverage: saturated-score and high-vol candidates require stronger effective RR and bounded execution cost
+- Known critical risks: before-guardrail PnL is exported as unavailable rather than simulated; high-vol diagnostic profile is not strategy-quality by default
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT LIVE READY
+
 ## 2026-06-30 RejectedShadowEvaluation test fixture alignment
 
 - Current version: unreleased test fixture alignment increment
