@@ -1,3 +1,28 @@
+## 2026-06-30 - DEFAULT_FILTERS selected-profile artifact parser
+
+### Added
+- Added regression coverage for the `20260630T164308Z` profile-comparison artifact schema rooted at `profiles/DEFAULT_FILTERS`.
+- Added selected profile metadata on dashboard results so the overview can audit `selected_profile_name` and `selected_profile_dir`.
+
+### Changed
+- Profile-comparison dashboard results now default the selected strategy profile to `DEFAULT_FILTERS` and populate the main Backtest Result panel from `profiles/DEFAULT_FILTERS/order_backtest_summary.csv`.
+- Accepted diagnostics now load without `accepted_orders.csv` by checking `backtest_orders.csv` and `lifecycle_calibration_summary.json`.
+- Leaderboard `avg_trades_per_day` is recomputed as accepted trades divided by the effective/requested window days.
+
+### Fixed
+- Fixed main Backtest Result metrics showing unavailable for accepted trades, rejected signals, reject rate, win/loss/open, net PnL, baseline/rescue PnL, accepted distributions, and rejected diagnostics when comparison artifacts use the real profile directory schema.
+- Fixed `OVERTRADE_RISK` warnings caused by artifact `avg_trades_per_day` values that were equal to total accepted trades.
+- Fixed overview template rescue/baseline field names to match the result model.
+
+### Removed
+- Removed the implicit requirement that `accepted_orders.csv` exist for accepted diagnostics.
+
+### Breaking Changes
+- None. BACKTEST/dashboard reporting only; PAPER/LIVE runtime and safety gates are unchanged.
+
+### Known Issues
+- LIVE remains NOT READY. Missing artifacts are now reported explicitly but cannot be reconstructed when exporters do not emit them.
+
 ## 2026-06-30 - BACKTEST evidence rendering contract replacement
 
 ### Added
