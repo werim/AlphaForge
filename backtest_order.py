@@ -99,6 +99,19 @@ class RescueStats:
     reject_reasons: Dict[str, int] = field(default_factory=dict)
 
 QUALITY_GATE_NAME = "SHORT_BREAKDOWN_BREAKOUT_NORMAL_STOP_GATE"
+SHORT_BREAKDOWN_RESCUE_REASON = "SHORT_BREAKDOWN_RESCUE"
+
+@dataclass
+class ShortBreakdownRescueConfig:
+    enabled: bool = False
+    modes: tuple[str, ...] = ("BACKTEST",)
+    size_multiplier: float = 0.25
+    max_trades_per_day: int = 1
+    min_effective_rr: float = 1.10
+    min_shadow_expectancy: float = 0.0
+    allowed_reasons: tuple[str, ...] = ("LOW_SCORE", "STOP_TOO_WIDE", "DAILY_SYMBOL_TRADE_LIMIT")
+    max_spread_pct: float = 0.0025
+    max_slippage_pct: float = 0.0020
 
 @dataclass
 class QualityGateConfig:
@@ -154,7 +167,7 @@ def filter_profile_name(disabled_filters: Iterable[str]) -> str:
         return "DEFAULT"
     return "CUSTOM"
 
-def build_backtest_filter_state(*, disabled_filters: Iterable[str], source: str, timestamp: str, symbols: Iterable[str], timeframe: str, last_days: int) -> dict[str, Any]:
+def build_backtest_filter_state(*, disabled_filters: Iterable[str], source: str, timestamp: str, symbols: Iterable[str], timeframe: str, last_days: int, short_breakdown_rescue_enabled: bool = False) -> dict[str, Any]:
     disabled = {str(r).upper() for r in disabled_filters}
     filters = []
     for spec in FILTER_SWITCH_SPECS:
@@ -172,6 +185,7 @@ def build_backtest_filter_state(*, disabled_filters: Iterable[str], source: str,
         "filters": filters,
         "hard_safety_gates": list(HARD_SAFETY_GATES),
         "all_off_warning": "This is a diagnostic stress test. It can increase accepted trades and destroy expectancy. Do not treat as strategy performance." if filter_profile_name(disabled) == "ALL_OFF" else "",
+        "backtest_only_experiments": [{"name": SHORT_BREAKDOWN_RESCUE_REASON, "enabled": bool(short_breakdown_rescue_enabled), "mode": "BACKTEST only", "default_behavior": "unchanged when disabled", "accepted_reason": SHORT_BREAKDOWN_RESCUE_REASON}],
     }
 
 def write_backtest_filter_state_artifacts(output_dir: str, state: Mapping[str, Any]) -> None:
@@ -399,6 +413,19 @@ def _rescue_config_from_args(args: Any, runtime_cfg: Any) -> RescueConfig:
         max_slippage_pct=float(getattr(args, "rescue_max_slippage_pct", 0.0020)),
         allow_cooldown_bypass=bool(getattr(args, "rescue_allow_cooldown_bypass", False)),
         max_concurrent_positions=int(getattr(getattr(runtime_cfg, "runtime", runtime_cfg), "max_concurrent_positions", 3)),
+    )
+
+def _short_breakdown_rescue_config_from_args(args: Any) -> ShortBreakdownRescueConfig:
+    return ShortBreakdownRescueConfig(
+        enabled=bool(getattr(args, "short_breakdown_rescue_enabled", False)),
+        modes=tuple(str(getattr(args, "short_breakdown_rescue_modes", "BACKTEST") or "BACKTEST").upper().replace(",", " ").split()),
+        size_multiplier=min(1.0, max(0.0, float(getattr(args, "short_breakdown_rescue_size_multiplier", 0.25)))),
+        max_trades_per_day=int(getattr(args, "short_breakdown_rescue_max_per_day", 1)),
+        min_effective_rr=float(getattr(args, "short_breakdown_rescue_min_effective_rr", 1.10)),
+        min_shadow_expectancy=float(getattr(args, "short_breakdown_rescue_min_shadow_expectancy", 0.0)),
+        allowed_reasons=tuple(r.strip().upper() for r in str(getattr(args, "short_breakdown_rescue_allowed_reasons", "LOW_SCORE,STOP_TOO_WIDE,DAILY_SYMBOL_TRADE_LIMIT") or "").replace(",", " ").split() if r.strip()),
+        max_spread_pct=float(getattr(args, "short_breakdown_rescue_max_spread_pct", 0.0025)),
+        max_slippage_pct=float(getattr(args, "short_breakdown_rescue_max_slippage_pct", 0.0020)),
     )
 
 def _quality_gate_config_from_args(args: Any) -> QualityGateConfig:
@@ -1253,10 +1280,12 @@ def process_backtest_result(
     recent_stats: Dict[str, Any],
     rescue_config: Optional[RescueConfig] = None,
     rescue_stats: Optional[RescueStats] = None,
+    short_breakdown_rescue_config: Optional[ShortBreakdownRescueConfig] = None,
     mode: str = "BACKTEST",
     disabled_backtest_filters: Iterable[str] = (),
 ) -> Optional[CandidateOrder]:
     rescue_config = rescue_config or RescueConfig()
+    short_breakdown_rescue_config = short_breakdown_rescue_config or ShortBreakdownRescueConfig()
     rescue_stats = rescue_stats or RescueStats()
     diagnostics = result.get("diagnostics", {})
     disabled_backtest_filters = tuple(sorted({str(r).upper() for r in disabled_backtest_filters}))
@@ -1285,29 +1314,63 @@ def process_backtest_result(
         )
     )
     def _try_rescue(reject_reason: str, effective_rr_value: float) -> Optional[CandidateOrder]:
-        ok, rescue_reason = _rescue_acceptance_allowed(
+        sbr = short_breakdown_rescue_config
+        reason_norm = str(reject_reason or "").upper()
+        regime_norm = str(regime or mctx.get("regime", "")).upper()
+        first_gate = str((diagnostics.get("failed_filter") if isinstance(diagnostics, dict) else "") or reason_norm).upper()
+        liquidity_ok = mctx.get("liquidity_ok") is not False
+        volatility_raw = mctx.get("volatility_ok", "UNAVAILABLE_BACKTEST")
+        volatility_ok = volatility_raw is not False or str(volatility_raw).upper() == "UNAVAILABLE_BACKTEST"
+        spread = _safe_float(mctx.get("spread_pct"), -1.0)
+        slip = _safe_float(mctx.get("expected_slippage_pct"), -1.0)
+        sbr_mode_ok = str(mode).upper() == "BACKTEST" and "BACKTEST" in {m.upper() for m in sbr.modes}
+        sbr_candidate = (
+            sbr.enabled and sbr_mode_ok
+            and str(side).upper() == "SHORT" and str(setup_type).upper() == "BREAKDOWN_DOWN"
+            and (reason_norm in set(sbr.allowed_reasons) or first_gate in set(sbr.allowed_reasons))
+        )
+        if sbr_candidate:
+            rescue_stats.candidate_count += 1
+        short_breakdown_ok = (
+            sbr_candidate
+            and ("BREAKOUT" in regime_norm or regime_norm == "NORMAL" or str(mctx.get("volatility_regime", "")).upper() == "NORMAL")
+            and liquidity_ok and volatility_ok
+            and effective_rr_value >= sbr.min_effective_rr
+            and (spread < 0.0 or spread <= sbr.max_spread_pct) and (slip < 0.0 or slip <= sbr.max_slippage_pct)
+            and rescue_stats.accepted_count < sbr.max_trades_per_day
+        )
+        if sbr_candidate and not short_breakdown_ok:
+            rescue_stats.rejected_count += 1
+        if short_breakdown_ok:
+            rescue_reason = SHORT_BREAKDOWN_RESCUE_REASON
+            rescue_size_multiplier = sbr.size_multiplier
+        else:
+            ok, rescue_reason = _rescue_acceptance_allowed(
             mode=mode, reason=reject_reason, score=score, effective_rr=effective_rr_value, regime=regime,
             mctx=mctx, cfg=rescue_config, stats=rescue_stats, recent_stats=recent_stats, open_rows=open_rows, symbol=symbol,
         )
-        if not ok:
-            return None
+        if not short_breakdown_ok:
+            if not ok:
+                return None
+            rescue_size_multiplier = rescue_config.size_multiplier
         rescue_stats.accepted_count += 1
         context = {
             "accepted_reason": rescue_reason,
             "original_reject_reason": reject_reason,
-            "rescue_size_multiplier": rescue_config.size_multiplier,
+            "rescue_size_multiplier": rescue_size_multiplier,
             "rescue_effective_rr": effective_rr_value,
             "rescue_score": score,
             "rescue_mode": mode,
+            "rescue_min_shadow_expectancy": getattr(sbr, "min_shadow_expectancy", 0.0) if rescue_reason == SHORT_BREAKDOWN_RESCUE_REASON else None,
         }
         rescued = CandidateOrder(
             candle.timestamp, symbol, side, entry, sl, tp, rr, setup_type, setup_reason, regime, score, order_type,
             expectancy_bucket=expectancy_bucket, accepted_reason=rescue_reason, original_reject_reason=reject_reason,
-            rescue_size_multiplier=rescue_config.size_multiplier, rescue_effective_rr=effective_rr_value,
+            rescue_size_multiplier=rescue_size_multiplier, rescue_effective_rr=effective_rr_value,
             rescue_decision_context=json.dumps(context, sort_keys=True),
         )
-        sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_config.size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True)}
-        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct * rescue_config.size_multiplier, market_ctx=sim_ctx)
+        sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True)}
+        sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct * rescue_size_multiplier, market_ctx=sim_ctx)
         lifecycle.extend(sim_rows)
         recent_stats["last_trade_ts_by_symbol"][symbol] = candle.timestamp
         recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
@@ -2883,6 +2946,15 @@ def main():
     p.add_argument("--rescue-max-spread-pct", type=float, default=0.0025)
     p.add_argument("--rescue-max-slippage-pct", type=float, default=0.0020)
     p.add_argument("--rescue-allow-cooldown-bypass", action="store_true")
+    p.add_argument("--short-breakdown-rescue-enabled", action="store_true", default=str(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", "false")).lower() in {"1","true","yes","on"}, help="Enable BACKTEST-only SHORT breakdown rescue activation; disabled is reporting-only")
+    p.add_argument("--short-breakdown-rescue-modes", default="BACKTEST")
+    p.add_argument("--short-breakdown-rescue-size-multiplier", type=float, default=float(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_SIZE_MULTIPLIER", "0.25")))
+    p.add_argument("--short-breakdown-rescue-max-per-day", type=int, default=int(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MAX_PER_DAY", "1")))
+    p.add_argument("--short-breakdown-rescue-allowed-reasons", default=os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ALLOWED_REASONS", "LOW_SCORE,STOP_TOO_WIDE,DAILY_SYMBOL_TRADE_LIMIT"))
+    p.add_argument("--short-breakdown-rescue-min-effective-rr", type=float, default=float(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_EFFECTIVE_RR", "1.10")))
+    p.add_argument("--short-breakdown-rescue-min-shadow-expectancy", type=float, default=float(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_SHADOW_EXPECTANCY", "0.0")))
+    p.add_argument("--short-breakdown-rescue-max-spread-pct", type=float, default=0.0025)
+    p.add_argument("--short-breakdown-rescue-max-slippage-pct", type=float, default=0.0020)
     p.add_argument("--quality-gate-enabled", action="store_true", help="Enable BACKTEST-only reporting comparison for SHORT breakdown/breakout NORMAL-stop gate")
     p.add_argument("--quality-gate-modes", default="BACKTEST")
     p.add_argument("--quality-gate-size-multiplier", type=float, default=0.25)
@@ -2902,6 +2974,7 @@ def main():
     disabled_filters = tuple(sorted(set(_disabled_backtest_filters(args)) | {str(x).upper() for x in getattr(args, "disable_backtest_filter", [])}))
     rescue_config = _rescue_config_from_args(args, cfg)
     quality_gate_config = _quality_gate_config_from_args(args)
+    short_breakdown_rescue_config = _short_breakdown_rescue_config_from_args(args)
     rescue_stats = RescueStats()
     now = datetime.now(timezone.utc)
     default_end = int(now.timestamp() * 1000)
@@ -2917,6 +2990,7 @@ def main():
         symbols=fixed_symbols_for_state,
         timeframe=args.interval,
         last_days=args.last_n_days,
+        short_breakdown_rescue_enabled=short_breakdown_rescue_config.enabled,
     )
     write_backtest_filter_state_artifacts(args.output_dir, filter_state)
     if args.offline:
@@ -3049,6 +3123,7 @@ def main():
                     recent_stats,
                     rescue_config=rescue_config,
                     rescue_stats=rescue_stats,
+                    short_breakdown_rescue_config=short_breakdown_rescue_config,
                     mode=args.mode,
                     disabled_backtest_filters=disabled_filters,
                 )
@@ -3209,9 +3284,10 @@ def main():
         "WOULD_SL": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_SL"),
         "WOULD_TIMEOUT": sum(1 for s in rejected_shadow if s.reject_reasons == "STOP_TOO_WIDE" and s.shadow_outcome == "WOULD_TIMEOUT"),
     }
-    rescue_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason == "HIGH_EFFECTIVE_RR_RESCUE"]
-    baseline_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason != "HIGH_EFFECTIVE_RR_RESCUE"]
-    rescue_accept_rows = [r for r in lifecycle if r.status_after == "SIGNAL_CREATED" and r.accepted_reason == "HIGH_EFFECTIVE_RR_RESCUE"]
+    rescue_reason_names = {"HIGH_EFFECTIVE_RR_RESCUE", SHORT_BREAKDOWN_RESCUE_REASON}
+    rescue_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason in rescue_reason_names]
+    baseline_closed = [r for r in lifecycle if r.status_after == "POSITION_CLOSED" and r.accepted_reason not in rescue_reason_names]
+    rescue_accept_rows = [r for r in lifecycle if r.status_after == "SIGNAL_CREATED" and r.accepted_reason in rescue_reason_names]
     accepted_reason_breakdown = _distribution([
         r.accepted_reason
         for r in lifecycle

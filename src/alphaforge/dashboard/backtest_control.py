@@ -94,6 +94,12 @@ class DashboardBacktestResult:
     filter_warning: str = ""
     filter_profile_comparison_path: str | None = None
     accepted_loss_diagnostics_path: str | None = None
+    baseline_accepted_trades: int | None = None
+    rescue_accepted_count: int | None = None
+    rescue_candidate_count: int | None = None
+    rescue_accepted_net_pnl: Any = None
+    baseline_net_pnl: Any = None
+    baseline_plus_rescue_net_pnl: Any = None
 
 
 def default_form_values() -> dict[str, Any]:
@@ -825,6 +831,12 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.loss_count = _safe_int(summary.get("sl_hits"))
     result.open_count = _safe_int(summary.get("open_at_end"))
     result.net_pnl = summary.get("total_net_pnl_usdt")
+    result.baseline_accepted_trades = _safe_int(summary.get("baseline_accepted_trades"))
+    result.rescue_candidate_count = _safe_int(summary.get("rescue_candidate_count"))
+    result.rescue_accepted_count = _safe_int(summary.get("rescue_accepted_count"))
+    result.rescue_accepted_net_pnl = summary.get("rescue_accepted_net_pnl")
+    result.baseline_net_pnl = summary.get("baseline_net_pnl")
+    result.baseline_plus_rescue_net_pnl = summary.get("baseline_plus_rescue_net_pnl")
     result.total_return_pct = summary.get("total_pnl_pct")
     result.max_drawdown = None
     diagnostics = _rejection_diagnostics(rejected_rows)
