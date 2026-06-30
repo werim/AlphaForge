@@ -40,7 +40,6 @@ AlphaForge is a SQL-first, execution-aware futures trading research/runtime prot
 - Persistence and schema modules: `src/alphaforge/persistence.py`, `src/alphaforge/models/`, `alembic/`
 - Backtest runner/export script: `backtest_order.py`
 
-
 ## Documentation Index
 
 - [Repository operating rules](AGENTS.md)
@@ -50,44 +49,21 @@ AlphaForge is a SQL-first, execution-aware futures trading research/runtime prot
 
 ## Setup
 
+### macOS / Linux
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 ```
 
-## Run migrations
+### Windows PowerShell
 
-```bash
-alembic upgrade head
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .[dev]
 ```
-
-## Run tests
-
-```bash
-pytest -q
-```
-
-## PAPER burn-in report
-
-Generate deterministic PAPER runtime diagnostics from a SQLite runtime database without changing thresholds or enabling live order flow:
-
-```bash
-python -m alphaforge.paper_burnin --db path/to/paper_runtime.db --out reports/paper_burnin
-```
-
-The command writes `paper_burnin_summary.csv`, `paper_burnin_report.md`, and `paper_burnin_blockers.json`. Missing evidence is reported as a blocker; this report never promotes LIVE readiness by itself.
-
-
-## Next Development Priority
-
-1. Unify `BACKTEST` / `PAPER` / `LIVE` decision lifecycle contract as much as possible.
-2. Persist rejected signals/orders consistently across modes.
-3. Fix lifecycle export accuracy (event ordering, statuses, and rejection visibility).
-4. Ensure score/RR fields are computed from context and not hardcoded placeholders.
-5. Populate execution-context fields where data exists; otherwise mark as unavailable explicitly.
-6. Add regression tests for rejected lifecycle rows and lifecycle completeness.
-
 
 ## Environment Configuration
 
@@ -95,6 +71,12 @@ The command writes `paper_burnin_summary.csv`, `paper_burnin_report.md`, and `pa
 
 ```bash
 cp .env.example .env
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
 ```
 
 2. Start safely with defaults:
@@ -110,6 +92,133 @@ cp .env.example .env
 - LIVE trading can lose capital quickly from slippage, spread expansion, latency, and exchange-side failures.
 - Do not enable LIVE unless lifecycle integrity, rejection persistence, reconciliation checks, and execution-risk thresholds are validated in your environment.
 
+## Run migrations
+
+```bash
+alembic upgrade head
+```
+
+## Run tests
+
+```bash
+pytest -q
+```
+
+## Exact Running Commands
+
+Run these from the repository root after activating `.venv` and installing the package in editable mode.
+
+### Backtest
+
+Backtest entrypoint: `backtest_order.py`.
+
+```bash
+python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/manual_1h_30d
+```
+
+Refresh Binance historical cache for the requested range:
+
+```bash
+python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/manual_1h_30d --force-refresh
+```
+
+CI/offline smoke backtest without network calls:
+
+```bash
+python backtest_order.py --ci --interval 1h --last-n-days 7 --symbols BTCUSDT --output-dir data/backtests/ci_smoke
+```
+
+BACKTEST-only SHORT breakdown rescue comparison, disabled by default unless explicitly enabled:
+
+```bash
+ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED=true python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/rescue_on
+```
+
+Windows PowerShell equivalent:
+
+```powershell
+$env:ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED="true"
+python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/rescue_on
+Remove-Item Env:ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED
+```
+
+### PAPER runtime
+
+PAPER runtime entrypoint: `python -m alphaforge.runtime`.
+
+macOS / Linux:
+
+```bash
+ALPHAFORGE_MODE=PAPER python -m alphaforge.runtime
+```
+
+Windows PowerShell:
+
+```powershell
+$env:ALPHAFORGE_MODE="PAPER"
+python -m alphaforge.runtime
+```
+
+For a deterministic smoke path using the safe placeholder scanner:
+
+```bash
+ALPHAFORGE_MODE=PAPER ALPHAFORGE_RUNTIME_SAFE_SCANNER=1 python -m alphaforge.runtime
+```
+
+### Dashboard
+
+Dashboard entrypoint: `alphaforge.dashboard.app:create_app`.
+
+```bash
+python -m uvicorn alphaforge.dashboard.app:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000
+```
+
+If you want the dashboard to read a specific SQLite DB, set `ALPHAFORGE_DATABASE_URL` before starting it, using the same value expected by `load_config_from_env()`.
+
+## Shortcut Scripts
+
+PowerShell shortcuts:
+
+```powershell
+.\scripts\run_backtest.ps1 -Interval 1h -Days 30 -Symbols BTCUSDT,ETHUSDT
+.\scripts\run_paper.ps1
+.\scripts\run_dashboard.ps1 -Port 8000
+```
+
+Bash shortcuts:
+
+```bash
+bash scripts/run_backtest.sh 1h 30 BTCUSDT,ETHUSDT
+bash scripts/run_paper.sh
+bash scripts/run_dashboard.sh 8000
+```
+
+These shortcuts are thin wrappers around the exact commands above. They do not bypass `.env`, migrations, readiness gates, or LIVE safeguards.
+
+## PAPER burn-in report
+
+Generate deterministic PAPER runtime diagnostics from a SQLite runtime database without changing thresholds or enabling live order flow:
+
+```bash
+python -m alphaforge.paper_burnin --db path/to/paper_runtime.db --out reports/paper_burnin
+```
+
+The command writes `paper_burnin_summary.csv`, `paper_burnin_report.md`, and `paper_burnin_blockers.json`. Missing evidence is reported as a blocker; this report never promotes LIVE readiness by itself.
+
+## Next Development Priority
+
+1. Unify `BACKTEST` / `PAPER` / `LIVE` decision lifecycle contract as much as possible.
+2. Persist rejected signals/orders consistently across modes.
+3. Fix lifecycle export accuracy (event ordering, statuses, and rejection visibility).
+4. Ensure score/RR fields are computed from context and not hardcoded placeholders.
+5. Populate execution-context fields where data exists; otherwise mark as unavailable explicitly.
+6. Add regression tests for rejected lifecycle rows and lifecycle completeness.
 
 ## Adaptive Learning Foundation (Generation 9)
 - AlphaForge now includes a deterministic, SQL-first adaptive learning foundation in `src/alphaforge/adaptive_learning.py`.
