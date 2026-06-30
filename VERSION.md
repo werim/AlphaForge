@@ -1,3 +1,15 @@
+## 2026-06-30 DEFAULT_FILTERS accepted-reason scope and STOP_TOO_WIDE diagnostics
+
+- Current version: unreleased BACKTEST dashboard selected-profile consistency increment
+- Current phase: selected DEFAULT_FILTERS dashboard artifact-scope hardening and recoverable STOP_TOO_WIDE reporting
+- Runtime maturity: BACKTEST dashboard/reporting improved; PAPER/LIVE runtime and order paths unchanged
+- BACKTEST/PAPER/LIVE alignment: selected main panel accepted-reason breakdown is sourced only from the selected profile artifacts and never from profile-comparison aggregates; no decision logic changed
+- Lifecycle coverage: accepted/rejected lifecycle exports are read without modifying lifecycle state transitions
+- Execution realism coverage: STOP_TOO_WIDE recoverable analysis is diagnostic-only and grouped by symbol, side, regime, effective-RR bucket, and shadow outcome with no stop-gate loosening
+- Known critical risks: highlighted STOP_TOO_WIDE candidates are calibration leads only, not acceptance approvals; LIVE readiness remains blocked
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 DEFAULT_FILTERS profile artifact parser fix
 
 - Current version: unreleased BACKTEST dashboard selected-profile artifact parser increment

@@ -1,3 +1,24 @@
+## 2026-06-30 - DEFAULT_FILTERS accepted-reason scope and STOP_TOO_WIDE recoverable diagnostics
+
+### Added
+- Added diagnostic-only STOP_TOO_WIDE recoverable candidate reporting grouped by symbol, side, regime, effective-RR bucket, and shadow outcome.
+- Added selected-profile regression coverage proving accepted=10, baseline/rescue=9/1, and accepted reason breakdown BASELINE=9 / SHORT_BREAKDOWN_RESCUE=1.
+
+### Changed
+- Selected BACKTEST main panel now prefers selected-profile `backtest_orders.csv` for accepted-reason breakdown.
+
+### Fixed
+- Fixed accepted-reason breakdown leakage from aggregate/profile-comparison scope into the selected DEFAULT_FILTERS main panel.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. BACKTEST/dashboard reporting only; PAPER/LIVE runtime and safety gates are unchanged.
+
+### Known Issues
+- STOP_TOO_WIDE highlighted candidates are calibration diagnostics only and do not imply gate relaxation or LIVE readiness.
+
 ## 2026-06-30 - DEFAULT_FILTERS selected-profile artifact parser
 
 ### Added

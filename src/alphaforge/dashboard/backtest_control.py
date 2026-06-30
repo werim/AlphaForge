@@ -767,6 +767,7 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
         "near_miss_score_distribution": _numeric_distribution(near, "score"),
         "near_miss_effective_rr_distribution": _numeric_distribution(near, "effective_rr"),
         "stop_too_wide_rescue_diagnostics": _stop_too_wide_rescue_diagnostics(later_gate_source),
+        "stop_too_wide_recoverable_candidates": _stop_too_wide_recoverable_candidate_table(shadow_diagnostic_rows),
         "disabled_filters": summary.get("disabled_filters", "[]"),
         "filter_switch_experiment_active": str(summary.get("filter_switch_experiment_active", "False")).lower() in {"1", "true", "yes", "on"},
         "disabled_filter_bypass_count": _safe_int(summary.get("disabled_filter_bypass_count")) or 0,
@@ -876,6 +877,94 @@ def _diagnostics_from_backtest_orders(rows: list[dict[str, str]]) -> list[dict[s
     return out
 
 
+
+def _accepted_reason_breakdown_from_orders(rows: list[dict[str, str]]) -> dict[str, int]:
+    reasons = Counter()
+    for row in rows:
+        reason = str(_first_available(row.get("accepted_reason"), row.get("acceptance_reason"), row.get("source"), row.get("strategy_source"), "UNKNOWN")).strip() or "UNKNOWN"
+        reasons[reason] += 1
+    return dict(reasons)
+
+
+def _selected_scoped_summary_reason_breakdown(summary: Mapping[str, Any], accepted_count: int | None) -> dict[str, Any]:
+    raw = summary.get("accepted_reason_breakdown")
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    numeric_total = 0
+    normalized: dict[str, Any] = {}
+    for key, value in decoded.items():
+        count = _safe_int(value)
+        if count is None:
+            return {}
+        normalized[str(key)] = count
+        numeric_total += count
+    if accepted_count is not None and numeric_total != accepted_count:
+        return {}
+    return normalized
+
+
+def _effective_expectancy_estimate(rows: list[dict[str, str]]) -> float | None:
+    if not rows:
+        return None
+    split = _outcome_split(rows)
+    mean_rr = _summary_value(rows, "effective_rr", "mean") or 0.0
+    return round((split["would_tp_rate"] * mean_rr) - split["would_sl_rate"], 6)
+
+
+def _stop_too_wide_recoverable_candidate_table(rows: list[dict[str, str]]) -> dict[str, Any]:
+    stop_rows = [r for r in rows if str(r.get("reject_reason") or "").strip().upper() == "STOP_TOO_WIDE"]
+    groups: dict[tuple[str, str, str, str, str], list[dict[str, str]]] = defaultdict(list)
+    for row in stop_rows:
+        outcome = _shadow(row).lower().replace("would_", "would_")
+        if outcome == "would_timeout":
+            outcome = "timeout"
+        elif outcome not in {"would_tp", "would_sl"}:
+            outcome = "unknown"
+        key = (
+            str(row.get("symbol") or "UNKNOWN"),
+            str(row.get("side") or "UNKNOWN").upper() or "UNKNOWN",
+            str(row.get("regime") or row.get("volatility_regime") or "UNKNOWN"),
+            _bucket(row.get("effective_rr"), 0.5),
+            outcome,
+        )
+        groups[key].append(row)
+    table = []
+    for (symbol, side, regime, rr_bucket, outcome), bucket_rows in sorted(groups.items()):
+        count = len(bucket_rows)
+        split = _outcome_split(bucket_rows)
+        highlighted = any(
+            (_safe_float_or_none(r.get("score")) or 0.0) >= 9.5
+            and (_safe_float_or_none(r.get("effective_rr")) or 0.0) >= 1.9
+            and _shadow(r) in {"WOULD_TP", "WOULD_SL"}
+            for r in bucket_rows
+        )
+        table.append({
+            "symbol": symbol,
+            "side": side,
+            "regime": regime,
+            "effective_rr_bucket": rr_bucket,
+            "shadow_outcome_bucket": outcome,
+            "count": count,
+            "would_tp_rate": split["would_tp_rate"],
+            "would_sl_rate": split["would_sl_rate"],
+            "mean_effective_rr": _summary_value(bucket_rows, "effective_rr", "mean"),
+            "expected_effective_expectancy": _effective_expectancy_estimate(bucket_rows),
+            "highlighted_candidate": highlighted,
+        })
+    return {
+        "mode": "DIAGNOSTIC_ONLY",
+        "decision_logic_changed": False,
+        "stop_too_wide_gate_loosened": False,
+        "candidate_table": table,
+        "highlighted_candidates": [row for row in table if row["highlighted_candidate"]],
+    }
+
 def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir: Path, *, selected_profile_name: str | None = None, window_days: float | None = None) -> None:
     """Populate the overview Backtest Result panel from a real backtest artifact directory."""
     run_dir = artifact_dir
@@ -933,12 +1022,7 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.baseline_net_pnl = summary.get("baseline_net_pnl")
     result.rescue_net_pnl = summary.get("rescue_accepted_net_pnl")
     result.baseline_plus_rescue_net_pnl = summary.get("baseline_plus_rescue_net_pnl")
-    try:
-        result.accepted_reason_breakdown = json.loads(summary.get("accepted_reason_breakdown") or "{}")
-    except json.JSONDecodeError:
-        result.accepted_reason_breakdown = dict(Counter(row.get("accepted_reason") or "UNKNOWN" for row in backtest_order_rows))
-    if not result.accepted_reason_breakdown and backtest_order_rows:
-        result.accepted_reason_breakdown = dict(Counter(row.get("accepted_reason") or "UNKNOWN" for row in backtest_order_rows))
+    result.accepted_reason_breakdown = _accepted_reason_breakdown_from_orders(backtest_order_rows) if backtest_order_rows else _selected_scoped_summary_reason_breakdown(summary, result.accepted_trades)
 
     diagnostics = _rejection_diagnostics(rejected_rows)
     result.top_rejection_reasons = diagnostics["top_rejection_reasons"]
@@ -960,6 +1044,9 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.near_miss_rejected_signals = calibration_summary.get("near_miss_rejected_signals") or rejected_shadow_rows[:20]
     result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else _read_csv_rows(high_rr_path)
     result.signal_quality_diagnostics = signal_quality_summary if isinstance(signal_quality_summary, dict) else {}
+    result.stop_too_wide_rescue_diagnostics = calibration_summary.get("stop_too_wide_rescue_diagnostics", {}) if isinstance(calibration_summary, dict) else {}
+    recoverable_rows = rejected_shadow_rows or rejected_rows
+    result.signal_quality_diagnostics.setdefault("stop_too_wide_recoverable_candidates", _stop_too_wide_recoverable_candidate_table(recoverable_rows))
     if candidate_quality_gates_path.exists():
         result.signal_quality_diagnostics.setdefault("candidate_quality_gates", _read_csv_rows(candidate_quality_gates_path))
     if rejected_shadow_summary_path.exists():
@@ -1313,6 +1400,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.near_miss_score_distribution = calibration_summary["near_miss_score_distribution"]
     result.near_miss_effective_rr_distribution = calibration_summary["near_miss_effective_rr_distribution"]
     result.stop_too_wide_rescue_diagnostics = calibration_summary["stop_too_wide_rescue_diagnostics"]
+    result.signal_quality_diagnostics.setdefault("stop_too_wide_recoverable_candidates", calibration_summary.get("stop_too_wide_recoverable_candidates", {}))
     result.score_saturation_diagnostics = calibration_summary["score_saturation_diagnostics"]
     result.daily_global_trade_limit_diagnostics = calibration_summary["daily_global_trade_limit_diagnostics"]
     result.dynamic_trade_limit_proposal = calibration_summary["dynamic_trade_limit_proposal"]

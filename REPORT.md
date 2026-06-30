@@ -1,3 +1,51 @@
+## 2026-06-30 - DEFAULT_FILTERS accepted-reason scope and STOP_TOO_WIDE recoverable diagnostics
+
+### Why the patch was needed
+The selected DEFAULT_FILTERS main panel showed accepted=10 and baseline/rescue accepted counts of 9/1, but accepted-reason breakdown could display aggregate comparison counts such as BASELINE=36 and SHORT_BREAKDOWN_RESCUE=4. That made the selected strategy panel internally inconsistent.
+
+### Root cause
+The dashboard trusted summary-level accepted-reason breakdown before deriving counts from selected `backtest_orders.csv`, allowing profile-comparison aggregate or wrong-scope summary values to leak into the selected main panel.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_backtest_profile_comparison.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+The selected BACKTEST main panel now derives accepted-reason breakdown from the selected profile's `backtest_orders.csv` when available. It falls back to summary counts only when the parsed count total matches the selected accepted count. Profile-comparison aggregate data is not used for the selected main panel.
+
+### Lifecycle changes
+No lifecycle transitions changed. Rejected and accepted rows are still read from exported BACKTEST artifacts only.
+
+### Persistence changes
+No SQLite, CSV export schema, PAPER, or LIVE persistence changes.
+
+### Export/schema changes
+No required exporter schema changes. The dashboard consumes existing `backtest_orders.csv`, `order_backtest_summary.csv`, `rejected_shadow.csv`, and calibration summary artifacts.
+
+### Tests added
+Extended the DEFAULT_FILTERS profile fixture to prove selected accepted=10, baseline/rescue=9/1, accepted-reason breakdown BASELINE=9 and SHORT_BREAKDOWN_RESCUE=1, and aggregate ALL_FILTERS_OFF/summary counts do not leak into the selected main panel.
+
+### Tests executed
+- `pytest -q tests/test_backtest_profile_comparison.py`
+- `pytest -q tests/test_dashboard_app.py`
+- `pytest -q tests/test_backtest_order_scanner.py::test_stop_too_wide_split_metrics_are_exported`
+
+### Risks
+STOP_TOO_WIDE recoverable candidates are reporting-only. The patch does not loosen STOP_TOO_WIDE, increase accepted trades, change PAPER/LIVE runtime behavior, or treat ALL_FILTERS_OFF as strategy performance.
+
+### Remaining limitations
+The recoverable table depends on rejected-shadow artifacts. Missing shadow outcomes remain unknown rather than fabricated.
+
+### Migration concerns
+None. Existing artifacts continue to load, with stricter protection against wrong-scope summary reason counts.
+
+### Push recommendation
+Safe to push after targeted dashboard tests. LIVE remains NOT READY.
+
 ## 2026-06-30 - DEFAULT_FILTERS selected-profile artifact parser
 
 ### Why the patch was needed
