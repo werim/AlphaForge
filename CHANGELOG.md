@@ -1,3 +1,49 @@
+## 2026-06-30 - RejectedShadowEvaluation test fixture alignment
+
+### Added
+- None.
+
+### Changed
+- Updated the dashboard score-saturation regression fixture to include the required `RejectedShadowEvaluation` execution diagnostic fields.
+
+### Fixed
+- Fixed the direct dashboard test fixture after constructor expansion for spread, liquidity, volatility, TP-hit, cost-penalty, and execution-ok fields.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Test-only fixture alignment.
+
+### Known Issues
+- Dashboard-specific tests remain import-skipped when optional dashboard dependencies are unavailable in the environment.
+
+## 2026-06-30 - DEFAULT_FILTERS overtrade diagnostics and drawdown exports
+
+### Added
+- Added `default_gate_funnel.csv`, `equity_curve.csv`, and `symbol_regime_acceptance_diagnostics.csv` BACKTEST exports.
+- Added blocking dashboard warnings for `OVERTRADE_RISK`, score=10 SL-dominance saturation, and DEFAULT profile not strategy-quality status.
+- Added drawdown, drawdown percent, win/loss streak, and profit factor metrics from accepted terminal trades.
+- Added regression coverage for score saturation table rendering, overtrade warnings, drawdown metrics, visible zero-reject gates, and WOULD_SL-dominated quality-candidate suppression.
+
+### Changed
+- Score Saturation Diagnostics can now render from `score_10_by_regime` and `score_10_by_reject_reason` JSON diagnostics.
+- Top Quality-Improvement Candidates now reports when no positive-expectancy candidate qualifies because high-RR near misses are WOULD_SL dominated.
+- Return and net PnL display now includes unit labels so risk-percent sums are not confused with USDT PnL.
+
+### Fixed
+- Fixed invisible score=10 diagnostics when JSON saturation splits existed but bucket-table rows were absent.
+- Fixed unavailable max-drawdown ranking inputs when accepted terminal trades can construct an equity curve.
+
+### Removed
+- None. No filters were loosened and no rejected shadows are converted to accepted trades.
+
+### Breaking Changes
+- None. BACKTEST exporter/dashboard diagnostics only; PAPER/LIVE runtime and order placement are unchanged.
+
+### Known Issues
+- The patch surfaces likely causes of the 11 -> 354 accepted-trade jump but does not recalibrate STOP_TOO_WIDE or score thresholds. DEFAULT_FILTERS remains not LIVE-ready when overtrade and score saturation warnings fire.
+
 ## 2026-06-30 - BACKTEST dashboard dynamic top-volume universe validation
 
 ### Added

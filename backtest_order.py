@@ -2198,6 +2198,103 @@ def build_filter_profile_comparison_artifact(summary: Mapping[str, Any], quality
     profiles[str(current["profile"])] = current
     return {"mode": "BACKTEST", "artifact_only": True, "profiles": profiles}
 
+
+def _accepted_terminal_rows_for_risk(lifecycle_rows: List[LifecycleRow]) -> List[LifecycleRow]:
+    rows = [
+        r for r in lifecycle_rows
+        if not r.reject_reason and r.status_after in {"POSITION_CLOSED", "OPEN_AT_END", "TP_HIT", "SL_HIT"}
+    ]
+    return sorted(rows, key=lambda r: (r.timestamp, r.symbol, r.side))
+
+
+def build_equity_curve_metrics(lifecycle_rows: List[LifecycleRow], initial_balance: float) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    equity = float(initial_balance or 0.0)
+    peak = equity
+    max_drawdown = 0.0
+    max_drawdown_pct = 0.0
+    longest_loss = longest_win = cur_loss = cur_win = 0
+    gross_profit = gross_loss = 0.0
+    curve: List[Dict[str, Any]] = []
+    for idx, row in enumerate(_accepted_terminal_rows_for_risk(lifecycle_rows), start=1):
+        pnl = float(row.net_pnl_usdt or 0.0)
+        equity += pnl
+        peak = max(peak, equity)
+        drawdown = equity - peak
+        drawdown_pct = (drawdown / peak * 100.0) if peak else 0.0
+        max_drawdown = min(max_drawdown, drawdown)
+        max_drawdown_pct = min(max_drawdown_pct, drawdown_pct)
+        if pnl > 0:
+            gross_profit += pnl; cur_win += 1; cur_loss = 0
+        elif pnl < 0:
+            gross_loss += abs(pnl); cur_loss += 1; cur_win = 0
+        else:
+            cur_loss = cur_win = 0
+        longest_loss = max(longest_loss, cur_loss)
+        longest_win = max(longest_win, cur_win)
+        curve.append({
+            "trade_index": idx, "timestamp": row.timestamp, "symbol": row.symbol, "side": row.side,
+            "close_reason": row.close_reason or row.status_after, "net_pnl_usdt": pnl,
+            "equity": equity, "peak_equity": peak, "drawdown": drawdown, "drawdown_pct": drawdown_pct,
+        })
+    metrics = {
+        "max_drawdown": max_drawdown,
+        "max_drawdown_pct": max_drawdown_pct,
+        "longest_loss_streak": longest_loss,
+        "longest_win_streak": longest_win,
+        "profit_factor": (gross_profit / gross_loss if gross_loss else (float("inf") if gross_profit else 0.0)),
+    }
+    return curve, metrics
+
+
+def build_default_gate_funnel(rejected: List[Dict[str, Any]], accepted_rows: List[LifecycleRow]) -> List[Dict[str, Any]]:
+    gate_order = ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"]
+    accepted_count = len(_accepted_terminal_rows_for_risk(accepted_rows)) or len([r for r in accepted_rows if not r.reject_reason and r.status_after == "SIGNAL_CREATED"])
+    total = accepted_count + len(rejected)
+    remaining = total
+    rows: List[Dict[str, Any]] = []
+    for gate in gate_order:
+        gate_rows = [r for r in rejected if str(r.get("reject_reason") or "").upper() == gate]
+        split = {
+            "would_tp_count": sum(1 for r in gate_rows if str(r.get("shadow_outcome") or "").upper() == "WOULD_TP"),
+            "would_sl_count": sum(1 for r in gate_rows if str(r.get("shadow_outcome") or "").upper() == "WOULD_SL"),
+            "would_timeout_count": sum(1 for r in gate_rows if str(r.get("shadow_outcome") or "").upper() == "WOULD_TIMEOUT"),
+        }
+        unknown = len(gate_rows) - sum(split.values())
+        exp = sum((float(r.get("effective_rr") or r.get("rr") or 0.0) if str(r.get("shadow_outcome") or "").upper() == "WOULD_TP" else (-1.0 if str(r.get("shadow_outcome") or "").upper() == "WOULD_SL" else 0.0)) for r in gate_rows)
+        rows.append({
+            "gate": gate, "candidates_entering_gate": remaining, "rejected_by_gate": len(gate_rows),
+            "accepted_after_gate": max(accepted_count, remaining - len(gate_rows)),
+            **split, "unknown_count": unknown,
+            "expected_effective_expectancy": (exp / len(gate_rows) if gate_rows else 0.0),
+            "gate_visible": True, "zero_reject_warning": len(gate_rows) == 0,
+        })
+        remaining = max(accepted_count, remaining - len(gate_rows))
+    return rows
+
+
+def build_symbol_regime_acceptance_diagnostics(lifecycle_rows: List[LifecycleRow]) -> List[Dict[str, Any]]:
+    groups: Dict[tuple[str, str], List[LifecycleRow]] = {}
+    for row in _accepted_terminal_rows_for_risk(lifecycle_rows):
+        groups.setdefault((row.symbol or "UNKNOWN", row.regime or row.volatility_regime or "UNKNOWN"), []).append(row)
+    out: List[Dict[str, Any]] = []
+    for (symbol, regime), rows in sorted(groups.items()):
+        score10 = [r for r in rows if float(r.score or 0.0) >= 10.0]
+        high = [r for r in rows if str(r.regime or r.volatility_regime).upper() in {"HIGH", "PANIC", "BREAKOUT", "NEWS_DRIVEN"}]
+        normal = [r for r in rows if str(r.regime or r.volatility_regime).upper() in {"NORMAL", "TREND", "RANGE"}]
+        def cnt(rs, reason): return sum(1 for r in rs if (r.close_reason or r.status_after) == reason)
+        n = len(rows)
+        out.append({
+            "symbol": symbol, "regime": regime, "accepted_count": n,
+            "tp_count": cnt(rows, "TP_HIT"), "sl_count": cnt(rows, "SL_HIT"),
+            "tp_rate": cnt(rows, "TP_HIT") / n if n else 0.0, "sl_rate": cnt(rows, "SL_HIT") / n if n else 0.0,
+            "mean_effective_rr": sum(float(r.effective_rr if r.effective_rr is not None else r.rr) for r in rows) / n if n else 0.0,
+            "mean_net_pnl": sum(float(r.net_pnl_usdt or 0.0) for r in rows) / n if n else 0.0,
+            "score_10_tp_count": cnt(score10, "TP_HIT"), "score_10_sl_count": cnt(score10, "SL_HIT"),
+            "high_regime_tp_count": cnt(high, "TP_HIT"), "high_regime_sl_count": cnt(high, "SL_HIT"),
+            "normal_regime_tp_count": cnt(normal, "TP_HIT"), "normal_regime_sl_count": cnt(normal, "SL_HIT"),
+        })
+    return out
+
 def write_backtest_quality_summary(path: str, summary: Mapping[str, Any]) -> None:
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["metric", "value"])
@@ -2838,7 +2935,16 @@ def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows:
     for t in thresholds:
         rows=[r for r in rejected if (_quality_float(r.get("effective_rr")) or -1) >= t]
         missed.append({"effective_rr_threshold":t, **split(rows)})
-    summary={"total_records":len(records), "accepted_records":sum(1 for r in records if r.get("source")=="ACCEPTED"), "rejected_shadow_records":len(shadows), "score_saturation":{"score_10_count":len(score10), "score_10_rate":len(score10)/len(records) if records else 0.0, "score_10_would_tp_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_TP"), "score_10_would_sl_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_SL"), "score_10_by_reject_reason":{k:split([r for r in score10 if str(r.get("reject_reason"))==k]) for k in sorted({str(r.get("reject_reason")) for r in score10})}, "score_10_by_regime":{k:split([r for r in score10 if str(r.get("regime"))==k]) for k in sorted({str(r.get("regime")) for r in score10})}}, "stop_too_wide_split":{"would_tp":split([r for r in stop if r.get("outcome")=="WOULD_TP"]), "would_sl":split([r for r in stop if r.get("outcome")=="WOULD_SL"]), "metrics":[g for g in group_rows if g["group_field"] in {"symbol","side","regime","effective_rr_decile","score_decile","volatility_score_bucket","liquidity_score_bucket","spread_pct_bucket","expected_slippage_pct_bucket","stop_distance_pct_bucket"} and any(str(r.get(g["group_field"]) or "UNAVAILABLE")==g["group_value"] and str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" for r in records)]}, "high_effective_rr_missed_alpha":missed, "top_quality_improvement_candidates": sorted([r for r in rejected if r.get("outcome")=="WOULD_TP"], key=lambda r:((_quality_float(r.get("effective_rr")) or 0), (_quality_float(r.get("score")) or 0)), reverse=True)[:20], "combo_group_count": len(combo_rows), "candidate_quality_gates": gate_rows, "score_calibration_diagnostics_count": len(calibration_rows), "thresholds_changed": False, "acceptance_logic_changed": False}
+    raw_tp_candidates = sorted([r for r in rejected if r.get("outcome")=="WOULD_TP"], key=lambda r:((_quality_float(r.get("effective_rr")) or 0), (_quality_float(r.get("score")) or 0)), reverse=True)
+    positive_candidates = []
+    for r in raw_tp_candidates:
+        peer = [x for x in rejected if x.get("reject_reason") == r.get("reject_reason")]
+        if peer and outcome_metrics(peer)["would_sl_rate"] > outcome_metrics(peer)["would_tp_rate"]:
+            continue
+        positive_candidates.append(r)
+    accepted_score10=[r for r in score10 if r.get("source")=="ACCEPTED"]
+    accepted_score10_split=split(accepted_score10)
+    summary={"total_records":len(records), "accepted_records":sum(1 for r in records if r.get("source")=="ACCEPTED"), "rejected_shadow_records":len(shadows), "score_saturation":{"score_10_count":len(score10), "score_10_rate":len(score10)/len(records) if records else 0.0, "score_10_would_tp_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_TP"), "score_10_would_sl_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_SL"), "accepted_score_10_count":len(accepted_score10), "accepted_score_10_would_tp_count":accepted_score10_split["would_tp_count"], "accepted_score_10_would_sl_count":accepted_score10_split["would_sl_count"], "accepted_score_10_tp_rate":accepted_score10_split["would_tp_count"]/len(accepted_score10) if accepted_score10 else 0.0, "accepted_score_10_sl_rate":accepted_score10_split["would_sl_count"]/len(accepted_score10) if accepted_score10 else 0.0, "warning":"SCORE_NO_LONGER_SEPARATES_WINNERS" if accepted_score10_split["would_sl_count"] > accepted_score10_split["would_tp_count"] else "", "score_10_by_reject_reason":{k:split([r for r in score10 if str(r.get("reject_reason"))==k]) for k in sorted({str(r.get("reject_reason")) for r in score10})}, "score_10_by_regime":{k:split([r for r in score10 if str(r.get("regime"))==k]) for k in sorted({str(r.get("regime")) for r in score10})}}, "stop_too_wide_split":{"would_tp":split([r for r in stop if r.get("outcome")=="WOULD_TP"]), "would_sl":split([r for r in stop if r.get("outcome")=="WOULD_SL"]), "metrics":[g for g in group_rows if g["group_field"] in {"symbol","side","regime","effective_rr_decile","score_decile","volatility_score_bucket","liquidity_score_bucket","spread_pct_bucket","expected_slippage_pct_bucket","stop_distance_pct_bucket"} and any(str(r.get(g["group_field"]) or "UNAVAILABLE")==g["group_value"] and str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" for r in records)]}, "high_effective_rr_missed_alpha":missed, "top_quality_improvement_candidates": positive_candidates[:20], "top_quality_improvement_candidate_note": "" if positive_candidates else "No positive-expectancy improvement candidates found: near-miss groups are dominated by WOULD_SL or negative expected expectancy.", "combo_group_count": len(combo_rows), "candidate_quality_gates": gate_rows, "score_calibration_diagnostics_count": len(calibration_rows), "thresholds_changed": False, "acceptance_logic_changed": False}
     summary.update(_quality_gate_metrics(records, quality_gate_config or QualityGateConfig(), baseline_net_pnl))
     return summary, group_rows, missed, combo_rows, gate_rows, calibration_rows
 
@@ -3308,6 +3414,9 @@ def main():
         quality_gate_config,
         baseline_net_pnl=sum(r.net_pnl_usdt for r in baseline_closed),
     )
+    equity_curve_rows, drawdown_metrics = build_equity_curve_metrics(lifecycle, args.balance)
+    gate_funnel_rows = build_default_gate_funnel([asdict(x) for x in rejected_shadow] or rejected, lifecycle)
+    symbol_regime_rows = build_symbol_regime_acceptance_diagnostics(lifecycle)
     summary = {
         "selected_symbols": len(universe),
         "requested_timeframe": args.interval,
@@ -3362,6 +3471,9 @@ def main():
         "avg_rr": 0.0 if not lifecycle else sum(r.rr for r in lifecycle) / len(lifecycle),
         "avg_pnl_pct": 0.0 if not lifecycle else sum(r.net_pnl_pct for r in lifecycle) / len(lifecycle),
         "total_pnl_pct": sum(r.net_pnl_pct for r in lifecycle),
+        "return_unit": "pct_of_position_risk_sum",
+        "net_pnl_unit": "USDT",
+        **drawdown_metrics,
         "total_net_pnl_usdt": sum(r.net_pnl_usdt for r in lifecycle),
         "avg_hold_minutes": 0.0 if not lifecycle else sum(r.hold_minutes for r in lifecycle) / len(lifecycle),
         "performance_by_symbol": {},
@@ -3386,6 +3498,16 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))
         w.writeheader()
         w.writerow(summary)
+    for name, rows, fallback in [
+        ("equity_curve.csv", equity_curve_rows, ["trade_index", "timestamp", "symbol", "side", "net_pnl_usdt", "equity", "drawdown", "drawdown_pct"]),
+        ("default_gate_funnel.csv", gate_funnel_rows, ["gate", "candidates_entering_gate", "rejected_by_gate", "accepted_after_gate", "expected_effective_expectancy"]),
+        ("symbol_regime_acceptance_diagnostics.csv", symbol_regime_rows, ["symbol", "regime", "accepted_count", "tp_count", "sl_count"]),
+    ]:
+        with open(os.path.join(args.output_dir, name), "w", newline="") as f:
+            fieldnames = resolve_csv_fieldnames(rows, list(rows[0].keys()) if rows else fallback)
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
     quality_summary = build_backtest_quality_summary(persisted_lifecycle_rows)
     write_backtest_quality_summary(
         os.path.join(args.output_dir, "backtest_quality_summary.csv"),

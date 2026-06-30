@@ -115,6 +115,7 @@
       <table>
         <tbody>
           <tr><th>Filter profile</th><td><strong>{{ backtest_result.filter_profile }}</strong>{% if backtest_result.filter_warning %}<div class="alert warn-box">{{ backtest_result.filter_warning }}</div>{% endif %}</td></tr>
+          {% if backtest_result.blocking_warnings %}<tr><th>Blocking diagnostics</th><td><div class="alert warn-box">{{ backtest_result.blocking_warnings|join(' | ') }}</div></td></tr>{% endif %}
           <tr><th>SHORT_BREAKDOWN_RESCUE experiment</th><td><strong>{{ 'enabled' if backtest_result.short_breakdown_rescue_enabled else 'disabled' }}</strong> · {{ backtest_result.short_breakdown_rescue_scope }} · disabled by default · does not affect PAPER/LIVE</td></tr>
           <tr><th>Baseline / Rescue accepted count</th><td>{{ backtest_result.baseline_accepted_count if backtest_result.baseline_accepted_count is not none else 'Unavailable' }} / {{ backtest_result.rescue_accepted_count if backtest_result.rescue_accepted_count is not none else 'Unavailable' }}</td></tr>
           <tr><th>Baseline / Rescue / Combined net PnL</th><td>{{ backtest_result.baseline_net_pnl if backtest_result.baseline_net_pnl is not none else 'Unavailable' }} / {{ backtest_result.rescue_net_pnl if backtest_result.rescue_net_pnl is not none else 'Unavailable' }} / {{ backtest_result.baseline_plus_rescue_net_pnl if backtest_result.baseline_plus_rescue_net_pnl is not none else 'Unavailable' }}</td></tr>
@@ -130,7 +131,8 @@
           <tr><th>Net PnL</th><td>{{ backtest_result.net_pnl if backtest_result.net_pnl is not none else 'Unavailable' }}</td></tr>
           <tr><th>BASELINE accepted trades</th><td>{{ backtest_result.baseline_accepted_count if backtest_result.baseline_accepted_count is not none else 'Unavailable' }} | Baseline PnL: {{ backtest_result.baseline_net_pnl if backtest_result.baseline_net_pnl is not none else 'Unavailable' }}</td></tr>
           <tr><th>RESCUE accepted trades</th><td>{{ backtest_result.rescue_accepted_count if backtest_result.rescue_accepted_count is not none else 'Unavailable' }} | Rescue PnL: {{ backtest_result.rescue_net_pnl if backtest_result.rescue_net_pnl is not none else 'Unavailable' }} | Baseline+Rescue PnL: {{ backtest_result.baseline_plus_rescue_net_pnl if backtest_result.baseline_plus_rescue_net_pnl is not none else 'Unavailable' }}</td></tr>
-          <tr><th>Return / Max drawdown</th><td>{{ backtest_result.total_return_pct if backtest_result.total_return_pct is not none else 'Unavailable' }} / {{ backtest_result.max_drawdown if backtest_result.max_drawdown is not none else 'Unavailable' }}</td></tr>
+          <tr><th>Return / Max drawdown</th><td>{{ backtest_result.total_return_pct if backtest_result.total_return_pct is not none else 'Unavailable' }} ({{ backtest_result.risk_metrics.get('return_unit', 'pct') }}) / {{ backtest_result.max_drawdown if backtest_result.max_drawdown is not none else 'Unavailable' }} ({{ backtest_result.risk_metrics.get('net_pnl_unit', 'USDT') }})</td></tr>
+          <tr><th>Risk metrics</th><td>{{ backtest_result.risk_metrics }}</td></tr>
           <tr><th>Actionable signal rejects / Symbol-selector rejects / Order-lifecycle rejects</th><td>{{ backtest_result.signal_rows_count if backtest_result.signal_rows_count is not none else 'Unavailable' }} / {{ backtest_result.symbol_selector_reject_count if backtest_result.symbol_selector_reject_count is not none else 'Unavailable' }} / {{ backtest_result.order_reject_reason_counts|length }}</td></tr>
           <tr><th>Rejection funnel</th><td>{{ backtest_result.rejection_funnel }}</td></tr>
           <tr><th>Rejected score distribution</th><td>{{ backtest_result.score_distribution }}</td></tr>
@@ -153,12 +155,13 @@
           <tr><th>STOP_TOO_WIDE WOULD_TP vs WOULD_SL split</th><td>{{ backtest_result.stop_too_wide_quality_split }}</td></tr>
           <tr><th>STOP_TOO_WIDE recoverable candidates (diagnostic only)</th><td>{{ backtest_result.signal_quality_diagnostics.get('stop_too_wide_recoverable_candidates', {}) }}</td></tr>
           <tr><th>Reporting-only gates</th><td>{{ backtest_result.signal_quality_diagnostics.get('candidate_quality_gates', []) }}</td></tr>
+          <tr><th>DEFAULT_FILTERS gate funnel</th><td>{{ backtest_result.gate_funnel }}</td></tr>
         </tbody>
       </table>
       <h3>Top Quality-Improvement Candidates</h3>
       <table>
         <thead><tr><th>Symbol</th><th>Side</th><th>Reason</th><th>Score</th><th>Effective RR</th><th>Regime</th><th>Spread</th><th>Slippage</th></tr></thead>
-        <tbody>{% for row in backtest_result.top_quality_improvement_candidates %}<tr><td>{{ row.symbol }}</td><td>{{ row.side }}</td><td>{{ row.reject_reason }}</td><td>{{ row.score }}</td><td>{{ row.effective_rr }}</td><td>{{ row.regime }}</td><td>{{ row.spread_pct }}</td><td>{{ row.expected_slippage_pct }}</td></tr>{% else %}<tr><td colspan="8" class="empty">No signal quality candidates available.</td></tr>{% endfor %}</tbody>
+        <tbody>{% for row in backtest_result.top_quality_improvement_candidates %}<tr><td>{{ row.symbol }}</td><td>{{ row.side }}</td><td>{{ row.reject_reason }}</td><td>{{ row.score }}</td><td>{{ row.effective_rr }}</td><td>{{ row.regime }}</td><td>{{ row.spread_pct }}</td><td>{{ row.expected_slippage_pct }}</td></tr>{% else %}<tr><td colspan="8" class="empty">{{ backtest_result.top_quality_improvement_note or 'No positive-expectancy improvement candidates found.' }}</td></tr>{% endfor %}</tbody>
       </table>
       <h3>Accepted Trade Diagnostics</h3>
       <table>
@@ -180,8 +183,8 @@
       <h3>Score Saturation Diagnostics</h3>
       <p>Score=10 TP rate: {{ backtest_result.score_saturation_diagnostics.score_10_tp_rate }} | Score=10 SL rate: {{ backtest_result.score_saturation_diagnostics.score_10_sl_rate }} | Mode: diagnostic only.</p>
       <table>
-        <thead><tr><th>Score Bucket</th><th>Count</th><th>WOULD_TP</th><th>WOULD_SL</th><th>TIMEOUT</th></tr></thead>
-        <tbody>{% for row in backtest_result.score_saturation_diagnostics.score_bucket_outcome_split %}<tr><td>{{ row.score_bucket }}</td><td>{{ row.count }}</td><td>{{ row.would_tp_count }}</td><td>{{ row.would_sl_count }}</td><td>{{ row.would_timeout_count }}</td></tr>{% else %}<tr><td colspan="5" class="empty">No score saturation diagnostics available.</td></tr>{% endfor %}</tbody>
+        <thead><tr><th>Score Bucket</th><th>Group</th><th>Count</th><th>WOULD_TP</th><th>WOULD_SL</th><th>TIMEOUT</th></tr></thead>
+        <tbody>{% for row in backtest_result.score_saturation_diagnostics.score_bucket_outcome_split %}<tr><td>{{ row.score_bucket }}</td><td>{{ row.group_type|default('bucket') }}={{ row.group_value|default(row.score_bucket) }}</td><td>{{ row.count }}</td><td>{{ row.would_tp_count }}</td><td>{{ row.would_sl_count }}</td><td>{{ row.would_timeout_count }}</td></tr>{% else %}<tr><td colspan="6" class="empty">No score saturation diagnostics available.</td></tr>{% endfor %}</tbody>
       </table>
       <h3>DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics</h3>
       <table>

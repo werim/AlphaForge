@@ -1,3 +1,98 @@
+## 2026-06-30 - RejectedShadowEvaluation fixture alignment
+
+### Why the patch was needed
+CI reported `test_top_quality_improvement_note_explains_would_sl_dominance` failing because its direct `RejectedShadowEvaluation` constructor calls did not include newly required execution diagnostic fields.
+
+### Root cause
+The test fixture used named arguments for only the fields needed by the assertion and was not updated when `RejectedShadowEvaluation` required spread, liquidity, volatility, TP-hit, cost-penalty, and execution-ok diagnostics.
+
+### Files changed
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+None. Production logic is unchanged.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+None.
+
+### Tests added
+No new test case; the existing dashboard fixture now uses a local helper with deterministic execution diagnostic values.
+
+### Tests executed
+- `pytest tests/test_dashboard_app.py::test_top_quality_improvement_note_explains_would_sl_dominance -q`
+- `pytest tests/test_dashboard_app.py -q`
+- `pytest -q`
+
+### Risks
+None beyond the dashboard module being import-skipped in environments missing optional dashboard dependencies.
+
+### Remaining limitations
+No production behavior was re-audited in this fixture-only change.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push.
+
+## 2026-06-30 - PR243/env DEFAULT_FILTERS overtrade audit diagnostics
+
+### Why the patch was needed
+After PR243/env changes, the comparable TOP 20 BACKTEST accepted count jumped from 11 to 354 and net expectancy turned negative. The dashboard did not make the gate-funnel failure, score=10 SL dominance, or missing drawdown obvious enough to prevent DEFAULT_FILTERS from looking strategy-quality.
+
+### Root cause
+Code audit found PR243 itself primarily changed dashboard dynamic-universe validation and selected artifact parsing, not the order gate. The acceptance jump is most consistent with existing environment/config behavior around STOP_TOO_WIDE softening and threshold calibration: score=10 saturation allowed many high-score wide/high-vol candidates to survive while STOP_TOO_WIDE disappeared from dominant reject reasons and DAILY_SYMBOL_TRADE_LIMIT became the later visible limiter. The patch records this as diagnostic evidence instead of changing strategy decisions.
+
+### Files changed
+- `backtest_order.py`
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_dashboard_app.py`
+- `VERSION.md`
+- `REPORT.md`
+- `CHANGELOG.md`
+
+### Runtime behavior changes
+No accepted/rejected decision behavior changed. BACKTEST now exports gate-funnel, equity-curve, and per-symbol/regime acceptance diagnostics and the dashboard shows blocking-level warnings for overtrade and score saturation risk.
+
+### Lifecycle changes
+No lifecycle states or transitions changed. Accepted terminal lifecycle rows are read in timestamp order for equity-curve and streak diagnostics only.
+
+### Persistence changes
+No SQLite schema or PAPER/LIVE persistence changes. BACKTEST CSV artifact set is extended with diagnostic-only files.
+
+### Export/schema changes
+Added optional BACKTEST exports: `equity_curve.csv`, `default_gate_funnel.csv`, and `symbol_regime_acceptance_diagnostics.csv`. `order_backtest_summary.csv` now includes drawdown/streak/profit-factor metrics and explicit return/net-PnL unit labels.
+
+### Tests added
+Added tests proving score saturation JSON renders in the dashboard table, overtrade and score saturation warnings fire, drawdown metrics are computed, STOP_TOO_WIDE and zero-reject gates are visible in the funnel, and WOULD_SL-dominated near misses do not become quality-improvement recommendations.
+
+### Tests executed
+- `pytest tests/test_dashboard_app.py -q` (skipped in this environment because optional dashboard deps were import-skipped)
+- `pytest tests -q`
+- `python -m py_compile backtest_order.py src/alphaforge/dashboard/backtest_control.py`
+
+### Risks
+This is diagnostic-only and does not fix the negative expectancy root calibration. If env leaves STOP_TOO_WIDE softening permissive or score=10 saturation uncalibrated, DEFAULT_FILTERS can still overtrade; the dashboard now flags that as not strategy-quality.
+
+### Remaining limitations
+The exact prior-run artifact was not present locally, so before/after attribution is based on git/env code audit and latest run metrics provided. Re-run the TOP 20 comparison to generate the new evidence artifacts.
+
+### Migration concerns
+No migration required. Consumers that parse summary CSVs should tolerate added columns.
+
+### Push recommendation
+Safe to push as diagnostic guardrails. Do not promote LIVE readiness.
+
 ## 2026-06-30 - BACKTEST dashboard dynamic top-volume universe validation
 
 ### Why the patch was needed
