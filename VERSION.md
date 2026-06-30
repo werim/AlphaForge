@@ -1,3 +1,15 @@
+## 2026-06-30 BACKTEST evidence rendering contract replacement
+
+- Current version: unreleased BACKTEST dashboard evidence rendering contract increment
+- Current phase: selected BACKTEST completed-vs-failed dashboard rendering hardening
+- Runtime maturity: BACKTEST evidence visibility improved; PAPER/LIVE unchanged
+- BACKTEST/PAPER/LIVE alignment: completed selected BACKTEST runs render only selected BACKTEST artifact evidence; failed selected BACKTEST runs fail closed without substituting PAPER SQL panels
+- Lifecycle coverage: lifecycle exports and states are unchanged; dashboard rendering now preserves completed-run evidence and hides failed-run diagnostic empty states
+- Execution realism coverage: execution cost summaries remain artifact-derived for completed runs only; unavailable failed-run evidence is explicitly marked unavailable
+- Known critical risks: strategy expectancy and calibration remain unproven; LIVE readiness remains blocked pending full lifecycle/reject/persistence validation
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 BACKTEST daily timeframe support and truthful interval errors
 
 - Current version: unreleased BACKTEST interval/reporting integrity increment

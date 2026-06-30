@@ -1,3 +1,26 @@
+## 2026-06-30 - BACKTEST evidence rendering contract replacement
+
+### Added
+- Added explicit completed-vs-failed selected BACKTEST rendering contract coverage in dashboard tests.
+
+### Changed
+- Reworked the selected BACKTEST dashboard result panel so completed runs render the full artifact evidence chain under one branch.
+- Failed selected BACKTEST runs now render only the unavailable marker and failure details instead of diagnostic tables or empty-state evidence.
+
+### Fixed
+- Fixed regressions that could hide `Accepted Trade Diagnostics`, `Backtest Top Rejection Reasons`, `LOW_SCORE Shadow Comparison`, or `Top Near-Miss Rejected Signals` for completed runs.
+- Fixed failed-run rendering so selected BACKTEST diagnostics are not shown or substituted from stale PAPER SQL evidence.
+
+### Removed
+- Removed duplicate/stale per-table failed-run branching from the selected BACKTEST diagnostics section.
+
+### Breaking Changes
+- None; dashboard rendering contract only. BACKTEST decision logic, artifact parsing, PAPER/LIVE runtime loops, and LIVE readiness are unchanged.
+
+### Known Issues
+- LIVE remains NOT READY. Local environment could not install FastAPI/httpx because package index access returned 403, so dashboard-specific tests are dependency-limited here.
+
+
 ## 2026-06-30 - BACKTEST daily timeframe support and truthful failures
 
 ### Added

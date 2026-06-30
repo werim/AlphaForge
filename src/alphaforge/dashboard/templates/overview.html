@@ -88,6 +88,12 @@
     {% if backtest_result %}
     <section class="result-panel">
       <h2>Backtest Result</h2>
+      {% if backtest_result.status != 'COMPLETED' %}
+      <div class="alert warn-box"><strong>SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE.</strong> Selected BACKTEST diagnostics are unavailable because this run failed closed; PAPER runtime diagnostics are not substituted.</div>
+      {% if backtest_result.error_message %}<div class="alert fail-box"><strong>Backtest failed closed.</strong> {{ backtest_result.error_message }}</div>{% endif %}
+      {% if backtest_result.lifecycle_warning %}<div class="alert warn-box">{{ backtest_result.lifecycle_warning }}</div>{% endif %}
+      {% if backtest_result.execution_context_warning %}<div class="alert warn-box">{{ backtest_result.execution_context_warning }}</div>{% endif %}
+      {% else %}
       <div class="cards">
         <article class="metric"><label>Status</label><strong class="badge {% if backtest_result.status == 'COMPLETED' %}pass{% else %}fail{% endif %}">{{ backtest_result.status }}</strong></article>
         <article class="metric"><label>Period</label><strong>{{ backtest_result.period }}</strong></article>
@@ -139,9 +145,6 @@
         </tbody>
       </table>
 
-      {% if backtest_result.status != 'COMPLETED' %}
-      <div class="alert warn-box"><strong>SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE.</strong> Selected BACKTEST diagnostics are unavailable because this run failed closed; PAPER runtime diagnostics are not substituted.</div>
-      {% else %}
       <h3>Signal Quality Diagnostics</h3>
       <table>
         <tbody>
