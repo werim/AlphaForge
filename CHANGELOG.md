@@ -1,3 +1,25 @@
+## 2026-06-30 - Purpose-specific environment profiles
+
+### Added
+- Added `.env.test.example`, `.env.medium.example`, and `.env.live.example` profiles for diagnostic BACKTEST, balanced PAPER, and hardened LIVE preparation.
+- Added regression tests for profile presence, required variables, placeholder secret safety, LIVE-vs-TEST strictness, diagnostic labeling, and README references.
+
+### Changed
+- Updated `.env.example` into the safe medium PAPER-oriented default with pointers to purpose-specific templates.
+- Documented environment profile copy commands for Windows PowerShell and macOS/Linux.
+
+### Fixed
+- Reduced mode confusion by separating loose diagnostic thresholds from PAPER defaults and LIVE readiness preparation defaults.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Example templates only; runtime trading logic is unchanged.
+
+### Known Issues
+- LIVE readiness remains NOT READY until local evidence, credentials, reconciliation, lifecycle, and operator guard checks pass consistently.
+
 ## 2026-06-30 - RejectedShadowEvaluation test fixture alignment
 
 ### Added

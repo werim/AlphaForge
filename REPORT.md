@@ -1,3 +1,51 @@
+## 2026-06-30 - Purpose-specific environment profiles surgery report
+
+### Why this patch was needed
+The single `.env.example` mixed BACKTEST diagnostics, PAPER evaluation, and LIVE preparation defaults, increasing the risk of mode confusion and threshold misuse.
+
+### Root cause
+Environment variables were meaningful but presented in one template without purpose-specific threshold tuning or copy guidance.
+
+### Files changed
+- `.env.example`: retained as safe medium PAPER-oriented default with profile pointers.
+- `.env.test.example`: added loose BACKTEST/PAPER diagnostic profile marked NOT FOR LIVE.
+- `.env.medium.example`: added balanced PAPER/default profile.
+- `.env.live.example`: added hardened LIVE preparation profile with fail-closed real-order guards.
+- `README.md`: documented profile purposes and copy commands for Windows PowerShell and macOS/Linux.
+- `tests/test_env_example_profiles.py`: added profile validation coverage.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: operational documentation updates.
+
+### Runtime behavior changes
+None. This patch changes example configuration templates and validation tests only.
+
+### Lifecycle changes
+None. Lifecycle state transitions and persistence behavior are unchanged.
+
+### Persistence changes
+None. No database schema or CSV export contract changed.
+
+### Export/schema changes
+None.
+
+### Tests added
+Added tests for all four env examples existing, containing core variables, avoiding real-looking secrets, keeping LIVE stricter than TEST on critical thresholds, marking TEST as diagnostic/non-LIVE, and documenting all profiles in README.
+
+### Tests executed
+- `pytest tests/test_env_example_profiles.py -q`
+- `pytest -q`
+
+### Risks
+Operators must still choose the right profile intentionally; LIVE examples remain templates and do not establish readiness evidence.
+
+### Remaining limitations
+The audit did not wire new variables because no cosmetic variables were added; existing reserved/unwired notes remain unchanged.
+
+### Migration concerns
+None for runtime code. Local users may copy the profile matching their workflow instead of the generic `.env.example`.
+
+### Push recommendation
+Push after tests pass; do not claim LIVE readiness.
+
 
 ## 2026-06-30 Strategy Quality Guardrails Surgery Report
 
