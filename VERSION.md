@@ -1,3 +1,15 @@
+## 2026-06-30 Purpose-specific environment profiles
+
+- Current version: unreleased environment profile separation increment
+- Current phase: configuration hygiene for BACKTEST diagnostics, PAPER defaults, and LIVE preparation
+- Runtime maturity: no trading logic changed; example configuration profiles now make mode intent explicit
+- BACKTEST/PAPER/LIVE alignment: profiles preserve shared variable names while tuning thresholds by purpose; LIVE remains fail-closed by default
+- Lifecycle coverage: no lifecycle transitions changed; profile tests protect reject/readiness-related core variables
+- Execution realism coverage: PAPER/LIVE examples retain execution-cost, spread, slippage, funding, stale-data, liquidity, and risk controls with stricter LIVE values
+- Known critical risks: templates do not prove strategy expectancy or LIVE readiness; local evidence and full validation remain mandatory
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 
 ## 2026-06-30 Strategy Quality Guardrails
 
