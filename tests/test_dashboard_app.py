@@ -751,3 +751,45 @@ def test_later_gate_breakdown_uses_only_passed_before_later_gate_candidates() ->
     assert by_reason["STOP_TOO_WIDE"]["count"] == 1
     assert by_reason["STOP_TOO_WIDE"]["would_sl_count"] == 1
     assert by_reason["REGIME_MISMATCH"]["count"] == 1
+
+
+def test_dashboard_unsupported_timeframe_failure_is_truthful(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import json
+    import subprocess
+
+    import alphaforge.dashboard.backtest_control as backtest_control
+    from alphaforge.dashboard.backtest_control import DashboardBacktestRequest, run_dashboard_backtest
+
+    stderr = "HistoricalDataError: UNSUPPORTED_TIMEFRAME: requested_interval=2d supported_intervals=1m,5m,15m,1h,4h,1d source_function=fetch_binance_klines_paginated"
+    monkeypatch.setattr(backtest_control.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", stderr))
+    monkeypatch.setenv("ALPHAFORGE_BACKTEST_OUTPUT_DIR", str(tmp_path))
+    result = run_dashboard_backtest(DashboardBacktestRequest(90, ["BTCUSDT"], "1d", 10000.0, 1))
+    assert result.status == "FAILED"
+    assert result.error_message is not None
+    assert "UNSUPPORTED_TIMEFRAME" in result.error_message
+    assert "Not enough historical data" not in result.error_message
+    md_path = next(tmp_path.glob("dashboard/*/backtest_run_metadata.json"))
+    metadata = json.loads(md_path.read_text())
+    assert metadata["requested_timeframe"] == "1d"
+    assert metadata["effective_timeframe"] == "1d"
+    assert metadata["failure_reason"] == "UNSUPPORTED_TIMEFRAME"
+    assert metadata["disabled_optional_filters"] == []
+    assert "LOW_SCORE" in metadata["enabled_optional_filters"]
+    assert metadata["filter_state_applied_before_failure"] is True
+
+
+def test_failed_backtest_html_does_not_substitute_stale_paper_diagnostics(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import subprocess
+
+    import alphaforge.dashboard.backtest_control as backtest_control
+
+    stderr = "HistoricalDataError: UNSUPPORTED_TIMEFRAME: requested_interval=2d supported_intervals=1m,5m,15m,1h,4h,1d source_function=fetch_binance_klines_paginated"
+    monkeypatch.setattr(backtest_control.subprocess, "run", lambda command, **kwargs: subprocess.CompletedProcess(command, 1, "", stderr))
+    monkeypatch.setenv("ALPHAFORGE_BACKTEST_OUTPUT_DIR", str(tmp_path))
+    client = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'failed.db'}"))
+    html = client.post(
+        "/backtest/run",
+        data={"last_days": "90", "symbols": "BTCUSDT", "timeframe": "1d", "initial_balance": "10000", "max_symbols": "1"},
+    ).text
+    assert "SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE" in html
+    assert "Signal Quality Diagnostics" not in html

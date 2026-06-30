@@ -1,3 +1,15 @@
+## 2026-06-30 BACKTEST daily timeframe support and truthful interval errors
+
+- Current version: unreleased BACKTEST interval/reporting integrity increment
+- Current phase: BACKTEST historical data plumbing and dashboard failure-reporting hardening
+- Runtime maturity: BACKTEST `1d`/`4h` historical interval support improved; PAPER/LIVE unchanged
+- BACKTEST/PAPER/LIVE alignment: no PAPER/LIVE decision, threshold, or order-path behavior changed
+- Lifecycle coverage: successful runs preserve existing lifecycle exports; failed pre-run BACKTEST diagnostics are explicitly marked unavailable rather than filled from stale runtime state
+- Execution realism coverage: Binance candles use real interval pagination; missing coverage remains a hard failure with explicit returned/required counts
+- Known critical risks: strategy expectancy and score calibration remain unproven; dashboard failures still require operator review of artifacts
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 
 ## 2026-06-30 BACKTEST profile comparison runner
 

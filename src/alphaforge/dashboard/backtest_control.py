@@ -14,9 +14,24 @@ from typing import Any, Mapping
 from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import config_snapshot
 from alphaforge.contracts import canonical_utc_timestamp
+from alphaforge.historical_market_data import supported_intervals
 
-SUPPORTED_TIMEFRAMES: tuple[str, ...] = ("1m", "15m", "1h", "4h", "1d")
+SUPPORTED_TIMEFRAMES: tuple[str, ...] = tuple(tf for tf in ("1m", "15m", "1h", "4h", "1d") if tf in supported_intervals())
 INSUFFICIENT_BINANCE_DATA_MESSAGE = "Not enough historical data returned by Binance for the requested period. Try fewer days or a higher timeframe."
+
+
+def _write_backtest_run_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _classify_backtest_failure(stderr: str) -> tuple[str, str]:
+    if "UNSUPPORTED_TIMEFRAME" in stderr:
+        return "UNSUPPORTED_TIMEFRAME", stderr[-1200:]
+    historical_tokens = ("HistoricalDataError", "Historical coverage", "No candles returned", "Insufficient candles")
+    if any(token in stderr for token in historical_tokens):
+        return "NOT_ENOUGH_HISTORICAL_DATA", f"{INSUFFICIENT_BINANCE_DATA_MESSAGE} Details: {stderr[-1200:]}"
+    return "BACKTEST_PROCESS_FAILED", stderr[-1200:]
 
 
 @dataclass(slots=True)
@@ -944,17 +959,36 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         str(output_dir),
         "--force-refresh",
     ]
+    effective_filter_switches = request.filter_switches or dict(default_form_values()["filter_switches"])
     command = list(base_command)
-    for reason, enabled in request.filter_switches.items():
+    for reason, enabled in effective_filter_switches.items():
         if not enabled:
             command.extend(["--disable-backtest-filter", reason])
     if request.short_breakdown_rescue_enabled:
         command.append("--rescue-enabled")
     period = f"last {request.last_days} days"
     result = DashboardBacktestResult("RUNNING", period, symbols, request.timeframe, request.initial_balance, request.max_symbols, output_dir=str(output_dir), command=command)
-    result.disabled_filters = [reason for reason, enabled in request.filter_switches.items() if not enabled]
+    result.disabled_filters = [reason for reason, enabled in effective_filter_switches.items() if not enabled]
+    result.enabled_filters = [reason for reason, enabled in effective_filter_switches.items() if enabled]
     result.short_breakdown_rescue_enabled = bool(request.short_breakdown_rescue_enabled)
     result.filter_switch_experiment_active = bool(result.disabled_filters)
+    run_metadata_path = output_dir / "backtest_run_metadata.json"
+    run_metadata = {
+        "mode": "BACKTEST",
+        "status": "RUNNING",
+        "requested_timeframe": request.timeframe,
+        "effective_timeframe": request.timeframe,
+        "requested_last_n_days": request.last_days,
+        "effective_start": fixed_start_ms,
+        "effective_end": fixed_end,
+        "symbols": symbols,
+        "requested_profile": "CUSTOM" if result.disabled_filters else "DEFAULT",
+        "enabled_optional_filters": result.enabled_filters,
+        "disabled_optional_filters": result.disabled_filters,
+        "filter_state_applied_before_failure": True,
+        "failure_reason": None,
+    }
+    _write_backtest_run_metadata(run_metadata_path, run_metadata)
     if request.run_profile_comparison:
         profiles_root = output_dir / "profiles"
         comparison_profiles: dict[str, Any] = {}
@@ -967,7 +1001,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
             disabled = PROFILE_FILTERS.get(profile, [])
             warnings: list[str] = []
             if profile == "CUSTOM_CURRENT_UI":
-                disabled = [reason for reason, enabled in request.filter_switches.items() if not enabled]
+                disabled = [reason for reason, enabled in effective_filter_switches.items() if not enabled]
             if profile == "ALL_FILTERS_OFF":
                 warnings.append("FILTERS_OFF_STRESS_TEST")
             if profile == "TRADE_FREQUENCY_GUARD_DIAGNOSTIC":
@@ -1005,6 +1039,8 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
             for row in leaderboard:
                 writer.writerow({**row, "warnings": json.dumps(row["warnings"], sort_keys=True)})
         result.status = "COMPLETED"
+        run_metadata.update({"status": "COMPLETED", "failure_reason": None})
+        _write_backtest_run_metadata(run_metadata_path, run_metadata)
         result.profile_comparison = comparison
         result.profile_leaderboard = sorted(leaderboard, key=lambda r: r["objective_score_rank"])
         result.filter_profile_comparison_path = str(output_dir / "backtest_filter_profile_comparison.json")
@@ -1021,11 +1057,13 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     if completed.returncode != 0:
         result.status = "FAILED"
         stderr = (completed.stderr or completed.stdout or "BACKTEST_PROCESS_FAILED").strip()
-        if "HistoricalDataError" in stderr or "Historical coverage" in stderr or "No candles returned" in stderr or "Insufficient candles" in stderr:
-            detail = stderr[-1200:]
-            result.error_message = f"{INSUFFICIENT_BINANCE_DATA_MESSAGE} Details: {detail}"
-        else:
-            result.error_message = stderr[-1200:]
+        failure_reason, message = _classify_backtest_failure(stderr)
+        result.error_message = message
+        run_metadata.update({"status": "FAILED", "failure_reason": failure_reason, "failure_detail": stderr[-1200:]})
+        _write_backtest_run_metadata(run_metadata_path, run_metadata)
+        if failure_reason == "UNSUPPORTED_TIMEFRAME":
+            result.lifecycle_warning = "SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE"
+            result.execution_context_warning = "SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE"
         return result
 
     summary_path = output_dir / "order_backtest_summary.csv"
@@ -1045,6 +1083,8 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
     filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() and filter_state_path.stat().st_size else {}
     result.status = "COMPLETED"
+    run_metadata.update({"status": "COMPLETED", "failure_reason": None})
+    _write_backtest_run_metadata(run_metadata_path, run_metadata)
     result.summary_path = str(summary_path) if summary_path.exists() else None
     result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
     result.rejected_path = str(rejected_path) if rejected_path.exists() else None

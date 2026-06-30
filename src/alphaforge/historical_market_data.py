@@ -13,6 +13,20 @@ class HistoricalDataError(RuntimeError):
     pass
 
 
+SUPPORTED_INTERVAL_MS: dict[str, int] = {
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "1h": 3_600_000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000,
+}
+
+
+def supported_intervals() -> tuple[str, ...]:
+    return tuple(SUPPORTED_INTERVAL_MS.keys())
+
+
 @dataclass(frozen=True)
 class HistoricalCandle:
     timestamp: int
@@ -24,11 +38,19 @@ class HistoricalCandle:
     funding_rate_pct: float | None = None
 
 
-def _interval_ms(interval: str) -> int:
-    m = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000}
-    if interval not in m:
-        raise HistoricalDataError(f"Unsupported interval={interval}")
-    return m[interval]
+def _unsupported_interval_error(interval: str, source_function: str) -> HistoricalDataError:
+    return HistoricalDataError(
+        "UNSUPPORTED_TIMEFRAME: "
+        f"requested_interval={interval} "
+        f"supported_intervals={','.join(supported_intervals())} "
+        f"source_function={source_function}"
+    )
+
+
+def _interval_ms(interval: str, *, source_function: str = "_interval_ms") -> int:
+    if interval not in SUPPORTED_INTERVAL_MS:
+        raise _unsupported_interval_error(interval, source_function)
+    return SUPPORTED_INTERVAL_MS[interval]
 
 
 def _fetch_json(url: str) -> Any:
@@ -45,7 +67,7 @@ def _floor_to_step(value: int, step: int) -> int:
 
 
 def expected_candle_count(start_ms: int, end_ms: int, interval: str) -> int:
-    step = _interval_ms(interval)
+    step = _interval_ms(interval, source_function="expected_candle_count")
     first_expected = _ceil_to_step(start_ms, step)
     last_expected = _floor_to_step(end_ms, step)
     if last_expected < first_expected:
@@ -65,6 +87,7 @@ def _coverage_error(reason: str, candles: list[HistoricalCandle], start_ms: int,
     details = (
         f"{reason}: symbol={symbol} timeframe={interval} "
         f"requested_start={_format_ms(start_ms)} requested_end={_format_ms(end_ms)} "
+        f"required_min_count={expected} returned_count={actual} "
         f"expected_candles={expected} actual_candles={actual} "
         f"actual_first={_format_ms(actual_first) if actual_first is not None else None} "
         f"actual_last={_format_ms(actual_last) if actual_last is not None else None}"
@@ -74,7 +97,7 @@ def _coverage_error(reason: str, candles: list[HistoricalCandle], start_ms: int,
 
 def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, end_ms: int, fetcher: Callable[[str], Any] | None = None) -> list[HistoricalCandle]:
     fetch = fetcher or _fetch_json
-    step = _interval_ms(interval)
+    step = _interval_ms(interval, source_function="fetch_binance_klines_paginated")
     cursor = start_ms
     out: list[HistoricalCandle] = []
     seen: set[int] = set()
@@ -199,7 +222,7 @@ def load_or_fetch_candles(
     if not force_refresh and cache_path.exists():
         metadata, cached = load_cache(cache_path)
         if cache_covers(metadata, start_ms, end_ms):
-            step = _interval_ms(interval)
+            step = _interval_ms(interval, source_function="load_or_fetch_candles")
             selected = [c for c in cached if start_ms <= c.timestamp <= end_ms]
             _validate_coverage(selected, start_ms, end_ms, step, symbol, interval)
             return selected

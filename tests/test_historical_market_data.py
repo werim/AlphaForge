@@ -93,3 +93,35 @@ def test_stale_cache_fetches_before_raising_historical_data_error(monkeypatch: p
     with pytest.raises(HistoricalDataError):
         hmd.load_or_fetch_candles("BTCUSDT", "1m", 0, 120_000, tmp_path)
     assert calls["fetch"] == 1
+
+
+def test_interval_ms_supports_daily_and_four_hour() -> None:
+    from alphaforge.historical_market_data import _interval_ms
+
+    assert _interval_ms("1d") == 86_400_000
+    assert _interval_ms("4h") == 14_400_000
+
+
+def test_daily_paginated_klines_advances_by_one_day() -> None:
+    step = 86_400_000
+    calls: list[str] = []
+
+    def fetcher(url: str):
+        calls.append(url)
+        page_start = int(url.split("startTime=")[1].split("&")[0])
+        return [[page_start, 1, 1, 1, 1, 1], [page_start + step, 1, 1, 1, 1, 1]]
+
+    rows = fetch_binance_klines_paginated("BTCUSDT", "1d", 0, 3 * step, fetcher=fetcher)
+    assert [r.timestamp for r in rows] == [0, step, 2 * step, 3 * step]
+    assert "startTime=0" in calls[0]
+    assert f"startTime={2 * step}" in calls[1]
+
+
+def test_unsupported_interval_is_not_not_enough_data() -> None:
+    with pytest.raises(HistoricalDataError) as exc:
+        fetch_binance_klines_paginated("BTCUSDT", "2d", 0, 86_400_000, fetcher=lambda _url: [])
+    message = str(exc.value)
+    assert "UNSUPPORTED_TIMEFRAME" in message
+    assert "requested_interval=2d" in message
+    assert "source_function=fetch_binance_klines_paginated" in message
+    assert "NOT_ENOUGH_HISTORICAL_DATA" not in message
