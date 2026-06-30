@@ -1,3 +1,49 @@
+## 2026-06-30 - RejectedShadowEvaluation fixture alignment
+
+### Why the patch was needed
+CI reported `test_top_quality_improvement_note_explains_would_sl_dominance` failing because its direct `RejectedShadowEvaluation` constructor calls did not include newly required execution diagnostic fields.
+
+### Root cause
+The test fixture used named arguments for only the fields needed by the assertion and was not updated when `RejectedShadowEvaluation` required spread, liquidity, volatility, TP-hit, cost-penalty, and execution-ok diagnostics.
+
+### Files changed
+- `tests/test_dashboard_app.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+None. Production logic is unchanged.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+None.
+
+### Tests added
+No new test case; the existing dashboard fixture now uses a local helper with deterministic execution diagnostic values.
+
+### Tests executed
+- `pytest tests/test_dashboard_app.py::test_top_quality_improvement_note_explains_would_sl_dominance -q`
+- `pytest tests/test_dashboard_app.py -q`
+- `pytest -q`
+
+### Risks
+None beyond the dashboard module being import-skipped in environments missing optional dashboard dependencies.
+
+### Remaining limitations
+No production behavior was re-audited in this fixture-only change.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push.
+
 ## 2026-06-30 - PR243/env DEFAULT_FILTERS overtrade audit diagnostics
 
 ### Why the patch was needed

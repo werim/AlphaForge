@@ -873,10 +873,33 @@ def test_backtest_drawdown_and_gate_funnel_helpers() -> None:
 def test_top_quality_improvement_note_explains_would_sl_dominance() -> None:
     from backtest_order import RejectedShadowEvaluation, build_signal_quality_diagnostics
 
+    def shadow(symbol: str, timestamp: int, effective_rr: float, outcome: str) -> RejectedShadowEvaluation:
+        return RejectedShadowEvaluation(
+            symbol=symbol,
+            timestamp=timestamp,
+            side="LONG",
+            entry=100,
+            stop_loss=99,
+            take_profit=103,
+            raw_rr=3,
+            effective_rr=effective_rr,
+            reject_reasons="DAILY_SYMBOL_TRADE_LIMIT",
+            score=10,
+            regime="HIGH",
+            spread_pct=0.0008,
+            liquidity_score=1.0,
+            volatility_score=1.0,
+            shadow_outcome=outcome,
+            effective_tp_hit=False,
+            cost_penalty=0.14,
+            liquidity_ok=True,
+            volatility_ok=True,
+        )
+
     shadows = [
-        RejectedShadowEvaluation(symbol="BTCUSDT", timestamp=1, side="LONG", entry=100, stop_loss=99, take_profit=103, raw_rr=3, effective_rr=2.5, reject_reasons="DAILY_SYMBOL_TRADE_LIMIT", score=10, regime="HIGH", shadow_outcome="WOULD_TP"),
-        RejectedShadowEvaluation(symbol="ETHUSDT", timestamp=2, side="LONG", entry=100, stop_loss=99, take_profit=103, raw_rr=3, effective_rr=2.4, reject_reasons="DAILY_SYMBOL_TRADE_LIMIT", score=10, regime="HIGH", shadow_outcome="WOULD_SL"),
-        RejectedShadowEvaluation(symbol="SOLUSDT", timestamp=3, side="LONG", entry=100, stop_loss=99, take_profit=103, raw_rr=3, effective_rr=2.3, reject_reasons="DAILY_SYMBOL_TRADE_LIMIT", score=10, regime="HIGH", shadow_outcome="WOULD_SL"),
+        shadow("BTCUSDT", 1, 2.5, "WOULD_TP"),
+        shadow("ETHUSDT", 2, 2.4, "WOULD_SL"),
+        shadow("SOLUSDT", 3, 2.3, "WOULD_SL"),
     ]
     summary, *_ = build_signal_quality_diagnostics([], shadows, "1h")
     assert summary["top_quality_improvement_candidates"] == []

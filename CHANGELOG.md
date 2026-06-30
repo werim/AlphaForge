@@ -1,3 +1,23 @@
+## 2026-06-30 - RejectedShadowEvaluation test fixture alignment
+
+### Added
+- None.
+
+### Changed
+- Updated the dashboard score-saturation regression fixture to include the required `RejectedShadowEvaluation` execution diagnostic fields.
+
+### Fixed
+- Fixed the direct dashboard test fixture after constructor expansion for spread, liquidity, volatility, TP-hit, cost-penalty, and execution-ok fields.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Test-only fixture alignment.
+
+### Known Issues
+- Dashboard-specific tests remain import-skipped when optional dashboard dependencies are unavailable in the environment.
+
 ## 2026-06-30 - DEFAULT_FILTERS overtrade diagnostics and drawdown exports
 
 ### Added

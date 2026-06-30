@@ -1,3 +1,15 @@
+## 2026-06-30 RejectedShadowEvaluation test fixture alignment
+
+- Current version: unreleased test fixture alignment increment
+- Current phase: CI regression repair for expanded rejected-shadow diagnostics constructor
+- Runtime maturity: no runtime behavior changed; test fixture only
+- BACKTEST/PAPER/LIVE alignment: unchanged
+- Lifecycle coverage: unchanged
+- Execution realism coverage: dashboard fixture now supplies deterministic execution diagnostic values instead of omitting required fields
+- Known critical risks: none introduced; LIVE readiness remains NOT READY
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 DEFAULT_FILTERS overtrade diagnostics and drawdown exports
 
 - Current version: unreleased BACKTEST diagnostic guardrail increment
