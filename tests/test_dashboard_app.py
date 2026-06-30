@@ -812,3 +812,72 @@ def test_failed_backtest_html_does_not_substitute_stale_paper_diagnostics(monkey
     assert "Top Near-Miss Rejected Signals" not in html
     assert "Score Saturation Diagnostics" not in html
     assert "DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics" not in html
+
+
+def test_score_saturation_table_renders_from_quality_summary_json(tmp_path) -> None:
+    from alphaforge.dashboard.backtest_control import DashboardBacktestResult, _apply_backtest_artifact_model
+
+    run = tmp_path / "run" / "profiles" / "DEFAULT_FILTERS"
+    run.mkdir(parents=True)
+    (run / "order_backtest_summary.csv").write_text("accepted_count,rejected_count,total_net_pnl_usdt,total_pnl_pct,max_drawdown\n2,0,-1,-5,-1\n")
+    (run / "order_lifecycle.csv").write_text("signal_id,lifecycle_state,decision,symbol,score,close_reason,net_pnl_usdt\na,POSITION_CLOSED,ACCEPTED,BTCUSDT,10,SL_HIT,-1\nb,POSITION_CLOSED,ACCEPTED,ETHUSDT,10,TP_HIT,1\n")
+    (run / "rejected_orders.csv").write_text("")
+    (run / "signal_quality_summary.json").write_text(json.dumps({"score_saturation": {"score_10_count": 3, "score_10_would_tp_count": 1, "score_10_would_sl_count": 2, "score_10_by_regime": {"HIGH": {"count": 3, "would_tp_count": 1, "would_sl_count": 2, "would_timeout_count": 0, "unknown_count": 0}}, "score_10_by_reject_reason": {"ACCEPTED": {"count": 2, "would_tp_count": 1, "would_sl_count": 1, "would_timeout_count": 0, "unknown_count": 0}}}}))
+    result = DashboardBacktestResult("SUCCESS", "last 30 days", ["BTCUSDT"], "1h", 10000, 1)
+    _apply_backtest_artifact_model(result, tmp_path / "run", selected_profile_name="DEFAULT_FILTERS", window_days=30)
+
+    rows = result.score_saturation_diagnostics["score_bucket_outcome_split"]
+    assert any(r["group_type"] == "regime" and r["group_value"] == "HIGH" for r in rows)
+    assert any(r["group_type"] == "reject_reason" and r["group_value"] == "ACCEPTED" for r in rows)
+
+
+def test_dashboard_overtrade_and_score_saturation_blocking_warning(tmp_path) -> None:
+    from alphaforge.dashboard.backtest_control import DashboardBacktestResult, _apply_backtest_artifact_model
+
+    run = tmp_path / "run" / "profiles" / "DEFAULT_FILTERS"
+    run.mkdir(parents=True)
+    (run / "order_backtest_summary.csv").write_text("accepted_count,rejected_count,total_net_pnl_usdt,total_pnl_pct,max_drawdown\n120,10,-5,-80,-3\n")
+    (run / "order_lifecycle.csv").write_text("signal_id,lifecycle_state,decision,symbol,score,close_reason,net_pnl_usdt\na,POSITION_CLOSED,ACCEPTED,BTCUSDT,10,SL_HIT,-1\n")
+    (run / "rejected_orders.csv").write_text("")
+    (run / "signal_quality_summary.json").write_text(json.dumps({"score_saturation": {"score_10_count": 10, "score_10_would_tp_count": 2, "score_10_would_sl_count": 8, "score_10_by_regime": {}}}))
+    result = DashboardBacktestResult("SUCCESS", "last 30 days", ["BTCUSDT"], "1h", 10000, 1)
+    _apply_backtest_artifact_model(result, tmp_path / "run", selected_profile_name="DEFAULT_FILTERS", window_days=30)
+
+    assert "OVERTRADE_RISK" in result.blocking_warnings
+    assert "SCORE_SATURATION_RISK" in result.blocking_warnings
+    assert any("DEFAULT PROFILE NOT STRATEGY-QUALITY" in warning for warning in result.blocking_warnings)
+
+
+def test_backtest_drawdown_and_gate_funnel_helpers() -> None:
+    from backtest_order import LifecycleRow, build_default_gate_funnel, build_equity_curve_metrics
+
+    lifecycle = [
+        LifecycleRow(1, "BTCUSDT", "LONG", "SETUP", "", "NORMAL", 10, 2, 100, 99, 102, "POSITION_OPENED", "POSITION_CLOSED", close_reason="TP_HIT", net_pnl_usdt=2),
+        LifecycleRow(2, "BTCUSDT", "LONG", "SETUP", "", "NORMAL", 10, 2, 100, 99, 102, "POSITION_OPENED", "POSITION_CLOSED", close_reason="SL_HIT", net_pnl_usdt=-5),
+        LifecycleRow(3, "ETHUSDT", "LONG", "SETUP", "", "HIGH", 10, 2, 100, 99, 102, "POSITION_OPENED", "POSITION_CLOSED", close_reason="SL_HIT", net_pnl_usdt=-1),
+    ]
+    curve, metrics = build_equity_curve_metrics(lifecycle, 100)
+    assert len(curve) == 3
+    assert metrics["max_drawdown"] == -6
+    assert metrics["longest_loss_streak"] == 2
+    assert metrics["longest_win_streak"] == 1
+    funnel = build_default_gate_funnel([
+        {"reject_reason": "STOP_TOO_WIDE", "shadow_outcome": "WOULD_SL", "effective_rr": "1.8"},
+        {"reject_reason": "DAILY_SYMBOL_TRADE_LIMIT", "shadow_outcome": "WOULD_TP", "effective_rr": "2.0"},
+    ], lifecycle)
+    by_gate = {row["gate"]: row for row in funnel}
+    assert by_gate["STOP_TOO_WIDE"]["rejected_by_gate"] == 1
+    assert by_gate["RR_TOO_LOW"]["zero_reject_warning"] is True
+
+
+def test_top_quality_improvement_note_explains_would_sl_dominance() -> None:
+    from backtest_order import RejectedShadowEvaluation, build_signal_quality_diagnostics
+
+    shadows = [
+        RejectedShadowEvaluation(symbol="BTCUSDT", timestamp=1, side="LONG", entry=100, stop_loss=99, take_profit=103, raw_rr=3, effective_rr=2.5, reject_reasons="DAILY_SYMBOL_TRADE_LIMIT", score=10, regime="HIGH", shadow_outcome="WOULD_TP"),
+        RejectedShadowEvaluation(symbol="ETHUSDT", timestamp=2, side="LONG", entry=100, stop_loss=99, take_profit=103, raw_rr=3, effective_rr=2.4, reject_reasons="DAILY_SYMBOL_TRADE_LIMIT", score=10, regime="HIGH", shadow_outcome="WOULD_SL"),
+        RejectedShadowEvaluation(symbol="SOLUSDT", timestamp=3, side="LONG", entry=100, stop_loss=99, take_profit=103, raw_rr=3, effective_rr=2.3, reject_reasons="DAILY_SYMBOL_TRADE_LIMIT", score=10, regime="HIGH", shadow_outcome="WOULD_SL"),
+    ]
+    summary, *_ = build_signal_quality_diagnostics([], shadows, "1h")
+    assert summary["top_quality_improvement_candidates"] == []
+    assert "No positive-expectancy improvement candidates found" in summary["top_quality_improvement_candidate_note"]

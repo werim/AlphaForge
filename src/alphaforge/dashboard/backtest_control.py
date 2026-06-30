@@ -127,6 +127,10 @@ class DashboardBacktestResult:
     selected_profile_name: str | None = None
     selected_profile_dir: str | None = None
     artifact_warnings: list[str] = field(default_factory=list)
+    blocking_warnings: list[str] = field(default_factory=list)
+    top_quality_improvement_note: str = ""
+    gate_funnel: list[dict[str, Any]] = field(default_factory=list)
+    risk_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 def default_form_values() -> dict[str, Any]:
@@ -550,6 +554,35 @@ def _score_saturation_diagnostics(accepted_rows: list[dict[str, str]], shadow_ro
             "possible_reject_reasons": ["SCORE_SATURATION_RISK", "POOR_SCORE_BUCKET_CALIBRATION"],
             "rule": "If explicitly enabled later, down-calibrate or reject score buckets whose shadow WOULD_SL rate materially exceeds WOULD_TP rate after execution costs.",
         },
+    }
+
+
+def _score_saturation_from_quality_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    sat = summary.get("score_saturation") if isinstance(summary, Mapping) else {}
+    if not isinstance(sat, Mapping):
+        return {}
+    rows: list[dict[str, Any]] = []
+    for section_name in ("score_10_by_regime", "score_10_by_reject_reason"):
+        section = sat.get(section_name, {})
+        if not isinstance(section, Mapping):
+            continue
+        label = "regime" if section_name.endswith("regime") else "reject_reason"
+        for key, split in section.items():
+            if isinstance(split, Mapping):
+                rows.append({"score_bucket": "10", "group_type": label, "group_value": key, **dict(split)})
+    return {
+        "mode": "DIAGNOSTIC_ONLY",
+        "thresholds_changed": False,
+        "acceptance_logic_changed": False,
+        "score_bucket_outcome_split": rows,
+        "score_10": {
+            "count": sat.get("score_10_count", 0),
+            "would_tp_count": sat.get("score_10_would_tp_count", 0),
+            "would_sl_count": sat.get("score_10_would_sl_count", 0),
+        },
+        "score_10_tp_rate": (float(sat.get("score_10_would_tp_count", 0) or 0) / float(sat.get("score_10_count", 1) or 1)),
+        "score_10_sl_rate": (float(sat.get("score_10_would_sl_count", 0) or 0) / float(sat.get("score_10_count", 1) or 1)),
+        "warning": sat.get("warning", ""),
     }
 
 
@@ -1014,6 +1047,8 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     signal_quality_summary_path = artifact_dir / "signal_quality_summary.json"
     candidate_quality_gates_path = artifact_dir / "candidate_quality_gates.csv"
     later_gate_path = artifact_dir / "later_gate_breakdown.csv"
+    gate_funnel_path = artifact_dir / "default_gate_funnel.csv"
+    equity_curve_path = artifact_dir / "equity_curve.csv"
 
     summary = _read_first_csv_row(summary_path)
     lifecycle_rows = _read_csv_rows(lifecycle_path)
@@ -1048,6 +1083,17 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.open_count = _safe_int(summary.get("open_at_end"))
     result.net_pnl = summary.get("total_net_pnl_usdt")
     result.total_return_pct = summary.get("total_pnl_pct")
+    result.max_drawdown = summary.get("max_drawdown")
+    result.risk_metrics = {
+        "return_unit": summary.get("return_unit", "pct"),
+        "net_pnl_unit": summary.get("net_pnl_unit", "USDT"),
+        "max_drawdown": summary.get("max_drawdown"),
+        "max_drawdown_pct": summary.get("max_drawdown_pct"),
+        "longest_loss_streak": summary.get("longest_loss_streak"),
+        "longest_win_streak": summary.get("longest_win_streak"),
+        "profit_factor": summary.get("profit_factor"),
+        "equity_curve_path": str(equity_curve_path) if equity_curve_path.exists() else None,
+    }
     result.baseline_accepted_count = _safe_int(summary.get("baseline_accepted_trades"))
     result.rescue_accepted_count = _safe_int(summary.get("rescue_accepted_count"))
     result.baseline_net_pnl = summary.get("baseline_net_pnl")
@@ -1075,11 +1121,13 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.near_miss_rejected_signals = calibration_summary.get("near_miss_rejected_signals") or rejected_shadow_rows[:20]
     result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else _read_csv_rows(high_rr_path)
     result.signal_quality_diagnostics = signal_quality_summary if isinstance(signal_quality_summary, dict) else {}
+    result.top_quality_improvement_note = str(result.signal_quality_diagnostics.get("top_quality_improvement_candidate_note") or "")
     result.stop_too_wide_rescue_diagnostics = calibration_summary.get("stop_too_wide_rescue_diagnostics", {}) if isinstance(calibration_summary, dict) else {}
     recoverable_rows = rejected_shadow_rows or rejected_rows
     result.signal_quality_diagnostics.setdefault("stop_too_wide_recoverable_candidates", _stop_too_wide_recoverable_candidate_table(recoverable_rows))
     if candidate_quality_gates_path.exists():
         result.signal_quality_diagnostics.setdefault("candidate_quality_gates", _read_csv_rows(candidate_quality_gates_path))
+    result.gate_funnel = _read_csv_rows(gate_funnel_path)
     if rejected_shadow_summary_path.exists():
         result.signal_quality_diagnostics.setdefault("rejected_shadow_summary", _read_csv_rows(rejected_shadow_summary_path))
     if isinstance(filter_state, dict) and filter_state:
@@ -1091,6 +1139,17 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     if result.rejected_signals is not None and result.accepted_trades is not None:
         denom = result.rejected_signals + result.accepted_trades
         result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None
+    result.score_saturation_diagnostics = _score_saturation_from_quality_summary(result.signal_quality_diagnostics) or _score_saturation_diagnostics(result.accepted_trade_diagnostics, rejected_shadow_rows or rejected_rows)
+    avg_per_day = (float(result.accepted_trades or 0.0) / max(1.0, float(window_days or _window_days_from_metadata(run_dir) or _safe_float_or_none(summary.get("last_days")) or 1.0)))
+    score10 = result.score_saturation_diagnostics.get("score_10", {}) if isinstance(result.score_saturation_diagnostics, dict) else {}
+    score10_sl = _safe_float_or_none(score10.get("would_sl_count")) or 0.0
+    score10_tp = _safe_float_or_none(score10.get("would_tp_count")) or 0.0
+    if avg_per_day > float(os.getenv("ALPHAFORGE_BACKTEST_SAFE_TRADES_PER_DAY", "3")):
+        result.blocking_warnings.append("OVERTRADE_RISK")
+    if score10_sl > score10_tp:
+        result.blocking_warnings.append("SCORE_SATURATION_RISK")
+    if (_safe_float_or_none(result.net_pnl) or 0.0) < 0 and "OVERTRADE_RISK" in result.blocking_warnings and "SCORE_SATURATION_RISK" in result.blocking_warnings:
+        result.blocking_warnings.append("DEFAULT PROFILE NOT STRATEGY-QUALITY: overtrade/score saturation risk")
     effective_days = window_days or _window_days_from_metadata(run_dir) or _safe_float_or_none(summary.get("last_days"))
     if result.profile_leaderboard and effective_days:
         for row in result.profile_leaderboard:

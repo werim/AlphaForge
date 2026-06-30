@@ -1,3 +1,15 @@
+## 2026-06-30 DEFAULT_FILTERS overtrade diagnostics and drawdown exports
+
+- Current version: unreleased BACKTEST diagnostic guardrail increment
+- Current phase: PR243/env overtrade audit instrumentation for DEFAULT_FILTERS
+- Runtime maturity: BACKTEST diagnostics/export visibility improved; PAPER/LIVE order placement and decision paths unchanged
+- BACKTEST/PAPER/LIVE alignment: diagnostic-only changes do not loosen filters, rescue rejected shadows, or alter accepted trade decisions
+- Lifecycle coverage: accepted terminal lifecycle rows now feed equity-curve risk metrics without changing lifecycle states
+- Execution realism coverage: DEFAULT gate funnel, score saturation, overtrade, symbol/regime damage, and drawdown diagnostics are artifact-derived; missing gates are visible as zero-reject warnings rather than hidden
+- Known critical risks: PR243 audit points to STOP_TOO_WIDE softening/env threshold calibration and score saturation as likely overtrade drivers; LIVE readiness remains blocked
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 BACKTEST dashboard dynamic top-volume universe validation
 
 - Current version: unreleased BACKTEST dashboard dynamic-universe validation increment
