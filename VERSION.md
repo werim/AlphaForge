@@ -1,3 +1,15 @@
+## 2026-06-30 DEFAULT_FILTERS profile artifact parser fix
+
+- Current version: unreleased BACKTEST dashboard selected-profile artifact parser increment
+- Current phase: dashboard overview artifact-schema compatibility for run `20260630T164308Z`
+- Runtime maturity: BACKTEST reporting improved; PAPER/LIVE runtime and order paths unchanged
+- BACKTEST/PAPER/LIVE alignment: profile-comparison overview now reads selected DEFAULT_FILTERS evidence from `profiles/DEFAULT_FILTERS` without treating ALL_FILTERS_OFF as strategy performance
+- Lifecycle coverage: selected-profile lifecycle/calibration diagnostics are read from `lifecycle_calibration_summary.json`, `backtest_orders.csv`, `rejected_orders.csv`, and optional shadow artifacts; lifecycle transition logic is unchanged
+- Execution realism coverage: accepted score/effective-RR distributions and rejected diagnostics remain artifact-derived; missing artifacts are reported with expected paths and fallback files checked
+- Known critical risks: strategy expectancy remains unproven; dashboard parsing does not imply LIVE readiness; ALL_FILTERS_OFF remains a diagnostic stress test only
+- Last audit date: 2026-06-30
+- Live readiness verdict: NOT READY
+
 ## 2026-06-30 BACKTEST evidence rendering contract replacement
 
 - Current version: unreleased BACKTEST dashboard evidence rendering contract increment

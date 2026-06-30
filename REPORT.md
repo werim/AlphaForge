@@ -1,3 +1,49 @@
+## 2026-06-30 - DEFAULT_FILTERS selected-profile artifact parser
+
+### Why the patch was needed
+The profile comparison leaderboard could read the uploaded run, but the main dashboard Backtest Result panel showed core DEFAULT_FILTERS metrics as unavailable because it did not resolve the selected profile directory or accepted diagnostics according to the real artifact schema from run `20260630T164308Z`.
+
+### Root cause
+The overview result model treated comparison output as leaderboard-only and did not populate the main panel from `profiles/DEFAULT_FILTERS`. Accepted diagnostics also relied on lifecycle-derived paths and did not explicitly fall back to `backtest_orders.csv` plus `lifecycle_calibration_summary.json` when `accepted_orders.csv` was absent.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`
+- `src/alphaforge/dashboard/templates/overview.html`
+- `tests/test_backtest_profile_comparison.py`
+- `CHANGELOG.md`
+- `REPORT.md`
+- `VERSION.md`
+
+### Runtime behavior changes
+Profile-comparison dashboard results now default `selected_profile_name` to `DEFAULT_FILTERS` and resolve `selected_profile_dir` as `data/backtest/dashboard/<run_id>/profiles/DEFAULT_FILTERS` for real dashboard runs. The main panel reads summary metrics from `order_backtest_summary.csv`, accepted trades from `backtest_orders.csv`, accepted diagnostics/distributions from `lifecycle_calibration_summary.json` with `backtest_orders.csv` fallback, rejected diagnostics from `rejected_orders.csv`, optional rejected-shadow and signal-quality evidence from the profile directory, and filter state from `backtest_filter_state.json`.
+
+### Lifecycle changes
+No lifecycle state machine or runtime transition logic changed. The patch only reads exported lifecycle/calibration evidence for dashboard reporting.
+
+### Persistence changes
+No SQLite schema migration and no PAPER/LIVE persistence changes. Missing artifact reporting now names the exact expected path and fallback files checked.
+
+### Export/schema changes
+No exporter schema changes. The supported dashboard artifact schema is the run root with `backtest_profile_leaderboard.csv/json`, `backtest_run_metadata.json`, and selected profile artifacts under `profiles/DEFAULT_FILTERS/`, including `order_backtest_summary.csv`, `backtest_orders.csv`, `rejected_orders.csv`, `lifecycle_calibration_summary.json`, `backtest_filter_state.json`, `signal_quality_summary.json`, and optional shadow/quality CSVs.
+
+### Tests added
+Added a regression fixture matching the `20260630T164308Z` schema, asserting DEFAULT_FILTERS selection, profile-dir resolution, accepted/rejected counts, reject rate, win/loss/open, net PnL, baseline/rescue metrics, accepted diagnostics without `accepted_orders.csv`, rejected diagnostics from `rejected_orders.csv`, corrected leaderboard average trades/day, and stress-test-only ALL_FILTERS_OFF labeling.
+
+### Tests executed
+- `pytest -q tests/test_backtest_profile_comparison.py`
+
+### Risks
+This is BACKTEST/dashboard reporting only. It does not validate positive expectancy, weaken safety gates, change live order paths, or make ALL_FILTERS_OFF strategy performance.
+
+### Remaining limitations
+If optional shadow or signal-quality files are absent, the dashboard reports the absence rather than fabricating diagnostics. Existing historical artifacts with malformed warnings may still need tolerant parsing by consumers outside this dashboard path.
+
+### Migration concerns
+None for SQLite or live runtime. Artifact consumers should tolerate the new result fields `selected_profile_name`, `selected_profile_dir`, and `artifact_warnings`.
+
+### Push recommendation
+Safe to push after targeted dashboard tests and a full relevant test pass. LIVE remains NOT READY.
+
 ## 2026-06-30 - BACKTEST evidence rendering contract replacement
 
 ### Why the patch was needed

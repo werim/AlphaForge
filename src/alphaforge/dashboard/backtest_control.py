@@ -124,6 +124,9 @@ class DashboardBacktestResult:
     profile_comparison: dict[str, Any] = field(default_factory=dict)
     profile_leaderboard: list[dict[str, Any]] = field(default_factory=list)
     profile_leaderboard_path: str | None = None
+    selected_profile_name: str | None = None
+    selected_profile_dir: str | None = None
+    artifact_warnings: list[str] = field(default_factory=list)
 
 
 def default_form_values() -> dict[str, Any]:
@@ -814,6 +817,179 @@ def _avg_net(rows: list[Mapping[str, Any]]) -> float | None:
     return sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) for r in rows) / len(rows)
 
 
+def _artifact_missing_message(path: Path, fallbacks: list[Path] | None = None) -> str:
+    checked = [str(path), *[str(p) for p in (fallbacks or [])]]
+    return f"Missing artifact. Expected path: {path}. Fallbacks checked: {', '.join(checked)}"
+
+
+def _window_days_from_metadata(run_dir: Path, fallback: int | float | None = None) -> float | None:
+    metadata_path = run_dir / "backtest_run_metadata.json"
+    if metadata_path.exists() and metadata_path.stat().st_size:
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except json.JSONDecodeError:
+            metadata = {}
+        requested = _safe_float_or_none(metadata.get("requested_last_n_days"))
+        if requested:
+            return requested
+        start = metadata.get("effective_start")
+        end = metadata.get("effective_end")
+        try:
+            start_dt = datetime.fromtimestamp(float(start) / 1000.0) if str(start).isdigit() else datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+            end_dt = datetime.fromtimestamp(float(end) / 1000.0) if str(end).isdigit() else datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+            days = abs((end_dt - start_dt).total_seconds()) / 86400.0
+            if days > 0:
+                return days
+        except (TypeError, ValueError):
+            pass
+    return float(fallback) if fallback else None
+
+
+def _selected_profile_dir(run_dir: Path, selected_profile_name: str | None = None) -> tuple[str, Path]:
+    profile_name = selected_profile_name or "DEFAULT_FILTERS"
+    profiles_root = run_dir / "profiles"
+    if (profiles_root / profile_name).exists():
+        return profile_name, profiles_root / profile_name
+    return profile_name, profiles_root / profile_name
+
+
+def _diagnostics_from_backtest_orders(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append({
+            "signal_id": row.get("signal_id"),
+            "symbol": row.get("symbol"),
+            "side": row.get("side"),
+            "score": row.get("score"),
+            "raw_rr": row.get("raw_rr") or row.get("rr"),
+            "effective_rr": row.get("effective_rr"),
+            "regime": row.get("regime") or row.get("volatility_regime"),
+            "entry": row.get("entry") or row.get("entry_price"),
+            "sl": row.get("sl") or row.get("stop_loss"),
+            "tp": row.get("tp") or row.get("take_profit"),
+            "exit": row.get("exit") or row.get("exit_price") or row.get("close_price"),
+            "close_reason": row.get("close_reason"),
+            "result": row.get("result") or row.get("close_reason"),
+            "net_pnl": row.get("net_pnl") or row.get("net_pnl_usdt"),
+            "net_pnl_status": "EXPORTED" if _first_exported_available(row.get("net_pnl"), row.get("net_pnl_usdt")) is not None else "NOT_EXPORTED",
+        })
+    return out
+
+
+def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir: Path, *, selected_profile_name: str | None = None, window_days: float | None = None) -> None:
+    """Populate the overview Backtest Result panel from a real backtest artifact directory."""
+    run_dir = artifact_dir
+    if (artifact_dir / "profiles").exists():
+        profile_name, profile_dir = _selected_profile_dir(artifact_dir, selected_profile_name)
+        result.selected_profile_name = profile_name
+        result.selected_profile_dir = str(profile_dir)
+        artifact_dir = profile_dir
+    result.output_dir = str(run_dir)
+    summary_path = artifact_dir / "order_backtest_summary.csv"
+    lifecycle_path = artifact_dir / "order_lifecycle.csv"
+    rejected_path = artifact_dir / "rejected_orders.csv"
+    rejected_shadow_path = artifact_dir / "rejected_shadow.csv"
+    rejected_shadow_summary_path = artifact_dir / "rejected_shadow_summary.csv"
+    high_rr_path = artifact_dir / "high_effective_rr_missed_alpha.csv"
+    backtest_orders_path = artifact_dir / "backtest_orders.csv"
+    calibration_summary_path = artifact_dir / "lifecycle_calibration_summary.json"
+    filter_state_path = artifact_dir / "backtest_filter_state.json"
+    signal_quality_summary_path = artifact_dir / "signal_quality_summary.json"
+    candidate_quality_gates_path = artifact_dir / "candidate_quality_gates.csv"
+    later_gate_path = artifact_dir / "later_gate_breakdown.csv"
+
+    summary = _read_first_csv_row(summary_path)
+    lifecycle_rows = _read_csv_rows(lifecycle_path)
+    rejected_rows = _read_csv_rows(rejected_path)
+    rejected_shadow_rows = _read_csv_rows(rejected_shadow_path)
+    backtest_order_rows = _read_csv_rows(backtest_orders_path)
+    calibration_summary = json.loads(calibration_summary_path.read_text()) if calibration_summary_path.exists() and calibration_summary_path.stat().st_size else {}
+    signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
+    filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() and filter_state_path.stat().st_size else {}
+
+    for path, fallbacks in (
+        (summary_path, []),
+        (backtest_orders_path, [artifact_dir / "accepted_orders.csv", calibration_summary_path]),
+        (rejected_path, []),
+        (calibration_summary_path, [backtest_orders_path]),
+    ):
+        if not path.exists():
+            result.artifact_warnings.append(_artifact_missing_message(path, fallbacks))
+
+    result.summary_path = str(summary_path) if summary_path.exists() else None
+    result.lifecycle_path = str(lifecycle_path) if lifecycle_path.exists() else None
+    result.rejected_path = str(rejected_path) if rejected_path.exists() else None
+    result.calibration_summary_path = str(calibration_summary_path) if calibration_summary_path.exists() else None
+    result.total_candidates = _safe_int(summary.get("total_candidates"))
+    result.accepted_trades = _safe_int(summary.get("accepted_count")) or len(backtest_order_rows) or None
+    result.rejected_signals = _safe_int(summary.get("rejected_count") or summary.get("total_rejected")) or len(rejected_rows) or None
+    result.win_count = _safe_int(summary.get("tp_hits"))
+    result.loss_count = _safe_int(summary.get("sl_hits"))
+    result.open_count = _safe_int(summary.get("open_at_end"))
+    result.net_pnl = summary.get("total_net_pnl_usdt")
+    result.total_return_pct = summary.get("total_pnl_pct")
+    result.baseline_accepted_count = _safe_int(summary.get("baseline_accepted_trades"))
+    result.rescue_accepted_count = _safe_int(summary.get("rescue_accepted_count"))
+    result.baseline_net_pnl = summary.get("baseline_net_pnl")
+    result.rescue_net_pnl = summary.get("rescue_accepted_net_pnl")
+    result.baseline_plus_rescue_net_pnl = summary.get("baseline_plus_rescue_net_pnl")
+    try:
+        result.accepted_reason_breakdown = json.loads(summary.get("accepted_reason_breakdown") or "{}")
+    except json.JSONDecodeError:
+        result.accepted_reason_breakdown = dict(Counter(row.get("accepted_reason") or "UNKNOWN" for row in backtest_order_rows))
+    if not result.accepted_reason_breakdown and backtest_order_rows:
+        result.accepted_reason_breakdown = dict(Counter(row.get("accepted_reason") or "UNKNOWN" for row in backtest_order_rows))
+
+    diagnostics = _rejection_diagnostics(rejected_rows)
+    result.top_rejection_reasons = diagnostics["top_rejection_reasons"]
+    result.signal_rows_count = diagnostics["signal_rows_count"]
+    result.symbol_selector_reject_count = diagnostics["symbol_selector_reject_count"]
+    result.score_distribution = diagnostics["score_distribution"]
+    result.rr_distribution = diagnostics["rr_distribution"]
+    result.effective_rr_distribution = diagnostics["effective_rr_distribution"]
+    result.pre_later_gate_pass_count = diagnostics["pre_later_gate_pass_count"]
+    result.accepted_trade_diagnostics = list(calibration_summary.get("accepted_trade_diagnostics") or []) or _accepted_trade_diagnostics(lifecycle_rows, backtest_order_rows) or _diagnostics_from_backtest_orders(backtest_order_rows)
+    result.accepted_score_distribution = calibration_summary.get("accepted_score_distribution") or _numeric_distribution(backtest_order_rows, "score")
+    result.accepted_effective_rr_distribution = calibration_summary.get("accepted_effective_rr_distribution") or _numeric_distribution(backtest_order_rows, "effective_rr")
+    result.near_miss_score_distribution = calibration_summary.get("near_miss_score_distribution", {})
+    result.near_miss_effective_rr_distribution = calibration_summary.get("near_miss_effective_rr_distribution", {})
+    result.rejection_funnel = calibration_summary.get("rejection_funnel", {})
+    result.later_gate_diagnostics = calibration_summary.get("later_gate_diagnostics") or _read_csv_rows(later_gate_path)
+    result.low_score_shadow_comparison = calibration_summary.get("low_score_shadow_comparison", {})
+    result.execution_cost_summary = calibration_summary.get("execution_cost_summary", {})
+    result.near_miss_rejected_signals = calibration_summary.get("near_miss_rejected_signals") or rejected_shadow_rows[:20]
+    result.high_effective_rr_missed_alpha = signal_quality_summary.get("high_effective_rr_missed_alpha", []) if isinstance(signal_quality_summary, dict) else _read_csv_rows(high_rr_path)
+    result.signal_quality_diagnostics = signal_quality_summary if isinstance(signal_quality_summary, dict) else {}
+    if candidate_quality_gates_path.exists():
+        result.signal_quality_diagnostics.setdefault("candidate_quality_gates", _read_csv_rows(candidate_quality_gates_path))
+    if rejected_shadow_summary_path.exists():
+        result.signal_quality_diagnostics.setdefault("rejected_shadow_summary", _read_csv_rows(rejected_shadow_summary_path))
+    if isinstance(filter_state, dict) and filter_state:
+        result.filter_state_path = str(filter_state_path)
+        result.filter_profile = str(filter_state.get("filter_profile", result.selected_profile_name or result.filter_profile))
+        result.enabled_filters = list(filter_state.get("enabled_filters", []))
+        result.disabled_filters = list(filter_state.get("disabled_filters", []))
+        result.hard_safety_gates = [str(g.get("filter_name", g)) for g in filter_state.get("hard_safety_gates", [])]
+    if result.rejected_signals is not None and result.accepted_trades is not None:
+        denom = result.rejected_signals + result.accepted_trades
+        result.backtest_rejection_rate = (result.rejected_signals / denom) if denom else None
+    effective_days = window_days or _window_days_from_metadata(run_dir) or _safe_float_or_none(summary.get("last_days"))
+    if result.profile_leaderboard and effective_days:
+        for row in result.profile_leaderboard:
+            row["avg_trades_per_day"] = (float(row.get("accepted_trades") or 0.0) / effective_days)
+            raw_warnings = row.get("warnings", [])
+            if isinstance(raw_warnings, str):
+                try:
+                    decoded_warnings = json.loads(raw_warnings)
+                    raw_warnings = decoded_warnings if isinstance(decoded_warnings, list) else [raw_warnings]
+                except json.JSONDecodeError:
+                    raw_warnings = [w.strip() for w in raw_warnings.split(",") if w.strip()]
+            warnings = [str(w) for w in raw_warnings if str(w) != "OVERTRADE_RISK"]
+            if row["avg_trades_per_day"] > 3:
+                warnings.append("OVERTRADE_RISK")
+            row["warnings"] = sorted(set(warnings))
+
+
 def _bucket(value: Any, step: float = 1.0) -> str:
     val = _safe_float_or_none(value)
     if val is None:
@@ -856,7 +1032,7 @@ def _bucket_diagnostics(rows: list[dict[str, str]]) -> dict[str, list[dict[str, 
     return out
 
 
-def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float, warnings: list[str] | None = None) -> dict[str, Any]:
+def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float, warnings: list[str] | None = None, window_days: float | None = None) -> dict[str, Any]:
     summary = _read_first_csv_row(profile_dir / "order_backtest_summary.csv")
     lifecycle = _read_csv_rows(profile_dir / "order_lifecycle.csv")
     rejected = _read_csv_rows(profile_dir / "rejected_orders.csv")
@@ -870,7 +1046,7 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
     rejected_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected")) or len(rejected)
     max_dd = _safe_float_or_none(summary.get("max_drawdown"))
     max_losses = _max_consecutive_losses(accepted)
-    avg_per_day = accepted_count / max(1, _safe_int(summary.get("last_days")) or 1)
+    avg_per_day = accepted_count / max(1.0, float(window_days or _safe_int(summary.get("last_days")) or 1))
     drawdown_penalty = abs(max_dd) if max_dd is not None else 0.0
     components = {
         "raw_net_pnl": net,
@@ -1016,7 +1192,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
                 result.status = "FAILED"
                 result.error_message = (completed.stderr or completed.stdout or f"{profile} failed")[-1200:]
                 return result
-            comparison_profiles[profile] = _comparison_metrics(profile, profile_dir, request.initial_balance, warnings)
+            comparison_profiles[profile] = _comparison_metrics(profile, profile_dir, request.initial_balance, warnings, window_days=request.last_days)
         raw_sorted = sorted(comparison_profiles.values(), key=lambda r: r.get("objective_score", {}).get("raw_net_pnl", 0.0), reverse=True)
         obj_sorted = sorted(comparison_profiles.values(), key=lambda r: r.get("objective_score", {}).get("final_objective_score", 0.0), reverse=True)
         raw_rank = {r["profile_name"]: i + 1 for i, r in enumerate(raw_sorted)}
@@ -1045,6 +1221,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
         result.profile_leaderboard = sorted(leaderboard, key=lambda r: r["objective_score_rank"])
         result.filter_profile_comparison_path = str(output_dir / "backtest_filter_profile_comparison.json")
         result.profile_leaderboard_path = str(output_dir / "backtest_profile_leaderboard.json")
+        _apply_backtest_artifact_model(result, output_dir, selected_profile_name="DEFAULT_FILTERS", window_days=request.last_days)
         return result
     try:
         run_env = os.environ.copy()
@@ -1066,6 +1243,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
             result.execution_context_warning = "SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE"
         return result
 
+    _apply_backtest_artifact_model(result, output_dir, window_days=request.last_days)
     summary_path = output_dir / "order_backtest_summary.csv"
     lifecycle_path = output_dir / "order_lifecycle.csv"
     rejected_path = output_dir / "rejected_orders.csv"
