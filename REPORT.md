@@ -1,3 +1,41 @@
+## 2026-07-01 Diagnostic profile execution-context strictness
+
+### Why the patch was needed
+PR262 diagnostic gating could treat missing execution fields as favorable defaults: zero spread/slippage/cost or perfect liquidity. That violated AlphaForge execution-realism rules and the explicit-unavailable-marker standard.
+
+### Root cause
+`_diagnostic_short_low_score_breakdown_row_allowed` used `_safe_float(..., default)` fallbacks after geometry checks. Missing `cost_penalty`, `spread_pct`, and `expected_slippage_pct` became `0.0`, while missing `liquidity_score` became `1.0`.
+
+### Files changed
+- `backtest_order.py`: added strict numeric validation and blocks unavailable execution context as `EXECUTION_CONTEXT_UNAVAILABLE` before applying existing safety thresholds.
+- `.env.example`, `.env.medium.example`, `.env.live.example`, `.env.test.example`: documented `ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS` as BACKTEST-only diagnostic scope.
+- `tests/test_backtest_order_scanner.py`: added missing/unavailable execution-context regression tests.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: documented the fail-closed diagnostic behavior.
+
+### Runtime behavior changes
+Only BACKTEST diagnostic inclusion changed. DEFAULT_FILTERS accepted counts, PAPER, LIVE, and production thresholds remain unchanged.
+
+### Lifecycle changes
+None. Diagnostic candidates remain rejected evidence.
+
+### Persistence changes
+None. Artifact rows may be fewer when execution context is unavailable, and summary blocked reasons now count `EXECUTION_CONTEXT_UNAVAILABLE`.
+
+### Export/schema changes
+No schema change. Existing diagnostic summary `blocked_reason_distribution` can now include `EXECUTION_CONTEXT_UNAVAILABLE`.
+
+### Tests added/executed
+Added regressions for missing spread, slippage, cost, liquidity, effective RR, and min effective RR.
+
+### Risks and remaining limitations
+The stricter diagnostic profile can reduce candidate counts if historical execution context is incomplete. This is intentional and safer than fake favorable defaults.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Push after targeted/full validation. LIVE remains NOT READY.
+
 ## 2026-07-01 SHORT LOW_SCORE BREAKDOWN diagnostic profile
 
 ### Why the patch was needed

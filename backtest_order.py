@@ -3812,6 +3812,23 @@ def _distribution_stats(rows: List[Mapping[str, Any]], field: str) -> Dict[str, 
     return {"count": len(vals), "min": min(vals) if vals else 0.0, "mean": _mean(vals), "median": _median(vals), "p95": _p95(vals), "max": max(vals) if vals else 0.0}
 
 
+def _strict_numeric_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text_value = value.strip()
+        if not text_value or "UNAVAILABLE" in text_value.upper() or text_value.upper() in {"UNKNOWN", "NONE", "NULL", "NAN"}:
+            return None
+        value = text_value
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        return None
+    return parsed
+
+
 def _diagnostic_short_low_score_breakdown_row_allowed(row: Mapping[str, Any], symbols: tuple[str, ...]) -> tuple[bool, str]:
     symbol = str(row.get("symbol") or "").upper()
     reason = str(row.get("reject_reason") or "").upper()
@@ -3832,17 +3849,31 @@ def _diagnostic_short_low_score_breakdown_row_allowed(row: Mapping[str, Any], sy
         return False, "STOP_TOO_WIDE_ACTIVE"
     if not _has_tp_sl_geometry(row):
         return False, "INVALID_GEOMETRY"
-    effective_rr = _safe_float(row.get("effective_rr"), 0.0)
-    min_effective_rr = _safe_float(row.get("min_effective_rr", row.get("MIN_EFFECTIVE_RR", 1.10)), 1.10)
+    required_values = {
+        "effective_rr": _strict_numeric_or_none(row.get("effective_rr")),
+        "min_effective_rr": _strict_numeric_or_none(row.get("min_effective_rr", row.get("MIN_EFFECTIVE_RR"))),
+        "cost_penalty": _strict_numeric_or_none(row.get("cost_penalty")),
+        "liquidity_score": _strict_numeric_or_none(row.get("liquidity_score")),
+        "spread_pct": _strict_numeric_or_none(row.get("spread_pct")),
+        "expected_slippage_pct": _strict_numeric_or_none(row.get("expected_slippage_pct")),
+    }
+    if any(value is None for value in required_values.values()):
+        return False, "EXECUTION_CONTEXT_UNAVAILABLE"
+    effective_rr = required_values["effective_rr"]
+    min_effective_rr = required_values["min_effective_rr"]
+    cost_penalty = required_values["cost_penalty"]
+    liquidity_score = required_values["liquidity_score"]
+    spread_pct = required_values["spread_pct"]
+    expected_slippage_pct = required_values["expected_slippage_pct"]
     if effective_rr <= 0.0 or effective_rr < min_effective_rr:
         return False, "LOW_EFFECTIVE_RR"
-    if _safe_float(row.get("cost_penalty"), 0.0) >= effective_rr:
+    if cost_penalty >= effective_rr:
         return False, "EXECUTION_COST_SANITY"
-    if _safe_float(row.get("liquidity_score"), 1.0) < 0.3:
+    if liquidity_score < 0.3:
         return False, "THIN_LIQUIDITY"
-    if _safe_float(row.get("spread_pct"), 0.0) >= 0.0025:
+    if spread_pct >= 0.0025:
         return False, "HIGH_SPREAD"
-    if _safe_float(row.get("expected_slippage_pct"), 0.0) >= 0.0020:
+    if expected_slippage_pct >= 0.0020:
         return False, "HIGH_SLIPPAGE"
     return True, "DIAGNOSTIC_CANDIDATE"
 

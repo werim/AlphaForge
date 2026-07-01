@@ -1,3 +1,25 @@
+## 2026-07-01 - Diagnostic profile execution-context strictness
+
+### Added
+- Added strict execution-context validation for `SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC`, blocking missing/non-numeric/unavailable `effective_rr`, `min_effective_rr`, `cost_penalty`, `liquidity_score`, `spread_pct`, and `expected_slippage_pct` as `EXECUTION_CONTEXT_UNAVAILABLE`.
+- Added `.env` example documentation for `ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS` as a BACKTEST-only reporting scope.
+- Added regressions for unavailable spread, slippage, cost, liquidity, effective-RR, and min-effective-RR diagnostic evidence.
+
+### Changed
+- Diagnostic SHORT LOW_SCORE BREAKDOWN rows no longer treat missing spread/slippage/cost as zero or missing liquidity as perfect liquidity.
+
+### Fixed
+- Fixed execution-realism leakage where unavailable execution context could be interpreted as favorable diagnostic evidence.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. This only tightens BACKTEST diagnostic inclusion and does not change DEFAULT_FILTERS, PAPER, or LIVE behavior.
+
+### Known Issues
+- Diagnostic sample counts may decrease when execution context is incomplete; this is intentional and preserves reject quality.
+
 ## 2026-07-01 - SHORT LOW_SCORE BREAKDOWN diagnostic profile
 
 ### Added

@@ -1960,3 +1960,45 @@ def test_short_low_score_breakdown_diagnostic_profile_keeps_default_count_unchan
     assert len(candidates) == 1
     assert default_accepted_count == 0
     assert summary["reason_diagnostic_only"].startswith("DIAGNOSTIC ONLY")
+
+
+def test_short_low_score_breakdown_diagnostic_blocks_missing_execution_context_fields():
+    base = {
+        "timestamp": 1710000000000, "symbol": "BTCUSDT", "side": "SHORT", "setup": "BREAKDOWN_DOWN",
+        "reject_reason": "LOW_SCORE", "entry": "100", "sl": "101", "tp": "98", "effective_rr": "1.4",
+        "min_effective_rr": "1.1", "cost_penalty": "0.1", "spread_pct": "0.0008",
+        "expected_slippage_pct": "0.0005", "liquidity_score": "0.8", "first_touch_outcome": "WOULD_TP",
+        "effective_shadow_r_after_costs": "1.3", "hour_utc": "6", "all_failed_gates": '["LOW_SCORE"]',
+    }
+    rows = []
+    for field, missing_value in [
+        ("spread_pct", ""),
+        ("expected_slippage_pct", None),
+        ("cost_penalty", "UNAVAILABLE_BACKTEST"),
+        ("liquidity_score", "nan"),
+    ]:
+        row = dict(base)
+        row[field] = missing_value
+        rows.append(row)
+
+    candidates, summary = bo.build_short_low_score_breakdown_diagnostic_profile(rows, symbols=("BTCUSDT", "ETHUSDT"))
+
+    assert candidates == []
+    assert summary["candidate_count"] == 0
+    assert summary["blocked_reason_distribution"] == {"EXECUTION_CONTEXT_UNAVAILABLE": 4}
+
+
+def test_short_low_score_breakdown_diagnostic_requires_explicit_effective_rr_threshold():
+    base = {
+        "timestamp": 1710000000000, "symbol": "ETHUSDT", "side": "SHORT", "setup": "BREAKDOWN_DOWN",
+        "reject_reason": "LOW_SCORE", "entry": "100", "sl": "101", "tp": "98", "effective_rr": "1.4",
+        "min_effective_rr": "1.1", "cost_penalty": "0.1", "spread_pct": "0.0008",
+        "expected_slippage_pct": "0.0005", "liquidity_score": "0.8", "first_touch_outcome": "WOULD_SL",
+        "effective_shadow_r_after_costs": "-1.1", "hour_utc": "7",
+    }
+    rows = [{**base, "effective_rr": "UNKNOWN"}, {**base, "min_effective_rr": ""}]
+
+    candidates, summary = bo.build_short_low_score_breakdown_diagnostic_profile(rows)
+
+    assert candidates == []
+    assert summary["blocked_reason_distribution"] == {"EXECUTION_CONTEXT_UNAVAILABLE": 2}

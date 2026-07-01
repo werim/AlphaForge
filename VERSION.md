@@ -1,3 +1,15 @@
+## 2026-07-01 Diagnostic profile execution-context strictness
+
+- Current version: unreleased diagnostic execution-context strictness follow-up
+- Current phase: BACKTEST-only diagnostic evidence hardening
+- Runtime maturity: SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC now fails closed on unavailable execution context; DEFAULT_FILTERS, PAPER, and LIVE decisions remain unchanged
+- BACKTEST/PAPER/LIVE alignment: no production threshold, acceptance, PAPER, or LIVE configuration changes
+- Lifecycle coverage: rejected rows remain rejected; no lifecycle transition changes
+- Execution realism coverage: missing/non-numeric/unavailable effective RR, min effective RR, cost penalty, liquidity, spread, or slippage blocks diagnostic inclusion as EXECUTION_CONTEXT_UNAVAILABLE
+- Known critical risks: diagnostic sample sizes may shrink when evidence is incomplete; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY. No production threshold relaxation is recommended.
+
 ## 2026-07-01 SHORT LOW_SCORE BREAKDOWN diagnostic profile
 
 - Current version: unreleased SHORT LOW_SCORE BREAKDOWN diagnostic profile increment
