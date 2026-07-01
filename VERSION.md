@@ -279,3 +279,14 @@
 - Known critical risks: score=10 saturation remains weakly calibrated; accepted-trade expectancy is not yet proven positive; dashboard BACKTEST filter/rescue switches can produce unsafe experiments if misread as strategy quality.
 - Last audit date: 2026-06-30
 - Live readiness verdict: NOT LIVE READY. Filters-off damage diagnostics are BACKTEST-only evidence; capital preservation remains mandatory and PAPER/LIVE behavior is unchanged.
+
+## 2026-07-01 Rejected forward outcome evidence phase
+- Current version: unreleased rejected forward evidence increment
+- Current phase: rejected LOW_SCORE/symbol-level forward outcome diagnostics and zero-accepted evidence completion
+- Runtime maturity: BACKTEST exports diagnostic rejected-forward evidence; PAPER/LIVE order paths unchanged
+- BACKTEST/PAPER/LIVE alignment: no acceptance thresholds or runtime decision logic changed; diagnostics are BACKTEST artifact-only
+- Lifecycle coverage: rejected lifecycle states remain persisted/exported; forward outcomes annotate rejects without creating trades
+- Execution realism coverage: effective shadow R records execution cost penalty after spread/slippage/liquidity cost modeling
+- Known critical risks: symbol-level rejects can lack candidate geometry; accepted-trade expectancy and LIVE readiness remain unproven
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY; diagnostic evidence only and no production threshold relaxation recommended

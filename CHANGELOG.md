@@ -2498,3 +2498,29 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Existing long-running PAPER/LIVE processes still require restart for risk-critical setting changes.
+
+## 2026-07-01 - Rejected forward outcome evidence artifacts
+
+### Added
+- Added canonical `rejected_forward_outcomes.csv/json` diagnostics with first-touch TP/SL/timeout/ambiguous/unavailable classifications.
+- Added LOW_SCORE and symbol-level forward summary artifacts.
+- Added HIGH_VOL_GUARD and STOP_TOO_WIDE forward confirmation fields to the zero-accepted root-cause summary.
+- Added dashboard surfacing for compact forward summaries and artifact paths.
+- Added regression tests for rejected forward outcome safety, geometry handling, cost penalties, and summary splits.
+
+### Changed
+- Zero-accepted root-cause summaries now include rejected-forward evidence completeness and conservative next-action guidance.
+- Legacy rejected-shadow indexing now excludes the reject timestamp candle from forward simulation.
+
+### Fixed
+- Missing geometry is now exported as explicit unavailable evidence instead of being silently skipped by actionable-only shadow filtering.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. BACKTEST, PAPER, and LIVE acceptance behavior is unchanged.
+
+### Known Issues
+- Symbol-level rejects may remain forward-unevaluable until safe pre-reject candidate geometry is captured.
+- PowerShell manual validation requires `pwsh`; Linux environments without PowerShell must run the equivalent Python command.
