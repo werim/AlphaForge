@@ -1,3 +1,54 @@
+## 2026-07-01 - BACKTEST lifecycle realism evidence completion surgery report
+
+### Why this patch was needed
+BACKTEST readiness evidence must prioritize decision quality before trade-result PnL. The reported artifact symptoms were hardcoded-looking score/RR values, lifecycle rows starting at generic `CREATED`, absent rejected rows, `UNKNOWN` expectancy, fake-zero execution fields, and dashboard inconsistency.
+
+### Root-cause audit answers
+1. `score` was historically fixed at `0.8` by placeholder fixtures/older diagnostic paths; the current scanner builds score in `backtest_order.py:_build_market_ctx` from breakout strength and candle range, then passes it through `src/alphaforge/order.py` via `run_order_cycle`.
+2. `rr` was historically fixed at `2.0` by placeholder fixtures/older diagnostics; the current adapter computes RR from entry/stop/target geometry in `backtest_order.py:_build_market_ctx` unless a test fixture explicitly supplies a fixed value.
+3. Rejected signals/orders were missing when callers only exported simulated trade results. The SQL-first lifecycle export now persists `SIGNAL_REJECTED` and `ORDER_REJECTED` rows through `backtest_order.py:process_backtest_result` and `_persist_lifecycle_rows`.
+4. Lifecycle previously appeared to start at `CREATED` because dashboard/summary compatibility fields collapsed candidate rows. Canonical BACKTEST rows now start with `SIGNAL_CREATED`; `CREATED` remains only a legacy decision label when old artifacts are parsed.
+5. `expectancy_bucket` was `UNKNOWN` when expectancy was absent because `_bucket_expectancy(None)` returned `UNKNOWN`. Missing expectancy now exports `EXPECTANCY_UNAVAILABLE` so unknown data is explicit.
+6. Execution/context fields were zero-looking when old code or fixtures defaulted missing values. Current lifecycle rows default to `UNAVAILABLE_BACKTEST`, while historical candle-derived volume and estimated spread are populated only when derivable and labeled.
+7. BACKTEST is not intended to use live calls for decision validation. It uses the shared order-cycle semantics for quality gates and an offline historical adapter for market/execution context.
+8. Older artifact paths could behave like trade-result simulators only. The current path emits decision lifecycle states before any terminal PnL result and persists rejected decisions as evidence.
+9. Safe PAPER/LIVE reuse without live exchange calls: order quality evaluation, reject attribution, lifecycle contract normalization, persistence schema, effective-RR cost model, and dashboard artifact parsing. Unsafe to reuse directly: live orderbook fetches, live placement, account/balance reconciliation, and exchange heartbeat/order status polling.
+
+### Files changed
+- `backtest_order.py`: made missing expectancy explicit as `EXPECTANCY_UNAVAILABLE`, canonicalized missing execution-context rejects to `EXECUTION_CONTEXT_UNAVAILABLE`, and removed unreachable duplicate attribution code.
+- `tests/test_backtest_order_scanner.py`: updated reject-attribution regression to assert the canonical missing execution-context reason.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: documented root cause, behavior, risks, and validation.
+
+### Runtime behavior changes
+BACKTEST attribution is stricter and more auditable: missing expectancy/context is visible evidence, not hidden as generic unknown/zero values. No filters were loosened and no rejected candidate is force-accepted.
+
+### Lifecycle changes
+No new state transition rewrite was needed because canonical states already exist in the current path. The patch tightens labels attached to rejected lifecycle evidence.
+
+### Persistence changes
+No schema migration. Existing lifecycle SQL/export rows carry more explicit bucket/reason values.
+
+### Export/schema changes
+No new columns. Existing `expectancy_bucket` and `reject_reason` values may be more specific.
+
+### Tests added/updated
+Updated the BACKTEST reject attribution regression for canonical `EXECUTION_CONTEXT_UNAVAILABLE`. Existing coverage already proves rejected rows, lifecycle order, score/RR variability, effective-RR penalties, persistence/export, and dashboard profile parsing.
+
+### Tests executed
+- `python -m pytest tests/test_backtest_order_scanner.py -q`
+
+### Risks
+Older consumers that hardcode `UNKNOWN` or `MISSING_EXECUTION_CONTEXT` may need to accept the explicit new labels. Historical spread is still an estimate unless actual spread is supplied.
+
+### Remaining limitations
+BACKTEST remains historical simulation, not LIVE execution. Actual historical orderbook depth/spread is unavailable unless supplied by artifacts, and missing fields must remain unavailable rather than zero-filled. Rejected trades are first-class evidence; a high reject rate can be healthy when filters are selective.
+
+### Migration concerns
+No SQL migration. Regenerate CSV/JSON artifacts to see the new labels.
+
+### Push recommendation
+Safe to push after full validation. Do not claim LIVE readiness.
+
 ## 2026-07-01 - BACKTEST reject reason attribution surgery report
 
 ### Why this patch was needed

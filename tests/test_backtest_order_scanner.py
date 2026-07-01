@@ -1672,7 +1672,7 @@ def test_backtest_unknown_reject_reason_attributed_missing_expectancy_when_requi
 def test_backtest_unknown_reject_reason_attributed_missing_execution_context():
     diagnostics = {"rr": 2.0, "effective_rr": 1.9, "min_effective_rr": 1.6, "expectancy": 0.1, "score": 8.0, "min_score": 7.5}
     reason = bo._primary_reject_reason_from_context(current_reason="UNKNOWN", diagnostics=diagnostics, market_ctx={}, execution_ctx_missing=True)
-    assert reason == "MISSING_EXECUTION_CONTEXT"
+    assert reason == "EXECUTION_CONTEXT_UNAVAILABLE"
 
 
 def test_reject_reason_distribution_classifies_concrete_unknown_rows():

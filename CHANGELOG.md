@@ -1,3 +1,24 @@
+## 2026-07-01 - BACKTEST lifecycle realism evidence completion
+
+### Added
+- Added explicit `EXPECTANCY_UNAVAILABLE` bucket behavior for missing BACKTEST expectancy evidence.
+- Added canonical `EXECUTION_CONTEXT_UNAVAILABLE` attribution for rejects caused by missing historical execution context.
+
+### Changed
+- BACKTEST reject attribution no longer emits the legacy missing-context label and does not collapse missing expectancy into silent `UNKNOWN`.
+
+### Fixed
+- Fixed a duplicate unreachable `LOW_EFFECTIVE_RR` return in BACKTEST reject attribution.
+
+### Removed
+- None.
+
+### Breaking Changes
+- CSV/report consumers may now see `EXPECTANCY_UNAVAILABLE` and `EXECUTION_CONTEXT_UNAVAILABLE` where older artifacts showed `UNKNOWN`/`MISSING_EXECUTION_CONTEXT`.
+
+### Known Issues
+- Actual historical bid/ask spread is still unavailable unless supplied by artifacts; estimated spread remains clearly labeled and LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - BACKTEST reject reason attribution
 
 ### Added

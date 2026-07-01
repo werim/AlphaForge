@@ -1,3 +1,15 @@
+## 2026-07-01 BACKTEST lifecycle realism evidence completion
+
+- Current version: unreleased BACKTEST lifecycle realism evidence increment
+- Current phase: historical decision lifecycle, reject evidence, and artifact consistency hardening
+- Runtime maturity: BACKTEST now exports canonical pre-trade lifecycle and concrete reject attribution; PAPER/LIVE gates remain conservative and unchanged
+- BACKTEST/PAPER/LIVE alignment: BACKTEST reuses the shared order cycle for signal quality while applying offline-only historical execution context; no live Binance/orderbook calls are required for decision simulation
+- Lifecycle coverage: SIGNAL_CREATED, SIGNAL_REJECTED, WAITING_ENTRY_ZONE, ENTRY_TRIGGERED, ORDER_PLACED, POSITION_OPENED, POSITION_CLOSED, ORDER_REJECTED, and ENTRY_TIMEOUT are canonical export states
+- Execution realism coverage: score/RR are historical adapter outputs, effective RR includes execution penalties, missing expectancy/context is labeled unavailable rather than zero-filled
+- Known critical risks: historical spread remains estimated when actual orderbook spread is absent; strategy expectancy remains unproven; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT READY
+
 ## 2026-07-01 BACKTEST reject reason attribution
 
 - Current version: unreleased BACKTEST reject attribution integrity increment
