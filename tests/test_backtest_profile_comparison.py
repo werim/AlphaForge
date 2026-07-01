@@ -522,3 +522,22 @@ def test_dashboard_main_and_profile_comparison_use_same_canonical_profile_artifa
     assert result.loss_count == comparison["loss_count"] == 1
     assert float(result.net_pnl) == pytest.approx(comparison["net_pnl"])
     assert {row["reason"] for row in result.top_rejection_reasons} == {"LOW_SCORE", "EXECUTION_CONTEXT_UNAVAILABLE"}
+
+
+def test_dashboard_rejection_reasons_use_canonical_rejected_orders_not_raw_quality_summary(tmp_path) -> None:
+    run = tmp_path / "run"
+    profile = run / "profiles" / "DEFAULT_FILTERS"
+    profile.mkdir(parents=True)
+    (run / "backtest_profile_leaderboard.csv").write_text("profile,selected,accepted_trades,rejected_signals,net_pnl,profit_factor\nDEFAULT_FILTERS,true,0,2,0,0\n")
+    (run / "backtest_run_metadata.json").write_text("{}")
+    (profile / "order_backtest_summary.csv").write_text("total_candidates,accepted_count,rejected_count,tp_hits,sl_hits,open_at_end,total_net_pnl_usdt,rejection_counts\n2,0,2,0,0,0,0,{}\n")
+    (profile / "order_lifecycle.csv").write_text("signal_id,lifecycle_state,decision,symbol,score,rr,effective_rr,reject_reason,expectancy_bucket\na,SIGNAL_REJECTED,REJECTED,BTCUSDT,1,1,0.5,LOW_EFFECTIVE_RR,LOW\nb,SIGNAL_REJECTED,REJECTED,BTCUSDT,1,1,0.5,UNKNOWN,LOW\n")
+    (profile / "rejected_orders.csv").write_text("signal_id,lifecycle_state,symbol,reject_reason,score,rr,effective_rr\na,SIGNAL_REJECTED,BTCUSDT,LOW_SCORE,1,1,0.5\nb,SIGNAL_REJECTED,BTCUSDT,TOO_CHOPPY,1,1,0.5\n")
+    (profile / "backtest_quality_summary.csv").write_text('metric,value\nraw_gate_reject_reason_distribution,"{\"LOW_EFFECTIVE_RR\": 1, \"UNKNOWN\": 1}"\n')
+    (profile / "lifecycle_calibration_summary.json").write_text("{}")
+    (profile / "backtest_filter_state.json").write_text("{}")
+
+    result = bc.DashboardBacktestResult("COMPLETED", "last 30 days", ["BTCUSDT"], "1h", 10000, 1)
+    bc._apply_backtest_artifact_model(result, run, selected_profile_name="DEFAULT_FILTERS", window_days=30)
+
+    assert {row["reason"]: row["count"] for row in result.top_rejection_reasons} == {"LOW_SCORE": 1, "TOO_CHOPPY": 1}

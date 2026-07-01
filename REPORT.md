@@ -1,3 +1,47 @@
+## 2026-07-01 - BACKTEST post-PR251 artifact consistency surgery report
+
+### Why this patch was needed
+A real BTCUSDT 30d/1h BACKTEST artifact showed `backtest_quality_summary.csv` reporting a different reject truth than `rejected_orders.csv` and `order_backtest_summary.csv`, while pre-signal `SYMBOL_REJECTED` rows used `UNKNOWN` expectancy and fake numeric zero RR/effective-RR values. The same run package also contained a stale ETHUSDT candle JSON despite a BTCUSDT-only symbol universe.
+
+### Root cause
+The quality summary rebuilt reject reasons from lifecycle/gate diagnostics after attribution had already produced canonical `rejected_orders.csv` reasons. Symbol-selector rejects reused order-geometry fields even though order geometry is not applicable before the selector passes. Candle files were stored directly in the run artifact directory without pruning stale symbol files before a narrowed symbol run.
+
+### Files changed
+- `backtest_order.py`: separates raw and canonical reject distributions, writes canonical quality summary distributions from rejected-order rows, marks `SYMBOL_REJECTED` RR/effective-RR/expectancy as unavailable/not applicable, persists availability flags, and prunes stale candle JSON artifacts.
+- `tests/test_backtest_order_scanner.py`: adds quality-summary canonical distribution, symbol-selector availability, and stale candle pruning regressions.
+- `tests/test_backtest_profile_comparison.py`: adds dashboard regression proving top rejection reasons come from canonical rejected-order artifacts, not raw quality diagnostics.
+- `VERSION.md`, `REPORT.md`, `CHANGELOG.md`: document behavior, compatibility, tests, and remaining risks.
+
+### Runtime behavior changes
+No trade acceptance thresholds, score logic, lifecycle transitions, or PAPER/LIVE runtime decisions changed. BACKTEST artifact generation now treats `rejected_orders.csv` as the canonical post-attribution reject source when building quality summaries.
+
+### Lifecycle changes
+`SYMBOL_REJECTED` remains a pre-signal symbol-selector lifecycle state. Exported context now identifies `source_stage=SYMBOL_SELECTOR`, `expectancy_bucket=NOT_APPLICABLE_SYMBOL_FILTER`, and false availability flags for RR/effective-RR/expectancy.
+
+### Persistence changes
+Lifecycle persistence now carries source-stage and availability diagnostics through the execution context projection. No SQLite schema migration is required because the fields are stored in existing JSON context and selected into CSV artifacts.
+
+### Export/schema changes
+`backtest_quality_summary.csv` includes explicit `canonical_reject_reason_distribution` and `raw_gate_reject_reason_distribution`; legacy `reject_reason_distribution` now mirrors canonical post-attribution reasons when canonical rejected rows are supplied. `SYMBOL_REJECTED` rows may now have blank RR/effective-RR values with `rr_available=false` and `effective_rr_available=false`.
+
+### Tests added
+Added regressions for canonical reject distribution parity, symbol-selector not-applicable expectancy/RR semantics, stale candle artifact pruning, and dashboard canonical reject reason use.
+
+### Tests executed
+- `python -m pytest tests -k "backtest or lifecycle or reject or dashboard or quality" -q`
+
+### Risks
+Downstream CSV readers that coerce blank RR/effective-RR to zero need to honor the new availability fields. This is intentionally more honest than fake zeros.
+
+### Remaining limitations
+Manual BTCUSDT 30d/1h validation was attempted, but Binance historical fetch failed with proxy tunnel 403 before artifacts could be generated. Historical spread remains estimated unless supplied by the data source.
+
+### Migration concerns
+No database migration required. Artifact consumers should prefer `canonical_reject_reason_distribution`; use `raw_gate_reject_reason_distribution` only for pre-attribution diagnostics.
+
+### Push recommendation
+Safe to push after full pytest validation. Do not claim LIVE readiness.
+
 ## 2026-07-01 - BACKTEST symbol-list parsing hardening surgery report
 
 ### Why this patch was needed
