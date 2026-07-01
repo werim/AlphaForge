@@ -120,8 +120,13 @@
           <tbody>
             {% if backtest_result.guardrail_reject_breakdown %}<tr><th>New guardrail reject breakdown</th><td>{{ backtest_result.guardrail_reject_breakdown }}</td></tr>{% endif %}
             {% if backtest_result.high_vol_guard_summary %}<tr><th>HIGH_VOL_GUARD verdict</th><td>{{ backtest_result.high_vol_guard_summary }}</td></tr>{% endif %}
+            {% if backtest_result.zero_accepted_root_cause_summary %}<tr><th>Zero-accepted root cause</th><td>{{ backtest_result.zero_accepted_root_cause_summary }}</td></tr>{% endif %}
+            {% if backtest_result.low_score_summary %}<tr><th>LOW_SCORE summary</th><td>{{ backtest_result.low_score_summary }}</td></tr>{% endif %}
+            {% if backtest_result.symbol_reject_summary %}<tr><th>Symbol reject summary</th><td>{{ backtest_result.symbol_reject_summary }}</td></tr>{% endif %}
             {% if backtest_result.acceptance_funnel_path %}<tr><th>Acceptance funnel artifact</th><td>{{ backtest_result.acceptance_funnel_path }}</td></tr>{% endif %}
             {% if backtest_result.high_vol_guard_diagnostics_path %}<tr><th>HIGH_VOL_GUARD diagnostics</th><td>{{ backtest_result.high_vol_guard_diagnostics_path }}</td></tr>{% endif %}
+            {% if backtest_result.low_score_diagnostics_path %}<tr><th>LOW_SCORE diagnostics</th><td>{{ backtest_result.low_score_diagnostics_path }}</td></tr>{% endif %}
+            {% if backtest_result.symbol_reject_diagnostics_path %}<tr><th>Symbol reject diagnostics</th><td>{{ backtest_result.symbol_reject_diagnostics_path }}</td></tr>{% endif %}
             {% if backtest_result.top_guardrail_reject_reasons %}<tr><th>Top guardrail reject reasons</th><td>{{ backtest_result.top_guardrail_reject_reasons }}</td></tr>{% endif %}
             {% if backtest_result.representative_guardrail_reject_examples %}<tr><th>Representative guardrail rejects</th><td>{{ backtest_result.representative_guardrail_reject_examples[:5] }}</td></tr>{% endif %}
           </tbody>
@@ -138,8 +143,14 @@
           <tr><th>Accepted reason breakdown</th><td>{{ backtest_result.accepted_reason_breakdown if backtest_result.accepted_reason_breakdown else 'Unavailable' }}</td></tr>
           <tr><th>New guardrail reject breakdown</th><td>{{ backtest_result.guardrail_reject_breakdown if backtest_result.guardrail_reject_breakdown else 'Unavailable' }}</td></tr>
           <tr><th>HIGH_VOL_GUARD summary</th><td>{{ backtest_result.high_vol_guard_summary if backtest_result.high_vol_guard_summary else 'Unavailable' }}</td></tr>
+          <tr><th>Zero-accepted root cause summary</th><td>{{ backtest_result.zero_accepted_root_cause_summary if backtest_result.zero_accepted_root_cause_summary else 'Unavailable' }}</td></tr>
+          <tr><th>LOW_SCORE summary</th><td>{{ backtest_result.low_score_summary if backtest_result.low_score_summary else 'Unavailable' }}</td></tr>
+          <tr><th>Symbol reject summary</th><td>{{ backtest_result.symbol_reject_summary if backtest_result.symbol_reject_summary else 'Unavailable' }}</td></tr>
+          <tr><th>Zero-accepted root cause artifact</th><td>{{ backtest_result.zero_accepted_root_cause_summary_path if backtest_result.zero_accepted_root_cause_summary_path else 'Unavailable' }}</td></tr>
           <tr><th>Acceptance funnel artifact</th><td>{{ backtest_result.acceptance_funnel_path if backtest_result.acceptance_funnel_path else 'Unavailable' }}</td></tr>
           <tr><th>HIGH_VOL_GUARD diagnostics artifact</th><td>{{ backtest_result.high_vol_guard_diagnostics_path if backtest_result.high_vol_guard_diagnostics_path else 'Unavailable' }}</td></tr>
+          <tr><th>LOW_SCORE diagnostics artifact</th><td>{{ backtest_result.low_score_diagnostics_path if backtest_result.low_score_diagnostics_path else 'Unavailable' }}</td></tr>
+          <tr><th>Symbol reject diagnostics artifact</th><td>{{ backtest_result.symbol_reject_diagnostics_path if backtest_result.symbol_reject_diagnostics_path else 'Unavailable' }}</td></tr>
           <tr><th>Top guardrail reject reasons</th><td>{{ backtest_result.top_guardrail_reject_reasons if backtest_result.top_guardrail_reject_reasons else 'Unavailable' }}</td></tr>
           <tr><th>Representative guardrail rejects</th><td>{{ backtest_result.representative_guardrail_reject_examples[:5] if backtest_result.representative_guardrail_reject_examples else 'Unavailable' }}</td></tr>
           <tr><th>Enabled optional BACKTEST filters</th><td>{{ backtest_result.enabled_filters|join(', ') if backtest_result.enabled_filters else 'None' }}</td></tr>

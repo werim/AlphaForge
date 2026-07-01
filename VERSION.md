@@ -1,3 +1,15 @@
+## 2026-07-01 PR255 HIGH_VOL_GUARD correction and zero-accepted audit
+
+- Current version: unreleased PR255 follow-up diagnostics increment
+- Current phase: HIGH_VOL_GUARD diagnostic correctness and LOW_SCORE/symbol reject bottleneck audit
+- Runtime maturity: BACKTEST artifact diagnostics improved; PAPER/LIVE order paths unchanged
+- BACKTEST/PAPER/LIVE alignment: default BACKTEST remains conservative and diagnostic counterfactuals do not alter PAPER/LIVE behavior
+- Lifecycle coverage: rejected HIGH_VOL_GUARD, LOW_SCORE, TOO_CHOPPY, and WEAK_TREND_AND_NO_RANGE_EDGE decisions remain persisted/exported rejects; no lifecycle transitions changed
+- Execution realism coverage: effective RR gaps, execution cost penalties, spread/slippage/liquidity pass flags, and unavailable volatility metrics are explicit
+- Known critical risks: accepted-trade expectancy remains unproven; LOW_SCORE calibration and symbol-level market-structure filters need further evidence before any tuning proposal
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY. No production threshold relaxation is recommended.
+
 ## 2026-07-01 HIGH_VOL_GUARD zero-accepted diagnostics
 
 - Current version: unreleased BACKTEST HIGH_VOL_GUARD diagnostics increment
