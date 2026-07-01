@@ -1649,3 +1649,51 @@ def test_short_breakdown_rescue_paper_live_untouched():
         )
         assert cand is None
         assert rejected[0]["reject_reason"] == "LOW_SCORE"
+
+
+def test_backtest_unknown_reject_reason_attributed_low_effective_rr():
+    diagnostics = {"rr": 1.8, "effective_rr": 1.1, "min_effective_rr": 1.6, "min_raw_rr": 1.3, "score": 8.0, "min_score": 7.5}
+    reason = bo._primary_reject_reason_from_context(current_reason="UNKNOWN", diagnostics=diagnostics, market_ctx={}, execution_ctx_missing=False)
+    assert reason == "LOW_EFFECTIVE_RR"
+
+
+def test_backtest_unknown_reject_reason_attributed_negative_expectancy():
+    diagnostics = {"rr": 2.0, "effective_rr": 1.9, "min_effective_rr": 1.6, "expectancy": -0.01, "score": 8.0, "min_score": 7.5}
+    reason = bo._primary_reject_reason_from_context(current_reason="UNKNOWN", diagnostics=diagnostics, market_ctx={}, execution_ctx_missing=False)
+    assert reason == "NEGATIVE_EXPECTANCY"
+
+
+def test_backtest_unknown_reject_reason_attributed_missing_expectancy_when_required():
+    diagnostics = {"rr": 2.0, "effective_rr": 1.9, "min_effective_rr": 1.6, "expectancy": None, "reject_unknown_expectancy": True, "score": 8.0, "min_score": 7.5}
+    reason = bo._primary_reject_reason_from_context(current_reason="UNKNOWN", diagnostics=diagnostics, market_ctx={}, execution_ctx_missing=False)
+    assert reason == "EXPECTANCY_MISSING"
+
+
+def test_backtest_unknown_reject_reason_attributed_missing_execution_context():
+    diagnostics = {"rr": 2.0, "effective_rr": 1.9, "min_effective_rr": 1.6, "expectancy": 0.1, "score": 8.0, "min_score": 7.5}
+    reason = bo._primary_reject_reason_from_context(current_reason="UNKNOWN", diagnostics=diagnostics, market_ctx={}, execution_ctx_missing=True)
+    assert reason == "MISSING_EXECUTION_CONTEXT"
+
+
+def test_reject_reason_distribution_classifies_concrete_unknown_rows():
+    rows = [
+        {"signal_id": "s1", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "UNKNOWN", "rr": 2.0, "effective_rr": 1.0, "min_effective_rr": 1.6, "score": 8.0, "setup_type": "BREAKOUT_UP", "regime": "TREND"},
+        {"signal_id": "s2", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "UNKNOWN", "rr": 2.0, "effective_rr": 1.8, "min_effective_rr": 1.6, "expectancy": -0.1, "score": 8.0, "setup_type": "BREAKOUT_UP", "regime": "TREND"},
+    ]
+    summary = bo.build_backtest_quality_summary(rows)
+    assert summary["reject_reason_distribution"] != {"UNKNOWN": 2}
+    assert summary["reject_reason_distribution"]["LOW_EFFECTIVE_RR"] == 1
+    assert summary["reject_reason_distribution"]["NEGATIVE_EXPECTANCY"] == 1
+
+
+def test_process_backtest_result_preserves_reject_reason_in_rejected_csv_payload(tmp_path):
+    candle = bo.Candle(1, 100, 101, 99, 100, 1)
+    result = {"status": "rejected", "reason": "UNKNOWN", "diagnostics": {"side": "LONG", "setup_type": "BREAKOUT_UP", "setup_reason": "fixture", "regime": "TREND", "score": 8.0, "rr": 2.0, "effective_rr": 1.0, "min_effective_rr": 1.6, "entry": 100, "sl": 99, "tp": 102}}
+    lifecycle, rejected, rejection_counts, open_rows = [], [], {}, []
+    bo.process_backtest_result("BTCUSDT", candle, 0, [candle], result, {"rr": 2.0, "MIN_EFFECTIVE_RR": 1.6}, 1000, 1, lifecycle, rejected, rejection_counts, open_rows, {"last_trade_ts_by_symbol": {}, "trades_today_by_symbol": {}, "global_trades_today": 0})
+    assert rejected[0]["reject_reason"] == "LOW_EFFECTIVE_RR"
+    out = tmp_path / "rejected_orders.csv"
+    with out.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=bo.resolve_csv_fieldnames(rejected, list(rejected[0].keys())))
+        w.writeheader(); w.writerows(rejected)
+    assert "LOW_EFFECTIVE_RR" in out.read_text()

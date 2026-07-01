@@ -16,6 +16,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 from alphaforge.execution import build_execution_context, build_execution_cost_model, normalize_pct_input
 from alphaforge.config import load_config_from_env
+from alphaforge.config_registry import decision_filter_config
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
@@ -211,6 +212,65 @@ HARD_SAFETY_GATES: tuple[dict[str, Any], ...] = (
     {"filter_name": "ORDER_GEOMETRY", "affected_reject_reasons": ["STOP_TOO_TIGHT", "INVALID_ENTRY_SL_TP", "IMPOSSIBLE_RR"], "optional_or_hard_safety": "hard_safety", "mode": "BACKTEST/PAPER/LIVE", "application": "candidate construction and trade-quality validation"},
     {"filter_name": "DAILY_GLOBAL_TRADE_LIMIT", "affected_reject_reasons": ["DAILY_GLOBAL_TRADE_LIMIT"], "optional_or_hard_safety": "runtime_gate", "mode": "PAPER/LIVE and BACKTEST when runtime limits are active", "application": "src/alphaforge/order.py:evaluate_trade_quality"},
 )
+
+
+CONCRETE_UNKNOWN_REJECT_PLACEHOLDERS = {"", "UNKNOWN", "REJECT_REASON_MISSING"}
+
+def _primary_reject_reason_from_context(
+    *,
+    current_reason: str = "",
+    diagnostics: Mapping[str, Any] | None = None,
+    market_ctx: Mapping[str, Any] | None = None,
+    execution_ctx_missing: bool = False,
+) -> str:
+    """Return the first concrete reject reason available without loosening filters."""
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    market_ctx = market_ctx if isinstance(market_ctx, Mapping) else {}
+
+    def _norm(value: Any) -> str:
+        return str(value or "").strip().upper()
+
+    for value in (current_reason, diagnostics.get("reject_reason"), diagnostics.get("primary_reject_reason")):
+        reason = _norm(value)
+        if reason not in CONCRETE_UNKNOWN_REJECT_PLACEHOLDERS:
+            if reason == "RR_TOO_LOW":
+                eff = _safe_float(diagnostics.get("effective_rr", market_ctx.get("effective_rr", 0.0)), 0.0)
+                min_eff = _safe_float(diagnostics.get("min_effective_rr", market_ctx.get("MIN_EFFECTIVE_RR", market_ctx.get("min_effective_rr", 1.60))), 1.60)
+                raw_rr = _safe_float(diagnostics.get("rr", market_ctx.get("rr", 0.0)), 0.0)
+                min_raw = _safe_float(diagnostics.get("min_raw_rr", diagnostics.get("min_rr", market_ctx.get("MIN_RR", 1.30))), 1.30)
+                if eff < min_eff and raw_rr >= min_raw:
+                    return "LOW_EFFECTIVE_RR"
+            return reason
+
+    failed = [_norm(x) for x in (diagnostics.get("all_failed_gates") or [])] if isinstance(diagnostics.get("all_failed_gates"), list) else []
+    eff = _safe_float(diagnostics.get("effective_rr", market_ctx.get("effective_rr", market_ctx.get("rr", 0.0))), 0.0)
+    min_eff = _safe_float(diagnostics.get("min_effective_rr", market_ctx.get("MIN_EFFECTIVE_RR", market_ctx.get("min_effective_rr", 1.60))), 1.60)
+    raw_rr = _safe_float(diagnostics.get("rr", market_ctx.get("rr", 0.0)), 0.0)
+    min_raw = _safe_float(diagnostics.get("min_raw_rr", diagnostics.get("min_rr", market_ctx.get("MIN_RR", 1.30))), 1.30)
+    score = _safe_float(diagnostics.get("score", market_ctx.get("score", 0.0)), 0.0)
+    min_score = _safe_float(diagnostics.get("min_required_score", diagnostics.get("min_score", market_ctx.get("MIN_TRADE_SCORE", 7.5))), 7.5)
+    expectancy = diagnostics.get("expectancy", market_ctx.get("expectancy"))
+    try:
+        expectancy_val = None if expectancy in (None, "", "UNKNOWN") else float(expectancy)
+    except (TypeError, ValueError):
+        expectancy_val = None
+    reject_unknown_expectancy = bool(diagnostics.get("reject_unknown_expectancy", diagnostics.get("block_unknown_expectancy", False)))
+
+    if eff < min_eff or "RR" in failed:
+        return "LOW_EFFECTIVE_RR"
+    if raw_rr < min_raw:
+        return "RR_TOO_LOW"
+    if expectancy_val is not None and expectancy_val < 0.0:
+        return "NEGATIVE_EXPECTANCY"
+    if expectancy_val is None and (reject_unknown_expectancy or "EXPECTANCY_PRESENT" in failed):
+        return "EXPECTANCY_MISSING"
+    if execution_ctx_missing:
+        return "MISSING_EXECUTION_CONTEXT"
+    if score < min_score or "SCORE" in failed:
+        return "LOW_SCORE"
+    if "REGIME" in failed:
+        return "REGIME_MISMATCH"
+    return "UNKNOWN"
 
 def filter_profile_name(disabled_filters: Iterable[str]) -> str:
     disabled = {str(r).upper() for r in disabled_filters}
@@ -1481,9 +1541,17 @@ def process_backtest_result(
         )
     )
     if result.get("status") == "rejected":
-        reason = str(result.get("reason") or result.get("reject_reason") or "").strip().upper()
-        if not reason or reason == "UNKNOWN":
-            reason = "REJECT_REASON_MISSING"
+        raw_reason = str(result.get("reason") or result.get("reject_reason") or "").strip().upper()
+        reason = _primary_reject_reason_from_context(
+            current_reason=raw_reason,
+            diagnostics=diagnostics if isinstance(diagnostics, Mapping) else {},
+            market_ctx=mctx,
+            execution_ctx_missing=execution_ctx_missing,
+        )
+        if isinstance(diagnostics, dict):
+            secondary = [str(x).upper() for x in diagnostics.get("all_failed_gates", [])] if isinstance(diagnostics.get("all_failed_gates"), list) else []
+            diagnostics.setdefault("primary_reject_reason", reason)
+            diagnostics.setdefault("secondary_reject_reasons", secondary)
         rescued = _try_rescue(reason, base_effective_rr)
         if rescued is not None:
             return rescued
@@ -1565,6 +1633,7 @@ def process_backtest_result(
                 "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 "first_blocking_gate": diagnostics.get("failed_filter", ""),
                 "all_failed_gates": json.dumps(diagnostics.get("all_failed_gates", []), sort_keys=True) if isinstance(diagnostics, dict) else "[]",
+                "secondary_reject_reasons": json.dumps(diagnostics.get("secondary_reject_reasons", []), sort_keys=True) if isinstance(diagnostics, dict) else "[]",
                 **_low_score_rescue_watch_fields(reason, diagnostics if isinstance(diagnostics, dict) else {}),
             }
         )
@@ -2089,6 +2158,14 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         r for r in rejected_rows
         if str(r.get("reject_reason", "")).upper() == "LOW_SCORE" and abs(_safe_float(r.get("score"), 0.0) - 7.5) <= 0.5
     ]
+    cfg = decision_filter_config("BACKTEST")
+    threshold_values = {
+        "min_score": float(cfg.get("MIN_TRADE_SCORE", 7.5)),
+        "min_raw_rr": float(cfg.get("MIN_RR", 1.3)),
+        "min_effective_rr": float(cfg.get("MIN_EFFECTIVE_RR", 1.6)),
+        "reject_unknown_expectancy": bool(cfg.get("BLOCK_UNKNOWN_EXPECTANCY", False)),
+        "require_execution_context": False,
+    }
     rescue_rows = [r for r in candidate_rows if str(r.get("accepted_reason", "")).upper() == "HIGH_EFFECTIVE_RR_RESCUE"]
     rescue_closed = [r for r in rescue_rows if str(r.get("lifecycle_state", "")).upper() == "POSITION_CLOSED"]
     baseline_closed = [r for r in candidate_rows if str(r.get("lifecycle_state", "")).upper() == "POSITION_CLOSED" and str(r.get("accepted_reason", "")).upper() != "HIGH_EFFECTIVE_RR_RESCUE"]
@@ -2111,7 +2188,8 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         "accepted_reason_breakdown": _distribution([r.get("accepted_reason", "BASELINE") for r in accepted_rows]),
         "rejected_count": len(rejected_rows),
         "reject_rate": (len(rejected_rows) / total) if total else 0.0,
-        "reject_reason_distribution": _distribution([r.get("reject_reason", "") or "" for r in rejected_rows]),
+        "reject_reason_distribution": _distribution([_primary_reject_reason_from_context(current_reason=str(r.get("reject_reason", "") or ""), diagnostics=r, market_ctx=r, execution_ctx_missing=bool(r.get("execution_ctx_missing"))) for r in rejected_rows]),
+        "thresholds_used": threshold_values,
         "score_distribution": _distribution([r.get("score") for r in candidate_rows]),
         "rr_distribution": _distribution([r.get("rr") for r in candidate_rows]),
         "effective_rr_distribution": _distribution([r.get("effective_rr") for r in candidate_rows]),
@@ -2125,8 +2203,8 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         "score_percentiles": _percentiles(score_vals, [10, 25, 50, 75, 90]),
         "raw_rr_percentiles": _percentiles(raw_rr_vals, [10, 25, 50, 75, 90]),
         "effective_rr_percentiles": _percentiles(effective_rr_vals, [10, 25, 50, 75, 90]),
-        "rejection_reason_by_setup_type": _distribution([f"{r.get('setup_type','UNKNOWN')}::{r.get('reject_reason','UNKNOWN')}" for r in rejected_rows]),
-        "rejection_reason_by_regime": _distribution([f"{r.get('regime','UNKNOWN')}::{r.get('reject_reason','UNKNOWN')}" for r in rejected_rows]),
+        "rejection_reason_by_setup_type": _distribution([f"{r.get('setup_type','UNKNOWN') or 'UNKNOWN'}::{_primary_reject_reason_from_context(current_reason=str(r.get('reject_reason', '') or ''), diagnostics=r, market_ctx=r, execution_ctx_missing=bool(r.get('execution_ctx_missing')))}" for r in rejected_rows]),
+        "rejection_reason_by_regime": _distribution([f"{r.get('regime','UNKNOWN') or 'UNKNOWN'}::{_primary_reject_reason_from_context(current_reason=str(r.get('reject_reason', '') or ''), diagnostics=r, market_ctx=r, execution_ctx_missing=bool(r.get('execution_ctx_missing')))}" for r in rejected_rows]),
         "acceptance_candidates_near_threshold_count": len(near_threshold),
         "accepted_trade_quality_diagnostics": _accepted_quality_diagnostics(accepted_rows, candidate_rows),
         "score_calibration_diagnostics": _score_calibration_diagnostics(candidate_rows),
@@ -3666,6 +3744,7 @@ def main():
         "filter_switch_experiment_active": bool(disabled_filters),
         "filter_profile": filter_state.get("filter_profile"),
         "hard_safety_gates_active": json.dumps([g.get("filter_name") for g in HARD_SAFETY_GATES], sort_keys=True),
+        "filter_thresholds_used": json.dumps({"min_score": decision_filter_config("BACKTEST").get("MIN_TRADE_SCORE"), "min_raw_rr": decision_filter_config("BACKTEST").get("MIN_RR"), "min_effective_rr": decision_filter_config("BACKTEST").get("MIN_EFFECTIVE_RR"), "reject_unknown_expectancy": decision_filter_config("BACKTEST").get("BLOCK_UNKNOWN_EXPECTANCY"), "require_execution_context": False}, sort_keys=True),
         "disabled_filter_bypass_count": sum(int((json.loads(str(r.get("diagnostics", "{}"))) if str(r.get("diagnostics", "")).startswith("{") else {}).get("disabled_filter_bypass_count", 0) or 0) for r in rejected),
         "cancel_counts": {},
         "event_flags":{},
