@@ -151,6 +151,12 @@ class StrategyQualityGuardrailConfig:
     max_drawdown_pct_for_profile_pass: float = 12.0
 
 
+HIGH_VOL_GUARD_DIAGNOSTIC_WARNING = (
+    "HIGH_VOL_GUARD_OFF_DIAGNOSTIC is not a production strategy profile. "
+    "It measures guardrail impact only."
+)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     return str(os.getenv(name, str(default))).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -1799,7 +1805,7 @@ def _is_high_vol_context(regime: str, mctx: Mapping[str, Any]) -> bool:
 
 
 def _guardrail_rejection_reason(symbol: str, timestamp: int, regime: str, score: float, effective_rr: float, mctx: Mapping[str, Any], recent_stats: Mapping[str, Any], cfg: StrategyQualityGuardrailConfig) -> str:
-    if not cfg.enabled or cfg.profile == "HIGH_VOL_MOMENTUM_DIAGNOSTIC":
+    if not cfg.enabled or cfg.profile in {"HIGH_VOL_MOMENTUM_DIAGNOSTIC", "HIGH_VOL_GUARD_OFF_DIAGNOSTIC", "VOL_GUARD_RELAXED_DIAGNOSTIC"}:
         return ""
     day = _day_key(timestamp)
     daily = recent_stats.get("accepted_trades_by_day", {}) or {}
@@ -1834,7 +1840,7 @@ def _append_guardrail_reject(reason: str, symbol: str, candle: Candle, cand: Can
     rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
     signal_id = f"{symbol}:{candle.timestamp}"
     lifecycle.append(LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), effective_rr=effective_rr, cost_penalty=cost_penalty, signal_id=signal_id, lifecycle_id=signal_id))
-    rejected.append({"signal_id": signal_id, "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "STRATEGY_QUALITY_GUARDRAIL", "execution_ctx_missing": execution_ctx_missing, "expectancy_bucket": cand.expectancy_bucket, "timestamp": candle.timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "gate_score": cand.score, "rr": cand.rr, "expectancy": mctx.get("expectancy"), "quality_score": diagnostics.get("quality_score", ""), "reject_reason": reason, "diagnostics": json.dumps({**dict(diagnostics), "strategy_quality_guardrail": reason}, sort_keys=True), "entry": cand.entry, "sl": cand.sl, "tp": cand.tp, "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")), "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), "raw_rr": cand.rr, "effective_rr": effective_rr, "cost_penalty": cost_penalty, "first_blocking_gate": reason, "all_failed_gates": json.dumps([reason]), **_low_score_rescue_watch_fields(reason, {})})
+    rejected.append({"signal_id": signal_id, "lifecycle_state": "SIGNAL_REJECTED", "source_stage": "STRATEGY_QUALITY_GUARDRAIL", "execution_ctx_missing": execution_ctx_missing, "expectancy_bucket": cand.expectancy_bucket, "timestamp": candle.timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "gate_score": cand.score, "rr": cand.rr, "expectancy": mctx.get("expectancy"), "quality_score": diagnostics.get("quality_score", ""), "reject_reason": reason, "diagnostics": json.dumps({**dict(diagnostics), "strategy_quality_guardrail": reason, "guard_source_function": "backtest_order._guardrail_rejection_reason"}, sort_keys=True), "entry": cand.entry, "sl": cand.sl, "tp": cand.tp, "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), "volatility_score": mctx.get("volatility_pct", mctx.get("spread_pct", "UNAVAILABLE_BACKTEST")), "atr_pct": mctx.get("atr_pct", diagnostics.get("atr_pct", "")), "candle_range_pct": mctx.get("candle_range_pct", diagnostics.get("candle_range_pct", "")), "realized_volatility_pct": mctx.get("realized_volatility_pct", diagnostics.get("realized_volatility_pct", "")), "volatility_regime": mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST"), "volume_24h_usdt": mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), "funding_rate_pct": mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), "raw_rr": cand.rr, "effective_rr": effective_rr, "cost_penalty": cost_penalty, "first_blocking_gate": reason, "all_failed_gates": json.dumps([reason]), **_low_score_rescue_watch_fields(reason, {})})
 
 
 def _record_guardrail_acceptance(recent_stats: Dict[str, Any], symbol: str, timestamp: int, regime: str, mctx: Mapping[str, Any]) -> None:
@@ -2542,7 +2548,8 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
     if loss > cfg.max_loss_streak_for_profile_pass: reasons.append("LOSS_STREAK_TOO_HIGH")
     if avg_day > cfg.max_accepted_trades_per_day: reasons.append("OVERTRADE_RISK")
     if score10_sl > score10_tp: reasons.append("SCORE_SATURATION_RISK")
-    if cfg.profile == "HIGH_VOL_MOMENTUM_DIAGNOSTIC": reasons.append("DIAGNOSTIC_ONLY_PROFILE")
+    if cfg.profile in {"HIGH_VOL_MOMENTUM_DIAGNOSTIC", "HIGH_VOL_GUARD_OFF_DIAGNOSTIC", "VOL_GUARD_RELAXED_DIAGNOSTIC"}:
+        reasons.append("DIAGNOSTIC_ONLY_PROFILE")
     status = "PASS" if not reasons else "FAIL"
     return {
         "profile_quality_status": status, "profile_quality_reasons": reasons,
@@ -2559,6 +2566,125 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
         "max_drawdown_before_after": {"before": None, "after": _safe_float(summary.get("max_drawdown_pct"), 0.0)},
         "score10_tp_sl_before_after": {"before": None, "after": {"tp": score10_tp, "sl": score10_sl}},
         "high_vol_trade_count_before_after": {"before": None, "after": len(high_vol_after)},
+        "diagnostic_profile_warning": HIGH_VOL_GUARD_DIAGNOSTIC_WARNING if cfg.profile == "HIGH_VOL_GUARD_OFF_DIAGNOSTIC" else "",
+    }
+
+def _json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip().startswith("["):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    return []
+
+def _high_vol_metric(row: Mapping[str, Any], cfg: StrategyQualityGuardrailConfig) -> tuple[str, float, float]:
+    if _safe_float(row.get("cost_penalty"), 0.0) > cfg.high_vol_max_cost_penalty:
+        return ("cost_penalty_total", _safe_float(row.get("cost_penalty"), 0.0), cfg.high_vol_max_cost_penalty)
+    return ("effective_rr", _safe_float(row.get("effective_rr"), 0.0), cfg.high_vol_min_effective_rr)
+
+def build_high_vol_guard_diagnostics(rejected_rows: List[Mapping[str, Any]], cfg: StrategyQualityGuardrailConfig) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for row in rejected_rows:
+        if str(row.get("reject_reason", "")).upper() != "HIGH_VOL_GUARD":
+            continue
+        diag = {}
+        if str(row.get("diagnostics", "")).strip().startswith("{"):
+            try:
+                diag = json.loads(str(row.get("diagnostics", "{}")))
+            except Exception:
+                diag = {}
+        metric_name, metric_value, threshold = _high_vol_metric(row, cfg)
+        failed = sorted(set([str(x) for x in _json_list(row.get("all_failed_gates")) + _json_list(diag.get("all_failed_gates")) if str(x)]))
+        passed = [
+            name for name, ok in {
+                "score": _safe_float(row.get("score"), 0.0) >= float(decision_filter_config("BACKTEST").get("MIN_TRADE_SCORE", 7.5)),
+                "raw_rr": _safe_float(row.get("raw_rr", row.get("rr")), 0.0) >= float(decision_filter_config("BACKTEST").get("MIN_RR", 1.3)),
+                "effective_rr": _safe_float(row.get("effective_rr"), 0.0) >= float(decision_filter_config("BACKTEST").get("MIN_EFFECTIVE_RR", 1.6)),
+                "cost_penalty": _safe_float(row.get("cost_penalty"), 0.0) <= cfg.high_vol_max_cost_penalty,
+            }.items() if ok
+        ]
+        all_non_vol_passed = not [x for x in failed if x != "HIGH_VOL_GUARD"]
+        entry = _safe_float(row.get("entry"), 0.0)
+        sl = _safe_float(row.get("sl"), 0.0)
+        rows.append({
+            "timestamp": row.get("timestamp"), "symbol": row.get("symbol"), "side": row.get("side"),
+            "score": row.get("score"), "rr": row.get("rr"), "raw_rr": row.get("raw_rr", row.get("rr")),
+            "effective_rr": row.get("effective_rr"), "expectancy_bucket": row.get("expectancy_bucket"),
+            "candidate_stage": row.get("source_stage", "STRATEGY_QUALITY_GUARDRAIL"),
+            "reject_reason": row.get("reject_reason"),
+            "volatility_metric_name": metric_name,
+            "volatility_metric_value": metric_value,
+            "volatility_threshold": threshold,
+            "volatility_ratio_to_threshold": (metric_value / threshold if threshold else ""),
+            "atr_pct": row.get("atr_pct", diag.get("atr_pct", "")),
+            "realized_volatility_pct": row.get("realized_volatility_pct", diag.get("realized_volatility_pct", "")),
+            "candle_range_pct": row.get("candle_range_pct", diag.get("candle_range_pct", "")),
+            "volume_24h_usdt": row.get("volume_24h_usdt"),
+            "spread_pct": row.get("spread_pct"),
+            "expected_slippage_pct": row.get("expected_slippage_pct"),
+            "funding_rate_pct": row.get("funding_rate_pct"),
+            "liquidity_score": row.get("liquidity_score"),
+            "regime": row.get("regime"), "setup": row.get("setup_type") or row.get("setup"),
+            "passed_all_non_volatility_filters": all_non_vol_passed,
+            "filters_passed": json.dumps(passed, sort_keys=True),
+            "filters_failed": json.dumps(failed or ["HIGH_VOL_GUARD"], sort_keys=True),
+            "would_accept_if_high_vol_guard_disabled": all_non_vol_passed,
+            "counterfactual_reject_reason_if_high_vol_guard_ignored": "" if all_non_vol_passed else ",".join(x for x in failed if x != "HIGH_VOL_GUARD"),
+            "counterfactual_effective_rr": row.get("effective_rr"),
+            "counterfactual_expected_slippage_penalty": row.get("expected_slippage_pct"),
+            "counterfactual_volatility_penalty": max(0.0, metric_value - threshold) if threshold else "",
+            "counterfactual_trade_quality_score": row.get("quality_score") or row.get("score"),
+            "estimated_stop_distance": (abs(entry - sl) / entry if entry else ""),
+            "estimated_liquidation_slippage_danger": "UNAVAILABLE_BACKTEST",
+            "source_function": "backtest_order._guardrail_rejection_reason",
+            "guard_name": "HIGH_VOL_GUARD",
+        })
+    return rows
+
+def build_acceptance_funnel(rejected_rows: List[Mapping[str, Any]], accepted_count: int, summary: Mapping[str, Any], cfg: StrategyQualityGuardrailConfig) -> List[Dict[str, Any]]:
+    counts = Counter(str(r.get("reject_reason") or "UNKNOWN").upper() for r in rejected_rows)
+    total = int(_safe_float(summary.get("total_candidates"), accepted_count + len(rejected_rows)))
+    symbol_rej = int(_safe_float(summary.get("symbol_rejected_count"), sum(1 for r in rejected_rows if str(r.get("lifecycle_state", "")).upper() == "SYMBOL_REJECTED")))
+    signal_rej = len(rejected_rows) - symbol_rej
+    hv_without = sum(1 for r in build_high_vol_guard_diagnostics(rejected_rows, cfg) if r["would_accept_if_high_vol_guard_disabled"])
+    stages = [
+        ("symbol_universe", len({r.get("symbol") for r in rejected_rows if r.get("symbol")}) or 0, "unique symbols in canonical rejected/accepted artifacts"),
+        ("total_candidates", total, "canonical accepted + rejected candidates"),
+        ("symbol_level_rejected", symbol_rej, "pre-signal symbol-selector rejects"),
+        ("signal_created", max(total - symbol_rej, 0), "candidates reaching signal engine"),
+        ("signal_level_rejected", signal_rej, "signal/guardrail rejects"),
+    ]
+    for reason, count in sorted(counts.items()):
+        stages.append((f"{reason.lower()}_rejected", count, "canonical reject_reason count"))
+    before = accepted_count + sum(counts[r] for r in ("HIGH_VOL_GUARD", "HIGH_VOL_OVERTRADE", "HIGH_VOL_EXECUTION_COST"))
+    stages.extend([
+        ("would_accept_without_high_vol_guard", hv_without, "shadow diagnostic only; default result unchanged"),
+        ("accepted_before_guardrails", before, "accepted terminal rows plus strategy guardrail rejects"),
+        ("accepted_after_guardrails", accepted_count, "default conservative BACKTEST acceptance"),
+        ("position_opened", accepted_count, "accepted terminal row proxy"),
+        ("position_closed", accepted_count, "accepted terminal row proxy"),
+    ])
+    prev = None
+    out = []
+    for stage, count, notes in stages:
+        out.append({"stage": stage, "count": count, "delta_from_previous": "" if prev is None else count - prev, "notes": notes})
+        prev = count
+    return out
+
+def classify_high_vol_guard(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not rows:
+        return {"high_vol_guard_verdict": "VALID_PROTECTIVE_GUARD", "high_vol_guard_evidence": "No HIGH_VOL_GUARD rows emitted.", "recommended_action": "Keep default guard enabled; no threshold change."}
+    would = sum(1 for r in rows if r.get("would_accept_if_high_vol_guard_disabled") in {True, "True", "true", "1"})
+    ratios = [_safe_float(r.get("volatility_ratio_to_threshold"), 0.0) for r in rows]
+    marginal = sum(1 for x in ratios if 0.95 <= x <= 1.05)
+    verdict = "OVERSTRICT_THRESHOLD" if would and marginal >= max(1, len(rows) // 2) else "VALID_PROTECTIVE_GUARD"
+    return {
+        "high_vol_guard_verdict": verdict,
+        "high_vol_guard_evidence": f"{len(rows)} HIGH_VOL_GUARD rows; {would} would pass if disabled; {marginal} are within +/-5% of threshold.",
+        "recommended_action": "Audit counterfactual drawdown before any production threshold change." if verdict != "VALID_PROTECTIVE_GUARD" else "Keep default HIGH_VOL_GUARD enabled; use diagnostic profile only for impact measurement.",
     }
 
 def build_default_gate_funnel(rejected: List[Dict[str, Any]], accepted_rows: List[LifecycleRow]) -> List[Dict[str, Any]]:
@@ -3834,6 +3960,9 @@ def main():
         "quality_gate_daily_trade_count_distribution": json.dumps(quality_gate_metrics["quality_gate_daily_trade_count_distribution"], sort_keys=True),
     })
     strategy_quality_evidence = build_strategy_quality_evidence(lifecycle, rejected, summary, strategy_guardrail_config)
+    high_vol_guard_diagnostics = build_high_vol_guard_diagnostics(rejected, strategy_guardrail_config)
+    high_vol_guard_summary = classify_high_vol_guard(high_vol_guard_diagnostics)
+    acceptance_funnel_rows = build_acceptance_funnel(rejected, counts["accepted_count"], {**summary, "symbol_rejected_count": sum(1 for r in rejected if str(r.get("lifecycle_state", "")).upper() == "SYMBOL_REJECTED")}, strategy_guardrail_config)
     summary.update({
         "profile_quality_status": strategy_quality_evidence["profile_quality_status"],
         "profile_quality_reasons": json.dumps(strategy_quality_evidence["profile_quality_reasons"], sort_keys=True),
@@ -3841,12 +3970,24 @@ def main():
         "accepted_before_guardrails": strategy_quality_evidence["accepted_before_guardrails"],
         "accepted_after_guardrails": strategy_quality_evidence["accepted_after_guardrails"],
         "rejected_by_new_guardrails": strategy_quality_evidence["rejected_by_new_guardrails"],
+        "high_vol_guard_count": len(high_vol_guard_diagnostics),
+        "high_vol_guard_would_accept_without_guard": sum(1 for r in high_vol_guard_diagnostics if r.get("would_accept_if_high_vol_guard_disabled")),
+        **high_vol_guard_summary,
     })
     with open(os.path.join(args.output_dir, "strategy_quality_guardrails.json"), "w") as f:
         json.dump(strategy_quality_evidence, f, indent=2, sort_keys=True)
     with open(os.path.join(args.output_dir, "strategy_quality_guardrails.csv"), "w", newline="") as f:
         flat = {k: (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v) for k, v in strategy_quality_evidence.items()}
         w = csv.DictWriter(f, fieldnames=list(flat.keys())); w.writeheader(); w.writerow(flat)
+    with open(os.path.join(args.output_dir, "high_vol_guard_diagnostics.csv"), "w", newline="") as f:
+        fields = resolve_csv_fieldnames(high_vol_guard_diagnostics, list(high_vol_guard_diagnostics[0].keys()) if high_vol_guard_diagnostics else ["timestamp", "symbol", "side", "reject_reason", "volatility_metric_name", "volatility_metric_value", "volatility_threshold", "volatility_ratio_to_threshold", "would_accept_if_high_vol_guard_disabled"])
+        w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(high_vol_guard_diagnostics)
+    with open(os.path.join(args.output_dir, "high_vol_guard_summary.json"), "w") as f:
+        json.dump(high_vol_guard_summary, f, indent=2, sort_keys=True)
+    with open(os.path.join(args.output_dir, "acceptance_funnel.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["stage", "count", "delta_from_previous", "notes"]); w.writeheader(); w.writerows(acceptance_funnel_rows)
+    with open(os.path.join(args.output_dir, "acceptance_funnel.json"), "w") as f:
+        json.dump(acceptance_funnel_rows, f, indent=2, sort_keys=True)
 
     with open(os.path.join(args.output_dir, "order_backtest_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))
@@ -3863,6 +4004,11 @@ def main():
             w.writeheader()
             w.writerows(rows)
     quality_summary = build_backtest_quality_summary(persisted_lifecycle_rows, canonical_rejected_rows=rejected)
+    quality_summary.update({
+        "high_vol_guard_count": len(high_vol_guard_diagnostics),
+        "high_vol_guard_would_accept_without_guard": sum(1 for r in high_vol_guard_diagnostics if r.get("would_accept_if_high_vol_guard_disabled")),
+        **high_vol_guard_summary,
+    })
     write_backtest_quality_summary(
         os.path.join(args.output_dir, "backtest_quality_summary.csv"),
         quality_summary,

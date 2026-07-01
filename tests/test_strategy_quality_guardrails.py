@@ -79,3 +79,53 @@ def test_default_gate_funnel_exposes_scope_when_gate_not_comparable():
     assert rows[0]["zero_reject_warning"] is True
     assert rows[0]["funnel_scope"] == "rejected_orders_plus_executed_terminal_rows"
     assert "pre-funnel" in rows[0]["comparability_note"]
+
+
+def test_high_vol_guard_diagnostics_export_candidate_quality_fields():
+    rows = bo.build_high_vol_guard_diagnostics([
+        {
+            "reject_reason": "HIGH_VOL_GUARD", "timestamp": "1", "symbol": "BTCUSDT", "side": "LONG",
+            "score": "8.4", "rr": "2.4", "raw_rr": "2.4", "effective_rr": "2.1",
+            "expectancy_bucket": "POSITIVE", "source_stage": "STRATEGY_QUALITY_GUARDRAIL",
+            "regime": "HIGH_VOL", "setup_type": "breakout", "cost_penalty": "0.1",
+            "spread_pct": "0.01", "expected_slippage_pct": "0.02", "liquidity_score": "0.9",
+            "all_failed_gates": '["HIGH_VOL_GUARD"]', "entry": "100", "sl": "98",
+        }
+    ], _cfg(high_vol_min_effective_rr=2.3))
+    assert rows[0]["volatility_metric_name"] == "effective_rr"
+    assert rows[0]["volatility_threshold"] == 2.3
+    assert rows[0]["volatility_ratio_to_threshold"] > 0
+    assert rows[0]["would_accept_if_high_vol_guard_disabled"] is True
+    assert "filters_passed" in rows[0]
+
+
+def test_high_vol_guard_not_emitted_when_volatility_acceptance_requirements_pass():
+    cfg = _cfg(high_vol_min_effective_rr=2.3, high_vol_max_cost_penalty=0.18)
+    stats = {"accepted_trades_by_day": {}, "accepted_trades_by_symbol_day": {}, "accepted_trades_by_symbol_regime_day": {}, "high_vol_accepted_trades_by_day": {}, "consecutive_sl_count": 0}
+    assert bo._guardrail_rejection_reason("BTCUSDT", 1782777600000, "HIGH_VOL", 8.5, 2.5, {"volatility_regime": "HIGH", "cost_penalty_total": 0.1}, stats, cfg) == ""
+
+
+def test_high_vol_guard_diagnostic_profile_does_not_change_default_guard_config():
+    stats = {"accepted_trades_by_day": {}, "accepted_trades_by_symbol_day": {}, "accepted_trades_by_symbol_regime_day": {}, "high_vol_accepted_trades_by_day": {}, "consecutive_sl_count": 0}
+    default = _cfg(high_vol_min_effective_rr=2.3)
+    diagnostic = _cfg(high_vol_min_effective_rr=2.3, profile="HIGH_VOL_GUARD_OFF_DIAGNOSTIC")
+    ctx = {"volatility_regime": "HIGH", "cost_penalty_total": 0.1}
+    assert bo._guardrail_rejection_reason("BTCUSDT", 1782777600000, "HIGH_VOL", 8.5, 2.1, ctx, stats, default) == "HIGH_VOL_GUARD"
+    assert bo._guardrail_rejection_reason("BTCUSDT", 1782777600000, "HIGH_VOL", 8.5, 2.1, ctx, stats, diagnostic) == ""
+    evidence = bo.build_strategy_quality_evidence([], [], {"total_net_pnl_usdt": 1, "profit_factor": 2, "max_drawdown_pct": 0}, diagnostic)
+    assert "DIAGNOSTIC_ONLY_PROFILE" in evidence["profile_quality_reasons"]
+    assert "not a production strategy profile" in evidence["diagnostic_profile_warning"]
+
+
+def test_acceptance_funnel_counts_reconcile_and_exposes_high_vol_counterfactual():
+    rejected = [
+        {"reject_reason": "LOW_SCORE", "lifecycle_state": "SIGNAL_REJECTED", "symbol": "BTCUSDT"},
+        {"reject_reason": "HIGH_VOL_GUARD", "lifecycle_state": "SIGNAL_REJECTED", "symbol": "BTCUSDT", "score": "8", "rr": "2.4", "effective_rr": "2.1", "cost_penalty": "0.1", "all_failed_gates": '["HIGH_VOL_GUARD"]'},
+        {"reject_reason": "TOO_CHOPPY", "lifecycle_state": "SYMBOL_REJECTED", "symbol": "BTCUSDT"},
+    ]
+    rows = bo.build_acceptance_funnel(rejected, 0, {"total_candidates": 3, "symbol_rejected_count": 1}, _cfg())
+    by_stage = {r["stage"]: r["count"] for r in rows}
+    assert by_stage["total_candidates"] == 3
+    assert by_stage["symbol_level_rejected"] == 1
+    assert by_stage["signal_level_rejected"] == 2
+    assert by_stage["would_accept_without_high_vol_guard"] == 1

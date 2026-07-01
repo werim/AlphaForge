@@ -1,3 +1,51 @@
+## 2026-07-01 HIGH_VOL_GUARD / zero-accepted root-cause diagnostics
+
+### Why the patch was needed
+A BTCUSDT 30d/1h BACKTEST run was internally consistent after PR254 but still produced `accepted_count=0`. The remaining audit gap was whether the 20 `HIGH_VOL_GUARD` rows were legitimate execution-protective rejects or an over-strict/mis-scaled guardrail.
+
+### Root cause / source audit
+`HIGH_VOL_GUARD` is emitted by `backtest_order._guardrail_rejection_reason`. It is a BACKTEST strategy-quality guardrail, not PAPER/LIVE order-path logic. The guard is active when `StrategyQualityGuardrailConfig.enabled` and `high_vol_acceptance_guard` are true and `_is_high_vol_context(...)` detects `HIGH`, `VOL`, or `BREAKOUT` in the regime/volatility context. It rejects high-vol candidates when either effective RR is below `high_vol_min_effective_rr` or a previously softened wide stop is present. A separate high-vol cost breach emits `HIGH_VOL_EXECUTION_COST`, and high-vol daily saturation emits `HIGH_VOL_OVERTRADE`.
+
+### Exact config/env variables used
+- `ALPHAFORGE_BACKTEST_STRATEGY_GUARDRAILS_ENABLED` controls the strategy-quality guardrail family.
+- `ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD` controls the HIGH_VOL acceptance guard.
+- The default `high_vol_min_effective_rr` threshold is `2.30` effective RR.
+- The default `high_vol_max_cost_penalty` threshold is `0.18` total cost penalty.
+- The default `high_vol_max_trades_per_day` threshold is `2` accepted high-vol trades/day.
+
+### Runtime behavior changes
+Default BACKTEST remains conservative. No production threshold was loosened and no rejected candidate is force-accepted. Diagnostic profiles `HIGH_VOL_GUARD_OFF_DIAGNOSTIC` and `VOL_GUARD_RELAXED_DIAGNOSTIC` bypass this BACKTEST-only strategy guardrail for measurement and are labeled diagnostic-only. The warning text is: `HIGH_VOL_GUARD_OFF_DIAGNOSTIC is not a production strategy profile. It measures guardrail impact only.`
+
+### Lifecycle changes
+No lifecycle transition semantics changed. HIGH_VOL_GUARD rows remain `SIGNAL_REJECTED`; counterfactual acceptance is exported as diagnostics only.
+
+### Persistence / export / schema changes
+No database migration is required. New additive artifacts are exported per BACKTEST run: `high_vol_guard_diagnostics.csv`, `high_vol_guard_summary.json`, `acceptance_funnel.csv`, and `acceptance_funnel.json`. `backtest_quality_summary.csv` gains additive HIGH_VOL_GUARD count/verdict/evidence/recommendation fields.
+
+### Latest diagnostic artifact summary
+The code now exports per-row HIGH_VOL_GUARD evidence including score, raw/effective RR, expectancy bucket, metric name/value/threshold/ratio, ATR/realized-volatility/candle-range fields when available, spread/slippage/funding/liquidity, pass/fail filter lists, would-accept-without-guard, counterfactual reason/effective RR/penalties, stop distance, and source function. The real BTCUSDT 30d/1h artifact must be regenerated to fill these fields for the observed 20 rows.
+
+### Acceptance funnel summary
+The new canonical funnel shows total candidates, symbol-level rejects, signal-created candidates, signal-level rejects, per-reason reject counts, HIGH_VOL_GUARD counterfactual would-accept count, accepted-before-guardrails, accepted-after-guardrails, and position-open/closed proxies.
+
+### Counterfactual summary
+Counterfactual fields are BACKTEST-only diagnostics. They quantify guardrail impact but do not mutate default accepted trades. PAPER/LIVE behavior is not weakened.
+
+### Risk assessment
+The HIGH_VOL_GUARD verdict defaults to protective unless diagnostics show candidates pass non-volatility filters and the threshold breach is marginal. Missing volatility fields are exported as unavailable rather than silently fabricating ATR or realized-volatility values.
+
+### Recommendation
+Regenerate BTCUSDT 30d/1h artifacts and inspect `high_vol_guard_verdict`, `high_vol_guard_evidence`, `acceptance_funnel.csv`, and `high_vol_guard_diagnostics.csv`. Do not relax HIGH_VOL_GUARD unless counterfactual rows pass score/RR/effective-RR/expectancy/spread/slippage/liquidity checks and drawdown/adverse-excursion evidence remains controlled.
+
+### Tests added/executed
+Added tests for HIGH_VOL_GUARD diagnostic fields, no emission below threshold, diagnostic profile labeling/no default mutation, and acceptance-funnel reconciliation.
+
+### Migration concerns
+None; artifacts/summary fields are additive CSV/JSON outputs.
+
+### Push recommendation
+Push after full test suite and manual backtest regeneration complete successfully.
+
 ## 2026-07-01 - BACKTEST quality summary reject-count parity surgery report
 
 ### Why this patch was needed
