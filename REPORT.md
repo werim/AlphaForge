@@ -1,3 +1,43 @@
+## 2026-07-01 reject overlay diagnostics
+
+### Why the patch was needed
+PR259 rejected-forward evidence showed TP/SL separation in specific rejected buckets, especially SHORT LOW_SCORE BREAKDOWN candidates in selected UTC hours, while LONG BREAKOUT_UP bad-hour and guard rejects remained protective. AlphaForge needed a discovery layer to export those patterns without changing production thresholds or accepted trades.
+
+### Root cause
+Rejected-forward outcomes existed, but there was no conservative BACKTEST-only overlay that grouped rows by symbol, side, setup, regime, hour group, reject reason, and LOW_SCORE gap band, nor a summary that could distinguish positive shadow candidates from negative confirmations and insufficient samples.
+
+### Files changed
+- `backtest_order.py`: added reject-overlay label generation, bucket expectancy aggregation, conservative verdicts, CSV/JSON exports, and zero-accepted summary fields.
+- `tests/test_reject_overlay.py`: added regressions for required overlay labels, near-threshold semantics, guard no-rescue behavior, verdict classification, missing evidence, and accepted-count immutability.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: updated operational documentation.
+
+### Runtime behavior changes
+No default BACKTEST accept/reject decision changed. PAPER/LIVE behavior is untouched. Diagnostic candidates remain labels only and are marked `production_decision_changed=false`.
+
+### Lifecycle changes
+No lifecycle states or transitions changed. Rejected rows remain rejected and are only annotated in diagnostic artifacts.
+
+### Persistence changes
+No SQLite migration. New evidence is written to BACKTEST CSV/JSON artifacts only.
+
+### Export/schema changes
+Added `reject_overlay_diagnostics.csv`, `reject_overlay_summary.json`, `reject_bucket_expectancy.csv`, and `reject_bucket_expectancy.json`. `zero_accepted_root_cause_summary` now includes strongest positive/negative diagnostic buckets, `production_threshold_change_recommended=false`, and the requested conservative next action.
+
+### Tests added
+Added targeted tests for LONG bad-hour traps, SHORT good-hour diagnostic candidates, 5% LOW_SCORE near-threshold splits, HIGH_VOL_GUARD LONG no-rescue labels, positive/negative/insufficient bucket verdicts, and no accepted-count changes.
+
+### Tests executed
+- `python -m pytest tests/test_reject_overlay.py -q`
+
+### Risks and remaining limitations
+Bucket verdicts require enough forward-evaluable evidence. Micro-buckets are exploratory only and must never drive production threshold changes. Symbol-level reject geometry may still be unavailable until safe pre-reject candidate geometry capture is added.
+
+### Migration concerns
+None for SQLite. CSV/JSON consumers should tolerate additive BACKTEST artifacts and summary fields.
+
+### Push recommendation
+Push after targeted/full pytest validation. Do not claim LIVE readiness or relax LOW_SCORE/HIGH_VOL_GUARD/STOP_TOO_WIDE.
+
 ## 2026-07-01 score calibration diagnostics
 
 ### Why the patch was needed

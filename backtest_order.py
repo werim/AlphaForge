@@ -3537,6 +3537,151 @@ def _low_score_gap_bucket(row: Mapping[str, Any]) -> str:
     return "above_threshold_or_unknown"
 
 
+def _utc_hour_from_row(row: Mapping[str, Any]) -> int | None:
+    direct = _numeric_or_none(row.get("hour_utc"))
+    if direct is not None:
+        return int(direct) % 24
+    ts = _numeric_or_none(row.get("timestamp"))
+    if ts is None:
+        return None
+    # Backtest timestamps are epoch milliseconds in exported rows.
+    if ts > 10_000_000_000:
+        ts = ts / 1000.0
+    return datetime.fromtimestamp(ts, tz=timezone.utc).hour
+
+
+def _hour_group(hour: int | None) -> str:
+    if hour in {6, 7, 18, 22, 23}:
+        return "SHORT_LOW_SCORE_GOOD_UTC_HOURS"
+    if hour in {0, 4, 8, 15, 17}:
+        return "LONG_BREAKOUT_BAD_UTC_HOURS"
+    if hour is None:
+        return "HOUR_UNAVAILABLE"
+    return "OTHER_UTC_HOURS"
+
+
+def _score_gap_band(row: Mapping[str, Any]) -> str:
+    bucket = _low_score_gap_bucket(row)
+    if bucket == "near":
+        return "NEAR_THRESHOLD_5PCT"
+    if bucket == "far":
+        return "FAR_BELOW_THRESHOLD"
+    return "ABOVE_THRESHOLD_OR_UNKNOWN"
+
+
+def _confidence_lower_bound(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    mean = _mean(values)
+    if len(values) < 2:
+        return mean
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return mean - 1.96 * ((variance ** 0.5) / (len(values) ** 0.5))
+
+
+def build_reject_bucket_expectancy(rows: List[Mapping[str, Any]], *, min_n: int = 30, exploratory_min_n: int = 10) -> List[Dict[str, Any]]:
+    buckets: Dict[tuple[str, str, str, str, str, str, str], List[Mapping[str, Any]]] = {}
+    for row in rows:
+        hour = _utc_hour_from_row(row)
+        key = (
+            str(row.get("symbol") or "UNKNOWN").upper(),
+            str(row.get("side") or "UNKNOWN").upper(),
+            str(row.get("setup") or row.get("setup_type") or "UNAVAILABLE").upper(),
+            str(row.get("regime") or "UNAVAILABLE").upper(),
+            _hour_group(hour),
+            str(row.get("reject_reason") or "UNKNOWN").upper(),
+            _score_gap_band(row),
+        )
+        buckets.setdefault(key, []).append(row)
+
+    out: List[Dict[str, Any]] = []
+    for key, sub in sorted(buckets.items()):
+        ev = [r for r in sub if _is_forward_evaluable(r)]
+        vals = [_safe_float(r.get("effective_shadow_r_after_costs")) for r in ev]
+        n = len(ev)
+        mean_eff = _mean(vals)
+        p95_adv = _p95([_safe_float(r.get("mae_r")) for r in ev])
+        exploratory = len(sub) >= exploratory_min_n and len(sub) < min_n
+        if n < min_n:
+            verdict = "INSUFFICIENT_SAMPLE"
+        elif mean_eff > 0.05 and _confidence_lower_bound(vals) > 0.0:
+            verdict = "POSITIVE_SHADOW_CANDIDATE"
+        elif mean_eff < -0.05:
+            verdict = "NEGATIVE_SHADOW_CONFIRMATION"
+        elif mean_eff > 0.0 and p95_adv > 2.0:
+            verdict = "EXECUTION_COSTS_INVALIDATE"
+        else:
+            verdict = "MIXED_UNCERTAIN"
+        out.append({
+            "symbol": key[0], "side": key[1], "setup": key[2], "regime": key[3], "hour_group": key[4],
+            "reject_reason": key[5], "score_gap_band": key[6],
+            "sample_count": len(sub), "forward_evaluable_count": n,
+            "would_tp_count": sum(1 for r in sub if r.get("first_touch_outcome") == "WOULD_TP"),
+            "would_sl_count": sum(1 for r in sub if r.get("first_touch_outcome") == "WOULD_SL"),
+            "ambiguous_count": sum(1 for r in sub if r.get("first_touch_outcome") == "WOULD_AMBIGUOUS"),
+            "timeout_count": sum(1 for r in sub if r.get("first_touch_outcome") == "WOULD_TIMEOUT"),
+            "tp_rate": (sum(1 for r in ev if r.get("first_touch_outcome") == "WOULD_TP") / n if n else 0.0),
+            "mean_effective_shadow_r": mean_eff,
+            "median_effective_shadow_r": _median(vals),
+            "mean_mfe_r": _mean([_safe_float(r.get("mfe_r")) for r in ev]),
+            "mean_mae_r": _mean([_safe_float(r.get("mae_r")) for r in ev]),
+            "p95_adverse_r": p95_adv,
+            "confidence_lower_bound_effective_r": _confidence_lower_bound(vals),
+            "min_sample_size": min_n,
+            "exploratory_micro_bucket": exploratory,
+            "micro_bucket_note": ("Exploratory only; never use for production threshold changes." if exploratory else ""),
+            "verdict": verdict,
+        })
+    return out
+
+
+def build_reject_overlay_diagnostics(rows: List[Mapping[str, Any]], bucket_rows: List[Mapping[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    bucket_verdicts = {
+        (r["symbol"], r["side"], r["setup"], r["regime"], r["hour_group"], r["reject_reason"], r["score_gap_band"]): r
+        for r in bucket_rows
+    }
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        reason = str(row.get("reject_reason") or "").upper()
+        side = str(row.get("side") or "").upper()
+        setup = str(row.get("setup") or row.get("setup_type") or "").upper()
+        hour = _utc_hour_from_row(row)
+        labels: list[str] = []
+        if side == "LONG" and setup == "BREAKOUT_UP" and hour in {0, 4, 8, 15, 17}:
+            labels.append("LONG_BREAKOUT_SESSION_TRAP")
+        if reason == "LOW_SCORE" and side == "SHORT" and setup == "BREAKDOWN_DOWN" and hour in {6, 7, 18, 22, 23} and _is_forward_evaluable(row):
+            labels.append("SHORT_BREAKDOWN_DIAGNOSTIC_CANDIDATE")
+        if reason == "LOW_SCORE" and _low_score_gap_bucket(row) == "near":
+            labels.append(f"LOW_SCORE_NEAR_THRESHOLD_{side or 'UNKNOWN'}")
+            labels.append("LOW_SCORE_NEAR_THRESHOLD_DIAGNOSTIC_CANDIDATE")
+        if reason in {"HIGH_VOL_GUARD", "STOP_TOO_WIDE"} and side == "LONG":
+            labels.append("GUARD_CONFIRMED_NO_RESCUE")
+        key = (
+            str(row.get("symbol") or "UNKNOWN").upper(), side or "UNKNOWN", setup or "UNAVAILABLE",
+            str(row.get("regime") or "UNAVAILABLE").upper(), _hour_group(hour), reason or "UNKNOWN", _score_gap_band(row),
+        )
+        verdict = str(bucket_verdicts.get(key, {}).get("verdict", "REJECT_BUCKET_INSUFFICIENT_SAMPLE"))
+        if verdict == "POSITIVE_SHADOW_CANDIDATE":
+            labels.append("REJECT_BUCKET_POSITIVE_SHADOW_CANDIDATE")
+        elif verdict == "NEGATIVE_SHADOW_CONFIRMATION":
+            labels.append("REJECT_BUCKET_NEGATIVE_SHADOW_CONFIRMATION")
+        elif verdict == "INSUFFICIENT_SAMPLE":
+            labels.append("REJECT_BUCKET_INSUFFICIENT_SAMPLE")
+        out.append({**dict(row), "hour_utc": hour if hour is not None else "", "diagnostic_overlay_labels": "|".join(dict.fromkeys(labels)), "bucket_expectancy_verdict": verdict, "diagnostic_only": True, "production_decision_changed": False})
+    positives = [r for r in bucket_rows if r.get("verdict") == "POSITIVE_SHADOW_CANDIDATE"]
+    negatives = [r for r in bucket_rows if r.get("verdict") == "NEGATIVE_SHADOW_CONFIRMATION"]
+    sort_key = lambda r: _safe_float(r.get("mean_effective_shadow_r"))
+    summary = {
+        "diagnostic_overlay_count": len(out),
+        "overlay_label_distribution": _distribution(label for r in out for label in str(r.get("diagnostic_overlay_labels", "")).split("|") if label),
+        "strongest_positive_diagnostic_buckets": sorted(positives, key=sort_key, reverse=True)[:10],
+        "strongest_negative_confirmation_buckets": sorted(negatives, key=sort_key)[:10],
+        "production_threshold_change_recommended": False,
+        "recommended_next_action": "Keep production thresholds unchanged. Create diagnostic-only profile for SHORT LOW_SCORE BREAKDOWN candidates in validated good hours. Add safe pre-reject candidate geometry capture for symbol-level rejects. Do not relax HIGH_VOL_GUARD or STOP_TOO_WIDE.",
+    }
+    return out, summary
+
+
 def build_low_score_forward_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
     low = [r for r in rows if str(r.get("reject_reason", "")).upper() == "LOW_SCORE"]
     ev = [r for r in low if _is_forward_evaluable(r)]; un = [r for r in low if not _is_forward_evaluable(r)]
@@ -4430,6 +4575,8 @@ def main():
     low_score_forward_summary = build_low_score_forward_summary(rejected_forward_outcomes)
     symbol_reject_forward_summary = build_symbol_reject_forward_summary(rejected_forward_outcomes)
     rejected_forward_confirmation = build_rejected_forward_confirmation_summary(rejected_forward_outcomes)
+    reject_bucket_expectancy = build_reject_bucket_expectancy(rejected_forward_outcomes)
+    reject_overlay_diagnostics, reject_overlay_summary = build_reject_overlay_diagnostics(rejected_forward_outcomes, reject_bucket_expectancy)
     forward_evaluations = build_forward_evaluations_from_lifecycle(lifecycle, candles_by_symbol)
     lifecycle_index = {f"{row.symbol}:{row.timestamp}": row for row in lifecycle}
     calibration_snapshots = persist_calibration_snapshots(forward_evaluations, lifecycle_index)
@@ -4672,16 +4819,25 @@ def main():
     if extra_reasons:
         zero_summary["evidence_quality"] = "PARTIAL" if forward_counts["rejected_forward_evaluable_count"] else "INSUFFICIENT"
     zero_summary["evidence_quality_reasons"] = list(dict.fromkeys(list(zero_summary.get("evidence_quality_reasons") or []) + extra_reasons))
-    zero_summary["recommended_next_action"] = "Keep thresholds; use rejected forward outcomes as diagnostic-only evidence and add safe geometry capture where unavailable."
+    zero_summary["strongest_positive_diagnostic_buckets"] = reject_overlay_summary.get("strongest_positive_diagnostic_buckets", [])
+    zero_summary["strongest_negative_confirmation_buckets"] = reject_overlay_summary.get("strongest_negative_confirmation_buckets", [])
+    zero_summary["recommended_next_action"] = reject_overlay_summary.get("recommended_next_action")
     zero_summary["production_threshold_change_recommended"] = False
     with open(os.path.join(args.output_dir, "zero_accepted_root_cause_summary.json"), "w") as f:
         json.dump(zero_summary, f, indent=2, sort_keys=True)
     with open(os.path.join(args.output_dir, "zero_accepted_root_cause_summary.csv"), "w", newline="") as f:
         flat = {k: (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v) for k, v in zero_summary.items()}
         w = csv.DictWriter(f, fieldnames=list(flat.keys())); w.writeheader(); w.writerow(flat)
-    for artifact_name, payload in [("rejected_forward_outcomes.json", rejected_forward_outcomes), ("low_score_forward_summary.json", low_score_forward_summary), ("symbol_reject_forward_summary.json", symbol_reject_forward_summary)]:
+    for artifact_name, payload in [("rejected_forward_outcomes.json", rejected_forward_outcomes), ("low_score_forward_summary.json", low_score_forward_summary), ("symbol_reject_forward_summary.json", symbol_reject_forward_summary), ("reject_overlay_summary.json", reject_overlay_summary), ("reject_bucket_expectancy.json", reject_bucket_expectancy)]:
         with open(os.path.join(args.output_dir, artifact_name), "w") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
+    for artifact_name, rows, fallback in [
+        ("reject_overlay_diagnostics.csv", reject_overlay_diagnostics, ["timestamp", "symbol", "side", "setup", "reject_reason", "diagnostic_overlay_labels", "diagnostic_only", "production_decision_changed"]),
+        ("reject_bucket_expectancy.csv", reject_bucket_expectancy, ["symbol", "side", "setup", "regime", "hour_group", "reject_reason", "score_gap_band", "sample_count", "verdict"]),
+    ]:
+        with open(os.path.join(args.output_dir, artifact_name), "w", newline="") as f:
+            fields = resolve_csv_fieldnames(rows, list(rows[0].keys()) if rows else fallback)
+            w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(rows)
     for artifact_name, payload in [("low_score_forward_summary.csv", low_score_forward_summary), ("symbol_reject_forward_summary.csv", symbol_reject_forward_summary)]:
         with open(os.path.join(args.output_dir, artifact_name), "w", newline="") as f:
             flat = {k: (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v) for k, v in payload.items()}
