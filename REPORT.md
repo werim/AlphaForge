@@ -1,3 +1,43 @@
+## 2026-07-01 PR256 diagnostic extraction correction
+
+### Why the patch was needed
+Manual BTCUSDT 30d/1h artifact validation after PR256 found diagnostic extraction defects, not production threshold defects: LOW_SCORE diagnostics used a 0-1 fallback threshold while exported rows carried 7.5, and symbol-level rejects had selector metrics nested inside diagnostics JSON.
+
+### Root cause
+`build_low_score_diagnostics` trusted BACKTEST config fallback before row-level exported evidence. `build_symbol_reject_diagnostics` only inspected top-level columns and did not parse `diagnostics.selector.inputs` / `diagnostics.selector.metrics`. The zero-accepted summary therefore could overclaim COMPLETE evidence quality.
+
+### Files changed
+- `backtest_order.py`: LOW_SCORE threshold source/scale detection, nested symbol selector extraction, and root-cause evidence-quality reasons.
+- `tests/test_strategy_quality_guardrails.py`: regression coverage for LOW_SCORE threshold scale, near/far counts, nested selector metrics, FEATURE_MISSING classification, and partial evidence quality.
+- `REPORT.md`, `CHANGELOG.md`, `VERSION.md`: updated operational documentation.
+
+### Runtime behavior changes
+No BACKTEST/PAPER/LIVE acceptance threshold changed. The patch only changes exported diagnostics and summaries. LOW_SCORE diagnostics now prefer row evidence (`min_required_score`, diagnostics thresholds) over fallback config and report threshold source/scale metadata. Symbol reject diagnostics now populate selector metrics from diagnostics JSON when top-level columns are empty.
+
+### Lifecycle changes
+No lifecycle state transition changed. Rejected rows remain rejected and symbol-level rejects remain symbol-level rejects.
+
+### Persistence changes
+No database migration is required. BACKTEST diagnostic CSV/JSON artifacts gain additive fields for threshold sources, scale mismatch/correction flags, selector metrics, selector reject reasons, selector sub-scores, and evidence-quality reasons.
+
+### Export/schema changes
+Additive CSV fields may appear in `low_score_diagnostics.csv`, `symbol_reject_diagnostics.csv`, and `zero_accepted_root_cause_summary.csv/json`. Existing threshold values are not rewritten in source rejected rows.
+
+### Tests added
+Added tests proving score 6.37 vs threshold 7.5 produces a 1.13 gap, row threshold 7.5 overrides fallback scale, near/far counts use real thresholds, nested selector metrics populate symbol diagnostics, FEATURE_MISSING is reserved for genuinely absent metrics, and zero-accepted evidence quality is PARTIAL when diagnostic evidence is invalid/missing.
+
+### Tests executed
+- `python -m pytest tests/test_strategy_quality_guardrails.py -q`
+
+### Risks and remaining limitations
+This patch does not tune LOW_SCORE or symbol selector thresholds. Shadow-outcome completeness still depends on available rejected-shadow evidence in generated artifacts. Manual BTCUSDT 30d/1h validation should be rerun in an environment with market data access.
+
+### Migration concerns
+None for SQLite. CSV consumers should tolerate additive columns.
+
+### Push recommendation
+Push after full targeted and complete pytest runs pass.
+
 ## 2026-07-01 PR255 follow-up: HIGH_VOL_GUARD correction and zero-accepted root-cause audit
 
 ### Why the patch was needed

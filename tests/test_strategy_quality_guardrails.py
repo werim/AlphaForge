@@ -189,3 +189,82 @@ def test_zero_accepted_root_cause_summary_reconciles_distribution():
     assert summary["primary_bottleneck"] == "LOW_SCORE"
     assert summary["secondary_bottleneck"] == "TOO_CHOPPY"
     assert summary["production_threshold_change_recommended"] is False
+
+
+def test_low_score_uses_row_threshold_not_backtest_config_scale():
+    rows = bo.build_low_score_diagnostics([
+        {
+            "reject_reason": "LOW_SCORE",
+            "symbol": "BTCUSDT",
+            "score": "6.37",
+            "min_required_score": "7.5",
+            "rr": "2.0",
+            "raw_rr": "2.0",
+            "effective_rr": "1.8",
+            "expectancy_bucket": "POSITIVE",
+            "all_failed_gates": '["LOW_SCORE"]',
+            "diagnostics": '{"min_score": 7.5, "adaptive_thresholds": {"min_score": 7.5}}',
+        }
+    ])
+    row = rows[0]
+    assert row["min_score_threshold"] == 7.5
+    assert row["score_threshold_source"] == "row.min_required_score"
+    assert row["score_gap_to_threshold"] == 1.13
+    assert row["score_threshold_scale_detected"] == "0_10"
+
+
+def test_low_score_near_far_counts_use_real_row_thresholds():
+    rows = bo.build_low_score_diagnostics([
+        {"reject_reason": "LOW_SCORE", "symbol": "BTCUSDT", "score": "7.2", "min_required_score": "7.5", "rr": "2", "raw_rr": "2", "effective_rr": "1.8", "expectancy_bucket": "POSITIVE", "all_failed_gates": '["LOW_SCORE"]'},
+        {"reject_reason": "LOW_SCORE", "symbol": "ETHUSDT", "score": "6.0", "min_required_score": "7.5", "rr": "2", "raw_rr": "2", "effective_rr": "1.8", "expectancy_bucket": "POSITIVE", "all_failed_gates": '["LOW_SCORE"]'},
+    ])
+    summary = bo.classify_low_score(rows)
+    assert summary["near_threshold_count"] == 1
+    assert summary["far_below_threshold_count"] == 1
+    assert summary["score_threshold_source_distribution"] == {"row.min_required_score": 2}
+
+
+def test_symbol_reject_extracts_nested_selector_metrics_when_top_level_empty():
+    diagnostics = {
+        "selector": {
+            "inputs": {"chop_score": 0.82, "trend_strength": 0.21, "candle_range_pct": 1.2, "liquidity_score": 0.74, "spread_pct": 0.01, "volume_24h_usdt": 123456},
+            "metrics": {"chop_score": 0.82, "trend_strength": 0.21, "volatility_pct": 2.4, "funding_rate_pct": 0.001},
+            "sub_scores": {"trend_score": 0.1},
+        },
+        "reject_reasons": ["TOO_CHOPPY"],
+    }
+    rows = bo.build_symbol_reject_diagnostics([
+        {"reject_reason": "TOO_CHOPPY", "symbol": "BTCUSDT", "timestamp": "1", "diagnostics": __import__('json').dumps(diagnostics)}
+    ])
+    row = rows[0]
+    assert row["metric_source"] == "DIAGNOSTICS_SELECTOR_INPUTS"
+    assert row["selector_chop_score"] == 0.82
+    assert row["selector_trend_strength"] == 0.21
+    assert row["selector_volatility_pct"] == 2.4
+    assert row["selector_volume_24h_usdt"] == 123456
+    assert bo.classify_symbol_reject(rows)["missing_market_structure_metric_count"] == 0
+    assert bo.classify_symbol_reject(rows)["symbol_reject_verdict"] == "VALID_MARKET_STRUCTURE_FILTER"
+
+
+def test_symbol_feature_missing_only_when_top_level_and_diagnostics_absent():
+    present = bo.build_symbol_reject_diagnostics([
+        {"reject_reason": "WEAK_TREND_AND_NO_RANGE_EDGE", "symbol": "BTCUSDT", "diagnostics": '{"selector":{"inputs":{"trend_strength":0.3}}}'},
+        {"reject_reason": "TOO_CHOPPY", "symbol": "ETHUSDT"},
+    ])
+    summary = bo.classify_symbol_reject(present)
+    assert summary["missing_market_structure_metric_count"] == 1
+    assert summary["symbol_reject_verdict"] == "VALID_MARKET_STRUCTURE_FILTER"
+    missing = bo.classify_symbol_reject(bo.build_symbol_reject_diagnostics([{"reject_reason": "TOO_CHOPPY", "symbol": "XRPUSDT"}]))
+    assert missing["symbol_reject_verdict"] == "FEATURE_MISSING"
+
+
+def test_zero_accepted_evidence_quality_reasons_are_partial_when_evidence_missing():
+    summary = bo.build_zero_accepted_root_cause_summary(
+        {"total_candidates": 2, "accepted_count": 0, "rejected_count": 2, "reject_reason_distribution": {"LOW_SCORE": 1, "TOO_CHOPPY": 1}},
+        {"high_vol_guard_verdict": "VALID_PROTECTIVE_GUARD"},
+        {"low_score_count": 1, "low_score_verdict": "VALID_QUALITY_FILTER", "threshold_scale_mismatch_detected_count": 1, "threshold_scale_correction_applied_count": 0},
+        {"symbol_reject_verdict": "FEATURE_MISSING", "symbol_reject_evidence": "missing"},
+    )
+    assert summary["evidence_quality"] == "PARTIAL"
+    assert "LOW_SCORE_THRESHOLD_SCALE_MISMATCH" in summary["evidence_quality_reasons"]
+    assert "SYMBOL_REJECT_METRICS_UNAVAILABLE" in summary["evidence_quality_reasons"]

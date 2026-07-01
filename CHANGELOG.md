@@ -1,3 +1,28 @@
+## 2026-07-01 PR256 diagnostic extraction correction
+
+### Added
+- LOW_SCORE diagnostic fields for score threshold source, detected score scale, detected threshold scale, mismatch detection, and correction flags.
+- Symbol reject diagnostic fields for nested selector inputs/metrics, reject reasons, sub-scores, and metric source.
+- Root-cause evidence-quality reasons.
+
+### Changed
+- LOW_SCORE diagnostics now derive thresholds from row-level evidence before falling back to BACKTEST config.
+- Symbol reject diagnostics now parse nested `diagnostics.selector` payloads when top-level columns are empty.
+- Zero-accepted root-cause evidence quality no longer claims COMPLETE when key diagnostic evidence is missing or invalid.
+
+### Fixed
+- Prevented 0-1 BACKTEST fallback threshold from masking 0-10 exported LOW_SCORE thresholds.
+- Prevented FEATURE_MISSING verdicts when selector metrics are present inside diagnostics JSON.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. Additive diagnostic/export fields only.
+
+### Known Issues
+- No production threshold tuning is included; manual artifact regeneration is still required to validate BTCUSDT 30d/1h outputs end-to-end.
+
 ## 2026-07-01 - PR255 HIGH_VOL_GUARD correction and zero-accepted bottleneck audit
 
 ### Added
