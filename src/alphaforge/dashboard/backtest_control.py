@@ -1165,7 +1165,8 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     accepted_summary_count = _safe_int(summary.get("accepted_count"))
     result.accepted_trades = accepted_summary_count if accepted_summary_count is not None else (len(backtest_order_rows) or None)
     rejected_summary_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected"))
-    result.rejected_signals = rejected_summary_count if rejected_summary_count is not None else (len(rejected_rows) or None)
+    canonical_rejected_count = len(rejected_rows) if rejected_rows else rejected_summary_count
+    result.rejected_signals = canonical_rejected_count if canonical_rejected_count is not None else None
     result.win_count = _safe_int(summary.get("tp_hits"))
     result.loss_count = _safe_int(summary.get("sl_hits"))
     result.open_count = _safe_int(summary.get("open_at_end"))
@@ -1645,7 +1646,8 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.rejected_path = str(rejected_path) if rejected_path.exists() else None
     result.total_candidates = _safe_int(summary.get("total_candidates"))
     result.accepted_trades = _safe_int(summary.get("accepted_count"))
-    result.rejected_signals = _safe_int(summary.get("rejected_count") or summary.get("total_rejected"))
+    rejected_summary_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected"))
+    result.rejected_signals = len(rejected_rows) if rejected_rows else rejected_summary_count
     result.win_count = _safe_int(summary.get("tp_hits"))
     result.loss_count = _safe_int(summary.get("sl_hits"))
     result.open_count = _safe_int(summary.get("open_at_end"))

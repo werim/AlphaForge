@@ -1792,9 +1792,35 @@ def test_backtest_quality_summary_canonical_distribution_can_use_rejected_orders
 
     summary = bo.build_backtest_quality_summary(persisted, canonical_rejected_rows=rejected_orders)
 
+    assert summary["rejected_count"] == 2
+    assert summary["canonical_rejected_count"] == 2
+    assert summary["signal_rejected_count"] == 2
+    assert summary["symbol_rejected_count"] == 0
+    assert sum(summary["reject_reason_distribution"].values()) == summary["rejected_count"]
     assert summary["reject_reason_distribution"] == {"LOW_SCORE": 1, "TOO_CHOPPY": 1}
     assert summary["canonical_reject_reason_distribution"] == {"LOW_SCORE": 1, "TOO_CHOPPY": 1}
     assert summary["raw_gate_reject_reason_distribution"] != summary["canonical_reject_reason_distribution"]
+
+
+def test_backtest_quality_summary_separates_signal_and_symbol_reject_counts():
+    persisted = [
+        {"signal_id": "A:1", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 4.0, "rr": 1.0, "effective_rr": 0.5, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "A:1", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "LOW_EFFECTIVE_RR", "score": 4.0, "rr": 1.0, "effective_rr": 0.5, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+    ]
+    rejected_orders = [
+        {"signal_id": "A:1", "lifecycle_state": "SIGNAL_REJECTED", "reject_reason": "LOW_SCORE"},
+        {"signal_id": "B:1", "lifecycle_state": "SYMBOL_REJECTED", "source_stage": "SYMBOL_SELECTOR", "reject_reason": "TOO_CHOPPY"},
+        {"signal_id": "C:1", "lifecycle_state": "SYMBOL_SELECTOR_REJECT", "source": "SYMBOL_SELECTOR", "reject_reason": "WEAK_TREND_AND_NO_RANGE_EDGE"},
+    ]
+
+    summary = bo.build_backtest_quality_summary(persisted, canonical_rejected_rows=rejected_orders)
+
+    assert summary["rejected_count"] == 3
+    assert summary["canonical_rejected_count"] == 3
+    assert summary["signal_rejected_count"] == 1
+    assert summary["symbol_rejected_count"] == 2
+    assert sum(summary["reject_reason_distribution"].values()) == summary["rejected_count"]
+    assert sum(summary["canonical_reject_reason_distribution"].values()) == summary["canonical_rejected_count"]
 
 
 def test_symbol_rejected_rows_export_not_applicable_expectancy_and_availability_flags():

@@ -1,3 +1,50 @@
+## 2026-07-01 - BACKTEST quality summary reject-count parity surgery report
+
+### Why this patch was needed
+A BTCUSDT 30d/1h BACKTEST artifact showed `backtest_quality_summary.csv.rejected_count=518` while the same file's canonical reject distributions, `order_backtest_summary.csv`, and `rejected_orders.csv` all represented 718 rejected rows.
+
+### Root cause
+`build_backtest_quality_summary` kept using signal-created lifecycle rows for the top-level `rejected_count` while its canonical distributions were correctly sourced from `rejected_orders.csv`, which also includes pre-signal `SYMBOL_REJECTED` rows.
+
+### Files changed
+- `backtest_order.py`: makes quality-summary `rejected_count` and `canonical_rejected_count` use canonical rejected totals, while exporting explicit signal-only and symbol-selector counts.
+- `src/alphaforge/dashboard/backtest_control.py`: makes overall dashboard BACKTEST rejection rate prefer canonical rejected artifact rows when present.
+- `tests/test_backtest_order_scanner.py`: adds canonical total and split-count regressions.
+- `tests/test_dashboard_app.py`: adds dashboard rejection-rate regression for canonical rejected rows.
+- `VERSION.md`, `REPORT.md`, `CHANGELOG.md`: document behavior, compatibility, tests, and risks.
+
+### Runtime behavior changes
+No trading filters, acceptance thresholds, lifecycle progression, or PAPER/LIVE runtime behavior changed. Only BACKTEST artifact accounting and dashboard display accounting changed.
+
+### Lifecycle changes
+None. `SIGNAL_REJECTED` and `SYMBOL_REJECTED` remain separate lifecycle states; the quality summary now exports both split counts explicitly.
+
+### Persistence changes
+No SQLite schema migration. CSV quality-summary metrics are additive except that `rejected_count` is corrected to canonical overall rejected rows.
+
+### Export/schema changes
+`backtest_quality_summary.csv` now includes `signal_rejected_count`, `symbol_rejected_count`, and `canonical_rejected_count`; `rejected_count` equals the canonical total and the sum of `canonical_reject_reason_distribution`.
+
+### Tests added
+Added regressions for quality-summary canonical rejected total, signal/symbol split metrics, distribution-total parity, and dashboard overall reject-rate canonical counting.
+
+### Tests executed
+- `python -m pytest tests -k "backtest or quality or reject or dashboard" -q`
+- `python -m pytest -q`
+- `python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT --output-dir data/backtests/manual_btcusdt_30d_1h_pr251_followup --force-refresh` (blocked by proxy tunnel 403 before artifacts were generated)
+
+### Risks
+Downstream consumers that interpreted `backtest_quality_summary.csv.rejected_count` as signal-only should switch to `signal_rejected_count`. The corrected `rejected_count` now matches canonical rejected artifacts.
+
+### Remaining limitations
+Manual BTCUSDT 30d/1h validation was attempted but Binance historical fetch was blocked by proxy tunnel 403 before artifacts were generated.
+
+### Migration concerns
+No database migration required. CSV readers should tolerate the new additive metrics.
+
+### Push recommendation
+Safe to push after requested pytest validation. Do not claim LIVE readiness.
+
 ## 2026-07-01 - BACKTEST post-PR251 artifact consistency surgery report
 
 ### Why this patch was needed

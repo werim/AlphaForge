@@ -1,3 +1,25 @@
+## 2026-07-01 - BACKTEST quality summary reject-count parity
+
+### Added
+- Added explicit `signal_rejected_count`, `symbol_rejected_count`, and `canonical_rejected_count` metrics to `backtest_quality_summary.csv`.
+- Added regression coverage for canonical reject totals and dashboard overall reject-rate counting.
+
+### Changed
+- `backtest_quality_summary.csv.rejected_count` now follows the canonical rejected total from `rejected_orders.csv` / canonical reject distribution instead of signal-only lifecycle rejects.
+- Dashboard overall BACKTEST reject rate now prefers canonical rejected artifact rows when available.
+
+### Fixed
+- Fixed an internal contradiction where quality-summary reject distributions included `SYMBOL_REJECTED` rows but `rejected_count` excluded them.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. The previous signal-only count remains available as `signal_rejected_count`.
+
+### Known Issues
+- Manual BTCUSDT 30d/1h validation still depends on Binance/network availability. LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - BACKTEST post-PR251 artifact consistency
 
 ### Added

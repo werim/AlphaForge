@@ -2208,15 +2208,28 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]], canonical_reje
         for r in rejected_rows
     ])
     if canonical_rejected_rows is None:
+        canonical_rejected_rows_for_counts = rejected_rows
         canonical_reject_reason_distribution = raw_gate_reject_reason_distribution
     else:
+        canonical_rejected_rows_for_counts = list(canonical_rejected_rows)
         canonical_reject_reason_distribution = _distribution([
             str(r.get("reject_reason") or r.get("reason") or "UNKNOWN").strip() or "UNKNOWN"
-            for r in canonical_rejected_rows
+            for r in canonical_rejected_rows_for_counts
         ])
+    canonical_rejected_count = sum(canonical_reject_reason_distribution.values())
+    total_for_summary = max(total, len(accepted_rows) + canonical_rejected_count) if canonical_rejected_rows is not None else total
+    signal_rejected_count = len(rejected_rows)
+    symbol_rejected_count = sum(
+        1
+        for r in canonical_rejected_rows_for_counts
+        if str(r.get("lifecycle_state", "") or "").strip().upper() in {"SYMBOL_REJECTED", "SYMBOL_SELECTOR_REJECT"}
+        or str(r.get("source", "") or "").strip().upper() == "SYMBOL_SELECTOR"
+        or str(r.get("source_stage", "") or "").strip().upper() == "SYMBOL_SELECTOR"
+        or str(r.get("event_flags", "") or "").strip().upper() == "SYMBOL_SELECTOR"
+    )
 
     return {
-        "total_candidates": total,
+        "total_candidates": total_for_summary,
         "accepted_count": len(accepted_rows),
         "baseline_accepted_trades": max(len(accepted_rows) - len(rescue_rows), 0),
         "rescue_candidate_count": len(rescue_rows),
@@ -2231,8 +2244,11 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]], canonical_reje
         "rescue_avg_score": (sum(_safe_float(r.get("score"), 0.0) for r in rescue_rows) / len(rescue_rows)) if rescue_rows else 0.0,
         "rescue_reject_reasons": {},
         "accepted_reason_breakdown": _distribution([r.get("accepted_reason", "BASELINE") for r in accepted_rows]),
-        "rejected_count": len(rejected_rows),
-        "reject_rate": (len(rejected_rows) / total) if total else 0.0,
+        "rejected_count": canonical_rejected_count,
+        "signal_rejected_count": signal_rejected_count,
+        "symbol_rejected_count": symbol_rejected_count,
+        "canonical_rejected_count": canonical_rejected_count,
+        "reject_rate": (canonical_rejected_count / total_for_summary) if total_for_summary else 0.0,
         "reject_reason_distribution": canonical_reject_reason_distribution,
         "canonical_reject_reason_distribution": canonical_reject_reason_distribution,
         "raw_gate_reject_reason_distribution": raw_gate_reject_reason_distribution,
@@ -2244,7 +2260,7 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]], canonical_reje
         "expectancy_bucket_distribution": _distribution([r.get("expectancy_bucket", "UNKNOWN") for r in candidate_rows]),
         "execution_ctx_missing_distribution": {
             "true": execution_ctx_missing_true,
-            "false": total - execution_ctx_missing_true,
+            "false": total_for_summary - execution_ctx_missing_true,
         },
         "unavailable_execution_context_field_counts": unavailable_counts,
         "score_percentiles": _percentiles(score_vals, [10, 25, 50, 75, 90]),
