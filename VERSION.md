@@ -1,3 +1,15 @@
+## 2026-07-01 BACKTEST reject reason attribution
+
+- Current version: unreleased BACKTEST reject attribution integrity increment
+- Current phase: rejected candidate auditability and dashboard explanation repair
+- Runtime maturity: BACKTEST reject diagnostics improved; filters remain conservative and no acceptance thresholds were loosened
+- BACKTEST/PAPER/LIVE alignment: shared order diagnostics now expose raw/effective RR thresholds for BACKTEST attribution; PAPER/LIVE decision paths retain concrete reasons
+- Lifecycle coverage: SIGNAL_REJECTED rows preserve concrete reject reasons when diagnostics support attribution; lifecycle ordering unchanged
+- Execution realism coverage: LOW_EFFECTIVE_RR, NEGATIVE_EXPECTANCY, EXPECTANCY_MISSING, MISSING_EXECUTION_CONTEXT, LOW_SCORE, and REGIME_MISMATCH are surfaced instead of masked as UNKNOWN
+- Known critical risks: strategy expectancy remains unproven; UNKNOWN can still occur for genuinely unclassified rejects; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT READY
+
 ## 2026-07-01 Dashboard BACKTEST accepted-count and guardrail attribution fix
 
 - Current version: unreleased dashboard BACKTEST reporting integrity increment

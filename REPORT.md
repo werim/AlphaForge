@@ -1,3 +1,47 @@
+## 2026-07-01 - BACKTEST reject reason attribution surgery report
+
+### Why this patch was needed
+Latest BACKTEST diagnostics showed 516/516 candidates rejected with every exported reject reason collapsed to `UNKNOWN`, obscuring whether rejects came from weak effective RR, expectancy, missing execution evidence, score, or regime/setup alignment.
+
+### Root cause
+The shared order gate already emitted diagnostics such as `effective_rr`, thresholds, failed gates, and expectancy status, but the BACKTEST handoff trusted `result.reason`/`result.reject_reason` first. When that field was `UNKNOWN`, exported `rejected_orders.csv` and dashboard summary distributions could remain unclassified instead of deriving the first concrete blocking cause from diagnostics and execution context.
+
+### Files changed
+- `backtest_order.py`: added concrete reject attribution from diagnostics/market context, preserves primary and secondary reject reasons, applies attribution before rejected lifecycle/CSV export, and adds threshold diagnostics to quality summaries.
+- `src/alphaforge/order.py`: exports threshold settings in decision diagnostics so BACKTEST attribution can separate raw RR from effective RR failures at export time.
+- `tests/test_backtest_order_scanner.py`: added reject attribution and rejected CSV preservation tests.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: documented behavior, compatibility, risks, and validation.
+
+### Runtime behavior changes
+Rejected BACKTEST candidates now preserve the first concrete cause when the runtime status reason is unknown. Filters are not loosened and no rejected candidate is forced into acceptance.
+
+### Lifecycle changes
+`SIGNAL_REJECTED` rows now carry a concrete reject reason when diagnostics identify one. Lifecycle ordering is unchanged.
+
+### Persistence changes
+No database migration. CSV/lifecycle artifacts gain better reject reason values and optional `secondary_reject_reasons` export data.
+
+### Export/schema changes
+`rejected_orders.csv` preserves `reject_reason` plus `secondary_reject_reasons`. BACKTEST quality summary diagnostics include `thresholds_used` with `min_score`, `min_raw_rr`, `min_effective_rr`, `reject_unknown_expectancy`, and `require_execution_context`.
+
+### Tests added
+Added focused regressions for low effective RR, negative expectancy, missing expectancy, missing execution context, non-UNKNOWN reject distributions, and rejected CSV preservation.
+
+### Tests executed
+- `pytest -q tests/test_backtest_order_scanner.py tests/test_phase123_foundations.py tests/test_backtest_paper_pre_submit_parity.py`
+
+### Risks
+Dashboard consumers may see `LOW_EFFECTIVE_RR` instead of older `RR_TOO_LOW` for execution-adjusted failures. This is intended attribution tightening, not strategy loosening.
+
+### Remaining limitations
+`UNKNOWN` is still possible when no concrete diagnostic, threshold, expectancy, score, regime, or execution-context failure can be determined.
+
+### Migration concerns
+No schema migration required. CSV consumers should tolerate the additional optional `secondary_reject_reasons` column.
+
+### Push recommendation
+Safe to push after full `pytest -q` passes. Do not claim LIVE readiness.
+
 ## 2026-07-01 - Dashboard guardrail section rendering regression surgery report
 
 ### Why this patch was needed

@@ -1,3 +1,26 @@
+## 2026-07-01 - BACKTEST reject reason attribution
+
+### Added
+- Added BACKTEST reject attribution fallback from diagnostics, thresholds, expectancy, and execution-context completeness.
+- Added `secondary_reject_reasons` export support and threshold diagnostics for reject dashboards.
+- Added regression coverage for concrete reject reasons and rejected CSV preservation.
+
+### Changed
+- BACKTEST export/summary attribution now reports `LOW_EFFECTIVE_RR` for execution-adjusted RR failures instead of leaving placeholder `UNKNOWN` reasons.
+- BACKTEST quality summaries derive concrete distribution keys when rejected rows still contain placeholder reasons.
+
+### Fixed
+- Fixed all-rejected BACKTEST runs reporting `UNKNOWN` for every reject reason despite concrete failure evidence.
+
+### Removed
+- None.
+
+### Breaking Changes
+- No runtime schema break. CSV/report consumers may observe more specific `LOW_EFFECTIVE_RR` values where placeholder `UNKNOWN` appeared before.
+
+### Known Issues
+- `UNKNOWN` remains only for genuinely unclassified rejects with insufficient diagnostics; LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - Dashboard guardrail section rendering regression
 
 ### Added
