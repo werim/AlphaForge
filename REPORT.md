@@ -1,3 +1,40 @@
+## 2026-07-01 BACKTEST lifecycle/reject SQL persistence completion
+
+### Why the patch was needed
+BACKTEST lifecycle artifacts already emitted canonical pre-trade states, but rejected decisions were not mirrored into `order_decisions` during the SQL-first lifecycle persistence pass. This made SQL-backed reject diagnostics depend on lifecycle rows alone and left ambiguous fallback values (`UNKNOWN`) for last-resort reject and unavailable expectancy evidence.
+
+### Root cause
+`backtest_order._persist_lifecycle_rows` saved `trade_lifecycle_events` from lifecycle rows but did not also persist the corresponding signal and final order-decision rows. Missing reject attribution fell through to `UNKNOWN`, and missing BACKTEST expectancy used a generic unavailable bucket.
+
+### Files changed
+- `backtest_order.py`: persists `signals` and final `order_decisions` alongside lifecycle events; rejected SQL rows now receive non-empty canonical reject reasons with `REJECT_REASON_UNAVAILABLE` as the explicit defensive fallback; unavailable expectancy now exports `BACKTEST_EXPECTANCY_UNAVAILABLE`; persisted lifecycle export rows include additive SQL order-decision count diagnostics.
+- `tests/test_backtest_order_scanner.py`: updated lifecycle/reject persistence regressions to assert rejected lifecycle rows have matching SQL rejected-decision diagnostics and the explicit BACKTEST expectancy-unavailable bucket.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: documented lifecycle/reject persistence behavior, risks, and validation.
+
+### Runtime behavior changes
+BACKTEST export persistence now writes SQL signal and final decision evidence in the same pass as lifecycle events. PAPER/LIVE behavior and guards are unchanged.
+
+### Lifecycle changes
+Canonical lifecycle states are preserved. Rejected signal/order states remain distinct as `SIGNAL_REJECTED`, `ORDER_REJECTED`, and `SYMBOL_REJECTED`; accepted paths still retain pre-terminal states before `POSITION_CLOSED`.
+
+### Persistence changes
+No migration. In-memory BACKTEST SQLite persistence now contains `signals`, `order_decisions`, and `trade_lifecycle_events` for exported lifecycle candidates. Rejected rows can be reconciled through additive `sql_order_decision_count` and `sql_rejected_decision_count` diagnostics.
+
+### Export/schema changes
+`order_lifecycle.csv` receives additive SQL-count columns through the existing dynamic fieldname resolver. Existing columns remain backward-compatible. Missing BACKTEST expectancy is now labeled `BACKTEST_EXPECTANCY_UNAVAILABLE` instead of generic `EXPECTANCY_UNAVAILABLE`/`UNKNOWN`.
+
+### Tests added/executed
+Updated regressions for SQL-backed rejected-decision counts and explicit unavailable expectancy buckets.
+
+### Risks and remaining limitations
+The BACKTEST SQL persistence used by artifact generation is still run-local/in-memory; it validates export parity and SQL contracts but is not a durable research database unless callers configure a persistent DB path. Historical funding/spread fields remain limited to available historical/safe estimates and explicit unavailable sentinels; BACKTEST still must not call live orderbook/order APIs.
+
+### Migration concerns
+No SQLite schema migration. CSV consumers should tolerate additive SQL diagnostic columns and the `BACKTEST_EXPECTANCY_UNAVAILABLE` value.
+
+### Push recommendation
+Push after targeted/full pytest validation. LIVE remains NOT READY.
+
 ## 2026-07-01 reject overlay diagnostics
 
 ### Why the patch was needed

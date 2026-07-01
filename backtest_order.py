@@ -18,7 +18,7 @@ from alphaforge.execution import build_execution_context, build_execution_cost_m
 from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
-from alphaforge.persistence import init_db, save_trade_lifecycle_event
+from alphaforge.persistence import init_db, save_order_decision, save_signal, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
 from alphaforge.symbols import SymbolListError, normalize_symbol_list
 from alphaforge.historical_market_data import (
@@ -222,6 +222,8 @@ HARD_SAFETY_GATES: tuple[dict[str, Any], ...] = (
 
 
 CONCRETE_UNKNOWN_REJECT_PLACEHOLDERS = {"", "UNKNOWN", "REJECT_REASON_MISSING"}
+REJECT_REASON_UNAVAILABLE = "REJECT_REASON_UNAVAILABLE"
+
 
 def _primary_reject_reason_from_context(
     *,
@@ -277,7 +279,7 @@ def _primary_reject_reason_from_context(
         return "LOW_SCORE"
     if "REGIME" in failed:
         return "REGIME_MISMATCH"
-    return "UNKNOWN"
+    return REJECT_REASON_UNAVAILABLE
 
 def filter_profile_name(disabled_filters: Iterable[str]) -> str:
     disabled = {str(r).upper() for r in disabled_filters}
@@ -494,7 +496,7 @@ def _lifecycle_signal_id(row: LifecycleRow, lifecycle_state: str | None = None) 
 
 def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
-        return "EXPECTANCY_UNAVAILABLE"
+        return "BACKTEST_EXPECTANCY_UNAVAILABLE"
     if expectancy < 0.0:
         return "NEGATIVE"
     if expectancy < 0.05:
@@ -1872,70 +1874,126 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
             source_stage = "SYMBOL_SELECTOR" if pre_signal_symbol_reject else "SIGNAL_ENGINE"
             if lifecycle_state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"}:
                 decision = "REJECTED"
+                reject_reason = str(row.reject_reason or "").strip().upper() or REJECT_REASON_UNAVAILABLE
             elif lifecycle_state == "SIGNAL_CREATED":
                 decision = "PENDING"
+                reject_reason = ""
             else:
                 decision = "ACCEPTED"
+                reject_reason = row.reject_reason
+            signal_id = _lifecycle_signal_id(row, lifecycle_state)
+            execution_ctx = {
+                "volume_24h_usdt": row.volume_24h_usdt,
+                "spread_pct": row.spread_pct,
+                "funding_rate_pct": row.funding_rate_pct,
+                "expected_slippage_pct": row.expected_slippage_pct,
+                "volatility_regime": row.volatility_regime,
+                "liquidity_score": row.liquidity_score,
+                "volatility_score": row.volatility_score,
+                "liquidity_ok": row.liquidity_ok,
+                "volatility_ok": row.volatility_ok,
+                "shadow_outcome": row.shadow_outcome or None,
+                "cost_penalty": row.cost_penalty,
+                "close_reason": row.close_reason,
+                "side": row.side,
+                "entry": row.entry,
+                "entry_price": row.entry,
+                "sl": row.sl,
+                "stop_loss": row.sl,
+                "tp": row.tp,
+                "take_profit": row.tp,
+                "exit_price": row.close_price,
+                "close_price": row.close_price,
+                "gross_pnl": row.net_pnl_usdt,
+                "net_pnl": row.net_pnl_usdt,
+                "net_pnl_usdt": row.net_pnl_usdt,
+                "fees": row.cost_penalty,
+                "accepted_reason": row.accepted_reason,
+                "original_reject_reason": row.original_reject_reason,
+                "rescue_size_multiplier": row.rescue_size_multiplier,
+                "rescue_effective_rr": row.rescue_effective_rr,
+                "rescue_decision_context": row.rescue_decision_context,
+                "bypassed_reject_reasons": row.bypassed_reject_reasons,
+                "disabled_filters": row.disabled_filters,
+                "disabled_filter_bypass_count": row.disabled_filter_bypass_count,
+                "filter_switch_experiment_active": row.filter_switch_experiment_active,
+                "source_stage": row.source_stage or source_stage,
+                "rr_available": row.rr_available,
+                "effective_rr_available": row.effective_rr_available,
+                "expectancy_available": row.expectancy_available,
+            }
+            effective_rr = row.effective_rr if row.effective_rr is not None else row.rr
+            save_signal(
+                session,
+                signal_id=signal_id,
+                symbol=row.symbol,
+                side=row.side,
+                timeframe=None,
+                mode="BACKTEST",
+                score=row.score,
+                rr=row.rr,
+                effective_rr=effective_rr,
+                expectancy_bucket=row.expectancy_bucket,
+            )
+            if decision == "REJECTED" or lifecycle_state == "ORDER_PLACED":
+                save_order_decision(
+                    session,
+                    decision_id=f"{signal_id}:{lifecycle_state}:{row.lifecycle_seq or idx + 1}",
+                    signal_id=signal_id,
+                    order_id=row.order_id or None,
+                    symbol=row.symbol,
+                    mode="BACKTEST",
+                    phase="final",
+                    decision=decision,
+                    reject_reason=reject_reason,
+                    score=row.score,
+                    rr=row.rr,
+                    effective_rr=effective_rr,
+                    expectancy_bucket=row.expectancy_bucket,
+                    order_payload={"lifecycle_state": lifecycle_state, "reject_reason": reject_reason},
+                    execution_ctx=execution_ctx,
+                    execution_ctx_missing=execution_ctx_missing,
+                    expected_slippage_pct=None if row.expected_slippage_pct == "UNAVAILABLE_BACKTEST" else row.expected_slippage_pct,
+                    spread_pct=None if row.spread_pct == "UNAVAILABLE_BACKTEST" else row.spread_pct,
+                    funding_rate_pct=None if row.funding_rate_pct == "UNAVAILABLE_BACKTEST" else row.funding_rate_pct,
+                    volatility_regime=None if row.volatility_regime == "UNAVAILABLE_BACKTEST" else row.volatility_regime,
+                )
             save_trade_lifecycle_event(
                 session,
                 event_id=_lifecycle_event_id(row, idx, lifecycle_state),
-                signal_id=_lifecycle_signal_id(row, lifecycle_state),
+                signal_id=signal_id,
                 order_id=row.order_id or None,
                 symbol=row.symbol,
                 mode="BACKTEST",
                 lifecycle_state=lifecycle_state,
                 decision=decision,
-                reject_reason=row.reject_reason,
+                reject_reason=reject_reason,
                 score=row.score,
                 rr=row.rr,
-                effective_rr=(row.effective_rr if row.effective_rr is not None else row.rr),
+                effective_rr=effective_rr,
                 expectancy_bucket=row.expectancy_bucket,
-                execution_ctx={
-                    "volume_24h_usdt": row.volume_24h_usdt,
-                    "spread_pct": row.spread_pct,
-                    "funding_rate_pct": row.funding_rate_pct,
-                    "expected_slippage_pct": row.expected_slippage_pct,
-                    "volatility_regime": row.volatility_regime,
-                    "liquidity_score": row.liquidity_score,
-                    "volatility_score": row.volatility_score,
-                    "liquidity_ok": row.liquidity_ok,
-                    "volatility_ok": row.volatility_ok,
-                    "shadow_outcome": row.shadow_outcome or None,
-                    "cost_penalty": row.cost_penalty,
-                    "close_reason": row.close_reason,
-                    "side": row.side,
-                    "entry": row.entry,
-                    "entry_price": row.entry,
-                    "sl": row.sl,
-                    "stop_loss": row.sl,
-                    "tp": row.tp,
-                    "take_profit": row.tp,
-                    "exit_price": row.close_price,
-                    "close_price": row.close_price,
-                    "gross_pnl": row.net_pnl_usdt,
-                    "net_pnl": row.net_pnl_usdt,
-                    "net_pnl_usdt": row.net_pnl_usdt,
-                    "fees": row.cost_penalty,
-                    "accepted_reason": row.accepted_reason,
-                    "original_reject_reason": row.original_reject_reason,
-                    "rescue_size_multiplier": row.rescue_size_multiplier,
-                    "rescue_effective_rr": row.rescue_effective_rr,
-                    "rescue_decision_context": row.rescue_decision_context,
-                    "bypassed_reject_reasons": row.bypassed_reject_reasons,
-                    "disabled_filters": row.disabled_filters,
-                    "disabled_filter_bypass_count": row.disabled_filter_bypass_count,
-                    "filter_switch_experiment_active": row.filter_switch_experiment_active,
-                    "source_stage": row.source_stage or source_stage,
-                    "rr_available": row.rr_available,
-                    "effective_rr_available": row.effective_rr_available,
-                    "expectancy_available": row.expectancy_available,
-                },
+                execution_ctx=execution_ctx,
                 execution_ctx_missing=execution_ctx_missing,
                 event_ts=str(row.timestamp),
                 lifecycle_seq=row.lifecycle_seq or (idx + 1),
                 lifecycle_id=row.lifecycle_id or f"{row.symbol}:{row.timestamp}",
                 payload={"source_stage": source_stage, "event_flags": row.event_flags},
             )
+        decision_counts = {
+            row["signal_id"]: {"sql_order_decision_count": row["total_count"], "sql_rejected_decision_count": row["rejected_count"]}
+            for row in session.execute(
+                text(
+                    """
+                    SELECT signal_id,
+                           COUNT(*) AS total_count,
+                           SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected_count
+                    FROM order_decisions
+                    WHERE mode = 'BACKTEST'
+                    GROUP BY signal_id
+                    """
+                )
+            ).mappings().all()
+        }
         persisted = session.execute(
             text(
                 """
@@ -1978,7 +2036,12 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 """
             )
         ).mappings().all()
-    return [dict(row) for row in persisted]
+    out = []
+    for row in persisted:
+        data = dict(row)
+        data.update(decision_counts.get(data.get("signal_id"), {"sql_order_decision_count": 0, "sql_rejected_decision_count": 0}))
+        out.append(data)
+    return out
 
 
 def _attach_rejected_shadow_to_lifecycle(rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation]) -> None:
