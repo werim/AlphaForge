@@ -88,14 +88,14 @@
     {% if backtest_result %}
     <section class="result-panel">
       <h2>Backtest Result</h2>
-      {% if backtest_result.status != 'COMPLETED' %}
+      {% if backtest_result.status not in ['COMPLETED', 'PARTIAL'] %}
       <div class="alert warn-box"><strong>SELECTED_BACKTEST_UNAVAILABLE_DUE_TO_FAILURE.</strong> Selected BACKTEST diagnostics are unavailable because this run failed closed; PAPER runtime diagnostics are not substituted.</div>
       {% if backtest_result.error_message %}<div class="alert fail-box"><strong>Backtest failed closed.</strong> {{ backtest_result.error_message }}</div>{% endif %}
       {% if backtest_result.lifecycle_warning %}<div class="alert warn-box">{{ backtest_result.lifecycle_warning }}</div>{% endif %}
       {% if backtest_result.execution_context_warning %}<div class="alert warn-box">{{ backtest_result.execution_context_warning }}</div>{% endif %}
       {% else %}
       <div class="cards">
-        <article class="metric"><label>Status</label><strong class="badge {% if backtest_result.status == 'COMPLETED' %}pass{% else %}fail{% endif %}">{{ backtest_result.status }}</strong></article>
+        <article class="metric"><label>Status</label><strong class="badge {% if backtest_result.status == 'COMPLETED' %}pass{% elif backtest_result.status == 'PARTIAL' %}neutral{% else %}fail{% endif %}">{{ backtest_result.status }}</strong></article>
         <article class="metric"><label>Period</label><strong>{{ backtest_result.period }}</strong></article>
         <article class="metric"><label>Symbols</label><strong class="small-value">{% if backtest_result.symbols %}{{ backtest_result.symbols|join(', ') }}{% else %}selected by MAX_SYMBOLS={{ backtest_result.max_symbols }}{% endif %}</strong></article>
         <article class="metric"><label>Timeframe</label><strong>{{ backtest_result.timeframe }}</strong></article>
@@ -107,8 +107,8 @@
       <h3>Backtest Profile Comparison</h3>
       <p class="alert warn-box"><strong>ALL_FILTERS_OFF:</strong> Diagnostic stress test, not strategy performance. Objective score penalizes drawdown fallback, loss streaks, overtrading, execution cost, and low sample size.</p>
       <table>
-        <thead><tr><th>Profile</th><th>Raw net PnL rank</th><th>Objective rank</th><th>Raw net PnL</th><th>Objective score</th><th>Accepted</th><th>Win/Loss/Open</th><th>Avg trades/day</th><th>Score=10 TP/SL</th><th>Warnings</th></tr></thead>
-        <tbody>{% for row in backtest_result.profile_leaderboard %}<tr><td>{{ row.profile_name }}</td><td>{{ row.raw_net_pnl_rank }}</td><td>{{ row.objective_score_rank }}</td><td>{{ row.raw_net_pnl }}</td><td>{{ row.final_objective_score }}</td><td>{{ row.accepted_trades }}</td><td>{{ row.win_count }}/{{ row.loss_count }}/{{ row.open_count }}</td><td>{{ row.avg_trades_per_day }}</td><td>{{ row.score_10_tp_count }}/{{ row.score_10_sl_count }}</td><td>{{ row.warnings|join(', ') }}</td></tr>{% endfor %}</tbody>
+        <thead><tr><th>Profile</th><th>Status</th><th>Raw net PnL rank</th><th>Objective rank</th><th>Raw net PnL</th><th>Objective score</th><th>Accepted</th><th>Win/Loss/Open</th><th>Avg trades/day</th><th>Score=10 TP/SL</th><th>Warnings</th></tr></thead>
+        <tbody>{% for row in backtest_result.profile_leaderboard %}<tr><td>{{ row.profile_name }}</td><td>{{ row.status or 'COMPLETED' }}</td><td>{{ row.raw_net_pnl_rank }}</td><td>{{ row.objective_score_rank }}</td><td>{{ row.raw_net_pnl }}</td><td>{{ row.final_objective_score }}</td><td>{{ row.accepted_trades }}</td><td>{{ row.win_count }}/{{ row.loss_count }}/{{ row.open_count }}</td><td>{{ row.avg_trades_per_day }}</td><td>{{ row.score_10_tp_count }}/{{ row.score_10_sl_count }}</td><td>{{ row.warnings|join(', ') }}</td></tr>{% endfor %}</tbody>
       </table>
       <p>Artifacts: {% if backtest_result.filter_profile_comparison_path %}{{ backtest_result.filter_profile_comparison_path }}{% endif %}{% if backtest_result.profile_leaderboard_path %}<br>{{ backtest_result.profile_leaderboard_path }}{% endif %}</p>
       {% endif %}

@@ -18,6 +18,81 @@ from alphaforge.historical_market_data import supported_intervals
 
 SUPPORTED_TIMEFRAMES: tuple[str, ...] = tuple(tf for tf in ("1m", "15m", "1h", "4h", "1d") if tf in supported_intervals())
 INSUFFICIENT_BINANCE_DATA_MESSAGE = "Not enough historical data returned by Binance for the requested period. Try fewer days or a higher timeframe."
+DASHBOARD_BACKTEST_SUBPROCESS_TIMEOUT_SECONDS = 600.0
+
+
+def _safe_subprocess_timeout(seconds: float | int | None) -> float:
+    """Return a strictly positive subprocess timeout or fail before subprocess.run."""
+    if seconds is None:
+        raise ValueError("subprocess timeout is required")
+    timeout = float(seconds)
+    if timeout <= 0:
+        raise ValueError(f"subprocess timeout must be positive; got {timeout:g}")
+    return timeout
+
+
+def _timeout_profile_metrics(profile: str, profile_dir: Path, command: list[str], timeout_seconds: float, warnings: list[str] | None = None) -> dict[str, Any]:
+    warn = sorted(set(list(warnings or []) + ["PROFILE_TIMEOUT"]))
+    return {
+        "profile_name": profile,
+        "filter_profile": profile,
+        "status": "TIMEOUT",
+        "enabled_filters": [],
+        "disabled_filters": [],
+        "hard_safety_gates": [],
+        "candidates": None,
+        "accepted_trades": None,
+        "accepted_trades_source": "UNAVAILABLE_TIMEOUT",
+        "lifecycle_event_count": 0,
+        "rejected_row_count": 0,
+        "rejected_signals": None,
+        "reject_rate": None,
+        "win_count": None,
+        "loss_count": None,
+        "open_count": None,
+        "timeout_count": None,
+        "gross_pnl": None,
+        "net_pnl": None,
+        "return_pct": None,
+        "return": None,
+        "max_drawdown": None,
+        "max_drawdown_status": "UNAVAILABLE_TIMEOUT",
+        "max_consecutive_losses": None,
+        "profit_factor": None,
+        "avg_win": None,
+        "avg_loss": None,
+        "expectancy_per_trade": None,
+        "avg_trades_per_day": None,
+        "accepted_effective_rr_distribution": {},
+        "rejected_effective_rr_distribution": {},
+        "score_10_count": None,
+        "score_10_tp_count": None,
+        "score_10_sl_count": None,
+        "score_10_timeout_count": None,
+        "score_10_net_pnl": None,
+        "top_reject_reasons": [],
+        "objective_score": {"raw_net_pnl": 0.0, "final_objective_score": -1000000.0, "timeout_penalty": 1000000.0},
+        "warnings": warn,
+        "bucket_diagnostics": {},
+        "artifact_paths": {"directory": str(profile_dir)},
+        "failure_reason": "PROFILE_TIMEOUT",
+        "timeout_seconds": timeout_seconds,
+        "command": command,
+    }
+
+
+def _write_profile_timeout_metadata(profile_dir: Path, profile: str, command: list[str], timeout_seconds: float) -> None:
+    _write_backtest_run_metadata(
+        profile_dir / "backtest_profile_metadata.json",
+        {
+            "mode": "BACKTEST",
+            "profile_name": profile,
+            "status": "TIMEOUT",
+            "failure_reason": "PROFILE_TIMEOUT",
+            "timeout_seconds": timeout_seconds,
+            "command": command,
+        },
+    )
 
 
 def _write_backtest_run_metadata(path: Path, metadata: dict[str, Any]) -> None:
@@ -1289,7 +1364,7 @@ def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float,
         warn.append("SCORE_SATURATION_RISK")
     diagnostics = _rejection_diagnostics(rejected)
     return {
-        "profile_name": profile, "filter_profile": filter_state.get("filter_profile", profile),
+        "profile_name": profile, "filter_profile": filter_state.get("filter_profile", profile), "status": "COMPLETED",
         "enabled_filters": filter_state.get("enabled_filters", []), "disabled_filters": filter_state.get("disabled_filters", []),
         "hard_safety_gates": filter_state.get("hard_safety_gates", []), "candidates": _safe_int(summary.get("total_candidates")),
         "accepted_trades": accepted_count, "accepted_trades_source": accepted_source, "lifecycle_event_count": len(lifecycle), "rejected_row_count": len(rejected),
@@ -1407,14 +1482,22 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
                 profile_command.extend(["--disable-backtest-filter", reason])
             if request.short_breakdown_rescue_enabled:
                 profile_command.append("--rescue-enabled")
-            completed = subprocess.run(profile_command, cwd=repo_root, text=True, capture_output=True, timeout=600, check=False, env=base_env)
+            profile_timeout = _safe_subprocess_timeout(DASHBOARD_BACKTEST_SUBPROCESS_TIMEOUT_SECONDS)
+            try:
+                completed = subprocess.run(profile_command, cwd=repo_root, text=True, capture_output=True, timeout=profile_timeout, check=False, env=base_env)
+            except subprocess.TimeoutExpired:
+                _write_profile_timeout_metadata(profile_dir, profile, profile_command, profile_timeout)
+                comparison_profiles[profile] = _timeout_profile_metrics(profile, profile_dir, profile_command, profile_timeout, warnings)
+                result.status = "PARTIAL"
+                result.error_message = f"Profile {profile} timed out. Completed profiles are still available."
+                continue
             if completed.returncode != 0:
                 result.status = "FAILED"
                 result.error_message = (completed.stderr or completed.stdout or f"{profile} failed")[-1200:]
                 return result
             comparison_profiles[profile] = _comparison_metrics(profile, profile_dir, request.initial_balance, warnings, window_days=request.last_days)
-        raw_sorted = sorted(comparison_profiles.values(), key=lambda r: (int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("raw_net_pnl", 0.0)), reverse=True)
-        obj_sorted = sorted(comparison_profiles.values(), key=lambda r: (int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("final_objective_score", 0.0)), reverse=True)
+        raw_sorted = sorted(comparison_profiles.values(), key=lambda r: (int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("raw_net_pnl", 0.0) or 0.0), reverse=True)
+        obj_sorted = sorted(comparison_profiles.values(), key=lambda r: (int(r.get("accepted_trades") or 0) > 0, r.get("objective_score", {}).get("final_objective_score", 0.0) or 0.0), reverse=True)
         raw_rank = {r["profile_name"]: i + 1 for i, r in enumerate(raw_sorted)}
         obj_rank = {r["profile_name"]: i + 1 for i, r in enumerate(obj_sorted)}
         leaderboard = []
@@ -1422,20 +1505,21 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
             leaderboard.append({
                 "profile_name": row["profile_name"], "raw_net_pnl": row["objective_score"]["raw_net_pnl"], "final_objective_score": row["objective_score"]["final_objective_score"],
                 "raw_net_pnl_rank": raw_rank[row["profile_name"]], "objective_score_rank": obj_rank[row["profile_name"]],
-                "accepted_trades": row["accepted_trades"], "win_count": row["win_count"], "loss_count": row["loss_count"], "open_count": row["open_count"],
+                "accepted_trades": row["accepted_trades"], "win_count": row["win_count"], "loss_count": row["loss_count"], "open_count": row["open_count"], "status": row.get("status", "COMPLETED"),
                 "avg_trades_per_day": row["avg_trades_per_day"], "score_10_tp_count": row["score_10_tp_count"], "score_10_sl_count": row["score_10_sl_count"], "warnings": row["warnings"],
             })
-        comparison = {"mode": "BACKTEST", "comparison_mode": True, "windows": {"30": "RUN" if request.last_days == 30 else "NOT_RUN", "90": "RUN" if request.last_days == 90 else "NOT_RUN", "180": "RUN" if request.last_days == 180 else "NOT_RUN", "365": "RUN" if request.last_days == 365 else "NOT_RUN"}, "profiles": comparison_profiles}
+        comparison_status = "PARTIAL" if any(row.get("status") == "TIMEOUT" for row in comparison_profiles.values()) else "COMPLETED"
+        comparison = {"mode": "BACKTEST", "comparison_mode": True, "status": comparison_status, "windows": {"30": "RUN" if request.last_days == 30 else "NOT_RUN", "90": "RUN" if request.last_days == 90 else "NOT_RUN", "180": "RUN" if request.last_days == 180 else "NOT_RUN", "365": "RUN" if request.last_days == 365 else "NOT_RUN"}, "profiles": comparison_profiles}
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "backtest_filter_profile_comparison.json").write_text(json.dumps(comparison, indent=2, sort_keys=True))
         (output_dir / "backtest_profile_leaderboard.json").write_text(json.dumps({"mode": "BACKTEST", "leaderboard": leaderboard}, indent=2, sort_keys=True))
         with (output_dir / "backtest_profile_leaderboard.csv").open("w", newline="") as fh:
-            fields = ["profile_name", "raw_net_pnl", "final_objective_score", "raw_net_pnl_rank", "objective_score_rank", "accepted_trades", "win_count", "loss_count", "open_count", "avg_trades_per_day", "score_10_tp_count", "score_10_sl_count", "warnings"]
+            fields = ["profile_name", "status", "raw_net_pnl", "final_objective_score", "raw_net_pnl_rank", "objective_score_rank", "accepted_trades", "win_count", "loss_count", "open_count", "avg_trades_per_day", "score_10_tp_count", "score_10_sl_count", "warnings"]
             writer = csv.DictWriter(fh, fieldnames=fields); writer.writeheader()
             for row in leaderboard:
                 writer.writerow({**row, "warnings": json.dumps(row["warnings"], sort_keys=True)})
-        result.status = "COMPLETED"
-        run_metadata.update({"status": "COMPLETED", "failure_reason": None})
+        result.status = comparison_status
+        run_metadata.update({"status": comparison_status, "failure_reason": "PROFILE_TIMEOUT" if comparison_status == "PARTIAL" else None})
         _write_backtest_run_metadata(run_metadata_path, run_metadata)
         result.profile_comparison = comparison
         result.profile_leaderboard = sorted(leaderboard, key=lambda r: r["objective_score_rank"])
@@ -1446,7 +1530,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     try:
         run_env = os.environ.copy()
         run_env["ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED"] = "true" if request.short_breakdown_rescue_enabled else "false"
-        completed = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=600, check=False, env=run_env)
+        completed = subprocess.run(command, cwd=repo_root, text=True, capture_output=True, timeout=_safe_subprocess_timeout(DASHBOARD_BACKTEST_SUBPROCESS_TIMEOUT_SECONDS), check=False, env=run_env)
     except Exception as exc:  # subprocess/environment failure, not strategy logic
         result.status = "FAILED"
         result.error_message = f"Backtest failed before completion: {exc}"

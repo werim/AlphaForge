@@ -1,3 +1,27 @@
+## 2026-07-01 - Dashboard BACKTEST profile timeout handling
+
+### Added
+- Added positive subprocess timeout validation before `subprocess.run`.
+- Added per-profile TIMEOUT metadata artifacts and PARTIAL profile-comparison results.
+- Added regression tests for timeout containment, completed profile preservation, and dashboard rendering.
+
+### Changed
+- Profile comparison now handles each profile timeout independently so completed profiles remain listed and DEFAULT_FILTERS can still populate the dashboard when ALL_FILTERS_OFF times out.
+- Dashboard rendering now shows PARTIAL results and per-profile statuses.
+
+### Fixed
+- Fixed uncaught dashboard crashes from `subprocess.TimeoutExpired` during BACKTEST profile comparison.
+- Prevented non-positive timeout values from being passed to `subprocess.run`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for trading/runtime behavior. Artifact consumers should handle added status fields and null metrics for timed-out profiles.
+
+### Known Issues
+- Timed-out profile metrics are unavailable until rerun; LIVE readiness remains NOT READY.
+
 ## 2026-06-30 - BACKTEST profile metric integrity
 
 ### Added

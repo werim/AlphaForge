@@ -1,3 +1,16 @@
+## 2026-07-01 Dashboard BACKTEST profile timeout handling
+
+- Current version: unreleased dashboard BACKTEST subprocess timeout hardening increment
+- Current phase: profile-comparison timeout containment and partial artifact preservation
+- Runtime maturity: BACKTEST dashboard runner stability improved; trading decision logic and PAPER/LIVE order paths unchanged
+- BACKTEST/PAPER/LIVE alignment: dashboard action remains BACKTEST-only and no runtime loop or live order path is invoked
+- Lifecycle coverage: no lifecycle transitions changed; completed profile lifecycle artifacts remain readable when another profile times out
+- Execution realism coverage: no score, filter, expectancy, RR, fill, or execution-cost logic changed
+- Known critical risks: timed-out profiles have unavailable metrics and require operator review; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT READY
+
+
 ## 2026-06-30 BACKTEST profile metric integrity
 
 - Current version: unreleased BACKTEST profile comparison integrity increment

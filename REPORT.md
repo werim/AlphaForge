@@ -1,3 +1,47 @@
+## 2026-07-01 - Dashboard BACKTEST profile timeout handling surgery report
+
+### Why this patch was needed
+Dashboard `POST /backtest/run` could crash with an uncaught `subprocess.TimeoutExpired` during profile comparison, including invalid negative timeout values from exhausted time budgets.
+
+### Root cause
+Profile-comparison subprocess execution did not contain timeout failures per profile or persist timeout metadata before returning to the dashboard. A timed-out profile could therefore abort the whole request and hide completed profile artifacts.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`: added positive timeout validation, per-profile timeout handling, TIMEOUT profile metadata, PARTIAL comparison results, and leaderboard preservation.
+- `src/alphaforge/dashboard/templates/overview.html`: renders PARTIAL results and profile statuses so completed profiles remain visible beside timed-out profiles.
+- `tests/test_backtest_profile_comparison.py`: added timeout regression coverage for non-positive timeout rejection, partial results, TIMEOUT profile marking, artifact preservation, and dashboard rendering.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: documented behavior, risks, and validation.
+
+### Runtime behavior changes
+Profile comparison now uses a positive per-profile timeout and catches `TimeoutExpired` for the individual profile. The dashboard returns a controlled PARTIAL result with a user-readable warning instead of an uncaught ASGI traceback.
+
+### Lifecycle changes
+None. Completed profile lifecycle artifacts are preserved and selected DEFAULT_FILTERS evidence remains displayable if ALL_FILTERS_OFF times out.
+
+### Persistence changes
+No database migration. Timed-out profile artifact directories now receive `backtest_profile_metadata.json` with machine-readable BACKTEST mode, profile name, status `TIMEOUT`, failure reason, timeout seconds, and command.
+
+### Export/schema changes
+Profile comparison JSON now includes top-level `status` and per-profile `status`; leaderboard rows include `status`. Timed-out profile metrics are explicitly unavailable/null rather than fabricated.
+
+### Tests added
+Added regression tests for non-positive timeout rejection before `subprocess.run`, timeout-to-PARTIAL result conversion, profile-scoped TIMEOUT marking, completed output preservation, and DEFAULT_FILTERS rendering when ALL_FILTERS_OFF times out.
+
+### Tests executed
+- `pytest -q tests/test_backtest_profile_comparison.py`
+
+### Risks
+Downstream consumers of profile leaderboard CSV/JSON should tolerate the added `status` column/field and null metrics for timed-out profiles.
+
+### Remaining limitations
+A timed-out profile is not retried automatically; operators must rerun with a smaller universe/window or investigate the profile artifact directory.
+
+### Migration concerns
+No schema migration. Artifact readers should handle `PARTIAL` comparison status and per-profile `TIMEOUT`.
+
+### Push recommendation
+Safe to push after tests pass; do not claim LIVE readiness.
+
 ## 2026-06-30 - BACKTEST profile metric integrity surgery report
 
 ### Why this patch was needed
