@@ -1,3 +1,27 @@
+## 2026-07-01 - HIGH_VOL_GUARD zero-accepted diagnostics
+
+### Added
+- Added `high_vol_guard_diagnostics.csv`, `high_vol_guard_summary.json`, `acceptance_funnel.csv`, and `acceptance_funnel.json` BACKTEST artifacts.
+- Added HIGH_VOL_GUARD counterfactual fields showing whether a candidate would pass if the guard were disabled, without changing default acceptance.
+- Added dashboard surfacing for the acceptance funnel and HIGH_VOL_GUARD summary/diagnostic artifact paths.
+- Added regression coverage for HIGH_VOL_GUARD diagnostics, acceptance-funnel reconciliation, diagnostic profile labeling, and no-guard emission below threshold.
+
+### Changed
+- HIGH_VOL_GUARD rejected rows now carry guard source metadata and volatility/context fields needed for audit.
+- BACKTEST quality summaries now include HIGH_VOL_GUARD verdict, evidence, recommendation, count, and would-accept-without-guard metrics.
+
+### Fixed
+- Fixed the zero-accepted audit gap where HIGH_VOL_GUARD impact could not be separated from other filters in exported artifacts.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; new artifacts and summary fields are additive.
+
+### Known Issues
+- The real BTCUSDT 30d/1h artifact still needs regeneration to populate the new diagnostics for the observed 20 HIGH_VOL_GUARD rejects. LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - BACKTEST quality summary reject-count parity
 
 ### Added

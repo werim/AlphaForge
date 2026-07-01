@@ -1,3 +1,15 @@
+## 2026-07-01 HIGH_VOL_GUARD zero-accepted diagnostics
+
+- Current version: unreleased BACKTEST HIGH_VOL_GUARD diagnostics increment
+- Current phase: zero-accepted root-cause audit and guardrail impact measurement
+- Runtime maturity: BACKTEST now exports acceptance-funnel and HIGH_VOL_GUARD diagnostics without loosening default filters; PAPER/LIVE decision paths unchanged
+- BACKTEST/PAPER/LIVE alignment: HIGH_VOL_GUARD remains a BACKTEST strategy-quality guardrail in `backtest_order._guardrail_rejection_reason`; diagnostic-off profiles are BACKTEST-only and labeled non-production
+- Lifecycle coverage: no lifecycle transition semantics changed; rejected HIGH_VOL_GUARD candidates remain SIGNAL_REJECTED and export counterfactual evidence separately
+- Execution realism coverage: diagnostics expose effective-RR/cost thresholds, execution context, stop distance, and counterfactual fields rather than force-accepting high-volatility candidates
+- Known critical risks: latest BTCUSDT 30d/1h artifact must be regenerated in an environment with historical data access to classify the real 20 HIGH_VOL_GUARD rows; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT READY
+
 ## 2026-07-01 BACKTEST quality summary reject-count parity
 
 - Current version: unreleased BACKTEST artifact count-consistency increment

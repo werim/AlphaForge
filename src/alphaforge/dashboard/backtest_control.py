@@ -208,6 +208,9 @@ class DashboardBacktestResult:
     guardrail_reject_breakdown: dict[str, Any] = field(default_factory=dict)
     top_guardrail_reject_reasons: list[dict[str, Any]] = field(default_factory=list)
     representative_guardrail_reject_examples: list[dict[str, Any]] = field(default_factory=list)
+    high_vol_guard_summary: dict[str, Any] = field(default_factory=dict)
+    high_vol_guard_diagnostics_path: str | None = None
+    acceptance_funnel_path: str | None = None
     top_quality_improvement_note: str = ""
     gate_funnel: list[dict[str, Any]] = field(default_factory=list)
     risk_metrics: dict[str, Any] = field(default_factory=dict)
@@ -1132,6 +1135,9 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     candidate_quality_gates_path = artifact_dir / "candidate_quality_gates.csv"
     later_gate_path = artifact_dir / "later_gate_breakdown.csv"
     gate_funnel_path = artifact_dir / "default_gate_funnel.csv"
+    acceptance_funnel_path = artifact_dir / "acceptance_funnel.csv"
+    high_vol_guard_diagnostics_path = artifact_dir / "high_vol_guard_diagnostics.csv"
+    high_vol_guard_summary_path = artifact_dir / "high_vol_guard_summary.json"
     equity_curve_path = artifact_dir / "equity_curve.csv"
     strategy_quality_path = artifact_dir / "strategy_quality_guardrails.json"
 
@@ -1144,6 +1150,7 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     signal_quality_summary = json.loads(signal_quality_summary_path.read_text()) if signal_quality_summary_path.exists() and signal_quality_summary_path.stat().st_size else {}
     filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() and filter_state_path.stat().st_size else {}
     strategy_quality = json.loads(strategy_quality_path.read_text()) if strategy_quality_path.exists() and strategy_quality_path.stat().st_size else {}
+    high_vol_guard_summary = json.loads(high_vol_guard_summary_path.read_text()) if high_vol_guard_summary_path.exists() and high_vol_guard_summary_path.stat().st_size else {}
 
     for path, fallbacks in (
         (summary_path, []),
@@ -1174,6 +1181,9 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.total_return_pct = summary.get("total_pnl_pct")
     result.max_drawdown = summary.get("max_drawdown")
     result.strategy_quality_guardrails = strategy_quality if isinstance(strategy_quality, dict) else {}
+    result.high_vol_guard_summary = high_vol_guard_summary if isinstance(high_vol_guard_summary, dict) else {}
+    result.high_vol_guard_diagnostics_path = str(high_vol_guard_diagnostics_path) if high_vol_guard_diagnostics_path.exists() else None
+    result.acceptance_funnel_path = str(acceptance_funnel_path) if acceptance_funnel_path.exists() else None
     result.risk_metrics = {
         "return_unit": summary.get("return_unit", "pct"),
         "net_pnl_unit": summary.get("net_pnl_unit", "USDT"),
@@ -1221,7 +1231,7 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.signal_quality_diagnostics.setdefault("stop_too_wide_recoverable_candidates", _stop_too_wide_recoverable_candidate_table(recoverable_rows))
     if candidate_quality_gates_path.exists():
         result.signal_quality_diagnostics.setdefault("candidate_quality_gates", _read_csv_rows(candidate_quality_gates_path))
-    exported_gate_funnel = _read_csv_rows(gate_funnel_path)
+    exported_gate_funnel = _read_csv_rows(acceptance_funnel_path) or _read_csv_rows(gate_funnel_path)
     result.gate_funnel = exported_gate_funnel or _canonical_gate_funnel_from_rejections(rejected_rows, result.accepted_trades)
     if rejected_shadow_summary_path.exists():
         result.signal_quality_diagnostics.setdefault("rejected_shadow_summary", _read_csv_rows(rejected_shadow_summary_path))
