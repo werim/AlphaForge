@@ -125,3 +125,40 @@ def test_unsupported_interval_is_not_not_enough_data() -> None:
     assert "requested_interval=2d" in message
     assert "source_function=fetch_binance_klines_paginated" in message
     assert "NOT_ENOUGH_HISTORICAL_DATA" not in message
+
+
+def test_symbol_list_normalization_accepts_comma_and_dedupes() -> None:
+    from alphaforge.symbols import normalize_symbol_list
+
+    assert normalize_symbol_list("BTCUSDT, ethusdt, BTCUSDT") == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_symbol_list_normalization_accepts_quoted_comma_and_whitespace() -> None:
+    from alphaforge.symbols import normalize_symbol_list
+
+    assert normalize_symbol_list(["BTCUSDT,ETHUSDT", " solusdt "]) == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    assert normalize_symbol_list("BTCUSDT ETHUSDT") == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_symbol_list_normalization_rejects_plus_combined_symbol() -> None:
+    from alphaforge.symbols import SymbolListError, normalize_symbol_list
+
+    with pytest.raises(SymbolListError) as exc:
+        normalize_symbol_list("BTCUSDT+ETHUSDT")
+    assert "Invalid symbol list: expected symbols like BTCUSDT,ETHUSDT; got BTCUSDT+ETHUSDT" in str(exc.value)
+
+
+def test_load_or_fetch_candles_rejects_combined_symbol_before_fetch(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import alphaforge.historical_market_data as hmd
+    from alphaforge.symbols import SymbolListError
+
+    called = {"fetch": False}
+
+    def fake_fetch(**_kwargs):
+        called["fetch"] = True
+        return []
+
+    monkeypatch.setattr(hmd, "fetch_binance_klines_paginated", fake_fetch)
+    with pytest.raises(SymbolListError):
+        hmd.load_or_fetch_candles("BTCUSDT,ETHUSDT", "1m", 0, 60_000, tmp_path)
+    assert called["fetch"] is False

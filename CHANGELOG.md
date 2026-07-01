@@ -1,3 +1,23 @@
+## 2026-07-01 - BACKTEST symbol-list parsing hardening
+
+### Added
+- Added shared symbol-list normalization and regression coverage for CLI/dashboard symbol inputs.
+
+### Changed
+- BACKTEST CLI and PowerShell runner now preserve multi-symbol requests as separate Binance symbols.
+
+### Fixed
+- Fixed combined symbols such as `BTCUSDT ETHUSDT` or `BTCUSDT+ETHUSDT` reaching Binance as one invalid kline/funding request.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Invalid symbol tokens now fail early with a clear validation error instead of relying on Binance rejection.
+
+### Known Issues
+- Dynamic top-volume selection still depends on Binance availability when not running offline. LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - BACKTEST lifecycle realism evidence completion
 
 ### Added

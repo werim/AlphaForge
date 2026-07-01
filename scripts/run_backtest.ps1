@@ -1,7 +1,7 @@
 param(
     [string]$Interval = "1h",
     [int]$Days = 30,
-    [string]$Symbols = "BTCUSDT,ETHUSDT",
+    [string[]]$Symbols = @("BTCUSDT", "ETHUSDT"),
     [string]$OutputDir = "data/backtests/manual",
     [switch]$ForceRefresh,
     [switch]$ShortBreakdownRescue
@@ -13,7 +13,7 @@ $argsList = @(
     "backtest_order.py",
     "--interval", $Interval,
     "--last-n-days", "$Days",
-    "--symbols", $Symbols,
+    "--symbols", (($Symbols -join ",")),
     "--output-dir", $OutputDir
 )
 
