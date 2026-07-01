@@ -1,4 +1,5 @@
 import csv
+from collections import Counter
 from pathlib import Path
 import pytest
 
@@ -1697,3 +1698,81 @@ def test_process_backtest_result_preserves_reject_reason_in_rejected_csv_payload
         w = csv.DictWriter(fh, fieldnames=bo.resolve_csv_fieldnames(rejected, list(rejected[0].keys())))
         w.writeheader(); w.writerows(rejected)
     assert "LOW_EFFECTIVE_RR" in out.read_text()
+
+
+def test_fixture_backtest_artifacts_prove_lifecycle_rejects_variability_and_sql_export(tmp_path):
+    """Small deterministic BACKTEST artifact proving lifecycle evidence before PnL results."""
+    accepted_fast = bo.CandidateOrder(1, "BTCUSDT", "LONG", 100.0, 99.0, 102.2, 2.2, "BREAKOUT_UP", "fixture", "TREND", 8.4, "MARKET", expectancy_bucket="HIGH")
+    accepted_slow = bo.CandidateOrder(2, "ETHUSDT", "LONG", 50.0, 49.0, 51.4, 1.4, "BREAKOUT_UP", "fixture", "TREND", 6.9, "MARKET", expectancy_bucket="LOW")
+    btc = [bo.Candle(1, 100, 102.4, 99.8, 101, 10)]
+    eth = [bo.Candle(2, 50, 50.7, 49.8, 50.2, 10), bo.Candle(62_000, 50.2, 51.8, 50.1, 51.0, 10)]
+    ctx_btc = {"volume_24h_usdt": 1_000_000.0, "spread_pct": 0.001, "funding_rate_pct": 0.0001, "expected_slippage_pct": 0.001, "liquidity_score": 0.9}
+    ctx_eth = {"volume_24h_usdt": 2_000_000.0, "spread_pct": 0.0015, "funding_rate_pct": 0.0002, "expected_slippage_pct": 0.001, "liquidity_score": 0.8}
+    lifecycle = []
+    lifecycle.extend(bo.simulate_candidate(accepted_fast, btc, 0, 1000, 1, market_ctx=ctx_btc))
+    lifecycle.extend(bo.simulate_candidate(accepted_slow, eth, 0, 1000, 1, market_ctx=ctx_eth))
+    missing_bucket = bo._bucket_expectancy(None)
+    assert missing_bucket == "EXPECTANCY_UNAVAILABLE"
+    rejected_signal = bo.LifecycleRow(3, "XRPUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 2.1, 1.1, 10.0, 9.5, 10.55, "NONE", "SIGNAL_CREATED", expectancy_bucket=missing_bucket)
+    rejected_signal_final = bo.LifecycleRow(3, "XRPUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 2.1, 1.1, 10.0, 9.5, 10.55, "SIGNAL_CREATED", "SIGNAL_REJECTED", reject_reason="LOW_SCORE", expectancy_bucket=missing_bucket)
+    rejected_order = bo.LifecycleRow(4, "ADAUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 8.0, 1.7, 1.0, 0.95, 1.085, "NONE", "SIGNAL_CREATED", expectancy_bucket="MEDIUM", spread_pct="UNAVAILABLE_BACKTEST", expected_slippage_pct="UNAVAILABLE_BACKTEST", funding_rate_pct="UNAVAILABLE_BACKTEST", liquidity_score="UNAVAILABLE_BACKTEST")
+    rejected_order_final = bo.LifecycleRow(4, "ADAUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 8.0, 1.7, 1.0, 0.95, 1.085, "SIGNAL_CREATED", "ORDER_REJECTED", reject_reason="EXECUTION_CONTEXT_UNAVAILABLE", expectancy_bucket="MEDIUM", spread_pct="UNAVAILABLE_BACKTEST", expected_slippage_pct="UNAVAILABLE_BACKTEST", funding_rate_pct="UNAVAILABLE_BACKTEST", liquidity_score="UNAVAILABLE_BACKTEST")
+    lifecycle.extend([rejected_signal, rejected_signal_final, rejected_order, rejected_order_final])
+
+    persisted = bo._persist_lifecycle_rows(lifecycle)
+    lifecycle_path = tmp_path / "order_lifecycle.csv"
+    rejected_orders_path = tmp_path / "rejected_orders.csv"
+    rejected_signals_path = tmp_path / "rejected_signals.csv"
+    rejected_rows = [
+        {"signal_id": "XRPUSDT:3", "lifecycle_state": "SIGNAL_REJECTED", "timestamp": 3, "symbol": "XRPUSDT", "side": "LONG", "score": 2.1, "rr": 1.1, "raw_rr": 1.1, "effective_rr": 1.1, "reject_reason": "LOW_SCORE", "expectancy_bucket": missing_bucket, "spread_pct": "UNAVAILABLE_BACKTEST", "expected_slippage_pct": "UNAVAILABLE_BACKTEST", "funding_rate_pct": "UNAVAILABLE_BACKTEST", "volume_24h_usdt": "UNAVAILABLE_BACKTEST"},
+        {"signal_id": "ADAUSDT:4", "lifecycle_state": "ORDER_REJECTED", "timestamp": 4, "symbol": "ADAUSDT", "side": "LONG", "score": 8.0, "rr": 1.7, "raw_rr": 1.7, "effective_rr": 1.0, "reject_reason": "EXECUTION_CONTEXT_UNAVAILABLE", "expectancy_bucket": "MEDIUM", "spread_pct": "UNAVAILABLE_BACKTEST", "expected_slippage_pct": "UNAVAILABLE_BACKTEST", "funding_rate_pct": "UNAVAILABLE_BACKTEST", "volume_24h_usdt": "UNAVAILABLE_BACKTEST"},
+    ]
+    for path, rows in ((lifecycle_path, persisted), (rejected_orders_path, rejected_rows), (rejected_signals_path, rejected_rows)):
+        with path.open("w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=bo.resolve_csv_fieldnames(rows, list(rows[0].keys())))
+            writer.writeheader(); writer.writerows(rows)
+
+    with lifecycle_path.open(newline="") as fh:
+        lifecycle_csv = list(csv.DictReader(fh))
+    with rejected_orders_path.open(newline="") as fh:
+        rejected_csv = list(csv.DictReader(fh))
+    with rejected_signals_path.open(newline="") as fh:
+        rejected_signal_csv = list(csv.DictReader(fh))
+
+    counts = Counter(row["lifecycle_state"] for row in lifecycle_csv)
+    assert counts["SIGNAL_CREATED"] == 4
+    assert counts["WAITING_ENTRY_ZONE"] == 2
+    assert counts["ENTRY_TRIGGERED"] == 2
+    assert counts["ORDER_PLACED"] == 2
+    assert counts["POSITION_OPENED"] == 2
+    assert counts["POSITION_CLOSED"] == 2
+    assert counts["SIGNAL_REJECTED"] == 1
+    assert counts["ORDER_REJECTED"] == 1
+    first_state_by_signal = {}
+    for row in lifecycle_csv:
+        first_state_by_signal.setdefault(row["signal_id"], row["lifecycle_state"])
+    assert set(first_state_by_signal.values()) == {"SIGNAL_CREATED"}
+    assert "CREATED" not in counts
+    assert {row["reject_reason"] for row in rejected_csv} == {"LOW_SCORE", "EXECUTION_CONTEXT_UNAVAILABLE"}
+    assert rejected_signal_csv == rejected_csv
+    assert len({float(row["score"]) for row in lifecycle_csv if row["lifecycle_state"] == "SIGNAL_CREATED"}) > 1
+    assert len({float(row["rr"]) for row in lifecycle_csv if row["lifecycle_state"] == "SIGNAL_CREATED"}) > 1
+    assert "UNKNOWN" not in {row["expectancy_bucket"] for row in lifecycle_csv if row["symbol"] == "XRPUSDT"}
+    ada_row = next(row for row in rejected_csv if row["symbol"] == "ADAUSDT")
+    assert ada_row["spread_pct"] == "UNAVAILABLE_BACKTEST"
+    assert ada_row["expected_slippage_pct"] == "UNAVAILABLE_BACKTEST"
+    assert ada_row["funding_rate_pct"] == "UNAVAILABLE_BACKTEST"
+    assert ada_row["volume_24h_usdt"] == "UNAVAILABLE_BACKTEST"
+    assert float(ada_row["effective_rr"]) < float(ada_row["raw_rr"])
+    assert not bo.verify_export_integrity(persisted, rejected_rows, lifecycle_csv, rejected_csv)
+
+
+def test_effective_rr_penalties_can_reject_below_threshold():
+    effective_rr, flags, penalties = bo._execution_reject_flags(
+        1.7,
+        {"spread_pct": 0.02, "expected_slippage_pct": 0.02, "liquidity_score": 0.2, "MIN_EFFECTIVE_RR": 1.6},
+    )
+    assert effective_rr < 1.6
+    assert "LOW_EFFECTIVE_RR" in flags
+    assert penalties["spread_penalty"] > 0
+    assert penalties["slippage_penalty"] > 0

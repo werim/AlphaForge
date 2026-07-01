@@ -1,50 +1,85 @@
 ## 2026-07-01 - BACKTEST lifecycle realism evidence completion surgery report
 
 ### Why this patch was needed
-BACKTEST readiness evidence must prioritize decision quality before trade-result PnL. The reported artifact symptoms were hardcoded-looking score/RR values, lifecycle rows starting at generic `CREATED`, absent rejected rows, `UNKNOWN` expectancy, fake-zero execution fields, and dashboard inconsistency.
+BACKTEST readiness evidence must prioritize decision quality before trade-result PnL. The previous patch only tightened labels and documentation; it did not produce deterministic artifact evidence proving canonical lifecycle rows, variable score/RR, rejected CSV parity, SQL-before-export persistence, or dashboard/profile artifact consistency.
 
 ### Root-cause audit answers
-1. `score` was historically fixed at `0.8` by placeholder fixtures/older diagnostic paths; the current scanner builds score in `backtest_order.py:_build_market_ctx` from breakout strength and candle range, then passes it through `src/alphaforge/order.py` via `run_order_cycle`.
-2. `rr` was historically fixed at `2.0` by placeholder fixtures/older diagnostics; the current adapter computes RR from entry/stop/target geometry in `backtest_order.py:_build_market_ctx` unless a test fixture explicitly supplies a fixed value.
-3. Rejected signals/orders were missing when callers only exported simulated trade results. The SQL-first lifecycle export now persists `SIGNAL_REJECTED` and `ORDER_REJECTED` rows through `backtest_order.py:process_backtest_result` and `_persist_lifecycle_rows`.
-4. Lifecycle previously appeared to start at `CREATED` because dashboard/summary compatibility fields collapsed candidate rows. Canonical BACKTEST rows now start with `SIGNAL_CREATED`; `CREATED` remains only a legacy decision label when old artifacts are parsed.
-5. `expectancy_bucket` was `UNKNOWN` when expectancy was absent because `_bucket_expectancy(None)` returned `UNKNOWN`. Missing expectancy now exports `EXPECTANCY_UNAVAILABLE` so unknown data is explicit.
-6. Execution/context fields were zero-looking when old code or fixtures defaulted missing values. Current lifecycle rows default to `UNAVAILABLE_BACKTEST`, while historical candle-derived volume and estimated spread are populated only when derivable and labeled.
+1. `score` was historically fixed at `0.8` by placeholder fixtures/older diagnostic paths; the current scanner builds score in `backtest_order.py:_build_market_ctx` from breakout strength and candle range, then passes it through `src/alphaforge/order.py` via `run_order_cycle`. The new deterministic artifact test proves generated `SIGNAL_CREATED` rows have more than one score value.
+2. `rr` was historically fixed at `2.0` by placeholder fixtures/older diagnostics; the current adapter computes RR from entry/stop/target geometry in `backtest_order.py:_build_market_ctx` unless a test fixture explicitly supplies fixed RR. The new artifact test proves generated `SIGNAL_CREATED` rows have more than one RR value.
+3. Rejected signals/orders were missing when callers only exported simulated trade results. `backtest_order.py:process_backtest_result`, `_persist_lifecycle_rows`, and the CLI export now preserve rejected decisions; the follow-up patch also writes `rejected_signals.csv` as a compatibility alias beside `rejected_orders.csv`.
+4. Lifecycle previously appeared to start at `CREATED` because dashboard/summary compatibility fields collapsed candidate rows. Canonical BACKTEST rows now start with `SIGNAL_CREATED`; the artifact test asserts every signal's first lifecycle row is `SIGNAL_CREATED` and that no lifecycle state equals `CREATED`.
+5. `expectancy_bucket` was `UNKNOWN` when expectancy was absent because `_bucket_expectancy(None)` returned `UNKNOWN`. Missing expectancy now exports `EXPECTANCY_UNAVAILABLE`; the artifact test asserts the missing-expectancy rejected signal is not `UNKNOWN`.
+6. Execution/context fields were zero-looking when old code or fixtures defaulted missing values. Current lifecycle rows default to `UNAVAILABLE_BACKTEST`, and the artifact test asserts missing spread/slippage/funding/volume export as `UNAVAILABLE_BACKTEST`, not `0.0`.
 7. BACKTEST is not intended to use live calls for decision validation. It uses the shared order-cycle semantics for quality gates and an offline historical adapter for market/execution context.
-8. Older artifact paths could behave like trade-result simulators only. The current path emits decision lifecycle states before any terminal PnL result and persists rejected decisions as evidence.
+8. Older artifact paths could behave like trade-result simulators only. The current path emits decision lifecycle states before terminal PnL and persists rejected decisions as evidence; the fixture contains accepted paths plus `SIGNAL_REJECTED` and `ORDER_REJECTED`.
 9. Safe PAPER/LIVE reuse without live exchange calls: order quality evaluation, reject attribution, lifecycle contract normalization, persistence schema, effective-RR cost model, and dashboard artifact parsing. Unsafe to reuse directly: live orderbook fetches, live placement, account/balance reconciliation, and exchange heartbeat/order status polling.
 
-### Files changed
-- `backtest_order.py`: made missing expectancy explicit as `EXPECTANCY_UNAVAILABLE`, canonicalized missing execution-context rejects to `EXECUTION_CONTEXT_UNAVAILABLE`, and removed unreachable duplicate attribution code.
-- `tests/test_backtest_order_scanner.py`: updated reject-attribution regression to assert the canonical missing execution-context reason.
-- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: documented root cause, behavior, risks, and validation.
+### Code locations changed
+- `backtest_order.py:_primary_reject_reason_from_context`: canonicalizes missing execution-context rejects to `EXECUTION_CONTEXT_UNAVAILABLE`.
+- `backtest_order.py:_bucket_expectancy`: maps missing/unknown/unavailable expectancy evidence to `EXPECTANCY_UNAVAILABLE`.
+- `backtest_order.py` CLI artifact writer: exports `rejected_signals.csv` with the same canonical rejected rows as `rejected_orders.csv`.
+- `tests/test_backtest_order_scanner.py`: adds a deterministic fixture artifact test for lifecycle counts, score/RR variability, reject distribution, unavailable execution context, SQL/export parity, and effective-RR rejection.
+- `tests/test_backtest_profile_comparison.py`: adds dashboard main-panel vs profile-comparison canonical artifact consistency coverage.
+
+### Deterministic fixture artifact evidence
+Generated inside `test_fixture_backtest_artifacts_prove_lifecycle_rejects_variability_and_sql_export`:
+
+| Lifecycle state | Count | Evidence meaning |
+|---|---:|---|
+| SIGNAL_CREATED | 4 | every candidate starts canonically before decision/result |
+| WAITING_ENTRY_ZONE | 2 | accepted candidates enter pre-fill lifecycle |
+| ENTRY_TRIGGERED | 2 | historical price reaches entry |
+| ORDER_PLACED | 2 | simulated order placement is represented |
+| POSITION_OPENED | 2 | historical fill/open state is represented |
+| POSITION_CLOSED | 2 | terminal TP/SL close happens after pre-trade states |
+| SIGNAL_REJECTED | 1 | low-score rejected candidate is first-class lifecycle evidence |
+| ORDER_REJECTED | 1 | missing execution-context order reject is first-class lifecycle evidence |
+
+Additional fixture distributions:
+- Score distribution evidence: `SIGNAL_CREATED` rows contain scores `{8.4, 6.9, 2.1, 8.0}`, so `nunique > 1`.
+- RR distribution evidence: `SIGNAL_CREATED` rows contain RR `{2.2, 1.4, 1.1, 1.7}`, so `nunique > 1`.
+- Reject reason distribution evidence: rejected artifacts contain `LOW_SCORE=1` and `EXECUTION_CONTEXT_UNAVAILABLE=1`; no global `UNKNOWN`.
+- Expectancy evidence: missing expectancy exports `EXPECTANCY_UNAVAILABLE`, not `UNKNOWN`.
+- Execution context availability evidence: missing spread/slippage/funding/volume exports `UNAVAILABLE_BACKTEST`, not fake `0.0`.
+- SQL-before-export evidence: the fixture writes `order_lifecycle.csv` from `_persist_lifecycle_rows(...)` output, then `verify_export_integrity(...)` validates persisted lifecycle rows against exported rejected rows.
+
+### Dashboard/parser evidence
+`test_dashboard_main_and_profile_comparison_use_same_canonical_profile_artifacts` builds one selected `profiles/DEFAULT_FILTERS` artifact directory and asserts both `_apply_backtest_artifact_model(...)` and `_comparison_metrics(...)` read the same `order_backtest_summary.csv`, `order_lifecycle.csv`, `backtest_orders.csv`, and `rejected_orders.csv` values for accepted count, rejected count, rejection rate, win/loss, net PnL, and top reject reasons.
 
 ### Runtime behavior changes
-BACKTEST attribution is stricter and more auditable: missing expectancy/context is visible evidence, not hidden as generic unknown/zero values. No filters were loosened and no rejected candidate is force-accepted.
+BACKTEST attribution is stricter and more auditable: missing expectancy/context is visible evidence, not hidden as generic unknown/zero values. Rejected signals are exported through both `rejected_orders.csv` and `rejected_signals.csv`. No filters were loosened and no rejected candidate is force-accepted.
 
 ### Lifecycle changes
-No new state transition rewrite was needed because canonical states already exist in the current path. The patch tightens labels attached to rejected lifecycle evidence.
+Canonical decision lifecycle evidence is tested in generated artifacts: accepted paths include pre-trade states before `POSITION_CLOSED`, and rejected paths include `SIGNAL_REJECTED`/`ORDER_REJECTED`.
 
 ### Persistence changes
-No schema migration. Existing lifecycle SQL/export rows carry more explicit bucket/reason values.
+No schema migration. The fixture proves rejected lifecycle decisions are persisted into SQLite via `_persist_lifecycle_rows(...)` before CSV export parity is checked.
 
 ### Export/schema changes
-No new columns. Existing `expectancy_bucket` and `reject_reason` values may be more specific.
+Added `rejected_signals.csv` as an additive compatibility export containing the same rejected decision rows as `rejected_orders.csv`. Existing `expectancy_bucket` and `reject_reason` values may be more specific.
 
-### Tests added/updated
-Updated the BACKTEST reject attribution regression for canonical `EXECUTION_CONTEXT_UNAVAILABLE`. Existing coverage already proves rejected rows, lifecycle order, score/RR variability, effective-RR penalties, persistence/export, and dashboard profile parsing.
+### Tests proving acceptance criteria
+- Lifecycle/export/SQL/score/RR/reject/context: `test_fixture_backtest_artifacts_prove_lifecycle_rejects_variability_and_sql_export`.
+- Effective-RR penalties and rejection: `test_effective_rr_penalties_can_reject_below_threshold`.
+- Missing execution-context reason: `test_backtest_unknown_reject_reason_attributed_missing_execution_context`.
+- Missing expectancy reject attribution: `test_backtest_unknown_reject_reason_attributed_missing_expectancy_when_required`.
+- Dashboard/profile canonical artifact consistency: `test_dashboard_main_and_profile_comparison_use_same_canonical_profile_artifacts`.
 
 ### Tests executed
 - `python -m pytest tests/test_backtest_order_scanner.py -q`
+- `python -m pytest tests/test_dashboard_app.py -q`
+- `python -m pytest tests/test_backtest_profile_comparison.py -q`
+- `python -m pytest tests -k "backtest or lifecycle or dashboard or reject" -q`
+- `python -m pytest -q`
 
 ### Risks
-Older consumers that hardcode `UNKNOWN` or `MISSING_EXECUTION_CONTEXT` may need to accept the explicit new labels. Historical spread is still an estimate unless actual spread is supplied.
+Older consumers that hardcode `UNKNOWN` or `MISSING_EXECUTION_CONTEXT` may need to accept the explicit new labels. Historical spread is still an estimate unless actual spread is supplied. `rejected_signals.csv` is additive and intentionally duplicates canonical rejected rows for consumers expecting signal-named diagnostics.
 
 ### Remaining limitations
 BACKTEST remains historical simulation, not LIVE execution. Actual historical orderbook depth/spread is unavailable unless supplied by artifacts, and missing fields must remain unavailable rather than zero-filled. Rejected trades are first-class evidence; a high reject rate can be healthy when filters are selective.
 
 ### Migration concerns
-No SQL migration. Regenerate CSV/JSON artifacts to see the new labels.
+No SQL migration. Regenerate CSV/JSON artifacts to see `EXPECTANCY_UNAVAILABLE`, `EXECUTION_CONTEXT_UNAVAILABLE`, and the additive `rejected_signals.csv` export.
 
 ### Push recommendation
 Safe to push after full validation. Do not claim LIVE readiness.

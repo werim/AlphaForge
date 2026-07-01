@@ -3637,6 +3637,7 @@ def main():
         ("order_candidates.csv", candidate_rows),
         ("backtest_orders.csv", candidate_rows),
         ("rejected_orders.csv", rejected),
+        ("rejected_signals.csv", rejected),
         ("rejected_shadow.csv", [asdict(x) for x in rejected_shadow]),
         ("open_at_end.csv", [asdict(x) for x in open_rows]),
         ("forward_evaluations.csv", [asdict(x) for x in forward_evaluations]),

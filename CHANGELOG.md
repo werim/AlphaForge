@@ -3,6 +3,8 @@
 ### Added
 - Added explicit `EXPECTANCY_UNAVAILABLE` bucket behavior for missing BACKTEST expectancy evidence.
 - Added canonical `EXECUTION_CONTEXT_UNAVAILABLE` attribution for rejects caused by missing historical execution context.
+- Added deterministic fixture artifact coverage for lifecycle counts, score/RR variability, concrete reject distribution, SQL/export parity, unavailable context fields, effective-RR rejection, and dashboard/profile parser consistency.
+- Added `rejected_signals.csv` as an additive compatibility export mirroring canonical rejected decision rows.
 
 ### Changed
 - BACKTEST reject attribution no longer emits the legacy missing-context label and does not collapse missing expectancy into silent `UNKNOWN`.
