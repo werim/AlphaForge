@@ -1,3 +1,24 @@
+## 2026-07-01 - BACKTEST lifecycle/reject SQL persistence completion
+
+### Added
+- Added BACKTEST SQL order-decision persistence during lifecycle export persistence, including additive `sql_order_decision_count` and `sql_rejected_decision_count` diagnostics.
+- Added explicit `REJECT_REASON_UNAVAILABLE` fallback for rejected rows only when concrete reject attribution is unavailable.
+
+### Changed
+- Missing BACKTEST expectancy now exports `BACKTEST_EXPECTANCY_UNAVAILABLE` to distinguish unavailable historical context from an ambiguous unknown bucket.
+
+### Fixed
+- Fixed rejected BACKTEST lifecycle rows being exportable without matching SQL `order_decisions` evidence in the persistence pass.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. CSV columns are additive; no SQLite migration.
+
+### Known Issues
+- BACKTEST artifact SQL persistence remains run-local/in-memory unless a persistent DB is explicitly wired by callers. LIVE remains NOT READY.
+
 ## 2026-07-01 - Reject overlay diagnostics
 
 ### Added

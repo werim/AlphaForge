@@ -1,3 +1,15 @@
+## 2026-07-01 BACKTEST lifecycle/reject SQL persistence completion
+
+- Current version: unreleased BACKTEST lifecycle/reject SQL persistence increment
+- Current phase: BACKTEST order-decision lifecycle simulator persistence hardening
+- Runtime maturity: BACKTEST lifecycle export persistence now writes signal, final order-decision, and lifecycle SQL evidence for accepted and rejected candidates; PAPER/LIVE behavior unchanged
+- BACKTEST/PAPER/LIVE alignment: shared reject outputs remain canonical while BACKTEST uses offline historical/safe execution context only; no live Binance orderbook/order calls added
+- Lifecycle coverage: SIGNAL_CREATED, SIGNAL_REJECTED, WAITING_ENTRY_ZONE, ENTRY_TRIGGERED, ORDER_PLACED, ORDER_REJECTED, POSITION_OPENED, POSITION_CLOSED, ENTRY_TIMEOUT, and SYMBOL_REJECTED remain represented in artifacts
+- Execution realism coverage: unavailable execution/expectancy evidence is explicit (`UNAVAILABLE_BACKTEST`, `BACKTEST_EXPECTANCY_UNAVAILABLE`, `REJECT_REASON_UNAVAILABLE`) and is not treated as zero cost
+- Known critical risks: durable BACKTEST SQL storage is still caller-dependent; historical funding/spread reconstruction remains limited by available inputs; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY
+
 ## 2026-07-01 reject overlay diagnostics
 
 - Current version: unreleased reject-overlay diagnostic discovery increment

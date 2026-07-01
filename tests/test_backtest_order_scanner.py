@@ -799,6 +799,8 @@ def test_lifecycle_export_reads_persisted_sql_events():
     assert persisted[1]["lifecycle_state"] == "SIGNAL_REJECTED"
     assert persisted[1]["decision"] == "REJECTED"
     assert persisted[1]["reject_reason"] == "LOW_SCORE"
+    assert persisted[1]["sql_rejected_decision_count"] == 1
+    assert persisted[1]["sql_order_decision_count"] == 1
 
 
 
@@ -1091,6 +1093,8 @@ def test_backtest_rejected_rows_have_signal_id_effective_rr_and_export_parity():
     assert len(rejected_lifecycle) == len(rejected) == 1
     assert rejected[0]["signal_id"] == rejected_lifecycle[0]["signal_id"] == "BTCUSDT:1710000000000"
     assert rejected[0]["reject_reason"] == rejected_lifecycle[0]["reject_reason"] == "LOW_SCORE"
+    assert rejected_lifecycle[0]["sql_rejected_decision_count"] == 1
+    assert rejected_lifecycle[0]["sql_order_decision_count"] == 1
     assert float(rejected[0]["raw_rr"]) != float(rejected[0]["effective_rr"])
     errors = bo.verify_export_integrity(persisted, rejected, list(persisted), list(rejected))
     assert not [error for error in errors if "rejected_orders.csv count mismatch" in error or "missing reject_reason" in error]
@@ -1712,7 +1716,7 @@ def test_fixture_backtest_artifacts_prove_lifecycle_rejects_variability_and_sql_
     lifecycle.extend(bo.simulate_candidate(accepted_fast, btc, 0, 1000, 1, market_ctx=ctx_btc))
     lifecycle.extend(bo.simulate_candidate(accepted_slow, eth, 0, 1000, 1, market_ctx=ctx_eth))
     missing_bucket = bo._bucket_expectancy(None)
-    assert missing_bucket == "EXPECTANCY_UNAVAILABLE"
+    assert missing_bucket == "BACKTEST_EXPECTANCY_UNAVAILABLE"
     rejected_signal = bo.LifecycleRow(3, "XRPUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 2.1, 1.1, 10.0, 9.5, 10.55, "NONE", "SIGNAL_CREATED", expectancy_bucket=missing_bucket)
     rejected_signal_final = bo.LifecycleRow(3, "XRPUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 2.1, 1.1, 10.0, 9.5, 10.55, "SIGNAL_CREATED", "SIGNAL_REJECTED", reject_reason="LOW_SCORE", expectancy_bucket=missing_bucket)
     rejected_order = bo.LifecycleRow(4, "ADAUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 8.0, 1.7, 1.0, 0.95, 1.085, "NONE", "SIGNAL_CREATED", expectancy_bucket="MEDIUM", spread_pct="UNAVAILABLE_BACKTEST", expected_slippage_pct="UNAVAILABLE_BACKTEST", funding_rate_pct="UNAVAILABLE_BACKTEST", liquidity_score="UNAVAILABLE_BACKTEST")
