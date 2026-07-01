@@ -3475,7 +3475,117 @@ def _quality_record_from_lifecycle(row: LifecycleRow, timeframe: str) -> Dict[st
     return {"source": "ACCEPTED", "reject_reason": "ACCEPTED", "symbol": row.symbol or "UNKNOWN", "side": row.side or "UNKNOWN", "regime": row.regime or "UNKNOWN", "setup_type": row.setup_type or "UNAVAILABLE", "timeframe": timeframe, "score": row.score, "raw_rr": row.rr, "effective_rr": row.effective_rr if row.effective_rr is not None else row.rr, "decision_cost_penalty": row.cost_penalty, "shadow_cost_penalty": "UNAVAILABLE", "spread_pct": row.spread_pct, "expected_slippage_pct": row.expected_slippage_pct, "volatility_score": row.volatility_score, "liquidity_score": row.liquidity_score, "stop_distance_pct": stop_distance, "outcome": _outcome_from_lifecycle(row)}
 
 def _quality_record_from_shadow(s: RejectedShadowEvaluation, timeframe: str) -> Dict[str, Any]:
-    return {"source": "REJECTED_SHADOW", "timestamp": s.timestamp, "reject_reason": s.reject_reasons or "UNKNOWN", "symbol": s.symbol or "UNKNOWN", "side": s.side or "UNKNOWN", "regime": s.regime or "UNKNOWN", "setup_type": s.setup_type or "UNAVAILABLE", "timeframe": timeframe, "score": s.score, "raw_rr": s.raw_rr, "effective_rr": s.effective_rr, "decision_cost_penalty": "UNAVAILABLE", "shadow_cost_penalty": s.cost_penalty, "spread_pct": s.spread_pct, "expected_slippage_pct": s.expected_slippage_pct, "volatility_score": s.volatility_score, "liquidity_score": s.liquidity_score, "liquidity_ok": s.liquidity_ok, "volatility_ok": s.volatility_ok, "stop_distance_pct": s.stop_distance_pct, "outcome": s.shadow_outcome or "UNKNOWN"}
+    return {"source": "REJECTED_SHADOW", "timestamp": s.timestamp, "reject_reason": s.reject_reasons or "UNKNOWN", "symbol": s.symbol or "UNKNOWN", "side": s.side or "UNKNOWN", "regime": s.regime or "UNKNOWN", "setup_type": s.setup_type or "UNAVAILABLE", "timeframe": timeframe, "score": s.score, "raw_rr": s.raw_rr, "effective_rr": s.effective_rr, "decision_cost_penalty": "UNAVAILABLE", "shadow_cost_penalty": s.cost_penalty, "spread_pct": s.spread_pct, "expected_slippage_pct": s.expected_slippage_pct, "volatility_score": s.volatility_score, "liquidity_score": s.liquidity_score, "liquidity_ok": s.liquidity_ok, "volatility_ok": s.volatility_ok, "stop_distance_pct": s.stop_distance_pct, "effective_tp_hit": s.effective_tp_hit, "outcome": s.shadow_outcome or "UNKNOWN"}
+
+
+
+def _rank_values(values: List[float]) -> List[float]:
+    indexed = sorted(enumerate(values), key=lambda item: item[1])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(indexed):
+        j = i
+        while j + 1 < len(indexed) and indexed[j + 1][1] == indexed[i][1]:
+            j += 1
+        avg_rank = (i + j + 2) / 2.0
+        for k in range(i, j + 1):
+            ranks[indexed[k][0]] = avg_rank
+        i = j + 1
+    return ranks
+
+def _pearson(xs: List[float], ys: List[float]) -> Optional[float]:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+    mx = sum(xs) / len(xs); my = sum(ys) / len(ys)
+    dx = [x - mx for x in xs]; dy = [y - my for y in ys]
+    denx = sum(x * x for x in dx) ** 0.5; deny = sum(y * y for y in dy) ** 0.5
+    if denx == 0.0 or deny == 0.0:
+        return None
+    return sum(x * y for x, y in zip(dx, dy)) / (denx * deny)
+
+def _spearman(xs: List[float], ys: List[float]) -> Optional[float]:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+    return _pearson(_rank_values(xs), _rank_values(ys))
+
+def _score_bucket_label(score: Any) -> str:
+    value = _quality_float(score)
+    if value is None:
+        return "UNAVAILABLE"
+    return "10" if value >= 10.0 else f"{max(0, min(9, int(value)))}-{max(1, min(10, int(value) + 1))}"
+
+def _calibrated_score_components(row: Mapping[str, Any]) -> Dict[str, float]:
+    score = _quality_float(row.get("score")) or 0.0
+    raw_rr = _quality_float(row.get("raw_rr")) or _quality_float(row.get("rr")) or 0.0
+    effective_rr = _quality_float(row.get("effective_rr")) or 0.0
+    cost_penalty = _quality_float(row.get("shadow_cost_penalty"))
+    if cost_penalty is None:
+        cost_penalty = _quality_float(row.get("decision_cost_penalty")) or _quality_float(row.get("cost_penalty")) or max(raw_rr - effective_rr, 0.0)
+    stop_distance = _quality_float(row.get("stop_distance_pct")) or 0.0
+    volatility = _quality_float(row.get("volatility_score")) or _quality_float(row.get("volatility_pct")) or 0.0
+    spread = _quality_float(row.get("spread_pct")) or 0.0
+    slippage = _quality_float(row.get("expected_slippage_pct")) or 0.0
+    rr_quality_bonus = max(-1.0, min(1.0, (effective_rr - 1.7) * 0.35))
+    cost_component = min(2.0, cost_penalty * 2.0)
+    stop_component = max(0.0, stop_distance - 1.5) * 0.45
+    volatility_component = max(0.0, volatility - 2.5) * 0.25
+    overextension_component = max(0.0, stop_distance - 2.0) * max(0.0, volatility - 2.0) * 0.10
+    late_breakout_component = 0.35 if str(row.get("setup_type", "")).upper().find("BREAKOUT") >= 0 and volatility > 3.0 and stop_distance > 1.5 else 0.0
+    execution_component = min(1.0, spread * 10.0 + slippage * 8.0)
+    total_penalty = cost_component + stop_component + volatility_component + overextension_component + late_breakout_component + execution_component
+    calibrated = max(0.0, min(10.0, score + rr_quality_bonus - total_penalty))
+    return {
+        "effective_rr_quality_component": round(rr_quality_bonus, 6),
+        "execution_cost_penalty_component": round(cost_component, 6),
+        "stop_distance_quality_penalty": round(stop_component, 6),
+        "volatility_exhaustion_penalty": round(volatility_component, 6),
+        "overextension_penalty": round(overextension_component, 6),
+        "late_breakout_entry_penalty": round(late_breakout_component, 6),
+        "spread_slippage_penalty": round(execution_component, 6),
+        "total_calibration_penalty": round(total_penalty, 6),
+        "calibrated_score": round(calibrated, 6),
+        "calibrated_score_delta": round(calibrated - score, 6),
+    }
+
+def build_score_calibration_artifacts(records: List[Mapping[str, Any]]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    rows = [dict(r) for r in records if _quality_float(r.get("score")) is not None]
+    for r in rows:
+        comps = _calibrated_score_components(r)
+        r.update({"score_bucket": _score_bucket_label(r.get("score")), **comps, "calibrated_score_components": json.dumps(comps, sort_keys=True)})
+        r["score_calibration_verdict"] = "PENALIZED_EXECUTION_RISK" if comps["calibrated_score_delta"] < -0.5 else "UNCHANGED_OR_LOW_RISK"
+    def metric_rows(group_field: str) -> List[Dict[str, Any]]:
+        out=[]
+        for key in sorted({str(r.get(group_field) or "UNAVAILABLE") for r in rows}):
+            bucket=[r for r in rows if str(r.get(group_field) or "UNAVAILABLE") == key]
+            n=len(bucket)
+            def avg(field):
+                vals=[_quality_float(x.get(field)) for x in bucket]; vals=[v for v in vals if v is not None]
+                return round(sum(vals)/len(vals), 8) if vals else None
+            tp=sum(1 for x in bucket if x.get("outcome") == "WOULD_TP"); sl=sum(1 for x in bucket if x.get("outcome") == "WOULD_SL"); eff=sum(1 for x in bucket if bool(x.get("effective_tp_hit")) or str(x.get("effective_tp_hit")).lower()=="true")
+            out.append({"breakdown": group_field, group_field: key, "count": n, "would_tp_count": tp, "would_tp_rate": tp/n if n else 0.0, "would_sl_count": sl, "would_sl_rate": sl/n if n else 0.0, "effective_tp_hit_count": eff, "effective_tp_hit_rate": eff/n if n else 0.0, "avg_raw_rr": avg("raw_rr"), "avg_effective_rr": avg("effective_rr"), "avg_cost_penalty": avg("shadow_cost_penalty"), "avg_stop_distance_pct": avg("stop_distance_pct"), "avg_volatility_score": avg("volatility_score"), "avg_spread_pct": avg("spread_pct"), "avg_expected_slippage_pct": avg("expected_slippage_pct"), "avg_calibrated_score": avg("calibrated_score")})
+        return out
+    diagnostics = metric_rows("score_bucket") + metric_rows("reject_reason") + metric_rows("regime") + metric_rows("setup_type")
+    xs=[_quality_float(r.get("score")) for r in rows]
+    raw_y=[1.0 if r.get("outcome") == "WOULD_TP" else 0.0 for r in rows]
+    eff_y=[1.0 if (bool(r.get("effective_tp_hit")) or str(r.get("effective_tp_hit")).lower()=="true") else 0.0 for r in rows]
+    xs=[x for x in xs if x is not None]
+    bucket_rows=[r for r in diagnostics if r.get("breakdown") == "score_bucket" and r.get("score_bucket") != "UNAVAILABLE"]
+    bucket_rates=[_quality_float(r.get("would_tp_rate")) or 0.0 for r in bucket_rows]
+    monotonic_violations=sum(1 for a,b in zip(bucket_rates, bucket_rates[1:]) if b + 1e-9 < a)
+    flags=[]
+    high_score=[r for r in rows if (_quality_float(r.get("score")) or 0.0) >= 8.0]
+    if high_score and sum(1 for r in high_score if r.get("outcome")=="WOULD_TP") / len(high_score) < 0.45: flags.append("HIGH_SCORE_LOW_TP_RATE")
+    for reason in ["HIGH_VOL_GUARD", "STOP_TOO_WIDE"]:
+        cluster=[r for r in high_score if str(r.get("reject_reason","")).upper()==reason]
+        if cluster and sum(1 for r in cluster if r.get("outcome")=="WOULD_SL") > sum(1 for r in cluster if r.get("outcome")=="WOULD_TP"):
+            flags.append("HIGH_VOL_HIGH_SCORE_SL_CLUSTER" if reason=="HIGH_VOL_GUARD" else "STOP_TOO_WIDE_HIGH_SCORE_SL_CLUSTER")
+    if monotonic_violations: flags.append("SCORE_NOT_MONOTONIC")
+    pear_raw=_pearson(xs, raw_y) if len(xs)==len(raw_y) else None; pear_eff=_pearson(xs, eff_y) if len(xs)==len(eff_y) else None
+    if pear_raw is not None and pear_eff is not None and pear_eff > pear_raw + 0.1: flags.append("SCORE_PREDICTS_EFFECTIVE_TP_BETTER_THAN_RAW_TP")
+    if pear_raw is not None and pear_raw < 0: flags.append("SCORE_INVERSION")
+    if any((_quality_float(r.get("score")) or 0) >= 8 and (_quality_float(r.get("stop_distance_pct")) or 0) > 2 and (_quality_float(r.get("volatility_score")) or 0) > 3 and r.get("outcome")=="WOULD_SL" for r in rows): flags.append("OVEREXTENSION_NOT_PENALIZED")
+    summary={"total_rows": len(rows), "score_source_interpretation": "BACKTEST score mixes breakout/range strength, raw RR expectancy, and execution context; PAPER/LIVE AIBrain score is probabilistic quality after costs. Diagnostics test both raw WOULD_TP and effective_tp_hit.", "pearson_score_would_tp": pear_raw, "spearman_score_would_tp": _spearman(xs, raw_y) if len(xs)==len(raw_y) else None, "pearson_score_effective_tp_hit": pear_eff, "spearman_score_effective_tp_hit": _spearman(xs, eff_y) if len(xs)==len(eff_y) else None, "monotonicity": {"score_bucket_count": len(bucket_rows), "violations": monotonic_violations, "generally_improves_with_score": monotonic_violations == 0}, "miscalibration_flags": sorted(set(flags)), "thresholds_changed": False, "acceptance_logic_changed": False, "calibrated_score_scope": "BACKTEST_DIAGNOSTIC_ONLY", "calibrated_score_future_leakage": "NO_FORWARD_OUTCOME_FIELDS_USED; row-local pre-decision score/RR/execution/volatility/stop-distance fields only"}
+    return diagnostics, summary
 
 def _quality_gate_metrics(records: List[Dict[str, Any]], cfg: QualityGateConfig, baseline_net_pnl: float = 0.0) -> Dict[str, Any]:
     rejected = [r for r in records if r.get("source") == "REJECTED_SHADOW"]
@@ -3624,9 +3734,11 @@ def build_signal_quality_diagnostics(accepted_rows: List[LifecycleRow], shadows:
         if peer and outcome_metrics(peer)["would_sl_rate"] > outcome_metrics(peer)["would_tp_rate"]:
             continue
         positive_candidates.append(r)
+    score_calibration_detail_rows, score_calibration_summary = build_score_calibration_artifacts(records)
+    calibration_rows.extend(score_calibration_detail_rows)
     accepted_score10=[r for r in score10 if r.get("source")=="ACCEPTED"]
     accepted_score10_split=split(accepted_score10)
-    summary={"total_records":len(records), "accepted_records":sum(1 for r in records if r.get("source")=="ACCEPTED"), "rejected_shadow_records":len(shadows), "score_saturation":{"score_10_count":len(score10), "score_10_rate":len(score10)/len(records) if records else 0.0, "score_10_would_tp_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_TP"), "score_10_would_sl_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_SL"), "accepted_score_10_count":len(accepted_score10), "accepted_score_10_would_tp_count":accepted_score10_split["would_tp_count"], "accepted_score_10_would_sl_count":accepted_score10_split["would_sl_count"], "accepted_score_10_tp_rate":accepted_score10_split["would_tp_count"]/len(accepted_score10) if accepted_score10 else 0.0, "accepted_score_10_sl_rate":accepted_score10_split["would_sl_count"]/len(accepted_score10) if accepted_score10 else 0.0, "warning":"SCORE_NO_LONGER_SEPARATES_WINNERS" if accepted_score10_split["would_sl_count"] > accepted_score10_split["would_tp_count"] else "", "score_10_by_reject_reason":{k:split([r for r in score10 if str(r.get("reject_reason"))==k]) for k in sorted({str(r.get("reject_reason")) for r in score10})}, "score_10_by_regime":{k:split([r for r in score10 if str(r.get("regime"))==k]) for k in sorted({str(r.get("regime")) for r in score10})}}, "stop_too_wide_split":{"would_tp":split([r for r in stop if r.get("outcome")=="WOULD_TP"]), "would_sl":split([r for r in stop if r.get("outcome")=="WOULD_SL"]), "metrics":[g for g in group_rows if g["group_field"] in {"symbol","side","regime","effective_rr_decile","score_decile","volatility_score_bucket","liquidity_score_bucket","spread_pct_bucket","expected_slippage_pct_bucket","stop_distance_pct_bucket"} and any(str(r.get(g["group_field"]) or "UNAVAILABLE")==g["group_value"] and str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" for r in records)]}, "high_effective_rr_missed_alpha":missed, "top_quality_improvement_candidates": positive_candidates[:20], "top_quality_improvement_candidate_note": "" if positive_candidates else "No positive-expectancy improvement candidates found: near-miss groups are dominated by WOULD_SL or negative expected expectancy.", "combo_group_count": len(combo_rows), "candidate_quality_gates": gate_rows, "score_calibration_diagnostics_count": len(calibration_rows), "thresholds_changed": False, "acceptance_logic_changed": False}
+    summary={"total_records":len(records), "accepted_records":sum(1 for r in records if r.get("source")=="ACCEPTED"), "rejected_shadow_records":len(shadows), "score_saturation":{"score_10_count":len(score10), "score_10_rate":len(score10)/len(records) if records else 0.0, "score_10_would_tp_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_TP"), "score_10_would_sl_count":sum(1 for r in score10 if r.get("outcome")=="WOULD_SL"), "accepted_score_10_count":len(accepted_score10), "accepted_score_10_would_tp_count":accepted_score10_split["would_tp_count"], "accepted_score_10_would_sl_count":accepted_score10_split["would_sl_count"], "accepted_score_10_tp_rate":accepted_score10_split["would_tp_count"]/len(accepted_score10) if accepted_score10 else 0.0, "accepted_score_10_sl_rate":accepted_score10_split["would_sl_count"]/len(accepted_score10) if accepted_score10 else 0.0, "warning":"SCORE_NO_LONGER_SEPARATES_WINNERS" if accepted_score10_split["would_sl_count"] > accepted_score10_split["would_tp_count"] else "", "score_10_by_reject_reason":{k:split([r for r in score10 if str(r.get("reject_reason"))==k]) for k in sorted({str(r.get("reject_reason")) for r in score10})}, "score_10_by_regime":{k:split([r for r in score10 if str(r.get("regime"))==k]) for k in sorted({str(r.get("regime")) for r in score10})}}, "stop_too_wide_split":{"would_tp":split([r for r in stop if r.get("outcome")=="WOULD_TP"]), "would_sl":split([r for r in stop if r.get("outcome")=="WOULD_SL"]), "metrics":[g for g in group_rows if g["group_field"] in {"symbol","side","regime","effective_rr_decile","score_decile","volatility_score_bucket","liquidity_score_bucket","spread_pct_bucket","expected_slippage_pct_bucket","stop_distance_pct_bucket"} and any(str(r.get(g["group_field"]) or "UNAVAILABLE")==g["group_value"] and str(r.get("reject_reason")).upper()=="STOP_TOO_WIDE" for r in records)]}, "high_effective_rr_missed_alpha":missed, "top_quality_improvement_candidates": positive_candidates[:20], "top_quality_improvement_candidate_note": "" if positive_candidates else "No positive-expectancy improvement candidates found: near-miss groups are dominated by WOULD_SL or negative expected expectancy.", "combo_group_count": len(combo_rows), "candidate_quality_gates": gate_rows, "score_calibration_diagnostics_count": len(calibration_rows), "thresholds_changed": False, "acceptance_logic_changed": False, "score_calibration_summary": score_calibration_summary}
     summary.update(_quality_gate_metrics(records, quality_gate_config or QualityGateConfig(), baseline_net_pnl))
     return summary, group_rows, missed, combo_rows, gate_rows, calibration_rows
 
@@ -4312,6 +4424,8 @@ def main():
     )
     with open(os.path.join(args.output_dir, "signal_quality_summary.json"), "w") as f:
         json.dump(signal_quality_summary, f, indent=2, sort_keys=True)
+    with open(os.path.join(args.output_dir, "score_calibration_summary.json"), "w") as f:
+        json.dump(signal_quality_summary.get("score_calibration_summary", {}), f, indent=2, sort_keys=True)
     for name, rows, fallback_fields in [
         ("signal_quality_by_group.csv", signal_quality_group_rows, ["group_field", "group_value", "count"]),
         ("high_effective_rr_missed_alpha.csv", high_effective_rr_rows, ["effective_rr_threshold", "count", "would_tp_count", "would_sl_count"]),

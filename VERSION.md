@@ -1,3 +1,15 @@
+## 2026-07-01 score calibration diagnostics
+
+- Current version: unreleased score calibration diagnostics increment
+- Current phase: post-lifecycle/reporting score calibration audit
+- Runtime maturity: BACKTEST exports richer score calibration evidence and BACKTEST-only calibrated-score diagnostics; PAPER/LIVE behavior unchanged
+- BACKTEST/PAPER/LIVE alignment: score source audit documented; no acceptance threshold or PAPER/LIVE default score formula changed
+- Lifecycle coverage: rejected shadow rows remain lifecycle-linked rejected evidence; no lifecycle transitions changed
+- Execution realism coverage: diagnostics now expose score buckets, outcome rates, execution costs, stop distance, volatility, spread/slippage, and high-score SL-prone clusters
+- Known critical risks: raw WOULD_TP calibration remains unproven on latest BTCUSDT 30d/1h evidence; calibrated_score is diagnostic-only until validated across runs
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY. No production threshold relaxation is recommended.
+
 ## 2026-07-01 PR256 diagnostic extraction correction
 
 - Current version: unreleased PR256 diagnostic extraction follow-up

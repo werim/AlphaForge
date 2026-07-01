@@ -1,3 +1,26 @@
+## 2026-07-01 - Score calibration diagnostics
+
+### Added
+- Added `score_calibration_summary.json` BACKTEST artifact with Pearson/Spearman score correlations, monotonicity checks, score source interpretation, and miscalibration flags.
+- Expanded `score_calibration_diagnostics.csv` with score buckets and breakdowns by reject reason, regime, and setup type, including raw/effective outcome rates and execution metrics.
+- Added BACKTEST-only `calibrated_score`, component, delta, and verdict diagnostics that penalize high volatility, wide stops, overextension, late breakouts, execution costs, spread, and slippage.
+- Added regression tests for score calibration exports, reconciliation, high-score SL cluster flags, diagnostic calibrated-score penalties, and no PAPER/LIVE loosening.
+
+### Changed
+- Signal-quality diagnostics now include a score calibration summary while preserving existing accepted/rejected lifecycle evidence.
+
+### Fixed
+- Fixed the audit gap where score calibration artifacts lacked direct raw WOULD_TP/effective TP correlations and high-score failure cluster flags.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. Additive BACKTEST diagnostics only.
+
+### Known Issues
+- The calibrated score is not used for acceptance. BTCUSDT 30d/1h artifacts must be regenerated to validate observed correlations and clusters end-to-end.
+
 ## 2026-07-01 PR256 diagnostic extraction correction
 
 ### Added

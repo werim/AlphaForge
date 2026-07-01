@@ -1857,3 +1857,57 @@ def test_prune_stale_candle_artifacts_keeps_only_current_run_symbols(tmp_path):
     assert (candles / "BTCUSDT_1h.json").exists()
     assert not (candles / "ETHUSDT_1h.json").exists()
     assert not (candles / "ETHUSDT_15m.json").exists()
+
+
+def test_score_calibration_artifacts_reconcile_counts_and_correlations():
+    shadows = [
+        _shadow_eval("AAAUSDT", "LOW_SCORE", 3.0, 1.2, "WOULD_SL"),
+        _shadow_eval("BBBUSDT", "LOW_SCORE", 8.0, 2.2, "WOULD_TP"),
+        _shadow_eval("CCCUSDT", "STOP_TOO_WIDE", 9.0, 1.4, "WOULD_SL", volatility_score=4.0),
+    ]
+    shadows[2].stop_distance_pct = 3.0
+
+    summary, _, _, _, _, calibration_rows = bo.build_signal_quality_diagnostics([], shadows, "1h")
+    score_rows = [r for r in calibration_rows if r.get("breakdown") == "score_bucket"]
+
+    assert sum(r["count"] for r in score_rows) == len(shadows)
+    cal = summary["score_calibration_summary"]
+    assert cal["total_rows"] == len(shadows)
+    assert "pearson_score_would_tp" in cal
+    assert "spearman_score_effective_tp_hit" in cal
+    assert cal["thresholds_changed"] is False
+    assert cal["acceptance_logic_changed"] is False
+
+
+def test_score_calibration_flags_high_score_low_tp_clusters_and_non_monotonicity():
+    shadows = [
+        _shadow_eval("AAAUSDT", "HIGH_VOL_GUARD", 8.5, 1.2, "WOULD_SL", volatility_score=5.0),
+        _shadow_eval("BBBUSDT", "HIGH_VOL_GUARD", 9.0, 1.3, "WOULD_SL", volatility_score=5.0),
+        _shadow_eval("CCCUSDT", "STOP_TOO_WIDE", 9.5, 1.4, "WOULD_SL", volatility_score=4.5),
+        _shadow_eval("DDDUSDT", "LOW_SCORE", 2.0, 2.4, "WOULD_TP"),
+    ]
+    for row in shadows:
+        row.stop_distance_pct = 3.0
+
+    summary, *_ = bo.build_signal_quality_diagnostics([], shadows, "1h")
+    flags = set(summary["score_calibration_summary"]["miscalibration_flags"])
+
+    assert "HIGH_SCORE_LOW_TP_RATE" in flags
+    assert "HIGH_VOL_HIGH_SCORE_SL_CLUSTER" in flags
+    assert "STOP_TOO_WIDE_HIGH_SCORE_SL_CLUSTER" in flags
+    assert "OVEREXTENSION_NOT_PENALIZED" in flags
+
+
+def test_calibrated_score_penalizes_high_volatility_sl_prone_without_future_leakage():
+    bad = _shadow_eval("AAAUSDT", "HIGH_VOL_GUARD", 9.0, 1.2, "WOULD_SL", volatility_score=5.0, spread_pct=0.03, expected_slippage_pct=0.03)
+    bad.stop_distance_pct = 3.0
+    good = _shadow_eval("BBBUSDT", "LOW_SCORE", 6.0, 2.4, "WOULD_TP", volatility_score=0.5, spread_pct=0.001, expected_slippage_pct=0.001)
+    good.stop_distance_pct = 0.8
+
+    records = [bo._quality_record_from_shadow(bad, "1h"), bo._quality_record_from_shadow(good, "1h")]
+    diagnostics, summary = bo.build_score_calibration_artifacts(records)
+    by_reason = {r.get("reject_reason"): r for r in diagnostics if r.get("breakdown") == "reject_reason"}
+
+    assert by_reason["HIGH_VOL_GUARD"]["avg_calibrated_score"] < bad.score
+    assert summary["calibrated_score_scope"] == "BACKTEST_DIAGNOSTIC_ONLY"
+    assert summary["calibrated_score_future_leakage"].startswith("NO_FORWARD_OUTCOME_FIELDS_USED")
