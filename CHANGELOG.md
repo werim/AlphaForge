@@ -1,3 +1,47 @@
+## 2026-07-01 - Diagnostic profile execution-context strictness
+
+### Added
+- Added strict execution-context validation for `SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC`, blocking missing/non-numeric/unavailable `effective_rr`, `min_effective_rr`, `cost_penalty`, `liquidity_score`, `spread_pct`, and `expected_slippage_pct` as `EXECUTION_CONTEXT_UNAVAILABLE`.
+- Added `.env` example documentation for `ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS` as a BACKTEST-only reporting scope.
+- Added regressions for unavailable spread, slippage, cost, liquidity, effective-RR, and min-effective-RR diagnostic evidence.
+
+### Changed
+- Diagnostic SHORT LOW_SCORE BREAKDOWN rows no longer treat missing spread/slippage/cost as zero or missing liquidity as perfect liquidity.
+
+### Fixed
+- Fixed execution-realism leakage where unavailable execution context could be interpreted as favorable diagnostic evidence.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. This only tightens BACKTEST diagnostic inclusion and does not change DEFAULT_FILTERS, PAPER, or LIVE behavior.
+
+### Known Issues
+- Diagnostic sample counts may decrease when execution context is incomplete; this is intentional and preserves reject quality.
+
+## 2026-07-01 - SHORT LOW_SCORE BREAKDOWN diagnostic profile
+
+### Added
+- Added BACKTEST-only `SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC` shadow-validation profile for SHORT `BREAKDOWN_DOWN` rows rejected by `LOW_SCORE` in `SHORT_LOW_SCORE_GOOD_UTC_HOURS`, scoped by default to BTCUSDT/ETHUSDT and configurable by `ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS`.
+- Added `diagnostic_short_low_score_breakdown_candidates.csv` and `diagnostic_short_low_score_breakdown_summary.json` with outcome counts, effective shadow R statistics, confidence lower bound, cost/spread/slippage/liquidity distributions, symbol/hour breakdowns, and explicit diagnostic-only rationale.
+- Added dashboard rendering for the diagnostic profile as a separate `DIAGNOSTIC ONLY` row with “production thresholds unchanged.”
+
+### Changed
+- BACKTEST summaries now expose the diagnostic candidate count without changing accepted counts or default filters.
+
+### Fixed
+- Prevented SHORT LOW_SCORE diagnostic discovery from bypassing STOP_TOO_WIDE, HIGH_VOL_GUARD, invalid geometry, effective-RR, cost, spread, slippage, or liquidity sanity gates.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. Additive BACKTEST artifacts/dashboard fields only.
+
+### Known Issues
+- The profile is not an acceptance path and is not PAPER/LIVE enabled. Latest multi-symbol artifacts still require regeneration to judge whether the bucket has durable positive expectancy after execution costs.
+
 ## 2026-07-01 - BACKTEST lifecycle/reject SQL persistence completion
 
 ### Added

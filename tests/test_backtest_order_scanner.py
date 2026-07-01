@@ -1915,3 +1915,90 @@ def test_calibrated_score_penalizes_high_volatility_sl_prone_without_future_leak
     assert by_reason["HIGH_VOL_GUARD"]["avg_calibrated_score"] < bad.score
     assert summary["calibrated_score_scope"] == "BACKTEST_DIAGNOSTIC_ONLY"
     assert summary["calibrated_score_future_leakage"].startswith("NO_FORWARD_OUTCOME_FIELDS_USED")
+
+
+def test_short_low_score_breakdown_diagnostic_profile_scope_and_safety():
+    base = {
+        "timestamp": 1710000000000, "symbol": "BTCUSDT", "side": "SHORT", "setup": "BREAKDOWN_DOWN",
+        "reject_reason": "LOW_SCORE", "entry": "100", "sl": "101", "tp": "98", "effective_rr": "1.4",
+        "min_effective_rr": "1.1", "cost_penalty": "0.1", "spread_pct": "0.0008",
+        "expected_slippage_pct": "0.0005", "liquidity_score": "0.8", "first_touch_outcome": "WOULD_TP",
+        "effective_shadow_r_after_costs": "1.3", "hour_utc": "6", "all_failed_gates": '["LOW_SCORE"]',
+    }
+    rows = [
+        dict(base),
+        {**base, "symbol": "SOLUSDT"},
+        {**base, "side": "LONG"},
+        {**base, "setup": "BREAKOUT_UP"},
+        {**base, "reject_reason": "STOP_TOO_WIDE"},
+        {**base, "hour_utc": "12"},
+        {**base, "all_failed_gates": '["LOW_SCORE", "STOP_TOO_WIDE"]'},
+        {**base, "all_failed_gates": '["LOW_SCORE", "HIGH_VOL_GUARD"]'},
+        {**base, "effective_rr": "0.9"},
+    ]
+
+    candidates, summary = bo.build_short_low_score_breakdown_diagnostic_profile(rows, symbols=("BTCUSDT", "ETHUSDT"))
+
+    assert len(candidates) == 1
+    assert candidates[0]["diagnostic_profile"] == bo.DIAGNOSTIC_PROFILE_NAME
+    assert candidates[0]["diagnostic_only"] is True
+    assert candidates[0]["production_decision_changed"] is False
+    assert summary["candidate_count"] == 1
+    assert summary["would_tp_count"] == 1
+    assert summary["blocked_reason_distribution"]["STOP_TOO_WIDE_ACTIVE"] == 1
+    assert summary["blocked_reason_distribution"]["HIGH_VOL_GUARD_ACTIVE"] == 1
+    assert summary["production_thresholds_unchanged"] is True
+    assert summary["paper_live_effect"] == "NONE"
+
+
+def test_short_low_score_breakdown_diagnostic_profile_keeps_default_count_unchanged():
+    rows = [
+        {"timestamp": 1710000000000, "symbol": "ETHUSDT", "side": "SHORT", "setup": "BREAKDOWN_DOWN", "reject_reason": "LOW_SCORE", "entry": 100, "sl": 101, "tp": 98, "effective_rr": 1.3, "min_effective_rr": 1.1, "cost_penalty": 0.1, "spread_pct": 0.0005, "expected_slippage_pct": 0.0004, "liquidity_score": 0.9, "first_touch_outcome": "WOULD_SL", "effective_shadow_r_after_costs": -1.1, "hour_utc": 7},
+    ]
+    default_accepted_count = 0
+    candidates, summary = bo.build_short_low_score_breakdown_diagnostic_profile(rows)
+    assert len(candidates) == 1
+    assert default_accepted_count == 0
+    assert summary["reason_diagnostic_only"].startswith("DIAGNOSTIC ONLY")
+
+
+def test_short_low_score_breakdown_diagnostic_blocks_missing_execution_context_fields():
+    base = {
+        "timestamp": 1710000000000, "symbol": "BTCUSDT", "side": "SHORT", "setup": "BREAKDOWN_DOWN",
+        "reject_reason": "LOW_SCORE", "entry": "100", "sl": "101", "tp": "98", "effective_rr": "1.4",
+        "min_effective_rr": "1.1", "cost_penalty": "0.1", "spread_pct": "0.0008",
+        "expected_slippage_pct": "0.0005", "liquidity_score": "0.8", "first_touch_outcome": "WOULD_TP",
+        "effective_shadow_r_after_costs": "1.3", "hour_utc": "6", "all_failed_gates": '["LOW_SCORE"]',
+    }
+    rows = []
+    for field, missing_value in [
+        ("spread_pct", ""),
+        ("expected_slippage_pct", None),
+        ("cost_penalty", "UNAVAILABLE_BACKTEST"),
+        ("liquidity_score", "nan"),
+    ]:
+        row = dict(base)
+        row[field] = missing_value
+        rows.append(row)
+
+    candidates, summary = bo.build_short_low_score_breakdown_diagnostic_profile(rows, symbols=("BTCUSDT", "ETHUSDT"))
+
+    assert candidates == []
+    assert summary["candidate_count"] == 0
+    assert summary["blocked_reason_distribution"] == {"EXECUTION_CONTEXT_UNAVAILABLE": 4}
+
+
+def test_short_low_score_breakdown_diagnostic_requires_explicit_effective_rr_threshold():
+    base = {
+        "timestamp": 1710000000000, "symbol": "ETHUSDT", "side": "SHORT", "setup": "BREAKDOWN_DOWN",
+        "reject_reason": "LOW_SCORE", "entry": "100", "sl": "101", "tp": "98", "effective_rr": "1.4",
+        "min_effective_rr": "1.1", "cost_penalty": "0.1", "spread_pct": "0.0008",
+        "expected_slippage_pct": "0.0005", "liquidity_score": "0.8", "first_touch_outcome": "WOULD_SL",
+        "effective_shadow_r_after_costs": "-1.1", "hour_utc": "7",
+    }
+    rows = [{**base, "effective_rr": "UNKNOWN"}, {**base, "min_effective_rr": ""}]
+
+    candidates, summary = bo.build_short_low_score_breakdown_diagnostic_profile(rows)
+
+    assert candidates == []
+    assert summary["blocked_reason_distribution"] == {"EXECUTION_CONTEXT_UNAVAILABLE": 2}

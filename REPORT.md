@@ -1,3 +1,81 @@
+## 2026-07-01 Diagnostic profile execution-context strictness
+
+### Why the patch was needed
+PR262 diagnostic gating could treat missing execution fields as favorable defaults: zero spread/slippage/cost or perfect liquidity. That violated AlphaForge execution-realism rules and the explicit-unavailable-marker standard.
+
+### Root cause
+`_diagnostic_short_low_score_breakdown_row_allowed` used `_safe_float(..., default)` fallbacks after geometry checks. Missing `cost_penalty`, `spread_pct`, and `expected_slippage_pct` became `0.0`, while missing `liquidity_score` became `1.0`.
+
+### Files changed
+- `backtest_order.py`: added strict numeric validation and blocks unavailable execution context as `EXECUTION_CONTEXT_UNAVAILABLE` before applying existing safety thresholds.
+- `.env.example`, `.env.medium.example`, `.env.live.example`, `.env.test.example`: documented `ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS` as BACKTEST-only diagnostic scope.
+- `tests/test_backtest_order_scanner.py`: added missing/unavailable execution-context regression tests.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: documented the fail-closed diagnostic behavior.
+
+### Runtime behavior changes
+Only BACKTEST diagnostic inclusion changed. DEFAULT_FILTERS accepted counts, PAPER, LIVE, and production thresholds remain unchanged.
+
+### Lifecycle changes
+None. Diagnostic candidates remain rejected evidence.
+
+### Persistence changes
+None. Artifact rows may be fewer when execution context is unavailable, and summary blocked reasons now count `EXECUTION_CONTEXT_UNAVAILABLE`.
+
+### Export/schema changes
+No schema change. Existing diagnostic summary `blocked_reason_distribution` can now include `EXECUTION_CONTEXT_UNAVAILABLE`.
+
+### Tests added/executed
+Added regressions for missing spread, slippage, cost, liquidity, effective RR, and min effective RR.
+
+### Risks and remaining limitations
+The stricter diagnostic profile can reduce candidate counts if historical execution context is incomplete. This is intentional and safer than fake favorable defaults.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Push after targeted/full validation. LIVE remains NOT READY.
+
+## 2026-07-01 SHORT LOW_SCORE BREAKDOWN diagnostic profile
+
+### Why the patch was needed
+Latest BACKTEST/dashboard evidence indicated `DEFAULT_FILTERS` still accepted zero trades while `ALL_FILTERS_OFF` produced losing trades. The root-cause summary identified `LOW_SCORE` as the main bottleneck, but broad threshold relaxation was unsafe. The only defensible next step was a diagnostic-only, narrowly scoped shadow profile for the strongest observed SHORT LOW_SCORE BREAKDOWN bucket.
+
+### Root cause
+LOW_SCORE rejects were already forward-evaluable, but there was no dedicated artifact that isolated SHORT `BREAKDOWN_DOWN` LOW_SCORE rows in the validated good UTC-hour group while keeping execution-cost and hard safety gates active. This made it difficult to compare the bucket without risking production-filter drift.
+
+### Files changed
+- `backtest_order.py`: added `SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC`, configurable symbol scope, candidate filtering, safety gating, summary aggregation, and artifact exports.
+- `src/alphaforge/dashboard/backtest_control.py`: reads the diagnostic summary/candidate artifact paths into the dashboard result model.
+- `src/alphaforge/dashboard/templates/overview.html`: renders a separate diagnostic-only row/card and states production thresholds are unchanged.
+- `tests/test_backtest_order_scanner.py`: added regressions for scope, STOP_TOO_WIDE/HIGH_VOL_GUARD preservation, candidate counts, and DEFAULT_FILTERS accepted-count immutability.
+- `tests/test_dashboard_app.py`: extended dashboard artifact parsing/rendering coverage where dashboard dependencies are available.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: documented behavior, risks, and no-live-readiness stance.
+
+### Runtime behavior changes
+No production behavior changed. DEFAULT_FILTERS accepted counts are not mutated. PAPER/LIVE configuration and thresholds are unchanged.
+
+### Lifecycle changes
+No lifecycle states or transitions changed. Candidate rows remain rejected evidence and are exported only as diagnostic shadow candidates.
+
+### Persistence changes
+No SQLite migration and no order-decision persistence change. New CSV/JSON artifacts are BACKTEST-only and additive.
+
+### Export/schema changes
+Added `diagnostic_short_low_score_breakdown_candidates.csv` and `diagnostic_short_low_score_breakdown_summary.json`. `order_backtest_summary.csv` receives additive diagnostic count/profile/note fields.
+
+### Tests added/executed
+Added targeted regressions for diagnostic profile scope and safety gates. Dashboard rendering coverage is present but may be skipped in environments without dashboard optional dependencies.
+
+### Risks and remaining limitations
+The diagnostic sample can still be too small, execution-cost estimates may drift, and forward labels are shadow evidence rather than trade approvals. This patch must not be used to justify LOW_SCORE threshold relaxation or LIVE readiness.
+
+### Migration concerns
+None. Consumers should tolerate additive BACKTEST artifact files and summary fields.
+
+### Push recommendation
+Push after targeted/full tests and one multi-symbol comparison backtest. LIVE remains NOT READY.
+
 ## 2026-07-01 BACKTEST lifecycle/reject SQL persistence completion
 
 ### Why the patch was needed
