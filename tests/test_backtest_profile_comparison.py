@@ -307,3 +307,82 @@ def test_leaderboard_ranking_prefers_executed_profiles_over_no_trade_zero_pnl(tm
     rows = [bc._comparison_metrics('DEFAULT_FILTERS', no_trade, 10000, window_days=30), bc._comparison_metrics('ALL_FILTERS_OFF', trade, 10000, window_days=30)]
     ranked = sorted(rows, key=lambda r: (int(r.get('accepted_trades') or 0) > 0, r.get('objective_score', {}).get('final_objective_score', 0.0)), reverse=True)
     assert ranked[0]['profile_name'] == 'ALL_FILTERS_OFF'
+
+
+def test_safe_subprocess_timeout_rejects_non_positive_values():
+    assert bc._safe_subprocess_timeout(1) == 1.0
+    with pytest.raises(ValueError):
+        bc._safe_subprocess_timeout(0)
+    with pytest.raises(ValueError):
+        bc._safe_subprocess_timeout(-24745.094)
+
+
+def test_profile_timeout_returns_partial_and_preserves_completed_profiles(monkeypatch, tmp_path):
+    class BacktestCfg:
+        output_dir = str(tmp_path)
+        export_config_snapshot = False
+        top_n = 1
+        timeframe = "1h"
+    class Cfg:
+        backtest = BacktestCfg()
+    monkeypatch.setattr(bc, "load_config_from_env", lambda: Cfg())
+    monkeypatch.setattr(bc, "canonical_utc_timestamp", lambda: "2026-06-30T21:45:29Z")
+    monkeypatch.setattr(bc, "DASHBOARD_BACKTEST_SUBPROCESS_TIMEOUT_SECONDS", 7)
+
+    def fake_run(command, cwd, text, capture_output, timeout, check, env):
+        assert timeout > 0
+        profile_dir = Path(command[command.index("--output-dir") + 1])
+        profile = profile_dir.name
+        if profile == "ALL_FILTERS_OFF":
+            raise bc.subprocess.TimeoutExpired(command, timeout)
+        disabled = [command[i + 1] for i, arg in enumerate(command) if arg == "--disable-backtest-filter"]
+        _write_profile_artifacts(profile_dir, disabled, accepted=3, net=12.0)
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(bc.subprocess, "run", fake_run)
+    request = bc.DashboardBacktestRequest(30, ["BTCUSDT"], "1h", 10000.0, 1, run_profile_comparison=True)
+    result = bc.run_dashboard_backtest(request)
+
+    assert result.status == "PARTIAL"
+    assert "Profile ALL_FILTERS_OFF timed out" in result.error_message
+    assert result.selected_profile_name == "DEFAULT_FILTERS"
+    assert result.accepted_trades == 3
+    comparison = json.loads(Path(result.filter_profile_comparison_path).read_text())
+    assert comparison["status"] == "PARTIAL"
+    assert comparison["profiles"]["ALL_FILTERS_OFF"]["status"] == "TIMEOUT"
+    assert comparison["profiles"]["DEFAULT_FILTERS"]["status"] == "COMPLETED"
+    assert Path(tmp_path / "dashboard" / "20260630T214529Z" / "profiles" / "ALL_FILTERS_OFF" / "backtest_profile_metadata.json").exists()
+    by_profile = {row["profile_name"]: row for row in result.profile_leaderboard}
+    assert by_profile["ALL_FILTERS_OFF"]["status"] == "TIMEOUT"
+    assert by_profile["DEFAULT_FILTERS"]["accepted_trades"] == 3
+
+
+def test_dashboard_displays_partial_profile_timeout_without_500(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    import alphaforge.dashboard.app as dashboard_app
+    from alphaforge.dashboard.app import create_app
+
+    def fake_runner(request):
+        return bc.DashboardBacktestResult(
+            "PARTIAL",
+            "last 30 days",
+            request.symbols,
+            request.timeframe,
+            request.initial_balance,
+            request.max_symbols,
+            error_message="Profile ALL_FILTERS_OFF timed out. Completed profiles are still available.",
+            accepted_trades=2,
+            profile_leaderboard=[
+                {"profile_name": "DEFAULT_FILTERS", "status": "COMPLETED", "raw_net_pnl_rank": 1, "objective_score_rank": 1, "raw_net_pnl": "10", "final_objective_score": "9", "accepted_trades": 2, "win_count": 1, "loss_count": 1, "open_count": 0, "avg_trades_per_day": 0.1, "score_10_tp_count": 0, "score_10_sl_count": 0, "warnings": []},
+                {"profile_name": "ALL_FILTERS_OFF", "status": "TIMEOUT", "raw_net_pnl_rank": 2, "objective_score_rank": 2, "raw_net_pnl": 0, "final_objective_score": -1000000, "accepted_trades": None, "win_count": None, "loss_count": None, "open_count": None, "avg_trades_per_day": None, "score_10_tp_count": None, "score_10_sl_count": None, "warnings": ["PROFILE_TIMEOUT"]},
+            ],
+        )
+
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", fake_runner)
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'partial.db'}")).post("/backtest/run", data={"last_days": "30", "symbols": "BTCUSDT", "timeframe": "1h", "initial_balance": "10000", "max_symbols": "1", "run_profile_comparison": "true"})
+    assert response.status_code == 200
+    assert "Profile ALL_FILTERS_OFF timed out" in response.text
+    assert "DEFAULT_FILTERS" in response.text
+    assert "TIMEOUT" in response.text
