@@ -2422,7 +2422,7 @@ def build_strategy_quality_evidence(lifecycle_rows: List[LifecycleRow], rejected
 
 def build_default_gate_funnel(rejected: List[Dict[str, Any]], accepted_rows: List[LifecycleRow]) -> List[Dict[str, Any]]:
     gate_order = ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"]
-    accepted_count = len(_accepted_terminal_rows_for_risk(accepted_rows)) or len([r for r in accepted_rows if not r.reject_reason and r.status_after == "SIGNAL_CREATED"])
+    accepted_count = len(_accepted_terminal_rows_for_risk(accepted_rows))
     total = accepted_count + len(rejected)
     remaining = total
     rows: List[Dict[str, Any]] = []
@@ -3697,7 +3697,7 @@ def main():
         w.writerow(summary)
     for name, rows, fallback in [
         ("equity_curve.csv", equity_curve_rows, ["trade_index", "timestamp", "symbol", "side", "net_pnl_usdt", "equity", "drawdown", "drawdown_pct"]),
-        ("default_gate_funnel.csv", gate_funnel_rows, ["gate", "candidates_entering_gate", "rejected_by_gate", "accepted_after_gate", "expected_effective_expectancy"]),
+        ("default_gate_funnel.csv", gate_funnel_rows, ["gate", "candidates_entering_gate", "rejected_by_gate", "accepted_after_gate", "would_tp_count", "would_sl_count", "would_timeout_count", "unknown_count", "expected_effective_expectancy", "gate_visible", "zero_reject_warning", "funnel_scope", "comparability_note"]),
         ("symbol_regime_acceptance_diagnostics.csv", symbol_regime_rows, ["symbol", "regime", "accepted_count", "tp_count", "sl_count"]),
     ]:
         with open(os.path.join(args.output_dir, name), "w", newline="") as f:

@@ -386,3 +386,90 @@ def test_dashboard_displays_partial_profile_timeout_without_500(monkeypatch, tmp
     assert "Profile ALL_FILTERS_OFF timed out" in response.text
     assert "DEFAULT_FILTERS" in response.text
     assert "TIMEOUT" in response.text
+
+
+def test_profile_comparison_required_zero_summary_with_12228_lifecycle_rows(tmp_path):
+    profile_dir = tmp_path / "DEFAULT_FILTERS"
+    _write_csv(profile_dir / "order_backtest_summary.csv", [{"accepted_count": "0", "tp_hits": "0", "sl_hits": "0", "open_at_end": "0", "total_net_pnl_usdt": "0", "rejected_count": "1058"}])
+    _write_csv(profile_dir / "order_lifecycle.csv", [
+        {"signal_id": f"s{i}", "lifecycle_state": "SIGNAL_CREATED", "decision": "CREATED", "score": "9.1", "effective_rr": "2.4"}
+        for i in range(12228)
+    ])
+    _write_csv(profile_dir / "rejected_orders.csv", [{"reject_reason": "LOW_SCORE", "lifecycle_state": "SIGNAL_REJECTED", "score": "4", "effective_rr": "1.0"}])
+
+    row = bc._comparison_metrics("DEFAULT_FILTERS", profile_dir, 10000, window_days=30)
+
+    assert row["accepted_trades"] == 0
+    assert row["avg_trades_per_day"] == 0
+    assert row["lifecycle_event_count"] == 12228
+    assert "OVERTRADE_RISK" not in row["warnings"]
+    assert "NO_EXECUTED_TRADES" in row["warnings"]
+
+
+def test_profile_comparison_required_all_filters_off_exact_executed_values(tmp_path):
+    profile_dir = tmp_path / "ALL_FILTERS_OFF"
+    net = "-5.977496714410623"
+    _write_csv(profile_dir / "order_backtest_summary.csv", [{"accepted_count": "9", "tp_hits": "2", "sl_hits": "7", "open_at_end": "0", "total_net_pnl_usdt": net, "rejected_count": "0"}])
+    orders = []
+    for i in range(9):
+        orders.append({"signal_id": f"o{i}", "close_reason": "TP_HIT" if i < 2 else "SL_HIT", "score": "8.5", "effective_rr": "1.7", "net_pnl_usdt": "1"})
+    _write_csv(profile_dir / "backtest_orders.csv", orders)
+    _write_csv(profile_dir / "order_lifecycle.csv", [{"signal_id": f"e{i}", "lifecycle_state": "SIGNAL_CREATED", "score": "10", "effective_rr": "9"} for i in range(12228)])
+    _write_csv(profile_dir / "rejected_orders.csv", [])
+
+    row = bc._comparison_metrics("ALL_FILTERS_OFF", profile_dir, 10000, window_days=30)
+
+    assert row["accepted_trades"] == 9
+    assert (row["win_count"], row["loss_count"], row["open_count"]) == (2, 7, 0)
+    assert row["net_pnl"] == pytest.approx(-5.977496714410623)
+    assert row["objective_score"]["raw_net_pnl"] == pytest.approx(-5.977496714410623)
+
+
+def test_guardrail_attribution_and_canonical_gate_funnel_from_existing_sources(tmp_path):
+    run_dir = tmp_path / "run"
+    default_dir = run_dir / "profiles" / "DEFAULT_FILTERS"
+    default_dir.mkdir(parents=True)
+    _write_csv(default_dir / "order_backtest_summary.csv", [{"accepted_count": "0", "rejected_count": "1058", "tp_hits": "0", "sl_hits": "0", "open_at_end": "0", "total_net_pnl_usdt": "0"}])
+    rejected = (
+        [{"reject_reason": "LOW_SCORE", "lifecycle_state": "SIGNAL_REJECTED", "score": "4", "rr": "1.0", "expectancy": "0"} for _ in range(3)]
+        + [{"reject_reason": "STOP_TOO_WIDE", "lifecycle_state": "SIGNAL_REJECTED", "score": "9", "rr": "2.0", "effective_rr": "1.8", "expectancy": "0.2", "source_stage": "SIGNAL_ENGINE", "symbol": "BTCUSDT"} for _ in range(2)]
+        + [{"reject_reason": "RR_TOO_LOW", "lifecycle_state": "SIGNAL_REJECTED", "score": "8", "rr": "1.4", "effective_rr": "1.1", "expectancy": "0.1", "source_stage": "SIGNAL_ENGINE", "symbol": "ETHUSDT"}]
+    )
+    _write_csv(default_dir / "rejected_orders.csv", rejected)
+    _write_csv(default_dir / "order_lifecycle.csv", [{"signal_id": "s", "lifecycle_state": "SIGNAL_CREATED"}])
+    calibration = {"rejection_funnel": {"passed_score_rr_expectancy": 3, "rejected_by_later_gates": 3, "accepted_trades": 0}, "accepted_score_distribution": {"count": 0}, "accepted_effective_rr_distribution": {"count": 0}}
+    (default_dir / "lifecycle_calibration_summary.json").write_text(json.dumps(calibration))
+
+    result = bc.DashboardBacktestResult("COMPLETED", "last 30 days", ["BTCUSDT"], "1h", 10000, 1)
+    bc._apply_backtest_artifact_model(result, run_dir, selected_profile_name="DEFAULT_FILTERS", window_days=30)
+
+    assert result.guardrail_reject_breakdown["STOP_TOO_WIDE"] == 2
+    assert result.guardrail_reject_breakdown["RR_TOO_LOW"] == 1
+    assert result.top_guardrail_reject_reasons
+    assert result.representative_guardrail_reject_examples
+    by_gate = {row["gate"]: row for row in result.gate_funnel}
+    assert by_gate["LOW_SCORE"]["rejected_by_gate"] == 3
+    assert by_gate["STOP_TOO_WIDE"]["rejected_by_gate"] == 2
+
+
+def test_dashboard_renders_guardrail_breakdown_when_source_data_exists(monkeypatch, tmp_path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+    import alphaforge.dashboard.app as dashboard_app
+    from alphaforge.dashboard.app import create_app
+
+    def fake_runner(request):
+        return bc.DashboardBacktestResult(
+            "COMPLETED", "last 30 days", request.symbols, request.timeframe, request.initial_balance, request.max_symbols,
+            guardrail_reject_breakdown={"STOP_TOO_WIDE": 2},
+            top_guardrail_reject_reasons=[{"reason": "STOP_TOO_WIDE", "count": 2}],
+            representative_guardrail_reject_examples=[{"symbol": "BTCUSDT", "reject_reason": "STOP_TOO_WIDE"}],
+        )
+
+    monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", fake_runner)
+    response = TestClient(create_app(f"sqlite+pysqlite:///{tmp_path / 'guardrails.db'}")).post("/backtest/run", data={"last_days": "30", "symbols": "BTCUSDT", "timeframe": "1h", "initial_balance": "10000", "max_symbols": "1"})
+    assert response.status_code == 200
+    guardrail_section = response.text.split("Strategy Quality Guardrails", 1)[1]
+    assert "STOP_TOO_WIDE" in guardrail_section
+    assert "Unavailable" not in guardrail_section.split("</table>", 1)[0]
