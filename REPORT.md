@@ -1,3 +1,49 @@
+## 2026-07-01 score calibration diagnostics
+
+### Why the patch was needed
+The latest BTCUSDT 30d/1h `rejected_shadow.csv` evidence showed score variability but weak raw-outcome calibration: WOULD_TP=187, WOULD_SL=328, UNKNOWN=3, mean score for WOULD_TP around 4.44, mean score for WOULD_SL around 4.41, and corr(score, WOULD_TP) around 0.01. Effective TP separation was better, indicating the current score is closer to mixed quality/execution evidence than raw TP-before-SL probability.
+
+### Root cause / exact score source files and functions
+- BACKTEST score originates in `backtest_order._build_market_ctx`, where score is a 0-10 blend of breakout strength and candle range, with expectancy derived from score and RR. It is routed through `scan_symbol_backtest`, the shared order runtime, guardrails, rejected exports, and `evaluate_rejected_shadow`.
+- PAPER/LIVE score originates in `src/alphaforge/ai_brain.py::AIBrain.score_signal`, where `total_score` is a 0-1 deterministic probabilistic score mixing setup quality, regime alignment, expectancy edge, momentum, liquidity, volatility fit, RR quality, execution success probability, confidence, and penalties. Runtime persistence uses that score through `src/alphaforge/runtime.py` and `src/alphaforge/order.py`.
+- BACKTEST and PAPER/LIVE score scales and formulas are therefore not identical: BACKTEST score mostly describes setup/breakout strength plus execution-derived gates, while PAPER/LIVE `AIBrain` score is intended as conservative probability/quality after costs. Neither should be treated as a pure raw WOULD_TP probability without calibration evidence.
+
+### Files changed
+- `backtest_order.py`: added score calibration artifact builders, Pearson/Spearman helpers, score bucket breakdowns, miscalibration flags, BACKTEST-only calibrated-score diagnostics, and `score_calibration_summary.json` export.
+- `tests/test_backtest_order_scanner.py`: added regression tests for diagnostics exports, count reconciliation, correlations, high-score SL cluster flags, calibrated-score penalties, and diagnostic-only/no-threshold-change guarantees.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: updated operational documentation.
+
+### Runtime behavior changes
+No acceptance threshold changed. No default BACKTEST/PAPER/LIVE decision formula was loosened. The calibrated score is exported as diagnostic evidence only and is labeled `BACKTEST_DIAGNOSTIC_ONLY`.
+
+### Lifecycle changes
+No lifecycle state changed. Rejected signals remain rejected and continue to produce rejected-shadow evidence.
+
+### Persistence changes
+No SQLite migration. New evidence is emitted as BACKTEST CSV/JSON artifacts only.
+
+### Export/schema changes
+- `score_calibration_diagnostics.csv` now includes score-bucket/reason/regime/setup breakdown rows with counts, WOULD_TP/WOULD_SL/effective-TP rates, average raw/effective RR, cost penalty, stop distance, volatility, spread/slippage, and calibrated-score averages.
+- `score_calibration_summary.json` includes Pearson/Spearman correlations for score vs raw WOULD_TP and effective TP, monotonicity status, miscalibration flags, source interpretation, and diagnostic-only threshold flags.
+
+### Calibration evidence and high-score failure clusters
+The patch encodes the observed failure modes as flags: `HIGH_SCORE_LOW_TP_RATE`, `SCORE_INVERSION`, `OVEREXTENSION_NOT_PENALIZED`, `HIGH_VOL_HIGH_SCORE_SL_CLUSTER`, `STOP_TOO_WIDE_HIGH_SCORE_SL_CLUSTER`, `SCORE_NOT_MONOTONIC`, and `SCORE_PREDICTS_EFFECTIVE_TP_BETTER_THAN_RAW_TP`.
+
+### Tests added/executed
+Added tests proving exported score-bucket counts reconcile to rejected-shadow records, correlation metrics are present, high-score low-TP clusters are flagged, calibrated_score penalizes high-volatility SL-prone candidates, diagnostic calibrated_score declares no forward outcome field usage, and default acceptance logic remains unchanged.
+
+### Risks and remaining limitations
+The diagnostic calibrated score is a conservative hypothesis, not production calibration. It uses only row-local pre-decision features, but it must be validated across regenerated BTCUSDT 30d/1h and additional symbols/timeframes before any default score or threshold change.
+
+### Migration concerns
+None for SQLite. CSV/JSON consumers should tolerate additive fields and the new `score_calibration_summary.json` artifact.
+
+### Recommended next action
+Regenerate BTCUSDT 30d/1h artifacts and compare raw score vs calibrated_score monotonicity and correlations. Do not loosen acceptance thresholds unless calibrated evidence improves raw and effective outcome separation without increasing execution-risk clusters.
+
+### Push recommendation
+Push after targeted and full pytest validation pass. Do not claim LIVE readiness.
+
 ## 2026-07-01 PR256 diagnostic extraction correction
 
 ### Why the patch was needed
