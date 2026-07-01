@@ -156,6 +156,21 @@ HIGH_VOL_GUARD_DIAGNOSTIC_WARNING = (
     "It measures guardrail impact only."
 )
 
+DIAGNOSTIC_PROFILE_NAME = "SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC"
+DIAGNOSTIC_PROFILE_DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT")
+DIAGNOSTIC_PROFILE_GOOD_HOUR_GROUP = "SHORT_LOW_SCORE_GOOD_UTC_HOURS"
+DIAGNOSTIC_PROFILE_REASON = (
+    "DIAGNOSTIC ONLY: BACKTEST-only shadow validation for SHORT BREAKDOWN_DOWN rows rejected by LOW_SCORE "
+    "in historically favorable UTC hours. Production thresholds unchanged; PAPER/LIVE unchanged; "
+    "HIGH_VOL_GUARD, STOP_TOO_WIDE, execution-cost, effective-RR, liquidity, and geometry sanity remain active."
+)
+
+
+def diagnostic_short_low_score_symbols_from_env() -> tuple[str, ...]:
+    raw = os.getenv("ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS", "")
+    symbols = tuple(s.strip().upper() for s in raw.replace(",", " ").split() if s.strip())
+    return symbols or DIAGNOSTIC_PROFILE_DEFAULT_SYMBOLS
+
 
 def _env_bool(name: str, default: bool) -> bool:
     return str(os.getenv(name, str(default))).strip().lower() in {"1", "true", "yes", "on"}
@@ -3773,6 +3788,114 @@ def build_symbol_reject_forward_summary(rows: List[Mapping[str, Any]]) -> Dict[s
     return {"symbol_reject_count": len(sym), "forward_evaluable_count": len(ev), "forward_unavailable_count": len(un), "missing_market_structure_metric_count": missing_metrics, "unavailable_reason_distribution": _distribution([r.get("shadow_unavailable_reason") or r.get("first_touch_outcome") for r in un]), "too_choppy_count": len(ch), "too_choppy_forward_evaluable_count": sum(1 for r in ch if _is_forward_evaluable(r)), "too_choppy_would_tp_count": c(ch,"WOULD_TP"), "too_choppy_would_sl_count": c(ch,"WOULD_SL"), "too_choppy_mean_effective_shadow_r": mean_eff(ch), "weak_trend_count": len(wk), "weak_trend_forward_evaluable_count": sum(1 for r in wk if _is_forward_evaluable(r)), "weak_trend_would_tp_count": c(wk,"WOULD_TP"), "weak_trend_would_sl_count": c(wk,"WOULD_SL"), "weak_trend_mean_effective_shadow_r": mean_eff(wk), "mean_chop_score": _mean([_safe_float(r.get("chop_score")) for r in sym if r.get("chop_score") not in (None,"")]), "mean_trend_strength": _mean([_safe_float(r.get("trend_strength")) for r in sym if r.get("trend_strength") not in (None,"")]), "mean_range_edge_score": _mean([_safe_float(r.get("range_edge_score")) for r in sym if r.get("range_edge_score") not in (None,"")]), "mean_mfe_r": _mean([_safe_float(r.get("mfe_r")) for r in ev]), "mean_mae_r": _mean([_safe_float(r.get("mae_r")) for r in ev]), "p95_adverse_r": _p95([_safe_float(r.get("mae_r")) for r in ev]), "symbol_reject_forward_verdict": verdict, "symbol_reject_forward_evidence": f"{len(ev)} of {len(sym)} symbol-level rejects have diagnostic forward outcomes.", "recommended_action": "Keep symbol-level filters; if geometry is unavailable, add safe pre-reject candidate geometry capture before threshold changes."}
 
 
+
+def _json_or_pipe_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).upper() for v in value]
+    text_value = str(value).strip()
+    if not text_value:
+        return []
+    if text_value.startswith("["):
+        try:
+            parsed = json.loads(text_value)
+            if isinstance(parsed, list):
+                return [str(v).upper() for v in parsed]
+        except json.JSONDecodeError:
+            pass
+    return [part.strip().upper() for part in text_value.replace("|", ",").split(",") if part.strip()]
+
+
+def _distribution_stats(rows: List[Mapping[str, Any]], field: str) -> Dict[str, Any]:
+    vals = [_safe_float(r.get(field)) for r in rows if str(r.get(field, "")).strip() != ""]
+    return {"count": len(vals), "min": min(vals) if vals else 0.0, "mean": _mean(vals), "median": _median(vals), "p95": _p95(vals), "max": max(vals) if vals else 0.0}
+
+
+def _diagnostic_short_low_score_breakdown_row_allowed(row: Mapping[str, Any], symbols: tuple[str, ...]) -> tuple[bool, str]:
+    symbol = str(row.get("symbol") or "").upper()
+    reason = str(row.get("reject_reason") or "").upper()
+    side = str(row.get("side") or "").upper()
+    setup = str(row.get("setup") or row.get("setup_type") or "").upper()
+    hour_group = _hour_group(_utc_hour_from_row(row))
+    if symbol not in symbols:
+        return False, "SYMBOL_OUT_OF_SCOPE"
+    if side != "SHORT" or setup != "BREAKDOWN_DOWN" or reason != "LOW_SCORE":
+        return False, "NOT_SHORT_BREAKDOWN_LOW_SCORE"
+    if hour_group != DIAGNOSTIC_PROFILE_GOOD_HOUR_GROUP:
+        return False, "UTC_HOUR_OUT_OF_SCOPE"
+    failed = set(_json_or_pipe_list(row.get("all_failed_gates")))
+    labels = set(_json_or_pipe_list(row.get("diagnostic_overlay_labels")))
+    if "HIGH_VOL_GUARD" in failed or "HIGH_VOL_GUARD" in reason or "GUARD_CONFIRMED_NO_RESCUE" in labels:
+        return False, "HIGH_VOL_GUARD_ACTIVE"
+    if "STOP_TOO_WIDE" in failed or reason == "STOP_TOO_WIDE":
+        return False, "STOP_TOO_WIDE_ACTIVE"
+    if not _has_tp_sl_geometry(row):
+        return False, "INVALID_GEOMETRY"
+    effective_rr = _safe_float(row.get("effective_rr"), 0.0)
+    min_effective_rr = _safe_float(row.get("min_effective_rr", row.get("MIN_EFFECTIVE_RR", 1.10)), 1.10)
+    if effective_rr <= 0.0 or effective_rr < min_effective_rr:
+        return False, "LOW_EFFECTIVE_RR"
+    if _safe_float(row.get("cost_penalty"), 0.0) >= effective_rr:
+        return False, "EXECUTION_COST_SANITY"
+    if _safe_float(row.get("liquidity_score"), 1.0) < 0.3:
+        return False, "THIN_LIQUIDITY"
+    if _safe_float(row.get("spread_pct"), 0.0) >= 0.0025:
+        return False, "HIGH_SPREAD"
+    if _safe_float(row.get("expected_slippage_pct"), 0.0) >= 0.0020:
+        return False, "HIGH_SLIPPAGE"
+    return True, "DIAGNOSTIC_CANDIDATE"
+
+
+def build_short_low_score_breakdown_diagnostic_profile(rows: List[Mapping[str, Any]], *, symbols: tuple[str, ...] | None = None) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    scoped_symbols = symbols or diagnostic_short_low_score_symbols_from_env()
+    candidates: List[Dict[str, Any]] = []
+    blocked: Counter[str] = Counter()
+    for row in rows:
+        ok, block_reason = _diagnostic_short_low_score_breakdown_row_allowed(row, scoped_symbols)
+        if not ok:
+            blocked[block_reason] += 1
+            continue
+        enriched = dict(row)
+        enriched.update({
+            "diagnostic_profile": DIAGNOSTIC_PROFILE_NAME,
+            "diagnostic_only": True,
+            "production_decision_changed": False,
+            "production_thresholds_unchanged": True,
+            "paper_live_effect": "NONE",
+            "hour_group": _hour_group(_utc_hour_from_row(row)),
+        })
+        candidates.append(enriched)
+    ev = [r for r in candidates if _is_forward_evaluable(r)]
+    values = [_safe_float(r.get("effective_shadow_r_after_costs")) for r in ev]
+    outcome = Counter(str(r.get("first_touch_outcome") or "UNKNOWN").upper() for r in candidates)
+    summary = {
+        "profile": DIAGNOSTIC_PROFILE_NAME,
+        "mode": "BACKTEST",
+        "diagnostic_only": True,
+        "production_thresholds_unchanged": True,
+        "paper_live_effect": "NONE",
+        "symbol_scope": list(scoped_symbols),
+        "hour_group_scope": DIAGNOSTIC_PROFILE_GOOD_HOUR_GROUP,
+        "candidate_count": len(candidates),
+        "would_tp_count": outcome.get("WOULD_TP", 0),
+        "would_sl_count": outcome.get("WOULD_SL", 0),
+        "would_timeout_count": outcome.get("WOULD_TIMEOUT", 0),
+        "unknown_count": len(candidates) - outcome.get("WOULD_TP", 0) - outcome.get("WOULD_SL", 0) - outcome.get("WOULD_TIMEOUT", 0),
+        "mean_effective_shadow_r": _mean(values),
+        "median_effective_shadow_r": _median(values),
+        "confidence_lower_bound_effective_r": _confidence_lower_bound(values),
+        "cost_penalty_distribution": _distribution_stats(candidates, "cost_penalty"),
+        "spread_distribution": _distribution_stats(candidates, "spread_pct"),
+        "slippage_distribution": _distribution_stats(candidates, "expected_slippage_pct"),
+        "liquidity_distribution": _distribution_stats(candidates, "liquidity_score"),
+        "symbol_breakdown": _distribution([r.get("symbol") for r in candidates]),
+        "hour_breakdown": _distribution([_utc_hour_from_row(r) for r in candidates]),
+        "blocked_reason_distribution": dict(blocked),
+        "reason_diagnostic_only": DIAGNOSTIC_PROFILE_REASON,
+    }
+    return candidates, summary
+
 def build_rejected_forward_confirmation_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for reason, prefix in [("HIGH_VOL_GUARD", "high_vol_guard"), ("STOP_TOO_WIDE", "stop_too_wide")]:
@@ -4640,6 +4763,7 @@ def main():
     rejected_forward_confirmation = build_rejected_forward_confirmation_summary(rejected_forward_outcomes)
     reject_bucket_expectancy = build_reject_bucket_expectancy(rejected_forward_outcomes)
     reject_overlay_diagnostics, reject_overlay_summary = build_reject_overlay_diagnostics(rejected_forward_outcomes, reject_bucket_expectancy)
+    diagnostic_short_candidates, diagnostic_short_summary = build_short_low_score_breakdown_diagnostic_profile(rejected_forward_outcomes)
     forward_evaluations = build_forward_evaluations_from_lifecycle(lifecycle, candles_by_symbol)
     lifecycle_index = {f"{row.symbol}:{row.timestamp}": row for row in lifecycle}
     calibration_snapshots = persist_calibration_snapshots(forward_evaluations, lifecycle_index)
@@ -4810,6 +4934,9 @@ def main():
         **high_vol_guard_summary,
         "low_score_verdict": low_score_summary["low_score_verdict"],
         "symbol_reject_verdict": symbol_reject_summary["symbol_reject_verdict"],
+        "diagnostic_short_low_score_breakdown_candidate_count": diagnostic_short_summary["candidate_count"],
+        "diagnostic_short_low_score_breakdown_profile": DIAGNOSTIC_PROFILE_NAME,
+        "diagnostic_short_low_score_breakdown_note": "DIAGNOSTIC ONLY; production thresholds unchanged; PAPER/LIVE unchanged",
     })
     with open(os.path.join(args.output_dir, "strategy_quality_guardrails.json"), "w") as f:
         json.dump(strategy_quality_evidence, f, indent=2, sort_keys=True)
@@ -4891,7 +5018,12 @@ def main():
     with open(os.path.join(args.output_dir, "zero_accepted_root_cause_summary.csv"), "w", newline="") as f:
         flat = {k: (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v) for k, v in zero_summary.items()}
         w = csv.DictWriter(f, fieldnames=list(flat.keys())); w.writeheader(); w.writerow(flat)
-    for artifact_name, payload in [("rejected_forward_outcomes.json", rejected_forward_outcomes), ("low_score_forward_summary.json", low_score_forward_summary), ("symbol_reject_forward_summary.json", symbol_reject_forward_summary), ("reject_overlay_summary.json", reject_overlay_summary), ("reject_bucket_expectancy.json", reject_bucket_expectancy)]:
+    with open(os.path.join(args.output_dir, "diagnostic_short_low_score_breakdown_candidates.csv"), "w", newline="") as f:
+        fields = resolve_csv_fieldnames(diagnostic_short_candidates, list(diagnostic_short_candidates[0].keys()) if diagnostic_short_candidates else ["timestamp", "symbol", "side", "setup", "reject_reason", "hour_group", "effective_rr", "first_touch_outcome", "effective_shadow_r_after_costs", "diagnostic_only", "production_thresholds_unchanged"])
+        w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows(diagnostic_short_candidates)
+    with open(os.path.join(args.output_dir, "diagnostic_short_low_score_breakdown_summary.json"), "w") as f:
+        json.dump(diagnostic_short_summary, f, indent=2, sort_keys=True)
+    for artifact_name, payload in [("rejected_forward_outcomes.json", rejected_forward_outcomes), ("low_score_forward_summary.json", low_score_forward_summary), ("symbol_reject_forward_summary.json", symbol_reject_forward_summary), ("reject_overlay_summary.json", reject_overlay_summary), ("reject_bucket_expectancy.json", reject_bucket_expectancy), ("diagnostic_short_low_score_breakdown_summary.json", diagnostic_short_summary)]:
         with open(os.path.join(args.output_dir, artifact_name), "w") as f:
             json.dump(payload, f, indent=2, sort_keys=True)
     for artifact_name, rows, fallback in [

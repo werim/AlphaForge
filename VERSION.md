@@ -1,3 +1,15 @@
+## 2026-07-01 SHORT LOW_SCORE BREAKDOWN diagnostic profile
+
+- Current version: unreleased SHORT LOW_SCORE BREAKDOWN diagnostic profile increment
+- Current phase: BACKTEST-only rejected LOW_SCORE shadow validation
+- Runtime maturity: BACKTEST exports a narrowly scoped diagnostic profile for SHORT BREAKDOWN_DOWN LOW_SCORE candidates; DEFAULT_FILTERS, PAPER, and LIVE decisions are unchanged
+- BACKTEST/PAPER/LIVE alignment: diagnostic artifacts do not lower LOW_SCORE thresholds, do not accept trades, and do not affect PAPER/LIVE configuration
+- Lifecycle coverage: rejected rows remain rejected; no lifecycle transition semantics changed
+- Execution realism coverage: HIGH_VOL_GUARD, STOP_TOO_WIDE, effective-RR, cost, spread, slippage, liquidity, and geometry sanity gates remain active for diagnostic inclusion
+- Known critical risks: positive shadow buckets are exploratory and may not survive larger samples or execution-cost drift; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY. No production threshold relaxation is recommended.
+
 ## 2026-07-01 BACKTEST lifecycle/reject SQL persistence completion
 
 - Current version: unreleased BACKTEST lifecycle/reject SQL persistence increment

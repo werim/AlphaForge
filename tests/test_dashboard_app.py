@@ -530,6 +530,12 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
             writer.writerow({"signal_id": "s3", "symbol": "ETHUSDT", "lifecycle_state": "SYMBOL_SELECTOR_REJECT", "source": "SYMBOL_SELECTOR", "source_stage": "SYMBOL_SELECTOR", "reject_reason": "LOW_LIQUIDITY", "score": "8", "raw_rr": "1.5", "effective_rr": "0.95", "expectancy": "0.2", "expectancy_bucket": "MEDIUM", "min_required_score": "7.5", "min_effective_rr": "1.1", "spread_pct": "", "expected_slippage_pct": "", "volume_24h_usdt": "", "liquidity_ok": "", "volatility_ok": "", "volatility_score": ""})
             writer.writerow({"signal_id": "s5", "symbol": "BTCUSDT", "lifecycle_state": "SIGNAL_REJECTED", "source": "", "source_stage": "SIGNAL_ENGINE", "reject_reason": "REGIME_MISMATCH", "score": "8.5", "raw_rr": "1.8", "effective_rr": "1.5", "expectancy": "0.3", "expectancy_bucket": "HIGH", "min_required_score": "7.5", "min_effective_rr": "1.1", "spread_pct": "0.0008", "expected_slippage_pct": "0.0004", "volume_24h_usdt": "1000000", "liquidity_ok": "true", "volatility_ok": "true", "volatility_score": "1.0"})
 
+        with open(os.path.join(out, "diagnostic_short_low_score_breakdown_summary.json"), "w") as fh:
+            import json
+            json.dump({"profile": "SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC", "diagnostic_only": True, "production_thresholds_unchanged": True, "candidate_count": 2, "reason_diagnostic_only": "DIAGNOSTIC ONLY; production thresholds unchanged"}, fh)
+        with open(os.path.join(out, "diagnostic_short_low_score_breakdown_candidates.csv"), "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=["symbol", "side", "setup", "reject_reason", "diagnostic_only"]); writer.writeheader(); writer.writerow({"symbol": "BTCUSDT", "side": "SHORT", "setup": "BREAKDOWN_DOWN", "reject_reason": "LOW_SCORE", "diagnostic_only": "True"})
+
         with open(os.path.join(out, "rejected_shadow.csv"), "w", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=["signal_id", "symbol", "lifecycle_state", "source_stage", "reject_reason", "score", "raw_rr", "effective_rr", "expectancy_bucket", "shadow_outcome", "cost_penalty", "liquidity_ok", "volatility_ok", "volatility_score"])
             writer.writeheader()
@@ -565,6 +571,9 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert "ESTIMATED_BACKTEST_SPREAD" in result.execution_cost_summary["spread_label"]
     assert result.calibration_report_path and os.path.exists(result.calibration_report_path)
     assert result.calibration_summary_path and os.path.exists(result.calibration_summary_path)
+    assert result.diagnostic_short_low_score_breakdown_summary["candidate_count"] == 2
+    assert result.diagnostic_short_low_score_breakdown_summary_path and os.path.exists(result.diagnostic_short_low_score_breakdown_summary_path)
+    assert result.diagnostic_short_low_score_breakdown_candidates_path and os.path.exists(result.diagnostic_short_low_score_breakdown_candidates_path)
 
     import alphaforge.dashboard.app as dashboard_app
     monkeypatch.setattr(dashboard_app, "run_dashboard_backtest", lambda _request: result)
@@ -593,6 +602,9 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert "Later Gate Diagnostics" in html
     assert "Score Saturation Diagnostics" in html
     assert "DAILY_GLOBAL_TRADE_LIMIT Near-Miss Diagnostics" in html
+    assert "SHORT LOW_SCORE BREAKDOWN profile" in html
+    assert "DIAGNOSTIC ONLY" in html
+    assert "production thresholds unchanged" in html
 
 
 def test_calibration_near_miss_uses_shadow_symbol_timestamp_side_match() -> None:

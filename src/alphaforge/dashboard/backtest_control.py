@@ -218,6 +218,9 @@ class DashboardBacktestResult:
     zero_accepted_root_cause_summary_path: str | None = None
     low_score_forward_summary: dict[str, Any] = field(default_factory=dict)
     symbol_reject_forward_summary: dict[str, Any] = field(default_factory=dict)
+    diagnostic_short_low_score_breakdown_summary: dict[str, Any] = field(default_factory=dict)
+    diagnostic_short_low_score_breakdown_summary_path: str | None = None
+    diagnostic_short_low_score_breakdown_candidates_path: str | None = None
     rejected_forward_outcomes_path: str | None = None
     acceptance_funnel_path: str | None = None
     top_quality_improvement_note: str = ""
@@ -1155,6 +1158,8 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     rejected_forward_outcomes_path = artifact_dir / "rejected_forward_outcomes.csv"
     low_score_forward_summary_path = artifact_dir / "low_score_forward_summary.json"
     symbol_reject_forward_summary_path = artifact_dir / "symbol_reject_forward_summary.json"
+    diagnostic_short_summary_path = artifact_dir / "diagnostic_short_low_score_breakdown_summary.json"
+    diagnostic_short_candidates_path = artifact_dir / "diagnostic_short_low_score_breakdown_candidates.csv"
     equity_curve_path = artifact_dir / "equity_curve.csv"
     strategy_quality_path = artifact_dir / "strategy_quality_guardrails.json"
 
@@ -1173,6 +1178,7 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     zero_accepted_root_cause_summary = json.loads(zero_accepted_root_cause_summary_path.read_text()) if zero_accepted_root_cause_summary_path.exists() and zero_accepted_root_cause_summary_path.stat().st_size else {}
     low_score_forward_summary = json.loads(low_score_forward_summary_path.read_text()) if low_score_forward_summary_path.exists() and low_score_forward_summary_path.stat().st_size else {}
     symbol_reject_forward_summary = json.loads(symbol_reject_forward_summary_path.read_text()) if symbol_reject_forward_summary_path.exists() and symbol_reject_forward_summary_path.stat().st_size else {}
+    diagnostic_short_summary = json.loads(diagnostic_short_summary_path.read_text()) if diagnostic_short_summary_path.exists() and diagnostic_short_summary_path.stat().st_size else {}
 
     for path, fallbacks in (
         (summary_path, []),
@@ -1213,6 +1219,9 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.zero_accepted_root_cause_summary_path = str(zero_accepted_root_cause_summary_path) if zero_accepted_root_cause_summary_path.exists() else None
     result.low_score_forward_summary = low_score_forward_summary if isinstance(low_score_forward_summary, dict) else {}
     result.symbol_reject_forward_summary = symbol_reject_forward_summary if isinstance(symbol_reject_forward_summary, dict) else {}
+    result.diagnostic_short_low_score_breakdown_summary = diagnostic_short_summary if isinstance(diagnostic_short_summary, dict) else {}
+    result.diagnostic_short_low_score_breakdown_summary_path = str(diagnostic_short_summary_path) if diagnostic_short_summary_path.exists() else None
+    result.diagnostic_short_low_score_breakdown_candidates_path = str(diagnostic_short_candidates_path) if diagnostic_short_candidates_path.exists() else None
     result.rejected_forward_outcomes_path = str(rejected_forward_outcomes_path) if rejected_forward_outcomes_path.exists() else None
     result.acceptance_funnel_path = str(acceptance_funnel_path) if acceptance_funnel_path.exists() else None
     result.risk_metrics = {
