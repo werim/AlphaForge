@@ -1,3 +1,15 @@
+## 2026-07-01 PR256 diagnostic extraction correction
+
+- Current version: unreleased PR256 diagnostic extraction follow-up
+- Current phase: zero-accepted artifact diagnostic integrity
+- Runtime maturity: BACKTEST diagnostics improved; PAPER/LIVE behavior unchanged
+- BACKTEST/PAPER/LIVE alignment: no production threshold or decision-path changes
+- Lifecycle coverage: rejected LOW_SCORE and symbol-level decisions remain persisted/exported; no lifecycle transitions changed
+- Execution realism coverage: diagnostic evidence now preserves row-level score thresholds and selector market-structure metrics instead of using misleading fallback/missing classifications
+- Known critical risks: accepted-trade expectancy remains unproven; threshold tuning remains blocked pending complete shadow/outcome evidence
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY
+
 ## 2026-07-01 PR255 HIGH_VOL_GUARD correction and zero-accepted audit
 
 - Current version: unreleased PR255 follow-up diagnostics increment
