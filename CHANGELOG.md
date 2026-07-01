@@ -1,3 +1,23 @@
+## 2026-07-01 - Dashboard guardrail section rendering regression
+
+### Added
+- None.
+
+### Changed
+- Restored the dashboard `Strategy Quality Guardrails` section as a data-gated section when guardrail breakdown, top reasons, or representative examples exist.
+
+### Fixed
+- Fixed `/backtest/run` HTML rendering so guardrail source data such as `STOP_TOO_WIDE` appears under the expected guardrail heading instead of only in the generic result table.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Dashboard/template-only change.
+
+### Known Issues
+- The section remains hidden when no guardrail source data exists; LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - Dashboard BACKTEST accepted-count and guardrail attribution fix
 
 ### Added

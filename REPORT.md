@@ -1,3 +1,46 @@
+## 2026-07-01 - Dashboard guardrail section rendering regression surgery report
+
+### Why this patch was needed
+A regression test for `/backtest/run` expected the rendered HTML to include the exact `Strategy Quality Guardrails` heading when guardrail data exists, but the template only rendered guardrail rows inside the generic result table.
+
+### Root cause
+The guardrail data fields were present on `DashboardBacktestResult`, but the template no longer exposed a dedicated, searchable guardrail section heading.
+
+### Files changed
+- `src/alphaforge/dashboard/templates/overview.html`: restored a dedicated `Strategy Quality Guardrails` section gated by guardrail breakdown, top reasons, or representative examples.
+- `CHANGELOG.md`, `REPORT.md`: documented the regression and validation.
+
+### Runtime behavior changes
+None. This is a dashboard/template rendering patch only.
+
+### Lifecycle changes
+None.
+
+### Persistence changes
+None.
+
+### Export/schema changes
+None. Existing result dataclass fields and artifact keys are unchanged.
+
+### Tests added
+No new test was needed; the existing regression test is preserved and targets this rendering behavior.
+
+### Tests executed
+- `pytest -q tests/test_backtest_profile_comparison.py::test_dashboard_renders_guardrail_breakdown_when_source_data_exists`
+- `pytest -q`
+
+### Risks
+Low. The new section is hidden unless guardrail source data is present.
+
+### Remaining limitations
+Dashboard rendering depends on artifacts/result fields being populated upstream; this patch does not alter reporting metrics or strategy decisions.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push after tests pass. Do not claim LIVE readiness.
+
 ## 2026-07-01 - Dashboard BACKTEST accepted-count and guardrail attribution surgery report
 
 ### Why this patch was needed
