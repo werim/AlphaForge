@@ -78,3 +78,87 @@ def test_symbol_reject_summary_separates_too_choppy_and_weak_trend():
 def test_zero_accepted_evidence_quality_incomplete_forward_evidence_remains_partial_or_insufficient():
     z = bo.build_zero_accepted_root_cause_summary({"total_candidates": 1, "accepted_count": 0, "rejected_count": 1, "reject_reason_distribution": {"LOW_SCORE": 1}}, {}, {"low_score_count": 1}, {})
     assert z["evidence_quality"] in {"PARTIAL", "INSUFFICIENT"}
+
+
+def test_low_score_637_threshold_75_is_far_not_near():
+    rows = [bo.evaluate_rejected_forward_outcome(row(score=6.37, min_score_threshold=7.5), [bo.Candle(2000,100,111,99,110,1)])]
+    s = bo.build_low_score_forward_summary(rows)
+    assert s["near_threshold_count"] == 0
+    assert s["far_below_threshold_count"] == 1
+
+
+def test_low_score_72_threshold_75_is_near_under_five_percent_rule():
+    rows = [bo.evaluate_rejected_forward_outcome(row(score=7.2, min_score_threshold=7.5), [bo.Candle(2000,100,111,99,110,1)])]
+    s = bo.build_low_score_forward_summary(rows)
+    assert s["near_threshold_count"] == 1
+    assert s["far_below_threshold_count"] == 0
+    assert "min_score_threshold * 0.05" in s["near_threshold_definition"]
+
+
+def test_low_score_positive_gap_113_is_far():
+    rows = [bo.evaluate_rejected_forward_outcome(row(score=6.37, min_score_threshold=7.5, score_gap_to_threshold=1.13), [bo.Candle(2000,100,111,99,110,1)])]
+    s = bo.build_low_score_forward_summary(rows)
+    assert s["far_below_threshold_count"] == 1
+    assert s["low_score_gap_source_distribution"]["row.score_gap_to_threshold"] == 1
+
+
+def test_would_accept_disabled_mean_shadow_r_uses_only_counterfactual_subset():
+    rows = [
+        bo.evaluate_rejected_forward_outcome(row(would_accept_if_low_score_disabled=True, score=7.2, spread_pct=0.0, expected_slippage_pct=0.0), [bo.Candle(2000,100,111,99,110,1)]),
+        bo.evaluate_rejected_forward_outcome(row(would_accept_if_low_score_disabled=False, score=3.0), [bo.Candle(2000,100,101,94,95,1)]),
+    ]
+    s = bo.build_low_score_forward_summary(rows)
+    assert s["would_accept_if_low_score_disabled_forward_evaluable_count"] == 1
+    assert s["would_accept_if_low_score_disabled_would_tp_count"] == 1
+    assert s["would_accept_if_low_score_disabled_would_sl_count"] == 0
+    assert s["would_accept_if_low_score_disabled_mean_shadow_r"] > 0
+
+
+def test_rejected_forward_outcome_preserves_low_score_threshold_metadata():
+    out = bo.evaluate_rejected_forward_outcome(row(score=7.2, min_score_threshold=7.5, score_gap_to_threshold=0.3, score_threshold_source="row.min_required_score", score_scale_detected="0_10", score_threshold_scale_detected="0_10", threshold_scale_mismatch_detected=False, threshold_scale_correction_applied=False, would_accept_if_low_score_disabled=True), [bo.Candle(2000,100,111,99,110,1)])
+    assert out["min_score_threshold"] == 7.5
+    assert out["score_gap_to_threshold"] == 0.3
+    assert out["score_threshold_source"] == "row.min_required_score"
+    assert out["score_scale_detected"] == "0_10"
+    assert out["score_threshold_scale_detected"] == "0_10"
+    assert out["threshold_scale_mismatch_detected"] is False
+    assert out["threshold_scale_correction_applied"] is False
+    assert out["would_accept_if_low_score_disabled"] is True
+
+
+def test_symbol_forward_rows_preserve_nested_selector_metrics():
+    diagnostics = {"selector": {"inputs": {"chop_score": 0.82, "trend_strength": 0.18, "volume_24h_usdt": 12345}, "metrics": {"volatility_pct": 2.5, "candle_range_pct": 1.1, "spread_pct": 0.02, "liquidity_score": 0.7}, "sub_scores": {"range_edge_score": 0.44}, "reject_reasons": ["TOO_CHOPPY"]}}
+    out = bo.evaluate_rejected_forward_outcome(row(reject_reason="TOO_CHOPPY", lifecycle_state="SYMBOL_REJECTED", side="N/A", entry="", sl="", tp="", spread_pct="", liquidity_score="", diagnostics=__import__('json').dumps(diagnostics)), [])
+    assert out["metric_source"] == "DIAGNOSTICS_SELECTOR_INPUTS"
+    assert out["chop_score"] == 0.82
+    assert out["trend_strength"] == 0.18
+    assert out["selector_volatility_pct"] == 2.5
+    assert out["selector_candle_range_pct"] == 1.1
+    assert out["selector_spread_pct"] == 0.02
+    assert out["selector_liquidity_score"] == 0.7
+    assert out["selector_volume_24h_usdt"] == 12345
+    assert "TOO_CHOPPY" in out["selector_reject_reasons"]
+
+
+def test_symbol_forward_summary_means_use_selector_metrics():
+    diagnostics = {"selector": {"inputs": {"chop_score": 0.8, "trend_strength": 0.2}, "metrics": {}, "sub_scores": {}}}
+    rows = [bo.evaluate_rejected_forward_outcome(row(reject_reason="TOO_CHOPPY", diagnostics=__import__('json').dumps(diagnostics)), [bo.Candle(2000,100,111,99,110,1)])]
+    s = bo.build_symbol_reject_forward_summary(rows)
+    assert s["mean_chop_score"] == 0.8
+    assert s["mean_trend_strength"] == 0.2
+
+
+def test_forward_evidence_quality_reasons_for_missing_low_score_gaps_and_symbol_metrics():
+    low_rows = [bo.evaluate_rejected_forward_outcome(row(score="", min_score_threshold=""), [bo.Candle(2000,100,111,99,110,1)])]
+    sym_rows = [bo.evaluate_rejected_forward_outcome(row(reject_reason="TOO_CHOPPY", lifecycle_state="SYMBOL_REJECTED", side="N/A", entry="", sl="", tp=""), [])]
+    low_summary = bo.build_low_score_forward_summary(low_rows)
+    sym_summary = bo.build_symbol_reject_forward_summary(sym_rows)
+    reasons = []
+    if low_summary["low_score_gap_source_distribution"].get("UNAVAILABLE", 0) > low_summary["low_score_count"] / 2:
+        reasons.append("LOW_SCORE_FORWARD_GAP_UNAVAILABLE")
+    if sym_summary["missing_market_structure_metric_count"] > sym_summary["symbol_reject_count"] / 2:
+        reasons.append("SYMBOL_FORWARD_METRICS_UNAVAILABLE")
+    evidence_quality = "PARTIAL" if reasons else "COMPLETE"
+    assert evidence_quality == "PARTIAL"
+    assert "LOW_SCORE_FORWARD_GAP_UNAVAILABLE" in reasons
+    assert "SYMBOL_FORWARD_METRICS_UNAVAILABLE" in reasons

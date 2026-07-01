@@ -1249,3 +1249,37 @@ The root-cause summary now reports rejected forward evaluable/unavailable counts
 
 ### Recommendation / push decision
 Keep thresholds unchanged. Use these artifacts to determine whether rejected candidates were actually positive expectancy after execution costs before considering any diagnostic-only profile expansion. Do not relax production thresholds from count evidence alone.
+
+## 2026-07-01 - PR259 rejected forward summary enrichment patch
+
+### Why this patch was needed
+Review found that PR259's first rejected-forward evidence pass needed PR257-compatible threshold and selector enrichment before merge. The prior LOW_SCORE near/far split used a loose `score_gap_to_threshold >= -1.0` rule, and the forward rows did not always carry the diagnostic context needed to audit LOW_SCORE or symbol-level rejects.
+
+### Root cause
+The rejected-forward artifact was built directly from rejected rows without normalizing PR257 LOW_SCORE threshold metadata and selector diagnostics into the canonical forward row. This made near-threshold counts too broad, made `would_accept_if_low_score_disabled_mean_shadow_r` use all LOW_SCORE evaluable rows instead of the counterfactual subset, and made symbol forward means vulnerable to missing selector metrics.
+
+### Files changed
+- `backtest_order.py`: added LOW_SCORE forward metadata extraction, selector metric enrichment, PR257-compatible 5% near-threshold bucketing, corrected counterfactual-disabled subset expectancy, and evidence-quality reasons for missing LOW_SCORE gaps or symbol metrics.
+- `tests/test_rejected_forward_outcomes.py`: added regressions for 6.37/7.5 far classification, 7.2/7.5 near classification, positive gap far classification, subset-only counterfactual expectancy, metadata preservation, selector metric preservation, non-zero symbol means, and missing-evidence quality reasons.
+- `CHANGELOG.md`, `VERSION.md`, and this `REPORT.md`: documented the review fix and remaining diagnostic-only scope.
+
+### Runtime behavior changes
+No acceptance behavior changed. Rejected forward outcomes remain diagnostic-only and do not alter default BACKTEST, PAPER, LIVE, thresholds, or canonical rejected decisions.
+
+### Lifecycle changes
+None. Existing rejected lifecycle rows remain unchanged; the patch only enriches exported forward diagnostics.
+
+### Persistence / export / schema changes
+No database migration. Additive artifact fields now include LOW_SCORE threshold metadata (`score_threshold_source`, score scale fields, mismatch/correction flags, counterfactual-disabled flag), `near_threshold_definition`, `above_threshold_or_unknown_count`, `low_score_gap_source_distribution`, counterfactual-disabled forward counts, selector metric fields, and missing-metric evidence reasons.
+
+### Tests executed
+- `python -m pytest tests/test_rejected_forward_outcomes.py -q`
+- `python -m pytest tests -k "backtest or rejected or shadow or forward or low_score or symbol or root_cause or dashboard" -q`
+- `python -m pytest -q`
+- `python -m py_compile backtest_order.py src/alphaforge/dashboard/backtest_control.py`
+
+### Risks / remaining limitations
+If historical rejected rows did not persist score or selector diagnostics, the new artifact honestly marks those gaps as unavailable and downgrades evidence quality instead of inferring fake values. Symbol-level thresholds should still not be relaxed without safe pre-reject candidate geometry and positive effective expectancy after costs.
+
+### Push recommendation
+Safe to merge as a diagnostic correctness patch. No production threshold relaxation is recommended.

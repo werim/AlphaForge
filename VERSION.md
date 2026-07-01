@@ -290,3 +290,14 @@
 - Known critical risks: symbol-level rejects can lack candidate geometry; accepted-trade expectancy and LIVE readiness remain unproven
 - Last audit date: 2026-07-01
 - Live readiness verdict: NOT LIVE READY; diagnostic evidence only and no production threshold relaxation recommended
+
+## 2026-07-01 PR259 rejected-forward enrichment correction
+- Current version: unreleased rejected forward evidence correction
+- Current phase: PR259 review fixes for LOW_SCORE near/far semantics and selector context preservation
+- Runtime maturity: BACKTEST diagnostic artifact correctness improved; PAPER/LIVE order paths unchanged
+- BACKTEST/PAPER/LIVE alignment: no decision logic, thresholds, or canonical rejected decisions changed
+- Lifecycle coverage: no lifecycle state changes; enriched rejected-forward evidence only
+- Execution realism coverage: counterfactual-disabled means now use the correct forward-evaluable subset after costs
+- Known critical risks: missing historical score gaps or selector metrics still constrain evidence quality
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY; diagnostic evidence only and no production threshold relaxation recommended

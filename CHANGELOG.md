@@ -2524,3 +2524,27 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - Symbol-level rejects may remain forward-unevaluable until safe pre-reject candidate geometry is captured.
 - PowerShell manual validation requires `pwsh`; Linux environments without PowerShell must run the equivalent Python command.
+
+## 2026-07-01 - PR259 rejected-forward summary enrichment fix
+
+### Added
+- Added PR257-compatible LOW_SCORE gap source tracking, above-threshold/unknown counts, and 5% near-threshold definition to rejected forward summaries.
+- Added LOW_SCORE threshold metadata and symbol selector metric enrichment to rejected forward rows.
+- Added missing LOW_SCORE gap and missing symbol metric evidence-quality reasons.
+- Added regression coverage for near/far classification, counterfactual-disabled subset expectancy, and selector metric preservation.
+
+### Changed
+- LOW_SCORE near/far classification now uses `0 <= gap <= min_score_threshold * 0.05` for near-threshold rows.
+- `would_accept_if_low_score_disabled_mean_shadow_r` now uses only forward-evaluable LOW_SCORE rows that would pass if LOW_SCORE were disabled.
+
+### Fixed
+- Symbol reject forward summary means now use carried selector diagnostics instead of falling back to zero when diagnostics JSON contains metrics.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Diagnostic artifacts are additive and no acceptance logic changed.
+
+### Known Issues
+- Missing persisted scores or selector diagnostics still limit evidence quality and are intentionally surfaced as unavailable.
