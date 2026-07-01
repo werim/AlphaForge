@@ -1,3 +1,28 @@
+## 2026-07-01 - PR255 HIGH_VOL_GUARD correction and zero-accepted bottleneck audit
+
+### Added
+- Added corrected HIGH_VOL_GUARD gap/trigger diagnostics, explicit pass/fail counterfactual booleans, and diagnostic-only warning fields.
+- Added `low_score_diagnostics.csv`, `low_score_summary.json`, `symbol_reject_diagnostics.csv`, `symbol_reject_summary.json`, and zero-accepted root-cause summary JSON/CSV artifacts.
+- Added dashboard parsing/rendering for summary artifacts without loading raw diagnostic rows into the UI.
+- Added regression coverage for HIGH_VOL_GUARD gap correctness, LOW_SCORE summaries, symbol reject metrics, and zero-accepted bottleneck reporting.
+
+### Changed
+- HIGH_VOL_GUARD summaries now classify far-below-threshold effective RR as protective evidence and recommend continuing LOW_SCORE/symbol-level audits.
+- Backtest quality summaries now include HIGH_VOL_GUARD, LOW_SCORE, and symbol-reject verdict/evidence metrics.
+
+### Fixed
+- Fixed misleading `counterfactual_volatility_penalty=0` when HIGH_VOL_GUARD rejected effective RR below the high-vol threshold.
+- Fixed ambiguity where effective RR was exported as a volatility metric without guard metric name/value/threshold/gap semantics.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; artifacts and summary fields are additive.
+
+### Known Issues
+- BTCUSDT 30d/1h artifacts still require regeneration in an environment with historical-data access. LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - HIGH_VOL_GUARD zero-accepted diagnostics
 
 ### Added

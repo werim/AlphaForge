@@ -210,6 +210,12 @@ class DashboardBacktestResult:
     representative_guardrail_reject_examples: list[dict[str, Any]] = field(default_factory=list)
     high_vol_guard_summary: dict[str, Any] = field(default_factory=dict)
     high_vol_guard_diagnostics_path: str | None = None
+    low_score_summary: dict[str, Any] = field(default_factory=dict)
+    low_score_diagnostics_path: str | None = None
+    symbol_reject_summary: dict[str, Any] = field(default_factory=dict)
+    symbol_reject_diagnostics_path: str | None = None
+    zero_accepted_root_cause_summary: dict[str, Any] = field(default_factory=dict)
+    zero_accepted_root_cause_summary_path: str | None = None
     acceptance_funnel_path: str | None = None
     top_quality_improvement_note: str = ""
     gate_funnel: list[dict[str, Any]] = field(default_factory=list)
@@ -1138,6 +1144,11 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     acceptance_funnel_path = artifact_dir / "acceptance_funnel.csv"
     high_vol_guard_diagnostics_path = artifact_dir / "high_vol_guard_diagnostics.csv"
     high_vol_guard_summary_path = artifact_dir / "high_vol_guard_summary.json"
+    low_score_diagnostics_path = artifact_dir / "low_score_diagnostics.csv"
+    low_score_summary_path = artifact_dir / "low_score_summary.json"
+    symbol_reject_diagnostics_path = artifact_dir / "symbol_reject_diagnostics.csv"
+    symbol_reject_summary_path = artifact_dir / "symbol_reject_summary.json"
+    zero_accepted_root_cause_summary_path = artifact_dir / "zero_accepted_root_cause_summary.json"
     equity_curve_path = artifact_dir / "equity_curve.csv"
     strategy_quality_path = artifact_dir / "strategy_quality_guardrails.json"
 
@@ -1151,6 +1162,9 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     filter_state = json.loads(filter_state_path.read_text()) if filter_state_path.exists() and filter_state_path.stat().st_size else {}
     strategy_quality = json.loads(strategy_quality_path.read_text()) if strategy_quality_path.exists() and strategy_quality_path.stat().st_size else {}
     high_vol_guard_summary = json.loads(high_vol_guard_summary_path.read_text()) if high_vol_guard_summary_path.exists() and high_vol_guard_summary_path.stat().st_size else {}
+    low_score_summary = json.loads(low_score_summary_path.read_text()) if low_score_summary_path.exists() and low_score_summary_path.stat().st_size else {}
+    symbol_reject_summary = json.loads(symbol_reject_summary_path.read_text()) if symbol_reject_summary_path.exists() and symbol_reject_summary_path.stat().st_size else {}
+    zero_accepted_root_cause_summary = json.loads(zero_accepted_root_cause_summary_path.read_text()) if zero_accepted_root_cause_summary_path.exists() and zero_accepted_root_cause_summary_path.stat().st_size else {}
 
     for path, fallbacks in (
         (summary_path, []),
@@ -1183,6 +1197,12 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.strategy_quality_guardrails = strategy_quality if isinstance(strategy_quality, dict) else {}
     result.high_vol_guard_summary = high_vol_guard_summary if isinstance(high_vol_guard_summary, dict) else {}
     result.high_vol_guard_diagnostics_path = str(high_vol_guard_diagnostics_path) if high_vol_guard_diagnostics_path.exists() else None
+    result.low_score_summary = low_score_summary if isinstance(low_score_summary, dict) else {}
+    result.low_score_diagnostics_path = str(low_score_diagnostics_path) if low_score_diagnostics_path.exists() else None
+    result.symbol_reject_summary = symbol_reject_summary if isinstance(symbol_reject_summary, dict) else {}
+    result.symbol_reject_diagnostics_path = str(symbol_reject_diagnostics_path) if symbol_reject_diagnostics_path.exists() else None
+    result.zero_accepted_root_cause_summary = zero_accepted_root_cause_summary if isinstance(zero_accepted_root_cause_summary, dict) else {}
+    result.zero_accepted_root_cause_summary_path = str(zero_accepted_root_cause_summary_path) if zero_accepted_root_cause_summary_path.exists() else None
     result.acceptance_funnel_path = str(acceptance_funnel_path) if acceptance_funnel_path.exists() else None
     result.risk_metrics = {
         "return_unit": summary.get("return_unit", "pct"),

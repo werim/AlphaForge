@@ -1,3 +1,59 @@
+## 2026-07-01 PR255 follow-up: HIGH_VOL_GUARD correction and zero-accepted root-cause audit
+
+### Why the patch was needed
+PR255 added HIGH_VOL_GUARD diagnostics, but effective-RR breaches could still show a misleading zero counterfactual penalty. The latest BTCUSDT 30d/1h manual artifact showed 718 candidates, 0 accepted, 718 rejected, 203 symbol-level rejects, and 515 signal-level rejects, with LOW_SCORE=480, TOO_CHOPPY=170, WEAK_TREND_AND_NO_RANGE_EDGE=33, HIGH_VOL_GUARD=20, and STOP_TOO_WIDE=15.
+
+### Root cause
+The HIGH_VOL_GUARD diagnostic used generic volatility metric naming and computed the counterfactual penalty as an above-threshold excess. That is correct for maximum-style metrics but wrong for minimum effective-RR breaches, where the meaningful gap is `max(0, high_vol_min_effective_rr - effective_rr)`.
+
+### Files changed
+- `backtest_order.py`: corrected HIGH_VOL_GUARD diagnostics, added LOW_SCORE diagnostics, symbol-level reject diagnostics, and zero-accepted root-cause summaries.
+- `src/alphaforge/dashboard/backtest_control.py`: reads new summary artifacts and exposes artifact paths safely when present.
+- `src/alphaforge/dashboard/templates/overview.html`: surfaces compact summary dictionaries and artifact paths, not raw CSV rows.
+- `tests/test_strategy_quality_guardrails.py`: adds regressions for corrected gaps/triggers, protective verdicts, LOW_SCORE/symbol diagnostics, and bottleneck reporting.
+
+### Runtime behavior changes
+Default BACKTEST acceptance remains conservative. No thresholds were loosened, no candidates are force accepted, and PAPER/LIVE behavior is unchanged. The new counterfactual fields are diagnostic-only evidence.
+
+### Exact HIGH_VOL_GUARD corrected diagnostic logic
+For effective-RR guard breaches, `effective_rr_gap_to_threshold = max(0, high_vol_min_effective_rr - effective_rr)` and `counterfactual_effective_rr_gap` uses the same value. `counterfactual_volatility_penalty` now mirrors the correct guard gap instead of reporting zero for below-minimum effective RR. Rows also export `guard_metric_name`, `guard_metric_value`, `guard_threshold`, `guard_gap_to_threshold`, `guard_breach_direction`, high-vol context source, trigger classification, pass/fail booleans, cost penalty fields, and explicit diagnostic-only warning text.
+
+### Latest BTCUSDT 30d/1h observed summary
+The observed artifact had `total_candidates=718`, `accepted_count=0`, `rejected_count=718`, `symbol_rejected_count=203`, and `signal_rejected_count=515`. Canonical rejects were LOW_SCORE=480, TOO_CHOPPY=170, WEAK_TREND_AND_NO_RANGE_EDGE=33, HIGH_VOL_GUARD=20, and STOP_TOO_WIDE=15. HIGH_VOL_GUARD rows had effective RR around 1.37-1.65 versus a 2.30 threshold, 12 baseline counterfactual passes, 8 secondary failures, and zero rows within ±5% of threshold.
+
+### Why HIGH_VOL_GUARD is not the primary zero-accepted bottleneck
+HIGH_VOL_GUARD accounts for only 20 of 718 rejects. Its observed effective-RR breaches are not marginal, and relaxing the guard would not address the dominant LOW_SCORE and symbol-level market-structure rejects. HIGH_VOL_GUARD is currently classified as VALID_PROTECTIVE_GUARD for BTCUSDT 30d/1h because effective RR breaches are not marginal. The primary zero-accepted bottleneck is LOW_SCORE, followed by choppy/weak-trend symbol-level rejects. No production threshold relaxation is recommended without stronger counterfactual evidence.
+
+### LOW_SCORE and symbol-level reject audit plan/results
+The exporter now writes `low_score_diagnostics.csv` and `low_score_summary.json` with score gaps, threshold evidence, pass/fail execution-quality booleans, and counterfactual reject reasons. It also writes `symbol_reject_diagnostics.csv` and `symbol_reject_summary.json` for TOO_CHOPPY and WEAK_TREND_AND_NO_RANGE_EDGE rows, including threshold/gap fields, source function, interval sensitivity, and future-leakage risk explanation. `zero_accepted_root_cause_summary.json/csv` unifies counts, reject distribution, verdicts, bottlenecks, and recommendation.
+
+### Lifecycle changes
+None. Rejected decisions remain rejected; lifecycle state semantics are unchanged.
+
+### Persistence changes
+No SQLite migration. New artifacts are additive CSV/JSON exports.
+
+### Export/schema changes
+BACKTEST output gains additive HIGH_VOL_GUARD fields, LOW_SCORE artifacts, symbol-reject artifacts, and zero-accepted summary artifacts. Existing CSV readers should tolerate additional metrics.
+
+### Tests added/executed
+Added tests for corrected high-vol effective-RR gaps, stop-too-wide trigger labeling, protective verdicts, diagnostic-only behavior, LOW_SCORE rows/summaries, symbol reject diagnostics, missing metric verdicts, and zero-accepted root-cause reporting.
+
+### Risk assessment
+The diagnostics depend on fields available in rejected artifacts; unavailable ATR/realized-volatility/candle-range values are exported as `UNAVAILABLE_BACKTEST` rather than fabricated. Symbol feature source safety is reported as unknown where the artifact cannot independently prove lookback safety.
+
+### Remaining limitations
+Manual BTCUSDT 30d/1h regeneration was not completed in this patch cycle. Shadow outcome/drawdown evidence is still needed before any threshold audit could become a tuning proposal.
+
+### Migration concerns
+No migration required. Downstream dashboard consumers should read summary JSON where available and treat raw diagnostics as audit artifacts.
+
+### Recommendation
+Keep HIGH_VOL_GUARD enabled. Do not relax thresholds based on current evidence. Continue audit on LOW_SCORE and symbol-level market-structure rejects.
+
+### Push recommendation
+Safe to push after full requested pytest validation passes. Do not claim LIVE readiness.
+
 ## 2026-07-01 HIGH_VOL_GUARD / zero-accepted root-cause diagnostics
 
 ### Why the patch was needed

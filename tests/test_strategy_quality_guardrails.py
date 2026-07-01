@@ -129,3 +129,63 @@ def test_acceptance_funnel_counts_reconcile_and_exposes_high_vol_counterfactual(
     assert by_stage["symbol_level_rejected"] == 1
     assert by_stage["signal_level_rejected"] == 2
     assert by_stage["would_accept_without_high_vol_guard"] == 1
+
+
+def test_high_vol_guard_corrected_effective_rr_gap_and_trigger_fields():
+    rows = bo.build_high_vol_guard_diagnostics([
+        {"reject_reason":"HIGH_VOL_GUARD","timestamp":"1","symbol":"BTCUSDT","side":"LONG","score":"8","rr":"2.0","raw_rr":"2.0","effective_rr":"1.5","expectancy_bucket":"POSITIVE","cost_penalty":"0.1","all_failed_gates": '["HIGH_VOL_GUARD", "STOP_TOO_WIDE"]'}
+    ], _cfg(high_vol_min_effective_rr=2.3))
+    row = rows[0]
+    assert row["effective_rr_gap_to_threshold"] == 0.8
+    assert row["counterfactual_effective_rr_gap"] == 0.8
+    assert row["counterfactual_volatility_penalty"] == 0.8
+    assert row["guard_metric_name"] == "effective_rr"
+    assert row["guard_breach_direction"] == "BELOW_MINIMUM"
+    assert row["high_vol_guard_trigger"] == "BOTH"
+    assert row["counterfactual_warning"] == "HIGH_VOL_GUARD counterfactual is diagnostic only. It does not imply production acceptance."
+
+
+def test_high_vol_guard_summary_far_below_threshold_is_protective():
+    rows = bo.build_high_vol_guard_diagnostics([
+        {"reject_reason":"HIGH_VOL_GUARD","symbol":"BTCUSDT","score":"8","rr":"2.0","effective_rr":"1.4","cost_penalty":"0.1","all_failed_gates": '["HIGH_VOL_GUARD"]'},
+        {"reject_reason":"HIGH_VOL_GUARD","symbol":"BTCUSDT","score":"8","rr":"2.0","effective_rr":"1.5","cost_penalty":"0.1","all_failed_gates": '["HIGH_VOL_GUARD"]'},
+    ], _cfg(high_vol_min_effective_rr=2.3))
+    summary = bo.classify_high_vol_guard(rows)
+    assert summary["high_vol_guard_verdict"] == "VALID_PROTECTIVE_GUARD"
+    assert summary["high_vol_guard_near_threshold_count"] == 0
+    assert "Do not relax" in summary["recommended_action"]
+
+
+def test_low_score_diagnostics_and_summary_do_not_auto_accept_far_below():
+    rows = bo.build_low_score_diagnostics([
+        {"reject_reason":"LOW_SCORE","symbol":"BTCUSDT","score":"0.1","rr":"2.0","raw_rr":"2.0","effective_rr":"1.8","expectancy_bucket":"POSITIVE","all_failed_gates": '["LOW_SCORE"]'}
+    ])
+    assert "min_score_threshold" in rows[0]
+    assert rows[0]["score_gap_to_threshold"] == max(0.0, rows[0]["min_score_threshold"] - 0.1)
+    assert rows[0]["passed_rr"] is True
+    assert rows[0]["would_accept_if_low_score_disabled"] is True
+    summary = bo.classify_low_score(rows)
+    assert summary["low_score_verdict"] == "VALID_QUALITY_FILTER"
+    assert summary["far_below_threshold_count"] == 1
+
+
+def test_symbol_reject_diagnostics_missing_metrics_are_not_confident():
+    rows = bo.build_symbol_reject_diagnostics([
+        {"reject_reason":"TOO_CHOPPY","symbol":"BTCUSDT","timestamp":"1"},
+        {"reject_reason":"WEAK_TREND_AND_NO_RANGE_EDGE","symbol":"ETHUSDT","timestamp":"2"},
+    ])
+    assert rows[0]["source_function"] == "alphaforge.symbol_selector.select_symbol"
+    assert rows[0]["interval_sensitive"] is True
+    assert rows[0]["future_leakage_risk"].startswith("UNKNOWN")
+    summary = bo.classify_symbol_reject(rows)
+    assert summary["symbol_reject_verdict"] == "FEATURE_MISSING"
+
+
+def test_zero_accepted_root_cause_summary_reconciles_distribution():
+    summary = bo.build_zero_accepted_root_cause_summary(
+        {"total_candidates": 3, "accepted_count": 0, "rejected_count": 3, "signal_rejected_count": 2, "symbol_rejected_count": 1, "reject_reason_distribution": {"LOW_SCORE": 2, "TOO_CHOPPY": 1}},
+        {"high_vol_guard_verdict":"VALID_PROTECTIVE_GUARD"}, {"low_score_verdict":"VALID_QUALITY_FILTER", "low_score_evidence":"2 rows"}, {"symbol_reject_verdict":"FEATURE_MISSING", "symbol_reject_evidence":"1 row"}
+    )
+    assert summary["primary_bottleneck"] == "LOW_SCORE"
+    assert summary["secondary_bottleneck"] == "TOO_CHOPPY"
+    assert summary["production_threshold_change_recommended"] is False
