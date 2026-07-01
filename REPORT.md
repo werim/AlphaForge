@@ -1177,3 +1177,109 @@ No database migration required. Artifact consumers should tolerate additive JSON
 
 ## Push recommendation
 Safe to push as a BACKTEST-only reporting-first experiment. Do not enable for LIVE; LIVE remains not ready.
+
+## 2026-07-01 - Rejected forward/shadow outcome evidence phase
+
+### Why this patch was needed
+The BTCUSDT 30d/1h zero-accepted audit still had `evidence_quality=PARTIAL` because rejected rows did not have canonical first-touch forward outcome evidence. That made it impossible to separate correct selectivity from possible overblocking without changing thresholds.
+
+### Root cause / audit findings
+- Existing rejected shadow outcomes were built in `backtest_order.evaluate_rejected_shadow`, persisted from `main()` as `rejected_shadow.csv`, and summarized by `build_rejected_shadow_summary`.
+- Existing shadow rows were generated only for `_is_actionable_rejected_order()` rows with side plus entry/sl/tp geometry, so symbol-level rejects and missing-geometry rejects were skipped rather than exported with explicit unavailable reasons.
+- Existing artifacts with shadow fields included `rejected_shadow.csv`, `rejected_shadow_summary.csv`, lifecycle rows after `_attach_rejected_shadow_to_lifecycle`, dashboard near-miss views, and quality diagnostics derived from rejected shadow rows.
+- LOW_SCORE, HIGH_VOL_GUARD, and STOP_TOO_WIDE could receive legacy shadow outcomes only when candidate geometry existed. TOO_CHOPPY and WEAK_TREND_AND_NO_RANGE_EDGE generally lacked candidate geometry because symbol-level rejection happens before signal candidate construction.
+- Missing shadow outcomes were therefore caused by a mix of candidate geometry unavailable, symbol-level rejects before candidate construction, missing TP/SL geometry, and rejected rows not being passed into the legacy actionable-only shadow simulator. Forward candle scarcity is now represented as `INSUFFICIENT_FORWARD_BARS`.
+- The new canonical simulator uses only candles with `candle.timestamp > rejected_timestamp`, so the reject candle/current bar is excluded from first-touch evidence. This is diagnostic forward labeling only and is not used to decide the original reject.
+- Feature calculation for the original reject is unchanged by this patch. Forward labeling is isolated after the reject timestamp; exported `future_leakage_risk` is `PASS` for that first-touch window rule, while symbol selector feature lookback audit remains separately documented in symbol diagnostics.
+- Existing legacy shadow cost treatment used effective RR and cost penalty from execution reject flags. The new canonical artifact records `cost_penalty`, `gross_shadow_r`, `effective_shadow_r_after_costs`, and `shadow_net_expectancy_r`.
+- The canonical outcome vocabulary now distinguishes `WOULD_TP`, `WOULD_SL`, `WOULD_TIMEOUT`, `WOULD_AMBIGUOUS`, `INSUFFICIENT_FORWARD_BARS`, `NO_TP_SL_GEOMETRY`, and `SYMBOL_REJECT_NO_CANDIDATE_GEOMETRY`.
+
+### Files changed
+- `backtest_order.py`: added canonical rejected forward outcome simulation, LOW_SCORE and symbol-reject forward summaries, HIGH_VOL_GUARD/STOP_TOO_WIDE confirmation fields, JSON/CSV artifact export, and zero-accepted root-cause forward evidence fields.
+- `src/alphaforge/dashboard/backtest_control.py`: added optional parsing for low-score forward summary, symbol-reject forward summary, and rejected-forward artifact path.
+- `src/alphaforge/dashboard/templates/overview.html`: surfaced compact forward summaries and the canonical rejected-forward artifact path without dumping raw rows.
+- `tests/test_rejected_forward_outcomes.py`: added regression coverage for historical-safe forward windows, TP/SL/timeout/ambiguous outcomes, missing geometry, symbol reject no-geometry classification, cost penalty subtraction, summaries, and incomplete evidence quality.
+- `CHANGELOG.md`, `VERSION.md`, and this `REPORT.md`: documented diagnostic-only behavior, persistence/export impact, risks, and testing.
+
+### Runtime behavior changes
+Rejected forward outcomes are diagnostic-only and do not change default BACKTEST, PAPER, or LIVE acceptance behavior. No production threshold relaxation is recommended unless forward outcomes show positive effective expectancy after execution costs and controlled adverse excursion.
+
+Default BACKTEST decision counts remain driven by the existing reject/accept flow. PAPER and LIVE order paths are untouched.
+
+### Lifecycle changes
+No lifecycle transition semantics changed. Rejected lifecycle states remain `SIGNAL_REJECTED` or `SYMBOL_REJECTED`; the new forward artifacts annotate counterfactual evidence without converting rejects into trades.
+
+### Persistence / export / schema changes
+No SQLite schema change was introduced. CSV/JSON exports now include:
+- `rejected_forward_outcomes.csv`
+- `rejected_forward_outcomes.json`
+- `low_score_forward_summary.csv`
+- `low_score_forward_summary.json`
+- `symbol_reject_forward_summary.csv`
+- `symbol_reject_forward_summary.json`
+- expanded `zero_accepted_root_cause_summary.csv/json` fields for forward evidence completeness and by-reason outcome/expectancy diagnostics.
+
+### Forward simulation source functions
+- `backtest_order.evaluate_rejected_forward_outcome`
+- `backtest_order.build_rejected_forward_outcomes`
+- `backtest_order.build_low_score_forward_summary`
+- `backtest_order.build_symbol_reject_forward_summary`
+- `backtest_order.build_rejected_forward_confirmation_summary`
+
+### Forward window used
+The canonical artifact uses `forward_window_bars=240`. `forward_window_minutes` is derived from the selected interval; for 1h this is 14,400 minutes. Only bars strictly after the rejected timestamp are evaluated.
+
+### LOW_SCORE forward outcome summary
+LOW_SCORE rows are split into forward-evaluable versus unavailable, near-threshold versus far-below-threshold, and effective-shadow-R after costs. The recommended action remains conservative: keep the LOW_SCORE threshold unless future diagnostic evidence shows positive effective expectancy after costs, controlled adverse excursion, sufficient sample size, and no SL dominance.
+
+### Symbol-level forward outcome summary
+TOO_CHOPPY and WEAK_TREND_AND_NO_RANGE_EDGE are summarized separately. When symbol-level rejects lack entry/sl/tp geometry, rows are exported as `SYMBOL_REJECT_NO_CANDIDATE_GEOMETRY` instead of fabricating TP/SL. The recommended action is safe pre-reject geometry capture before any threshold discussion.
+
+### HIGH_VOL_GUARD and STOP_TOO_WIDE confirmation
+The zero-accepted root-cause summary now includes forward-evaluable counts, WOULD_TP/WOULD_SL counts, and mean effective shadow R for HIGH_VOL_GUARD and STOP_TOO_WIDE. These remain confirmation diagnostics only; neither guard is relaxed.
+
+### Zero-accepted root-cause update
+The root-cause summary now reports rejected forward evaluable/unavailable counts, unavailable reason distribution, LOW_SCORE and symbol forward verdicts, HIGH_VOL/STOP_TOO_WIDE confirmations, by-reason shadow expectancy, by-reason shadow outcome distribution, evidence quality, evidence-quality reasons, conservative next action, and `production_threshold_change_recommended=false`.
+
+### Risk assessment / limitations
+- Symbol-level rejects may still be unevaluable until safe pre-reject candidate geometry is captured.
+- First-touch ordering inside one OHLC candle is unknowable; such rows are `WOULD_AMBIGUOUS`, not optimistic TP wins.
+- Network validation against Binance can fail in restricted environments; offline validation confirms artifact creation but not latest BTCUSDT market evidence.
+- This patch does not prove strategy expectancy or LIVE readiness.
+
+### Recommendation / push decision
+Keep thresholds unchanged. Use these artifacts to determine whether rejected candidates were actually positive expectancy after execution costs before considering any diagnostic-only profile expansion. Do not relax production thresholds from count evidence alone.
+
+## 2026-07-01 - PR259 rejected forward summary enrichment patch
+
+### Why this patch was needed
+Review found that PR259's first rejected-forward evidence pass needed PR257-compatible threshold and selector enrichment before merge. The prior LOW_SCORE near/far split used a loose `score_gap_to_threshold >= -1.0` rule, and the forward rows did not always carry the diagnostic context needed to audit LOW_SCORE or symbol-level rejects.
+
+### Root cause
+The rejected-forward artifact was built directly from rejected rows without normalizing PR257 LOW_SCORE threshold metadata and selector diagnostics into the canonical forward row. This made near-threshold counts too broad, made `would_accept_if_low_score_disabled_mean_shadow_r` use all LOW_SCORE evaluable rows instead of the counterfactual subset, and made symbol forward means vulnerable to missing selector metrics.
+
+### Files changed
+- `backtest_order.py`: added LOW_SCORE forward metadata extraction, selector metric enrichment, PR257-compatible 5% near-threshold bucketing, corrected counterfactual-disabled subset expectancy, and evidence-quality reasons for missing LOW_SCORE gaps or symbol metrics.
+- `tests/test_rejected_forward_outcomes.py`: added regressions for 6.37/7.5 far classification, 7.2/7.5 near classification, positive gap far classification, subset-only counterfactual expectancy, metadata preservation, selector metric preservation, non-zero symbol means, and missing-evidence quality reasons.
+- `CHANGELOG.md`, `VERSION.md`, and this `REPORT.md`: documented the review fix and remaining diagnostic-only scope.
+
+### Runtime behavior changes
+No acceptance behavior changed. Rejected forward outcomes remain diagnostic-only and do not alter default BACKTEST, PAPER, LIVE, thresholds, or canonical rejected decisions.
+
+### Lifecycle changes
+None. Existing rejected lifecycle rows remain unchanged; the patch only enriches exported forward diagnostics.
+
+### Persistence / export / schema changes
+No database migration. Additive artifact fields now include LOW_SCORE threshold metadata (`score_threshold_source`, score scale fields, mismatch/correction flags, counterfactual-disabled flag), `near_threshold_definition`, `above_threshold_or_unknown_count`, `low_score_gap_source_distribution`, counterfactual-disabled forward counts, selector metric fields, and missing-metric evidence reasons.
+
+### Tests executed
+- `python -m pytest tests/test_rejected_forward_outcomes.py -q`
+- `python -m pytest tests -k "backtest or rejected or shadow or forward or low_score or symbol or root_cause or dashboard" -q`
+- `python -m pytest -q`
+- `python -m py_compile backtest_order.py src/alphaforge/dashboard/backtest_control.py`
+
+### Risks / remaining limitations
+If historical rejected rows did not persist score or selector diagnostics, the new artifact honestly marks those gaps as unavailable and downgrades evidence quality instead of inferring fake values. Symbol-level thresholds should still not be relaxed without safe pre-reject candidate geometry and positive effective expectancy after costs.
+
+### Push recommendation
+Safe to merge as a diagnostic correctness patch. No production threshold relaxation is recommended.

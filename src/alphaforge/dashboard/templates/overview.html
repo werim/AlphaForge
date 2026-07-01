@@ -147,6 +147,9 @@
           <tr><th>LOW_SCORE summary</th><td>{{ backtest_result.low_score_summary if backtest_result.low_score_summary else 'Unavailable' }}</td></tr>
           <tr><th>Symbol reject summary</th><td>{{ backtest_result.symbol_reject_summary if backtest_result.symbol_reject_summary else 'Unavailable' }}</td></tr>
           <tr><th>Zero-accepted root cause artifact</th><td>{{ backtest_result.zero_accepted_root_cause_summary_path if backtest_result.zero_accepted_root_cause_summary_path else 'Unavailable' }}</td></tr>
+          <tr><th>LOW_SCORE forward summary</th><td>{{ backtest_result.low_score_forward_summary if backtest_result.low_score_forward_summary else 'Unavailable' }}</td></tr>
+          <tr><th>Symbol reject forward summary</th><td>{{ backtest_result.symbol_reject_forward_summary if backtest_result.symbol_reject_forward_summary else 'Unavailable' }}</td></tr>
+          <tr><th>Rejected forward outcomes artifact</th><td>{{ backtest_result.rejected_forward_outcomes_path if backtest_result.rejected_forward_outcomes_path else 'Unavailable' }}</td></tr>
           <tr><th>Acceptance funnel artifact</th><td>{{ backtest_result.acceptance_funnel_path if backtest_result.acceptance_funnel_path else 'Unavailable' }}</td></tr>
           <tr><th>HIGH_VOL_GUARD diagnostics artifact</th><td>{{ backtest_result.high_vol_guard_diagnostics_path if backtest_result.high_vol_guard_diagnostics_path else 'Unavailable' }}</td></tr>
           <tr><th>LOW_SCORE diagnostics artifact</th><td>{{ backtest_result.low_score_diagnostics_path if backtest_result.low_score_diagnostics_path else 'Unavailable' }}</td></tr>

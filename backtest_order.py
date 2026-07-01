@@ -3313,6 +3313,271 @@ def persist_calibration_snapshots(evals: List[ForwardWindowEvaluation], lifecycl
             candidate_row.get("liquidity_score"),
         ),
     )
+
+FORWARD_OUTCOME_VALUES = ["WOULD_TP", "WOULD_SL", "WOULD_TIMEOUT", "WOULD_AMBIGUOUS", "INSUFFICIENT_FORWARD_BARS", "NO_TP_SL_GEOMETRY", "SYMBOL_REJECT_NO_CANDIDATE_GEOMETRY"]
+
+
+def _interval_to_minutes(interval: str) -> int:
+    text = str(interval or "").strip().lower()
+    try:
+        if text.endswith("m"):
+            return max(1, int(text[:-1]))
+        if text.endswith("h"):
+            return max(1, int(text[:-1]) * 60)
+        if text.endswith("d"):
+            return max(1, int(text[:-1]) * 1440)
+    except ValueError:
+        return 60
+    return 60
+
+
+def _has_tp_sl_geometry(row: Mapping[str, Any]) -> bool:
+    if str(row.get("side", "") or "").upper() not in {"LONG", "SHORT"}:
+        return False
+    return all(_safe_float(row.get(k), 0.0) > 0.0 for k in ("entry", "sl", "tp"))
+
+
+def _cost_penalty_from_row(row: Mapping[str, Any], raw_rr: float) -> tuple[float, float]:
+    spread_pct, _ = normalize_pct_input(row.get("spread_pct"), field="spread_pct")
+    slippage = _safe_float(row.get("expected_slippage_pct", row.get("slippage_pct", 0.0)), 0.0)
+    liquidity = _safe_float(row.get("liquidity_score"), 1.0)
+    effective_rr, _, breakdown = _execution_reject_flags(raw_rr, {"spread_pct": spread_pct, "expected_slippage_pct": slippage, "liquidity_score": liquidity})
+    return effective_rr, _safe_float(breakdown.get("cost_penalty_total"), max(raw_rr - effective_rr, 0.0))
+
+
+
+def _numeric_or_none(value: Any) -> float | None:
+    if value in ("", None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _truthy(value: Any) -> bool:
+    return value is True or str(value).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _low_score_forward_metadata(row: Mapping[str, Any]) -> Dict[str, Any]:
+    diagnostics = _json_dict(row.get("diagnostics"))
+    threshold_info = _low_score_threshold_for_row(row, diagnostics)
+    score_value = row.get("score", diagnostics.get("score"))
+    score_num = _numeric_or_none(score_value)
+    score = _safe_float(score_value, 0.0)
+    threshold = _numeric_or_none(row.get("min_score_threshold"))
+    threshold_source = row.get("score_threshold_source", "")
+    if threshold is None:
+        threshold = _numeric_or_none(row.get("min_required_score"))
+    if threshold is None:
+        threshold = _safe_float(threshold_info.get("threshold"), 7.5)
+        threshold_source = threshold_info.get("source", "decision_filter_config.BACKTEST.MIN_TRADE_SCORE")
+    if not threshold_source:
+        threshold_source = threshold_info.get("source", "UNAVAILABLE")
+    raw_gap = _numeric_or_none(row.get("score_gap_to_threshold"))
+    if raw_gap is not None:
+        gap = raw_gap
+        gap_source = "row.score_gap_to_threshold"
+    elif score_num is not None and threshold is not None:
+        gap = threshold - score_num
+        gap_source = "computed:min_score_threshold-score"
+    else:
+        gap = ""
+        gap_source = "UNAVAILABLE"
+    failed = sorted(set([str(x) for x in _json_list(row.get("all_failed_gates")) if str(x)]))
+    cfg = decision_filter_config("BACKTEST")
+    raw = _safe_float(row.get("raw_rr", row.get("rr")), 0.0)
+    eff = _safe_float(row.get("effective_rr"), raw)
+    passed_rr = raw >= float(cfg.get("MIN_RR", 1.3))
+    passed_eff = eff >= float(cfg.get("MIN_EFFECTIVE_RR", 1.6))
+    passed_exp = str(row.get("expectancy_bucket", "")).upper() not in {"NEGATIVE", "MISSING"}
+    passed_costs = "HIGH_SPREAD" not in failed and "HIGH_SLIPPAGE" not in failed and "THIN_LIQUIDITY" not in failed
+    would = row.get("would_accept_if_low_score_disabled")
+    if would in ("", None):
+        would = passed_rr and passed_eff and passed_exp and passed_costs
+    return {
+        "min_score_threshold": threshold,
+        "score_gap_to_threshold": gap,
+        "score_gap_source": gap_source,
+        "score_threshold_source": threshold_source,
+        "score_scale_detected": row.get("score_scale_detected", threshold_info.get("score_scale_detected")),
+        "score_threshold_scale_detected": row.get("score_threshold_scale_detected", threshold_info.get("score_threshold_scale_detected")),
+        "threshold_scale_mismatch_detected": row.get("threshold_scale_mismatch_detected", threshold_info.get("threshold_scale_mismatch_detected")),
+        "threshold_scale_correction_applied": row.get("threshold_scale_correction_applied", threshold_info.get("threshold_scale_correction_applied")),
+        "would_accept_if_low_score_disabled": bool(_truthy(would)),
+    }
+
+
+def _symbol_forward_metadata(row: Mapping[str, Any]) -> Dict[str, Any]:
+    inputs, metrics, sub_scores, reject_reasons = _selector_payload(row)
+    chop, chop_src = _selector_metric(row, inputs, metrics, "chop_score")
+    trend, trend_src = _selector_metric(row, inputs, metrics, "trend_strength")
+    vol, _ = _selector_metric(row, inputs, metrics, "realized_volatility_pct", metric_key="volatility_pct")
+    candle, _ = _selector_metric(row, inputs, metrics, "candle_range_pct")
+    spread, _ = _selector_metric(row, inputs, metrics, "spread_pct")
+    liq, _ = _selector_metric(row, inputs, metrics, "liquidity_score")
+    volume, _ = _selector_metric(row, inputs, metrics, "volume_24h_usdt")
+    metric_source = next((src for src in [chop_src, trend_src] if src != "MISSING"), row.get("metric_source", "MISSING"))
+    return {
+        "metric_source": metric_source,
+        "chop_score": chop,
+        "trend_strength": trend,
+        "range_edge_score": row.get("range_edge_score", metrics.get("range_edge_score", inputs.get("range_edge_score", ""))),
+        "selector_chop_score": chop,
+        "selector_trend_strength": trend,
+        "selector_volatility_pct": vol,
+        "selector_candle_range_pct": candle,
+        "selector_spread_pct": spread,
+        "selector_liquidity_score": liq,
+        "selector_volume_24h_usdt": volume,
+        "selector_reject_reasons": json.dumps(reject_reasons, sort_keys=True) if isinstance(reject_reasons, (list, dict)) else reject_reasons,
+        "selector_sub_scores": json.dumps(sub_scores, sort_keys=True) if isinstance(sub_scores, (list, dict)) else sub_scores,
+    }
+
+def evaluate_rejected_forward_outcome(row: Mapping[str, Any], candles: List[Candle], *, forward_window_bars: int = 240, interval_minutes: int = 60) -> Dict[str, Any]:
+    """Diagnostic-only first-touch evaluation using candles strictly after reject timestamp."""
+    ts = int(_safe_float(row.get("timestamp"), 0.0))
+    reason = str(row.get("reject_reason", "UNKNOWN") or "UNKNOWN").upper()
+    lifecycle = str(row.get("lifecycle_state", row.get("status_after", "")) or "").upper()
+    raw_rr = _safe_float(row.get("raw_rr", row.get("rr")), 0.0)
+    effective_rr, cost_penalty = _cost_penalty_from_row(row, raw_rr)
+    low_meta = _low_score_forward_metadata(row) if reason == "LOW_SCORE" else {}
+    symbol_meta = _symbol_forward_metadata(row) if reason in {"TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE"} else {}
+    base = {
+        "timestamp": row.get("timestamp"), "symbol": row.get("symbol"), "side": row.get("side"),
+        "reject_reason": reason, "lifecycle_state": lifecycle, "candidate_stage": row.get("source_stage", row.get("setup_reason", "UNAVAILABLE")),
+        "setup": row.get("setup_type", row.get("setup", "UNAVAILABLE")), "regime": row.get("regime", "UNAVAILABLE"),
+        "score": row.get("score"), "min_score_threshold": low_meta.get("min_score_threshold", row.get("min_score_threshold", row.get("min_required_score", ""))),
+        "score_gap_to_threshold": low_meta.get("score_gap_to_threshold", row.get("score_gap_to_threshold", "")),
+        "score_gap_source": low_meta.get("score_gap_source", ""),
+        "score_threshold_source": low_meta.get("score_threshold_source", row.get("score_threshold_source", "")),
+        "score_scale_detected": low_meta.get("score_scale_detected", row.get("score_scale_detected", "")),
+        "score_threshold_scale_detected": low_meta.get("score_threshold_scale_detected", row.get("score_threshold_scale_detected", "")),
+        "threshold_scale_mismatch_detected": low_meta.get("threshold_scale_mismatch_detected", row.get("threshold_scale_mismatch_detected", "")),
+        "threshold_scale_correction_applied": low_meta.get("threshold_scale_correction_applied", row.get("threshold_scale_correction_applied", "")),
+        "would_accept_if_low_score_disabled": low_meta.get("would_accept_if_low_score_disabled", row.get("would_accept_if_low_score_disabled", "")),
+        "raw_rr": raw_rr, "effective_rr": effective_rr,
+        "entry": row.get("entry"), "sl": row.get("sl"), "tp": row.get("tp"),
+        "stop_distance_pct": row.get("stop_distance_pct", ""), "target_distance_pct": row.get("target_distance_pct", ""),
+        "expectancy_bucket": row.get("expectancy_bucket", ""), "spread_pct": row.get("spread_pct", ""),
+        "expected_slippage_pct": row.get("expected_slippage_pct", row.get("slippage_pct", "")), "funding_rate_pct": row.get("funding_rate_pct", ""),
+        "liquidity_score": row.get("liquidity_score", ""), "volume_24h_usdt": row.get("volume_24h_usdt", ""),
+        "volatility_regime": row.get("volatility_regime", ""), "candle_range_pct": row.get("candle_range_pct", ""),
+        "atr_pct": row.get("atr_pct", ""), "realized_volatility_pct": row.get("realized_volatility_pct", row.get("volatility_pct", "")),
+        "forward_window_bars": forward_window_bars, "forward_window_minutes": forward_window_bars * interval_minutes,
+        "first_touch_timestamp": "", "bars_to_first_touch": "", "minutes_to_first_touch": "", "mfe_pct": 0.0, "mae_pct": 0.0,
+        "mfe_r": 0.0, "mae_r": 0.0, "max_favorable_before_adverse": 0.0, "max_adverse_before_favorable": 0.0,
+        "gross_shadow_r": 0.0, "effective_shadow_r_after_costs": 0.0, "cost_penalty": cost_penalty, "shadow_net_expectancy_r": 0.0,
+        "shadow_outcome_confidence": "UNAVAILABLE", "shadow_unavailable_reason": "", "historical_safe_data_only": True,
+        "future_leakage_risk": "PASS", "source_function": "backtest_order.evaluate_rejected_forward_outcome",
+        **symbol_meta,
+    }
+    if not _has_tp_sl_geometry(row):
+        outcome = "SYMBOL_REJECT_NO_CANDIDATE_GEOMETRY" if lifecycle == "SYMBOL_REJECTED" or reason in {"TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE"} else "NO_TP_SL_GEOMETRY"
+        return {**base, "first_touch_outcome": outcome, "shadow_unavailable_reason": outcome}
+    entry = _safe_float(row.get("entry")); sl = _safe_float(row.get("sl")); tp = _safe_float(row.get("tp")); side = str(row.get("side", "LONG")).upper()
+    risk = abs(entry - sl)
+    if risk <= 0.0:
+        return {**base, "first_touch_outcome": "NO_TP_SL_GEOMETRY", "shadow_unavailable_reason": "NO_TP_SL_GEOMETRY"}
+    scan = [c for c in candles if c.timestamp > ts][:forward_window_bars]
+    if not scan:
+        return {**base, "first_touch_outcome": "INSUFFICIENT_FORWARD_BARS", "shadow_unavailable_reason": "INSUFFICIENT_FORWARD_BARS"}
+    mfe = mae = 0.0; outcome = "WOULD_TIMEOUT"; touch_ts = ""; bars = ""
+    for i, c in enumerate(scan, start=1):
+        if side == "SHORT":
+            favorable = max(0.0, entry - c.low); adverse = max(0.0, c.high - entry); hit_tp = c.low <= tp; hit_sl = c.high >= sl
+        else:
+            favorable = max(0.0, c.high - entry); adverse = max(0.0, entry - c.low); hit_tp = c.high >= tp; hit_sl = c.low <= sl
+        mfe = max(mfe, favorable); mae = max(mae, adverse)
+        if hit_tp and hit_sl:
+            outcome = "WOULD_AMBIGUOUS"; touch_ts = c.timestamp; bars = i; break
+        if hit_tp or hit_sl:
+            outcome = "WOULD_TP" if hit_tp else "WOULD_SL"; touch_ts = c.timestamp; bars = i; break
+    if outcome == "WOULD_TIMEOUT" and len(scan) < forward_window_bars:
+        outcome = "INSUFFICIENT_FORWARD_BARS"
+    gross_r = raw_rr if outcome == "WOULD_TP" else (-1.0 if outcome == "WOULD_SL" else 0.0)
+    effective_shadow_r = effective_rr if outcome == "WOULD_TP" else (-1.0 - cost_penalty if outcome == "WOULD_SL" else 0.0)
+    return {**base, "first_touch_outcome": outcome, "first_touch_timestamp": touch_ts, "bars_to_first_touch": bars, "minutes_to_first_touch": (bars * interval_minutes if isinstance(bars, int) else ""), "mfe_pct": (mfe / entry) * 100.0, "mae_pct": (mae / entry) * 100.0, "mfe_r": mfe / risk, "mae_r": mae / risk, "max_favorable_before_adverse": mfe / risk, "max_adverse_before_favorable": mae / risk, "gross_shadow_r": gross_r, "effective_shadow_r_after_costs": effective_shadow_r, "shadow_net_expectancy_r": effective_shadow_r, "shadow_outcome_confidence": ("HIGH" if outcome in {"WOULD_TP", "WOULD_SL"} else "MEDIUM"), "shadow_unavailable_reason": (outcome if outcome in {"INSUFFICIENT_FORWARD_BARS"} else "")}
+
+
+def build_rejected_forward_outcomes(rejected_rows: List[Mapping[str, Any]], candles_by_symbol: Mapping[str, List[Candle]], *, forward_window_bars: int = 240, interval_minutes: int = 60) -> List[Dict[str, Any]]:
+    return [evaluate_rejected_forward_outcome(r, candles_by_symbol.get(str(r.get("symbol", "")), []), forward_window_bars=forward_window_bars, interval_minutes=interval_minutes) for r in rejected_rows]
+
+
+def _mean(vals: List[float]) -> float:
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _median(vals: List[float]) -> float:
+    vals = sorted(vals)
+    if not vals: return 0.0
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def _p95(vals: List[float]) -> float:
+    vals = sorted(vals)
+    if not vals: return 0.0
+    return vals[min(len(vals) - 1, int(len(vals) * 0.95))]
+
+
+def _is_forward_evaluable(r: Mapping[str, Any]) -> bool:
+    return str(r.get("first_touch_outcome", "")).upper() in {"WOULD_TP", "WOULD_SL", "WOULD_TIMEOUT", "WOULD_AMBIGUOUS"}
+
+
+def _low_score_gap_bucket(row: Mapping[str, Any]) -> str:
+    gap = _numeric_or_none(row.get("score_gap_to_threshold"))
+    threshold = _numeric_or_none(row.get("min_score_threshold"))
+    if gap is None or threshold is None or threshold <= 0.0:
+        return "above_threshold_or_unknown"
+    if 0.0 <= gap <= threshold * 0.05:
+        return "near"
+    if gap > threshold * 0.05:
+        return "far"
+    return "above_threshold_or_unknown"
+
+
+def build_low_score_forward_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    low = [r for r in rows if str(r.get("reject_reason", "")).upper() == "LOW_SCORE"]
+    ev = [r for r in low if _is_forward_evaluable(r)]; un = [r for r in low if not _is_forward_evaluable(r)]
+    near = [r for r in low if _low_score_gap_bucket(r) == "near"]
+    far = [r for r in low if _low_score_gap_bucket(r) == "far"]
+    above_unknown = [r for r in low if _low_score_gap_bucket(r) == "above_threshold_or_unknown"]
+    def c(sub, out): return sum(1 for r in sub if r.get("first_touch_outcome") == out)
+    mean_eff = _mean([_safe_float(r.get("effective_shadow_r_after_costs")) for r in ev])
+    near_ev = [r for r in near if _is_forward_evaluable(r)]; far_ev = [r for r in far if _is_forward_evaluable(r)]
+    would_subset = [r for r in low if _truthy(r.get("would_accept_if_low_score_disabled"))]
+    would_subset_ev = [r for r in would_subset if _is_forward_evaluable(r)]
+    verdict = "SHADOW_EVIDENCE_INSUFFICIENT" if len(ev) < max(10, len(low) * 0.1) else ("POSSIBLE_OVERSTRICT_NEAR_THRESHOLD" if near_ev and _mean([_safe_float(r.get("effective_shadow_r_after_costs")) for r in near_ev]) > 0 and c(near_ev,"WOULD_TP") > c(near_ev,"WOULD_SL") else "VALID_QUALITY_FILTER")
+    if verdict == "POSSIBLE_OVERSTRICT_NEAR_THRESHOLD": action = "Add diagnostic-only near-threshold LOW_SCORE shadow profile; do not relax production thresholds."
+    else: action = "Keep LOW_SCORE threshold; rejected forward diagnostics do not justify production relaxation."
+    return {"low_score_count": len(low), "forward_evaluable_count": len(ev), "forward_unavailable_count": len(un), "unavailable_reason_distribution": _distribution([r.get("shadow_unavailable_reason") or r.get("first_touch_outcome") for r in un]), "would_tp_count": c(low,"WOULD_TP"), "would_sl_count": c(low,"WOULD_SL"), "would_timeout_count": c(low,"WOULD_TIMEOUT"), "would_ambiguous_count": c(low,"WOULD_AMBIGUOUS"), "insufficient_forward_bars_count": c(low,"INSUFFICIENT_FORWARD_BARS"), "no_geometry_count": c(low,"NO_TP_SL_GEOMETRY"), "would_tp_rate": c(ev,"WOULD_TP")/len(ev) if ev else 0.0, "would_sl_rate": c(ev,"WOULD_SL")/len(ev) if ev else 0.0, "timeout_rate": c(ev,"WOULD_TIMEOUT")/len(ev) if ev else 0.0, "mean_effective_shadow_r": mean_eff, "median_effective_shadow_r": _median([_safe_float(r.get("effective_shadow_r_after_costs")) for r in ev]), "mean_mfe_r": _mean([_safe_float(r.get("mfe_r")) for r in ev]), "mean_mae_r": _mean([_safe_float(r.get("mae_r")) for r in ev]), "p95_adverse_r": _p95([_safe_float(r.get("mae_r")) for r in ev]), "near_threshold_definition": "0 <= (min_score_threshold - score or score_gap_to_threshold) <= min_score_threshold * 0.05", "near_threshold_count": len(near), "near_threshold_forward_evaluable_count": len(near_ev), "near_threshold_would_tp_count": c(near,"WOULD_TP"), "near_threshold_would_sl_count": c(near,"WOULD_SL"), "near_threshold_mean_effective_shadow_r": _mean([_safe_float(r.get("effective_shadow_r_after_costs")) for r in near_ev]), "far_below_threshold_count": len(far), "far_below_would_tp_count": c(far,"WOULD_TP"), "far_below_would_sl_count": c(far,"WOULD_SL"), "far_below_mean_effective_shadow_r": _mean([_safe_float(r.get("effective_shadow_r_after_costs")) for r in far_ev]), "above_threshold_or_unknown_count": len(above_unknown), "low_score_gap_source_distribution": _distribution([r.get("score_gap_source") or "UNAVAILABLE" for r in low]), "would_accept_if_low_score_disabled_count": len(would_subset), "would_accept_if_low_score_disabled_forward_evaluable_count": len(would_subset_ev), "would_accept_if_low_score_disabled_would_tp_count": c(would_subset,"WOULD_TP"), "would_accept_if_low_score_disabled_would_sl_count": c(would_subset,"WOULD_SL"), "would_accept_if_low_score_disabled_mean_shadow_r": _mean([_safe_float(r.get("effective_shadow_r_after_costs")) for r in would_subset_ev]), "low_score_forward_verdict": verdict, "low_score_forward_evidence": f"{len(ev)} of {len(low)} LOW_SCORE rejects have diagnostic forward outcomes after costs.", "recommended_action": action}
+
+
+def build_symbol_reject_forward_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    sym = [r for r in rows if str(r.get("reject_reason", "")).upper() in {"TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE"}]
+    ev = [r for r in sym if _is_forward_evaluable(r)]; un = [r for r in sym if not _is_forward_evaluable(r)]
+    ch = [r for r in sym if r.get("reject_reason") == "TOO_CHOPPY"]; wk = [r for r in sym if r.get("reject_reason") == "WEAK_TREND_AND_NO_RANGE_EDGE"]
+    def c(sub, out): return sum(1 for r in sub if r.get("first_touch_outcome") == out)
+    def mean_eff(sub): return _mean([_safe_float(r.get("effective_shadow_r_after_costs")) for r in sub if _is_forward_evaluable(r)])
+    missing_metrics = sum(1 for r in sym if (r.get("metric_source") in ("", None, "MISSING") and r.get("chop_score") in ("", None) and r.get("trend_strength") in ("", None) and r.get("range_edge_score") in ("", None)))
+    verdict = "SYMBOL_REJECT_NO_GEOMETRY" if sym and not ev and any(r.get("first_touch_outcome") == "SYMBOL_REJECT_NO_CANDIDATE_GEOMETRY" for r in sym) else ("SHADOW_EVIDENCE_INSUFFICIENT" if sym and len(ev) < max(10, len(sym)*0.1) else "VALID_MARKET_STRUCTURE_FILTER")
+    return {"symbol_reject_count": len(sym), "forward_evaluable_count": len(ev), "forward_unavailable_count": len(un), "missing_market_structure_metric_count": missing_metrics, "unavailable_reason_distribution": _distribution([r.get("shadow_unavailable_reason") or r.get("first_touch_outcome") for r in un]), "too_choppy_count": len(ch), "too_choppy_forward_evaluable_count": sum(1 for r in ch if _is_forward_evaluable(r)), "too_choppy_would_tp_count": c(ch,"WOULD_TP"), "too_choppy_would_sl_count": c(ch,"WOULD_SL"), "too_choppy_mean_effective_shadow_r": mean_eff(ch), "weak_trend_count": len(wk), "weak_trend_forward_evaluable_count": sum(1 for r in wk if _is_forward_evaluable(r)), "weak_trend_would_tp_count": c(wk,"WOULD_TP"), "weak_trend_would_sl_count": c(wk,"WOULD_SL"), "weak_trend_mean_effective_shadow_r": mean_eff(wk), "mean_chop_score": _mean([_safe_float(r.get("chop_score")) for r in sym if r.get("chop_score") not in (None,"")]), "mean_trend_strength": _mean([_safe_float(r.get("trend_strength")) for r in sym if r.get("trend_strength") not in (None,"")]), "mean_range_edge_score": _mean([_safe_float(r.get("range_edge_score")) for r in sym if r.get("range_edge_score") not in (None,"")]), "mean_mfe_r": _mean([_safe_float(r.get("mfe_r")) for r in ev]), "mean_mae_r": _mean([_safe_float(r.get("mae_r")) for r in ev]), "p95_adverse_r": _p95([_safe_float(r.get("mae_r")) for r in ev]), "symbol_reject_forward_verdict": verdict, "symbol_reject_forward_evidence": f"{len(ev)} of {len(sym)} symbol-level rejects have diagnostic forward outcomes.", "recommended_action": "Keep symbol-level filters; if geometry is unavailable, add safe pre-reject candidate geometry capture before threshold changes."}
+
+
+def build_rejected_forward_confirmation_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for reason, prefix in [("HIGH_VOL_GUARD", "high_vol_guard"), ("STOP_TOO_WIDE", "stop_too_wide")]:
+        sub = [r for r in rows if str(r.get("reject_reason","")).upper() == reason]
+        ev = [r for r in sub if _is_forward_evaluable(r)]
+        out[f"{prefix}_forward_evaluable_count"] = len(ev)
+        out[f"{prefix}_would_tp_count"] = sum(1 for r in sub if r.get("first_touch_outcome") == "WOULD_TP")
+        out[f"{prefix}_would_sl_count"] = sum(1 for r in sub if r.get("first_touch_outcome") == "WOULD_SL")
+        out[f"{prefix}_mean_effective_shadow_r"] = _mean([_safe_float(r.get("effective_shadow_r_after_costs")) for r in ev])
+    out["high_vol_forward_confirmation"] = "VALID_PROTECTIVE_GUARD" if out.get("high_vol_guard_would_sl_count",0) >= out.get("high_vol_guard_would_tp_count",0) else "DIAGNOSTIC_REVIEW_REQUIRED"
+    out["stop_too_wide_forward_confirmation"] = "KEEP_GUARD_DIAGNOSTIC_ONLY" if out.get("stop_too_wide_would_sl_count",0) >= out.get("stop_too_wide_would_tp_count",0) else "DIAGNOSTIC_REVIEW_REQUIRED"
+    return out
+
 def _is_actionable_rejected_order(row: Mapping[str, Any]) -> bool:
     if row.get("setup_reason") == "SYMBOL_SELECTOR":
         return False
@@ -4157,8 +4422,14 @@ def main():
         symbol = row.get("symbol")
         ts = int(row.get("timestamp", 0) or 0)
         candles = candles_by_symbol.get(symbol, [])
-        idx = next((i for i, c in enumerate(candles) if c.timestamp >= ts), len(candles))
+        idx = next((i for i, c in enumerate(candles) if c.timestamp > ts), len(candles))
         rejected_shadow.append(evaluate_rejected_shadow(row, candles, idx))
+    rejected_forward_outcomes = build_rejected_forward_outcomes(
+        rejected, candles_by_symbol, forward_window_bars=240, interval_minutes=_interval_to_minutes(args.interval)
+    )
+    low_score_forward_summary = build_low_score_forward_summary(rejected_forward_outcomes)
+    symbol_reject_forward_summary = build_symbol_reject_forward_summary(rejected_forward_outcomes)
+    rejected_forward_confirmation = build_rejected_forward_confirmation_summary(rejected_forward_outcomes)
     forward_evaluations = build_forward_evaluations_from_lifecycle(lifecycle, candles_by_symbol)
     lifecycle_index = {f"{row.symbol}:{row.timestamp}": row for row in lifecycle}
     calibration_snapshots = persist_calibration_snapshots(forward_evaluations, lifecycle_index)
@@ -4193,6 +4464,7 @@ def main():
         ("rejected_orders.csv", rejected),
         ("rejected_signals.csv", rejected),
         ("rejected_shadow.csv", [asdict(x) for x in rejected_shadow]),
+        ("rejected_forward_outcomes.csv", rejected_forward_outcomes),
         ("open_at_end.csv", [asdict(x) for x in open_rows]),
         ("forward_evaluations.csv", [asdict(x) for x in forward_evaluations]),
         ("adaptive_scope_stats.csv", adaptive_scope_stats),
@@ -4375,12 +4647,45 @@ def main():
         **low_score_summary,
         **symbol_reject_summary,
     })
-    zero_summary = build_zero_accepted_root_cause_summary(quality_summary, high_vol_guard_summary, low_score_summary, symbol_reject_summary)
+    forward_counts = {
+        "rejected_forward_evaluable_count": sum(1 for r in rejected_forward_outcomes if _is_forward_evaluable(r)),
+        "rejected_forward_unavailable_count": sum(1 for r in rejected_forward_outcomes if not _is_forward_evaluable(r)),
+        "forward_unavailable_reason_distribution": _distribution([r.get("shadow_unavailable_reason") or r.get("first_touch_outcome") for r in rejected_forward_outcomes if not _is_forward_evaluable(r)]),
+        "low_score_forward_verdict": low_score_forward_summary.get("low_score_forward_verdict"),
+        "symbol_reject_forward_verdict": symbol_reject_forward_summary.get("symbol_reject_forward_verdict"),
+        "rejected_shadow_expectancy_by_reason": {reason: _mean([_safe_float(x.get("effective_shadow_r_after_costs")) for x in rejected_forward_outcomes if str(x.get("reject_reason")).upper() == reason and _is_forward_evaluable(x)]) for reason in sorted({str(x.get("reject_reason")).upper() for x in rejected_forward_outcomes})},
+        "rejected_shadow_outcome_distribution_by_reason": {reason: _distribution([x.get("first_touch_outcome") for x in rejected_forward_outcomes if str(x.get("reject_reason")).upper() == reason]) for reason in sorted({str(x.get("reject_reason")).upper() for x in rejected_forward_outcomes})},
+        **rejected_forward_confirmation,
+    }
+    zero_summary = build_zero_accepted_root_cause_summary(quality_summary, high_vol_guard_summary, {**low_score_summary, **low_score_forward_summary}, {**symbol_reject_summary, **symbol_reject_forward_summary})
+    zero_summary.update(forward_counts)
+    if forward_counts["rejected_forward_evaluable_count"] == 0 and forward_counts["rejected_forward_unavailable_count"]:
+        zero_summary["evidence_quality"] = "INSUFFICIENT"
+    elif forward_counts["rejected_forward_unavailable_count"]:
+        zero_summary["evidence_quality"] = "PARTIAL"
+    extra_reasons = ["FORWARD_EVIDENCE_INCOMPLETE"] if forward_counts["rejected_forward_unavailable_count"] else []
+    gap_dist = low_score_forward_summary.get("low_score_gap_source_distribution") or {}
+    if low_score_forward_summary.get("low_score_count", 0) and int(gap_dist.get("UNAVAILABLE", 0) or 0) > int(low_score_forward_summary.get("low_score_count", 0) or 0) / 2:
+        extra_reasons.append("LOW_SCORE_FORWARD_GAP_UNAVAILABLE")
+    if symbol_reject_forward_summary.get("symbol_reject_count", 0) and int(symbol_reject_forward_summary.get("missing_market_structure_metric_count", 0) or 0) > int(symbol_reject_forward_summary.get("symbol_reject_count", 0) or 0) / 2:
+        extra_reasons.append("SYMBOL_FORWARD_METRICS_UNAVAILABLE")
+    if extra_reasons:
+        zero_summary["evidence_quality"] = "PARTIAL" if forward_counts["rejected_forward_evaluable_count"] else "INSUFFICIENT"
+    zero_summary["evidence_quality_reasons"] = list(dict.fromkeys(list(zero_summary.get("evidence_quality_reasons") or []) + extra_reasons))
+    zero_summary["recommended_next_action"] = "Keep thresholds; use rejected forward outcomes as diagnostic-only evidence and add safe geometry capture where unavailable."
+    zero_summary["production_threshold_change_recommended"] = False
     with open(os.path.join(args.output_dir, "zero_accepted_root_cause_summary.json"), "w") as f:
         json.dump(zero_summary, f, indent=2, sort_keys=True)
     with open(os.path.join(args.output_dir, "zero_accepted_root_cause_summary.csv"), "w", newline="") as f:
         flat = {k: (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v) for k, v in zero_summary.items()}
         w = csv.DictWriter(f, fieldnames=list(flat.keys())); w.writeheader(); w.writerow(flat)
+    for artifact_name, payload in [("rejected_forward_outcomes.json", rejected_forward_outcomes), ("low_score_forward_summary.json", low_score_forward_summary), ("symbol_reject_forward_summary.json", symbol_reject_forward_summary)]:
+        with open(os.path.join(args.output_dir, artifact_name), "w") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+    for artifact_name, payload in [("low_score_forward_summary.csv", low_score_forward_summary), ("symbol_reject_forward_summary.csv", symbol_reject_forward_summary)]:
+        with open(os.path.join(args.output_dir, artifact_name), "w", newline="") as f:
+            flat = {k: (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v) for k, v in payload.items()}
+            w = csv.DictWriter(f, fieldnames=list(flat.keys())); w.writeheader(); w.writerow(flat)
     write_backtest_quality_summary(
         os.path.join(args.output_dir, "backtest_quality_summary.csv"),
         quality_summary,
