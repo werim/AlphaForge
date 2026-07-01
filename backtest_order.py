@@ -20,6 +20,7 @@ from alphaforge.config_registry import decision_filter_config
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_trade_lifecycle_event
 from alphaforge.symbol_selector import select_symbol
+from alphaforge.symbols import SymbolListError, normalize_symbol_list
 from alphaforge.historical_market_data import (
     HistoricalCandle,
     HistoricalDataError,
@@ -3303,7 +3304,7 @@ def main():
     p.add_argument("--telegram", action="store_true")
     p.add_argument("--offline", action="store_true", help="Run without network APIs using deterministic fixture data")
     p.add_argument("--ci", action="store_true", help="CI-safe mode; implies --offline")
-    p.add_argument("--symbols", default="", help="Comma-separated fixed symbol list for deterministic historical universe")
+    p.add_argument("--symbols", nargs="*", default=[], help="Comma- or whitespace-separated fixed symbol list for deterministic historical universe")
     p.add_argument("--force-refresh", action="store_true", help="Fetch the full requested Binance historical range before running")
     p.add_argument("--rescue-enabled", action="store_true", help="Enable BACKTEST-only high effective-RR rescue acceptance lane")
     p.add_argument("--rescue-modes", default="BACKTEST")
@@ -3353,7 +3354,10 @@ def main():
     start_ms = parse_ts(args.start) if args.start else default_start
     end_ms = parse_ts(args.end) if args.end else default_end
     os.makedirs(args.output_dir, exist_ok=True)
-    fixed_symbols_for_state = [x.strip().upper() for x in str(args.symbols or "").split(",") if x.strip()]
+    try:
+        fixed_symbols_for_state = normalize_symbol_list(args.symbols)
+    except SymbolListError as exc:
+        p.error(str(exc))
     filter_state = build_backtest_filter_state(
         disabled_filters=disabled_filters,
         source=("dashboard/env/default" if disabled_filters else "default"),
@@ -3367,7 +3371,7 @@ def main():
     if args.offline:
         universe, candles_by_symbol = _offline_fixture(start_ms)
     else:
-        fixed_symbols = [x.strip() for x in str(args.symbols or "").split(",") if x.strip()]
+        fixed_symbols = fixed_symbols_for_state
         universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
         candles_by_symbol = {}
         for row in universe:

@@ -8,6 +8,8 @@ from typing import Any, Callable
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
+from alphaforge.symbols import validate_single_binance_symbol
+
 
 class HistoricalDataError(RuntimeError):
     pass
@@ -96,6 +98,7 @@ def _coverage_error(reason: str, candles: list[HistoricalCandle], start_ms: int,
 
 
 def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, end_ms: int, fetcher: Callable[[str], Any] | None = None) -> list[HistoricalCandle]:
+    symbol = validate_single_binance_symbol(symbol)
     fetch = fetcher or _fetch_json
     step = _interval_ms(interval, source_function="fetch_binance_klines_paginated")
     cursor = start_ms
@@ -154,6 +157,7 @@ def _validate_coverage(candles: list[HistoricalCandle], start_ms: int, end_ms: i
 
 
 def fetch_historical_funding_rates(symbol: str, start_ms: int, end_ms: int, fetcher: Callable[[str], Any] | None = None) -> list[tuple[int, float]]:
+    symbol = validate_single_binance_symbol(symbol)
     fetch = fetcher or _fetch_json
     params = urlencode({"symbol": symbol, "startTime": start_ms, "endTime": end_ms, "limit": 1000})
     rows = fetch(f"https://fapi.binance.com/fapi/v1/fundingRate?{params}")
@@ -218,6 +222,7 @@ def load_or_fetch_candles(
     Cache coverage is treated as an optimization only. A stale cache must not
     fail a backtest before Binance has been asked for the requested range.
     """
+    symbol = validate_single_binance_symbol(symbol)
     cache_path = Path(output_dir) / "candles" / f"{symbol}_{interval}.json"
     if not force_refresh and cache_path.exists():
         metadata, cached = load_cache(cache_path)

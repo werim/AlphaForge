@@ -55,3 +55,21 @@ def test_dynamic_universe_command_omits_empty_symbols_and_passes_max_symbols(mon
     assert result.command[result.command.index("--mode") + 1] == "BACKTEST"
     assert "--paper" not in result.command
     assert "--live" not in result.command
+
+
+def test_backtest_form_normalizes_whitespace_and_dedupes_symbols() -> None:
+    from alphaforge.dashboard.backtest_control import parse_backtest_form
+
+    request, errors = parse_backtest_form({"last_days": "30", "symbols": "btcusdt, ETHUSDT btcusdt", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "20"})
+
+    assert errors == {}
+    assert request.symbols == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_backtest_form_rejects_plus_combined_symbol() -> None:
+    from alphaforge.dashboard.backtest_control import parse_backtest_form
+
+    request, errors = parse_backtest_form({"last_days": "30", "symbols": "BTCUSDT+ETHUSDT", "timeframe": "15m", "initial_balance": "10000", "max_symbols": "20"})
+
+    assert request is None
+    assert errors["symbols"] == "Invalid symbol list: expected symbols like BTCUSDT,ETHUSDT; got BTCUSDT+ETHUSDT"

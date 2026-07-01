@@ -15,6 +15,7 @@ from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import config_snapshot
 from alphaforge.contracts import canonical_utc_timestamp
 from alphaforge.historical_market_data import supported_intervals
+from alphaforge.symbols import SymbolListError, normalize_symbol_list
 
 SUPPORTED_TIMEFRAMES: tuple[str, ...] = tuple(tf for tf in ("1m", "15m", "1h", "4h", "1d") if tf in supported_intervals())
 INSUFFICIENT_BINANCE_DATA_MESSAGE = "Not enough historical data returned by Binance for the requested period. Try fewer days or a higher timeframe."
@@ -271,7 +272,11 @@ def parse_backtest_form(form: Mapping[str, Any]) -> tuple[DashboardBacktestReque
     last_days = parse_int("last_days", 30, 1, 730)
     initial_balance = parse_float("initial_balance", 10000.0, 100.0, 10_000_000.0)
     max_symbols, max_symbols_provided = parse_optional_int("max_symbols", default_form_values()["max_symbols"], 1, 200)
-    symbols = [item.strip().upper() for item in str(form.get("symbols", "")).split(",") if item.strip()]
+    try:
+        symbols = normalize_symbol_list(form.get("symbols", ""))
+    except SymbolListError as exc:
+        symbols = []
+        errors["symbols"] = str(exc)
     dynamic_universe_requested = not symbols and max_symbols_provided and max_symbols > 0 and "max_symbols" not in errors
     if not symbols and not dynamic_universe_requested:
         errors["symbols"] = "Provide at least one symbol or set MAX SYMBOLS greater than 0 for dynamic universe selection."

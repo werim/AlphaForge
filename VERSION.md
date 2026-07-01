@@ -1,3 +1,15 @@
+## 2026-07-01 BACKTEST symbol-list parsing hardening
+
+- Current version: unreleased BACKTEST symbol input safety increment
+- Current phase: CLI/dashboard historical fetch input validation
+- Runtime maturity: BACKTEST symbol parsing is hardened before Binance fetches; strategy decisions and PAPER/LIVE paths unchanged
+- BACKTEST/PAPER/LIVE alignment: no decision logic changed; this is BACKTEST runner/dashboard input normalization only
+- Lifecycle coverage: no lifecycle transitions changed
+- Execution realism coverage: malformed combined symbols now fail before producing unrealistic or invalid historical fetch attempts
+- Known critical risks: manual PowerShell execution was not available in the Linux validation container; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT READY
+
 ## 2026-07-01 BACKTEST lifecycle realism evidence completion
 
 - Current version: unreleased BACKTEST lifecycle realism evidence increment

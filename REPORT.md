@@ -1,3 +1,50 @@
+## 2026-07-01 - BACKTEST symbol-list parsing hardening surgery report
+
+### Why this patch was needed
+PowerShell multi-symbol BACKTEST runs could collapse `BTCUSDT,ETHUSDT` into a single space-separated string that was URL-encoded as `BTCUSDT+ETHUSDT`, causing Binance kline/funding endpoints to reject the request as an invalid symbol.
+
+### Root cause
+`scripts/run_backtest.ps1` accepted `-Symbols` as a scalar string, while the Python CLI only split symbols on commas. When PowerShell collapsed a comma expression into whitespace, Python treated the combined value as one symbol and the historical fetch path did not defensively validate impossible symbol tokens before building Binance URLs.
+
+### Files changed
+- `scripts/run_backtest.ps1`: accepts `Symbols` as a string array and forwards a comma-joined value to Python.
+- `src/alphaforge/symbols.py`: adds shared symbol normalization and single-symbol validation.
+- `backtest_order.py`: uses shared normalization for CLI fixed-symbol state and historical universe selection.
+- `src/alphaforge/historical_market_data.py`: rejects invalid single-symbol fetches before kline/funding requests.
+- `src/alphaforge/dashboard/backtest_control.py`: uses shared normalization for dashboard form symbols.
+- `tests/test_historical_market_data.py` and `tests/test_dashboard_backtest_dynamic_universe.py`: add symbol parser/fetch/dashboard regressions.
+
+### Runtime behavior changes
+BACKTEST now accepts comma-separated, quoted comma-separated, whitespace-separated, PowerShell array, and dashboard comma-separated symbol inputs, normalizes them to uppercase unique symbols, and fails early on invalid tokens such as `BTCUSDT+ETHUSDT`. Strategy logic, lifecycle logic, filters, and thresholds were not changed.
+
+### Lifecycle changes
+None. This patch only prevents malformed symbol inputs from reaching historical data fetches.
+
+### Persistence changes
+None. No schema or CSV persistence changes.
+
+### Export/schema changes
+None.
+
+### Tests added
+Added coverage for comma-separated symbols, quoted/list symbol values, whitespace-separated accidental input, plus-sign rejection before fetch, dashboard parsing, and single-symbol preservation through existing parser/fetch tests.
+
+### Tests executed
+- `python -m pytest tests -k "symbol or backtest or dashboard" -q`
+- `python -m pytest -q`
+
+### Risks
+The validator intentionally rejects symbols containing punctuation outside uppercase alphanumeric Binance-style tokens. If Binance lists a future futures symbol requiring other characters, the validator will need an explicit compatibility update before use.
+
+### Remaining limitations
+Manual PowerShell validation cannot be executed in this Linux container; regression coverage verifies the Python normalization and fetch guard.
+
+### Migration concerns
+No migration required. Invalid existing automation inputs must be corrected to comma/whitespace-separated symbols.
+
+### Push recommendation
+Safe to push after full validation. Do not claim LIVE readiness.
+
 ## 2026-07-01 - BACKTEST lifecycle realism evidence completion surgery report
 
 ### Why this patch was needed
