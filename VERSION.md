@@ -1,3 +1,15 @@
+## 2026-07-01 reject overlay diagnostics
+
+- Current version: unreleased reject-overlay diagnostic discovery increment
+- Current phase: BACKTEST-only rejected-forward bucket discovery
+- Runtime maturity: BACKTEST exports diagnostic overlay/bucket artifacts; PAPER/LIVE behavior unchanged
+- BACKTEST/PAPER/LIVE alignment: default accept/reject decisions and thresholds are unchanged; overlays are labels only
+- Lifecycle coverage: rejected rows remain rejected; no lifecycle transitions changed
+- Execution realism coverage: bucket verdicts use first-touch rejected-forward outcomes, effective shadow R after costs, MFE/MAE, adverse excursion, and conservative sample thresholds
+- Known critical risks: overlay candidates are not production recommendations; micro-buckets remain exploratory only
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT LIVE READY. No production threshold relaxation is recommended.
+
 ## 2026-07-01 score calibration diagnostics
 
 - Current version: unreleased score calibration diagnostics increment

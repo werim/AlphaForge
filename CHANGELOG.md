@@ -1,3 +1,25 @@
+## 2026-07-01 - Reject overlay diagnostics
+
+### Added
+- Added BACKTEST-only diagnostic reject overlay labels for LONG breakout session traps, SHORT LOW_SCORE breakdown candidates, near-threshold LOW_SCORE splits, guard no-rescue confirmations, and bucket verdict labels.
+- Added `reject_overlay_diagnostics.csv`, `reject_overlay_summary.json`, `reject_bucket_expectancy.csv`, and `reject_bucket_expectancy.json` artifacts.
+- Added regression coverage for overlay labels, near-threshold 5% gaps, guard non-bypass, bucket verdicts, and no accepted-count mutation.
+
+### Changed
+- Zero-accepted root-cause summaries now include strongest positive/negative diagnostic buckets and an explicit no-production-threshold-change recommendation.
+
+### Fixed
+- Prevented missing rejected-forward evidence from becoming an optimistic diagnostic candidate by requiring forward-evaluable first-touch evidence for SHORT breakdown candidate labels.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. Additive BACKTEST artifacts only.
+
+### Known Issues
+- Diagnostic candidates remain labels only and must not be used to relax LOW_SCORE, HIGH_VOL_GUARD, or STOP_TOO_WIDE without separate production validation.
+
 ## 2026-07-01 - Score calibration diagnostics
 
 ### Added
