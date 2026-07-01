@@ -560,7 +560,8 @@ def test_dashboard_backtest_shows_top_rejection_reasons_and_diagnostics(monkeypa
     assert result.accepted_score_distribution["mean"] == 8.8
     assert result.accepted_effective_rr_distribution["mean"] == 1.7
     assert result.near_miss_score_distribution["count"] == 1
-    assert result.backtest_rejection_rate == 0.75
+    assert result.rejected_signals == 4
+    assert result.backtest_rejection_rate == 0.8
     assert "ESTIMATED_BACKTEST_SPREAD" in result.execution_cost_summary["spread_label"]
     assert result.calibration_report_path and os.path.exists(result.calibration_report_path)
     assert result.calibration_summary_path and os.path.exists(result.calibration_summary_path)

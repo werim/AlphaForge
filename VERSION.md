@@ -1,3 +1,15 @@
+## 2026-07-01 BACKTEST quality summary reject-count parity
+
+- Current version: unreleased BACKTEST artifact count-consistency increment
+- Current phase: quality-summary canonical reject accounting hardening
+- Runtime maturity: BACKTEST reporting now exposes canonical, signal-only, and symbol-selector reject counts separately; PAPER/LIVE decision paths unchanged
+- BACKTEST/PAPER/LIVE alignment: no filters, thresholds, acceptance logic, lifecycle transitions, or LIVE readiness gates changed
+- Lifecycle coverage: SIGNAL_REJECTED and SYMBOL_REJECTED remain distinct lifecycle evidence while quality-summary overall rejects use canonical rejected rows
+- Execution realism coverage: no execution-cost or fill assumptions changed; this is artifact accounting only
+- Known critical risks: manual BTCUSDT 30d/1h validation depends on historical data/network availability; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT READY
+
 ## 2026-07-01 BACKTEST post-PR251 artifact consistency
 
 - Current version: unreleased BACKTEST artifact consistency increment
