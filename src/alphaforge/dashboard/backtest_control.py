@@ -1168,9 +1168,6 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.total_return_pct = summary.get("total_pnl_pct")
     result.max_drawdown = summary.get("max_drawdown")
     result.strategy_quality_guardrails = strategy_quality if isinstance(strategy_quality, dict) else {}
-    result.guardrail_reject_breakdown = result.strategy_quality_guardrails.get("guardrail_reject_breakdown", {})
-    result.top_guardrail_reject_reasons = result.strategy_quality_guardrails.get("top_guardrail_reject_reasons", [])
-    result.representative_guardrail_reject_examples = result.strategy_quality_guardrails.get("representative_guardrail_reject_examples", [])
     result.risk_metrics = {
         "return_unit": summary.get("return_unit", "pct"),
         "net_pnl_unit": summary.get("net_pnl_unit", "USDT"),
@@ -1203,6 +1200,10 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.near_miss_effective_rr_distribution = calibration_summary.get("near_miss_effective_rr_distribution", {})
     result.rejection_funnel = calibration_summary.get("rejection_funnel", {})
     result.later_gate_diagnostics = calibration_summary.get("later_gate_diagnostics") or _read_csv_rows(later_gate_path)
+    guardrail_attribution = _guardrail_attribution_from_sources(rejected_rows, result.later_gate_diagnostics, calibration_summary)
+    result.guardrail_reject_breakdown = result.strategy_quality_guardrails.get("guardrail_reject_breakdown") or guardrail_attribution["guardrail_reject_breakdown"]
+    result.top_guardrail_reject_reasons = result.strategy_quality_guardrails.get("top_guardrail_reject_reasons") or guardrail_attribution["top_guardrail_reject_reasons"]
+    result.representative_guardrail_reject_examples = result.strategy_quality_guardrails.get("representative_guardrail_reject_examples") or guardrail_attribution["representative_guardrail_reject_examples"]
     result.low_score_shadow_comparison = calibration_summary.get("low_score_shadow_comparison", {})
     result.execution_cost_summary = calibration_summary.get("execution_cost_summary", {})
     result.near_miss_rejected_signals = calibration_summary.get("near_miss_rejected_signals") or rejected_shadow_rows[:20]
@@ -1214,7 +1215,8 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.signal_quality_diagnostics.setdefault("stop_too_wide_recoverable_candidates", _stop_too_wide_recoverable_candidate_table(recoverable_rows))
     if candidate_quality_gates_path.exists():
         result.signal_quality_diagnostics.setdefault("candidate_quality_gates", _read_csv_rows(candidate_quality_gates_path))
-    result.gate_funnel = _read_csv_rows(gate_funnel_path)
+    exported_gate_funnel = _read_csv_rows(gate_funnel_path)
+    result.gate_funnel = exported_gate_funnel or _canonical_gate_funnel_from_rejections(rejected_rows, result.accepted_trades)
     if rejected_shadow_summary_path.exists():
         result.signal_quality_diagnostics.setdefault("rejected_shadow_summary", _read_csv_rows(rejected_shadow_summary_path))
     if isinstance(filter_state, dict) and filter_state:
@@ -1253,6 +1255,69 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
                 warnings.append("OVERTRADE_RISK")
             row["warnings"] = sorted(set(warnings))
 
+
+
+def _guardrail_attribution_from_sources(rejected_rows: list[dict[str, str]], later_gate_rows: list[dict[str, Any]], calibration_summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Build reporting-only guardrail attribution from exported later-gate evidence.
+
+    This intentionally does not infer accepted trades. It only names concrete later
+    gates/reasons when the rejection funnel says candidates passed score/RR/expectancy
+    and were rejected downstream.
+    """
+    guard_names = {
+        "DAILY_SYMBOL_TRADE_LIMIT", "DAILY_TRADE_FREQUENCY_GUARD", "LOSS_STREAK_PAUSE",
+        "SYMBOL_CLUSTER_GUARD", "SCORE_SATURATION_GUARD", "HIGH_VOL_GUARD",
+        "HIGH_VOL_OVERTRADE", "HIGH_VOL_EXECUTION_COST", "REGIME_MISMATCH",
+        "RR_TOO_LOW", "STOP_TOO_WIDE", "PANIC_CONDITIONS",
+    }
+    breakdown: Counter = Counter()
+    examples: list[dict[str, Any]] = []
+    for row in later_gate_rows:
+        reason = str(row.get("reject_reason") or row.get("reason") or row.get("gate") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        count = _safe_int(row.get("count")) or _safe_int(row.get("rejected_by_gate")) or 0
+        if count > 0:
+            breakdown[reason] += count
+            examples.append({k: row.get(k) for k in ("reject_reason", "gate", "source_stage", "count", "avg_score", "mean_score", "avg_effective_rr", "mean_effective_rr") if row.get(k) not in (None, "")})
+    if not breakdown:
+        for row in rejected_rows:
+            reason = str(row.get("reject_reason") or row.get("reason") or "UNKNOWN").strip().upper() or "UNKNOWN"
+            if reason not in guard_names:
+                continue
+            if not (_passes_score_rr_expectancy(row) or _safe_float_or_none(row.get("effective_rr")) is not None):
+                continue
+            breakdown[reason] += 1
+            if len(examples) < 5:
+                examples.append({k: row.get(k) for k in ("signal_id", "symbol", "side", "timestamp", "reject_reason", "score", "raw_rr", "rr", "effective_rr", "regime", "source_stage") if row.get(k) not in (None, "")})
+    funnel = calibration_summary.get("rejection_funnel", {}) if isinstance(calibration_summary, Mapping) else {}
+    later_count = _safe_int(funnel.get("rejected_by_later_gates")) or 0
+    if later_count > 0 and not breakdown:
+        breakdown["UNATTRIBUTED_LATER_GATE"] = later_count
+        examples.append({"reject_reason": "UNATTRIBUTED_LATER_GATE", "count": later_count})
+    return {
+        "guardrail_reject_breakdown": dict(breakdown),
+        "top_guardrail_reject_reasons": [{"reason": reason, "count": count} for reason, count in breakdown.most_common()],
+        "representative_guardrail_reject_examples": examples[:5],
+    }
+
+
+def _canonical_gate_funnel_from_rejections(rejected_rows: list[dict[str, str]], accepted_count: int | None) -> list[dict[str, Any]]:
+    gate_order = ["LOW_SCORE", "TOO_CHOPPY", "WEAK_TREND_AND_NO_RANGE_EDGE", "STOP_TOO_WIDE", "RR_TOO_LOW", "DAILY_SYMBOL_TRADE_LIMIT", "REGIME_MISMATCH", "PANIC_CONDITIONS"]
+    counts = Counter(str(r.get("reject_reason") or r.get("reason") or "UNKNOWN").strip().upper() or "UNKNOWN" for r in rejected_rows)
+    remaining = int(accepted_count or 0) + sum(counts.values())
+    rows: list[dict[str, Any]] = []
+    for gate in gate_order:
+        rejected = counts.get(gate, 0)
+        rows.append({
+            "gate": gate,
+            "candidates_entering_gate": remaining,
+            "rejected_by_gate": rejected,
+            "accepted_after_gate": max(int(accepted_count or 0), remaining - rejected),
+            "funnel_scope": "canonical_rejected_orders_plus_executed_trades",
+            "comparability_note": "Canonical dashboard funnel from rejected_orders.csv reject_reason counts and canonical accepted/executed trade count.",
+            "zero_reject_warning": rejected == 0,
+        })
+        remaining = max(int(accepted_count or 0), remaining - rejected)
+    return rows
 
 def _bucket(value: Any, step: float = 1.0) -> str:
     val = _safe_float_or_none(value)

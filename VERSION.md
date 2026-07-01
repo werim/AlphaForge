@@ -1,3 +1,16 @@
+## 2026-07-01 Dashboard BACKTEST accepted-count and guardrail attribution fix
+
+- Current version: unreleased dashboard BACKTEST reporting integrity increment
+- Current phase: profile comparison accepted-count correction and guardrail attribution wiring
+- Runtime maturity: BACKTEST dashboard reporting improved; strategy logic, thresholds, PAPER, and LIVE paths unchanged
+- BACKTEST/PAPER/LIVE alignment: reporting now uses canonical executed-trade evidence from summary/order artifacts and does not treat lifecycle/reject/diagnostic rows as trades
+- Lifecycle coverage: lifecycle event counts remain diagnostics only; no lifecycle transitions changed
+- Execution realism coverage: no-trade profiles receive no-trade warnings instead of overtrade risk, and guardrail/later-gate rejects are attributed to concrete exported reasons
+- Known critical risks: no-trade DEFAULT_FILTERS remains not strategy-quality evidence; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT READY
+
+
 ## 2026-07-01 Dashboard BACKTEST profile timeout handling
 
 - Current version: unreleased dashboard BACKTEST subprocess timeout hardening increment

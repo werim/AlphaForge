@@ -1,3 +1,48 @@
+## 2026-07-01 - Dashboard BACKTEST accepted-count and guardrail attribution surgery report
+
+### Why this patch was needed
+The latest profile-comparison artifact still showed DEFAULT_FILTERS/STRICT_FILTERS/CUSTOM_CURRENT_UI with 12,228 accepted trades and `OVERTRADE_RISK`, while the selected DEFAULT_FILTERS backtest summary reported zero accepted trades, zero outcomes, zero PnL, and unavailable accepted diagnostics.
+
+### Root cause
+Previous reporting fixes did not fully protect every dashboard comparison/fallback path from lifecycle/event rows and diagnostic rows. Guardrail/later-gate evidence was exported but dashboard attribution could remain empty, and the fallback gate funnel could show zero rejects despite canonical reject reasons being present.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`: added artifact-derived guardrail attribution fallback, canonical rejection gate-funnel fallback, and tests covering no-trade/overtrade warning behavior through comparison metrics.
+- `backtest_order.py`: removed `SIGNAL_CREATED` accepted-count fallback from default gate-funnel construction and expanded gate-funnel CSV fields for exported diagnostic columns.
+- `tests/test_backtest_profile_comparison.py`: added required zero-summary/12,228 lifecycle fixture, exact ALL_FILTERS_OFF fixture, guardrail attribution/funnel fixture, and dashboard rendering fixture.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: documented reporting-only behavior, risks, and validation.
+
+### Runtime behavior changes
+None to strategy logic, filter thresholds, scoring, PAPER, or LIVE behavior. The patch changes BACKTEST dashboard/reporting metrics only.
+
+### Lifecycle changes
+No lifecycle transitions changed. Lifecycle event rows remain visible as diagnostics but are not accepted trades.
+
+### Persistence changes
+No database migration. Existing CSV/JSON artifacts are read more conservatively; `default_gate_funnel.csv` export field coverage is expanded to include existing diagnostic columns without changing trade persistence semantics.
+
+### Export/schema changes
+Dashboard fallback guardrail sections can now populate `guardrail_reject_breakdown`, `top_guardrail_reject_reasons`, and representative examples from later-gate/rejection artifacts when `strategy_quality_guardrails.json` is absent or incomplete.
+
+### Tests added
+Added regressions proving summary `accepted_count=0` wins over 12,228 lifecycle rows, lifecycle events are not trades, average trades/day uses executed count only, no-trade profiles do not raise `OVERTRADE_RISK`, ALL_FILTERS_OFF exact executed values are preserved, guardrail breakdown populates from source data, and dashboard rendering does not show `Unavailable` when guardrail source data exists.
+
+### Tests executed
+- `pytest -q tests/test_backtest_profile_comparison.py -q`
+- `pytest -q tests/test_strategy_quality_guardrails.py tests/test_backtest_profile_comparison.py -q`
+
+### Risks
+Downstream consumers may see lower accepted counts and lower avg trades/day where prior dashboards counted lifecycle events. This is intended and safer.
+
+### Remaining limitations
+Guardrail attribution uses exported evidence only; it does not synthesize fake fills or counterfactual PnL for rejected candidates.
+
+### Migration concerns
+No schema migration. Consumers should treat lifecycle row counts as diagnostics and accepted counts as summary/order/executed evidence only.
+
+### Push recommendation
+Safe to push after tests pass. Do not claim LIVE readiness.
+
 ## 2026-07-01 - Dashboard BACKTEST profile timeout handling surgery report
 
 ### Why this patch was needed

@@ -1,3 +1,28 @@
+## 2026-07-01 - Dashboard BACKTEST accepted-count and guardrail attribution fix
+
+### Added
+- Added regression fixtures proving `accepted_count=0` with 12,228 lifecycle rows remains zero accepted trades and zero average trades/day.
+- Added exact ALL_FILTERS_OFF profile fixture for 9 accepted trades, 2/7/0 outcomes, and -5.977496714410623 net PnL.
+- Added dashboard-side guardrail attribution fallback from later-gate and canonical rejection artifacts.
+
+### Changed
+- Dashboard fallback gate funnel now uses canonical `rejected_orders.csv` reason counts plus canonical executed-trade count when exported funnel coverage is missing.
+- No-trade profile warnings now remain `NO_EXECUTED_TRADES` / `NO_ACCEPTED_TRADES` and do not inherit `OVERTRADE_RISK` from lifecycle/event rows.
+
+### Fixed
+- Fixed residual accepted-trade inflation from lifecycle/diagnostic rows in BACKTEST profile comparison fixtures.
+- Fixed guardrail breakdown rendering as unavailable when later-gate/rejection source data exists.
+- Fixed DEFAULT gate funnel fallback so visible per-gate counts match canonical reject reasons instead of all-zero rows.
+
+### Removed
+- Removed the BACKTEST gate-funnel fallback that counted `SIGNAL_CREATED` rows as accepted trades.
+
+### Breaking Changes
+- None for trading/runtime behavior. Dashboard reporting may show lower accepted counts where prior artifacts counted lifecycle events.
+
+### Known Issues
+- Guardrail attribution remains artifact-derived reporting; it does not replay rejected candidates or alter strategy decisions. LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - Dashboard BACKTEST profile timeout handling
 
 ### Added
