@@ -1776,3 +1776,58 @@ def test_effective_rr_penalties_can_reject_below_threshold():
     assert "LOW_EFFECTIVE_RR" in flags
     assert penalties["spread_penalty"] > 0
     assert penalties["slippage_penalty"] > 0
+
+
+def test_backtest_quality_summary_canonical_distribution_can_use_rejected_orders_truth():
+    persisted = [
+        {"signal_id": "A:1", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 4.0, "rr": 1.0, "effective_rr": 0.5, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "A:1", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "LOW_EFFECTIVE_RR", "score": 4.0, "rr": 1.0, "effective_rr": 0.5, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "B:1", "lifecycle_state": "SIGNAL_CREATED", "decision": "PENDING", "reject_reason": "", "score": 3.0, "rr": 1.0, "effective_rr": 0.5, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+        {"signal_id": "B:1", "lifecycle_state": "SIGNAL_REJECTED", "decision": "REJECTED", "reject_reason": "UNKNOWN", "score": 3.0, "rr": 1.0, "effective_rr": 0.5, "expectancy_bucket": "LOW", "execution_ctx_missing": 0, "execution_ctx": "{}"},
+    ]
+    rejected_orders = [
+        {"signal_id": "A:1", "reject_reason": "LOW_SCORE"},
+        {"signal_id": "B:1", "reject_reason": "TOO_CHOPPY"},
+    ]
+
+    summary = bo.build_backtest_quality_summary(persisted, canonical_rejected_rows=rejected_orders)
+
+    assert summary["reject_reason_distribution"] == {"LOW_SCORE": 1, "TOO_CHOPPY": 1}
+    assert summary["canonical_reject_reason_distribution"] == {"LOW_SCORE": 1, "TOO_CHOPPY": 1}
+    assert summary["raw_gate_reject_reason_distribution"] != summary["canonical_reject_reason_distribution"]
+
+
+def test_symbol_rejected_rows_export_not_applicable_expectancy_and_availability_flags():
+    rows = [
+        bo.LifecycleRow(
+            1, "ETHUSDT", "N/A", "", "", "CHOP", 2.0, None, 0.0, 0.0, 0.0,
+            "NONE", "SYMBOL_REJECTED", reject_reason="TOO_CHOPPY", event_flags="SYMBOL_SELECTOR",
+            expectancy_bucket="NOT_APPLICABLE_SYMBOL_FILTER", effective_rr=None, source_stage="SYMBOL_SELECTOR",
+            rr_available=False, effective_rr_available=False, expectancy_available=False,
+        )
+    ]
+
+    persisted = bo._persist_lifecycle_rows(rows)
+
+    assert persisted[0]["expectancy_bucket"] != "UNKNOWN"
+    assert persisted[0]["expectancy_bucket"] == "NOT_APPLICABLE_SYMBOL_FILTER"
+    assert persisted[0]["rr"] is None
+    assert persisted[0]["effective_rr"] is None
+    assert persisted[0]["rr_available"] == 0
+    assert persisted[0]["effective_rr_available"] == 0
+    assert persisted[0]["expectancy_available"] == 0
+    assert persisted[0]["source_stage"] == "SYMBOL_SELECTOR"
+
+
+def test_prune_stale_candle_artifacts_keeps_only_current_run_symbols(tmp_path):
+    candles = tmp_path / "candles"
+    candles.mkdir()
+    (candles / "BTCUSDT_1h.json").write_text("{}")
+    (candles / "ETHUSDT_1h.json").write_text("{}")
+    (candles / "ETHUSDT_15m.json").write_text("{}")
+
+    bo._prune_stale_candle_artifacts(str(tmp_path), ["BTCUSDT"], "1h")
+
+    assert (candles / "BTCUSDT_1h.json").exists()
+    assert not (candles / "ETHUSDT_1h.json").exists()
+    assert not (candles / "ETHUSDT_15m.json").exists()

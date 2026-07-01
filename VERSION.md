@@ -1,3 +1,15 @@
+## 2026-07-01 BACKTEST post-PR251 artifact consistency
+
+- Current version: unreleased BACKTEST artifact consistency increment
+- Current phase: reject attribution/export consistency and run-artifact hygiene
+- Runtime maturity: BACKTEST quality summaries now separate canonical post-attribution reject distribution from raw gate diagnostics; PAPER/LIVE decision paths unchanged
+- BACKTEST/PAPER/LIVE alignment: no acceptance thresholds or order runtime logic changed; this is artifact/persistence/reporting alignment only
+- Lifecycle coverage: SYMBOL_REJECTED rows remain pre-signal symbol-selector rejects, with not-applicable expectancy/RR availability flags instead of fake zero geometry
+- Execution realism coverage: zero RR/effective RR no longer represents unavailable symbol-filter geometry; stale candle JSON files are pruned from run-local artifacts before fetch
+- Known critical risks: historical spread remains estimated when orderbook data is unavailable; manual BTCUSDT 30d/1h validation was attempted but Binance fetch was blocked by proxy tunnel 403; LIVE readiness remains blocked
+- Last audit date: 2026-07-01
+- Live readiness verdict: NOT READY
+
 ## 2026-07-01 BACKTEST symbol-list parsing hardening
 
 - Current version: unreleased BACKTEST symbol input safety increment

@@ -1,3 +1,28 @@
+## 2026-07-01 - BACKTEST post-PR251 artifact consistency
+
+### Added
+- Added `canonical_reject_reason_distribution` and `raw_gate_reject_reason_distribution` to BACKTEST quality summaries.
+- Added RR/effective-RR/expectancy availability flags and source-stage evidence for pre-signal `SYMBOL_REJECTED` exports.
+- Added run-local candle artifact pruning to prevent stale symbol candle JSON files from being mistaken as current run inputs.
+
+### Changed
+- `reject_reason_distribution` now follows canonical post-attribution rejected rows when the exporter has `rejected_orders.csv` evidence.
+- Pre-signal symbol-selector rejects now export `NOT_APPLICABLE_SYMBOL_FILTER` rather than `UNKNOWN` expectancy.
+
+### Fixed
+- Fixed quality summary reject distributions diverging from `rejected_orders.csv` / `order_backtest_summary.csv` after canonical attribution.
+- Fixed symbol-selector rejects exporting fake `0.0` RR/effective RR without availability semantics.
+- Fixed BTCUSDT-only run directories retaining stale ETHUSDT candle artifacts from previous runs.
+
+### Removed
+- Removed zero-as-missing semantics for symbol-selector RR/effective-RR fields in new exports.
+
+### Breaking Changes
+- CSV consumers should treat blank RR/effective-RR plus `*_available=false` as not applicable for `SYMBOL_REJECTED` rows.
+
+### Known Issues
+- Manual BTCUSDT 30d/1h validation was attempted but blocked by proxy tunnel 403. LIVE readiness remains NOT READY.
+
 ## 2026-07-01 - BACKTEST symbol-list parsing hardening
 
 ### Added

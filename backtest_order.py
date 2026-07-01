@@ -417,7 +417,7 @@ class LifecycleRow:
     setup_reason: str
     regime: str
     score: float
-    rr: float
+    rr: Optional[float]
     entry: float
     sl: float
     tp: float
@@ -468,6 +468,10 @@ class LifecycleRow:
     disabled_filters: str = ""
     disabled_filter_bypass_count: int = 0
     filter_switch_experiment_active: bool = False
+    source_stage: str = ""
+    rr_available: bool = True
+    effective_rr_available: bool = True
+    expectancy_available: bool = True
 
 
 def _is_pre_signal_symbol_reject(row: LifecycleRow, lifecycle_state: str | None = None) -> bool:
@@ -797,6 +801,22 @@ def _fetch_klines_legacy(symbol: str, interval: str, start_ms: int, end_ms: int)
         )
         for r in rows
     ]
+
+def _prune_stale_candle_artifacts(output_dir: str, symbols: Iterable[str], interval: str) -> None:
+    """Keep run-local candle artifacts aligned with the current symbol universe.
+
+    Candle JSON files live inside the run artifact directory, not a shared cache.
+    Remove symbol/interval files not used by this run so exported zips cannot imply
+    stale candles were run inputs.
+    """
+    candles_dir = Path(output_dir) / "candles"
+    if not candles_dir.exists():
+        return
+    expected = {f"{str(symbol).upper()}_{interval}.json" for symbol in symbols}
+    for path in candles_dir.glob("*.json"):
+        if path.name not in expected:
+            path.unlink()
+
 def load_or_fetch_candles(symbol: str, interval: str, start_ms: int, end_ms: int, output_dir: str, force_refresh: bool = False) -> List[Candle]:
     rows = load_or_fetch_historical_candles(
         symbol=symbol,
@@ -1877,7 +1897,6 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                     "shadow_outcome": row.shadow_outcome or None,
                     "cost_penalty": row.cost_penalty,
                     "close_reason": row.close_reason,
-                    "source_stage": source_stage,
                     "side": row.side,
                     "entry": row.entry,
                     "entry_price": row.entry,
@@ -1900,6 +1919,10 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                     "disabled_filters": row.disabled_filters,
                     "disabled_filter_bypass_count": row.disabled_filter_bypass_count,
                     "filter_switch_experiment_active": row.filter_switch_experiment_active,
+                    "source_stage": row.source_stage or source_stage,
+                    "rr_available": row.rr_available,
+                    "effective_rr_available": row.effective_rr_available,
+                    "expectancy_available": row.expectancy_available,
                 },
                 execution_ctx_missing=execution_ctx_missing,
                 event_ts=str(row.timestamp),
@@ -1938,6 +1961,10 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                        json_extract(execution_ctx, '$.rescue_size_multiplier') AS rescue_size_multiplier,
                        json_extract(execution_ctx, '$.rescue_effective_rr') AS rescue_effective_rr,
                        json_extract(execution_ctx, '$.rescue_decision_context') AS rescue_decision_context,
+                       json_extract(execution_ctx, '$.source_stage') AS source_stage,
+                       json_extract(execution_ctx, '$.rr_available') AS rr_available,
+                       json_extract(execution_ctx, '$.effective_rr_available') AS effective_rr_available,
+                       json_extract(execution_ctx, '$.expectancy_available') AS expectancy_available,
                        event_ts, created_at, lifecycle_seq, lifecycle_id
                 FROM trade_lifecycle_events
                 WHERE mode = 'BACKTEST'
@@ -2052,7 +2079,7 @@ def _low_score_rescue_watch_fields(reject_reason: str, row: Mapping[str, Any]) -
     }
 
 
-def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, Any]:
+def build_backtest_quality_summary(rows: List[Mapping[str, Any]], canonical_rejected_rows: Optional[List[Mapping[str, Any]]] = None) -> Dict[str, Any]:
     def _normalized_decision(row: Mapping[str, Any]) -> str:
         decision = str(row.get("decision", "") or "").strip().upper()
         if decision:
@@ -2171,6 +2198,23 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
     rescue_closed = [r for r in rescue_rows if str(r.get("lifecycle_state", "")).upper() == "POSITION_CLOSED"]
     baseline_closed = [r for r in candidate_rows if str(r.get("lifecycle_state", "")).upper() == "POSITION_CLOSED" and str(r.get("accepted_reason", "")).upper() != "HIGH_EFFECTIVE_RR_RESCUE"]
 
+    raw_gate_reject_reason_distribution = _distribution([
+        _primary_reject_reason_from_context(
+            current_reason=str(r.get("reject_reason", "") or ""),
+            diagnostics=r,
+            market_ctx=r,
+            execution_ctx_missing=bool(r.get("execution_ctx_missing")),
+        )
+        for r in rejected_rows
+    ])
+    if canonical_rejected_rows is None:
+        canonical_reject_reason_distribution = raw_gate_reject_reason_distribution
+    else:
+        canonical_reject_reason_distribution = _distribution([
+            str(r.get("reject_reason") or r.get("reason") or "UNKNOWN").strip() or "UNKNOWN"
+            for r in canonical_rejected_rows
+        ])
+
     return {
         "total_candidates": total,
         "accepted_count": len(accepted_rows),
@@ -2189,7 +2233,9 @@ def build_backtest_quality_summary(rows: List[Mapping[str, Any]]) -> Dict[str, A
         "accepted_reason_breakdown": _distribution([r.get("accepted_reason", "BASELINE") for r in accepted_rows]),
         "rejected_count": len(rejected_rows),
         "reject_rate": (len(rejected_rows) / total) if total else 0.0,
-        "reject_reason_distribution": _distribution([_primary_reject_reason_from_context(current_reason=str(r.get("reject_reason", "") or ""), diagnostics=r, market_ctx=r, execution_ctx_missing=bool(r.get("execution_ctx_missing"))) for r in rejected_rows]),
+        "reject_reason_distribution": canonical_reject_reason_distribution,
+        "canonical_reject_reason_distribution": canonical_reject_reason_distribution,
+        "raw_gate_reject_reason_distribution": raw_gate_reject_reason_distribution,
         "thresholds_used": threshold_values,
         "score_distribution": _distribution([r.get("score") for r in candidate_rows]),
         "rr_distribution": _distribution([r.get("rr") for r in candidate_rows]),
@@ -2542,7 +2588,7 @@ def build_symbol_regime_acceptance_diagnostics(lifecycle_rows: List[LifecycleRow
             "symbol": symbol, "regime": regime, "accepted_count": n,
             "tp_count": cnt(rows, "TP_HIT"), "sl_count": cnt(rows, "SL_HIT"),
             "tp_rate": cnt(rows, "TP_HIT") / n if n else 0.0, "sl_rate": cnt(rows, "SL_HIT") / n if n else 0.0,
-            "mean_effective_rr": sum(float(r.effective_rr if r.effective_rr is not None else r.rr) for r in rows) / n if n else 0.0,
+            "mean_effective_rr": sum(_safe_float(r.effective_rr if r.effective_rr is not None else r.rr, 0.0) for r in rows) / n if n else 0.0,
             "mean_net_pnl": sum(float(r.net_pnl_usdt or 0.0) for r in rows) / n if n else 0.0,
             "score_10_tp_count": cnt(score10, "TP_HIT"), "score_10_sl_count": cnt(score10, "SL_HIT"),
             "high_regime_tp_count": cnt(high, "TP_HIT"), "high_regime_sl_count": cnt(high, "SL_HIT"),
@@ -3373,6 +3419,7 @@ def main():
     else:
         fixed_symbols = fixed_symbols_for_state
         universe = select_symbol_universe(args.top_n, args.quote, symbols=fixed_symbols)
+        _prune_stale_candle_artifacts(args.output_dir, [row["symbol"] for row in universe], args.interval)
         candles_by_symbol = {}
         for row in universe:
             c = load_or_fetch_candles(row["symbol"], args.interval, start_ms, end_ms, args.output_dir, force_refresh=args.force_refresh)
@@ -3422,7 +3469,7 @@ def main():
                             setup_reason="",
                             regime=selector_result.regime_hint,
                             score=selector_result.symbol_score,
-                            rr=0.0,
+                            rr=None,
                             entry=0.0,
                             sl=0.0,
                             tp=0.0,
@@ -3433,6 +3480,12 @@ def main():
                             volume_24h_usdt=selector_market.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
                             spread_pct=selector_market.get("spread_pct", "UNAVAILABLE_BACKTEST"),
                             liquidity_score=selector_market.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
+                            effective_rr=None,
+                            expectancy_bucket="NOT_APPLICABLE_SYMBOL_FILTER",
+                            source_stage="SYMBOL_SELECTOR",
+                            rr_available=False,
+                            effective_rr_available=False,
+                            expectancy_available=False,
                         )
                     )
                     rejected.append(
@@ -3447,8 +3500,10 @@ def main():
                             "setup_reason": "SYMBOL_SELECTOR",
                             "regime": selector_result.regime_hint,
                             "score": selector_result.symbol_score,
-                            "rr": 0.0,
+                            "rr": "",
+                            "rr_available": False,
                             "expectancy": "",
+                            "expectancy_available": False,
                             "quality_score": "",
                             "reject_reason": reason,
                             "diagnostics": json.dumps(
@@ -3464,8 +3519,10 @@ def main():
                             "volume_24h_usdt": selector_market.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"),
                             "spread_pct": selector_market.get("spread_pct", "UNAVAILABLE_BACKTEST"),
                             "liquidity_score": selector_market.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
-                            "raw_rr": 0.0,
-                            "effective_rr": 0.0,
+                            "expectancy_bucket": "NOT_APPLICABLE_SYMBOL_FILTER",
+                            "raw_rr": "",
+                            "effective_rr": "",
+                            "effective_rr_available": False,
                             **_low_score_rescue_watch_fields(reason, {}),
                         }
                     )
@@ -3733,7 +3790,7 @@ def main():
             else sum(1 for r in lifecycle if r.close_reason == "TP_HIT")
             / max(1, sum(1 for r in lifecycle if r.status_after == "POSITION_CLOSED"))
         ),
-        "avg_rr": 0.0 if not lifecycle else sum(r.rr for r in lifecycle) / len(lifecycle),
+        "avg_rr": 0.0 if not lifecycle else sum(_safe_float(r.rr, 0.0) for r in lifecycle) / len(lifecycle),
         "avg_pnl_pct": 0.0 if not lifecycle else sum(r.net_pnl_pct for r in lifecycle) / len(lifecycle),
         "total_pnl_pct": sum(r.net_pnl_pct for r in lifecycle),
         "return_unit": "pct_of_position_risk_sum",
@@ -3789,7 +3846,7 @@ def main():
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows(rows)
-    quality_summary = build_backtest_quality_summary(persisted_lifecycle_rows)
+    quality_summary = build_backtest_quality_summary(persisted_lifecycle_rows, canonical_rejected_rows=rejected)
     write_backtest_quality_summary(
         os.path.join(args.output_dir, "backtest_quality_summary.csv"),
         quality_summary,
