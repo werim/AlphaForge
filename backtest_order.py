@@ -265,7 +265,7 @@ def _primary_reject_reason_from_context(
     if expectancy_val is None and (reject_unknown_expectancy or "EXPECTANCY_PRESENT" in failed):
         return "EXPECTANCY_MISSING"
     if execution_ctx_missing:
-        return "MISSING_EXECUTION_CONTEXT"
+        return "EXECUTION_CONTEXT_UNAVAILABLE"
     if score < min_score or "SCORE" in failed:
         return "LOW_SCORE"
     if "REGIME" in failed:
@@ -482,8 +482,8 @@ def _lifecycle_signal_id(row: LifecycleRow, lifecycle_state: str | None = None) 
     return f"{row.symbol}:{row.timestamp}"
 
 def _bucket_expectancy(expectancy: Optional[float]) -> str:
-    if expectancy is None:
-        return "UNKNOWN"
+    if expectancy in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        return "EXPECTANCY_UNAVAILABLE"
     if expectancy < 0.0:
         return "NEGATIVE"
     if expectancy < 0.05:
@@ -3637,6 +3637,7 @@ def main():
         ("order_candidates.csv", candidate_rows),
         ("backtest_orders.csv", candidate_rows),
         ("rejected_orders.csv", rejected),
+        ("rejected_signals.csv", rejected),
         ("rejected_shadow.csv", [asdict(x) for x in rejected_shadow]),
         ("open_at_end.csv", [asdict(x) for x in open_rows]),
         ("forward_evaluations.csv", [asdict(x) for x in forward_evaluations]),

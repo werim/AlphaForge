@@ -473,3 +473,52 @@ def test_dashboard_renders_guardrail_breakdown_when_source_data_exists(monkeypat
     guardrail_section = response.text.split("Strategy Quality Guardrails", 1)[1]
     assert "STOP_TOO_WIDE" in guardrail_section
     assert "Unavailable" not in guardrail_section.split("</table>", 1)[0]
+
+
+def test_dashboard_main_and_profile_comparison_use_same_canonical_profile_artifacts(tmp_path) -> None:
+    run = tmp_path / "run"
+    profile = run / "profiles" / "DEFAULT_FILTERS"
+    profile.mkdir(parents=True)
+    (profile / "order_backtest_summary.csv").write_text(
+        "total_candidates,accepted_count,rejected_count,tp_hits,sl_hits,open_at_end,total_net_pnl_usdt,total_pnl_pct,max_drawdown,last_days\n"
+        "4,2,2,1,1,0,3.5,0.035,-1.2,30\n"
+    )
+    (profile / "backtest_orders.csv").write_text(
+        "signal_id,symbol,lifecycle_state,decision,score,effective_rr,close_reason,net_pnl_usdt\n"
+        "a,BTCUSDT,POSITION_CLOSED,ACCEPTED,8.4,2.0,TP_HIT,5.0\n"
+        "b,ETHUSDT,POSITION_CLOSED,ACCEPTED,6.9,1.7,SL_HIT,-1.5\n"
+    )
+    (profile / "order_lifecycle.csv").write_text(
+        "signal_id,lifecycle_state,decision,symbol,score,rr,effective_rr,reject_reason,close_reason,net_pnl_usdt\n"
+        "a,SIGNAL_CREATED,PENDING,BTCUSDT,8.4,2.2,2.0,, ,\n"
+        "a,POSITION_CLOSED,ACCEPTED,BTCUSDT,8.4,2.2,2.0,,TP_HIT,5.0\n"
+        "b,SIGNAL_CREATED,PENDING,ETHUSDT,6.9,1.4,1.7,, ,\n"
+        "b,POSITION_CLOSED,ACCEPTED,ETHUSDT,6.9,1.4,1.7,,SL_HIT,-1.5\n"
+        "c,SIGNAL_CREATED,PENDING,XRPUSDT,2.1,1.1,1.1,, ,\n"
+        "c,SIGNAL_REJECTED,REJECTED,XRPUSDT,2.1,1.1,1.1,LOW_SCORE, ,\n"
+        "d,SIGNAL_CREATED,PENDING,ADAUSDT,8.0,1.7,1.0,, ,\n"
+        "d,ORDER_REJECTED,REJECTED,ADAUSDT,8.0,1.7,1.0,EXECUTION_CONTEXT_UNAVAILABLE, ,\n"
+    )
+    (profile / "rejected_orders.csv").write_text(
+        "signal_id,lifecycle_state,symbol,reject_reason,score,rr,effective_rr\n"
+        "c,SIGNAL_REJECTED,XRPUSDT,LOW_SCORE,2.1,1.1,1.1\n"
+        "d,ORDER_REJECTED,ADAUSDT,EXECUTION_CONTEXT_UNAVAILABLE,8.0,1.7,1.0\n"
+    )
+    (profile / "lifecycle_calibration_summary.json").write_text("{}")
+    (profile / "backtest_filter_state.json").write_text('{"filter_profile":"DEFAULT_FILTERS","enabled_filters":[],"disabled_filters":[]}')
+
+    result = bc.DashboardBacktestResult("COMPLETED", "last 30 days", ["BTCUSDT"], "1h", 10000, 1)
+    bc._apply_backtest_artifact_model(result, run, selected_profile_name="DEFAULT_FILTERS", window_days=30)
+    comparison = bc._comparison_metrics("DEFAULT_FILTERS", profile, 10000, window_days=30)
+
+    assert result.selected_profile_dir == str(profile)
+    assert result.summary_path == str(profile / "order_backtest_summary.csv")
+    assert result.lifecycle_path == str(profile / "order_lifecycle.csv")
+    assert result.rejected_path == str(profile / "rejected_orders.csv")
+    assert result.accepted_trades == comparison["accepted_trades"] == 2
+    assert result.rejected_signals == comparison["rejected_signals"] == 2
+    assert result.backtest_rejection_rate == pytest.approx(comparison["reject_rate"])
+    assert result.win_count == comparison["win_count"] == 1
+    assert result.loss_count == comparison["loss_count"] == 1
+    assert float(result.net_pnl) == pytest.approx(comparison["net_pnl"])
+    assert {row["reason"] for row in result.top_rejection_reasons} == {"LOW_SCORE", "EXECUTION_CONTEXT_UNAVAILABLE"}
