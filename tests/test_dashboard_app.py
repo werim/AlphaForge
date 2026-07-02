@@ -917,3 +917,48 @@ def test_top_quality_improvement_note_explains_would_sl_dominance() -> None:
     summary, *_ = build_signal_quality_diagnostics([], shadows, "1h")
     assert summary["top_quality_improvement_candidates"] == []
     assert "No positive-expectancy improvement candidates found" in summary["top_quality_improvement_candidate_note"]
+
+
+def test_score10_sl_dominance_guard_exports_and_flags_backtest_only(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from alphaforge.dashboard.backtest_control import _write_calibration_artifacts
+
+    monkeypatch.setenv("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", "true")
+    shadows: list[dict[str, str]] = []
+    for idx in range(40):
+        outcome = "WOULD_SL" if idx < 25 else "WOULD_TP"
+        shadows.append({
+            "signal_id": f"sl{idx}", "source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "10",
+            "shadow_outcome": outcome, "effective_rr": "1.2", "effective_shadow_r_after_costs": "-1.1" if outcome == "WOULD_SL" else "1.2",
+            "setup": "BREAKOUT_UP", "regime": "HIGH", "side": "LONG", "symbol": "BTCUSDT", "stop_distance_pct": "3.2",
+            "volatility_score": "2.4", "cost_penalty": "0.1", "range_position": "0.9",
+        })
+    for idx in range(34):
+        outcome = "WOULD_TP" if idx < 24 else "WOULD_SL"
+        shadows.append({"signal_id": f"tp{idx}", "source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "10", "shadow_outcome": outcome, "effective_rr": "2.0", "effective_shadow_r_after_costs": "2.0" if outcome == "WOULD_TP" else "-1.0", "symbol": "ETHUSDT"})
+    for idx in range(12):
+        shadows.append({"signal_id": f"small{idx}", "source_stage": "SIGNAL_ENGINE", "reject_reason": "REGIME_MISMATCH", "score": "10", "shadow_outcome": "WOULD_SL", "effective_shadow_r_after_costs": "-1.0", "symbol": "SOLUSDT"})
+
+    _, _, summary = _write_calibration_artifacts(tmp_path, [], [], {"accepted_count": "7"}, shadows, [])
+    guard = summary["score10_sl_dominance_guard"]
+    assert guard["mode"] == "BACKTEST_ONLY"
+    assert guard["diagnostic_only"] is True
+    assert guard["production_thresholds_unchanged"] is True
+    assert guard["paper_live_unchanged"] is True
+    assert (tmp_path / "score10_sl_dominance_guard.json").exists()
+    assert (tmp_path / "score10_sl_dominance_guard.csv").exists()
+    by_bucket = {(row["bucket_type"], row["bucket_value"]): row for row in guard["buckets"]}
+    assert "SCORE10_SL_DOMINANCE" in by_bucket[("symbol", "BTCUSDT")]["flags"]
+    assert "SCORE10_STOP_WIDTH_SL_CLUSTER" in by_bucket[("reject_reason", "STOP_TOO_WIDE")]["flags"]
+    assert by_bucket[("symbol", "ETHUSDT")]["guard_confirmed"] is False
+    assert by_bucket[("reject_reason", "REGIME_MISMATCH")]["exploratory"] is True
+    assert by_bucket[("reject_reason", "REGIME_MISMATCH")]["guard_confirmed"] is False
+
+
+def test_score10_sl_dominance_guard_disabled_does_not_export_for_paper_live_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from alphaforge.dashboard.backtest_control import _write_calibration_artifacts
+
+    monkeypatch.delenv("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", raising=False)
+    _, _, summary = _write_calibration_artifacts(tmp_path, [], [], {"accepted_count": "3"}, [{"source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "10", "shadow_outcome": "WOULD_SL"}], [])
+    assert summary["score10_sl_dominance_guard"]["enabled"] is False
+    assert not (tmp_path / "score10_sl_dominance_guard.json").exists()
+    assert not (tmp_path / "score10_sl_dominance_guard.csv").exists()

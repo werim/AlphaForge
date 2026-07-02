@@ -1,3 +1,15 @@
+## 2026-07-02 BACKTEST SCORE10 SL dominance diagnostic guard
+
+- Current version: unreleased SCORE10 SL dominance diagnostic artifact increment
+- Current phase: BACKTEST-only score calibration evidence hardening
+- Runtime maturity: BACKTEST can export SCORE10_SL_DOMINANCE_GUARD JSON/CSV diagnostics when explicitly enabled; DEFAULT_FILTERS acceptance, PAPER, and LIVE decisions are unchanged
+- BACKTEST/PAPER/LIVE alignment: no production threshold, strategy guardrail, PAPER, or LIVE configuration path changed
+- Lifecycle coverage: accepted/rejected/shadow rows are analyzed as evidence only; lifecycle transitions and reject writers are unchanged
+- Execution realism coverage: bucket means use effective shadow R after costs when available and never convert missing execution evidence into live acceptance/rejection logic
+- Known critical risks: score=10 SL-dominant buckets are calibration evidence only and require broader validation before any future threshold work; LIVE readiness remains blocked
+- Last audit date: 2026-07-02
+- Live readiness verdict: NOT LIVE READY. This is not an acceptance or rejection rule.
+
 ## 2026-07-01 Diagnostic profile execution-context strictness
 
 - Current version: unreleased diagnostic execution-context strictness follow-up

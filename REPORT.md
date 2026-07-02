@@ -1,3 +1,42 @@
+## 2026-07-02 BACKTEST SCORE10 SL dominance diagnostic guard
+
+### Why the patch was needed
+Latest BACKTEST artifacts showed score=10 was not reliably predictive: score=10 rows had more WOULD_SL than WOULD_TP evidence, including a STOP_TOO_WIDE high-score SL cluster. Operators needed an auditable diagnostic artifact without changing production thresholds.
+
+### Root cause
+Existing score saturation summaries exposed aggregate score=10 weakness but did not export a dedicated bucketed guard artifact with sample-size confirmation, exploratory marking, effective shadow R statistics, and STOP_TOO_WIDE cluster flags.
+
+### Files changed
+- `src/alphaforge/dashboard/backtest_control.py`: added BACKTEST-only SCORE10_SL_DOMINANCE_GUARD builders and JSON/CSV export wiring from existing accepted/rejected shadow diagnostic rows.
+- `src/alphaforge/dashboard/templates/overview.html`: added a clearly labeled dashboard summary stating BACKTEST ONLY, diagnostic only, production thresholds unchanged, and PAPER/LIVE unchanged.
+- `tests/test_backtest_order_scanner.py`: added regression coverage for SL-dominant flagging, TP-dominant non-flagging, exploratory low-sample buckets, disabled-env no-export behavior, and no accepted-count mutation path.
+- `tests/test_dashboard_app.py`: added dashboard-side coverage for environments where optional dashboard dependencies are installed.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: documented diagnostic-only scope and risks.
+
+### Runtime behavior changes
+When `ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD=true`, BACKTEST dashboard artifact processing writes `score10_sl_dominance_guard.json` and `score10_sl_dominance_guard.csv`. Production acceptance thresholds, legacy strategy guardrails, DEFAULT_FILTERS trade counts, PAPER, and LIVE behavior are unchanged.
+
+### Lifecycle changes
+None. The patch does not modify `_guardrail_rejection_reason`, does not call `_append_guardrail_reject`, and does not reject live orders.
+
+### Persistence changes
+No SQLite migration or persistence-contract change. The new artifacts are additive BACKTEST diagnostic exports derived from existing diagnostic rows.
+
+### Export/schema changes
+Added `score10_sl_dominance_guard.json` and `score10_sl_dominance_guard.csv` with bucket counts, forward-evaluable counts, WOULD_TP/WOULD_SL/ambiguous/timeout counts, rates, effective shadow R mean/median/confidence lower bound, exploratory markers, and flags.
+
+### Tests added/executed
+Added targeted regressions for SCORE10 SL dominance and disabled-env export behavior.
+
+### Risks and remaining limitations
+This is calibration evidence, not an acceptance or rejection rule. Bucket evidence can be sparse, and missing forward outcomes remain non-confirming. Broader multi-window validation is required before any future production threshold proposal.
+
+### Migration concerns
+None. Artifact consumers should tolerate the new optional BACKTEST files.
+
+### Push recommendation
+Push only after targeted/full validation. LIVE remains NOT READY.
+
 ## 2026-07-01 Diagnostic profile execution-context strictness
 
 ### Why the patch was needed
