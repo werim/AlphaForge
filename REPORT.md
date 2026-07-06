@@ -1,4 +1,48 @@
 
+## 2026-07-06 Decision-Boundary Authority Follow-up
+
+### Why this patch was needed
+Review found that `evaluate_signal_decision(...)` was being used as a BACKTEST side-channel diagnostic rather than the authoritative boundary. It also called `evaluate_paper_style_pre_submit(...)`, which executes accepted candidates and emits an ORDER_PLACED audit, violating the intended pre-submit-only contract.
+
+### Root cause
+The first Phase 1 patch wrapped existing PAPER pre-submit behavior instead of separating candidate/quality/effective-RR evaluation from order execution. BACKTEST then called the wrapper but still trusted `run_order_cycle(...)` for the real accept/reject result.
+
+### Files changed
+- `src/alphaforge/order.py`: refactored `evaluate_signal_decision(...)` to directly perform candidate construction, quality gates, and effective-RR checks without executing orders or emitting audit events.
+- `backtest_order.py`: BACKTEST scan now treats `DecisionResult` as authoritative and fails closed on parity mismatch with the legacy runtime cycle.
+- `tests/test_backtest_paper_pre_submit_parity.py`: added no-audit, market-shape score variability, and fail-closed ignored-boundary tests.
+- `tests/test_backtest_order_scanner.py`: updated scanner tests to account for fail-closed decision authority and realistic execution context.
+- `CHANGELOG.md`, `REPORT.md`: documented the follow-up.
+
+### Runtime behavior changes
+- Accepted `evaluate_signal_decision(...)` calls no longer execute virtual/paper/live orders and no longer append ORDER_PLACED audit rows.
+- BACKTEST scanner rejects with `DECISION_PARITY_MISMATCH` if legacy runtime status disagrees with the shared boundary.
+
+### Lifecycle changes
+- The boundary still returns lifecycle intent, but actual lifecycle persistence remains in the existing BACKTEST export path.
+- Rejected BACKTEST decisions continue flowing into lifecycle/rejected exports via `process_backtest_result(...)`.
+
+### Persistence/export/schema changes
+- No schema migration.
+- Existing SQL-first lifecycle and rejected export writers remain intact.
+
+### Tests added/executed
+- Added tests for no ORDER_PLACED audit side effect, candle-derived score variability, and fail-closed BACKTEST parity mismatch.
+- Executed `python -m py_compile src/alphaforge/order.py backtest_order.py`.
+- Executed `pytest -q tests/test_backtest_paper_pre_submit_parity.py tests/test_trading_modes.py`.
+- Executed `pytest -q`.
+
+### Risks and remaining limitations
+- `run_order_cycle(...)` still exists for legacy parity checking and other call sites; Phase 2 should consolidate remaining direct runtime uses where practical.
+- Full durable `DecisionResult` persistence by run/profile remains a Phase 2 blocker.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push for review; LIVE remains NOT READY.
+
+
 ## 2026-07-06 Phase 1 Decision-Parity Surgery Report
 
 ### Why this patch was needed

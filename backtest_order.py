@@ -905,13 +905,41 @@ def scan_symbol_backtest(
             mctx.get("execution_ctx"),
             TradingMode.BACKTEST,
         )
-        result = run_order_cycle(ctx, config={"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": disabled_filters}, recent_stats=context.get("recent_stats", {}))
-        result.setdefault("diagnostics", {})["shared_decision_boundary"] = "evaluate_signal_decision"
-        result["decision_result"] = shared_decision
+        runtime_result = run_order_cycle(ctx, config={"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": disabled_filters}, recent_stats=context.get("recent_stats", {}))
     except TypeError:
         # Test doubles and older call sites may not accept the newer config kwarg;
         # production runtime still receives the real BACKTEST filter switches above.
-        result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
+        runtime_result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
+    boundary_status = "executed" if shared_decision.decision == "ACCEPT" else "rejected"
+    runtime_status = "executed" if runtime_result.get("status") == "executed" else "rejected"
+    if runtime_status != boundary_status:
+        result = {
+            "status": "rejected",
+            "accepted": False,
+            "candidate": shared_decision.candidate,
+            "reason": "DECISION_PARITY_MISMATCH",
+            "reject_reason": "DECISION_PARITY_MISMATCH",
+            "rejection_reason": "DECISION_PARITY_MISMATCH",
+            "diagnostics": {
+                **shared_decision.diagnostics,
+                "shared_decision_boundary": "evaluate_signal_decision",
+                "boundary_decision": shared_decision.decision,
+                "runtime_status": runtime_status,
+                "fail_closed": True,
+            },
+            "decision_result": shared_decision,
+        }
+    else:
+        result = {
+            "status": boundary_status,
+            "accepted": shared_decision.decision == "ACCEPT",
+            "candidate": shared_decision.candidate,
+            "reason": shared_decision.reject_reason,
+            "reject_reason": shared_decision.reject_reason,
+            "rejection_reason": shared_decision.reject_reason,
+            "diagnostics": shared_decision.diagnostics,
+            "decision_result": shared_decision,
+        }
     context["last_result"] = result
     context["market_ctx"] = mctx
     if result.get("status") != "executed":

@@ -1,4 +1,28 @@
 
+## 2026-07-06 - Decision-boundary authority follow-up
+
+### Added
+- Added regression coverage that accepted `evaluate_signal_decision(...)` does not emit order audit events.
+- Added BACKTEST scan fail-closed parity coverage so runtime results cannot silently override `DecisionResult`.
+- Added score variability coverage based on different candle-derived market snapshots instead of literal score overrides.
+
+### Changed
+- `evaluate_signal_decision(...)` now performs candidate build, quality gates, and effective-RR checks directly without calling `evaluate_paper_style_pre_submit(...)` or `execute_order_candidate(...)`.
+- BACKTEST scan now uses `DecisionResult` as the authoritative result and only uses `run_order_cycle(...)` as a parity guard; mismatches fail closed as `DECISION_PARITY_MISMATCH`.
+
+### Fixed
+- Removed the side-channel behavior where BACKTEST could call the shared boundary and then ignore its accept/reject decision.
+
+### Removed
+- Removed order-execution/audit side effects from the shared decision boundary.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Phase 2 still needs durable full `DecisionResult` persistence by run/profile for long-running BACKTEST/PAPER evidence reconciliation.
+
+
 ## 2026-07-06 - Phase 1 decision-boundary parity
 
 ### Added

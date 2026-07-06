@@ -147,3 +147,94 @@ def test_backtest_offline_funding_unavailable_not_fake_zero():
     ctx = bo._build_market_ctx(now, prev, {}, [prev, now])
     assert ctx["funding_rate_pct"] is None
     assert ctx["funding_status"] == "UNAVAILABLE_BACKTEST"
+
+
+def test_accepted_shared_decision_does_not_emit_order_audit():
+    from alphaforge.order import evaluate_signal_decision
+
+    storage = {"audit": []}
+    decision = evaluate_signal_decision(
+        _market(score=9.0, rr=2.4, expectancy=0.3),
+        {},
+        {"balance": 1000, "risk_pct": 1, "storage": storage},
+        None,
+        TradingMode.BACKTEST,
+    )
+    assert decision.decision == "ACCEPT"
+    assert storage["audit"] == []
+
+
+def test_shared_decision_boundary_score_varies_from_market_snapshot_shape():
+    import importlib.util
+    from pathlib import Path
+    from alphaforge.order import evaluate_signal_decision
+
+    spec = importlib.util.spec_from_file_location("backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py")
+    bo = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(bo)
+
+    calm_prev = bo.Candle(1, 100, 101, 99, 100, 100)
+    calm_now = bo.Candle(2, 100, 101.1, 99.9, 100.1, 100)
+    breakout_prev = bo.Candle(3, 100, 101, 99, 100, 100)
+    breakout_now = bo.Candle(4, 100, 110, 99.5, 109, 100)
+    calm_ctx = bo._build_market_ctx(calm_now, calm_prev, {"quoteVolume": 100000000, "fundingRate": 0.00001}, [calm_prev, calm_now])
+    breakout_ctx = bo._build_market_ctx(breakout_now, breakout_prev, {"quoteVolume": 100000000, "fundingRate": 0.00001}, [breakout_prev, breakout_now])
+
+    calm = evaluate_signal_decision(calm_ctx, {}, {"balance": 1000, "risk_pct": 1}, calm_ctx.get("execution_ctx"), TradingMode.BACKTEST)
+    breakout = evaluate_signal_decision(breakout_ctx, {}, {"balance": 1000, "risk_pct": 1}, breakout_ctx.get("execution_ctx"), TradingMode.BACKTEST)
+    assert calm_ctx["score"] != breakout_ctx["score"]
+    assert calm.score != breakout.score
+
+
+def test_backtest_scan_fails_closed_when_runtime_would_ignore_boundary(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    import alphaforge.order as order_mod
+
+    spec = importlib.util.spec_from_file_location("backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py")
+    bo = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(bo)
+
+    def fake_boundary(*args, **kwargs):
+        return order_mod.DecisionResult(
+            symbol="AAAUSDT",
+            side="LONG",
+            decision="REJECT",
+            score=1.0,
+            raw_rr=2.0,
+            effective_rr=2.0,
+            reject_reason="LOW_SCORE",
+            lifecycle_events=("SIGNAL_CREATED", "SIGNAL_REJECTED"),
+            diagnostics={"score": 1.0, "rr": 2.0, "reject_reason": "LOW_SCORE"},
+        )
+
+    class _Mode:
+        BACKTEST = order_mod.TradingMode.BACKTEST
+
+    class _Ctx:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def fake_cycle(ctx, *args, **kwargs):
+        class _C:
+            side = "LONG"
+            entry = ctx.market_ctx["entry"]
+            sl = ctx.market_ctx["sl"]
+            tp = ctx.market_ctx["tp"]
+            rr = ctx.market_ctx["rr"]
+            setup_type = ctx.market_ctx["setup_type"]
+            setup_reason = ctx.market_ctx["setup_reason"]
+            regime = ctx.market_ctx["regime"]
+            score = ctx.market_ctx["score"]
+            order_type = "LIMIT"
+        return {"status": "executed", "candidate": _C()}
+
+    monkeypatch.setattr(order_mod, "evaluate_signal_decision", fake_boundary)
+    monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, fake_cycle))
+    candles = [bo.Candle(1, 1, 1.1, 0.9, 1.0, 1), bo.Candle(2, 1, 1.1, 0.9, 1.0, 1), bo.Candle(3, 1.05, 1.3, 1.0, 1.2, 1)]
+    ctx = {"mode": "BACKTEST"}
+    assert bo.scan_symbol_backtest("AAAUSDT", candles, 2, ctx) is None
+    assert ctx["last_result"]["reject_reason"] == "DECISION_PARITY_MISMATCH"
+    assert ctx["last_result"]["diagnostics"]["fail_closed"] is True
