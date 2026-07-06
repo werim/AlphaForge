@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -72,6 +72,35 @@ class LifecycleState(str, Enum):
     CANCELLED = "CANCELLED"
     ERROR = "ERROR"
 
+
+DecisionAction = Literal["ACCEPT", "REJECT", "WAIT", "CANCEL"]
+
+
+@dataclass(frozen=True)
+class DecisionResult:
+    """Mode-agnostic final signal decision boundary shared by BACKTEST/PAPER/LIVE.
+
+    This object intentionally contains only pre-submit decision evidence. BACKTEST
+    may simulate fills after this boundary, but it must not bypass it.
+    """
+
+    symbol: str
+    side: str
+    decision: DecisionAction
+    score: float
+    raw_rr: float
+    effective_rr: float
+    reject_reason: str = ""
+    cancel_reason: str = ""
+    expectancy_bucket: str = "UNKNOWN"
+    regime: str = "UNKNOWN"
+    spread_pct: float | None = None
+    funding_rate_pct: float | None = None
+    volume_24h_usdt: float | None = None
+    slippage_estimate_pct: float | None = None
+    liquidity_status: str = "UNAVAILABLE"
+    lifecycle_events: tuple[str, ...] = ()
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class OrderExecutionContext:
@@ -485,6 +514,78 @@ def run_order_cycle(ctx: OrderExecutionContext, config: Mapping[str, Any] | None
     ctx.diagnostics.update(quality.diagnostics)
     execution = execute_order_candidate(decision, ctx)
     return {"status": "executed", "accepted": True, "candidate": decision, "reason": "", "reject_reason": "", "rejection_reason": "", "execution": execution, "diagnostics": quality.diagnostics}
+
+
+def evaluate_signal_decision(
+    market_snapshot: Mapping[str, Any],
+    strategy_context: Mapping[str, Any] | None = None,
+    risk_context: Mapping[str, Any] | None = None,
+    execution_context: Mapping[str, Any] | None = None,
+    mode: TradingMode | str = TradingMode.PAPER,
+) -> DecisionResult:
+    """Evaluate a signal through the shared pre-submit decision boundary.
+
+    BACKTEST uses this same boundary as PAPER/LIVE without live exchange calls.
+    The optional execution_context is merged into market_snapshot and may contain
+    offline BACKTEST estimates or explicit UNAVAILABLE markers.
+    """
+    mode_enum = mode if isinstance(mode, TradingMode) else TradingMode(str(mode).upper())
+    market_ctx = dict(market_snapshot or {})
+    if execution_context is not None:
+        market_ctx["execution_ctx"] = dict(execution_context)
+        market_ctx.update(
+            {
+                k: v
+                for k, v in dict(execution_context).items()
+                if k not in market_ctx or market_ctx.get(k) in (None, "", "UNAVAILABLE", "UNAVAILABLE_BACKTEST")
+            }
+        )
+    strategy_context = dict(strategy_context or {})
+    risk_context = dict(risk_context or {})
+    symbol = str(market_ctx.get("symbol") or strategy_context.get("symbol") or risk_context.get("symbol") or "UNKNOWN")
+    ctx = OrderExecutionContext(
+        mode=mode_enum,
+        timestamp=int(market_ctx.get("timestamp", risk_context.get("timestamp", 0)) or 0),
+        symbol=symbol,
+        balance=float(risk_context.get("balance", 0.0) or 0.0),
+        risk_pct=float(risk_context.get("risk_pct", 0.0) or 0.0),
+        allow_live_orders=False,
+        market_ctx=market_ctx,
+        storage=dict(risk_context.get("storage", {}) or {}),
+    )
+    config = {**strategy_context, "MODE": mode_enum.value}
+    recent_stats = risk_context.get("recent_stats", {})
+    result = evaluate_paper_style_pre_submit(
+        ctx,
+        config=config,
+        recent_stats=recent_stats if isinstance(recent_stats, Mapping) else {},
+    )
+    candidate = result.get("candidate")
+    diagnostics = dict(result.get("diagnostics") or {})
+    raw_rr = float(getattr(candidate, "rr", market_ctx.get("rr", 0.0)) or 0.0)
+    effective_rr = float(diagnostics.get("effective_rr", market_ctx.get("effective_rr", raw_rr)) or 0.0)
+    execution_ctx = market_ctx.get("execution_ctx") if isinstance(market_ctx.get("execution_ctx"), Mapping) else build_execution_context(market_ctx)
+    accepted = bool(result.get("accepted"))
+    lifecycle = ("SIGNAL_CREATED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED") if accepted else ("SIGNAL_CREATED", "SIGNAL_REJECTED")
+    return DecisionResult(
+        symbol=symbol,
+        side=str(getattr(candidate, "side", market_ctx.get("side", "N/A"))),
+        decision="ACCEPT" if accepted else "REJECT",
+        score=float(diagnostics.get("score", getattr(candidate, "score", market_ctx.get("score", 0.0))) or 0.0),
+        raw_rr=raw_rr,
+        effective_rr=effective_rr,
+        reject_reason=str(result.get("reject_reason") or result.get("reason") or ""),
+        cancel_reason="",
+        expectancy_bucket=str(market_ctx.get("expectancy_bucket", "UNKNOWN") or "UNKNOWN"),
+        regime=str(diagnostics.get("regime", getattr(candidate, "regime", market_ctx.get("regime", "UNKNOWN"))) or "UNKNOWN"),
+        spread_pct=_nullable_float(execution_ctx.get("spread_pct", market_ctx.get("spread_pct"))),
+        funding_rate_pct=_nullable_float(execution_ctx.get("funding_rate_pct", market_ctx.get("funding_rate_pct"))),
+        volume_24h_usdt=_nullable_float(market_ctx.get("volume_24h_usdt")),
+        slippage_estimate_pct=_nullable_float(execution_ctx.get("expected_slippage_pct", market_ctx.get("expected_slippage_pct"))),
+        liquidity_status=str(execution_ctx.get("liquidity_status", market_ctx.get("liquidity_status", "UNAVAILABLE")) or "UNAVAILABLE"),
+        lifecycle_events=lifecycle,
+        diagnostics={**diagnostics, "shared_decision_boundary": "evaluate_signal_decision"},
+    )
 
 
 def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[str, Any] | None = None, recent_stats: Mapping[str, Any] | None = None) -> dict[str, Any]:

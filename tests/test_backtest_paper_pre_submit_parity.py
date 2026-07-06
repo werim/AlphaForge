@@ -100,3 +100,50 @@ def test_backtest_paper_parity_rejected_candidate_lifecycle_sequence():
     assert backtest["reject_reason"] == paper["reject_reason"] == "LOW_SCORE"
     assert [e["status_after"] for e in backtest_ctx.storage["audit"]] == ["SIGNAL_REJECTED"]
     assert [e["status_after"] for e in paper_ctx.storage["audit"]] == ["SIGNAL_REJECTED"]
+
+
+def test_shared_decision_boundary_shape_and_parity():
+    from alphaforge.order import evaluate_signal_decision
+
+    market = _market(score=9.0, rr=2.4, expectancy=0.3, volume_24h_usdt=123456.0)
+    backtest = evaluate_signal_decision(market, {}, {"balance": 1000, "risk_pct": 1}, market["execution_ctx"], TradingMode.BACKTEST)
+    paper = evaluate_signal_decision(market, {}, {"balance": 1000, "risk_pct": 1}, market["execution_ctx"], TradingMode.PAPER)
+    assert backtest.decision == paper.decision == "ACCEPT"
+    assert backtest.lifecycle_events == paper.lifecycle_events == ("SIGNAL_CREATED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED")
+    assert backtest.raw_rr == paper.raw_rr == 2.4
+    assert backtest.effective_rr == paper.effective_rr
+    assert backtest.volume_24h_usdt == 123456.0
+    assert backtest.liquidity_status == "MEASURED"
+
+
+def test_shared_decision_boundary_rejects_low_score_in_backtest():
+    from alphaforge.order import evaluate_signal_decision
+
+    decision = evaluate_signal_decision(_market(score=1.0), {}, {"balance": 1000, "risk_pct": 1}, None, TradingMode.BACKTEST)
+    assert decision.decision == "REJECT"
+    assert decision.reject_reason == "LOW_SCORE"
+    assert decision.lifecycle_events == ("SIGNAL_CREATED", "SIGNAL_REJECTED")
+
+
+def test_shared_decision_boundary_score_varies_with_snapshot_inputs():
+    from alphaforge.order import evaluate_signal_decision
+
+    weak = evaluate_signal_decision(_market(score=2.0), {}, {"balance": 1000, "risk_pct": 1}, None, TradingMode.BACKTEST)
+    strong = evaluate_signal_decision(_market(score=9.0), {}, {"balance": 1000, "risk_pct": 1}, None, TradingMode.BACKTEST)
+    assert weak.score != strong.score
+    assert weak.raw_rr == strong.raw_rr == 2.0
+
+
+def test_backtest_offline_funding_unavailable_not_fake_zero():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("backtest_order", Path(__file__).resolve().parents[1] / "backtest_order.py")
+    bo = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(bo)
+
+    prev = bo.Candle(1, 100, 101, 99, 100, 10)
+    now = bo.Candle(2, 100, 102, 99, 101, 10)
+    ctx = bo._build_market_ctx(now, prev, {}, [prev, now])
+    assert ctx["funding_rate_pct"] is None
+    assert ctx["funding_status"] == "UNAVAILABLE_BACKTEST"

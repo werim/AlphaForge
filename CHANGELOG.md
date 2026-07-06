@@ -1,3 +1,26 @@
+
+## 2026-07-06 - Phase 1 decision-boundary parity
+
+### Added
+- Added a mode-agnostic `DecisionResult` and `evaluate_signal_decision(...)` shared decision boundary for BACKTEST/PAPER/LIVE pre-submit semantics.
+- Added tests covering shared decision-boundary parity, BACKTEST low-score rejection, score variability, and explicit unavailable offline funding evidence.
+
+### Changed
+- BACKTEST scanning now records use of the shared decision boundary before its virtual fill/result simulation.
+- BACKTEST offline funding evidence no longer silently defaults missing funding to fake zero; unavailable funding is propagated as null/unavailable execution evidence.
+
+### Fixed
+- Reduced BACKTEST/PAPER divergence risk by routing BACKTEST pre-submit evaluation through the same candidate quality and effective-RR semantics used by PAPER.
+
+### Removed
+- Removed a fake zero fallback for missing BACKTEST funding-rate evidence.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- BACKTEST still uses virtual fill simulation after the shared decision boundary; Phase 2 should persist full `DecisionResult` rows for every intermediate lifecycle event in long-running database-backed backtests.
+
 ## 2026-07-02 - BACKTEST SCORE10 SL dominance diagnostic guard
 
 ### Added

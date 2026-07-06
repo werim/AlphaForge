@@ -1,3 +1,57 @@
+
+## 2026-07-06 Phase 1 Decision-Parity Surgery Report
+
+### Why this patch was needed
+BACKTEST needed an explicit shared pre-submit decision boundary with PAPER/LIVE semantics before virtual result simulation, because prior evidence suggested lifecycle exports could look like direct TP/SL result simulation rather than decision-pipeline evidence.
+
+### Root cause
+BACKTEST had partial reuse of `run_order_cycle(...)`, but no first-class `DecisionResult` object carrying the required mode-agnostic decision fields. Missing BACKTEST funding also fell back to fake zero in the offline market context.
+
+### Files changed
+- `src/alphaforge/order.py`: added `DecisionResult` and `evaluate_signal_decision(...)`.
+- `backtest_order.py`: BACKTEST scanner invokes the shared boundary and no longer fake-zeroes missing funding.
+- `tests/test_backtest_paper_pre_submit_parity.py`: added shared boundary parity/evidence tests.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: documented Phase 1 behavior and risks.
+
+### Decision-flow map before
+- BACKTEST generation: `backtest_order.py::_build_market_ctx(...)` and `scan_symbol_backtest(...)`.
+- PAPER/LIVE generation: `src/alphaforge/runtime.py::_build_signal_payload(...)` and `_process_selection(...)`.
+- Scoring/rejects: `evaluate_trade_quality(...)`, `AIBrain.score_signal(...)`, and runtime `before_real_order(...)` existed but were not exposed as a single shared boundary object for BACKTEST/PAPER/LIVE evidence.
+- Persistence/export: BACKTEST used `LifecycleRow`, `_persist_lifecycle_rows(...)`, `save_order_decision(...)`, `save_trade_lifecycle_event(...)`, and CSV export.
+
+### Decision-flow map after
+- BACKTEST now calls `evaluate_signal_decision(...)` before virtual fills.
+- `evaluate_signal_decision(...)` wraps the existing PAPER-style pre-submit path and returns decision, score, raw/effective RR, reject/cancel reason, expectancy bucket, regime, execution fields, liquidity status, and lifecycle intent.
+- BACKTEST remains offline-safe and does not call Binance order APIs.
+
+### Runtime behavior changes
+- BACKTEST diagnostics tag the shared decision boundary.
+- Missing offline funding is unavailable/null, not fake zero.
+
+### Lifecycle changes
+- Shared accepted lifecycle intent: SIGNAL_CREATED → WAITING_ENTRY_ZONE → ENTRY_TRIGGERED → ORDER_PLACED.
+- Shared rejected lifecycle intent: SIGNAL_CREATED → SIGNAL_REJECTED.
+- Existing BACKTEST SQL-first lifecycle persistence/export remains in place.
+
+### Persistence/export/schema changes
+- No schema migration.
+- SQL-first persistence functions are unchanged; dashboard/export behavior continues to read persisted lifecycle evidence.
+
+### Tests added/executed
+- Added tests for shared decision boundary parity, BACKTEST low-score rejection, score variability, and unavailable funding evidence.
+- Executed `pytest -q tests/test_backtest_paper_pre_submit_parity.py tests/test_trading_modes.py`.
+
+### Risks and remaining limitations
+- BACKTEST fill simulation after acceptance remains virtual.
+- Historical spread/funding/orderbook/latency can be incomplete.
+- Phase 2 should persist complete `DecisionResult` payloads for every long-running profile/run_id and further reconcile runtime direct `AIBrain.before_real_order(...)` calls into the boundary.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe for Phase 1 review; do not claim LIVE readiness.
+
 ## 2026-07-02 BACKTEST SCORE10 SL dominance diagnostic guard
 
 ### Why the patch was needed

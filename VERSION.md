@@ -1,3 +1,15 @@
+
+## 2026-07-06 Phase 1 Decision-Parity Update
+
+- Current phase: Phase 1 shared decision-boundary parity.
+- Runtime maturity: Research/PAPER hardening; LIVE remains NOT READY.
+- Alignment: BACKTEST now enters the shared `evaluate_signal_decision(...)` boundary before virtual fill simulation; PAPER uses the same pre-submit semantics and LIVE enablement remains guarded.
+- Lifecycle coverage: accepted boundary intent is SIGNAL_CREATED → WAITING_ENTRY_ZONE → ENTRY_TRIGGERED → ORDER_PLACED; rejected intent is SIGNAL_CREATED → SIGNAL_REJECTED.
+- Execution realism: missing BACKTEST funding is explicit unavailable/null rather than fake zero.
+- Known critical risks: virtual BACKTEST fills remain non-production execution; measured historical spread/funding/orderbook/latency may be incomplete.
+- Last audit date: 2026-07-06.
+- Live readiness verdict: NOT LIVE READY.
+
 ## 2026-07-02 BACKTEST SCORE10 SL dominance diagnostic guard
 
 - Current version: unreleased SCORE10 SL dominance diagnostic artifact increment

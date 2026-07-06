@@ -689,7 +689,8 @@ def _build_market_ctx(
         "spread_source": spread_source,
         "candle_range_pct": candle_range_pct,
         "volatility_pct": candle_range_pct,
-        "funding_rate_pct": float(symbol_meta.get("fundingRate", 0.0) or 0.0),
+        "funding_rate_pct": (float(symbol_meta["fundingRate"]) if symbol_meta.get("fundingRate") not in (None, "") else "UNAVAILABLE_BACKTEST"),
+        "funding_status": ("ESTIMATED_BACKTEST" if symbol_meta.get("fundingRate") not in (None, "") else "UNAVAILABLE_BACKTEST"),
     }
     klines = [{"high": c.high, "low": c.low, "close": c.close} for c in (recent or [])[-20:] if c]
     exec_ctx = build_execution_context(
@@ -892,7 +893,21 @@ def scan_symbol_backtest(
     )
     disabled_filters = tuple(context.get("disabled_backtest_filters", ()))
     try:
+        from alphaforge.order import evaluate_signal_decision
+        shared_decision = evaluate_signal_decision(
+            mctx,
+            {"DISABLED_BACKTEST_FILTERS": disabled_filters},
+            {
+                "balance": context.get("balance", 1000),
+                "risk_pct": context.get("risk_pct", 1.0),
+                "recent_stats": context.get("recent_stats", {}),
+            },
+            mctx.get("execution_ctx"),
+            TradingMode.BACKTEST,
+        )
         result = run_order_cycle(ctx, config={"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": disabled_filters}, recent_stats=context.get("recent_stats", {}))
+        result.setdefault("diagnostics", {})["shared_decision_boundary"] = "evaluate_signal_decision"
+        result["decision_result"] = shared_decision
     except TypeError:
         # Test doubles and older call sites may not accept the newer config kwarg;
         # production runtime still receives the real BACKTEST filter switches above.
