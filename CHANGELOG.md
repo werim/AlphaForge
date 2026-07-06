@@ -1,3 +1,26 @@
+## 2026-07-02 - BACKTEST SCORE10 SL dominance diagnostic guard
+
+### Added
+- Added BACKTEST-only `SCORE10_SL_DOMINANCE_GUARD` diagnostics behind `ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD=true`.
+- Added `score10_sl_dominance_guard.json` and `score10_sl_dominance_guard.csv` exports with score=10 bucket breakdowns by reject reason, setup, regime, side, symbol, stop-width band, effective-RR band, volatility band, cost band, and overextension/range-position band.
+- Added flags for `SCORE10_SL_DOMINANCE` and `SCORE10_STOP_WIDTH_SL_CLUSTER`, plus exploratory marking for buckets below the minimum forward-evaluable sample size.
+- Added regression tests for SL-dominant flagging, TP-dominant non-flagging, low-sample exploratory handling, disabled-env no-export behavior, and accepted-count immutability.
+
+### Changed
+- Dashboard BACKTEST results now surface the diagnostic summary with explicit BACKTEST ONLY / diagnostic only / production thresholds unchanged / PAPER-LIVE unchanged labeling.
+
+### Fixed
+- Filled the audit gap where score=10 STOP_TOO_WIDE SL clusters were visible only in broader summaries rather than a dedicated machine-readable artifact.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. This does not change production acceptance thresholds, PAPER/LIVE behavior, or live order rejection.
+
+### Known Issues
+- The guard is calibration evidence only; it is not a strategy acceptance/rejection rule and does not establish LIVE readiness.
+
 ## 2026-07-01 - Diagnostic profile execution-context strictness
 
 ### Added

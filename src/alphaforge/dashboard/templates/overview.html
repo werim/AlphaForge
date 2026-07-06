@@ -220,6 +220,9 @@
       <p>{{ backtest_result.low_score_shadow_comparison }}</p>
       <h3>Score Saturation Diagnostics</h3>
       <p>Score=10 TP rate: {{ backtest_result.score_saturation_diagnostics.score_10_tp_rate }} | Score=10 SL rate: {{ backtest_result.score_saturation_diagnostics.score_10_sl_rate }} | Mode: diagnostic only.</p>
+      <h3>SCORE10_SL_DOMINANCE_GUARD Summary</h3>
+      <p><strong>BACKTEST ONLY</strong> · diagnostic only · production thresholds unchanged · PAPER/LIVE unchanged.</p>
+      <p>{{ backtest_result.score10_sl_dominance_guard }}</p>
       <table>
         <thead><tr><th>Score Bucket</th><th>Group</th><th>Count</th><th>WOULD_TP</th><th>WOULD_SL</th><th>TIMEOUT</th></tr></thead>
         <tbody>{% for row in backtest_result.score_saturation_diagnostics.score_bucket_outcome_split %}<tr><td>{{ row.score_bucket }}</td><td>{{ row.group_type|default('bucket') }}={{ row.group_value|default(row.score_bucket) }}</td><td>{{ row.count }}</td><td>{{ row.would_tp_count }}</td><td>{{ row.would_sl_count }}</td><td>{{ row.would_timeout_count }}</td></tr>{% else %}<tr><td colspan="6" class="empty">No score saturation diagnostics available.</td></tr>{% endfor %}</tbody>

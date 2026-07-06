@@ -226,6 +226,9 @@ class DashboardBacktestResult:
     top_quality_improvement_note: str = ""
     gate_funnel: list[dict[str, Any]] = field(default_factory=list)
     risk_metrics: dict[str, Any] = field(default_factory=dict)
+    score10_sl_dominance_guard: dict[str, Any] = field(default_factory=dict)
+    score10_sl_dominance_guard_json_path: str | None = None
+    score10_sl_dominance_guard_csv_path: str | None = None
 
 
 def default_form_values() -> dict[str, Any]:
@@ -629,6 +632,112 @@ def _outcome_split(rows: list[dict[str, str]]) -> dict[str, Any]:
     }
 
 
+
+def _backtest_score10_sl_dominance_enabled() -> bool:
+    return str(os.environ.get("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _diagnostic_outcome(row: Mapping[str, Any]) -> str:
+    value = str(row.get("first_touch_outcome") or row.get("shadow_outcome") or row.get("close_reason") or row.get("lifecycle_state") or "").strip().upper()
+    if value in {"TP_HIT", "WOULD_TP"}:
+        return "WOULD_TP"
+    if value in {"SL_HIT", "WOULD_SL"}:
+        return "WOULD_SL"
+    if value in {"WOULD_AMBIGUOUS"}:
+        return "WOULD_AMBIGUOUS"
+    if value in {"WOULD_TIMEOUT", "OPEN_AT_END", "TIMEOUT"}:
+        return "WOULD_TIMEOUT"
+    return "UNKNOWN"
+
+
+def _diagnostic_effective_shadow_r(row: Mapping[str, Any]) -> float:
+    direct = _safe_float_or_none(row.get("effective_shadow_r_after_costs") or row.get("shadow_net_expectancy_r"))
+    if direct is not None:
+        return direct
+    outcome = _diagnostic_outcome(row)
+    if outcome == "WOULD_TP":
+        return _safe_float(row.get("effective_rr", row.get("raw_rr", row.get("rr"))), 0.0)
+    if outcome == "WOULD_SL":
+        return -1.0 - max(_safe_float(row.get("cost_penalty"), 0.0), 0.0)
+    return 0.0
+
+
+def _band_numeric(value: Any, edges: tuple[float, ...], suffix: str = "") -> str:
+    parsed = _safe_float_or_none(value)
+    if parsed is None:
+        return "UNAVAILABLE"
+    last = float("-inf")
+    for edge in edges:
+        if parsed <= edge:
+            left = "-inf" if last == float("-inf") else f"{last:g}{suffix}"
+            return f"{left}_to_{edge:g}{suffix}"
+        last = edge
+    return f">{edges[-1]:g}{suffix}"
+
+
+def _score10_bucket_specs(row: Mapping[str, Any]) -> list[tuple[str, str]]:
+    cost_value = row.get("cost_penalty", row.get("expected_slippage_pct", row.get("slippage_pct", row.get("spread_pct"))))
+    return [
+        ("ALL_SCORE10", "ALL"),
+        ("reject_reason", str(row.get("reject_reason") or "ACCEPTED_OR_UNKNOWN").upper()),
+        ("setup", str(row.get("setup") or row.get("setup_type") or "UNAVAILABLE").upper()),
+        ("regime", str(row.get("regime") or "UNAVAILABLE").upper()),
+        ("side", str(row.get("side") or "UNAVAILABLE").upper()),
+        ("symbol", str(row.get("symbol") or "UNAVAILABLE").upper()),
+        ("stop_width_sl_pct_band", _band_numeric(row.get("stop_distance_pct", row.get("sl_pct", row.get("stop_width"))), (0.5, 1.0, 2.0, 3.0, 5.0), "%")),
+        ("effective_rr_band", _band_numeric(row.get("effective_rr", row.get("rr")), (0.0, 1.0, 1.5, 2.0, 3.0))),
+        ("volatility_score_band", _band_numeric(row.get("volatility_score", row.get("realized_volatility_pct")), (0.5, 1.0, 2.0, 4.0))),
+        ("spread_slippage_cost_penalty_band", _band_numeric(cost_value, (0.001, 0.005, 0.01, 0.02, 0.05))),
+        ("overextension_range_position", _band_numeric(row.get("overextension", row.get("range_position")), (0.2, 0.4, 0.6, 0.8, 1.0))),
+    ]
+
+
+def build_score10_sl_dominance_guard(rows: list[Mapping[str, Any]], *, min_forward_evaluable: int = 30) -> dict[str, Any]:
+    score10 = [dict(r) for r in rows if _safe_float_or_none(r.get("score")) == 10.0]
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in score10:
+        for key in _score10_bucket_specs(row):
+            buckets[key].append(row)
+    out: list[dict[str, Any]] = []
+    for (bucket_type, bucket_value), sub in sorted(buckets.items()):
+        ev = [r for r in sub if _diagnostic_outcome(r) in {"WOULD_TP", "WOULD_SL", "WOULD_AMBIGUOUS", "WOULD_TIMEOUT"}]
+        vals = [_diagnostic_effective_shadow_r(r) for r in ev]
+        n = len(ev); tp = sum(1 for r in ev if _diagnostic_outcome(r) == "WOULD_TP"); sl = sum(1 for r in ev if _diagnostic_outcome(r) == "WOULD_SL")
+        amb = sum(1 for r in ev if _diagnostic_outcome(r) == "WOULD_AMBIGUOUS"); timeout = sum(1 for r in ev if _diagnostic_outcome(r) == "WOULD_TIMEOUT")
+        mean_eff = sum(vals) / len(vals) if vals else 0.0
+        ordered = sorted(vals); med = (ordered[len(ordered)//2] if len(ordered) % 2 else ((ordered[len(ordered)//2-1] + ordered[len(ordered)//2]) / 2.0)) if ordered else 0.0
+        if vals:
+            variance = sum((v - mean_eff) ** 2 for v in vals) / (len(vals) - 1) if len(vals) > 1 else 0.0
+            lower = mean_eff - 1.96 * ((variance ** 0.5) / (len(vals) ** 0.5))
+        else:
+            lower = 0.0
+        confirmed = n >= min_forward_evaluable
+        flags = []
+        if confirmed and sl > tp and mean_eff <= 0.0:
+            flags.append("SCORE10_SL_DOMINANCE")
+        if confirmed and bucket_type == "reject_reason" and bucket_value == "STOP_TOO_WIDE" and n and (sl / n) >= ((tp / n) * 1.25):
+            flags.append("SCORE10_STOP_WIDTH_SL_CLUSTER")
+        out.append({
+            "guard_name": "SCORE10_SL_DOMINANCE_GUARD", "bucket_type": bucket_type, "bucket_value": bucket_value,
+            "count": len(sub), "forward_evaluable_count": n, "would_tp_count": tp, "would_sl_count": sl,
+            "would_ambiguous_count": amb, "would_timeout_count": timeout, "tp_rate": round(tp / n, 6) if n else 0.0,
+            "sl_rate": round(sl / n, 6) if n else 0.0, "mean_effective_shadow_r": round(mean_eff, 6),
+            "median_effective_shadow_r": round(med, 6), "confidence_lower_bound_effective_r": round(lower, 6),
+            "min_forward_evaluable_count": min_forward_evaluable, "exploratory": n < min_forward_evaluable,
+            "guard_confirmed": bool(flags), "flags": "|".join(flags), "diagnostic_only": True,
+            "production_thresholds_unchanged": True, "paper_live_unchanged": True,
+        })
+    return {
+        "guard_name": "SCORE10_SL_DOMINANCE_GUARD", "mode": "BACKTEST_ONLY", "diagnostic_only": True,
+        "production_thresholds_unchanged": True, "paper_live_unchanged": True, "acceptance_or_rejection_rule": False,
+        "min_forward_evaluable_count": min_forward_evaluable, "score10_row_count": len(score10),
+        "guard_confirmed_count": sum(1 for r in out if r["guard_confirmed"]),
+        "flags": sorted({f for r in out for f in str(r.get("flags", "")).split("|") if f}),
+        "buckets": out,
+        "note": "Calibration evidence only; does not modify acceptance thresholds, PAPER/LIVE behavior, or order rejection.",
+    }
+
+
 def _score_saturation_diagnostics(accepted_rows: list[dict[str, str]], shadow_rows: list[dict[str, str]]) -> dict[str, Any]:
     accepted = [dict(row, score_bucket=_score_bucket(row)) for row in accepted_rows]
     rejected = [dict(row, score_bucket=_score_bucket(row)) for row in shadow_rows if _source_stage(row) == "SIGNAL_ENGINE"]
@@ -892,6 +1001,7 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
     near = sorted(passed_later, key=lambda r: ((_safe_float_or_none(r.get("score")) or 0.0), (_safe_float_or_none(r.get("effective_rr")) or 0.0), 1 if _shadow(r) == "WOULD_TP" else 0), reverse=True)[:20]
     accepted_rows = _accepted_trade_rows(lifecycle_rows)
     score_saturation = _score_saturation_diagnostics(accepted_rows, shadow_diagnostic_rows)
+    score10_guard = build_score10_sl_dominance_guard(accepted_rows + shadow_diagnostic_rows) if _backtest_score10_sl_dominance_enabled() else {"guard_name": "SCORE10_SL_DOMINANCE_GUARD", "mode": "BACKTEST_ONLY", "diagnostic_only": True, "enabled": False, "production_thresholds_unchanged": True, "paper_live_unchanged": True, "buckets": []}
     daily_global_limit = _daily_global_trade_limit_diagnostics(shadow_diagnostic_rows, accepted_rows)
     summary_out = {
         "rejection_funnel": funnel,
@@ -908,6 +1018,7 @@ def _build_calibration_outputs(lifecycle_rows: list[dict[str, str]], rejected_ro
         "near_miss_rejected_signals": [dict({k: (r.get(k) if r.get(k) not in (None, "") else ("UNAVAILABLE" if k in {"shadow_outcome", "cost_penalty"} else r.get(k))) for k in ("signal_id", "symbol", "reject_reason", "score", "raw_rr", "rr", "effective_rr", "cost_penalty", "shadow_outcome", "spread_pct", "expected_slippage_pct", "liquidity_ok", "volatility_ok")}) for r in near],
         "accepted_trade_diagnostics": _accepted_trade_diagnostics(lifecycle_rows, backtest_order_rows),
         "score_saturation_diagnostics": score_saturation,
+        "score10_sl_dominance_guard": score10_guard,
         "daily_global_trade_limit_diagnostics": daily_global_limit,
         "dynamic_trade_limit_proposal": {
             "enabled": False,
@@ -945,6 +1056,17 @@ def _write_calibration_artifacts(output_dir: Path, lifecycle_rows: list[dict[str
         writer.writeheader()
         writer.writerows(report_rows)
     summary_path.write_text(json.dumps(summary_out, indent=2, sort_keys=True))
+    if _backtest_score10_sl_dominance_enabled():
+        guard = summary_out.get("score10_sl_dominance_guard", {}) if isinstance(summary_out, Mapping) else {}
+        guard_json_path = output_dir / "score10_sl_dominance_guard.json"
+        guard_csv_path = output_dir / "score10_sl_dominance_guard.csv"
+        guard_json_path.write_text(json.dumps(guard, indent=2, sort_keys=True))
+        guard_rows = list(guard.get("buckets", [])) if isinstance(guard, Mapping) else []
+        guard_fields = list(guard_rows[0].keys()) if guard_rows else ["guard_name", "bucket_type", "bucket_value", "count", "forward_evaluable_count", "would_tp_count", "would_sl_count", "would_ambiguous_count", "would_timeout_count", "tp_rate", "sl_rate", "mean_effective_shadow_r", "median_effective_shadow_r", "confidence_lower_bound_effective_r", "exploratory", "guard_confirmed", "flags", "diagnostic_only", "production_thresholds_unchanged", "paper_live_unchanged"]
+        with guard_csv_path.open("w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=guard_fields)
+            writer.writeheader()
+            writer.writerows(guard_rows)
     later_gate_path = output_dir / "later_gate_breakdown.csv"
     later_gate_rows = list(summary_out.get("later_gate_diagnostics", [])) if isinstance(summary_out, Mapping) else []
     later_gate_fields = list(later_gate_rows[0].keys()) if later_gate_rows else ["reject_reason", "source_stage", "count", "avg_score", "avg_effective_rr", "would_tp_rate", "would_sl_rate"]
@@ -1744,6 +1866,11 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.stop_too_wide_rescue_diagnostics = calibration_summary["stop_too_wide_rescue_diagnostics"]
     result.signal_quality_diagnostics.setdefault("stop_too_wide_recoverable_candidates", calibration_summary.get("stop_too_wide_recoverable_candidates", {}))
     result.score_saturation_diagnostics = calibration_summary["score_saturation_diagnostics"]
+    result.score10_sl_dominance_guard = calibration_summary.get("score10_sl_dominance_guard", {})
+    guard_json_path = output_dir / "score10_sl_dominance_guard.json"
+    guard_csv_path = output_dir / "score10_sl_dominance_guard.csv"
+    result.score10_sl_dominance_guard_json_path = str(guard_json_path) if guard_json_path.exists() else None
+    result.score10_sl_dominance_guard_csv_path = str(guard_csv_path) if guard_csv_path.exists() else None
     result.daily_global_trade_limit_diagnostics = calibration_summary["daily_global_trade_limit_diagnostics"]
     result.dynamic_trade_limit_proposal = calibration_summary["dynamic_trade_limit_proposal"]
     result.signal_quality_diagnostics = signal_quality_summary

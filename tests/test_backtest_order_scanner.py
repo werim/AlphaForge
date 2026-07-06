@@ -2002,3 +2002,46 @@ def test_short_low_score_breakdown_diagnostic_requires_explicit_effective_rr_thr
 
     assert candidates == []
     assert summary["blocked_reason_distribution"] == {"EXECUTION_CONTEXT_UNAVAILABLE": 2}
+
+
+def test_score10_sl_dominance_guard_bucket_flags_and_exports(monkeypatch, tmp_path):
+    from alphaforge.dashboard.backtest_control import _comparison_metrics, _write_calibration_artifacts
+
+    monkeypatch.setenv("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", "true")
+    rows = []
+    for idx in range(40):
+        outcome = "WOULD_SL" if idx < 25 else "WOULD_TP"
+        rows.append({"source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "10", "shadow_outcome": outcome, "effective_rr": "1.2", "effective_shadow_r_after_costs": "-1.1" if outcome == "WOULD_SL" else "1.2", "symbol": "BTCUSDT", "side": "LONG", "setup": "BREAKOUT_UP", "regime": "HIGH", "stop_distance_pct": "3.0", "volatility_score": "2.0", "cost_penalty": "0.1"})
+    for idx in range(34):
+        outcome = "WOULD_TP" if idx < 24 else "WOULD_SL"
+        rows.append({"source_stage": "SIGNAL_ENGINE", "reject_reason": "LOW_SCORE", "score": "10", "shadow_outcome": outcome, "effective_rr": "2.0", "effective_shadow_r_after_costs": "2.0" if outcome == "WOULD_TP" else "-1.0", "symbol": "ETHUSDT"})
+    for idx in range(12):
+        rows.append({"source_stage": "SIGNAL_ENGINE", "reject_reason": "REGIME_MISMATCH", "score": "10", "shadow_outcome": "WOULD_SL", "effective_shadow_r_after_costs": "-1.0", "symbol": "SOLUSDT"})
+
+    _, _, summary = _write_calibration_artifacts(tmp_path, [], [], {"accepted_count": "1"}, rows, [])
+    guard = summary["score10_sl_dominance_guard"]
+    by_bucket = {(row["bucket_type"], row["bucket_value"]): row for row in guard["buckets"]}
+    assert "SCORE10_SL_DOMINANCE" in by_bucket[("symbol", "BTCUSDT")]["flags"]
+    assert "SCORE10_STOP_WIDTH_SL_CLUSTER" in by_bucket[("reject_reason", "STOP_TOO_WIDE")]["flags"]
+    assert by_bucket[("symbol", "ETHUSDT")]["guard_confirmed"] is False
+    assert by_bucket[("reject_reason", "REGIME_MISMATCH")]["exploratory"] is True
+    assert by_bucket[("reject_reason", "REGIME_MISMATCH")]["guard_confirmed"] is False
+    assert (tmp_path / "score10_sl_dominance_guard.json").exists()
+    assert (tmp_path / "score10_sl_dominance_guard.csv").exists()
+    profile_dir = tmp_path / "profiles" / "DEFAULT_FILTERS"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "order_backtest_summary.csv").write_text("accepted_count,total_net_pnl_usdt,rejected_count\n1,0,0\n")
+    (profile_dir / "order_lifecycle.csv").write_text("signal_id,lifecycle_state,score,close_reason,net_pnl_usdt\n")
+    (profile_dir / "rejected_orders.csv").write_text("reject_reason,score\n")
+    metrics = _comparison_metrics("DEFAULT_FILTERS", profile_dir, 10000)
+    assert metrics["accepted_trades"] == 1
+
+
+def test_score10_sl_dominance_guard_env_disabled_no_export(monkeypatch, tmp_path):
+    from alphaforge.dashboard.backtest_control import _write_calibration_artifacts
+
+    monkeypatch.delenv("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", raising=False)
+    _, _, summary = _write_calibration_artifacts(tmp_path, [], [], {"accepted_count": "1"}, [{"source_stage": "SIGNAL_ENGINE", "reject_reason": "STOP_TOO_WIDE", "score": "10", "shadow_outcome": "WOULD_SL"}], [])
+    assert summary["score10_sl_dominance_guard"]["enabled"] is False
+    assert not (tmp_path / "score10_sl_dominance_guard.json").exists()
+    assert not (tmp_path / "score10_sl_dominance_guard.csv").exists()
