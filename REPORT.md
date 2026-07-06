@@ -1,3 +1,101 @@
+
+## 2026-07-06 Decision-Boundary Authority Follow-up
+
+### Why this patch was needed
+Review found that `evaluate_signal_decision(...)` was being used as a BACKTEST side-channel diagnostic rather than the authoritative boundary. It also called `evaluate_paper_style_pre_submit(...)`, which executes accepted candidates and emits an ORDER_PLACED audit, violating the intended pre-submit-only contract.
+
+### Root cause
+The first Phase 1 patch wrapped existing PAPER pre-submit behavior instead of separating candidate/quality/effective-RR evaluation from order execution. BACKTEST then called the wrapper but still trusted `run_order_cycle(...)` for the real accept/reject result.
+
+### Files changed
+- `src/alphaforge/order.py`: refactored `evaluate_signal_decision(...)` to directly perform candidate construction, quality gates, and effective-RR checks without executing orders or emitting audit events.
+- `backtest_order.py`: BACKTEST scan now treats `DecisionResult` as authoritative and fails closed on parity mismatch with the legacy runtime cycle.
+- `tests/test_backtest_paper_pre_submit_parity.py`: added no-audit, market-shape score variability, and fail-closed ignored-boundary tests.
+- `tests/test_backtest_order_scanner.py`: updated scanner tests to account for fail-closed decision authority and realistic execution context.
+- `CHANGELOG.md`, `REPORT.md`: documented the follow-up.
+
+### Runtime behavior changes
+- Accepted `evaluate_signal_decision(...)` calls no longer execute virtual/paper/live orders and no longer append ORDER_PLACED audit rows.
+- BACKTEST scanner rejects with `DECISION_PARITY_MISMATCH` if legacy runtime status disagrees with the shared boundary.
+
+### Lifecycle changes
+- The boundary still returns lifecycle intent, but actual lifecycle persistence remains in the existing BACKTEST export path.
+- Rejected BACKTEST decisions continue flowing into lifecycle/rejected exports via `process_backtest_result(...)`.
+
+### Persistence/export/schema changes
+- No schema migration.
+- Existing SQL-first lifecycle and rejected export writers remain intact.
+
+### Tests added/executed
+- Added tests for no ORDER_PLACED audit side effect, candle-derived score variability, and fail-closed BACKTEST parity mismatch.
+- Executed `python -m py_compile src/alphaforge/order.py backtest_order.py`.
+- Executed `pytest -q tests/test_backtest_paper_pre_submit_parity.py tests/test_trading_modes.py`.
+- Executed `pytest -q`.
+
+### Risks and remaining limitations
+- `run_order_cycle(...)` still exists for legacy parity checking and other call sites; Phase 2 should consolidate remaining direct runtime uses where practical.
+- Full durable `DecisionResult` persistence by run/profile remains a Phase 2 blocker.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe to push for review; LIVE remains NOT READY.
+
+
+## 2026-07-06 Phase 1 Decision-Parity Surgery Report
+
+### Why this patch was needed
+BACKTEST needed an explicit shared pre-submit decision boundary with PAPER/LIVE semantics before virtual result simulation, because prior evidence suggested lifecycle exports could look like direct TP/SL result simulation rather than decision-pipeline evidence.
+
+### Root cause
+BACKTEST had partial reuse of `run_order_cycle(...)`, but no first-class `DecisionResult` object carrying the required mode-agnostic decision fields. Missing BACKTEST funding also fell back to fake zero in the offline market context.
+
+### Files changed
+- `src/alphaforge/order.py`: added `DecisionResult` and `evaluate_signal_decision(...)`.
+- `backtest_order.py`: BACKTEST scanner invokes the shared boundary and no longer fake-zeroes missing funding.
+- `tests/test_backtest_paper_pre_submit_parity.py`: added shared boundary parity/evidence tests.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: documented Phase 1 behavior and risks.
+
+### Decision-flow map before
+- BACKTEST generation: `backtest_order.py::_build_market_ctx(...)` and `scan_symbol_backtest(...)`.
+- PAPER/LIVE generation: `src/alphaforge/runtime.py::_build_signal_payload(...)` and `_process_selection(...)`.
+- Scoring/rejects: `evaluate_trade_quality(...)`, `AIBrain.score_signal(...)`, and runtime `before_real_order(...)` existed but were not exposed as a single shared boundary object for BACKTEST/PAPER/LIVE evidence.
+- Persistence/export: BACKTEST used `LifecycleRow`, `_persist_lifecycle_rows(...)`, `save_order_decision(...)`, `save_trade_lifecycle_event(...)`, and CSV export.
+
+### Decision-flow map after
+- BACKTEST now calls `evaluate_signal_decision(...)` before virtual fills.
+- `evaluate_signal_decision(...)` wraps the existing PAPER-style pre-submit path and returns decision, score, raw/effective RR, reject/cancel reason, expectancy bucket, regime, execution fields, liquidity status, and lifecycle intent.
+- BACKTEST remains offline-safe and does not call Binance order APIs.
+
+### Runtime behavior changes
+- BACKTEST diagnostics tag the shared decision boundary.
+- Missing offline funding is unavailable/null, not fake zero.
+
+### Lifecycle changes
+- Shared accepted lifecycle intent: SIGNAL_CREATED → WAITING_ENTRY_ZONE → ENTRY_TRIGGERED → ORDER_PLACED.
+- Shared rejected lifecycle intent: SIGNAL_CREATED → SIGNAL_REJECTED.
+- Existing BACKTEST SQL-first lifecycle persistence/export remains in place.
+
+### Persistence/export/schema changes
+- No schema migration.
+- SQL-first persistence functions are unchanged; dashboard/export behavior continues to read persisted lifecycle evidence.
+
+### Tests added/executed
+- Added tests for shared decision boundary parity, BACKTEST low-score rejection, score variability, and unavailable funding evidence.
+- Executed `pytest -q tests/test_backtest_paper_pre_submit_parity.py tests/test_trading_modes.py`.
+
+### Risks and remaining limitations
+- BACKTEST fill simulation after acceptance remains virtual.
+- Historical spread/funding/orderbook/latency can be incomplete.
+- Phase 2 should persist complete `DecisionResult` payloads for every long-running profile/run_id and further reconcile runtime direct `AIBrain.before_real_order(...)` calls into the boundary.
+
+### Migration concerns
+None.
+
+### Push recommendation
+Safe for Phase 1 review; do not claim LIVE readiness.
+
 ## 2026-07-02 BACKTEST SCORE10 SL dominance diagnostic guard
 
 ### Why the patch was needed

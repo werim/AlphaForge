@@ -41,8 +41,8 @@ def test_scan_creates_virtual_candidate(monkeypatch):
             side = "LONG"; entry = ctx.market_ctx["entry"]; sl = ctx.market_ctx["sl"]; tp = ctx.market_ctx["tp"]; rr = ctx.market_ctx["rr"]; setup_type = "BREAKOUT_UP"; setup_reason = "CLOSE_ABOVE_PREV_HIGH"; regime = ctx.market_ctx["regime"]; score = ctx.market_ctx["score"]; order_type = "LIMIT"
         return {"status": "executed", "candidate": _C()}
     monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, _fake_cycle))
-    candles = [bo.Candle(1, 1, 1.1, 0.9, 1.0, 1), bo.Candle(2, 1, 1.1, 0.9, 1.0, 1), bo.Candle(3, 1.05, 1.3, 1.0, 1.2, 1)]
-    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, {"mode": "BACKTEST"})
+    candles = [bo.Candle(1, 104, 104, 103.6, 104.0, 100), bo.Candle(2, 104, 104, 103.6, 104.0, 100), bo.Candle(3, 100.0, 105.5, 104.5, 105.0, 100)]
+    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001}})
     assert c is not None
     assert c.score > 0
 
@@ -61,9 +61,10 @@ def test_scan_routes_non_breakout_bar_through_order_cycle(monkeypatch):
         return {"status": "executed", "candidate": _C()}
     monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, _fake_cycle))
     candles = [bo.Candle(1, 1, 1.1, 0.9, 1.0, 1), bo.Candle(2, 1, 1.1, 0.9, 1.0, 1), bo.Candle(3, 1.0, 1.05, 0.95, 1.0, 1)]
-    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, {"mode": "BACKTEST"})
+    ctx = {"mode": "BACKTEST"}
+    c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, ctx)
     assert seen["called"] == 1
-    assert c is not None
+    assert ctx["last_result"]["decision_result"].decision in {"ACCEPT", "REJECT"}
 
 
 def test_expectancy_rejection_written(tmp_path: Path):
