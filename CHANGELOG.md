@@ -1,3 +1,26 @@
+## 2026-07-06 - Phase 2 SQL-backed lifecycle/dashboard evidence consistency
+
+### Added
+- Added a normalized `decision_evidence` SQL table for lifecycle/export/dashboard reconciliation fields.
+- Added `order_backtest_lifecycle.csv` and `decision_evidence.csv` compatibility exports derived from SQL-persisted lifecycle rows.
+- Added LIVE readiness checks for Phase 2 lifecycle/reject/accept evidence presence, fake-zero execution evidence, and parity mismatch blockers.
+
+### Changed
+- BACKTEST lifecycle export now carries diagnostics JSON and normalized evidence fields forward from persisted SQL lifecycle rows.
+- Dashboard BACKTEST artifact parsing now prefers selected-profile persisted summary/lifecycle/rejected evidence and emits specific missing-evidence warnings.
+
+### Fixed
+- Reduced dashboard-only truth risk by reconciling accepted/rejected/win/loss/open/net-PnL values from the selected profile's SQL-backed CSV evidence.
+
+### Removed
+- Nothing. Existing CSV artifact names remain supported.
+
+### Breaking Changes
+- None. Schema changes are additive.
+
+### Known Issues
+- Phase 3 still needs durable per-run/profile SQL database retention and deeper dashboard-to-SQL reconciliation beyond exported artifacts. LIVE remains disabled/not ready.
+
 
 ## 2026-07-06 - Decision-boundary authority follow-up
 

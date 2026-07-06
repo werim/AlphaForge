@@ -104,6 +104,7 @@ class LiveReadinessEvaluator:
         gates = [
             CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
             CheckResult("reject_persistence_complete", self._checks_pass(checks, reject), "requires rejected decisions and lifecycle reject reasons persisted"),
+            CheckResult("phase2_persisted_evidence_complete", self._checks_pass(checks, {"phase2_lifecycle_evidence_present", "phase2_reject_evidence_present", "phase2_accept_evidence_present", "phase2_no_fake_zero_execution_evidence", "phase2_no_decision_parity_mismatch"}), "requires SQL-backed lifecycle/reject/accept evidence and no fake-zero/parity blockers"),
             CheckResult("mode_parity_complete", self._checks_pass(checks, parity), "requires BACKTEST/PAPER/LIVE_PRECHECK parity evidence"),
             CheckResult("execution_realism_complete", self._checks_pass(checks, realism), "requires measured selectivity plus non-constant RR/score evidence"),
             CheckResult("effective_rr_penalty_breakdown_complete", bool(mode_parity.get("effective_rr_penalty_breakdown_complete", False) or mode_parity.get("execution_context_complete", False)), "requires persisted execution-context/effective-RR penalty evidence"),
@@ -124,7 +125,7 @@ class LiveReadinessEvaluator:
     @staticmethod
     def _verdict_from_gates(gates: list[CheckResult]) -> str:
         passed = {gate.name: gate.passed for gate in gates}
-        lower_gate_names = ["lifecycle_integrity_complete", "reject_persistence_complete", "mode_parity_complete", "execution_realism_complete", "effective_rr_penalty_breakdown_complete", "no_submit_live_precheck_verified"]
+        lower_gate_names = ["lifecycle_integrity_complete", "reject_persistence_complete", "phase2_persisted_evidence_complete", "mode_parity_complete", "execution_realism_complete", "effective_rr_penalty_breakdown_complete", "no_submit_live_precheck_verified"]
         if not all(passed.get(name, False) for name in lower_gate_names):
             return "NOT_LIVE_READY"
         if not passed.get("kill_switch_verified", False):
@@ -200,6 +201,20 @@ class LiveReadinessEvaluator:
         rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
         rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE lifecycle_state='SIGNAL_REJECTED'")).scalar_one()
         checks.append(CheckResult("reject_persistence_parity", int(rejected_decisions) <= int(rejected_events), f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
+        lifecycle_rows = int(conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events")).scalar_one())
+        accepted_events = int(conn.execute(text("SELECT COUNT(DISTINCT signal_id) FROM trade_lifecycle_events WHERE lifecycle_state IN ('SIGNAL_ACCEPTED','WAITING_ENTRY_ZONE','ENTRY_TRIGGERED','ORDER_PLACED','POSITION_OPENED','POSITION_CLOSED','TP_HIT','SL_HIT','OPEN_AT_END','CANCELLED','ENTRY_TIMEOUT')")).scalar_one())
+        parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH'")).scalar_one())
+        fake_zero_rows = int(conn.execute(text("""
+            SELECT COUNT(*) FROM order_decisions
+            WHERE COALESCE(execution_ctx_missing,0)=1
+              AND UPPER(COALESCE(execution_ctx,'')) LIKE '%UNAVAILABLE%'
+              AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0)
+        """)).scalar_one())
+        checks.append(CheckResult("phase2_lifecycle_evidence_present", lifecycle_rows > 0, f"lifecycle_rows={lifecycle_rows}"))
+        checks.append(CheckResult("phase2_reject_evidence_present", int(rejected_decisions) > 0 and int(rejected_events) > 0, f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
+        checks.append(CheckResult("phase2_accept_evidence_present", accepted_events > 0, f"accepted_signal_ids={accepted_events}"))
+        checks.append(CheckResult("phase2_no_fake_zero_execution_evidence", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
+        checks.append(CheckResult("phase2_no_decision_parity_mismatch", parity_rows == 0, f"decision_parity_mismatch_rows={parity_rows}"))
         return checks
 
     def _check_stats(self, conn: Any) -> list[CheckResult]:

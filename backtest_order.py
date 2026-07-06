@@ -1917,6 +1917,15 @@ def _lifecycle_event_id(row: LifecycleRow, index: int, lifecycle_state: str | No
         f"{row.timestamp}:{row.symbol}:{row.status_before}:{status_after}:"
         f"{row.entry}:{row.sl}:{row.tp}:{index}"
     )
+
+def _sql_nullable_number(value: Any) -> Any:
+    if value in (None, "", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
@@ -2037,6 +2046,57 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 lifecycle_id=row.lifecycle_id or f"{row.symbol}:{row.timestamp}",
                 payload={"source_stage": source_stage, "event_flags": row.event_flags},
             )
+            diagnostics_json = json.dumps(execution_ctx, sort_keys=True)
+            session.execute(
+                text(
+                    """
+                    INSERT INTO decision_evidence (
+                        evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type,
+                        setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr,
+                        effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason, entry,
+                        sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes, volume_24h_usdt,
+                        spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score, volatility_regime,
+                        cost_penalty, diagnostics_json, signal_id, order_id, position_id, lifecycle_id, lifecycle_seq, created_at
+                    ) VALUES (
+                        :evidence_id, :run_id, :profile_id, :profile_name, :mode, :timestamp, :symbol, :side, :setup_type,
+                        :setup_reason, :regime, :lifecycle_state_before, :lifecycle_state_after, :decision, :score, :raw_rr,
+                        :effective_rr, :expectancy, :expectancy_bucket, :reject_reason, :cancel_reason, :close_reason, :entry,
+                        :sl, :tp, :trigger_price, :close_price, :net_pnl_pct, :net_pnl_usdt, :hold_minutes, :volume_24h_usdt,
+                        :spread_pct, :funding_rate_pct, :expected_slippage_pct, :liquidity_score, :volatility_regime,
+                        :cost_penalty, :diagnostics_json, :signal_id, :order_id, :position_id, :lifecycle_id, :lifecycle_seq, :created_at
+                    )
+                    ON CONFLICT(evidence_id) DO UPDATE SET
+                        decision=excluded.decision, reject_reason=excluded.reject_reason, cancel_reason=excluded.cancel_reason,
+                        close_reason=excluded.close_reason, diagnostics_json=excluded.diagnostics_json
+                    """
+                ),
+                {
+                    "evidence_id": _lifecycle_event_id(row, idx, lifecycle_state),
+                    "run_id": os.getenv("ALPHAFORGE_RUN_ID"),
+                    "profile_id": os.getenv("ALPHAFORGE_PROFILE_ID"),
+                    "profile_name": os.getenv("ALPHAFORGE_PROFILE_NAME"),
+                    "mode": "BACKTEST", "timestamp": str(row.timestamp), "symbol": row.symbol, "side": row.side,
+                    "setup_type": row.setup_type, "setup_reason": row.setup_reason, "regime": row.regime,
+                    "lifecycle_state_before": row.status_before, "lifecycle_state_after": lifecycle_state,
+                    "decision": {"ACCEPTED": "ACCEPT", "REJECTED": "REJECT", "PENDING": "WAIT"}.get(decision, decision),
+                    "score": row.score, "raw_rr": row.rr, "effective_rr": effective_rr,
+                    "expectancy": _sql_nullable_number(mctx.get("expectancy") if 'mctx' in locals() else None),
+                    "expectancy_bucket": row.expectancy_bucket, "reject_reason": reject_reason or None,
+                    "cancel_reason": row.cancel_reason or None, "close_reason": row.close_reason or None,
+                    "entry": row.entry, "sl": row.sl, "tp": row.tp, "trigger_price": row.trigger_price or None,
+                    "close_price": row.close_price or None, "net_pnl_pct": row.net_pnl_pct if row.net_pnl_pct != 0.0 else (0.0 if row.close_reason else None),
+                    "net_pnl_usdt": row.net_pnl_usdt if row.net_pnl_usdt != 0.0 else (0.0 if row.close_reason else None),
+                    "hold_minutes": row.hold_minutes if row.hold_minutes != 0.0 else (0.0 if row.close_reason else None),
+                    "volume_24h_usdt": _sql_nullable_number(row.volume_24h_usdt), "spread_pct": _sql_nullable_number(row.spread_pct),
+                    "funding_rate_pct": _sql_nullable_number(row.funding_rate_pct), "expected_slippage_pct": _sql_nullable_number(row.expected_slippage_pct),
+                    "liquidity_score": _sql_nullable_number(row.liquidity_score),
+                    "volatility_regime": None if row.volatility_regime == "UNAVAILABLE_BACKTEST" else row.volatility_regime,
+                    "cost_penalty": _sql_nullable_number(row.cost_penalty), "diagnostics_json": diagnostics_json,
+                    "signal_id": signal_id, "order_id": row.order_id or None, "position_id": row.position_id or None,
+                    "lifecycle_id": row.lifecycle_id or f"{row.symbol}:{row.timestamp}", "lifecycle_seq": row.lifecycle_seq or (idx + 1),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
         decision_counts = {
             row["signal_id"]: {"sql_order_decision_count": row["total_count"], "sql_rejected_decision_count": row["rejected_count"]}
             for row in session.execute(
@@ -2087,7 +2147,9 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                        json_extract(execution_ctx, '$.rr_available') AS rr_available,
                        json_extract(execution_ctx, '$.effective_rr_available') AS effective_rr_available,
                        json_extract(execution_ctx, '$.expectancy_available') AS expectancy_available,
-                       event_ts, created_at, lifecycle_seq, lifecycle_id
+                       event_ts, created_at, lifecycle_seq, lifecycle_id,
+                       payload AS lifecycle_payload,
+                       execution_ctx AS diagnostics_json
                 FROM trade_lifecycle_events
                 WHERE mode = 'BACKTEST'
                 ORDER BY event_ts, symbol, signal_id, COALESCE(lifecycle_seq, 0), lifecycle_state, event_id
@@ -4867,6 +4929,8 @@ def main():
     )
     for name, rows in [
         ("order_lifecycle.csv", persisted_lifecycle_rows),
+        ("order_backtest_lifecycle.csv", persisted_lifecycle_rows),
+        ("decision_evidence.csv", persisted_lifecycle_rows),
         ("order_candidates.csv", candidate_rows),
         ("backtest_orders.csv", candidate_rows),
         ("rejected_orders.csv", rejected),
