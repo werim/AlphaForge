@@ -1,3 +1,47 @@
+## 2026-07-07 Phase 3 Execution Realism and Cost Model Hardening
+
+### Root Cause
+Phase 1/2 established shared pre-submit decisions and SQL-backed evidence, but execution costs still had gaps: the canonical penalty model did not expose a full cost-breakdown object, fee penalty was absent from effective RR diagnostics, missing liquidity could become perfect liquidity in `build_execution_context`, and readiness gates did not explicitly fail on accepted trades with missing critical execution context.
+
+### Files Changed
+- `src/alphaforge/execution.py`: added canonical `ExecutionCostBreakdown`, source classification, explicit fee penalty, reject flags, unavailable field propagation, and deterministic diagnostics JSON.
+- `src/alphaforge/effective_rr.py`: includes `fee_penalty` in effective RR result diagnostics.
+- `backtest_order.py`: BACKTEST execution reject flags now use canonical breakdown and lifecycle evidence carries cost/source/unavailable fields.
+- `src/alphaforge/persistence.py`: additively extends `decision_evidence` with Phase 3 execution fields.
+- `src/alphaforge/config_registry.py`: adds Phase 3 execution threshold env vars.
+- `src/alphaforge/live_readiness.py`: adds fail-closed Phase 3 readiness gates.
+- `tests/test_execution_cost_breakdown.py`: adds regression coverage for source tags, missing funding, fee penalty, low liquidity, and unavailable context flags.
+
+### Execution Cost Model Before
+The model penalized spread, slippage, latency, funding, liquidity, and volatility, but fee cost was not represented and callers could inspect only partial diagnostics. Some missing context paths relied on numeric fallbacks such as liquidity=1.0. Readiness only had Phase 2 fake-zero evidence checks.
+
+### Execution Cost Model After
+Canonical formula:
+
+`effective_rr = raw_rr - spread_penalty - slippage_penalty - fee_penalty - funding_penalty - latency_penalty - liquidity_penalty - volatility_penalty`
+
+`ExecutionCostBreakdown` exposes spread/slippage/fee/funding/latency/liquidity/volatility values, source tags (`MEASURED`, `ESTIMATED_BACKTEST`, `MODELLED`, `UNAVAILABLE`), `total_cost_pct`, `cost_penalty_rr`, `reject_flags`, `unavailable_fields`, and JSON diagnostics. Missing numeric values remain `NULL`/unavailable rather than fake zero.
+
+### SQL / Export Evidence
+`decision_evidence` adds: `total_cost_pct`, `spread_source`, `slippage_source`, `fee_pct`, `fee_source`, `funding_source`, `latency_ms`, `latency_source`, `liquidity_status`, `volatility_penalty_pct`, `volatility_source`, `reject_flags`, and `unavailable_fields`. The export remains SQL-backed through existing `decision_evidence.csv` export.
+
+### Rejection / Readiness Impact
+Canonical reject flags include `LOW_EFFECTIVE_RR`, `HIGH_SPREAD`, `HIGH_SLIPPAGE`, `HIGH_TOTAL_COST`, `LOW_LIQUIDITY`, `HIGH_LATENCY`, `EXECUTION_CONTEXT_UNAVAILABLE`, `EXCESSIVE_VOLATILITY_PENALTY`, `FUNDING_UNAVAILABLE`, and `FUNDING_TOO_HIGH`. LIVE remains fail-closed and NOT READY.
+
+### Tests Added / Executed
+- Added focused `tests/test_execution_cost_breakdown.py`.
+- Executed targeted backtest/persistence/readiness regressions and the new cost breakdown regression.
+
+### Remaining Phase 4 Blockers
+- Sustained PAPER evidence with measured exchange spread/latency/liquidity.
+- Authenticated read-only reconciliation evidence.
+- Demonstrated no accepted trades below configured effective RR over representative runs.
+- Full run artifact regeneration to populate new additive Phase 3 columns.
+- LIVE order submission remains disabled until all historical gates and operational gates pass.
+
+### Push Recommendation
+Safe to push after targeted/full validation. Do not claim LIVE readiness.
+
 ## 2026-07-06 Phase 2 SQL-backed Evidence Consistency Report
 
 ### Why this patch was needed

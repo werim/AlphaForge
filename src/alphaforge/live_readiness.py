@@ -215,9 +215,20 @@ class LiveReadinessEvaluator:
                 WHERE UPPER(COALESCE(diagnostics_json,'')) LIKE '%UNAVAILABLE%'
                   AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0 OR COALESCE(volume_24h_usdt, -999) = 0 OR COALESCE(liquidity_score, -999) = 0)
             """)).scalar_one())
+            phase3_breakdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE cost_penalty IS NOT NULL AND (diagnostics_json LIKE '%spread_penalty%' OR diagnostics_json LIKE '%cost_penalty%')")).scalar_one())
+            phase3_effective_rr_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE raw_rr IS NOT NULL AND effective_rr IS NOT NULL")).scalar_one())
+            phase3_execution_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','HIGH_SLIPPAGE','HIGH_TOTAL_COST','LOW_LIQUIDITY','HIGH_LATENCY','EXECUTION_CONTEXT_UNAVAILABLE','EXCESSIVE_VOLATILITY_PENALTY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')")).scalar_one())
+            phase3_missing_critical_accepted = int(conn.execute(text("""
+                SELECT COUNT(*) FROM decision_evidence
+                WHERE UPPER(COALESCE(decision,''))='ACCEPT'
+                  AND (effective_rr IS NULL OR cost_penalty IS NULL OR spread_pct IS NULL OR expected_slippage_pct IS NULL OR liquidity_score IS NULL)
+            """)).scalar_one())
+            phase3_low_effective_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < 1.6")).scalar_one())
         else:
             evidence_rows = evidence_lifecycle_states = evidence_accepted = evidence_rejected = 0
             evidence_parity_rows = evidence_fake_zero_rows = 1
+            phase3_breakdown_rows = phase3_effective_rr_rows = phase3_execution_reject_rows = 0
+            phase3_missing_critical_accepted = phase3_low_effective_accepted = 1
         parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH'")).scalar_one()) + evidence_parity_rows
         fake_zero_rows = int(conn.execute(text("""
             SELECT COUNT(*) FROM order_decisions
@@ -232,6 +243,12 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("phase2_accept_evidence_present", accepted_events > 0 and evidence_accepted > 0, f"accepted_signal_ids={accepted_events},decision_evidence_accepted={evidence_accepted}"))
         checks.append(CheckResult("phase2_no_fake_zero_execution_evidence", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
         checks.append(CheckResult("phase2_no_decision_parity_mismatch", parity_rows == 0, f"decision_parity_mismatch_rows={parity_rows}"))
+        checks.append(CheckResult("execution_cost_breakdown_present", phase3_breakdown_rows > 0, f"breakdown_rows={phase3_breakdown_rows}"))
+        checks.append(CheckResult("effective_rr_available", phase3_effective_rr_rows > 0, f"effective_rr_rows={phase3_effective_rr_rows}"))
+        checks.append(CheckResult("execution_rejects_persisted", phase3_execution_reject_rows > 0 or evidence_rejected > 0, f"execution_reject_rows={phase3_execution_reject_rows},evidence_rejected={evidence_rejected}"))
+        checks.append(CheckResult("no_accepted_trade_with_effective_rr_below_threshold", phase3_low_effective_accepted == 0, f"low_effective_accepted={phase3_low_effective_accepted}"))
+        checks.append(CheckResult("no_accepted_trade_with_missing_critical_execution_context", phase3_missing_critical_accepted == 0, f"missing_critical_accepted={phase3_missing_critical_accepted}"))
+        checks.append(CheckResult("no_fake_zero_execution_costs", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
         return checks
 
     def _check_stats(self, conn: Any) -> list[CheckResult]:

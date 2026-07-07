@@ -1,3 +1,26 @@
+## 2026-07-07 - Phase 3 execution cost hardening
+
+### Added
+- Canonical `ExecutionCostBreakdown` evidence with source tags, unavailable fields, reject flags, total cost, and deterministic diagnostics.
+- Phase 3 readiness checks for execution cost breakdown presence, effective RR availability, fake-zero costs, execution reject persistence, and accepted-trade critical context.
+- Regression coverage for explicit fee/funding/slippage/spread/liquidity source handling.
+
+### Changed
+- Effective RR cost model now includes an explicit fee penalty and exports formula diagnostics.
+- BACKTEST execution reject flags use the canonical cost breakdown rather than duplicating penalty logic.
+
+### Fixed
+- Missing liquidity in execution context is no longer silently promoted to perfect liquidity.
+
+### Removed
+- No live-order behavior was enabled or removed.
+
+### Breaking Changes
+- None. Schema additions are additive.
+
+### Known Issues
+- Historical spread/slippage/funding remain estimated or unavailable unless supplied by data artifacts; LIVE remains NOT READY.
+
 ## 2026-07-06 - Phase 2 SQL-backed lifecycle/dashboard evidence consistency
 
 ### Added
