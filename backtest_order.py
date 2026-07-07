@@ -477,6 +477,7 @@ class LifecycleRow:
     shadow_outcome: str = ""
     cost_penalty: float = 0.0
     total_cost_pct: Any = "UNAVAILABLE_BACKTEST"
+    total_explicit_cost_pct: Any = "UNAVAILABLE_BACKTEST"
     spread_source: str = "UNAVAILABLE"
     slippage_source: str = "UNAVAILABLE"
     fee_pct: Any = "UNAVAILABLE_BACKTEST"
@@ -1336,6 +1337,7 @@ def finalize(
     risk_usdt = balance * (risk_pct / 100)
     net_pnl_usdt = risk_usdt * (pnl_pct / 100)
     hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
+    effective_rr, reject_flags, cost_breakdown = _execution_reject_flags(candidate.rr, market_ctx)
     return LifecycleRow(
         candidate.timestamp,
         candidate.symbol,
@@ -1364,8 +1366,22 @@ def finalize(
         expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
         volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
         liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
-        effective_rr=_execution_reject_flags(candidate.rr, market_ctx)[0],
-        cost_penalty=_execution_reject_flags(candidate.rr, market_ctx)[2]["cost_penalty_total"],
+        effective_rr=effective_rr,
+        cost_penalty=cost_breakdown["cost_penalty_rr"],
+        total_cost_pct=cost_breakdown.get("total_cost_pct", "UNAVAILABLE_BACKTEST"),
+        total_explicit_cost_pct=cost_breakdown.get("total_explicit_cost_pct", cost_breakdown.get("total_cost_pct", "UNAVAILABLE_BACKTEST")),
+        spread_source=cost_breakdown.get("spread_source", "UNAVAILABLE"),
+        slippage_source=cost_breakdown.get("slippage_source", "UNAVAILABLE"),
+        fee_pct=cost_breakdown.get("fee_pct", "UNAVAILABLE_BACKTEST"),
+        fee_source=cost_breakdown.get("fee_source", "UNAVAILABLE"),
+        funding_source=cost_breakdown.get("funding_source", "UNAVAILABLE"),
+        latency_ms=cost_breakdown.get("latency_ms", "UNAVAILABLE_BACKTEST"),
+        latency_source=cost_breakdown.get("latency_source", "UNAVAILABLE"),
+        liquidity_status=cost_breakdown.get("liquidity_status", "UNAVAILABLE"),
+        volatility_penalty_pct=cost_breakdown.get("volatility_penalty_pct", "UNAVAILABLE_BACKTEST"),
+        volatility_source=cost_breakdown.get("volatility_source", "UNAVAILABLE"),
+        reject_flags=json.dumps(reject_flags, sort_keys=True),
+        unavailable_fields=json.dumps(cost_breakdown.get("missing_fields", cost_breakdown.get("unavailable_fields", [])), sort_keys=True),
         stop_too_wide_softened=bool(market_ctx.get("stop_too_wide_softened", False)),
         original_reject_reason=str(market_ctx.get("original_reject_reason", "") or ""),
         reject_reason_softened=str(market_ctx.get("reject_reason_softened", "") or ""),
@@ -1702,6 +1718,9 @@ def process_backtest_result(
                 "raw_rr": rr,
                 "effective_rr": diagnostics.get("effective_rr", base_effective_rr),
                 **_base_penalty_breakdown,
+                "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+                "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 "cost_penalty": _safe_float(_base_penalty_breakdown.get("cost_penalty_total"), 0.0),
                 "stop_too_wide_softened": bool(diagnostics.get("stop_too_wide_softened", False)) if isinstance(diagnostics, dict) else False,
                 "original_reject_reason": diagnostics.get("original_reject_reason", "") if isinstance(diagnostics, dict) else "",
@@ -1958,6 +1977,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 "shadow_outcome": row.shadow_outcome or None,
                 "cost_penalty": row.cost_penalty,
                 "total_cost_pct": row.total_cost_pct,
+                "total_explicit_cost_pct": row.total_explicit_cost_pct,
                 "spread_source": row.spread_source,
                 "slippage_source": row.slippage_source,
                 "fee_pct": row.fee_pct,
@@ -2109,7 +2129,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
             session.execute(
                 text("""
                     UPDATE decision_evidence
-                    SET total_cost_pct=:total_cost_pct, spread_source=:spread_source, slippage_source=:slippage_source,
+                    SET total_cost_pct=:total_cost_pct, total_explicit_cost_pct=:total_explicit_cost_pct, spread_source=:spread_source, slippage_source=:slippage_source,
                         fee_pct=:fee_pct, fee_source=:fee_source, funding_source=:funding_source,
                         latency_ms=:latency_ms, latency_source=:latency_source, liquidity_status=:liquidity_status,
                         volatility_penalty_pct=:volatility_penalty_pct, volatility_source=:volatility_source,
@@ -2119,6 +2139,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 {
                     "evidence_id": _lifecycle_event_id(row, idx, lifecycle_state),
                     "total_cost_pct": _sql_nullable_number(row.total_cost_pct),
+                    "total_explicit_cost_pct": _sql_nullable_number(row.total_explicit_cost_pct),
                     "spread_source": row.spread_source or None,
                     "slippage_source": row.slippage_source or None,
                     "fee_pct": _sql_nullable_number(row.fee_pct),

@@ -1,3 +1,34 @@
+## 2026-07-07 PR266 Pre-merge Fix Report
+
+### Why this patch was needed
+CI exposed that full BACKTEST lifecycle simulation still expected `cost_penalty_total` compatibility evidence from `_execution_reject_flags`. The previous Phase 3 patch also surfaced new checks without aggregating them into a lower fail-closed readiness gate, and `total_cost_pct` could be read as full RR penalty even though latency/liquidity/volatility are RR penalties rather than explicit percentage costs.
+
+### Root cause
+The canonical breakdown renamed the full penalty to `cost_penalty_rr` but some BACKTEST simulation paths still consumed the legacy `cost_penalty_total` key. Readiness checks were appended as standalone checks but omitted from lower readiness gate aggregation. Cost diagnostics did not clearly separate explicit percentage costs from full RR penalties.
+
+### Files changed
+- `src/alphaforge/execution.py`: preserves `cost_penalty_total`, adds `total_explicit_cost_pct`, `total_rr_penalty`, and conservative default thresholds; preserves reject priority for slippage/spread before low effective RR.
+- `backtest_order.py`: carries `total_explicit_cost_pct` through lifecycle and SQL evidence updates, and populates Phase 3 source/unavailable fields from the canonical breakdown during simulation.
+- `src/alphaforge/persistence.py`: additively adds `total_explicit_cost_pct` to `decision_evidence`.
+- `src/alphaforge/live_readiness.py`: adds `phase3_execution_realism_complete` and includes it in lower readiness gates.
+- `tests/test_live_readiness.py`: adds per-check fail-closed Phase 3 readiness regressions.
+- `tests/test_execution_cost_breakdown.py`: asserts explicit-cost and RR-penalty diagnostics are not ambiguous.
+
+### Runtime behavior changes
+No strategy scoring, portfolio risk, live order submission, or live enablement changed. Execution rejection remains conservative: high slippage/spread can be the first blocking execution reason, while low effective RR remains in reject flags when the cost-adjusted RR is below threshold.
+
+### Persistence/export changes
+`decision_evidence` now includes additive `total_explicit_cost_pct`. Existing `total_cost_pct` is preserved as a compatibility alias for explicit percentage costs. The full RR penalty is `cost_penalty_rr` / `cost_penalty_total` in diagnostics and `cost_penalty` in SQL rows.
+
+### Tests added/executed
+Added Phase 3 gate regressions and explicit-cost semantic assertions. Required targeted and full test commands were executed.
+
+### Risks / remaining limitations
+Historical execution evidence remains estimated or unavailable unless supplied by source data. PAPER still needs sustained measured spread/latency/liquidity evidence. LIVE remains NOT READY and disabled.
+
+### Push recommendation
+Safe to push after full test suite passes; do not claim LIVE readiness.
+
 ## 2026-07-07 Phase 3 Execution Realism and Cost Model Hardening
 
 ### Root Cause

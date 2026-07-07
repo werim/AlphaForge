@@ -212,7 +212,7 @@ class ExecutionCostBreakdown:
     liquidity_status: str
     volatility_penalty_pct: float | None
     volatility_source: str
-    total_cost_pct: float
+    total_explicit_cost_pct: float
     raw_rr: float
     effective_rr: float
     cost_penalty_rr: float
@@ -229,8 +229,8 @@ class ExecutionCostBreakdown:
             "latency_ms": self.latency_ms, "latency_source": self.latency_source,
             "liquidity_score": self.liquidity_score, "liquidity_status": self.liquidity_status,
             "volatility_penalty_pct": self.volatility_penalty_pct, "volatility_source": self.volatility_source,
-            "total_cost_pct": self.total_cost_pct, "raw_rr": self.raw_rr, "effective_rr": self.effective_rr,
-            "cost_penalty": self.cost_penalty_rr, "cost_penalty_rr": self.cost_penalty_rr,
+            "total_explicit_cost_pct": self.total_explicit_cost_pct, "total_cost_pct": self.total_explicit_cost_pct, "raw_rr": self.raw_rr, "effective_rr": self.effective_rr,
+            "cost_penalty": self.cost_penalty_rr, "cost_penalty_rr": self.cost_penalty_rr, "cost_penalty_total": self.cost_penalty_rr,
             "reject_flags": list(self.reject_flags), "unavailable_fields": list(self.unavailable_fields),
             "diagnostics_json": self.diagnostics_json,
         }
@@ -268,8 +268,8 @@ def build_execution_cost_breakdown(raw_rr: Any, execution_ctx: Mapping[str, Any]
             return None
 
     t = dict(thresholds or {})
-    max_spread = float(t.get("MAX_SPREAD_PCT", t.get("max_spread_pct", 0.05)) or 0.05)
-    max_slip = float(t.get("MAX_SLIPPAGE_PCT", t.get("MAX_EXPECTED_SLIPPAGE_PCT", 0.05)) or 0.05)
+    max_spread = float(t.get("MAX_SPREAD_PCT", t.get("max_spread_pct", 0.0025)) or 0.0025)
+    max_slip = float(t.get("MAX_SLIPPAGE_PCT", t.get("MAX_EXPECTED_SLIPPAGE_PCT", 0.002)) or 0.002)
     max_total = float(t.get("MAX_TOTAL_COST_PCT", 0.20) or 0.20)
     min_liq = float(t.get("MIN_LIQUIDITY_SCORE", 0.30) or 0.30)
     max_latency = float(t.get("MAX_LATENCY_MS", 2500) or 2500)
@@ -279,19 +279,19 @@ def build_execution_cost_breakdown(raw_rr: Any, execution_ctx: Mapping[str, Any]
     max_funding = float(t.get("MAX_ABS_FUNDING_RATE_PCT", 1.0) or 1.0)
 
     spread, slip, fee, funding, latency, liq = f("spread_pct"), f("expected_slippage_pct"), f("fee_pct"), f("funding_rate_pct"), f("latency_ms"), f("liquidity_score")
-    total_cost_pct = round(sum(abs(x) for x in (spread, slip, fee, funding) if x is not None), 10)
+    total_explicit_cost_pct = round(sum(abs(x) for x in (spread, slip, fee, funding) if x is not None), 10)
     flags: list[str] = []
-    if effective < float(min_effective_rr): flags.append("LOW_EFFECTIVE_RR")
-    if spread is not None and spread > max_spread: flags.append("HIGH_SPREAD")
     if slip is not None and slip > max_slip: flags.append("HIGH_SLIPPAGE")
-    if total_cost_pct > max_total: flags.append("HIGH_TOTAL_COST")
+    if spread is not None and spread > max_spread: flags.append("HIGH_SPREAD")
+    if total_explicit_cost_pct > max_total: flags.append("HIGH_TOTAL_COST")
     if liq is not None and liq < min_liq: flags.append("LOW_LIQUIDITY")
     if latency is not None and latency > max_latency: flags.append("HIGH_LATENCY")
     if model.volatility_penalty > max_vol_pen: flags.append("EXCESSIVE_VOLATILITY_PENALTY")
     if funding is None and require_funding: flags.append("FUNDING_UNAVAILABLE")
     if funding is not None and abs(funding) > max_funding: flags.append("FUNDING_TOO_HIGH")
     if model.missing_fields and reject_unknown: flags.append("EXECUTION_CONTEXT_UNAVAILABLE")
-    diagnostics = {**model.__dict__, "formula": "effective_rr = raw_rr - spread_penalty - slippage_penalty - fee_penalty - funding_penalty - latency_penalty - liquidity_penalty - volatility_penalty"}
+    if effective < float(min_effective_rr): flags.append("LOW_EFFECTIVE_RR")
+    diagnostics = {**model.__dict__, "total_explicit_cost_pct": total_explicit_cost_pct, "total_rr_penalty": model.total_penalty, "cost_penalty_rr": model.total_penalty, "formula": "effective_rr = raw_rr - spread_penalty - slippage_penalty - fee_penalty - funding_penalty - latency_penalty - liquidity_penalty - volatility_penalty"}
     return ExecutionCostBreakdown(
         spread, _source_from_status(execution_ctx, "spread_status", "spread_source", estimated=SOURCE_ESTIMATED_BACKTEST),
         slip, _source_from_status(execution_ctx, "slippage_status", "slippage_source", estimated=SOURCE_MODELLED),
@@ -300,7 +300,7 @@ def build_execution_cost_breakdown(raw_rr: Any, execution_ctx: Mapping[str, Any]
         latency, _source_from_status(execution_ctx, "latency_status", "latency_source", estimated=SOURCE_MODELLED),
         liq, str(execution_ctx.get("liquidity_status", SOURCE_UNAVAILABLE) or SOURCE_UNAVAILABLE),
         model.volatility_penalty, _source_from_status(execution_ctx, "volatility_status", "volatility_source", estimated=SOURCE_ESTIMATED_BACKTEST),
-        total_cost_pct, round(raw, 6), effective, model.total_penalty, tuple(sorted(set(flags))), model.missing_fields, json.dumps(diagnostics, sort_keys=True),
+        total_explicit_cost_pct, round(raw, 6), effective, model.total_penalty, tuple(dict.fromkeys(flags)), model.missing_fields, json.dumps(diagnostics, sort_keys=True),
     )
 
 @dataclass(frozen=True)

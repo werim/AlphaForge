@@ -1,3 +1,25 @@
+## 2026-07-07 - PR266 pre-merge fixes
+
+### Added
+- Added a fail-closed `phase3_execution_realism_complete` readiness gate that aggregates Phase 3 execution evidence checks.
+- Added readiness regressions proving NOT_LIVE_READY when each Phase 3 execution check fails.
+
+### Changed
+- Clarified `total_explicit_cost_pct` as explicit percentage costs only; `cost_penalty_rr` remains the full RR penalty including latency, liquidity, and volatility.
+- Kept spread/slippage defaults conservative and restored execution reject priority for slippage/spread before low effective RR attribution.
+
+### Fixed
+- Fixed full backtest scanner CI failures caused by missing `cost_penalty_total` compatibility evidence.
+
+### Removed
+- No live-order behavior was enabled or removed.
+
+### Breaking Changes
+- None. Schema additions remain additive.
+
+### Known Issues
+- LIVE remains NOT READY; historical cost fields are still estimated/unavailable unless supplied by data artifacts.
+
 ## 2026-07-07 - Phase 3 execution cost hardening
 
 ### Added

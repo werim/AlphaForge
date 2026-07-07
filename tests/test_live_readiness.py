@@ -26,10 +26,14 @@ def _seed_valid(session: Session) -> None:
     session.execute(text("""
         INSERT INTO decision_evidence (
             evidence_id, mode, timestamp, symbol, side, lifecycle_state_before, lifecycle_state_after,
-            decision, score, raw_rr, effective_rr, expectancy_bucket, reject_reason, diagnostics_json, signal_id, lifecycle_seq, created_at
+            decision, score, raw_rr, effective_rr, expectancy_bucket, reject_reason,
+            cost_penalty, total_cost_pct, total_explicit_cost_pct, spread_pct, expected_slippage_pct, liquidity_score,
+            diagnostics_json, signal_id, lifecycle_seq, created_at
         ) VALUES
-            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.2, 'LOW', 'HIGH_SPREAD', '{"spread_pct": 0.01}', 's-1', 2, '2026-01-01T00:00:01Z'),
-            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 1.8, 'HIGH', '', '{"spread_pct": 0.01}', 's-2', 2, '2026-01-01T00:00:01Z')
+            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.2, 'LOW', 'HIGH_SPREAD',
+             0.2, 0.011, 0.011, 0.01, 0.001, 0.5, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}', 's-1', 2, '2026-01-01T00:00:01Z'),
+            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 1.8, 'HIGH', '',
+             0.2, 0.011, 0.011, 0.01, 0.001, 0.8, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}', 's-2', 2, '2026-01-01T00:00:01Z')
         ON CONFLICT(evidence_id) DO NOTHING
     """))
     session.commit()
@@ -380,3 +384,24 @@ def test_phase2_readiness_fails_on_decision_evidence_parity_mismatch() -> None:
     check = next(check for check in report.checks if check.name == "phase2_no_decision_parity_mismatch")
     assert report.qualified is False
     assert check.passed is False
+
+
+def test_phase3_execution_gate_blocks_when_each_required_check_fails() -> None:
+    mutations = {
+        "execution_cost_breakdown_present": "UPDATE decision_evidence SET cost_penalty=NULL, diagnostics_json='{}'",
+        "effective_rr_available": "UPDATE decision_evidence SET effective_rr=NULL",
+        "execution_rejects_persisted": "UPDATE decision_evidence SET reject_reason='' WHERE decision='REJECT'",
+        "no_accepted_trade_with_effective_rr_below_threshold": "UPDATE decision_evidence SET effective_rr=1.0 WHERE decision='ACCEPT'",
+        "no_accepted_trade_with_missing_critical_execution_context": "UPDATE decision_evidence SET spread_pct=NULL WHERE decision='ACCEPT'",
+        "no_fake_zero_execution_costs": "UPDATE decision_evidence SET diagnostics_json='UNAVAILABLE', spread_pct=0 WHERE decision='ACCEPT'",
+    }
+    for check_name, sql in mutations.items():
+        engine = _engine()
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        report = _evaluate(engine)
+        checks = {c.name: c for c in report.checks}
+        gates = {g.name: g for g in (report.gates or [])}
+        assert checks[check_name].passed is False
+        assert gates["phase3_execution_realism_complete"].passed is False
+        assert report.verdict == "NOT_LIVE_READY"

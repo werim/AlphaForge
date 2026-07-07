@@ -32,7 +32,12 @@ def test_phase3_cost_breakdown_sources_and_fee_penalty_are_explicit():
     b = build_execution_cost_breakdown(2.0, ctx, min_effective_rr=1.6, thresholds=ctx, include_missing_penalty=True)
     assert b.effective_rr < b.raw_rr
     assert b.fee_pct == pytest.approx(0.0004)
-    assert "fee_penalty" in json.loads(b.diagnostics_json)
+    diagnostics = json.loads(b.diagnostics_json)
+    assert "fee_penalty" in diagnostics
+    assert diagnostics["total_explicit_cost_pct"] == pytest.approx(0.0054)
+    assert diagnostics["cost_penalty_rr"] == pytest.approx(b.cost_penalty_rr)
+    assert b.as_dict()["total_explicit_cost_pct"] == pytest.approx(0.0054)
+    assert b.as_dict()["total_cost_pct"] == pytest.approx(b.as_dict()["total_explicit_cost_pct"])
     assert b.funding_rate_pct is None
     assert "funding_rate_pct" in b.unavailable_fields
     assert b.spread_source == "MEASURED"
