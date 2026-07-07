@@ -1,3 +1,14 @@
+## 2026-07-06 Phase 2 SQL-backed Evidence Consistency
+
+- Current phase: Phase 2 persisted evidence authority for BACKTEST artifacts/dashboard/readiness.
+- Runtime maturity: Research/PAPER hardening; LIVE remains NOT READY.
+- BACKTEST/PAPER/LIVE alignment: BACKTEST exports lifecycle/decision evidence from the configured durable SQL DB; no strategy/risk gate loosening and no LIVE enablement.
+- Lifecycle coverage: accepted, rejected, timeout/cancel-capable lifecycle rows remain persisted before CSV/dashboard consumption; `decision_evidence` adds a normalized SQL evidence surface.
+- Execution realism coverage: unavailable execution numeric fields are exported as NULL/explicit unavailable markers rather than fake zero.
+- Known critical risks: durable run/profile database selection for every dashboard profile remains a Phase 3 hardening item; virtual BACKTEST fills are not live execution evidence.
+- Last audit date: 2026-07-06.
+- Live readiness verdict: NOT LIVE READY.
+
 
 ## 2026-07-06 Decision-Boundary Authority Follow-up
 

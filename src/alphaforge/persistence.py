@@ -191,6 +191,55 @@ def init_db(database_url: str | None = None) -> Engine:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS decision_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            evidence_id TEXT UNIQUE,
+            run_id TEXT,
+            profile_id TEXT,
+            profile_name TEXT,
+            mode TEXT,
+            timestamp TEXT,
+            symbol TEXT,
+            side TEXT,
+            setup_type TEXT,
+            setup_reason TEXT,
+            regime TEXT,
+            lifecycle_state_before TEXT,
+            lifecycle_state_after TEXT,
+            decision TEXT,
+            score REAL,
+            raw_rr REAL,
+            effective_rr REAL,
+            expectancy REAL,
+            expectancy_bucket TEXT,
+            reject_reason TEXT,
+            cancel_reason TEXT,
+            close_reason TEXT,
+            entry REAL,
+            sl REAL,
+            tp REAL,
+            trigger_price REAL,
+            close_price REAL,
+            net_pnl_pct REAL,
+            net_pnl_usdt REAL,
+            hold_minutes REAL,
+            volume_24h_usdt REAL,
+            spread_pct REAL,
+            funding_rate_pct REAL,
+            expected_slippage_pct REAL,
+            liquidity_score REAL,
+            volatility_regime TEXT,
+            cost_penalty REAL,
+            diagnostics_json TEXT,
+            signal_id TEXT,
+            order_id TEXT,
+            position_id TEXT,
+            lifecycle_id TEXT,
+            lifecycle_seq INTEGER,
+            created_at TEXT
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS closed_trade_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             trade_id TEXT, symbol TEXT, setup_type TEXT, regime TEXT, side TEXT, entry_price REAL, exit_price REAL,
@@ -413,6 +462,24 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("point_forecast", "point_forecast REAL"),
             ("quantiles_json", "quantiles_json TEXT"),
         ],
+        "decision_evidence": [
+            ("evidence_id", "evidence_id TEXT"), ("run_id", "run_id TEXT"), ("profile_id", "profile_id TEXT"),
+            ("profile_name", "profile_name TEXT"), ("mode", "mode TEXT"), ("timestamp", "timestamp TEXT"),
+            ("symbol", "symbol TEXT"), ("side", "side TEXT"), ("setup_type", "setup_type TEXT"),
+            ("setup_reason", "setup_reason TEXT"), ("regime", "regime TEXT"),
+            ("lifecycle_state_before", "lifecycle_state_before TEXT"), ("lifecycle_state_after", "lifecycle_state_after TEXT"),
+            ("decision", "decision TEXT"), ("score", "score REAL"), ("raw_rr", "raw_rr REAL"),
+            ("effective_rr", "effective_rr REAL"), ("expectancy", "expectancy REAL"), ("expectancy_bucket", "expectancy_bucket TEXT"),
+            ("reject_reason", "reject_reason TEXT"), ("cancel_reason", "cancel_reason TEXT"), ("close_reason", "close_reason TEXT"),
+            ("entry", "entry REAL"), ("sl", "sl REAL"), ("tp", "tp REAL"), ("trigger_price", "trigger_price REAL"),
+            ("close_price", "close_price REAL"), ("net_pnl_pct", "net_pnl_pct REAL"), ("net_pnl_usdt", "net_pnl_usdt REAL"),
+            ("hold_minutes", "hold_minutes REAL"), ("volume_24h_usdt", "volume_24h_usdt REAL"), ("spread_pct", "spread_pct REAL"),
+            ("funding_rate_pct", "funding_rate_pct REAL"), ("expected_slippage_pct", "expected_slippage_pct REAL"),
+            ("liquidity_score", "liquidity_score REAL"), ("volatility_regime", "volatility_regime TEXT"),
+            ("cost_penalty", "cost_penalty REAL"), ("diagnostics_json", "diagnostics_json TEXT"),
+            ("signal_id", "signal_id TEXT"), ("order_id", "order_id TEXT"), ("position_id", "position_id TEXT"),
+            ("lifecycle_id", "lifecycle_id TEXT"), ("lifecycle_seq", "lifecycle_seq INTEGER"), ("created_at", "created_at TEXT"),
+        ],
     }
     for table_name, columns in required_columns.items():
         if not _sqlite_table_exists(conn, table_name):
@@ -487,6 +554,7 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         ("2026_06_19_rollback_evidence_bootstrap", "Ensure fresh SQLite bootstrap creates canonical live rollback validation evidence table."),
         ("2026_06_21_timesfm_canonical_evidence", "Add canonical TimesFM forecast evidence and optional forward outcome labels tables."),
         ("2026_06_23_core_identifier_normalization", "Add normalized lifecycle identifier columns and safe join indexes."),
+        ("2026_07_06_phase2_decision_evidence", "Add SQL-backed decision evidence export surface for lifecycle/dashboard reconciliation."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_core_identifier_schema(conn)

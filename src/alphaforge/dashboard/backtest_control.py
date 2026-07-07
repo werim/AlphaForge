@@ -1258,6 +1258,8 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.output_dir = str(run_dir)
     summary_path = artifact_dir / "order_backtest_summary.csv"
     lifecycle_path = artifact_dir / "order_lifecycle.csv"
+    if not lifecycle_path.exists() and (artifact_dir / "order_backtest_lifecycle.csv").exists():
+        lifecycle_path = artifact_dir / "order_backtest_lifecycle.csv"
     rejected_path = artifact_dir / "rejected_orders.csv"
     rejected_shadow_path = artifact_dir / "rejected_shadow.csv"
     rejected_shadow_summary_path = artifact_dir / "rejected_shadow_summary.csv"
@@ -1320,14 +1322,17 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     result.calibration_summary_path = str(calibration_summary_path) if calibration_summary_path.exists() else None
     result.total_candidates = _safe_int(summary.get("total_candidates"))
     accepted_summary_count = _safe_int(summary.get("accepted_count"))
-    result.accepted_trades = accepted_summary_count if accepted_summary_count is not None else (len(backtest_order_rows) or None)
+    accepted_count, accepted_rows, accepted_source = _canonical_profile_accepted_rows(summary, lifecycle_rows, backtest_order_rows)
+    result.accepted_trades = accepted_summary_count if accepted_summary_count is not None else (accepted_count if accepted_source else None)
     rejected_summary_count = _safe_int(summary.get("rejected_count") or summary.get("total_rejected"))
-    canonical_rejected_count = len(rejected_rows) if rejected_rows else rejected_summary_count
+    lifecycle_reject_count = sum(1 for row in lifecycle_rows if str(row.get("lifecycle_state") or row.get("status_after") or "").upper() in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"})
+    canonical_rejected_count = len(rejected_rows) if rejected_rows else (lifecycle_reject_count if lifecycle_rows else rejected_summary_count)
     result.rejected_signals = canonical_rejected_count if canonical_rejected_count is not None else None
-    result.win_count = _safe_int(summary.get("tp_hits"))
-    result.loss_count = _safe_int(summary.get("sl_hits"))
-    result.open_count = _safe_int(summary.get("open_at_end"))
-    result.net_pnl = summary.get("total_net_pnl_usdt")
+    closed_rows = [r for r in lifecycle_rows if str(r.get("lifecycle_state") or r.get("status_after") or "").upper() == "POSITION_CLOSED"]
+    result.win_count = _safe_int(summary.get("tp_hits")) if summary else sum(1 for r in closed_rows if str(r.get("close_reason") or "").upper() == "TP_HIT")
+    result.loss_count = _safe_int(summary.get("sl_hits")) if summary else sum(1 for r in closed_rows if str(r.get("close_reason") or "").upper() == "SL_HIT")
+    result.open_count = _safe_int(summary.get("open_at_end")) if summary else sum(1 for r in closed_rows if str(r.get("close_reason") or "").upper() in {"TIMEOUT", "OPEN_AT_END"})
+    result.net_pnl = summary.get("total_net_pnl_usdt") if summary else str(sum(_safe_float(r.get("net_pnl_usdt", r.get("net_pnl")), 0.0) for r in closed_rows))
     result.total_return_pct = summary.get("total_pnl_pct")
     result.max_drawdown = summary.get("max_drawdown")
     result.strategy_quality_guardrails = strategy_quality if isinstance(strategy_quality, dict) else {}
@@ -1417,6 +1422,12 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
         result.blocking_warnings.append("SCORE_SATURATION_RISK")
     if (_safe_float_or_none(result.net_pnl) or 0.0) < 0 and "OVERTRADE_RISK" in result.blocking_warnings and "SCORE_SATURATION_RISK" in result.blocking_warnings:
         result.blocking_warnings.append("DEFAULT PROFILE NOT STRATEGY-QUALITY: overtrade/score saturation risk")
+    if summary_path.exists() and lifecycle_path.exists():
+        result.artifact_warnings.append(f"EVIDENCE_SOURCE_SQL_EXPORT:{summary_path.name}+{lifecycle_path.name}")
+    elif not summary_path.exists():
+        result.artifact_warnings.append(f"MISSING_EVIDENCE:SUMMARY:{summary_path}")
+    elif not lifecycle_path.exists():
+        result.artifact_warnings.append(f"MISSING_EVIDENCE:LIFECYCLE:{lifecycle_path}")
     effective_days = window_days or _window_days_from_metadata(run_dir) or _safe_float_or_none(summary.get("last_days"))
     if result.profile_leaderboard and effective_days:
         for row in result.profile_leaderboard:
@@ -1564,7 +1575,10 @@ def _canonical_profile_accepted_rows(summary: Mapping[str, Any], lifecycle: list
 
 def _comparison_metrics(profile: str, profile_dir: Path, initial_balance: float, warnings: list[str] | None = None, window_days: float | None = None) -> dict[str, Any]:
     summary = _read_first_csv_row(profile_dir / "order_backtest_summary.csv")
-    lifecycle = _read_csv_rows(profile_dir / "order_lifecycle.csv")
+    lifecycle_path = profile_dir / "order_lifecycle.csv"
+    if not lifecycle_path.exists() and (profile_dir / "order_backtest_lifecycle.csv").exists():
+        lifecycle_path = profile_dir / "order_backtest_lifecycle.csv"
+    lifecycle = _read_csv_rows(lifecycle_path)
     rejected = _read_csv_rows(profile_dir / "rejected_orders.csv")
     backtest_orders = _read_csv_rows(profile_dir / "backtest_orders.csv")
     filter_state_path = profile_dir / "backtest_filter_state.json"

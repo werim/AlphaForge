@@ -1,3 +1,48 @@
+## 2026-07-06 Phase 2 SQL-backed Evidence Consistency Report
+
+### Why this patch was needed
+BACKTEST exports and dashboard panels could still treat in-memory CSV rows or dashboard-only fallbacks as truth. Phase 2 makes persisted lifecycle evidence the source that CSV artifacts and dashboard metrics reconcile against.
+
+### Root cause
+The lifecycle exporter already wrote SQL rows, but there was no normalized decision-evidence surface containing the full lifecycle/decision/execution context contract, and dashboard/profile comparison parsing had multiple fallback paths that could disagree for the same selected profile.
+
+### Files changed
+- `src/alphaforge/persistence.py`: added additive `decision_evidence` schema and migration bookkeeping.
+- `backtest_order.py`: persists normalized decision evidence beside lifecycle rows into the configured durable AlphaForge DB (or an explicit test DB URL), preserves unavailable numeric execution evidence as NULL, and exports SQL-backed lifecycle/evidence CSV aliases directly from SQL.
+- `src/alphaforge/dashboard/backtest_control.py`: selected-profile parsing now falls back to `order_backtest_lifecycle.csv`, derives metrics from the same selected summary/lifecycle/rejected evidence, and surfaces specific missing-evidence warnings.
+- `src/alphaforge/live_readiness.py`: added Phase 2 evidence gates for lifecycle/reject/accept persistence, fake-zero execution blockers, and decision parity mismatch blockers.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: documented Phase 2 evidence authority and remaining blockers.
+
+### Schema/table changes
+- Added `decision_evidence` with run/profile/mode/timestamp, lifecycle before/after, ACCEPT/REJECT/WAIT decisions, score/RR/expectancy, reject/cancel/close reasons, execution context metrics, diagnostics JSON, and signal/order/position/lifecycle identifiers.
+- Existing tables remain backward compatible; no existing CSV artifact was removed.
+
+### Before/after evidence flow
+- Before: lifecycle rows were persisted, but dashboard/export consumers could rely on memory-built CSVs and inconsistent fallback calculations.
+- After: lifecycle rows are persisted first, normalized decision evidence is written beside them, and CSV/dashboard values consume SQL-backed lifecycle/export evidence for the selected profile.
+
+### Reconciliation formulas
+- `final_decisions = accepted + rejected + cancelled`.
+- `reject_rate = rejected / max(1, accepted + rejected)`.
+- `SIGNAL_REJECTED/ORDER_REJECTED/SYMBOL_REJECTED lifecycle count == rejected_orders.csv row count`.
+- `net_pnl = sum(net_pnl_usdt for POSITION_CLOSED rows)`, with summary values preferred only when the selected profile summary exists.
+- Accepted-but-never-triggered rows remain lifecycle evidence and are not counted as filled trades.
+
+### Tests added/executed
+- Added durable decision-evidence regressions in `tests/test_backtest_order_scanner.py` for cross-session SQL reads, `decision_evidence.csv` row-count reconciliation, and NULL unavailable execution evidence.
+- Added readiness regressions in `tests/test_live_readiness.py` proving SQL-empty `decision_evidence` fails even when CSV artifacts exist and `DECISION_PARITY_MISMATCH` in SQL blocks readiness.
+
+### Risks and remaining limitations
+- Durable SQL-backed BACKTEST export now writes to `ALPHAFORGE_DATABASE_URL` / `ALPHAFORGE_DB_URL` or an output-directory SQLite DB; Phase 3 should add retention/cleanup policy for accumulated run/profile evidence.
+- Virtual BACKTEST fills remain simulation evidence, not live execution readiness.
+- LIVE remains NOT READY and is not enabled by this patch.
+
+### Migration concerns
+Additive SQLite schema only. Consumers that ignore `decision_evidence.csv` and `order_backtest_lifecycle.csv` can continue using legacy artifacts.
+
+### Push recommendation
+Safe to push for Phase 2 review after targeted validation; do not promote LIVE readiness.
+
 
 ## 2026-07-06 Decision-Boundary Authority Follow-up
 
