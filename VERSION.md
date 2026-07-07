@@ -1,3 +1,15 @@
+# AlphaForge Version
+
+- Current version: Phase 3 execution-realism hardening
+- Current phase: Phase 3 - canonical execution cost breakdown and fail-closed readiness evidence
+- Runtime maturity: BACKTEST/PAPER research runtime; LIVE disabled
+- BACKTEST/PAPER/LIVE alignment: shared pre-submit decision boundary with explicit execution evidence; LIVE_PRECHECK still requires conservative/measured context
+- Lifecycle coverage: accepted/rejected lifecycle rows and decision evidence remain SQL-backed
+- Execution realism coverage: spread, slippage, fee, funding, latency, liquidity, and volatility penalties are explicit in `ExecutionCostBreakdown`; missing values remain unavailable/null
+- Known critical risks: historical execution data can be incomplete; PAPER measured latency/liquidity evidence still needs sustained burn-in; authenticated reconciliation is not complete
+- Last audit date: 2026-07-07
+- Live readiness verdict: NOT LIVE READY
+
 ## 2026-07-06 Phase 2 SQL-backed Evidence Consistency
 
 - Current phase: Phase 2 persisted evidence authority for BACKTEST artifacts/dashboard/readiness.

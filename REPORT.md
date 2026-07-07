@@ -1,3 +1,78 @@
+## 2026-07-07 PR266 Pre-merge Fix Report
+
+### Why this patch was needed
+CI exposed that full BACKTEST lifecycle simulation still expected `cost_penalty_total` compatibility evidence from `_execution_reject_flags`. The previous Phase 3 patch also surfaced new checks without aggregating them into a lower fail-closed readiness gate, and `total_cost_pct` could be read as full RR penalty even though latency/liquidity/volatility are RR penalties rather than explicit percentage costs.
+
+### Root cause
+The canonical breakdown renamed the full penalty to `cost_penalty_rr` but some BACKTEST simulation paths still consumed the legacy `cost_penalty_total` key. Readiness checks were appended as standalone checks but omitted from lower readiness gate aggregation. Cost diagnostics did not clearly separate explicit percentage costs from full RR penalties.
+
+### Files changed
+- `src/alphaforge/execution.py`: preserves `cost_penalty_total`, adds `total_explicit_cost_pct`, `total_rr_penalty`, and conservative default thresholds; preserves reject priority for slippage/spread before low effective RR.
+- `backtest_order.py`: carries `total_explicit_cost_pct` through lifecycle and SQL evidence updates, and populates Phase 3 source/unavailable fields from the canonical breakdown during simulation.
+- `src/alphaforge/persistence.py`: additively adds `total_explicit_cost_pct` to `decision_evidence`.
+- `src/alphaforge/live_readiness.py`: adds `phase3_execution_realism_complete` and includes it in lower readiness gates.
+- `tests/test_live_readiness.py`: adds per-check fail-closed Phase 3 readiness regressions.
+- `tests/test_execution_cost_breakdown.py`: asserts explicit-cost and RR-penalty diagnostics are not ambiguous.
+
+### Runtime behavior changes
+No strategy scoring, portfolio risk, live order submission, or live enablement changed. Execution rejection remains conservative: high slippage/spread can be the first blocking execution reason, while low effective RR remains in reject flags when the cost-adjusted RR is below threshold.
+
+### Persistence/export changes
+`decision_evidence` now includes additive `total_explicit_cost_pct`. Existing `total_cost_pct` is preserved as a compatibility alias for explicit percentage costs. The full RR penalty is `cost_penalty_rr` / `cost_penalty_total` in diagnostics and `cost_penalty` in SQL rows.
+
+### Tests added/executed
+Added Phase 3 gate regressions and explicit-cost semantic assertions. Required targeted and full test commands were executed.
+
+### Risks / remaining limitations
+Historical execution evidence remains estimated or unavailable unless supplied by source data. PAPER still needs sustained measured spread/latency/liquidity evidence. LIVE remains NOT READY and disabled.
+
+### Push recommendation
+Safe to push after full test suite passes; do not claim LIVE readiness.
+
+## 2026-07-07 Phase 3 Execution Realism and Cost Model Hardening
+
+### Root Cause
+Phase 1/2 established shared pre-submit decisions and SQL-backed evidence, but execution costs still had gaps: the canonical penalty model did not expose a full cost-breakdown object, fee penalty was absent from effective RR diagnostics, missing liquidity could become perfect liquidity in `build_execution_context`, and readiness gates did not explicitly fail on accepted trades with missing critical execution context.
+
+### Files Changed
+- `src/alphaforge/execution.py`: added canonical `ExecutionCostBreakdown`, source classification, explicit fee penalty, reject flags, unavailable field propagation, and deterministic diagnostics JSON.
+- `src/alphaforge/effective_rr.py`: includes `fee_penalty` in effective RR result diagnostics.
+- `backtest_order.py`: BACKTEST execution reject flags now use canonical breakdown and lifecycle evidence carries cost/source/unavailable fields.
+- `src/alphaforge/persistence.py`: additively extends `decision_evidence` with Phase 3 execution fields.
+- `src/alphaforge/config_registry.py`: adds Phase 3 execution threshold env vars.
+- `src/alphaforge/live_readiness.py`: adds fail-closed Phase 3 readiness gates.
+- `tests/test_execution_cost_breakdown.py`: adds regression coverage for source tags, missing funding, fee penalty, low liquidity, and unavailable context flags.
+
+### Execution Cost Model Before
+The model penalized spread, slippage, latency, funding, liquidity, and volatility, but fee cost was not represented and callers could inspect only partial diagnostics. Some missing context paths relied on numeric fallbacks such as liquidity=1.0. Readiness only had Phase 2 fake-zero evidence checks.
+
+### Execution Cost Model After
+Canonical formula:
+
+`effective_rr = raw_rr - spread_penalty - slippage_penalty - fee_penalty - funding_penalty - latency_penalty - liquidity_penalty - volatility_penalty`
+
+`ExecutionCostBreakdown` exposes spread/slippage/fee/funding/latency/liquidity/volatility values, source tags (`MEASURED`, `ESTIMATED_BACKTEST`, `MODELLED`, `UNAVAILABLE`), `total_cost_pct`, `cost_penalty_rr`, `reject_flags`, `unavailable_fields`, and JSON diagnostics. Missing numeric values remain `NULL`/unavailable rather than fake zero.
+
+### SQL / Export Evidence
+`decision_evidence` adds: `total_cost_pct`, `spread_source`, `slippage_source`, `fee_pct`, `fee_source`, `funding_source`, `latency_ms`, `latency_source`, `liquidity_status`, `volatility_penalty_pct`, `volatility_source`, `reject_flags`, and `unavailable_fields`. The export remains SQL-backed through existing `decision_evidence.csv` export.
+
+### Rejection / Readiness Impact
+Canonical reject flags include `LOW_EFFECTIVE_RR`, `HIGH_SPREAD`, `HIGH_SLIPPAGE`, `HIGH_TOTAL_COST`, `LOW_LIQUIDITY`, `HIGH_LATENCY`, `EXECUTION_CONTEXT_UNAVAILABLE`, `EXCESSIVE_VOLATILITY_PENALTY`, `FUNDING_UNAVAILABLE`, and `FUNDING_TOO_HIGH`. LIVE remains fail-closed and NOT READY.
+
+### Tests Added / Executed
+- Added focused `tests/test_execution_cost_breakdown.py`.
+- Executed targeted backtest/persistence/readiness regressions and the new cost breakdown regression.
+
+### Remaining Phase 4 Blockers
+- Sustained PAPER evidence with measured exchange spread/latency/liquidity.
+- Authenticated read-only reconciliation evidence.
+- Demonstrated no accepted trades below configured effective RR over representative runs.
+- Full run artifact regeneration to populate new additive Phase 3 columns.
+- LIVE order submission remains disabled until all historical gates and operational gates pass.
+
+### Push Recommendation
+Safe to push after targeted/full validation. Do not claim LIVE readiness.
+
 ## 2026-07-06 Phase 2 SQL-backed Evidence Consistency Report
 
 ### Why this patch was needed

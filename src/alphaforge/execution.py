@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Mapping
 
 EXECUTION_EVIDENCE_COMPLETE_MEASURED = "COMPLETE_MEASURED"
@@ -20,6 +21,12 @@ REQUIRED_EXECUTION_FIELDS = (
     "orderbook_imbalance",
     "volatility_regime",
 )
+
+SOURCE_MEASURED = "MEASURED"
+SOURCE_ESTIMATED_BACKTEST = "ESTIMATED_BACKTEST"
+SOURCE_MODELLED = "MODELLED"
+SOURCE_UNAVAILABLE = "UNAVAILABLE"
+
 
 
 def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: float | None = None) -> dict[str, Any]:
@@ -63,7 +70,11 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     orderbook_status = str(market_ctx.get("orderbook_status", "MEASURED" if orderbook is not None else "UNAVAILABLE"))
     orderbook_source = str(market_ctx.get("orderbook_source", "UNKNOWN" if orderbook is not None else "UNAVAILABLE"))
 
-    liquidity_score = float(market_ctx.get("liquidity_score", 1.0) or 1.0)
+    raw_liquidity = market_ctx.get("liquidity_score")
+    if raw_liquidity in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        liquidity_score = None
+    else:
+        liquidity_score = float(raw_liquidity)
     volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
 
     liquidity_status = str(market_ctx.get("liquidity_status", "MEASURED" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
@@ -91,7 +102,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
         "orderbook_status": orderbook_status,
         "orderbook_source": orderbook_source,
-        "liquidity_score": max(min(liquidity_score, 1.0), 0.0) if liquidity_status != "UNAVAILABLE" else None,
+        "liquidity_score": (max(min(liquidity_score, 1.0), 0.0) if liquidity_score is not None and liquidity_status != "UNAVAILABLE" else None),
         "liquidity_status": liquidity_status,
         "liquidity_source": liquidity_source,
         "funding_rate_pct": funding_val,
@@ -107,7 +118,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
             "slippage_status": slippage_status,
             "latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
             "market_data_latency_status": md_latency_status,
-            "liquidity_score": max(min(liquidity_score, 1.0), 0.0) if liquidity_status != "UNAVAILABLE" else None,
+            "liquidity_score": (max(min(liquidity_score, 1.0), 0.0) if liquidity_score is not None and liquidity_status != "UNAVAILABLE" else None),
             "liquidity_status": liquidity_status,
             "funding_rate_pct": funding_val,
             "funding_status": funding_status,
@@ -184,11 +195,120 @@ def _volatility_regime(klines: list[Any]) -> str:
     return "normal"
 
 
+
+@dataclass(frozen=True)
+class ExecutionCostBreakdown:
+    spread_pct: float | None
+    spread_source: str
+    slippage_pct: float | None
+    slippage_source: str
+    fee_pct: float | None
+    fee_source: str
+    funding_rate_pct: float | None
+    funding_source: str
+    latency_ms: float | None
+    latency_source: str
+    liquidity_score: float | None
+    liquidity_status: str
+    volatility_penalty_pct: float | None
+    volatility_source: str
+    total_explicit_cost_pct: float
+    raw_rr: float
+    effective_rr: float
+    cost_penalty_rr: float
+    reject_flags: tuple[str, ...]
+    unavailable_fields: tuple[str, ...]
+    diagnostics_json: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "spread_pct": self.spread_pct, "spread_source": self.spread_source,
+            "slippage_pct": self.slippage_pct, "expected_slippage_pct": self.slippage_pct, "slippage_source": self.slippage_source,
+            "fee_pct": self.fee_pct, "fee_source": self.fee_source,
+            "funding_rate_pct": self.funding_rate_pct, "funding_source": self.funding_source,
+            "latency_ms": self.latency_ms, "latency_source": self.latency_source,
+            "liquidity_score": self.liquidity_score, "liquidity_status": self.liquidity_status,
+            "volatility_penalty_pct": self.volatility_penalty_pct, "volatility_source": self.volatility_source,
+            "total_explicit_cost_pct": self.total_explicit_cost_pct, "total_cost_pct": self.total_explicit_cost_pct, "raw_rr": self.raw_rr, "effective_rr": self.effective_rr,
+            "cost_penalty": self.cost_penalty_rr, "cost_penalty_rr": self.cost_penalty_rr, "cost_penalty_total": self.cost_penalty_rr,
+            "reject_flags": list(self.reject_flags), "unavailable_fields": list(self.unavailable_fields),
+            "diagnostics_json": self.diagnostics_json,
+        }
+
+
+def _source_from_status(ctx: Mapping[str, Any], status_key: str, source_key: str, *, estimated: str = SOURCE_MODELLED) -> str:
+    status = str(ctx.get(status_key, "") or "").upper()
+    source = str(ctx.get(source_key, "") or "").upper()
+    if status in UNAVAILABLE_STATUSES or source in UNAVAILABLE_STATUSES:
+        return SOURCE_UNAVAILABLE
+    if "BACKTEST" in status or "BACKTEST" in source:
+        return SOURCE_ESTIMATED_BACKTEST
+    if status in ESTIMATED_STATUSES:
+        return estimated
+    if status in MEASURED_STATUSES or source not in {"", "UNKNOWN"}:
+        return SOURCE_MEASURED
+    return SOURCE_UNAVAILABLE
+
+
+def build_execution_cost_breakdown(raw_rr: Any, execution_ctx: Mapping[str, Any], *, min_effective_rr: float = 1.6, thresholds: Mapping[str, Any] | None = None, include_missing_penalty: bool = False) -> ExecutionCostBreakdown:
+    try:
+        raw = float(raw_rr or 0.0)
+    except (TypeError, ValueError):
+        raw = 0.0
+    model = build_execution_cost_model(execution_ctx, include_missing_penalty=include_missing_penalty)
+    effective = round(max(raw - model.total_penalty, 0.0), 6)
+
+    def f(key: str) -> float | None:
+        value = execution_ctx.get(key)
+        if value in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    t = dict(thresholds or {})
+    max_spread = float(t.get("MAX_SPREAD_PCT", t.get("max_spread_pct", 0.0025)) or 0.0025)
+    max_slip = float(t.get("MAX_SLIPPAGE_PCT", t.get("MAX_EXPECTED_SLIPPAGE_PCT", 0.002)) or 0.002)
+    max_total = float(t.get("MAX_TOTAL_COST_PCT", 0.20) or 0.20)
+    min_liq = float(t.get("MIN_LIQUIDITY_SCORE", 0.30) or 0.30)
+    max_latency = float(t.get("MAX_LATENCY_MS", 2500) or 2500)
+    max_vol_pen = float(t.get("MAX_VOLATILITY_PENALTY_PCT", 0.20) or 0.20)
+    reject_unknown = bool(t.get("REJECT_UNKNOWN_EXECUTION_CONTEXT", False))
+    require_funding = bool(t.get("REQUIRE_FUNDING_RATE", False))
+    max_funding = float(t.get("MAX_ABS_FUNDING_RATE_PCT", 1.0) or 1.0)
+
+    spread, slip, fee, funding, latency, liq = f("spread_pct"), f("expected_slippage_pct"), f("fee_pct"), f("funding_rate_pct"), f("latency_ms"), f("liquidity_score")
+    total_explicit_cost_pct = round(sum(abs(x) for x in (spread, slip, fee, funding) if x is not None), 10)
+    flags: list[str] = []
+    if slip is not None and slip > max_slip: flags.append("HIGH_SLIPPAGE")
+    if spread is not None and spread > max_spread: flags.append("HIGH_SPREAD")
+    if total_explicit_cost_pct > max_total: flags.append("HIGH_TOTAL_COST")
+    if liq is not None and liq < min_liq: flags.append("LOW_LIQUIDITY")
+    if latency is not None and latency > max_latency: flags.append("HIGH_LATENCY")
+    if model.volatility_penalty > max_vol_pen: flags.append("EXCESSIVE_VOLATILITY_PENALTY")
+    if funding is None and require_funding: flags.append("FUNDING_UNAVAILABLE")
+    if funding is not None and abs(funding) > max_funding: flags.append("FUNDING_TOO_HIGH")
+    if model.missing_fields and reject_unknown: flags.append("EXECUTION_CONTEXT_UNAVAILABLE")
+    if effective < float(min_effective_rr): flags.append("LOW_EFFECTIVE_RR")
+    diagnostics = {**model.__dict__, "total_explicit_cost_pct": total_explicit_cost_pct, "total_rr_penalty": model.total_penalty, "cost_penalty_rr": model.total_penalty, "formula": "effective_rr = raw_rr - spread_penalty - slippage_penalty - fee_penalty - funding_penalty - latency_penalty - liquidity_penalty - volatility_penalty"}
+    return ExecutionCostBreakdown(
+        spread, _source_from_status(execution_ctx, "spread_status", "spread_source", estimated=SOURCE_ESTIMATED_BACKTEST),
+        slip, _source_from_status(execution_ctx, "slippage_status", "slippage_source", estimated=SOURCE_MODELLED),
+        fee, _source_from_status(execution_ctx, "fee_status", "fee_source", estimated=SOURCE_MODELLED),
+        funding, _source_from_status(execution_ctx, "funding_status", "funding_source", estimated=SOURCE_ESTIMATED_BACKTEST),
+        latency, _source_from_status(execution_ctx, "latency_status", "latency_source", estimated=SOURCE_MODELLED),
+        liq, str(execution_ctx.get("liquidity_status", SOURCE_UNAVAILABLE) or SOURCE_UNAVAILABLE),
+        model.volatility_penalty, _source_from_status(execution_ctx, "volatility_status", "volatility_source", estimated=SOURCE_ESTIMATED_BACKTEST),
+        total_explicit_cost_pct, round(raw, 6), effective, model.total_penalty, tuple(dict.fromkeys(flags)), model.missing_fields, json.dumps(diagnostics, sort_keys=True),
+    )
+
 @dataclass(frozen=True)
 class ExecutionCostModel:
     spread_penalty: float
     slippage_penalty: float
     latency_penalty: float
+    fee_penalty: float
     funding_penalty: float
     liquidity_penalty: float
     volatility_penalty: float
@@ -243,6 +363,7 @@ def build_execution_cost_model(execution_ctx: Mapping[str, Any], *, include_miss
     slippage=req_float('expected_slippage_pct')
     latency=req_float('latency_ms')
     funding=req_float('funding_rate_pct')
+    fee=req_float('fee_pct') if 'fee_pct' in execution_ctx else 0.0
     liquidity=req_float('liquidity_score')
     volatility_regime = str(execution_ctx.get('volatility_regime', '') or '').lower()
     if not volatility_regime or volatility_regime in {'unknown', 'unavailable'}:
@@ -251,15 +372,16 @@ def build_execution_cost_model(execution_ctx: Mapping[str, Any], *, include_miss
     spread_penalty=max((spread or 0.0)*25.0,0.0)
     slippage_penalty=max((slippage or 0.0)*30.0,0.0)
     latency_penalty=max(((latency or 0.0)/1000.0)*0.2,0.0)
+    fee_penalty=max(abs(fee or 0.0)*10.0,0.0)
     funding_penalty=max(abs(funding or 0.0)*2.5,0.0)
     liquidity_penalty=max((1.0-max(min(liquidity if liquidity is not None else 1.0,1.0),0.0))*0.6,0.0)
     volatility_penalty={"low":0.02,"normal":0.0,"high":0.12,"extreme":0.25}.get(volatility_regime,0.10)
 
     completeness=classify_execution_evidence(execution_ctx)
-    total=spread_penalty+slippage_penalty+latency_penalty+funding_penalty+liquidity_penalty+volatility_penalty
+    total=spread_penalty+slippage_penalty+fee_penalty+latency_penalty+funding_penalty+liquidity_penalty+volatility_penalty
     if include_missing_penalty and missing:
         total += min(0.5, 0.1*len(missing))
-    return ExecutionCostModel(spread_penalty,slippage_penalty,latency_penalty,funding_penalty,liquidity_penalty,volatility_penalty,round(total,6),tuple(sorted(set(missing))),completeness)
+    return ExecutionCostModel(spread_penalty,slippage_penalty,fee_penalty,latency_penalty,funding_penalty,liquidity_penalty,volatility_penalty,round(total,6),tuple(sorted(set(missing))),completeness)
 def normalize_pct_input(value: Any, *, field: str) -> tuple[float, str]:
     """
     Normalize spread/slippage inputs into fractional rate units.

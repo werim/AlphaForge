@@ -14,6 +14,7 @@ class EffectiveRRResult:
     spread_penalty: float
     slippage_penalty: float
     latency_penalty: float
+    fee_penalty: float
     funding_penalty: float
     liquidity_penalty: float
     volatility_penalty: float
@@ -28,6 +29,7 @@ class EffectiveRRResult:
             "spread_penalty": self.spread_penalty,
             "slippage_penalty": self.slippage_penalty,
             "latency_penalty": self.latency_penalty,
+            "fee_penalty": self.fee_penalty,
             "funding_penalty": self.funding_penalty,
             "liquidity_penalty": self.liquidity_penalty,
             "volatility_penalty": self.volatility_penalty,
@@ -72,6 +74,7 @@ def calculate_effective_rr(
         spread_penalty=model.spread_penalty,
         slippage_penalty=model.slippage_penalty,
         latency_penalty=model.latency_penalty,
+        fee_penalty=model.fee_penalty,
         funding_penalty=model.funding_penalty,
         liquidity_penalty=model.liquidity_penalty,
         volatility_penalty=model.volatility_penalty,

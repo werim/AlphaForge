@@ -14,7 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-from alphaforge.execution import build_execution_context, build_execution_cost_model, normalize_pct_input
+from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input
 from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
@@ -476,6 +476,20 @@ class LifecycleRow:
     lifecycle_seq: int = 0
     shadow_outcome: str = ""
     cost_penalty: float = 0.0
+    total_cost_pct: Any = "UNAVAILABLE_BACKTEST"
+    total_explicit_cost_pct: Any = "UNAVAILABLE_BACKTEST"
+    spread_source: str = "UNAVAILABLE"
+    slippage_source: str = "UNAVAILABLE"
+    fee_pct: Any = "UNAVAILABLE_BACKTEST"
+    fee_source: str = "UNAVAILABLE"
+    funding_source: str = "UNAVAILABLE"
+    latency_ms: Any = "UNAVAILABLE_BACKTEST"
+    latency_source: str = "UNAVAILABLE"
+    liquidity_status: str = "UNAVAILABLE"
+    volatility_penalty_pct: Any = "UNAVAILABLE_BACKTEST"
+    volatility_source: str = "UNAVAILABLE"
+    reject_flags: str = ""
+    unavailable_fields: str = ""
     volatility_score: Any = "UNAVAILABLE_BACKTEST"
     liquidity_ok: Optional[bool] = None
     volatility_ok: Optional[bool] = None
@@ -519,29 +533,12 @@ def _bucket_expectancy(expectancy: Optional[float]) -> str:
     if expectancy < 0.2:
         return "MEDIUM"
     return "HIGH"
-def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[float, list[str], dict[str, float]]:
-    model = build_execution_cost_model(market_ctx, include_missing_penalty=False)
-    effective = round(max(float(rr) - model.total_penalty, 0.0), 6)
-    liquidity_score = min(1.0, max(0.0, float(market_ctx.get("liquidity_score", 1.0) or 1.0)))
-    flags: list[str] = []
-    if model.slippage_penalty >= 0.20:
-        flags.append("HIGH_SLIPPAGE")
-    if model.spread_penalty >= 0.20:
-        flags.append("HIGH_SPREAD")
-    if liquidity_score < 0.3:
-        flags.append("LOW_LIQUIDITY")
+def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[float, list[str], dict[str, Any]]:
     min_effective_rr = float(market_ctx.get("MIN_EFFECTIVE_RR", market_ctx.get("min_effective_rr", 1.60)) or 1.60)
-    if effective < min_effective_rr:
-        flags.append("LOW_EFFECTIVE_RR")
-    breakdown = {
-        "cost_penalty_total": model.total_penalty,
-        "spread_penalty": model.spread_penalty,
-        "slippage_penalty": model.slippage_penalty,
-        "latency_penalty": model.latency_penalty,
-        "liquidity_penalty": model.liquidity_penalty,
-        "funding_penalty": model.funding_penalty,
-    }
-    return effective, flags, breakdown
+    breakdown = build_execution_cost_breakdown(rr, market_ctx, min_effective_rr=min_effective_rr, thresholds=market_ctx, include_missing_penalty=bool(market_ctx.get("REJECT_UNKNOWN_EXECUTION_CONTEXT", False)))
+    data = breakdown.as_dict()
+    data.update(json.loads(breakdown.diagnostics_json))
+    return breakdown.effective_rr, list(breakdown.reject_flags), data
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -1340,6 +1337,7 @@ def finalize(
     risk_usdt = balance * (risk_pct / 100)
     net_pnl_usdt = risk_usdt * (pnl_pct / 100)
     hold = (closed_ts - triggered_ts) / 60000 if triggered_ts else 0
+    effective_rr, reject_flags, cost_breakdown = _execution_reject_flags(candidate.rr, market_ctx)
     return LifecycleRow(
         candidate.timestamp,
         candidate.symbol,
@@ -1368,8 +1366,22 @@ def finalize(
         expected_slippage_pct=market_ctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
         volatility_regime=str(market_ctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")),
         liquidity_score=market_ctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
-        effective_rr=_execution_reject_flags(candidate.rr, market_ctx)[0],
-        cost_penalty=_execution_reject_flags(candidate.rr, market_ctx)[2]["cost_penalty_total"],
+        effective_rr=effective_rr,
+        cost_penalty=cost_breakdown["cost_penalty_rr"],
+        total_cost_pct=cost_breakdown.get("total_cost_pct", "UNAVAILABLE_BACKTEST"),
+        total_explicit_cost_pct=cost_breakdown.get("total_explicit_cost_pct", cost_breakdown.get("total_cost_pct", "UNAVAILABLE_BACKTEST")),
+        spread_source=cost_breakdown.get("spread_source", "UNAVAILABLE"),
+        slippage_source=cost_breakdown.get("slippage_source", "UNAVAILABLE"),
+        fee_pct=cost_breakdown.get("fee_pct", "UNAVAILABLE_BACKTEST"),
+        fee_source=cost_breakdown.get("fee_source", "UNAVAILABLE"),
+        funding_source=cost_breakdown.get("funding_source", "UNAVAILABLE"),
+        latency_ms=cost_breakdown.get("latency_ms", "UNAVAILABLE_BACKTEST"),
+        latency_source=cost_breakdown.get("latency_source", "UNAVAILABLE"),
+        liquidity_status=cost_breakdown.get("liquidity_status", "UNAVAILABLE"),
+        volatility_penalty_pct=cost_breakdown.get("volatility_penalty_pct", "UNAVAILABLE_BACKTEST"),
+        volatility_source=cost_breakdown.get("volatility_source", "UNAVAILABLE"),
+        reject_flags=json.dumps(reject_flags, sort_keys=True),
+        unavailable_fields=json.dumps(cost_breakdown.get("missing_fields", cost_breakdown.get("unavailable_fields", [])), sort_keys=True),
         stop_too_wide_softened=bool(market_ctx.get("stop_too_wide_softened", False)),
         original_reject_reason=str(market_ctx.get("original_reject_reason", "") or ""),
         reject_reason_softened=str(market_ctx.get("reject_reason_softened", "") or ""),
@@ -1706,6 +1718,9 @@ def process_backtest_result(
                 "raw_rr": rr,
                 "effective_rr": diagnostics.get("effective_rr", base_effective_rr),
                 **_base_penalty_breakdown,
+                "expected_slippage_pct": mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"),
+                "spread_pct": mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"),
+                "liquidity_score": mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"),
                 "cost_penalty": _safe_float(_base_penalty_breakdown.get("cost_penalty_total"), 0.0),
                 "stop_too_wide_softened": bool(diagnostics.get("stop_too_wide_softened", False)) if isinstance(diagnostics, dict) else False,
                 "original_reject_reason": diagnostics.get("original_reject_reason", "") if isinstance(diagnostics, dict) else "",
@@ -1961,6 +1976,20 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 "volatility_ok": row.volatility_ok,
                 "shadow_outcome": row.shadow_outcome or None,
                 "cost_penalty": row.cost_penalty,
+                "total_cost_pct": row.total_cost_pct,
+                "total_explicit_cost_pct": row.total_explicit_cost_pct,
+                "spread_source": row.spread_source,
+                "slippage_source": row.slippage_source,
+                "fee_pct": row.fee_pct,
+                "fee_source": row.fee_source,
+                "funding_source": row.funding_source,
+                "latency_ms": row.latency_ms,
+                "latency_source": row.latency_source,
+                "liquidity_status": row.liquidity_status,
+                "volatility_penalty_pct": row.volatility_penalty_pct,
+                "volatility_source": row.volatility_source,
+                "reject_flags": row.reject_flags,
+                "unavailable_fields": row.unavailable_fields,
                 "close_reason": row.close_reason,
                 "side": row.side,
                 "entry": row.entry,
@@ -2095,6 +2124,34 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                     "signal_id": signal_id, "order_id": row.order_id or None, "position_id": row.position_id or None,
                     "lifecycle_id": row.lifecycle_id or f"{row.symbol}:{row.timestamp}", "lifecycle_seq": row.lifecycle_seq or (idx + 1),
                     "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            session.execute(
+                text("""
+                    UPDATE decision_evidence
+                    SET total_cost_pct=:total_cost_pct, total_explicit_cost_pct=:total_explicit_cost_pct, spread_source=:spread_source, slippage_source=:slippage_source,
+                        fee_pct=:fee_pct, fee_source=:fee_source, funding_source=:funding_source,
+                        latency_ms=:latency_ms, latency_source=:latency_source, liquidity_status=:liquidity_status,
+                        volatility_penalty_pct=:volatility_penalty_pct, volatility_source=:volatility_source,
+                        reject_flags=:reject_flags, unavailable_fields=:unavailable_fields
+                    WHERE evidence_id=:evidence_id
+                """),
+                {
+                    "evidence_id": _lifecycle_event_id(row, idx, lifecycle_state),
+                    "total_cost_pct": _sql_nullable_number(row.total_cost_pct),
+                    "total_explicit_cost_pct": _sql_nullable_number(row.total_explicit_cost_pct),
+                    "spread_source": row.spread_source or None,
+                    "slippage_source": row.slippage_source or None,
+                    "fee_pct": _sql_nullable_number(row.fee_pct),
+                    "fee_source": row.fee_source or None,
+                    "funding_source": row.funding_source or None,
+                    "latency_ms": _sql_nullable_number(row.latency_ms),
+                    "latency_source": row.latency_source or None,
+                    "liquidity_status": row.liquidity_status or None,
+                    "volatility_penalty_pct": _sql_nullable_number(row.volatility_penalty_pct),
+                    "volatility_source": row.volatility_source or None,
+                    "reject_flags": row.reject_flags or None,
+                    "unavailable_fields": row.unavailable_fields or None,
                 },
             )
         if hasattr(session, "commit"):
