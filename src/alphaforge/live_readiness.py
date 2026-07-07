@@ -104,7 +104,7 @@ class LiveReadinessEvaluator:
         gates = [
             CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
             CheckResult("reject_persistence_complete", self._checks_pass(checks, reject), "requires rejected decisions and lifecycle reject reasons persisted"),
-            CheckResult("phase2_persisted_evidence_complete", self._checks_pass(checks, {"phase2_lifecycle_evidence_present", "phase2_reject_evidence_present", "phase2_accept_evidence_present", "phase2_no_fake_zero_execution_evidence", "phase2_no_decision_parity_mismatch"}), "requires SQL-backed lifecycle/reject/accept evidence and no fake-zero/parity blockers"),
+            CheckResult("phase2_persisted_evidence_complete", self._checks_pass(checks, {"phase2_decision_evidence_table_exists", "phase2_decision_evidence_rows_present", "phase2_lifecycle_evidence_present", "phase2_reject_evidence_present", "phase2_accept_evidence_present", "phase2_no_fake_zero_execution_evidence", "phase2_no_decision_parity_mismatch"}), "requires SQL-backed lifecycle/reject/accept evidence and no fake-zero/parity blockers"),
             CheckResult("mode_parity_complete", self._checks_pass(checks, parity), "requires BACKTEST/PAPER/LIVE_PRECHECK parity evidence"),
             CheckResult("execution_realism_complete", self._checks_pass(checks, realism), "requires measured selectivity plus non-constant RR/score evidence"),
             CheckResult("effective_rr_penalty_breakdown_complete", bool(mode_parity.get("effective_rr_penalty_breakdown_complete", False) or mode_parity.get("execution_context_complete", False)), "requires persisted execution-context/effective-RR penalty evidence"),
@@ -201,18 +201,35 @@ class LiveReadinessEvaluator:
         rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
         rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE lifecycle_state='SIGNAL_REJECTED'")).scalar_one()
         checks.append(CheckResult("reject_persistence_parity", int(rejected_decisions) <= int(rejected_events), f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
+        decision_evidence_exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_evidence'")).scalar_one() > 0
         lifecycle_rows = int(conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events")).scalar_one())
         accepted_events = int(conn.execute(text("SELECT COUNT(DISTINCT signal_id) FROM trade_lifecycle_events WHERE lifecycle_state IN ('SIGNAL_ACCEPTED','WAITING_ENTRY_ZONE','ENTRY_TRIGGERED','ORDER_PLACED','POSITION_OPENED','POSITION_CLOSED','TP_HIT','SL_HIT','OPEN_AT_END','CANCELLED','ENTRY_TIMEOUT')")).scalar_one())
-        parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH'")).scalar_one())
+        if decision_evidence_exists:
+            evidence_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence")).scalar_one())
+            evidence_lifecycle_states = int(conn.execute(text("SELECT COUNT(DISTINCT lifecycle_state_after) FROM decision_evidence WHERE COALESCE(lifecycle_state_after,'') <> ''")).scalar_one())
+            evidence_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT'")).scalar_one())
+            evidence_rejected = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='REJECT'")).scalar_one())
+            evidence_parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(diagnostics_json,'')) LIKE '%DECISION_PARITY_MISMATCH%'")).scalar_one())
+            evidence_fake_zero_rows = int(conn.execute(text("""
+                SELECT COUNT(*) FROM decision_evidence
+                WHERE UPPER(COALESCE(diagnostics_json,'')) LIKE '%UNAVAILABLE%'
+                  AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0 OR COALESCE(volume_24h_usdt, -999) = 0 OR COALESCE(liquidity_score, -999) = 0)
+            """)).scalar_one())
+        else:
+            evidence_rows = evidence_lifecycle_states = evidence_accepted = evidence_rejected = 0
+            evidence_parity_rows = evidence_fake_zero_rows = 1
+        parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH'")).scalar_one()) + evidence_parity_rows
         fake_zero_rows = int(conn.execute(text("""
             SELECT COUNT(*) FROM order_decisions
             WHERE COALESCE(execution_ctx_missing,0)=1
               AND UPPER(COALESCE(execution_ctx,'')) LIKE '%UNAVAILABLE%'
               AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0)
-        """)).scalar_one())
-        checks.append(CheckResult("phase2_lifecycle_evidence_present", lifecycle_rows > 0, f"lifecycle_rows={lifecycle_rows}"))
-        checks.append(CheckResult("phase2_reject_evidence_present", int(rejected_decisions) > 0 and int(rejected_events) > 0, f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
-        checks.append(CheckResult("phase2_accept_evidence_present", accepted_events > 0, f"accepted_signal_ids={accepted_events}"))
+        """)).scalar_one()) + evidence_fake_zero_rows
+        checks.append(CheckResult("phase2_decision_evidence_table_exists", decision_evidence_exists, f"decision_evidence_exists={decision_evidence_exists}"))
+        checks.append(CheckResult("phase2_decision_evidence_rows_present", evidence_rows > 0, f"decision_evidence_rows={evidence_rows}"))
+        checks.append(CheckResult("phase2_lifecycle_evidence_present", lifecycle_rows > 0 and evidence_lifecycle_states > 0, f"lifecycle_rows={lifecycle_rows},decision_evidence_lifecycle_states={evidence_lifecycle_states}"))
+        checks.append(CheckResult("phase2_reject_evidence_present", int(rejected_decisions) > 0 and int(rejected_events) > 0 and evidence_rejected > 0, f"rejected_decisions={rejected_decisions},rejected_events={rejected_events},decision_evidence_rejected={evidence_rejected}"))
+        checks.append(CheckResult("phase2_accept_evidence_present", accepted_events > 0 and evidence_accepted > 0, f"accepted_signal_ids={accepted_events},decision_evidence_accepted={evidence_accepted}"))
         checks.append(CheckResult("phase2_no_fake_zero_execution_evidence", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
         checks.append(CheckResult("phase2_no_decision_parity_mismatch", parity_rows == 0, f"decision_parity_mismatch_rows={parity_rows}"))
         return checks

@@ -1926,8 +1926,8 @@ def _sql_nullable_number(value: Any) -> Any:
     except (TypeError, ValueError):
         return None
 
-def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
-    engine = init_db("sqlite+pysqlite:///:memory:")
+def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None = None, *, run_id: str | None = None, profile_name: str | None = None) -> List[dict[str, Any]]:
+    engine = init_db(database_url)
     with Session(engine) as session:
         for idx, row in enumerate(rows):
             execution_ctx_missing = any(
@@ -2072,9 +2072,9 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                 ),
                 {
                     "evidence_id": _lifecycle_event_id(row, idx, lifecycle_state),
-                    "run_id": os.getenv("ALPHAFORGE_RUN_ID"),
+                    "run_id": run_id or os.getenv("ALPHAFORGE_RUN_ID"),
                     "profile_id": os.getenv("ALPHAFORGE_PROFILE_ID"),
-                    "profile_name": os.getenv("ALPHAFORGE_PROFILE_NAME"),
+                    "profile_name": profile_name or os.getenv("ALPHAFORGE_PROFILE_NAME"),
                     "mode": "BACKTEST", "timestamp": str(row.timestamp), "symbol": row.symbol, "side": row.side,
                     "setup_type": row.setup_type, "setup_reason": row.setup_reason, "regime": row.regime,
                     "lifecycle_state_before": row.status_before, "lifecycle_state_after": lifecycle_state,
@@ -2097,6 +2097,8 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
+        if hasattr(session, "commit"):
+            session.commit()
         decision_counts = {
             row["signal_id"]: {"sql_order_decision_count": row["total_count"], "sql_rejected_decision_count": row["rejected_count"]}
             for row in session.execute(
@@ -2163,6 +2165,29 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow]) -> List[dict[str, Any]]:
         out.append(data)
     return out
 
+
+
+def _decision_evidence_rows(database_url: str | None = None, *, mode: str = "BACKTEST", run_id: str | None = None) -> List[dict[str, Any]]:
+    engine = init_db(database_url)
+    with Session(engine) as session:
+        rows = session.execute(
+            text(
+                """
+                SELECT evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type,
+                       setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr,
+                       effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason,
+                       entry, sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes,
+                       volume_24h_usdt, spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score,
+                       volatility_regime, cost_penalty, diagnostics_json, signal_id, order_id, position_id,
+                       lifecycle_id, lifecycle_seq, created_at
+                FROM decision_evidence
+                WHERE mode = :mode AND (:run_id IS NULL OR run_id = :run_id)
+                ORDER BY timestamp, symbol, signal_id, COALESCE(lifecycle_seq, 0), lifecycle_state_after, evidence_id
+                """
+            ),
+            {"mode": mode, "run_id": run_id},
+        ).mappings().all()
+    return [dict(row) for row in rows]
 
 def _attach_rejected_shadow_to_lifecycle(rows: List[LifecycleRow], shadows: List[RejectedShadowEvaluation]) -> None:
     """Annotate rejected lifecycle decisions with shadow labels without accepting them."""
@@ -4921,7 +4946,11 @@ def main():
         }
         adaptive_scope_stats.append(scope_payload)
     _attach_rejected_shadow_to_lifecycle(lifecycle, rejected_shadow)
-    persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle)
+    backtest_database_url = os.getenv("ALPHAFORGE_DATABASE_URL") or os.getenv("ALPHAFORGE_DB_URL") or f"sqlite+pysqlite:///{Path(args.output_dir) / 'alphaforge_backtest.db'}"
+    backtest_run_id = os.getenv("ALPHAFORGE_RUN_ID") or Path(args.output_dir).name
+    backtest_profile_name = os.getenv("ALPHAFORGE_PROFILE_NAME") or Path(args.output_dir).name
+    persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle, database_url=backtest_database_url, run_id=backtest_run_id, profile_name=backtest_profile_name)
+    persisted_decision_evidence_rows = _decision_evidence_rows(backtest_database_url, run_id=backtest_run_id)
     forward_eval_rows = build_forward_evaluation_rows(
         [{**row, "timestamp": _safe_float(row.get("event_ts"), 0.0)} for row in persisted_lifecycle_rows],
         candles_by_symbol,
@@ -4930,7 +4959,7 @@ def main():
     for name, rows in [
         ("order_lifecycle.csv", persisted_lifecycle_rows),
         ("order_backtest_lifecycle.csv", persisted_lifecycle_rows),
-        ("decision_evidence.csv", persisted_lifecycle_rows),
+        ("decision_evidence.csv", persisted_decision_evidence_rows),
         ("order_candidates.csv", candidate_rows),
         ("backtest_orders.csv", candidate_rows),
         ("rejected_orders.csv", rejected),

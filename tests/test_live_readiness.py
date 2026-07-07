@@ -23,6 +23,17 @@ def _seed_valid(session: Session) -> None:
     save_trade_lifecycle_event(session, event_id="e-5", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", lifecycle_state="ENTRY_TRIGGERED", event_ts="2026-01-01T00:00:02Z", previous_lifecycle_state="WAITING_ENTRY_ZONE")
     save_trade_lifecycle_event(session, event_id="e-6", signal_id="s-2", symbol="ETHUSDT", mode="PAPER", lifecycle_state="CANCELLED", event_ts="2026-01-01T00:00:03Z", previous_lifecycle_state="ENTRY_TRIGGERED")
 
+    session.execute(text("""
+        INSERT INTO decision_evidence (
+            evidence_id, mode, timestamp, symbol, side, lifecycle_state_before, lifecycle_state_after,
+            decision, score, raw_rr, effective_rr, expectancy_bucket, reject_reason, diagnostics_json, signal_id, lifecycle_seq, created_at
+        ) VALUES
+            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.2, 'LOW', 'HIGH_SPREAD', '{"spread_pct": 0.01}', 's-1', 2, '2026-01-01T00:00:01Z'),
+            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 1.8, 'HIGH', '', '{"spread_pct": 0.01}', 's-2', 2, '2026-01-01T00:00:01Z')
+        ON CONFLICT(evidence_id) DO NOTHING
+    """))
+    session.commit()
+
 
 def _parity() -> dict[str, object]:
     return {"evidence_status": "COMPLETE", "sample_count": 5, "min_sample_count": 3, "mismatch_count": 0, "missing_field_count": 0, "no_order_submission_verified": True, "no_submit_verified": True, "execution_context_complete": True, "effective_rr_penalty_breakdown_complete": True}
@@ -346,3 +357,26 @@ def test_timesfm_cannot_satisfy_execution_or_order_readiness_by_itself() -> None
     assert gates["timesfm_evidence_safe_non_ordering"].passed is False
     assert gates["exchange_connectivity_healthy"].passed is False
     assert report.verdict != "LIVE_REAL_ORDERS_READY"
+
+
+def test_phase2_readiness_fails_when_decision_evidence_empty_even_if_csv_artifacts_exist(tmp_path) -> None:
+    (tmp_path / "decision_evidence.csv").write_text("evidence_id,decision\ncsv-only,ACCEPT\n")
+    (tmp_path / "order_backtest_lifecycle.csv").write_text("signal_id,lifecycle_state\ncsv-only,SIGNAL_ACCEPTED\n")
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM decision_evidence"))
+    report = _evaluate(engine)
+    checks = {check.name: check for check in report.checks}
+    assert report.qualified is False
+    assert checks["phase2_decision_evidence_rows_present"].passed is False
+    assert any(gate.name == "phase2_persisted_evidence_complete" and not gate.passed for gate in report.gates or [])
+
+
+def test_phase2_readiness_fails_on_decision_evidence_parity_mismatch() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE decision_evidence SET reject_reason='DECISION_PARITY_MISMATCH' WHERE evidence_id='de-1'"))
+    report = _evaluate(engine)
+    check = next(check for check in report.checks if check.name == "phase2_no_decision_parity_mismatch")
+    assert report.qualified is False
+    assert check.passed is False

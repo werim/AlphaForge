@@ -2,11 +2,11 @@
 
 ### Added
 - Added a normalized `decision_evidence` SQL table for lifecycle/export/dashboard reconciliation fields.
-- Added `order_backtest_lifecycle.csv` and `decision_evidence.csv` compatibility exports derived from SQL-persisted lifecycle rows.
+- Added `order_backtest_lifecycle.csv` and `decision_evidence.csv` compatibility exports; `decision_evidence.csv` is exported directly from the durable `decision_evidence` SQL table.
 - Added LIVE readiness checks for Phase 2 lifecycle/reject/accept evidence presence, fake-zero execution evidence, and parity mismatch blockers.
 
 ### Changed
-- BACKTEST lifecycle export now carries diagnostics JSON and normalized evidence fields forward from persisted SQL lifecycle rows.
+- BACKTEST lifecycle export now writes lifecycle/order/decision evidence to the configured durable AlphaForge DB (or an explicit test DB URL) before CSV export.
 - Dashboard BACKTEST artifact parsing now prefers selected-profile persisted summary/lifecycle/rejected evidence and emits specific missing-evidence warnings.
 
 ### Fixed

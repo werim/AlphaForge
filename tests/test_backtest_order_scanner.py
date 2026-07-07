@@ -2046,3 +2046,57 @@ def test_score10_sl_dominance_guard_env_disabled_no_export(monkeypatch, tmp_path
     assert summary["score10_sl_dominance_guard"]["enabled"] is False
     assert not (tmp_path / "score10_sl_dominance_guard.json").exists()
     assert not (tmp_path / "score10_sl_dominance_guard.csv").exists()
+
+
+def test_decision_evidence_persists_to_durable_db_and_csv_reconciles(tmp_path):
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'phase2_evidence.db'}"
+    rows = [
+        bo.LifecycleRow(10, "BTCUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 8.0, 2.0, 100.0, 99.0, 102.0, "NONE", "SIGNAL_CREATED", expectancy_bucket="HIGH"),
+        bo.LifecycleRow(10, "BTCUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 8.0, 2.0, 100.0, 99.0, 102.0, "SIGNAL_CREATED", "WAITING_ENTRY_ZONE", expectancy_bucket="HIGH"),
+        bo.LifecycleRow(11, "ETHUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 2.0, 1.0, 50.0, 49.0, 51.0, "NONE", "SIGNAL_CREATED", expectancy_bucket="LOW"),
+        bo.LifecycleRow(11, "ETHUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 2.0, 1.0, 50.0, 49.0, 51.0, "SIGNAL_CREATED", "SIGNAL_REJECTED", reject_reason="LOW_SCORE", expectancy_bucket="LOW"),
+    ]
+
+    persisted_lifecycle = bo._persist_lifecycle_rows(rows, database_url=db_url)
+    decision_rows = bo._decision_evidence_rows(db_url)
+
+    assert len(persisted_lifecycle) == len(rows)
+    assert len(decision_rows) == len(rows)
+    assert {row["decision"] for row in decision_rows} == {"WAIT", "ACCEPT", "REJECT"}
+
+    with bo.Session(bo.init_db(db_url)) as session:
+        table_count = session.execute(bo.text("SELECT COUNT(*) FROM decision_evidence")).scalar_one()
+        reject_count = session.execute(bo.text("SELECT COUNT(*) FROM decision_evidence WHERE decision='REJECT'")).scalar_one()
+    assert table_count == len(decision_rows)
+    assert reject_count == 1
+
+    out = tmp_path / "decision_evidence.csv"
+    with out.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=bo.resolve_csv_fieldnames(decision_rows, list(decision_rows[0].keys())))
+        writer.writeheader(); writer.writerows(decision_rows)
+    with out.open(newline="") as fh:
+        csv_rows = list(csv.DictReader(fh))
+    assert len(csv_rows) == table_count
+
+
+def test_decision_evidence_unavailable_numeric_fields_are_null_in_sql(tmp_path):
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'phase2_nulls.db'}"
+    rows = [
+        bo.LifecycleRow(12, "ADAUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 3.0, 1.0, 1.0, 0.9, 1.1, "NONE", "SIGNAL_CREATED", spread_pct="UNAVAILABLE_BACKTEST", expected_slippage_pct="UNAVAILABLE_BACKTEST", funding_rate_pct="UNAVAILABLE_BACKTEST", volume_24h_usdt="UNAVAILABLE_BACKTEST", liquidity_score="UNAVAILABLE_BACKTEST"),
+        bo.LifecycleRow(12, "ADAUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 3.0, 1.0, 1.0, 0.9, 1.1, "SIGNAL_CREATED", "SIGNAL_REJECTED", reject_reason="EXECUTION_CONTEXT_UNAVAILABLE", spread_pct="UNAVAILABLE_BACKTEST", expected_slippage_pct="UNAVAILABLE_BACKTEST", funding_rate_pct="UNAVAILABLE_BACKTEST", volume_24h_usdt="UNAVAILABLE_BACKTEST", liquidity_score="UNAVAILABLE_BACKTEST"),
+    ]
+    bo._persist_lifecycle_rows(rows, database_url=db_url)
+    with bo.Session(bo.init_db(db_url)) as session:
+        nulls = session.execute(bo.text("""
+            SELECT COUNT(*) FROM decision_evidence
+            WHERE spread_pct IS NULL AND expected_slippage_pct IS NULL AND funding_rate_pct IS NULL
+              AND volume_24h_usdt IS NULL AND liquidity_score IS NULL
+        """)).scalar_one()
+        zeros = session.execute(bo.text("""
+            SELECT COUNT(*) FROM decision_evidence
+            WHERE COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0
+               OR COALESCE(funding_rate_pct, -999) = 0 OR COALESCE(volume_24h_usdt, -999) = 0
+               OR COALESCE(liquidity_score, -999) = 0
+        """)).scalar_one()
+    assert nulls == 2
+    assert zeros == 0

@@ -8,7 +8,7 @@ The lifecycle exporter already wrote SQL rows, but there was no normalized decis
 
 ### Files changed
 - `src/alphaforge/persistence.py`: added additive `decision_evidence` schema and migration bookkeeping.
-- `backtest_order.py`: persists normalized decision evidence beside lifecycle rows, preserves unavailable numeric execution evidence as NULL, and exports SQL-backed lifecycle/evidence CSV aliases.
+- `backtest_order.py`: persists normalized decision evidence beside lifecycle rows into the configured durable AlphaForge DB (or an explicit test DB URL), preserves unavailable numeric execution evidence as NULL, and exports SQL-backed lifecycle/evidence CSV aliases directly from SQL.
 - `src/alphaforge/dashboard/backtest_control.py`: selected-profile parsing now falls back to `order_backtest_lifecycle.csv`, derives metrics from the same selected summary/lifecycle/rejected evidence, and surfaces specific missing-evidence warnings.
 - `src/alphaforge/live_readiness.py`: added Phase 2 evidence gates for lifecycle/reject/accept persistence, fake-zero execution blockers, and decision parity mismatch blockers.
 - `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: documented Phase 2 evidence authority and remaining blockers.
@@ -29,10 +29,11 @@ The lifecycle exporter already wrote SQL rows, but there was no normalized decis
 - Accepted-but-never-triggered rows remain lifecycle evidence and are not counted as filled trades.
 
 ### Tests added/executed
-- Reused lifecycle/export regression coverage in `tests/test_backtest_order_scanner.py` for SQL-backed lifecycle/reject artifact consistency.
+- Added durable decision-evidence regressions in `tests/test_backtest_order_scanner.py` for cross-session SQL reads, `decision_evidence.csv` row-count reconciliation, and NULL unavailable execution evidence.
+- Added readiness regressions in `tests/test_live_readiness.py` proving SQL-empty `decision_evidence` fails even when CSV artifacts exist and `DECISION_PARITY_MISMATCH` in SQL blocks readiness.
 
 ### Risks and remaining limitations
-- `_persist_lifecycle_rows(...)` still uses an in-memory SQLite engine during artifact generation; Phase 3 should make run/profile durable SQL storage configurable end-to-end.
+- Durable SQL-backed BACKTEST export now writes to `ALPHAFORGE_DATABASE_URL` / `ALPHAFORGE_DB_URL` or an output-directory SQLite DB; Phase 3 should add retention/cleanup policy for accumulated run/profile evidence.
 - Virtual BACKTEST fills remain simulation evidence, not live execution readiness.
 - LIVE remains NOT READY and is not enabled by this patch.
 
