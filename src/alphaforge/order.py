@@ -12,6 +12,7 @@ from alphaforge.ai_brain import AIBrain
 from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
 from alphaforge.effective_rr import calculate_effective_rr
 from alphaforge.config_registry import decision_filter_config
+from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.persistence import (
     fetch_expectancy_stat,
     save_ai_decision_features,
@@ -689,6 +690,38 @@ def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[
         payload["accepted"] = False
         payload["reason"] = reason
         payload["reject_reason"] = reason
+        return payload
+
+    portfolio_snapshot = snapshot_from_state(
+        mode=ctx.mode.value if hasattr(ctx.mode, "value") else str(ctx.mode),
+        symbol=decision.symbol,
+        side=decision.side,
+        candidate_notional=abs(float(decision.entry or 0.0) * float(ctx.market_ctx.get("quantity", ctx.market_ctx.get("qty", 0.0)) or 0.0)) or ctx.market_ctx.get("notional"),
+        equity=float(ctx.market_ctx.get("equity", ctx.balance) or ctx.balance) if ctx.market_ctx.get("equity", ctx.balance) is not None else None,
+        available_balance=float(ctx.market_ctx.get("available_balance", ctx.balance) or ctx.balance) if ctx.market_ctx.get("available_balance", ctx.balance) is not None else None,
+        open_positions=ctx.storage.get("open_positions", {}),
+        config={**dict(config), "default_candidate_notional": abs(float(decision.entry or 0.0) * float(ctx.market_ctx.get("quantity", ctx.market_ctx.get("qty", 0.0)) or 0.0)) or ctx.market_ctx.get("notional") or max(float(ctx.balance or 0.0) * float(ctx.risk_pct or 0.0), 1.0), "reject_unknown_portfolio_risk": config.get("REJECT_UNKNOWN_PORTFOLIO_RISK", False)},
+        now=float(ctx.timestamp),
+        cooldown_until=ctx.storage.get("symbol_cooldown_until", {}),
+        daily_realized_pnl=ctx.storage.get("daily_realized_pnl"),
+        trades_today_symbol=ctx.storage.get("trades_today_symbol"),
+        trades_today_global=ctx.storage.get("trades_today_global"),
+        consecutive_loss_count=ctx.storage.get("consecutive_loss_count"),
+        rolling_drawdown_pct=ctx.storage.get("rolling_drawdown_pct"),
+    )
+    portfolio_decision = evaluate_portfolio_risk({"symbol": decision.symbol, "side": decision.side, "entry": decision.entry, "notional": ctx.market_ctx.get("notional") or max(float(ctx.balance or 0.0) * float(ctx.risk_pct or 0.0), 1.0), "quantity": ctx.market_ctx.get("quantity", ctx.market_ctx.get("qty"))}, portfolio_snapshot, {**dict(config), "reject_unknown_portfolio_risk": config.get("REJECT_UNKNOWN_PORTFOLIO_RISK", False)}, mode=portfolio_snapshot.mode)
+    diagnostics.update({"portfolio_risk": portfolio_decision.diagnostics, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_risk_flags": portfolio_decision.risk_flags})
+    if not portfolio_decision.accepted:
+        reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
+        ctx.diagnostics.update(diagnostics)
+        _audit(ctx, decision, LifecycleState.SIGNAL_CREATED, LifecycleState.SIGNAL_REJECTED, reason)
+        payload = _rejected_cycle_result(reason, candidate=decision, diagnostics=diagnostics)
+        payload["accepted"] = False
+        payload["reason"] = reason
+        payload["reject_reason"] = reason
+        payload["portfolio_reject_reason"] = reason
+        payload["portfolio_risk_state"] = portfolio_decision.risk_state
+        payload["risk_flags"] = portfolio_decision.risk_flags
         return payload
 
     ctx.diagnostics.update(diagnostics)

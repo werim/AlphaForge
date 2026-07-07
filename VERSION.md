@@ -1,5 +1,18 @@
 # AlphaForge Version
 
+- Current version: Phase 4 portfolio risk & exposure engine
+- Current phase: Phase 4 - portfolio exposure caps, correlation guards, and fail-closed portfolio evidence
+- Runtime maturity: BACKTEST/PAPER research runtime with shared portfolio-risk gate; LIVE disabled
+- BACKTEST/PAPER/LIVE alignment: BACKTEST and PAPER now call the shared `evaluate_portfolio_risk` engine after quality/effective-RR and before simulated or paper order placement; LIVE_PRECHECK remains no-submit and LIVE remains blocked
+- Lifecycle coverage: portfolio rejects persist as rejected decisions/lifecycle evidence with explicit portfolio reject reasons
+- Execution realism coverage: Phase 3 effective-RR cost breakdown remains canonical and is not bypassed by portfolio risk
+- Portfolio risk coverage: open/concurrent positions, total/symbol notional, cooldown, daily loss, rolling drawdown, loss clusters, and conservative correlation grouping are represented in `PortfolioRiskSnapshot`; unknown risk can fail closed
+- Known critical risks: full historical backtest accounting/export regeneration is still required to populate all Phase 4 additive evidence at scale; PAPER open-position reconciliation depends on durable broker/exchange state availability
+- Last audit date: 2026-07-07
+- Live readiness verdict: NOT LIVE READY
+
+# AlphaForge Version
+
 - Current version: Phase 3 execution-realism hardening
 - Current phase: Phase 3 - canonical execution cost breakdown and fail-closed readiness evidence
 - Runtime maturity: BACKTEST/PAPER research runtime; LIVE disabled

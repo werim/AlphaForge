@@ -26,6 +26,7 @@ from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconcilia
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
+from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.config import load_config_from_env, runtime_filter_config
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -73,6 +74,12 @@ class RuntimeConfig:
     symbol_cooldown_sec: float = 120.0
     max_notional_exposure: float = 100_000.0
     max_symbol_notional: float = 50_000.0
+    max_open_positions: int = 3
+    max_daily_loss_pct: float = 0.03
+    max_rolling_drawdown_pct: float = 0.08
+    max_correlation_group_exposure: float = 75_000.0
+    max_correlated_positions: int = 2
+    reject_unknown_portfolio_risk: bool = False
     stale_market_data_sec: float = 15.0
     min_rr: float = 1.20
     min_effective_rr: float = 1.10
@@ -573,6 +580,32 @@ class RuntimeOrchestrator:
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject(reject_payload)
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
+            return
+
+        candidate_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
+        if candidate_notional is None:
+            candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
+        inferred_equity = market_ctx.get("equity", market_ctx.get("available_balance"))
+        if inferred_equity is None and not self.config.reject_unknown_portfolio_risk:
+            inferred_equity = self.config.max_notional_exposure
+        snapshot = snapshot_from_state(
+            mode=self.config.execution_mode.value,
+            symbol=selection.symbol,
+            side=str(market_ctx.get("side", signal_payload.get("side", "LONG"))),
+            candidate_notional=candidate_notional,
+            equity=inferred_equity,
+            available_balance=market_ctx.get("available_balance", inferred_equity),
+            open_positions={k: {"notional": v, "side": "LONG"} for k, v in self._active_positions.items()},
+            config=self.config,
+            now=time.time(),
+            cooldown_until=self._symbol_cooldown_until,
+        )
+        portfolio_decision = evaluate_portfolio_risk({"symbol": selection.symbol, "side": market_ctx.get("side"), "entry": market_ctx.get("entry"), "quantity": market_ctx.get("quantity", market_ctx.get("qty")), "notional": candidate_notional}, snapshot, self.config, mode=self.config.execution_mode.value)
+        if not portfolio_decision.accepted:
+            reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            await self._persist_reject(reject_payload)
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
             return
 
         if self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:

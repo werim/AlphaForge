@@ -1,3 +1,28 @@
+## 2026-07-07 - Phase 4 portfolio risk and exposure engine
+
+### Added
+- Canonical `PortfolioRiskSnapshot` / `PortfolioRiskDecision` and shared `evaluate_portfolio_risk` gate.
+- Conservative crypto correlation grouping with unknown symbols mapped to `UNKNOWN_CONSERVATIVE`.
+- Phase 4 readiness checks for portfolio snapshots, persisted portfolio rejects, exposure violations, daily-loss/drawdown guards, correlation evidence, and shared BACKTEST/PAPER engine evidence.
+- Portfolio risk dashboard diagnostics and missing-evidence warnings.
+- Regression tests for portfolio rejection rules, persistence, conservative grouping, and readiness missing-evidence failures.
+
+### Changed
+- BACKTEST/PAPER runtime paths now evaluate portfolio risk after quality/effective-RR checks and before simulated or paper order placement.
+- Order decision and decision evidence schemas add portfolio risk evidence fields without changing existing columns.
+
+### Fixed
+- Closed the gap where a candidate with valid effective RR could bypass portfolio exposure/correlation/drawdown context.
+
+### Removed
+- No live-order behavior was enabled or removed.
+
+### Breaking Changes
+- None. Schema additions remain additive.
+
+### Known Issues
+- Existing artifacts must be regenerated to populate Phase 4 evidence fields. PAPER open-position state still requires durable reconciliation in production environments. LIVE remains NOT READY.
+
 ## 2026-07-07 - PR266 pre-merge fixes
 
 ### Added
