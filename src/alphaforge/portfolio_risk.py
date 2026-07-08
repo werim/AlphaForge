@@ -122,14 +122,15 @@ def evaluate_portfolio_risk(candidate: Mapping[str, Any] | Any, portfolio_snapsh
     notional = _num(cand.get("notional") or cand.get("notional_usdt"), None)
     if notional is None and qty is not None and price is not None: notional = abs(qty * price)
     if notional is None: notional = _num(cfgget("default_candidate_notional"), None)
-    reject_unknown = bool(cfgget("reject_unknown_portfolio_risk", True))
-    diagnostics = {"snapshot": portfolio_snapshot.to_dict(), "candidate_notional": notional}
+    diagnostic_fail_open = bool(cfgget("portfolio_risk_diagnostic_fail_open", False))
+    reject_unknown = bool(cfgget("reject_unknown_portfolio_risk", True)) and not diagnostic_fail_open
+    diagnostics = {"snapshot": portfolio_snapshot.to_dict(), "candidate_notional": notional, "portfolio_risk_diagnostic_fail_open": diagnostic_fail_open}
     flags: list[str] = []
     def fail(reason: str) -> PortfolioRiskDecision:
         return PortfolioRiskDecision(False, reason, flags + [reason], reason, 0.0, 0.0, diagnostics)
     required = [portfolio_snapshot.equity, portfolio_snapshot.open_position_count, portfolio_snapshot.total_notional_exposure, portfolio_snapshot.symbol_notional_exposure]
     if reject_unknown and any(v is None for v in required): return fail("UNKNOWN_PORTFOLIO_RISK")
-    if portfolio_snapshot.equity is None or portfolio_snapshot.equity <= 0: return fail("INVALID_EQUITY")
+    if not diagnostic_fail_open and (portfolio_snapshot.equity is None or portfolio_snapshot.equity <= 0): return fail("INVALID_EQUITY")
     if notional is None or notional <= 0: return fail("INVALID_POSITION_SIZE")
     checks = [
         (portfolio_snapshot.open_position_count, portfolio_snapshot.max_open_positions, 1, "MAX_OPEN_POSITIONS"),
@@ -144,8 +145,123 @@ def evaluate_portfolio_risk(candidate: Mapping[str, Any] | Any, portfolio_snapsh
     if portfolio_snapshot.daily_loss_pct is not None and portfolio_snapshot.max_daily_loss_pct is not None and portfolio_snapshot.daily_loss_pct >= portfolio_snapshot.max_daily_loss_pct: return fail("MAX_DAILY_LOSS")
     if portfolio_snapshot.rolling_drawdown_pct is not None and portfolio_snapshot.max_rolling_drawdown_pct is not None and portfolio_snapshot.rolling_drawdown_pct >= portfolio_snapshot.max_rolling_drawdown_pct: return fail("MAX_ROLLING_DRAWDOWN")
     if (portfolio_snapshot.symbol_cooldown_remaining_sec or 0) > 0: return fail("SYMBOL_COOLDOWN_ACTIVE")
+    max_symbol_trades = cfgget("max_daily_symbol_trades", cfgget("max_symbol_trades_per_day"))
+    if max_symbol_trades is not None and portfolio_snapshot.trades_today_symbol is not None and int(portfolio_snapshot.trades_today_symbol) >= int(max_symbol_trades): return fail("DAILY_SYMBOL_TRADE_LIMIT")
+    max_global_trades = cfgget("max_daily_global_trades", cfgget("max_global_trades_per_day"))
+    if max_global_trades is not None and portfolio_snapshot.trades_today_global is not None and int(portfolio_snapshot.trades_today_global) >= int(max_global_trades): return fail("DAILY_GLOBAL_TRADE_LIMIT")
+    side = str(cand.get("side") or "LONG").upper()
+    same_side_limit = cfgget("max_same_side_exposure")
+    if same_side_limit is not None:
+        current_side = portfolio_snapshot.side_exposure_short if side == "SHORT" else portfolio_snapshot.side_exposure_long
+        if current_side is not None and float(current_side) + float(notional) > float(same_side_limit): return fail("SAME_SIDE_OVEREXPOSURE")
+    net_limit = cfgget("max_net_exposure")
+    if net_limit is not None and portfolio_snapshot.net_exposure is not None:
+        signed = -float(notional) if side == "SHORT" else float(notional)
+        if abs(float(portfolio_snapshot.net_exposure) + signed) > float(net_limit): return fail("NET_EXPOSURE_TOO_HIGH")
     if portfolio_snapshot.loss_cluster_active: return fail("LOSS_CLUSTER_ACTIVE")
     return PortfolioRiskDecision(True, "", [], "ACCEPTED", 1.0, notional, diagnostics)
+
+
+@dataclass(slots=True)
+class BacktestPosition:
+    position_id: str
+    symbol: str
+    side: str
+    notional: float
+    entry_price: float
+    opened_ts: int
+    correlation_group: str
+
+
+@dataclass(slots=True)
+class BacktestPortfolioState:
+    initial_equity: float
+    current_equity: float | None = None
+    peak_equity: float | None = None
+    open_positions: dict[str, BacktestPosition] = field(default_factory=dict)
+    pending_entries: dict[str, float] = field(default_factory=dict)
+    daily_realized_pnl: dict[str, float] = field(default_factory=dict)
+    symbol_daily_trade_counts: dict[str, int] = field(default_factory=dict)
+    global_daily_trade_counts: dict[str, int] = field(default_factory=dict)
+    cooldown_until: dict[str, float] = field(default_factory=dict)
+    consecutive_loss_count: int = 0
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.current_equity is None:
+            self.current_equity = float(self.initial_equity)
+        if self.peak_equity is None:
+            self.peak_equity = float(self.current_equity)
+
+    def _day_key(self, ts: int | float | str | None) -> str:
+        try:
+            raw = float(ts or 0.0)
+        except (TypeError, ValueError):
+            raw = 0.0
+        seconds = raw / 1000.0 if raw > 10_000_000_000 else raw
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime("%Y-%m-%d") if seconds > 0 else "UNKNOWN_DAY"
+
+    def notional_for(self, *, entry: Any, balance: Any | None = None, risk_pct: Any | None = None, risk_scale: Any = 1.0, notional: Any | None = None) -> float | None:
+        explicit = _num(notional, None)
+        if explicit is not None and explicit > 0:
+            return explicit * max(_num(risk_scale, 1.0) or 1.0, 0.0)
+        equity = _num(balance, self.current_equity)
+        pct = _num(risk_pct, None)
+        if equity is None or pct is None:
+            return None
+        scaled = equity * (pct / 100.0) * max(_num(risk_scale, 1.0) or 1.0, 0.0)
+        return scaled if scaled > 0 else None
+
+    def snapshot(self, *, mode: str, symbol: str, side: str = "LONG", config: Mapping[str, Any] | Any | None = None, timestamp: int | float | None = None, candidate_notional: float | None = None) -> PortfolioRiskSnapshot:
+        day = self._day_key(timestamp)
+        symbol_key = f"{symbol}:{day}"
+        total_daily = self.global_daily_trade_counts.get(day)
+        symbol_daily = self.symbol_daily_trade_counts.get(symbol_key)
+        daily_pnl = self.daily_realized_pnl.get(day, 0.0)
+        rolling_dd = None
+        if self.peak_equity and self.current_equity is not None:
+            rolling_dd = max(0.0, (self.peak_equity - self.current_equity) / self.peak_equity)
+        open_map = {pid: {"symbol": p.symbol, "notional": p.notional, "side": p.side} for pid, p in self.open_positions.items()}
+        snap = snapshot_from_state(mode=mode, symbol=symbol, side=side, candidate_notional=candidate_notional, equity=self.current_equity, available_balance=self.current_equity, open_positions={p.symbol: {"notional": p.notional, "side": p.side} for p in self.open_positions.values()}, config=config, now=float(timestamp or 0.0) / 1000.0 if timestamp else None, cooldown_until=self.cooldown_until, daily_realized_pnl=daily_pnl, trades_today_symbol=symbol_daily, trades_today_global=total_daily, consecutive_loss_count=self.consecutive_loss_count, rolling_drawdown_pct=rolling_dd)
+        try:
+            diag = json.loads(snap.diagnostics_json or "{}")
+        except Exception:
+            diag = {}
+        diag.update({"open_positions": open_map, "pending_entries": dict(self.pending_entries), "accounting_source": "BacktestPortfolioState"})
+        snap.diagnostics_json = json.dumps(diag, sort_keys=True)
+        return snap
+
+    def mark_pending(self, position_id: str, notional: float | None) -> None:
+        if notional is not None and notional > 0:
+            self.pending_entries[position_id] = float(notional)
+
+    def open_position(self, *, position_id: str, symbol: str, side: str, notional: float | None, entry_price: float, timestamp: int) -> None:
+        self.pending_entries.pop(position_id, None)
+        if notional is None or notional <= 0:
+            return
+        self.open_positions[position_id] = BacktestPosition(position_id=position_id, symbol=symbol, side=str(side).upper(), notional=float(notional), entry_price=float(entry_price or 0.0), opened_ts=int(timestamp or 0), correlation_group=correlation_group_for_symbol(symbol))
+
+    def close_position(self, *, position_id: str, symbol: str, timestamp: int, net_pnl_usdt: float, close_reason: str) -> None:
+        self.pending_entries.pop(position_id, None)
+        self.open_positions.pop(position_id, None)
+        pnl = float(net_pnl_usdt or 0.0)
+        self.current_equity = float(self.current_equity or 0.0) + pnl
+        self.peak_equity = max(float(self.peak_equity or self.current_equity or 0.0), float(self.current_equity or 0.0))
+        day = self._day_key(timestamp)
+        self.daily_realized_pnl[day] = self.daily_realized_pnl.get(day, 0.0) + pnl
+        if pnl < 0 or str(close_reason).upper() == "SL_HIT":
+            self.consecutive_loss_count += 1
+        elif pnl > 0 or str(close_reason).upper() == "TP_HIT":
+            self.consecutive_loss_count = 0
+
+    def record_trade_count(self, *, symbol: str, timestamp: int) -> None:
+        day = self._day_key(timestamp)
+        self.global_daily_trade_counts[day] = self.global_daily_trade_counts.get(day, 0) + 1
+        key = f"{symbol}:{day}"
+        self.symbol_daily_trade_counts[key] = self.symbol_daily_trade_counts.get(key, 0) + 1
+
+    def cancel_pending(self, position_id: str) -> None:
+        self.pending_entries.pop(position_id, None)
 
 
 def _num(value: Any, default: float | None = 0.0) -> float | None:

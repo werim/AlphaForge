@@ -1,3 +1,37 @@
+## 2026-07-07 PR267 Phase 4 Portfolio Risk Merge Blocker Fix
+
+### Why this patch was needed
+PR267 review found Phase 4 was still incomplete: runtime portfolio risk could fail open by default, BACKTEST did not maintain evolving portfolio accounting, and several declared portfolio reject reasons were not implemented. Unknown equity/exposure could not be treated as safe.
+
+### Root cause
+The prior patch added the evaluator and shallow integration but did not wire a portfolio accounting state into the real BACKTEST loop. Runtime also substituted missing equity with configured notional capacity, creating synthetic safe state.
+
+### Files changed
+- `src/alphaforge/portfolio_risk.py`: adds `BacktestPortfolioState`, daily trade counters, opening/closing accounting, conservative snapshots, diagnostic fail-open flagging, and missing reject rules (`DAILY_SYMBOL_TRADE_LIMIT`, `DAILY_GLOBAL_TRADE_LIMIT`, `SAME_SIDE_OVEREXPOSURE`, `NET_EXPOSURE_TOO_HIGH`).
+- `backtest_order.py`: wires `BacktestPortfolioState` into scan/process/simulation, annotates lifecycle rows with evolving portfolio fields, persists accepted/rejected portfolio evidence to SQL/export rows, and keeps accepted-but-not-triggered entries from consuming filled exposure.
+- `src/alphaforge/runtime.py`: restores fail-closed default, removes synthetic equity substitution, and persists portfolio reject diagnostics.
+- `src/alphaforge/order.py`: defaults unknown portfolio risk to fail-closed unless an explicit diagnostic fail-open override is passed and records that override in diagnostics.
+- `src/alphaforge/live_readiness.py`: strengthens portfolio accounting readiness to require non-static accounting states.
+- `tests/test_phase4_portfolio_risk.py` and `tests/test_runtime.py`: add/adjust regressions for fail-closed unknown state, accounting transitions, daily/same-side/net limits, and explicit runtime portfolio context.
+
+### Runtime behavior changes
+Unknown portfolio equity/exposure now rejects by default in BACKTEST/PAPER/LIVE_PRECHECK. Fail-open is only available via an explicitly named diagnostic/test override and is carried in evaluator diagnostics. LIVE remains disabled and no real order path was enabled.
+
+### Lifecycle and BACKTEST accounting changes
+`BacktestPortfolioState` now tracks current/peak equity, open positions, pending entries, daily realized PnL, rolling drawdown, consecutive losses, trade counters, cooldown map, and correlation-group exposure. Accepted-but-not-triggered candidates do not consume filled exposure; `POSITION_OPENED` adds exposure; `POSITION_CLOSED` releases exposure and updates equity/PnL/drawdown/loss streak; `ENTRY_TIMEOUT`/cancel paths release pending state; open positions remain in the final snapshot until closed.
+
+### Persistence/export changes
+Lifecycle rows, order decisions, and `decision_evidence` receive portfolio snapshot fields, risk flags, portfolio reject reason/state, and diagnostics JSON. BACKTEST exports now carry evolving portfolio evidence instead of static defaults.
+
+### Tests added/executed
+Added Phase 4 accounting/limit regressions and executed requested targeted suites plus full `pytest -q`.
+
+### Remaining limitations / Phase 5 blockers
+PAPER still needs durable broker/exchange open-state reconciliation beyond in-process state. Portfolio state sizing remains based on configured notional/risk inputs available to BACKTEST and should be validated against real venue contract sizing before any LIVE readiness work. LIVE remains NOT READY.
+
+### Push recommendation
+Safe to push after full suite passes. Do not claim LIVE readiness.
+
 ## 2026-07-07 Phase 4 Portfolio Risk & Exposure Engine
 
 ### Why this patch was needed

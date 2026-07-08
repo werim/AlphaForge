@@ -700,7 +700,7 @@ def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[
         equity=float(ctx.market_ctx.get("equity", ctx.balance) or ctx.balance) if ctx.market_ctx.get("equity", ctx.balance) is not None else None,
         available_balance=float(ctx.market_ctx.get("available_balance", ctx.balance) or ctx.balance) if ctx.market_ctx.get("available_balance", ctx.balance) is not None else None,
         open_positions=ctx.storage.get("open_positions", {}),
-        config={**dict(config), "default_candidate_notional": abs(float(decision.entry or 0.0) * float(ctx.market_ctx.get("quantity", ctx.market_ctx.get("qty", 0.0)) or 0.0)) or ctx.market_ctx.get("notional") or max(float(ctx.balance or 0.0) * float(ctx.risk_pct or 0.0), 1.0), "reject_unknown_portfolio_risk": config.get("REJECT_UNKNOWN_PORTFOLIO_RISK", False)},
+        config={**dict(config), "default_candidate_notional": abs(float(decision.entry or 0.0) * float(ctx.market_ctx.get("quantity", ctx.market_ctx.get("qty", 0.0)) or 0.0)) or ctx.market_ctx.get("notional") or max(float(ctx.balance or 0.0) * float(ctx.risk_pct or 0.0), 1.0), "reject_unknown_portfolio_risk": config.get("REJECT_UNKNOWN_PORTFOLIO_RISK", not config.get("PORTFOLIO_RISK_DIAGNOSTIC_FAIL_OPEN", False)), "portfolio_risk_diagnostic_fail_open": config.get("PORTFOLIO_RISK_DIAGNOSTIC_FAIL_OPEN", False)},
         now=float(ctx.timestamp),
         cooldown_until=ctx.storage.get("symbol_cooldown_until", {}),
         daily_realized_pnl=ctx.storage.get("daily_realized_pnl"),
@@ -709,7 +709,7 @@ def evaluate_paper_style_pre_submit(ctx: OrderExecutionContext, config: Mapping[
         consecutive_loss_count=ctx.storage.get("consecutive_loss_count"),
         rolling_drawdown_pct=ctx.storage.get("rolling_drawdown_pct"),
     )
-    portfolio_decision = evaluate_portfolio_risk({"symbol": decision.symbol, "side": decision.side, "entry": decision.entry, "notional": ctx.market_ctx.get("notional") or max(float(ctx.balance or 0.0) * float(ctx.risk_pct or 0.0), 1.0), "quantity": ctx.market_ctx.get("quantity", ctx.market_ctx.get("qty"))}, portfolio_snapshot, {**dict(config), "reject_unknown_portfolio_risk": config.get("REJECT_UNKNOWN_PORTFOLIO_RISK", False)}, mode=portfolio_snapshot.mode)
+    portfolio_decision = evaluate_portfolio_risk({"symbol": decision.symbol, "side": decision.side, "entry": decision.entry, "notional": ctx.market_ctx.get("notional") or max(float(ctx.balance or 0.0) * float(ctx.risk_pct or 0.0), 1.0), "quantity": ctx.market_ctx.get("quantity", ctx.market_ctx.get("qty"))}, portfolio_snapshot, {**dict(config), "reject_unknown_portfolio_risk": config.get("REJECT_UNKNOWN_PORTFOLIO_RISK", not config.get("PORTFOLIO_RISK_DIAGNOSTIC_FAIL_OPEN", False)), "portfolio_risk_diagnostic_fail_open": config.get("PORTFOLIO_RISK_DIAGNOSTIC_FAIL_OPEN", False)}, mode=portfolio_snapshot.mode)
     diagnostics.update({"portfolio_risk": portfolio_decision.diagnostics, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_risk_flags": portfolio_decision.risk_flags})
     if not portfolio_decision.accepted:
         reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"

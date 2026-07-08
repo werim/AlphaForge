@@ -165,7 +165,7 @@ def test_runtime_risk_gate_rejects_stale_market_data() -> None:
     rejects: list[dict] = []
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.5, "tp": 101.2, "rr": 2.0, "side": "LONG", "market_ts": 1.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.5, "tp": 101.2, "rr": 2.0, "side": "LONG", "market_ts": 1.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.BACKTEST, stale_market_data_sec=0.01),
@@ -252,7 +252,7 @@ def test_reconciliation_event_on_timeout_like_execution_state() -> None:
             return {"status": "timeout", "order_id": "abc-1"}
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
@@ -359,7 +359,7 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence() -> None:
     events: list[dict] = []
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -379,7 +379,7 @@ def test_paper_reject_emits_signal_rejected_after_signal_created() -> None:
     rejects: list[dict] = []
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 101.0, "rr": 1.1, "side": "LONG", "market_ts": 9999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0001, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 101.0, "rr": 1.1, "side": "LONG", "market_ts": 9999999999.0, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0001, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -575,7 +575,7 @@ def test_live_precheck_uses_paper_decision_pipeline_and_does_not_submit(tmp_path
     adapter = _MutationTrapAdapter()
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 9999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 9999999999.0, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),

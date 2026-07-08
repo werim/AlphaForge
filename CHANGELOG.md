@@ -1,3 +1,27 @@
+## 2026-07-07 - PR267 Phase 4 portfolio risk blocker fixes
+
+### Added
+- `BacktestPortfolioState` with evolving equity, open-position, pending-entry, daily PnL, drawdown, loss-streak, trade-counter, and correlation exposure accounting.
+- Portfolio reject rules for daily symbol/global trade limits, same-side exposure, and net exposure.
+- Regressions for fail-closed unknown equity, BACKTEST accounting transitions, daily/same-side/net exposure rejects, and runtime explicit portfolio context.
+
+### Changed
+- Runtime portfolio risk now fails closed by default and no longer substitutes max notional as synthetic equity.
+- BACKTEST lifecycle/SQL/export evidence now carries evolving portfolio snapshots for accepted and rejected decisions.
+- Readiness portfolio accounting evidence now rejects static/incomplete accounting states.
+
+### Fixed
+- Fixed fail-open default behavior and incomplete BACKTEST portfolio accounting from the initial Phase 4 patch.
+
+### Removed
+- No LIVE order behavior was enabled or removed.
+
+### Breaking Changes
+- None for schema; additions remain additive. BACKTEST/PAPER candidates without portfolio state now reject unless an explicit diagnostic fail-open override is supplied.
+
+### Known Issues
+- PAPER still requires durable external open-state reconciliation for production-like operation. LIVE remains NOT READY.
+
 ## 2026-07-07 - Phase 4 portfolio risk and exposure engine
 
 ### Added

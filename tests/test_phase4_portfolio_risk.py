@@ -57,3 +57,47 @@ def test_readiness_fails_when_portfolio_evidence_missing(tmp_path):
     names = {c.name: c for c in checks}
     assert names["portfolio_risk_snapshot_present"].passed is False
     assert names["correlation_risk_evidence_present"].passed is False
+
+from alphaforge.portfolio_risk import BacktestPortfolioState
+
+
+def test_unknown_equity_rejects_by_default_and_runtime_no_synthetic_equity():
+    snap = snapshot_from_state(mode="PAPER", symbol="BTCUSDT", side="LONG", equity=None, available_balance=None, open_positions={}, config={"max_notional_exposure": 10000.0}, candidate_notional=1000.0)
+    decision = evaluate_portfolio_risk({"symbol": "BTCUSDT", "entry": 100, "quantity": 10}, snap, {"reject_unknown_portfolio_risk": True})
+    assert not decision.accepted
+    assert decision.reject_reason == "UNKNOWN_PORTFOLIO_RISK"
+    assert decision.diagnostics["snapshot"]["equity"] is None
+
+
+def test_backtest_portfolio_accounting_open_close_loss_win_and_open_at_end():
+    state = BacktestPortfolioState(initial_equity=10_000.0)
+    cfg = {"max_open_positions": 3, "max_notional_exposure": 10_000.0, "max_symbol_notional": 5_000.0, "max_correlation_group_exposure": 8_000.0}
+    snap0 = state.snapshot(mode="BACKTEST", symbol="BTCUSDT", side="LONG", config=cfg, timestamp=1_700_000_000_000, candidate_notional=1000.0)
+    assert snap0.total_notional_exposure == 0.0
+    state.mark_pending("p1", 1000.0)
+    assert state.snapshot(mode="BACKTEST", symbol="BTCUSDT", config=cfg, timestamp=1_700_000_000_000).total_notional_exposure == 0.0
+    state.open_position(position_id="p1", symbol="BTCUSDT", side="LONG", notional=1000.0, entry_price=100.0, timestamp=1_700_000_000_000)
+    snap_open = state.snapshot(mode="BACKTEST", symbol="BTCUSDT", side="LONG", config=cfg, timestamp=1_700_000_000_000)
+    assert snap_open.open_position_count == 1
+    assert snap_open.total_notional_exposure == 1000.0
+    assert snap_open.correlation_group_exposure == 1000.0
+    state.close_position(position_id="p1", symbol="BTCUSDT", timestamp=1_700_000_060_000, net_pnl_usdt=-100.0, close_reason="SL_HIT")
+    snap_loss = state.snapshot(mode="BACKTEST", symbol="BTCUSDT", side="LONG", config=cfg, timestamp=1_700_000_060_000)
+    assert snap_loss.open_position_count == 0
+    assert snap_loss.equity == 9900.0
+    assert snap_loss.daily_realized_pnl == -100.0
+    assert snap_loss.consecutive_loss_count == 1
+    state.open_position(position_id="p2", symbol="ETHUSDT", side="LONG", notional=500.0, entry_price=100.0, timestamp=1_700_000_120_000)
+    state.close_position(position_id="p2", symbol="ETHUSDT", timestamp=1_700_000_180_000, net_pnl_usdt=150.0, close_reason="TP_HIT")
+    assert state.snapshot(mode="BACKTEST", symbol="ETHUSDT", config=cfg, timestamp=1_700_000_180_000).consecutive_loss_count == 0
+    state.open_position(position_id="p3", symbol="SOLUSDT", side="LONG", notional=700.0, entry_price=50.0, timestamp=1_700_000_240_000)
+    assert state.snapshot(mode="BACKTEST", symbol="SOLUSDT", config=cfg, timestamp=1_700_000_300_000).open_position_count == 1
+
+
+def test_daily_trade_same_side_and_net_exposure_rejects():
+    base = _snapshot(open_positions={"ETHUSDT": {"notional": 500, "side": "LONG"}}, trades_today_symbol=2, trades_today_global=5)
+    cand = {"symbol": "BTCUSDT", "side": "LONG", "entry": 100, "quantity": 1}
+    assert evaluate_portfolio_risk(cand, base, {"max_daily_symbol_trades": 2}).reject_reason == "DAILY_SYMBOL_TRADE_LIMIT"
+    assert evaluate_portfolio_risk(cand, base, {"max_daily_global_trades": 5}).reject_reason == "DAILY_GLOBAL_TRADE_LIMIT"
+    assert evaluate_portfolio_risk(cand, base, {"max_same_side_exposure": 550}).reject_reason == "SAME_SIDE_OVEREXPOSURE"
+    assert evaluate_portfolio_risk(cand, base, {"max_net_exposure": 550}).reject_reason == "NET_EXPOSURE_TOO_HIGH"

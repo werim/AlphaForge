@@ -79,7 +79,7 @@ class RuntimeConfig:
     max_rolling_drawdown_pct: float = 0.08
     max_correlation_group_exposure: float = 75_000.0
     max_correlated_positions: int = 2
-    reject_unknown_portfolio_risk: bool = False
+    reject_unknown_portfolio_risk: bool = True
     stale_market_data_sec: float = 15.0
     min_rr: float = 1.20
     min_effective_rr: float = 1.10
@@ -586,8 +586,6 @@ class RuntimeOrchestrator:
         if candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
         inferred_equity = market_ctx.get("equity", market_ctx.get("available_balance"))
-        if inferred_equity is None and not self.config.reject_unknown_portfolio_risk:
-            inferred_equity = self.config.max_notional_exposure
         snapshot = snapshot_from_state(
             mode=self.config.execution_mode.value,
             symbol=selection.symbol,
@@ -658,7 +656,7 @@ class RuntimeOrchestrator:
             await self._reconcile_symbol_state(symbol, result, market_ctx)
             return
         await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
-        self._active_positions[symbol] = float(market_ctx.get("entry", 0.0) or 0.0)
+        self._active_positions[symbol] = float(market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
     async def _persist_live_precheck_evidence(self, symbol: str, signal_payload: Mapping[str, Any], market_ctx: Mapping[str, Any], regime_ctx: Mapping[str, Any], stats_ctx: Mapping[str, Any], score_ctx: Any, order_plan: Any, explanation: str, effective_rr: float) -> None:
@@ -1026,6 +1024,10 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                 funding_rate_pct=payload.get("funding_rate_pct"),
                 orderbook_imbalance=payload.get("orderbook_imbalance"),
                 volatility_regime=payload.get("volatility_regime"),
+                portfolio_reject_reason=payload.get("portfolio_reject_reason"),
+                portfolio_risk_state=payload.get("portfolio_risk_state"),
+                portfolio_diagnostics=payload.get("portfolio_diagnostics"),
+                risk_flags=payload.get("risk_flags"),
             )
             if persisted is None:
                 raise RuntimeError("rejected_decision_artifact_persistence_failed")

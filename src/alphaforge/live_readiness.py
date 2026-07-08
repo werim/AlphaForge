@@ -267,9 +267,10 @@ class LiveReadinessEvaluator:
             correlation_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE correlation_group IS NOT NULL OR correlated_position_count IS NOT NULL")).scalar_one())
             drawdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE rolling_drawdown_pct IS NOT NULL OR daily_loss_pct IS NOT NULL")).scalar_one())
             reconcile_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
+            accounting_distinct_states = int(conn.execute(text("SELECT COUNT(DISTINCT COALESCE(CAST(open_position_count AS TEXT),'') || ':' || COALESCE(CAST(total_notional_exposure AS TEXT),'') || ':' || COALESCE(CAST(portfolio_equity AS TEXT),'')) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
             shared_engine_rows = int(conn.execute(text("SELECT COUNT(DISTINCT mode) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL AND mode IN ('BACKTEST','PAPER')")).scalar_one())
         else:
-            portfolio_snapshot_rows = portfolio_reject_rows = correlation_rows = drawdown_rows = reconcile_rows = shared_engine_rows = 0
+            portfolio_snapshot_rows = portfolio_reject_rows = correlation_rows = drawdown_rows = reconcile_rows = shared_engine_rows = accounting_distinct_states = 0
             accepted_over_position = accepted_over_notional = accepted_over_symbol = accepted_after_daily_loss = accepted_unknown = 1
         checks.append(CheckResult("no_fake_zero_execution_costs", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
         checks.append(CheckResult("portfolio_risk_snapshot_present", portfolio_snapshot_rows > 0, f"portfolio_snapshot_rows={portfolio_snapshot_rows},portfolio_columns={has_portfolio_cols}"))
@@ -281,7 +282,7 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("no_accepted_trade_with_unknown_portfolio_risk", accepted_unknown == 0, f"accepted_unknown_portfolio_risk={accepted_unknown}"))
         checks.append(CheckResult("correlation_risk_evidence_present", correlation_rows > 0, f"correlation_rows={correlation_rows}"))
         checks.append(CheckResult("drawdown_guard_evidence_present", drawdown_rows > 0, f"drawdown_rows={drawdown_rows}"))
-        checks.append(CheckResult("portfolio_accounting_reconciliation_present", reconcile_rows > 0, f"reconcile_rows={reconcile_rows}"))
+        checks.append(CheckResult("portfolio_accounting_reconciliation_present", reconcile_rows > 0 and accounting_distinct_states > 1, f"reconcile_rows={reconcile_rows},distinct_accounting_states={accounting_distinct_states}"))
         checks.append(CheckResult("backtest_and_paper_share_portfolio_risk_engine", shared_engine_rows >= 2, f"modes_with_portfolio_risk={shared_engine_rows}"))
         return checks
 

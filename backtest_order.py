@@ -19,6 +19,7 @@ from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_order_decision, save_signal, save_trade_lifecycle_event
+from alphaforge.portfolio_risk import BacktestPortfolioState, evaluate_portfolio_risk
 from alphaforge.symbol_selector import select_symbol
 from alphaforge.symbols import SymbolListError, normalize_symbol_list
 from alphaforge.historical_market_data import (
@@ -509,6 +510,30 @@ class LifecycleRow:
     rr_available: bool = True
     effective_rr_available: bool = True
     expectancy_available: bool = True
+    portfolio_equity: Any = "UNAVAILABLE_BACKTEST"
+    available_balance: Any = "UNAVAILABLE_BACKTEST"
+    open_position_count: Any = "UNAVAILABLE_BACKTEST"
+    max_open_positions: Any = "UNAVAILABLE_BACKTEST"
+    total_notional_exposure: Any = "UNAVAILABLE_BACKTEST"
+    max_notional_exposure: Any = "UNAVAILABLE_BACKTEST"
+    symbol_notional_exposure: Any = "UNAVAILABLE_BACKTEST"
+    max_symbol_notional: Any = "UNAVAILABLE_BACKTEST"
+    side_exposure_long: Any = "UNAVAILABLE_BACKTEST"
+    side_exposure_short: Any = "UNAVAILABLE_BACKTEST"
+    net_exposure: Any = "UNAVAILABLE_BACKTEST"
+    gross_exposure: Any = "UNAVAILABLE_BACKTEST"
+    daily_realized_pnl: Any = "UNAVAILABLE_BACKTEST"
+    daily_loss_pct: Any = "UNAVAILABLE_BACKTEST"
+    max_daily_loss_pct: Any = "UNAVAILABLE_BACKTEST"
+    rolling_drawdown_pct: Any = "UNAVAILABLE_BACKTEST"
+    consecutive_loss_count: Any = "UNAVAILABLE_BACKTEST"
+    correlation_group: str = "UNAVAILABLE"
+    correlation_group_exposure: Any = "UNAVAILABLE_BACKTEST"
+    correlated_position_count: Any = "UNAVAILABLE_BACKTEST"
+    risk_flags: str = ""
+    portfolio_reject_reason: str = ""
+    portfolio_risk_state: str = ""
+    portfolio_diagnostics_json: str = ""
 
 
 def _is_pre_signal_symbol_reject(row: LifecycleRow, lifecycle_state: str | None = None) -> bool:
@@ -902,7 +927,18 @@ def scan_symbol_backtest(
             mctx.get("execution_ctx"),
             TradingMode.BACKTEST,
         )
-        runtime_result = run_order_cycle(ctx, config={"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": disabled_filters}, recent_stats=context.get("recent_stats", {}))
+        portfolio_state = context.get("portfolio_state")
+        if isinstance(portfolio_state, BacktestPortfolioState):
+            candidate_notional = portfolio_state.notional_for(entry=decision.entry, balance=context.get("balance"), risk_pct=context.get("risk_pct"), notional=mctx.get("notional"))
+            portfolio_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=decision.side, config=context.get("portfolio_config", {}), timestamp=now.timestamp, candidate_notional=candidate_notional)
+            mctx.update({"equity": portfolio_snapshot.equity, "available_balance": portfolio_snapshot.available_balance, "notional": candidate_notional})
+            ctx.storage["open_positions"] = {pid: {"notional": pos.notional, "side": pos.side} for pid, pos in portfolio_state.open_positions.items()}
+            ctx.storage["daily_realized_pnl"] = portfolio_snapshot.daily_realized_pnl
+            ctx.storage["trades_today_symbol"] = portfolio_snapshot.trades_today_symbol
+            ctx.storage["trades_today_global"] = portfolio_snapshot.trades_today_global
+            ctx.storage["consecutive_loss_count"] = portfolio_snapshot.consecutive_loss_count
+            ctx.storage["rolling_drawdown_pct"] = portfolio_snapshot.rolling_drawdown_pct
+        runtime_result = run_order_cycle(ctx, config={"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": disabled_filters, **dict(context.get("portfolio_config", {}))}, recent_stats=context.get("recent_stats", {}))
     except TypeError:
         # Test doubles and older call sites may not accept the newer config kwarg;
         # production runtime still receives the real BACKTEST filter switches above.
@@ -1507,6 +1543,8 @@ def process_backtest_result(
     mode: str = "BACKTEST",
     disabled_backtest_filters: Iterable[str] = (),
     strategy_guardrail_config: Optional[StrategyQualityGuardrailConfig] = None,
+    portfolio_state: BacktestPortfolioState | None = None,
+    portfolio_config: Mapping[str, Any] | None = None,
 ) -> Optional[CandidateOrder]:
     strategy_guardrail_config = strategy_guardrail_config or strategy_guardrail_config_from_env()
     rescue_config = rescue_config or RescueConfig()
@@ -1596,6 +1634,23 @@ def process_backtest_result(
         )
         sim_ctx = {**dict(mctx), **context, "risk_scale": rescue_size_multiplier, "rescue_decision_context": json.dumps(context, sort_keys=True)}
         sim_rows = simulate_candidate(rescued, candles, idx, balance, risk_pct * rescue_size_multiplier, market_ctx=sim_ctx)
+        if portfolio_state is not None:
+            candidate_notional = portfolio_state.notional_for(entry=rescued.entry, balance=balance, risk_pct=risk_pct, risk_scale=rescue_size_multiplier, notional=mctx.get("notional"))
+            position_id = next((r.position_id for r in sim_rows if r.position_id), f"{symbol}:{candle.timestamp}:position")
+            accepted_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=rescued.side, config=portfolio_config or {}, timestamp=candle.timestamp, candidate_notional=candidate_notional)
+            portfolio_state.mark_pending(position_id, candidate_notional)
+            for sim_row in sim_rows:
+                state = str(sim_row.status_after).upper()
+                if state == "POSITION_OPENED":
+                    portfolio_state.open_position(position_id=position_id, symbol=symbol, side=rescued.side, notional=candidate_notional, entry_price=rescued.entry, timestamp=sim_row.timestamp)
+                    portfolio_state.record_trade_count(symbol=symbol, timestamp=sim_row.timestamp)
+                    snap = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=rescued.side, config=portfolio_config or {}, timestamp=sim_row.timestamp, candidate_notional=candidate_notional)
+                elif state == "POSITION_CLOSED":
+                    portfolio_state.close_position(position_id=position_id, symbol=symbol, timestamp=sim_row.timestamp, net_pnl_usdt=sim_row.net_pnl_usdt, close_reason=sim_row.close_reason)
+                    snap = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=rescued.side, config=portfolio_config or {}, timestamp=sim_row.timestamp, candidate_notional=0.0)
+                else:
+                    snap = accepted_snapshot
+                _apply_portfolio_snapshot_to_row(sim_row, snap, "ACCEPTED", [], "", {"accounting_source": "BacktestPortfolioState"})
         lifecycle.extend(sim_rows)
         recent_stats["last_trade_ts_by_symbol"][symbol] = candle.timestamp
         recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
@@ -1838,6 +1893,21 @@ def process_backtest_result(
             }
         )
         return None
+    if portfolio_state is not None:
+        risk_scale = min(1.0, max(0.0, _safe_float(diagnostics.get("risk_scale"), 1.0))) if isinstance(diagnostics, dict) else 1.0
+        candidate_notional = portfolio_state.notional_for(entry=cand.entry, balance=balance, risk_pct=risk_pct, risk_scale=risk_scale, notional=mctx.get("notional"))
+        portfolio_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=cand.side, config=portfolio_config or {}, timestamp=candle.timestamp, candidate_notional=candidate_notional)
+        portfolio_decision = evaluate_portfolio_risk({"symbol": symbol, "side": cand.side, "entry": cand.entry, "notional": candidate_notional}, portfolio_snapshot, portfolio_config or {}, mode="BACKTEST")
+        pdiag = {"portfolio_snapshot": portfolio_snapshot.to_dict(), "portfolio_decision": portfolio_decision.diagnostics}
+        if not portfolio_decision.accepted:
+            reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            row = LifecycleRow(timestamp=candle.timestamp, symbol=symbol, side=cand.side, setup_type=cand.setup_type, setup_reason=cand.setup_reason, regime=cand.regime, score=cand.score, rr=cand.rr, entry=cand.entry, sl=cand.sl, tp=cand.tp, status_before="SIGNAL_CREATED", status_after="SIGNAL_REJECTED", reject_reason=reason, order_type=cand.order_type, expectancy_bucket=cand.expectancy_bucket, volume_24h_usdt=mctx.get("volume_24h_usdt", "UNAVAILABLE_BACKTEST"), spread_pct=mctx.get("spread_pct", "UNAVAILABLE_BACKTEST"), funding_rate_pct=mctx.get("funding_rate_pct", "UNAVAILABLE_BACKTEST"), expected_slippage_pct=mctx.get("expected_slippage_pct", "UNAVAILABLE_BACKTEST"), volatility_regime=str(mctx.get("volatility_regime", "UNAVAILABLE_BACKTEST")), liquidity_score=mctx.get("liquidity_score", "UNAVAILABLE_BACKTEST"), effective_rr=effective_rr, cost_penalty=_safe_float(penalty_breakdown.get("cost_penalty_total"), 0.0), signal_id=signal_id, lifecycle_id=signal_id)
+            _apply_portfolio_snapshot_to_row(row, portfolio_snapshot, portfolio_decision.risk_state, portfolio_decision.risk_flags, reason, pdiag)
+            lifecycle.append(row)
+            rejected.append({"signal_id": signal_id, "lifecycle_state": "SIGNAL_REJECTED", "timestamp": candle.timestamp, "symbol": symbol, "side": cand.side, "setup_type": cand.setup_type, "setup_reason": cand.setup_reason, "regime": cand.regime, "score": cand.score, "rr": cand.rr, "reject_reason": reason, "diagnostics": json.dumps({**(diagnostics if isinstance(diagnostics, dict) else {}), **pdiag}, sort_keys=True), "entry": cand.entry, "sl": cand.sl, "tp": cand.tp, "raw_rr": cand.rr, "effective_rr": effective_rr, "portfolio_reject_reason": reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics_json": json.dumps(pdiag, sort_keys=True), "risk_flags": json.dumps(portfolio_decision.risk_flags, sort_keys=True)})
+            return None
+
     guard_reason = _guardrail_rejection_reason(symbol, candle.timestamp, cand.regime, cand.score, effective_rr, {**dict(mctx), **penalty_breakdown, **({"stop_too_wide_softened": diagnostics.get("stop_too_wide_softened", False)} if isinstance(diagnostics, dict) else {})}, recent_stats, strategy_guardrail_config)
     if guard_reason:
         _append_guardrail_reject(guard_reason, symbol, candle, cand, mctx, effective_rr, diagnostics if isinstance(diagnostics, dict) else {}, lifecycle, rejected, rejection_counts, execution_ctx_missing, _safe_float(penalty_breakdown.get("cost_penalty_total"), 0.0))
@@ -1854,6 +1924,27 @@ def process_backtest_result(
             if key in diagnostics:
                 sim_ctx[key] = diagnostics[key]
     sim_rows = simulate_candidate(cand, candles, idx, balance, risk_pct * risk_scale, market_ctx=sim_ctx)
+    if portfolio_state is not None:
+        candidate_notional = portfolio_state.notional_for(entry=cand.entry, balance=balance, risk_pct=risk_pct, risk_scale=risk_scale, notional=mctx.get("notional"))
+        position_id = next((r.position_id for r in sim_rows if r.position_id), f"{symbol}:{candle.timestamp}:position")
+        accepted_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=cand.side, config=portfolio_config or {}, timestamp=candle.timestamp, candidate_notional=candidate_notional)
+        portfolio_state.mark_pending(position_id, candidate_notional)
+        for sim_row in sim_rows:
+            state = str(sim_row.status_after).upper()
+            if state == "POSITION_OPENED":
+                portfolio_state.open_position(position_id=position_id, symbol=symbol, side=cand.side, notional=candidate_notional, entry_price=cand.entry, timestamp=sim_row.timestamp)
+                portfolio_state.record_trade_count(symbol=symbol, timestamp=sim_row.timestamp)
+                snap = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=cand.side, config=portfolio_config or {}, timestamp=sim_row.timestamp, candidate_notional=candidate_notional)
+            elif state == "POSITION_CLOSED":
+                snap = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=cand.side, config=portfolio_config or {}, timestamp=sim_row.timestamp, candidate_notional=candidate_notional)
+                portfolio_state.close_position(position_id=position_id, symbol=symbol, timestamp=sim_row.timestamp, net_pnl_usdt=sim_row.net_pnl_usdt, close_reason=sim_row.close_reason)
+                snap = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=cand.side, config=portfolio_config or {}, timestamp=sim_row.timestamp, candidate_notional=0.0)
+            elif state in {"ENTRY_TIMEOUT", "CANCELLED", "ORDER_CANCELLED"}:
+                portfolio_state.cancel_pending(position_id)
+                snap = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=cand.side, config=portfolio_config or {}, timestamp=sim_row.timestamp, candidate_notional=0.0)
+            else:
+                snap = accepted_snapshot
+            _apply_portfolio_snapshot_to_row(sim_row, snap, "ACCEPTED", [], "", {"accounting_source": "BacktestPortfolioState"})
     lifecycle.extend(sim_rows)
     recent_stats["last_trade_ts_by_symbol"][symbol] = candle.timestamp
     recent_stats["trades_today_by_symbol"][symbol] = int(recent_stats["trades_today_by_symbol"].get(symbol, 0)) + 1
@@ -1865,6 +1956,35 @@ def process_backtest_result(
         if sim_row.status_after == "POSITION_CLOSED":
             _update_recent_stats_after_close(recent_stats, symbol, sim_row.close_reason)
     return cand
+
+
+def _apply_portfolio_snapshot_to_row(row: LifecycleRow, snapshot: Any, risk_state: str, risk_flags: list[str] | tuple[str, ...], reject_reason: str = "", diagnostics: Mapping[str, Any] | None = None) -> None:
+    row.portfolio_equity = snapshot.equity
+    row.available_balance = snapshot.available_balance
+    row.open_position_count = snapshot.open_position_count
+    row.max_open_positions = snapshot.max_open_positions
+    row.total_notional_exposure = snapshot.total_notional_exposure
+    row.max_notional_exposure = snapshot.max_notional_exposure
+    row.symbol_notional_exposure = snapshot.symbol_notional_exposure
+    row.max_symbol_notional = snapshot.max_symbol_notional
+    row.side_exposure_long = snapshot.side_exposure_long
+    row.side_exposure_short = snapshot.side_exposure_short
+    row.net_exposure = snapshot.net_exposure
+    row.gross_exposure = snapshot.gross_exposure
+    row.daily_realized_pnl = snapshot.daily_realized_pnl
+    row.daily_loss_pct = snapshot.daily_loss_pct
+    row.max_daily_loss_pct = snapshot.max_daily_loss_pct
+    row.rolling_drawdown_pct = snapshot.rolling_drawdown_pct
+    row.consecutive_loss_count = snapshot.consecutive_loss_count
+    row.correlation_group = snapshot.correlation_group or "UNKNOWN_CONSERVATIVE"
+    row.correlation_group_exposure = snapshot.correlation_group_exposure
+    row.correlated_position_count = snapshot.correlated_position_count
+    row.risk_flags = json.dumps(list(risk_flags), sort_keys=True)
+    row.portfolio_reject_reason = reject_reason
+    row.portfolio_risk_state = risk_state
+    payload = dict(diagnostics or {})
+    payload.setdefault("snapshot", snapshot.to_dict() if hasattr(snapshot, "to_dict") else {})
+    row.portfolio_diagnostics_json = json.dumps(payload, sort_keys=True)
 
 
 def _day_key(ts: int) -> str:
@@ -2017,6 +2137,30 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 "rr_available": row.rr_available,
                 "effective_rr_available": row.effective_rr_available,
                 "expectancy_available": row.expectancy_available,
+                "portfolio_equity": row.portfolio_equity,
+                "available_balance": row.available_balance,
+                "open_position_count": row.open_position_count,
+                "max_open_positions": row.max_open_positions,
+                "total_notional_exposure": row.total_notional_exposure,
+                "max_notional_exposure": row.max_notional_exposure,
+                "symbol_notional_exposure": row.symbol_notional_exposure,
+                "max_symbol_notional": row.max_symbol_notional,
+                "side_exposure_long": row.side_exposure_long,
+                "side_exposure_short": row.side_exposure_short,
+                "net_exposure": row.net_exposure,
+                "gross_exposure": row.gross_exposure,
+                "daily_realized_pnl": row.daily_realized_pnl,
+                "daily_loss_pct": row.daily_loss_pct,
+                "max_daily_loss_pct": row.max_daily_loss_pct,
+                "rolling_drawdown_pct": row.rolling_drawdown_pct,
+                "consecutive_loss_count": row.consecutive_loss_count,
+                "correlation_group": row.correlation_group,
+                "correlation_group_exposure": row.correlation_group_exposure,
+                "correlated_position_count": row.correlated_position_count,
+                "risk_flags": row.risk_flags,
+                "portfolio_reject_reason": row.portfolio_reject_reason,
+                "portfolio_risk_state": row.portfolio_risk_state,
+                "portfolio_diagnostics_json": row.portfolio_diagnostics_json,
             }
             effective_rr = row.effective_rr if row.effective_rr is not None else row.rr
             save_signal(
@@ -2053,6 +2197,10 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                     spread_pct=None if row.spread_pct == "UNAVAILABLE_BACKTEST" else row.spread_pct,
                     funding_rate_pct=None if row.funding_rate_pct == "UNAVAILABLE_BACKTEST" else row.funding_rate_pct,
                     volatility_regime=None if row.volatility_regime == "UNAVAILABLE_BACKTEST" else row.volatility_regime,
+                    portfolio_reject_reason=row.portfolio_reject_reason or None,
+                    portfolio_risk_state=row.portfolio_risk_state or None,
+                    portfolio_diagnostics_json=row.portfolio_diagnostics_json or None,
+                    risk_flags=json.loads(row.risk_flags) if isinstance(row.risk_flags, str) and row.risk_flags.startswith("[") else row.risk_flags,
                 )
             save_trade_lifecycle_event(
                 session,
@@ -2085,18 +2233,33 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                         effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason, entry,
                         sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes, volume_24h_usdt,
                         spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score, volatility_regime,
-                        cost_penalty, diagnostics_json, signal_id, order_id, position_id, lifecycle_id, lifecycle_seq, created_at
+                        cost_penalty, diagnostics_json, portfolio_equity, available_balance, open_position_count, max_open_positions,
+                        total_notional_exposure, max_notional_exposure, symbol_notional_exposure, max_symbol_notional,
+                        side_exposure_long, side_exposure_short, net_exposure, gross_exposure, daily_realized_pnl,
+                        daily_loss_pct, max_daily_loss_pct, rolling_drawdown_pct, consecutive_loss_count,
+                        correlation_group, correlation_group_exposure, correlated_position_count, risk_flags,
+                        portfolio_reject_reason, portfolio_risk_state, portfolio_diagnostics_json,
+                        signal_id, order_id, position_id, lifecycle_id, lifecycle_seq, created_at
                     ) VALUES (
                         :evidence_id, :run_id, :profile_id, :profile_name, :mode, :timestamp, :symbol, :side, :setup_type,
                         :setup_reason, :regime, :lifecycle_state_before, :lifecycle_state_after, :decision, :score, :raw_rr,
                         :effective_rr, :expectancy, :expectancy_bucket, :reject_reason, :cancel_reason, :close_reason, :entry,
                         :sl, :tp, :trigger_price, :close_price, :net_pnl_pct, :net_pnl_usdt, :hold_minutes, :volume_24h_usdt,
                         :spread_pct, :funding_rate_pct, :expected_slippage_pct, :liquidity_score, :volatility_regime,
-                        :cost_penalty, :diagnostics_json, :signal_id, :order_id, :position_id, :lifecycle_id, :lifecycle_seq, :created_at
+                        :cost_penalty, :diagnostics_json, :portfolio_equity, :available_balance, :open_position_count, :max_open_positions,
+                        :total_notional_exposure, :max_notional_exposure, :symbol_notional_exposure, :max_symbol_notional,
+                        :side_exposure_long, :side_exposure_short, :net_exposure, :gross_exposure, :daily_realized_pnl,
+                        :daily_loss_pct, :max_daily_loss_pct, :rolling_drawdown_pct, :consecutive_loss_count,
+                        :correlation_group, :correlation_group_exposure, :correlated_position_count, :risk_flags,
+                        :portfolio_reject_reason, :portfolio_risk_state, :portfolio_diagnostics_json,
+                        :signal_id, :order_id, :position_id, :lifecycle_id, :lifecycle_seq, :created_at
                     )
                     ON CONFLICT(evidence_id) DO UPDATE SET
                         decision=excluded.decision, reject_reason=excluded.reject_reason, cancel_reason=excluded.cancel_reason,
-                        close_reason=excluded.close_reason, diagnostics_json=excluded.diagnostics_json
+                        close_reason=excluded.close_reason, diagnostics_json=excluded.diagnostics_json,
+                        portfolio_equity=excluded.portfolio_equity, open_position_count=excluded.open_position_count,
+                        total_notional_exposure=excluded.total_notional_exposure, portfolio_reject_reason=excluded.portfolio_reject_reason,
+                        portfolio_risk_state=excluded.portfolio_risk_state, portfolio_diagnostics_json=excluded.portfolio_diagnostics_json
                     """
                 ),
                 {
@@ -2121,6 +2284,18 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                     "liquidity_score": _sql_nullable_number(row.liquidity_score),
                     "volatility_regime": None if row.volatility_regime == "UNAVAILABLE_BACKTEST" else row.volatility_regime,
                     "cost_penalty": _sql_nullable_number(row.cost_penalty), "diagnostics_json": diagnostics_json,
+                    "portfolio_equity": _sql_nullable_number(row.portfolio_equity), "available_balance": _sql_nullable_number(row.available_balance),
+                    "open_position_count": _sql_nullable_number(row.open_position_count), "max_open_positions": _sql_nullable_number(row.max_open_positions),
+                    "total_notional_exposure": _sql_nullable_number(row.total_notional_exposure), "max_notional_exposure": _sql_nullable_number(row.max_notional_exposure),
+                    "symbol_notional_exposure": _sql_nullable_number(row.symbol_notional_exposure), "max_symbol_notional": _sql_nullable_number(row.max_symbol_notional),
+                    "side_exposure_long": _sql_nullable_number(row.side_exposure_long), "side_exposure_short": _sql_nullable_number(row.side_exposure_short),
+                    "net_exposure": _sql_nullable_number(row.net_exposure), "gross_exposure": _sql_nullable_number(row.gross_exposure),
+                    "daily_realized_pnl": _sql_nullable_number(row.daily_realized_pnl), "daily_loss_pct": _sql_nullable_number(row.daily_loss_pct),
+                    "max_daily_loss_pct": _sql_nullable_number(row.max_daily_loss_pct), "rolling_drawdown_pct": _sql_nullable_number(row.rolling_drawdown_pct),
+                    "consecutive_loss_count": _sql_nullable_number(row.consecutive_loss_count), "correlation_group": None if row.correlation_group == "UNAVAILABLE" else row.correlation_group,
+                    "correlation_group_exposure": _sql_nullable_number(row.correlation_group_exposure), "correlated_position_count": _sql_nullable_number(row.correlated_position_count),
+                    "risk_flags": row.risk_flags or None, "portfolio_reject_reason": row.portfolio_reject_reason or None,
+                    "portfolio_risk_state": row.portfolio_risk_state or None, "portfolio_diagnostics_json": row.portfolio_diagnostics_json or None,
                     "signal_id": signal_id, "order_id": row.order_id or None, "position_id": row.position_id or None,
                     "lifecycle_id": row.lifecycle_id or f"{row.symbol}:{row.timestamp}", "lifecycle_seq": row.lifecycle_seq or (idx + 1),
                     "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2206,6 +2381,30 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                        json_extract(execution_ctx, '$.rr_available') AS rr_available,
                        json_extract(execution_ctx, '$.effective_rr_available') AS effective_rr_available,
                        json_extract(execution_ctx, '$.expectancy_available') AS expectancy_available,
+                       json_extract(execution_ctx, '$.portfolio_equity') AS portfolio_equity,
+                       json_extract(execution_ctx, '$.available_balance') AS available_balance,
+                       json_extract(execution_ctx, '$.open_position_count') AS open_position_count,
+                       json_extract(execution_ctx, '$.max_open_positions') AS max_open_positions,
+                       json_extract(execution_ctx, '$.total_notional_exposure') AS total_notional_exposure,
+                       json_extract(execution_ctx, '$.max_notional_exposure') AS max_notional_exposure,
+                       json_extract(execution_ctx, '$.symbol_notional_exposure') AS symbol_notional_exposure,
+                       json_extract(execution_ctx, '$.max_symbol_notional') AS max_symbol_notional,
+                       json_extract(execution_ctx, '$.side_exposure_long') AS side_exposure_long,
+                       json_extract(execution_ctx, '$.side_exposure_short') AS side_exposure_short,
+                       json_extract(execution_ctx, '$.net_exposure') AS net_exposure,
+                       json_extract(execution_ctx, '$.gross_exposure') AS gross_exposure,
+                       json_extract(execution_ctx, '$.daily_realized_pnl') AS daily_realized_pnl,
+                       json_extract(execution_ctx, '$.daily_loss_pct') AS daily_loss_pct,
+                       json_extract(execution_ctx, '$.max_daily_loss_pct') AS max_daily_loss_pct,
+                       json_extract(execution_ctx, '$.rolling_drawdown_pct') AS rolling_drawdown_pct,
+                       json_extract(execution_ctx, '$.consecutive_loss_count') AS consecutive_loss_count,
+                       json_extract(execution_ctx, '$.correlation_group') AS correlation_group,
+                       json_extract(execution_ctx, '$.correlation_group_exposure') AS correlation_group_exposure,
+                       json_extract(execution_ctx, '$.correlated_position_count') AS correlated_position_count,
+                       json_extract(execution_ctx, '$.risk_flags') AS risk_flags,
+                       json_extract(execution_ctx, '$.portfolio_reject_reason') AS portfolio_reject_reason,
+                       json_extract(execution_ctx, '$.portfolio_risk_state') AS portfolio_risk_state,
+                       json_extract(execution_ctx, '$.portfolio_diagnostics_json') AS portfolio_diagnostics_json,
                        event_ts, created_at, lifecycle_seq, lifecycle_id,
                        payload AS lifecycle_payload,
                        execution_ctx AS diagnostics_json
@@ -4755,6 +4954,22 @@ def main():
         "accepted_trades_by_symbol_regime_day": {},
         "high_vol_accepted_trades_by_day": {},
     }
+    portfolio_config = {
+        "max_open_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_OPEN_POSITIONS", os.getenv("ALPHAFORGE_MAX_OPEN_POSITIONS", "3"))),
+        "max_concurrent_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_CONCURRENT_POSITIONS", os.getenv("ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "3"))),
+        "max_notional_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_NOTIONAL_EXPOSURE", os.getenv("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", str(args.balance)))),
+        "max_symbol_notional": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_SYMBOL_NOTIONAL", os.getenv("ALPHAFORGE_MAX_SYMBOL_NOTIONAL", str(args.balance * 0.5)))),
+        "max_daily_loss_pct": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_DAILY_LOSS_PCT", "0.03")),
+        "max_rolling_drawdown_pct": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_ROLLING_DRAWDOWN_PCT", "0.08")),
+        "max_correlation_group_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_CORRELATION_GROUP_EXPOSURE", str(args.balance * 0.75))),
+        "max_correlated_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_CORRELATED_POSITIONS", "2")),
+        "max_daily_symbol_trades": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_TRADES_SYMBOL_PER_DAY", "2")),
+        "max_daily_global_trades": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_TRADES_GLOBAL_PER_DAY", "6")),
+        "max_same_side_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_SAME_SIDE_EXPOSURE", str(args.balance * 0.75))),
+        "max_net_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_NET_EXPOSURE", str(args.balance))),
+        "reject_unknown_portfolio_risk": True,
+    }
+    portfolio_state = BacktestPortfolioState(initial_equity=float(args.balance))
     rejection_counts: Dict[str, int] = {}
     if not args.offline:
         for symbol, candles in candles_by_symbol.items():
@@ -4842,6 +5057,8 @@ def main():
                     "symbol_meta": symbol_meta,
                     "disabled_backtest_filters": disabled_filters,
                     "min_effective_rr": getattr(getattr(cfg, "runtime", cfg), "min_effective_rr", 1.60),
+                    "portfolio_state": portfolio_state,
+                    "portfolio_config": portfolio_config,
                 }
                 _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})
@@ -4870,6 +5087,8 @@ def main():
                     mode=args.mode,
                     disabled_backtest_filters=disabled_filters,
                     strategy_guardrail_config=strategy_guardrail_config,
+                    portfolio_state=portfolio_state,
+                    portfolio_config=portfolio_config,
                 )
                 if cand:
                     candidates.append(cand)
