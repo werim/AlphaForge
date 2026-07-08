@@ -1,3 +1,30 @@
+## 2026-07-08 - Phase 5 runtime resilience and reconciliation
+
+### Added
+- Canonical `RuntimeStateSnapshot` SQL evidence with instance/startup ids, heartbeat age, kill switch, active positions, pending orders, cooldowns, stale data, orphan/unreconciled state, exchange read-only status, recovery requirement, and fail-closed reason.
+- Runtime recovery and exchange reconciliation event tables.
+- Startup recovery loading for persisted positions, pending orders, cooldowns, kill switch state, unclean shutdown detection, stale pending order fail-closed detection, and DB-unavailable fail-closed state.
+- Phase 5 readiness checks for runtime snapshot presence, heartbeat freshness, recovery state, unclean shutdown, kill switch persistence, orphan/stale-pending state, read-only reconciliation evidence, and runtime DB persistence.
+- Dashboard runtime status fields for snapshot id/status, recovery requirement, unclean shutdown, orphan counts, reconciliation status, exchange read-only status, fail-closed reason, and missing evidence reason.
+- Regression tests for snapshot persistence, recovery detection, stale pending fail-closed behavior, PAPER reconciliation unavailability, BACKTEST not-required reconciliation, and readiness blockers.
+
+### Changed
+- Runtime startup persists startup/operating/clean-shutdown snapshots and refuses trading when recovery, kill switch, stale pending, orphan, unreconciled, unknown exchange, or DB state is unsafe.
+- PAPER/LIVE_PRECHECK reconciliation now treats unsupported or incomplete read-only exchange state as fail-closed evidence; BACKTEST explicitly records `NOT_REQUIRED_BACKTEST`.
+- LIVE readiness remains fail-closed and now requires Phase 5 runtime resilience evidence in addition to prior Phase 1-4 gates.
+
+### Fixed
+- Closed the gap where active/pending runtime state and exchange read-only availability could remain in-memory/dashboard-only and not block acceptance.
+
+### Removed
+- No live order submission, cancellation, modification, strategy, scoring, effective-RR, or portfolio-risk behavior was enabled or removed.
+
+### Breaking Changes
+- None. Schema additions are additive. PAPER/LIVE_PRECHECK deployments without read-only reconciliation evidence now fail closed unless explicitly run in diagnostic mode.
+
+### Known Issues
+- Provider-specific reconciliation coverage depends on adapter support for open orders, positions, and balances. Phase 6 still needs broader operator workflows, manual recovery runbooks, and representative burn-in artifacts. LIVE remains NOT READY.
+
 ## 2026-07-07 - PR267 Phase 4 portfolio risk blocker fixes
 
 ### Added

@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from alphaforge.runtime_heartbeat import evaluate_runtime_heartbeat_freshness
+from alphaforge.runtime_state import latest_runtime_state_snapshot
 from .rollback_queries import fetch_rollback_evidence_status
 
 
@@ -61,6 +62,11 @@ def _column_names(engine: Engine, table_name: str) -> set[str]:
 def fetch_runtime_heartbeat_status(engine: Engine, *, max_age_sec: float = 120.0) -> dict[str, Any]:
     evidence = evaluate_runtime_heartbeat_freshness(engine, max_age_sec=max_age_sec)
     heartbeat = evidence.latest_heartbeat or {}
+    try:
+        runtime_snapshot = latest_runtime_state_snapshot(engine) or {}
+    except Exception as exc:
+        runtime_snapshot = {"missing_evidence_reason": f"runtime_state_snapshot_query_failed:{exc.__class__.__name__}"}
+    missing_reason = "" if runtime_snapshot else "runtime_state_snapshot_missing"
     return {
         "runtime_process_status": evidence.state,
         "runtime_process_status_reason": evidence.reason,
@@ -75,6 +81,17 @@ def fetch_runtime_heartbeat_status(engine: Engine, *, max_age_sec: float = 120.0
         "last_decision_ts": heartbeat.get("last_decision_ts"),
         "active_positions_count": heartbeat.get("active_positions_count"),
         "pending_orders_count": heartbeat.get("pending_orders_count"),
+        "runtime_snapshot_instance_id": runtime_snapshot.get("instance_id"),
+        "runtime_snapshot_status": runtime_snapshot.get("runtime_status"),
+        "runtime_recovery_required": runtime_snapshot.get("recovery_action_required"),
+        "runtime_unclean_shutdown_detected": runtime_snapshot.get("fail_closed_reason") == "UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED",
+        "runtime_orphan_order_count": runtime_snapshot.get("orphan_order_count"),
+        "runtime_orphan_position_count": runtime_snapshot.get("orphan_position_count"),
+        "runtime_reconciliation_status": runtime_snapshot.get("reconciliation_status"),
+        "runtime_exchange_read_only_status": runtime_snapshot.get("exchange_read_only_status"),
+        "runtime_fail_closed_reason": runtime_snapshot.get("fail_closed_reason"),
+        "runtime_last_error": runtime_snapshot.get("last_error"),
+        "runtime_missing_evidence_reason": runtime_snapshot.get("missing_evidence_reason") or missing_reason,
     }
 
 

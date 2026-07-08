@@ -28,6 +28,8 @@ __all__ = [
     "save_rejected_decision_artifact",
     "save_trade_lifecycle_event",
     "save_closed_trade_review",
+    "save_runtime_state_snapshot",
+    "latest_runtime_state_snapshot",
     "save_timesfm_forecast_evidence",
     "upsert_expectancy_stats",
 ]
@@ -353,6 +355,9 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS calibration_labels (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT, run_id TEXT, symbol TEXT, timeframe TEXT, mode TEXT, label TEXT, payload_json TEXT, created_at TEXT)",
         "CREATE TABLE IF NOT EXISTS optimizer_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT UNIQUE, status TEXT, payload_json TEXT, created_at TEXT, updated_at TEXT)",
         "CREATE TABLE IF NOT EXISTS cooldown_states (symbol TEXT PRIMARY KEY, cooldown_remaining_sec INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS runtime_state_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, instance_id TEXT NOT NULL, startup_id TEXT, process_id INTEGER, mode TEXT, requested_mode TEXT, actual_mode TEXT, runtime_status TEXT, heartbeat_age_sec REAL, last_start_time TEXT, last_shutdown_time TEXT, last_error TEXT, kill_switch_active INTEGER, kill_switch_reason TEXT, active_symbols TEXT, active_position_count INTEGER, active_positions TEXT, pending_order_count INTEGER, pending_orders TEXT, cooldown_symbols TEXT, stale_market_data_symbols TEXT, unreconciled_symbols TEXT, orphan_order_count INTEGER, orphan_orders TEXT, orphan_position_count INTEGER, orphan_positions TEXT, unknown_exchange_state INTEGER, exchange_connectivity_status TEXT, exchange_read_only_status TEXT, reconciliation_status TEXT, reconciliation_mismatch_count INTEGER, recovery_action_required INTEGER, fail_closed_reason TEXT, runtime_flags TEXT, diagnostics_json TEXT, created_at TEXT)",
+        "CREATE TABLE IF NOT EXISTS runtime_recovery_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_ts TEXT, instance_id TEXT, startup_id TEXT, mode TEXT, status TEXT, reason TEXT, diagnostics_json TEXT)",
+        "CREATE TABLE IF NOT EXISTS exchange_reconciliation_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_ts TEXT, instance_id TEXT, startup_id TEXT, mode TEXT, status TEXT, mismatch_count INTEGER, orphan_order_count INTEGER, orphan_position_count INTEGER, exchange_read_only_status TEXT, diagnostics_json TEXT)",
     ]
     with engine.begin() as conn:
         for statement in ddl:
@@ -1081,3 +1086,7 @@ def upsert_expectancy_stats(session: Any, table_name: str, key_column: str, key_
         return True
     except Exception:
         return False
+
+
+# Runtime state persistence re-export (Phase 5)
+from alphaforge.runtime_state import latest_runtime_state_snapshot, save_runtime_state_snapshot  # noqa: E402

@@ -27,6 +27,7 @@ from alphaforge.reconciliation import ReconciliationEngine, persist_findings, su
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
+from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, latest_runtime_state_snapshot
 from alphaforge.config import load_config_from_env, runtime_filter_config
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -98,6 +99,9 @@ class RuntimeConfig:
     required_live_exchanges: tuple[str, ...] = ("binance",)
     exchange_connectivity_timeout_sec: float = 2.0
     enable_binance_readonly_reconciliation: bool = False
+    pending_order_timeout_sec: float = 300.0
+    require_exchange_reconciliation_for_paper: bool = True
+    diagnostic_mode: bool = False
 
 
 @dataclass(slots=True)
@@ -137,6 +141,20 @@ class RuntimeOrchestrator:
     _reject_log: deque[dict[str, Any]] = field(init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
     runtime_instance_id: str = field(default_factory=lambda: f"runtime:{uuid.uuid4().hex}", init=False)
+    startup_id: str = field(default_factory=lambda: f"startup:{uuid.uuid4().hex}", init=False)
+    _runtime_status: str = field(default="INITIALIZING", init=False)
+    _last_start_time: str | None = field(default=None, init=False)
+    _last_shutdown_time: str | None = field(default=None, init=False)
+    _last_error: str | None = field(default=None, init=False)
+    _recovery_required: bool = field(default=False, init=False)
+    _fail_closed_reason: str | None = field(default=None, init=False)
+    _unknown_exchange_state: bool = field(default=False, init=False)
+    _reconciliation_status: str = field(default="UNKNOWN", init=False)
+    _exchange_read_only_status: str = field(default="UNKNOWN", init=False)
+    _unreconciled_symbols: set[str] = field(default_factory=set, init=False)
+    _orphan_orders: list[dict[str, Any]] = field(default_factory=list, init=False)
+    _orphan_positions: list[dict[str, Any]] = field(default_factory=list, init=False)
+    _stale_market_data_symbols: set[str] = field(default_factory=set, init=False)
     _last_lifecycle_state_by_symbol: dict[str, str] = field(default_factory=dict, init=False)
     _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
     _active_positions: dict[str, float] = field(default_factory=dict, init=False)
@@ -238,9 +256,106 @@ class RuntimeOrchestrator:
             return self.control_store.is_kill_switch_active()
         return False
 
-    async def start(self) -> None:
+    def _build_runtime_state_snapshot(self, *, status: str | None = None) -> RuntimeStateSnapshot:
+        hb_age = None
+        if self.metrics.last_heartbeat_ts:
+            hb_age = max(0.0, time.time() - self.metrics.last_heartbeat_ts)
+        flags = []
+        if self._recovery_required:
+            flags.append("RECOVERY_REQUIRED")
         if self._kill_switch_active():
+            flags.append("KILL_SWITCH_ACTIVE")
+        if self._unknown_exchange_state and self.config.execution_mode != ExecutionMode.BACKTEST:
+            flags.append("EXCHANGE_STATE_UNKNOWN")
+        return RuntimeStateSnapshot(
+            mode=self.config.execution_mode.value,
+            requested_mode=self.config.execution_mode.value,
+            actual_mode=self.config.execution_mode.value,
+            runtime_status=status or self._runtime_status,
+            heartbeat_age_sec=hb_age,
+            instance_id=self.runtime_instance_id,
+            startup_id=self.startup_id,
+            last_start_time=self._last_start_time,
+            last_shutdown_time=self._last_shutdown_time,
+            last_error=self._last_error,
+            kill_switch_active=self._kill_switch_active(),
+            kill_switch_reason="KILL_SWITCH_ACTIVE" if self._kill_switch_active() else None,
+            active_symbols=sorted(self._active_positions),
+            active_position_count=len(self._active_positions),
+            active_positions=[{"symbol": s, "notional": n} for s, n in sorted(self._active_positions.items())],
+            pending_order_count=len(self._pending_orders),
+            pending_orders=list(self._pending_orders.values()),
+            cooldown_symbols=sorted(s for s, until in self._symbol_cooldown_until.items() if until > time.time()),
+            stale_market_data_symbols=sorted(self._stale_market_data_symbols),
+            unreconciled_symbols=sorted(self._unreconciled_symbols),
+            orphan_order_count=len(self._orphan_orders),
+            orphan_orders=list(self._orphan_orders),
+            orphan_position_count=len(self._orphan_positions),
+            orphan_positions=list(self._orphan_positions),
+            unknown_exchange_state=self._unknown_exchange_state,
+            exchange_connectivity_status="HEALTHY" if self._exchange_health and all(h.connected for h in self._exchange_health) else ("UNKNOWN" if not self._exchange_health else "DEGRADED"),
+            exchange_read_only_status=self._exchange_read_only_status,
+            reconciliation_status=self._reconciliation_status,
+            reconciliation_mismatch_count=len(self._unreconciled_symbols) + len(self._orphan_orders) + len(self._orphan_positions),
+            recovery_action_required=self._recovery_required,
+            fail_closed_reason=self._fail_closed_reason,
+            runtime_flags=flags,
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics)},
+        )
+
+    def _persist_runtime_state_snapshot(self, status: str | None = None) -> None:
+        engine = self._resolve_persistence_engine()
+        if engine is None or not self.metrics.persistence_enabled:
+            return
+        save_runtime_state_snapshot(engine, self._build_runtime_state_snapshot(status=status))
+
+    def _load_recovery_state(self) -> None:
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            self._recovery_required = True; self._fail_closed_reason = "RUNTIME_DB_UNAVAILABLE"; return
+        latest = latest_runtime_state_snapshot(engine)
+        if latest and str(latest.get("runtime_status")) not in {"STOPPED", "CLEAN_SHUTDOWN", "STOPPING"}:
+            self._recovery_required = True
+            self._fail_closed_reason = "UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED"
+            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_REQUIRED", reason=self._fail_closed_reason, diagnostics={"previous": latest})
+        now = time.time()
+        with engine.connect() as conn:
+            for row in conn.execute(text("SELECT symbol, qty, status FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')")).mappings():
+                self._active_positions[str(row['symbol'])] = float(row.get('qty') or 0.0)
+            for row in conn.execute(text("SELECT order_id, symbol, status, created_at FROM orders WHERE UPPER(COALESCE(status,'')) IN ('PENDING','OPEN','ORDER_PLACED','ENTRY_SUBMITTED')")).mappings():
+                self._pending_orders[str(row['symbol'])] = dict(row)
+            for row in conn.execute(text("SELECT symbol, cooldown_remaining_sec FROM cooldown_states WHERE cooldown_remaining_sec > 0")).mappings():
+                self._symbol_cooldown_until[str(row['symbol'])] = now + float(row['cooldown_remaining_sec'] or 0)
+        for order in self._pending_orders.values():
+            # conservative: persisted pending orders without parseable fresh timestamp require recovery
+            self._recovery_required = True; self._fail_closed_reason = self._fail_closed_reason or "STALE_PENDING_ORDER"
+        if self._kill_switch_active():
+            self._recovery_required = True; self._fail_closed_reason = self._fail_closed_reason or "KILL_SWITCH_ACTIVE"
+
+    async def start(self) -> None:
+        self._last_start_time = canonical_utc_timestamp()
+        self._runtime_status = "STARTING"
+        if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK}:
+            allowed_sources = {"EXCHANGE_PUBLIC_MARKET_DATA"}
+            scanner_source = str(self.scanner_source or "UNKNOWN").strip().upper()
+            if not scanner_source or scanner_source == "UNKNOWN":
+                raise RuntimeError("LIVE mode blocked: market scanner provenance is not verified")
+            if scanner_source not in allowed_sources:
+                raise RuntimeError("LIVE mode blocked: exchange-backed market scanner is required")
+            if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
+                raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
+        if self.metrics.persistence_enabled:
+            self._load_recovery_state()
+            self._persist_runtime_state_snapshot("STARTUP")
+        if self._kill_switch_active():
+            self._runtime_status = "RECOVERY_REQUIRED"
+            self._fail_closed_reason = "KILL_SWITCH_ACTIVE"
+            self._persist_runtime_state_snapshot("RECOVERY_REQUIRED")
             raise RuntimeError("KILL_SWITCH_ACTIVE")
+        if self._recovery_required:
+            self._runtime_status = "RECOVERY_REQUIRED"
+            self._persist_runtime_state_snapshot("RECOVERY_REQUIRED")
+            raise RuntimeError(self._fail_closed_reason or "RUNTIME_RECOVERY_REQUIRED")
         if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK}:
             allowed_sources = {"EXCHANGE_PUBLIC_MARKET_DATA"}
             scanner_source = str(self.scanner_source or "UNKNOWN").strip().upper()
@@ -253,7 +368,19 @@ class RuntimeOrchestrator:
             await self._run_live_exchange_connectivity_gate()
             if self.config.execution_mode == ExecutionMode.LIVE and self.config.require_live_qualification:
                 self._persist_runtime_heartbeat()
+                self._persist_runtime_state_snapshot("OPERATING")
                 await self._run_live_qualification_gate()
+        if self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
+            await self._run_reconciliation_once()
+            if self._fail_closed_reason and not self.config.diagnostic_mode:
+                self._persist_runtime_state_snapshot("RECOVERY_REQUIRED")
+                raise RuntimeError(self._fail_closed_reason)
+        elif self.config.execution_mode == ExecutionMode.BACKTEST:
+            self._unknown_exchange_state = False
+            self._exchange_read_only_status = "NOT_REQUIRED_BACKTEST"
+            self._reconciliation_status = "NOT_REQUIRED_BACKTEST"
+        self._runtime_status = "OPERATING"
+        self._persist_runtime_state_snapshot("OPERATING")
         self._register_signals()
         self._tasks = [
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
@@ -265,7 +392,10 @@ class RuntimeOrchestrator:
         try:
             await self._stop_event.wait()
         finally:
+            self._runtime_status = "STOPPING"
+            self._last_shutdown_time = canonical_utc_timestamp()
             self._persist_runtime_heartbeat(runtime_state="STOPPING")
+            self._persist_runtime_state_snapshot("CLEAN_SHUTDOWN")
             await self._shutdown_tasks()
 
     def _on_task_done(self, task: asyncio.Task[Any]) -> None:
@@ -308,7 +438,7 @@ class RuntimeOrchestrator:
             if evidence_status == "COMPLETE":
                 snapshot = self._reconciliation_engine.snapshot_from_source(provider_snapshot)
                 findings, _recommendations, _metrics = self._reconciliation_engine.reconcile(
-                    intended_orders=list(self._pending_orders.values()),
+                    intended_orders=[] if self._exchange_read_only_status == "LOCAL_ONLY" else list(self._pending_orders.values()),
                     lifecycle_state_by_symbol=self._last_lifecycle_state_by_symbol,
                     snapshot=snapshot,
                     mode=ExecutionMode.LIVE.value,
@@ -785,6 +915,20 @@ class RuntimeOrchestrator:
 
     def _evaluate_runtime_risk(self, symbol: str, market_ctx: Mapping[str, Any]) -> str | None:
         now = time.time()
+        if self._fail_closed_reason:
+            return self._fail_closed_reason
+        if self._recovery_required:
+            return "RUNTIME_RECOVERY_REQUIRED"
+        if self.metrics.last_heartbeat_ts and (now - self.metrics.last_heartbeat_ts) > max(self.config.heartbeat_interval_sec * 3, 120.0):
+            return "HEARTBEAT_STALE"
+        if self.config.execution_mode != ExecutionMode.BACKTEST and self._unknown_exchange_state:
+            return "EXCHANGE_STATE_UNKNOWN"
+        if self._orphan_orders:
+            return "ORPHAN_ORDER_DETECTED"
+        if self._orphan_positions:
+            return "ORPHAN_POSITION_DETECTED"
+        if self._unreconciled_symbols:
+            return "UNRECONCILED_POSITION"
         if self.config.global_kill_switch:
             return "GLOBAL_KILL_SWITCH"
         if len(self._active_positions) >= self.config.max_concurrent_positions:
@@ -794,6 +938,7 @@ class RuntimeOrchestrator:
         market_ts_raw = market_ctx.get("market_ts", now)
         market_ts = float(now if market_ts_raw in (None, "") else market_ts_raw)
         if (now - market_ts) > self.config.stale_market_data_sec:
+            self._stale_market_data_symbols.add(symbol)
             return "STALE_MARKET_DATA"
         spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
         if spread_pct > self.config.max_spread_pct:
@@ -826,6 +971,7 @@ class RuntimeOrchestrator:
             while not self._stop_event.is_set():
                 self.metrics.last_heartbeat_ts = time.time()
                 self._persist_runtime_heartbeat()
+                self._persist_runtime_state_snapshot("OPERATING")
                 logger.info(
                     "runtime_heartbeat=%s persistence_enabled=%s top_selection_reject_reasons=%s decision_gate_blockers=%s",
                     self.metrics,
@@ -857,29 +1003,63 @@ class RuntimeOrchestrator:
             self.shutdown()
 
     async def _reconcile_runtime_state(self) -> None:
-        if self.config.execution_mode == ExecutionMode.LIVE:
-            if self.live_reconciliation_provider is None:
-                raise RuntimeError("LIVE mode blocked: reconciliation provider is not configured")
-            snapshot_source = dict(self.live_reconciliation_provider.snapshot())
-            if str(snapshot_source.get("evidence_status") or "INCOMPLETE").upper() != "COMPLETE":
-                raise RuntimeError("LIVE mode blocked: reconciliation evidence incomplete")
+        if self.config.execution_mode == ExecutionMode.BACKTEST:
+            self._unknown_exchange_state = False
+            self._exchange_read_only_status = "NOT_REQUIRED_BACKTEST"
+            self._reconciliation_status = "NOT_REQUIRED_BACKTEST"
+            snapshot_source = {"orders": list(self._pending_orders.values()), "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()], "fills": []}
+        elif self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK, ExecutionMode.LIVE}:
+            provider = self.live_reconciliation_provider or self.exchange_snapshot_provider
+            if provider is None:
+                if self.config.execution_mode == ExecutionMode.LIVE:
+                    raise RuntimeError("LIVE mode blocked: reconciliation provider is not configured")
+                if self._pending_orders or self._active_positions:
+                    self._unknown_exchange_state = False
+                    self._exchange_read_only_status = "LOCAL_ONLY"
+                    self._reconciliation_status = "LOCAL_ONLY"
+                    snapshot_source = {"orders": list(self._pending_orders.values()), "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()], "fills": [], "evidence_status": "LOCAL_ONLY"}
+                else:
+                    self._unknown_exchange_state = True
+                    self._exchange_read_only_status = "UNAVAILABLE"
+                    self._reconciliation_status = "EXCHANGE_RECONCILIATION_UNAVAILABLE"
+                    self._fail_closed_reason = "EXCHANGE_RECONCILIATION_UNAVAILABLE"
+                    snapshot_source = {"orders": [], "positions": [], "fills": [], "evidence_status": "INCOMPLETE"}
+            else:
+                snapshot_source = dict(provider.snapshot())
+                complete = str(snapshot_source.get("evidence_status") or "INCOMPLETE").upper() == "COMPLETE"
+                self._unknown_exchange_state = not complete
+                self._exchange_read_only_status = "AVAILABLE" if complete else "UNAVAILABLE"
+                if not complete:
+                    if self.config.execution_mode == ExecutionMode.LIVE:
+                        raise RuntimeError("LIVE mode blocked: reconciliation evidence incomplete")
+                    self._fail_closed_reason = "EXCHANGE_STATE_UNKNOWN"
+                    self._reconciliation_status = "EXCHANGE_STATE_UNKNOWN"
         else:
-            snapshot_source = {
-                "orders": list(self._pending_orders.values()),
-                "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()],
-                "fills": [],
-            }
+            snapshot_source = {"orders": [], "positions": [], "fills": []}
         snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
         findings, recommendations, _metrics = self._reconciliation_engine.reconcile(
-            intended_orders=list(self._pending_orders.values()),
+            intended_orders=[] if self._exchange_read_only_status == "LOCAL_ONLY" else list(self._pending_orders.values()),
             lifecycle_state_by_symbol=self._last_lifecycle_state_by_symbol,
             snapshot=snapshot,
             mode=self.config.execution_mode.value,
         )
+        self._orphan_orders = [dict(getattr(f, "evidence", {}) or {"symbol": f.symbol, "type": f.finding_type}) for f in findings if "ORDER" in str(f.finding_type).upper() and getattr(f, "fail_closed", False)]
+        self._orphan_positions = [dict(getattr(f, "evidence", {}) or {"symbol": f.symbol, "type": f.finding_type}) for f in findings if "POSITION" in str(f.finding_type).upper() and getattr(f, "fail_closed", False)]
+        self._unreconciled_symbols = {str(f.symbol) for f in findings if getattr(f, "fail_closed", False)}
+        if findings and self._fail_closed_reason is None:
+            self._fail_closed_reason = "ORPHAN_ORDER_DETECTED" if self._orphan_orders else ("ORPHAN_POSITION_DETECTED" if self._orphan_positions else "UNRECONCILED_POSITION")
+        if not self._fail_closed_reason:
+            self._unknown_exchange_state = False
+            if self.config.execution_mode != ExecutionMode.BACKTEST:
+                self._reconciliation_status = "CLEAN"
         engine = self._resolve_persistence_engine()
         if engine is not None:
             persist_findings(engine, findings)
+            save_exchange_reconciliation_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status=self._reconciliation_status, mismatch_count=len(findings), orphan_order_count=len(self._orphan_orders), orphan_position_count=len(self._orphan_positions), exchange_read_only_status=self._exchange_read_only_status, diagnostics=snapshot_source)
+            self._persist_runtime_state_snapshot("RECONCILED" if not self._fail_closed_reason else "RECOVERY_REQUIRED")
         for finding in findings:
+            if not finding.fail_closed:
+                continue
             signature = f"{finding.finding_type}:{finding.symbol}:{finding.lifecycle_ref}"
             if signature in self._last_repair_signature:
                 continue

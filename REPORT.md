@@ -1,3 +1,40 @@
+## 2026-07-08 Phase 5 Runtime Resilience, Recovery & Exchange-State Reconciliation
+
+### Root cause summary
+Runtime safety could still drift after Phase 1-4 because active positions, pending orders, cooldowns, recovery status, exchange read-only availability, orphan/mismatch state, and startup/shutdown health were partially in memory or heartbeat-only. A profitable strategy remains unsafe if the runtime cannot prove its local state matches persisted and exchange/account state.
+
+### Files changed
+- `src/alphaforge/runtime_state.py`: adds canonical `RuntimeStateSnapshot`, SQL schema helpers, latest snapshot reader, recovery event writer, and exchange reconciliation event writer.
+- `src/alphaforge/persistence.py`: additively creates `runtime_state_snapshots`, `runtime_recovery_events`, and `exchange_reconciliation_events`; re-exports runtime snapshot helpers.
+- `src/alphaforge/runtime.py`: persists startup/heartbeat/shutdown/reconciliation snapshots, loads persisted positions/orders/cooldowns on startup, detects unclean shutdown and stale pending state, records fail-closed recovery reasons, gates candidates before portfolio risk, and marks BACKTEST reconciliation as not required.
+- `src/alphaforge/live_readiness.py`: adds Phase 5 runtime state checks and an aggregate fail-closed runtime resilience gate.
+- `src/alphaforge/dashboard/queries.py`: exposes runtime snapshot/recovery/reconciliation/orphan/fail-closed evidence and specific missing-evidence reasons.
+- `tests/test_phase5_runtime_resilience.py`: adds regression coverage for persistence, recovery, reconciliation, runtime gate, and readiness blockers.
+
+### Runtime state model before
+Before this patch, heartbeat rows existed for PAPER/LIVE operating evidence, lifecycle events were persisted, orders/positions/cooldowns tables existed, and control-store kill switch state existed. However, the canonical runtime truth for active positions, pending orders, cooldown maps, reconciliation status, unknown exchange state, unclean shutdown, orphan state, and recovery requirement was not a single SQL-backed snapshot consumed by readiness/dashboard.
+
+### Runtime state model after
+`RuntimeStateSnapshot` persists mode/requested/actual mode, runtime status, timestamp, heartbeat age, process/instance/startup ids, start/shutdown/error fields, kill switch state/reason, active symbols/positions, pending orders, cooldowns, stale market-data symbols, unreconciled symbols, orphan orders/positions, unknown exchange state, exchange connectivity/read-only status, reconciliation status/mismatch count, recovery action requirement, fail-closed reason, runtime flags, and diagnostics JSON.
+
+### Recovery and reconciliation flow
+Startup initializes SQL evidence, loads open persisted positions, pending orders, cooldowns, last runtime snapshot, and kill switch state. Non-terminal prior runtime status is treated as `UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED`. Persisted pending orders conservatively require recovery. PAPER/LIVE_PRECHECK attempt read-only reconciliation and fail closed on unavailable/incomplete provider evidence. BACKTEST writes runtime evidence but marks exchange reconciliation `NOT_REQUIRED_BACKTEST`. Reconciliation findings update orphan/unreconciled sets, write `exchange_reconciliation_events`, and snapshot the fail-closed state.
+
+### Fail-closed reject reasons
+Runtime gates now block before portfolio risk/order simulation on `RUNTIME_DB_UNAVAILABLE`, `KILL_SWITCH_ACTIVE`, `RUNTIME_RECOVERY_REQUIRED`, `UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED`, `EXCHANGE_RECONCILIATION_UNAVAILABLE`, `EXCHANGE_STATE_UNKNOWN`, `ORPHAN_ORDER_DETECTED`, `ORPHAN_POSITION_DETECTED`, `STALE_PENDING_ORDER`, `UNRECONCILED_POSITION`, `STALE_MARKET_DATA`, `HEARTBEAT_STALE`, `MODE_MISMATCH`, and `RUNTIME_STATE_UNAVAILABLE`-class conditions. Existing reject persistence writes the runtime reject to `order_decisions`, lifecycle reject evidence, and decision artifacts through the current rejected-decision artifact flow.
+
+### SQL/export fields and tables added
+Additive SQL tables: `runtime_state_snapshots`, `runtime_recovery_events`, and `exchange_reconciliation_events`. Runtime reject evidence continues through existing `order_decisions`, `trade_lifecycle_events`, and `decision_evidence` paths; BACKTEST export contexts inherit rejected order artifact behavior without adding live exchange requirements.
+
+### Tests added/executed
+Added targeted Phase 5 tests for startup snapshot persistence, heartbeat-compatible snapshot freshness, unclean shutdown recovery, stale pending order fail-closed behavior, read-only exchange unavailability in PAPER, BACKTEST `NOT_REQUIRED_BACKTEST`, and readiness blockers for missing/dirty runtime state. Targeted runtime heartbeat and Phase 4 portfolio tests were re-run to verify no lower-gate loosening.
+
+### Remaining blockers for Phase 6
+Adapter-specific read-only reconciliation must be expanded and validated against actual provider capabilities; manual recovery/operator runbooks are still needed; no auto-repair or mutation path exists by design; representative PAPER/LIVE_PRECHECK burn-in artifacts must be regenerated with Phase 5 evidence; LIVE remains disabled and NOT LIVE READY.
+
+### Push recommendation
+Safe to push after targeted/full validation. Do not claim LIVE readiness.
+
 ## 2026-07-07 PR267 Phase 4 Portfolio Risk Merge Blocker Fix
 
 ### Why this patch was needed
