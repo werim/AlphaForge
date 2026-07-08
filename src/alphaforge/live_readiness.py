@@ -102,6 +102,7 @@ class LiveReadinessEvaluator:
         operational = {"alert_delivery_evidence", "observability_coverage"}
         rollback = {"rollback_ready"}
         phase3_execution_realism = {"execution_cost_breakdown_present", "effective_rr_available", "execution_rejects_persisted", "no_accepted_trade_with_effective_rr_below_threshold", "no_accepted_trade_with_missing_critical_execution_context", "no_fake_zero_execution_costs"}
+        phase4_portfolio_risk = {"portfolio_risk_snapshot_present", "portfolio_risk_rejects_persisted", "no_accepted_trade_over_position_limit", "no_accepted_trade_over_notional_limit", "no_accepted_trade_over_symbol_notional_limit", "no_accepted_trade_after_daily_loss_limit", "no_accepted_trade_with_unknown_portfolio_risk", "correlation_risk_evidence_present", "drawdown_guard_evidence_present", "portfolio_accounting_reconciliation_present", "backtest_and_paper_share_portfolio_risk_engine"}
         gates = [
             CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
             CheckResult("reject_persistence_complete", self._checks_pass(checks, reject), "requires rejected decisions and lifecycle reject reasons persisted"),
@@ -109,6 +110,7 @@ class LiveReadinessEvaluator:
             CheckResult("mode_parity_complete", self._checks_pass(checks, parity), "requires BACKTEST/PAPER/LIVE_PRECHECK parity evidence"),
             CheckResult("execution_realism_complete", self._checks_pass(checks, realism), "requires measured selectivity plus non-constant RR/score evidence"),
             CheckResult("phase3_execution_realism_complete", self._checks_pass(checks, phase3_execution_realism), "requires execution cost breakdown, effective RR, execution reject persistence, no fake-zero costs, and no accepted trade with below-threshold/missing execution context"),
+            CheckResult("phase4_portfolio_risk_complete", self._checks_pass(checks, phase4_portfolio_risk), "requires portfolio risk snapshots, persisted portfolio rejects, exposure/drawdown/correlation guards, and BACKTEST/PAPER shared engine evidence"),
             CheckResult("effective_rr_penalty_breakdown_complete", bool(mode_parity.get("effective_rr_penalty_breakdown_complete", False) or mode_parity.get("execution_context_complete", False)), "requires persisted execution-context/effective-RR penalty evidence"),
             CheckResult("exchange_connectivity_healthy", bool(reconciliation.get("exchange_connectivity_healthy", False)), "requires measured healthy exchange connectivity; PAPER success is insufficient"),
             CheckResult("authenticated_reconciliation_evidence_complete", self._checks_pass(checks, reconciliation_checks) and bool(reconciliation.get("authenticated", reconciliation.get("authenticated_reconciliation", False))), "requires authenticated read-only reconciliation evidence"),
@@ -127,7 +129,7 @@ class LiveReadinessEvaluator:
     @staticmethod
     def _verdict_from_gates(gates: list[CheckResult]) -> str:
         passed = {gate.name: gate.passed for gate in gates}
-        lower_gate_names = ["lifecycle_integrity_complete", "reject_persistence_complete", "phase2_persisted_evidence_complete", "mode_parity_complete", "execution_realism_complete", "phase3_execution_realism_complete", "effective_rr_penalty_breakdown_complete", "no_submit_live_precheck_verified"]
+        lower_gate_names = ["lifecycle_integrity_complete", "reject_persistence_complete", "phase2_persisted_evidence_complete", "mode_parity_complete", "execution_realism_complete", "phase3_execution_realism_complete", "phase4_portfolio_risk_complete", "effective_rr_penalty_breakdown_complete", "no_submit_live_precheck_verified"]
         if not all(passed.get(name, False) for name in lower_gate_names):
             return "NOT_LIVE_READY"
         if not passed.get("kill_switch_verified", False):
@@ -250,7 +252,38 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("execution_rejects_persisted", phase3_execution_reject_rows > 0, f"execution_reject_rows={phase3_execution_reject_rows},evidence_rejected={evidence_rejected}"))
         checks.append(CheckResult("no_accepted_trade_with_effective_rr_below_threshold", phase3_low_effective_accepted == 0, f"low_effective_accepted={phase3_low_effective_accepted}"))
         checks.append(CheckResult("no_accepted_trade_with_missing_critical_execution_context", phase3_missing_critical_accepted == 0, f"missing_critical_accepted={phase3_missing_critical_accepted}"))
+        portfolio_cols = []
+        if decision_evidence_exists:
+            portfolio_cols = [str(r[1]) for r in conn.execute(text("PRAGMA table_info(decision_evidence)")).all()]
+        has_portfolio_cols = {"portfolio_equity", "open_position_count", "total_notional_exposure", "portfolio_risk_state", "portfolio_diagnostics_json"}.issubset(set(portfolio_cols))
+        if decision_evidence_exists and has_portfolio_cols:
+            portfolio_snapshot_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL OR portfolio_diagnostics_json IS NOT NULL")).scalar_one())
+            portfolio_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE portfolio_reject_reason IS NOT NULL AND portfolio_reject_reason <> ''")).scalar_one())
+            accepted_over_position = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_open_positions IS NOT NULL AND open_position_count > max_open_positions")).scalar_one()) if "max_open_positions" in portfolio_cols else 1
+            accepted_over_notional = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_notional_exposure IS NOT NULL AND total_notional_exposure > max_notional_exposure")).scalar_one())
+            accepted_over_symbol = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_symbol_notional IS NOT NULL AND symbol_notional_exposure > max_symbol_notional")).scalar_one())
+            accepted_after_daily_loss = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_daily_loss_pct IS NOT NULL AND daily_loss_pct >= max_daily_loss_pct")).scalar_one())
+            accepted_unknown = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND UPPER(COALESCE(portfolio_risk_state,'')) LIKE '%UNKNOWN%'")).scalar_one())
+            correlation_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE correlation_group IS NOT NULL OR correlated_position_count IS NOT NULL")).scalar_one())
+            drawdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE rolling_drawdown_pct IS NOT NULL OR daily_loss_pct IS NOT NULL")).scalar_one())
+            reconcile_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
+            accounting_distinct_states = int(conn.execute(text("SELECT COUNT(DISTINCT COALESCE(CAST(open_position_count AS TEXT),'') || ':' || COALESCE(CAST(total_notional_exposure AS TEXT),'') || ':' || COALESCE(CAST(portfolio_equity AS TEXT),'')) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
+            shared_engine_rows = int(conn.execute(text("SELECT COUNT(DISTINCT mode) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL AND mode IN ('BACKTEST','PAPER')")).scalar_one())
+        else:
+            portfolio_snapshot_rows = portfolio_reject_rows = correlation_rows = drawdown_rows = reconcile_rows = shared_engine_rows = accounting_distinct_states = 0
+            accepted_over_position = accepted_over_notional = accepted_over_symbol = accepted_after_daily_loss = accepted_unknown = 1
         checks.append(CheckResult("no_fake_zero_execution_costs", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
+        checks.append(CheckResult("portfolio_risk_snapshot_present", portfolio_snapshot_rows > 0, f"portfolio_snapshot_rows={portfolio_snapshot_rows},portfolio_columns={has_portfolio_cols}"))
+        checks.append(CheckResult("portfolio_risk_rejects_persisted", portfolio_reject_rows > 0, f"portfolio_reject_rows={portfolio_reject_rows}"))
+        checks.append(CheckResult("no_accepted_trade_over_position_limit", accepted_over_position == 0, f"accepted_over_position={accepted_over_position}"))
+        checks.append(CheckResult("no_accepted_trade_over_notional_limit", accepted_over_notional == 0, f"accepted_over_notional={accepted_over_notional}"))
+        checks.append(CheckResult("no_accepted_trade_over_symbol_notional_limit", accepted_over_symbol == 0, f"accepted_over_symbol={accepted_over_symbol}"))
+        checks.append(CheckResult("no_accepted_trade_after_daily_loss_limit", accepted_after_daily_loss == 0, f"accepted_after_daily_loss={accepted_after_daily_loss}"))
+        checks.append(CheckResult("no_accepted_trade_with_unknown_portfolio_risk", accepted_unknown == 0, f"accepted_unknown_portfolio_risk={accepted_unknown}"))
+        checks.append(CheckResult("correlation_risk_evidence_present", correlation_rows > 0, f"correlation_rows={correlation_rows}"))
+        checks.append(CheckResult("drawdown_guard_evidence_present", drawdown_rows > 0, f"drawdown_rows={drawdown_rows}"))
+        checks.append(CheckResult("portfolio_accounting_reconciliation_present", reconcile_rows > 0 and accounting_distinct_states > 1, f"reconcile_rows={reconcile_rows},distinct_accounting_states={accounting_distinct_states}"))
+        checks.append(CheckResult("backtest_and_paper_share_portfolio_risk_engine", shared_engine_rows >= 2, f"modes_with_portfolio_risk={shared_engine_rows}"))
         return checks
 
     def _check_stats(self, conn: Any) -> list[CheckResult]:

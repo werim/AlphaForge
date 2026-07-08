@@ -150,6 +150,7 @@ class DashboardBacktestResult:
     error_message: str | None = None
     command: list[str] = field(default_factory=list)
     top_rejection_reasons: list[dict[str, Any]] = field(default_factory=list)
+    portfolio_risk_metrics: dict[str, Any] = field(default_factory=dict)
     signal_rows_count: int | None = None
     symbol_selector_reject_count: int | None = None
     score_distribution: dict[str, Any] = field(default_factory=dict)
@@ -580,7 +581,18 @@ def _rejection_diagnostics(rows: list[dict[str, str]]) -> dict[str, Any]:
         expectancy = _safe_float_or_none(row.get("expectancy") if row.get("expectancy") not in (None, "") else row.get("expectancy_bucket"))
         min_score = _safe_float_or_none(row.get("min_required_score")) or 7.5
         return _source_stage(row) == "SIGNAL_ENGINE" and score is not None and rr is not None and expectancy is not None and score >= min_score and rr >= 1.3 and expectancy >= 0.0
+    portfolio_reasons = Counter((row.get("portfolio_reject_reason") or "").strip() for row in rows if (row.get("portfolio_reject_reason") or "").strip())
+    portfolio_rows = [row for row in rows if (row.get("portfolio_reject_reason") or row.get("portfolio_risk_state") or row.get("portfolio_diagnostics_json"))]
+    portfolio_metrics = {
+        "evidence_status": "PRESENT" if portfolio_rows else "MISSING",
+        "missing_evidence_reason": "NO_PORTFOLIO_RISK_FIELDS_IN_REJECTED_ORDERS" if not portfolio_rows else "",
+        "portfolio_reject_reason_counts": _counter_rows(portfolio_reasons),
+        "correlation_overexposure_count": portfolio_reasons.get("CORRELATION_OVEREXPOSURE", 0),
+        "unknown_portfolio_risk_count": portfolio_reasons.get("UNKNOWN_PORTFOLIO_RISK", 0),
+        "accepted_trade_count_rejected_by_portfolio_risk": sum(portfolio_reasons.values()),
+    }
     return {
+        "portfolio_risk_metrics": portfolio_metrics,
         "top_rejection_reasons": [{"reason": reason, "count": count, "ratio": (count / total if total else None)} for reason, count in reasons.most_common(8)],
         "signal_rows_count": signal_rows,
         "symbol_selector_reject_count": selector_rows,
@@ -1370,6 +1382,8 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
 
     diagnostics = _rejection_diagnostics(rejected_rows)
     result.top_rejection_reasons = diagnostics["top_rejection_reasons"]
+    result.portfolio_risk_metrics = diagnostics.get("portfolio_risk_metrics", {})
+    result.portfolio_risk_metrics = diagnostics.get("portfolio_risk_metrics", {})
     result.signal_rows_count = diagnostics["signal_rows_count"]
     result.symbol_selector_reject_count = diagnostics["symbol_selector_reject_count"]
     result.score_distribution = diagnostics["score_distribution"]
@@ -1852,6 +1866,7 @@ def run_dashboard_backtest(request: DashboardBacktestRequest) -> DashboardBackte
     result.max_drawdown = None
     diagnostics = _rejection_diagnostics(rejected_rows)
     result.top_rejection_reasons = diagnostics["top_rejection_reasons"]
+    result.portfolio_risk_metrics = diagnostics.get("portfolio_risk_metrics", {})
     result.signal_rows_count = diagnostics["signal_rows_count"]
     result.symbol_selector_reject_count = diagnostics["symbol_selector_reject_count"]
     result.score_distribution = diagnostics["score_distribution"]

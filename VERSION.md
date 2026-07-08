@@ -1,14 +1,16 @@
 # AlphaForge Version
 
-- Current version: Phase 3 execution-realism hardening
-- Current phase: Phase 3 - canonical execution cost breakdown and fail-closed readiness evidence
-- Runtime maturity: BACKTEST/PAPER research runtime; LIVE disabled
-- BACKTEST/PAPER/LIVE alignment: shared pre-submit decision boundary with explicit execution evidence; LIVE_PRECHECK still requires conservative/measured context
-- Lifecycle coverage: accepted/rejected lifecycle rows and decision evidence remain SQL-backed
-- Execution realism coverage: spread, slippage, fee, funding, latency, liquidity, and volatility penalties are explicit in `ExecutionCostBreakdown`; missing values remain unavailable/null
-- Known critical risks: historical execution data can be incomplete; PAPER measured latency/liquidity evidence still needs sustained burn-in; authenticated reconciliation is not complete
+- Current version: Phase 4 portfolio risk & exposure engine - PR267 blocker fixes
+- Current phase: Phase 4 - fail-closed portfolio risk with BACKTEST accounting wired
+- Runtime maturity: BACKTEST/PAPER research runtime with shared portfolio-risk gate; LIVE disabled
+- BACKTEST/PAPER/LIVE alignment: BACKTEST and PAPER call the shared portfolio evaluator after quality/effective-RR; unknown portfolio state rejects by default; LIVE_PRECHECK remains no-submit and LIVE remains blocked
+- Lifecycle coverage: BACKTEST portfolio accounting now annotates accepted/rejected lifecycle evidence with evolving exposure/equity fields
+- Execution realism coverage: Phase 3 effective-RR cost breakdown remains canonical and is not bypassed by portfolio risk
+- Portfolio risk coverage: position/notional/symbol/side/net exposure, daily trade limits, daily loss, rolling drawdown, loss streaks, cooldown state, and conservative correlation grouping are represented in snapshots
+- Known critical risks: PAPER durable broker/exchange open-state reconciliation remains incomplete; venue-specific contract sizing needs further validation before any LIVE readiness claim
 - Last audit date: 2026-07-07
 - Live readiness verdict: NOT LIVE READY
+
 
 ## 2026-07-06 Phase 2 SQL-backed Evidence Consistency
 
