@@ -9,6 +9,7 @@ import os
 import signal
 import time
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
@@ -267,6 +268,8 @@ class RuntimeOrchestrator:
             flags.append("KILL_SWITCH_ACTIVE")
         if self._unknown_exchange_state and self.config.execution_mode != ExecutionMode.BACKTEST:
             flags.append("EXCHANGE_STATE_UNKNOWN")
+        if self._exchange_read_only_status == "LOCAL_ONLY":
+            flags.append("LOCAL_ONLY_DIAGNOSTIC_RECONCILIATION")
         return RuntimeStateSnapshot(
             mode=self.config.execution_mode.value,
             requested_mode=self.config.execution_mode.value,
@@ -300,7 +303,7 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics)},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY"},
         )
 
     def _persist_runtime_state_snapshot(self, status: str | None = None) -> None:
@@ -308,6 +311,20 @@ class RuntimeOrchestrator:
         if engine is None or not self.metrics.persistence_enabled:
             return
         save_runtime_state_snapshot(engine, self._build_runtime_state_snapshot(status=status))
+
+    @staticmethod
+    def _parse_runtime_ts(raw: Any) -> float | None:
+        if raw in (None, ""):
+            return None
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        text_value = str(raw).strip()
+        if not text_value:
+            return None
+        try:
+            return datetime.fromisoformat(text_value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
 
     def _load_recovery_state(self) -> None:
         engine = self._resolve_persistence_engine()
@@ -326,9 +343,19 @@ class RuntimeOrchestrator:
                 self._pending_orders[str(row['symbol'])] = dict(row)
             for row in conn.execute(text("SELECT symbol, cooldown_remaining_sec FROM cooldown_states WHERE cooldown_remaining_sec > 0")).mappings():
                 self._symbol_cooldown_until[str(row['symbol'])] = now + float(row['cooldown_remaining_sec'] or 0)
+        stale_orders: list[dict[str, Any]] = []
         for order in self._pending_orders.values():
-            # conservative: persisted pending orders without parseable fresh timestamp require recovery
-            self._recovery_required = True; self._fail_closed_reason = self._fail_closed_reason or "STALE_PENDING_ORDER"
+            created_ts = self._parse_runtime_ts(order.get("created_at"))
+            age_sec = None if created_ts is None else max(0.0, now - created_ts)
+            order["recovery_age_sec"] = age_sec
+            if age_sec is None or age_sec > float(self.config.pending_order_timeout_sec):
+                reason = "MISSING_OR_UNPARSEABLE_CREATED_AT" if age_sec is None else "PENDING_ORDER_TIMEOUT_EXCEEDED"
+                order["stale_reason"] = reason
+                stale_orders.append({"order_id": order.get("order_id"), "symbol": order.get("symbol"), "created_at": order.get("created_at"), "age_sec": age_sec, "timeout_sec": self.config.pending_order_timeout_sec, "reason": reason})
+        if stale_orders:
+            self._recovery_required = True
+            self._fail_closed_reason = self._fail_closed_reason or "STALE_PENDING_ORDER"
+            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_REQUIRED", reason="STALE_PENDING_ORDER", diagnostics={"stale_pending_orders": stale_orders})
         if self._kill_switch_active():
             self._recovery_required = True; self._fail_closed_reason = self._fail_closed_reason or "KILL_SWITCH_ACTIVE"
 
@@ -1013,17 +1040,17 @@ class RuntimeOrchestrator:
             if provider is None:
                 if self.config.execution_mode == ExecutionMode.LIVE:
                     raise RuntimeError("LIVE mode blocked: reconciliation provider is not configured")
-                if self._pending_orders or self._active_positions:
+                if self.config.diagnostic_mode:
                     self._unknown_exchange_state = False
                     self._exchange_read_only_status = "LOCAL_ONLY"
-                    self._reconciliation_status = "LOCAL_ONLY"
-                    snapshot_source = {"orders": list(self._pending_orders.values()), "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()], "fills": [], "evidence_status": "LOCAL_ONLY"}
+                    self._reconciliation_status = "LOCAL_ONLY_DIAGNOSTIC"
+                    snapshot_source = {"orders": list(self._pending_orders.values()), "positions": [{"symbol": s, "qty": q} for s, q in self._active_positions.items()], "fills": [], "evidence_status": "LOCAL_ONLY_DIAGNOSTIC", "diagnostic_override": True}
                 else:
                     self._unknown_exchange_state = True
                     self._exchange_read_only_status = "UNAVAILABLE"
                     self._reconciliation_status = "EXCHANGE_RECONCILIATION_UNAVAILABLE"
                     self._fail_closed_reason = "EXCHANGE_RECONCILIATION_UNAVAILABLE"
-                    snapshot_source = {"orders": [], "positions": [], "fills": [], "evidence_status": "INCOMPLETE"}
+                    snapshot_source = {"orders": [], "positions": [], "fills": [], "evidence_status": "INCOMPLETE", "blocking_reason": "EXCHANGE_RECONCILIATION_UNAVAILABLE"}
             else:
                 snapshot_source = dict(provider.snapshot())
                 complete = str(snapshot_source.get("evidence_status") or "INCOMPLETE").upper() == "COMPLETE"

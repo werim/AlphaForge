@@ -1,13 +1,13 @@
 # AlphaForge Version
 
-- Current version: Phase 5 runtime resilience, recovery, and exchange-state reconciliation
-- Current phase: Phase 5 - persisted runtime state, fail-closed recovery, read-only reconciliation evidence
-- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed runtime snapshots; PAPER/LIVE_PRECHECK fail closed on unknown exchange state; LIVE disabled
-- BACKTEST/PAPER/LIVE alignment: BACKTEST records runtime state with reconciliation marked NOT_REQUIRED_BACKTEST; PAPER/LIVE_PRECHECK require persisted startup/heartbeat/reconciliation evidence before trading; LIVE remains blocked by readiness and operator gates
-- Lifecycle coverage: runtime rejects are persisted through order decisions and lifecycle reject artifacts; startup, heartbeat, reconciliation, stale/orphan, and recovery state are persisted as SQL evidence
+- Current version: Phase 5 runtime resilience - PR268 fail-closed reconciliation/readiness fixes
+- Current phase: Phase 5 - pre-merge blocker hardening for runtime recovery and exchange-state evidence
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed runtime snapshots; PAPER/LIVE_PRECHECK fail closed without read-only exchange evidence; LIVE disabled
+- BACKTEST/PAPER/LIVE alignment: BACKTEST records `NOT_REQUIRED_BACKTEST`; PAPER/LIVE_PRECHECK require provider-backed read-only reconciliation unless explicit diagnostic mode records LOCAL_ONLY override; LIVE remains blocked
+- Lifecycle coverage: runtime rejects and reconciliation blockers continue through persisted decision/lifecycle evidence without exchange mutation
 - Execution realism coverage: Phase 3 effective-RR cost breakdown remains canonical and is not bypassed by runtime resilience gates
-- Runtime resilience coverage: canonical RuntimeStateSnapshot includes instance/startup ids, heartbeat age, kill switch, active/pending/cooldown state, stale symbols, orphan/unreconciled state, exchange read-only/reconciliation status, recovery requirement, fail-closed reason, and diagnostics
-- Known critical risks: adapter-specific authenticated read-only reconciliation breadth remains dependent on provider support; no auto-repair or mutation is implemented; representative PAPER burn-in evidence must be regenerated with Phase 5 snapshots
+- Runtime resilience coverage: missing runtime snapshots never satisfy readiness; pending-order recovery uses configured timeout and records stale diagnostics
+- Known critical risks: diagnostic LOCAL_ONLY is not production-safe exchange truth; adapter-specific read-only reconciliation coverage still requires provider validation
 - Last audit date: 2026-07-08
 - Live readiness verdict: NOT LIVE READY
 

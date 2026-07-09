@@ -1,3 +1,29 @@
+## 2026-07-08 - PR268 Phase 5 pre-merge blocker fixes
+
+### Added
+- Regressions proving PAPER/LIVE_PRECHECK fail closed without a read-only reconciliation provider, even with local pending/open state.
+- Diagnostic-mode-only LOCAL_ONLY reconciliation override evidence with explicit runtime flags and diagnostics.
+- Pending-order recovery tests for fresh, expired, and malformed timestamps.
+- Readiness regression proving missing `runtime_state_snapshots` fails even when legacy decision/lifecycle evidence exists.
+
+### Changed
+- PAPER/LIVE_PRECHECK no longer treat local pending/open state as exchange truth unless `diagnostic_mode=True`.
+- Startup recovery now parses pending-order `created_at` and compares age to `pending_order_timeout_sec` before marking `STALE_PENDING_ORDER`.
+- LIVE readiness test fixtures now seed a real `RuntimeStateSnapshot` instead of relying on a production readiness bypass.
+
+### Fixed
+- Removed the legacy-fixture Phase 5 readiness bypass that could pass missing runtime snapshot evidence.
+- Fixed fail-closed exchange reconciliation behavior for PAPER/LIVE_PRECHECK provider absence.
+
+### Removed
+- Removed production readiness compatibility logic that marked missing runtime snapshots as passing.
+
+### Breaking Changes
+- None. Operators must provide Phase 5 runtime snapshot evidence for readiness; legacy decision/lifecycle evidence alone is insufficient.
+
+### Known Issues
+- Diagnostic LOCAL_ONLY remains non-production evidence only and cannot satisfy exchange/account reconciliation safety for operations. LIVE remains NOT READY.
+
 ## 2026-07-08 - Phase 5 runtime resilience and reconciliation
 
 ### Added

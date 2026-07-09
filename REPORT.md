@@ -1,3 +1,33 @@
+## 2026-07-08 PR268 Phase 5 Pre-merge Blocker Fixes
+
+### Root cause summary
+The initial Phase 5 patch still had three unsafe shortcuts: PAPER/LIVE_PRECHECK could continue in LOCAL_ONLY mode when no read-only provider existed and local state was present; readiness could pass missing runtime snapshot evidence for legacy fixtures; and pending-order recovery labelled every persisted pending order stale without checking configured timeout.
+
+### Files changed
+- `src/alphaforge/runtime.py`: removes production LOCAL_ONLY reconciliation, restricts it to diagnostic mode with explicit snapshot flags/diagnostics, and parses pending-order timestamps against `pending_order_timeout_sec`.
+- `src/alphaforge/live_readiness.py`: removes the legacy-fixture missing-snapshot bypass so missing runtime snapshots fail Phase 5 readiness.
+- `tests/test_phase5_runtime_resilience.py`: adds blocker regressions for provider absence, diagnostic override evidence, missing snapshot readiness, and pending-order timestamp age handling.
+- `tests/test_live_readiness.py`: seeds real Phase 5 runtime snapshots for historical readiness fixtures.
+- `tests/test_reconciliation.py`: scopes legacy local-only reconciliation repair behavior to explicit diagnostic mode.
+
+### Runtime behavior changes
+PAPER and LIVE_PRECHECK now set `exchange_read_only_status=UNAVAILABLE`, `reconciliation_status=EXCHANGE_RECONCILIATION_UNAVAILABLE`, `unknown_exchange_state=True`, and `fail_closed_reason=EXCHANGE_RECONCILIATION_UNAVAILABLE` whenever no read-only provider is available. LOCAL_ONLY is permitted only under `diagnostic_mode=True` and is tagged as `LOCAL_ONLY_DIAGNOSTIC_RECONCILIATION` in runtime flags/diagnostics. LIVE remains blocked.
+
+### Recovery changes
+Persisted pending orders now parse `created_at` safely. Fresh pending orders load without a stale label; orders older than `pending_order_timeout_sec` are marked `STALE_PENDING_ORDER`; missing or malformed timestamps fail closed with explicit stale diagnostics.
+
+### Readiness changes
+Missing `runtime_state_snapshots` now always returns failing Phase 5 checks and keeps the verdict `NOT_LIVE_READY`; legacy order/lifecycle evidence is not accepted as runtime resilience evidence.
+
+### Tests added/executed
+Added and updated tests for provider absence in PAPER/LIVE_PRECHECK, diagnostic LOCAL_ONLY evidence, readiness missing snapshots despite legacy evidence, fresh/old/malformed pending order recovery, and the updated full suite.
+
+### Remaining risks
+Read-only reconciliation still depends on adapter support and representative PAPER/LIVE_PRECHECK evidence must be regenerated after this fix. LIVE remains NOT READY.
+
+### Push recommendation
+Safe to push after targeted and full suites pass. Do not claim LIVE readiness.
+
 ## 2026-07-08 Phase 5 Runtime Resilience, Recovery & Exchange-State Reconciliation
 
 ### Root cause summary

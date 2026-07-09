@@ -186,29 +186,6 @@ class LiveReadinessEvaluator:
         except Exception as exc:
             return [CheckResult("runtime_db_persistence_verified", False, f"runtime_state_query_failed={exc.__class__.__name__}")]
         if not snapshot:
-            # Preserve historical readiness fixture determinism only when the DB already
-            # contains substantial lower-gate evidence; truly missing runtime DBs still fail closed.
-            try:
-                with self.engine.connect() as conn:
-                    existing_decisions = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions")).scalar_one())
-                    existing_lifecycle = int(conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events")).scalar_one())
-            except Exception:
-                existing_decisions = existing_lifecycle = 0
-            if existing_decisions and existing_lifecycle:
-                return [
-                    CheckResult("runtime_state_snapshot_present", True, "legacy_fixture_runtime_snapshot_not_present; regenerate Phase 5 evidence before operations"),
-                    CheckResult("runtime_db_persistence_verified", True, "legacy fixture DB readable"),
-                    CheckResult("runtime_heartbeat_fresh", True, "legacy fixture heartbeat compatibility"),
-                    CheckResult("runtime_recovery_not_required", True, "legacy fixture only"),
-                    CheckResult("no_unclean_shutdown_unresolved", True, "legacy fixture only"),
-                    CheckResult("kill_switch_state_persisted", True, "legacy fixture only"),
-                    CheckResult("no_orphan_orders", True, "legacy fixture only"),
-                    CheckResult("no_orphan_positions", True, "legacy fixture only"),
-                    CheckResult("no_stale_pending_orders", True, "legacy fixture only"),
-                    CheckResult("exchange_reconciliation_evidence_present", True, "legacy fixture supplied reconciliation input"),
-                    CheckResult("exchange_reconciliation_clean", True, "legacy fixture supplied reconciliation input"),
-                    CheckResult("exchange_read_only_evidence_present", True, "legacy fixture supplied reconciliation input"),
-                ]
             return [
                 CheckResult("runtime_state_snapshot_present", False, "missing runtime_state_snapshots row"),
                 CheckResult("runtime_db_persistence_verified", False, "runtime_state_snapshots missing"),

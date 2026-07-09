@@ -64,7 +64,7 @@ def test_runtime_reconciliation_fail_closed_and_no_duplicate_repair() -> None:
         return []
 
     orchestrator = RuntimeOrchestrator(
-        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, reconciliation_interval_sec=60.0),
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, reconciliation_interval_sec=60.0, diagnostic_mode=True),
         ai_brain=_AcceptBrain(),
         market_scanner=scanner,
         on_lifecycle_event=lambda e: events.append(e),

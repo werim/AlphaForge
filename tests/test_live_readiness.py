@@ -11,6 +11,7 @@ from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 from alphaforge.rollback_evidence import persist_rollback_validation_evidence
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
+from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
 
 
 def _seed_valid(session: Session) -> None:
@@ -84,7 +85,7 @@ def _persist_verified_rollback(engine) -> None:
     })
 
 
-def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, persist_rollback: bool = True):
+def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, persist_rollback: bool = True, persist_runtime_snapshot: bool = True):
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
@@ -94,6 +95,8 @@ def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, 
         save_runtime_heartbeat(engine, runtime_instance_id="runtime:live-qualified-test", execution_mode="LIVE", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
     if persist_rollback:
         _persist_verified_rollback(engine)
+    if persist_runtime_snapshot:
+        save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="LIVE_PRECHECK", requested_mode="LIVE_PRECHECK", actual_mode="LIVE_PRECHECK", runtime_status="RECONCILED", heartbeat_age_sec=1.0, instance_id="runtime:phase5-readiness", kill_switch_active=False, unknown_exchange_state=False, exchange_read_only_status="AVAILABLE", reconciliation_status="CLEAN", recovery_action_required=False))
     return engine
 
 
