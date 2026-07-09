@@ -1,5 +1,21 @@
 # AlphaForge Version
 
+- Current version: PR269 Phase 6 runtime-enforced LIVE_PRECHECK canary and shadow controls
+- Current phase: Phase 6 - runtime-integrated canary/shadow release gates
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed lifecycle, recovery, release evidence, runtime-enforced canary gates, non-mutating shadow decisions, and mutation-trap evidence; LIVE real orders disabled
+- BACKTEST/PAPER/LIVE alignment: lower-phase gates remain required; LIVE_PRECHECK canary now enforces release snapshot, operator ack, scope, notional, risk, duration, reject spike, runtime error, and mutation evidence in `RuntimeOrchestrator`
+- Lifecycle coverage: canary rejects emit explicit lifecycle reject evidence; shadow decisions are separated from PAPER/LIVE_PRECHECK and do not produce order-placement mutations
+- Execution realism coverage: execution-cost/effective-RR and portfolio-risk gates run before shadow/canary decisions are persisted or rejected
+- Known critical risks: real LIVE submission is still blocked; GitHub Actions must pass before merge; missing release/ack/canary/rollback/runbook/test/burn-in evidence fails closed
+- Last audit date: 2026-07-09
+- Live readiness verdict: NOT_LIVE_READY / LIVE_REAL_ORDERS_BLOCKED; Phase 6 can prove LIVE_PRECHECK/CANARY non-mutation only
+
+---
+
+## Historical version notes
+
+# AlphaForge Version
+
 - Current version: Phase 6 canary LIVE_PRECHECK release gates
 - Current phase: Phase 6 - shadow/canary release-control machinery and operator evidence
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed lifecycle, runtime recovery, release gate, operator acknowledgement, runbook, canary, and rollback evidence; LIVE real orders disabled

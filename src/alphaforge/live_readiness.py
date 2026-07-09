@@ -15,7 +15,7 @@ from alphaforge.contracts import ALLOWED_LIFECYCLE_TRANSITIONS, LifecycleEventTy
 from alphaforge.rollback_evidence import latest_persisted_rollback_evidence
 from alphaforge.runtime_heartbeat import DEFAULT_MAX_AGE_SEC, evaluate_runtime_heartbeat_freshness
 from alphaforge.runtime_state import latest_runtime_state_snapshot
-from alphaforge.release_gates import latest_release_snapshot
+from alphaforge.release_gates import canary_mutation_attempt_count, latest_release_snapshot
 
 CRITICAL_SIGNAL_FIELDS = ("signal_id", "symbol", "mode", "created_at")
 CRITICAL_DECISION_FIELDS = ("decision_id", "signal_id", "symbol", "mode", "decision", "created_at")
@@ -137,7 +137,7 @@ class LiveReadinessEvaluator:
             CheckResult("runbook_evidence_present", bool(release_snapshot.get("runbook_present")), "RUNBOOK hash must be persisted"),
             CheckResult("release_tests_passing_evidence_present", str(release_snapshot.get("test_evidence_status", "MISSING")).upper() == "PASS", "release test evidence must be recorded"),
             CheckResult("paper_burnin_evidence_present", str(release_snapshot.get("paper_burnin_status", "MISSING")).upper() == "ACCEPTABLE", "paper burn-in evidence must be recorded"),
-            CheckResult("no_canary_mutation_attempts", "CANARY_MUTATION_ATTEMPT" not in str(release_snapshot.get("readiness_blockers_json", "")) and '"mutation_attempt_count": 0' in str(release_snapshot.get("diagnostics_json", "{}")), "canary mutation attempts block readiness"),
+            CheckResult("no_canary_mutation_attempts", canary_mutation_attempt_count(self.engine, str(release_snapshot.get("release_id") or "")) == 0 if release_snapshot else False, "persisted canary mutation attempts must be zero"),
         ]
         return gates
 

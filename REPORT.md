@@ -1,3 +1,51 @@
+## 2026-07-09 PR269 Phase 6 Runtime Canary/Shadow Enforcement Fix
+
+### Root cause summary
+The initial Phase 6 patch persisted release evidence, but the runtime still treated canary controls as helper/readiness data. `RuntimeOrchestrator` did not enforce release snapshots, operator acknowledgement, canary limits, mutation traps, or shadow non-mutation before the real decision path reached lifecycle/order execution.
+
+### Why the patch was needed
+Release evidence must be operationally enforced, not only reported. A LIVE_PRECHECK canary has to fail closed inside the runtime before execution, and shadow mode must prove it cannot mutate active exposure, pending orders, or execution adapters.
+
+### Files changed
+- `src/alphaforge/release_gates.py`: adds release snapshot lookup by release ID, row normalization, persisted canary mutation count queries, and `MutationTrapExecutionAdapter` for submit/cancel/modify attempt evidence.
+- `src/alphaforge/runtime.py`: adds release/canary runtime configuration, wraps Phase 6 canary/shadow adapters with a mutation trap, enforces canary gates before order execution, persists canary accept/reject/stop/runtime-error events, and adds a non-mutating shadow decision path.
+- `src/alphaforge/live_readiness.py`: derives `no_canary_mutation_attempts` from persisted `canary_run_events` mutation counts.
+- `tests/test_phase6_release_gates.py`: adds runtime-path regressions for canary scope/notional/risk/ack/evidence blockers, shadow non-mutation, mutation traps, and canary stop limits.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: document the PR269 blocker fix and remaining LIVE blockers.
+
+### Runtime behavior changes
+- LIVE_PRECHECK canary candidates now load the current release snapshot by `release_id`, require canary enabled, require `actual_mode=LIVE_PRECHECK`, require `live_order_submission_enabled=false`, validate release-scoped operator acknowledgement, call `evaluate_canary_candidate`, and persist every canary accept/reject event before lifecycle/order execution.
+- Shadow mode now runs scanner, decision, execution-cost, portfolio-risk, and runtime gates, then persists `SHADOW` decisions and returns before active positions, pending orders, or execution adapters can mutate state.
+- Mutation-trap submit/cancel/modify calls persist `CANARY_MUTATION_ATTEMPT` and raise immediately.
+
+### Lifecycle impact
+Canary rejects emit explicit `SIGNAL_REJECTED` lifecycle evidence with canary reasons. Shadow decisions are persisted separately as `SHADOW` order-decision evidence and do not emit order placement or fill lifecycle transitions.
+
+### Persistence changes
+No new tables beyond PR269's Phase 6 additive tables. This patch writes more complete `canary_run_events` evidence: START, CANDIDATE_ACCEPTED, CANDIDATE_REJECTED, STOP, RUNTIME_ERROR, and MUTATION_ATTEMPT.
+
+### Export/schema changes
+Existing release tables remain compatible. Readiness now queries persisted mutation event counts rather than trusting snapshot booleans.
+
+### Tests added/executed
+- Runtime canary gate rejects out-of-scope symbols, excessive notional/risk, missing operator ack, and missing persistence evidence.
+- Shadow mode persists decisions without active positions or pending orders.
+- Mutation-trap submit attempts persist `CANARY_MUTATION_ATTEMPT` and block readiness.
+- Canary duration, reject-spike, and runtime-error stop limits are enforced.
+
+### Risks and remaining limitations
+- Real LIVE order submission remains disabled and unimplemented for Phase 6 readiness.
+- GitHub Actions must pass before merge.
+- This patch intentionally does not loosen Phase 1-5 gates.
+
+### Migration concerns
+No destructive migration. Existing Phase 6 tables are reused.
+
+### Push recommendation
+Push after targeted and full local tests pass, then merge only after GitHub Actions succeeds.
+
+---
+
 ## 2026-07-09 Phase 6 Canary LIVE_PRECHECK Release Gates
 
 ### Root cause summary

@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -197,6 +197,79 @@ def latest_release_snapshot(engine: Engine) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def release_snapshot_by_id(engine: Engine, release_id: str) -> dict[str, Any] | None:
+    ensure_release_gate_schema(engine)
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT * FROM release_gate_snapshots WHERE release_id=:rid ORDER BY id DESC LIMIT 1"), {"rid": release_id}).mappings().first()
+    return dict(row) if row else None
+
+
+def release_snapshot_from_row(row: Mapping[str, Any]) -> ReleaseGateSnapshot:
+    raw_symbols = row.get("canary_symbols_json") or row.get("canary_symbols") or "[]"
+    try:
+        symbols = json.loads(str(raw_symbols)) if isinstance(raw_symbols, str) else list(raw_symbols or [])
+    except json.JSONDecodeError:
+        symbols = []
+    try:
+        blockers = json.loads(str(row.get("readiness_blockers_json") or "[]"))
+    except json.JSONDecodeError:
+        blockers = []
+    try:
+        flags = json.loads(str(row.get("release_flags_json") or "{}"))
+    except json.JSONDecodeError:
+        flags = {}
+    try:
+        diagnostics = json.loads(str(row.get("diagnostics_json") or "{}"))
+    except json.JSONDecodeError:
+        diagnostics = {}
+    return ReleaseGateSnapshot(
+        timestamp=str(row.get("timestamp") or canonical_utc_timestamp()),
+        release_id=str(row.get("release_id") or ""),
+        version=str(row.get("version") or "UNKNOWN"),
+        git_commit=str(row.get("git_commit") or "UNKNOWN"),
+        branch=str(row.get("branch") or "UNKNOWN"),
+        requested_mode=str(row.get("requested_mode") or "UNKNOWN"),
+        actual_mode=str(row.get("actual_mode") or "UNKNOWN"),
+        live_enabled=bool(row.get("live_enabled")),
+        live_order_submission_enabled=bool(row.get("live_order_submission_enabled")),
+        live_precheck_enabled=bool(row.get("live_precheck_enabled")),
+        shadow_mode_enabled=bool(row.get("shadow_mode_enabled")),
+        canary_enabled=bool(row.get("canary_enabled")),
+        canary_scope=str(row.get("canary_scope") or "NONE"),
+        canary_symbols=[str(v) for v in symbols],
+        canary_max_notional=row.get("canary_max_notional"),
+        canary_max_risk_pct=row.get("canary_max_risk_pct"),
+        canary_start_time=row.get("canary_start_time"),
+        canary_end_time=row.get("canary_end_time"),
+        canary_status=str(row.get("canary_status") or "NOT_STARTED"),
+        operator_ack_required=bool(row.get("operator_ack_required")),
+        operator_ack_present=bool(row.get("operator_ack_present")),
+        operator_ack_user=row.get("operator_ack_user"),
+        operator_ack_timestamp=row.get("operator_ack_timestamp"),
+        operator_ack_text_hash=row.get("operator_ack_text_hash"),
+        kill_switch_active=bool(row.get("kill_switch_active")),
+        rollback_ready=bool(row.get("rollback_ready")),
+        rollback_last_tested_at=row.get("rollback_last_tested_at"),
+        rollback_procedure_hash=row.get("rollback_procedure_hash"),
+        runbook_present=bool(row.get("runbook_present")),
+        runbook_hash=row.get("runbook_hash"),
+        test_evidence_status=str(row.get("test_evidence_status") or "MISSING"),
+        paper_burnin_status=str(row.get("paper_burnin_status") or "MISSING"),
+        readiness_verdict=str(row.get("readiness_verdict") or "NOT_LIVE_READY"),
+        readiness_blockers=[str(v) for v in blockers],
+        release_flags=dict(flags),
+        diagnostics_json=dict(diagnostics),
+    )
+
+
+def canary_mutation_attempt_count(engine: Engine, release_id: str | None = None) -> int:
+    ensure_release_gate_schema(engine)
+    with engine.connect() as conn:
+        if release_id:
+            return int(conn.execute(text("SELECT COUNT(*) FROM canary_run_events WHERE release_id=:rid AND mutation_attempt=1"), {"rid": release_id}).scalar_one() or 0)
+        return int(conn.execute(text("SELECT COUNT(*) FROM canary_run_events WHERE mutation_attempt=1")).scalar_one() or 0)
+
+
 def build_release_snapshot(engine: Engine, *, release_id: str, requested_mode: str, actual_mode: str, version: str = "UNKNOWN", canary_enabled: bool = False, shadow_mode_enabled: bool = False, live_precheck_enabled: bool = True, canary_symbols: list[str] | None = None, canary_max_notional: float | None = None, canary_max_risk_pct: float | None = None, test_evidence_status: str = "MISSING", paper_burnin_status: str = "MISSING", runbook_path: str = "RUNBOOK.md") -> ReleaseGateSnapshot:
     ack = latest_valid_operator_ack(engine, release_id)
     runbook_hash = file_sha256(runbook_path)
@@ -222,3 +295,55 @@ def evaluate_canary_candidate(snapshot: ReleaseGateSnapshot, *, symbol: str, not
     if snapshot.canary_max_risk_pct is not None and risk_pct > snapshot.canary_max_risk_pct: return False, "CANARY_RISK_LIMIT"
     if snapshot.live_order_submission_enabled: return False, "CANARY_MUTATION_ATTEMPT"
     return True, "PASS"
+
+
+class SupportsExecutionMutation(Protocol):
+    async def submit(self, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> Mapping[str, Any]: ...
+
+
+class MutationTrapExecutionAdapter:
+    """Non-mutating adapter wrapper for Phase 6 shadow/canary paths.
+
+    Any submit/cancel/modify call is recorded as a mutation attempt and then
+    rejected. This makes no-submit evidence measured instead of declarative.
+    """
+
+    def __init__(self, adapter: Any | None = None, *, engine: Engine | None = None, release_id: str | None = None, phase: str = "CANARY") -> None:
+        self.adapter = adapter
+        self.engine = engine
+        self.release_id = release_id or "UNKNOWN_RELEASE"
+        self.phase = phase
+        self.submit_calls = 0
+        self.cancel_calls = 0
+        self.modify_calls = 0
+
+    @property
+    def mutation_attempt_count(self) -> int:
+        return self.submit_calls + self.cancel_calls + self.modify_calls
+
+    def _record(self, action: str, payload: Mapping[str, Any] | None = None) -> None:
+        if self.engine is not None:
+            persist_canary_event(
+                self.engine,
+                release_id=self.release_id,
+                event_type="MUTATION_ATTEMPT",
+                status="FAIL",
+                reason="CANARY_MUTATION_ATTEMPT",
+                mutation_attempt=True,
+                payload={"action": action, "phase": self.phase, **dict(payload or {})},
+            )
+
+    async def submit(self, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.submit_calls += 1
+        self._record("submit", {"symbol": market_ctx.get("symbol")})
+        raise RuntimeError("CANARY_MUTATION_ATTEMPT")
+
+    async def cancel(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        self.cancel_calls += 1
+        self._record("cancel", {"args": [str(a) for a in args], "kwargs": {k: str(v) for k, v in kwargs.items()}})
+        raise RuntimeError("CANARY_MUTATION_ATTEMPT")
+
+    async def modify(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        self.modify_calls += 1
+        self._record("modify", {"args": [str(a) for a in args], "kwargs": {k: str(v) for k, v in kwargs.items()}})
+        raise RuntimeError("CANARY_MUTATION_ATTEMPT")

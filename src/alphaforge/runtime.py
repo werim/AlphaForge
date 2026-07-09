@@ -30,6 +30,15 @@ from alphaforge.persistence import init_db
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, latest_runtime_state_snapshot
 from alphaforge.config import load_config_from_env, runtime_filter_config
+from alphaforge.release_gates import (
+    MutationTrapExecutionAdapter,
+    canary_mutation_attempt_count,
+    evaluate_canary_candidate,
+    latest_valid_operator_ack,
+    persist_canary_event,
+    release_snapshot_by_id,
+    release_snapshot_from_row,
+)
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
@@ -94,6 +103,13 @@ class RuntimeConfig:
     enable_shadow_mode: bool = False
     enable_canary_mode: bool = False
     operator_live_acknowledged: bool = False
+    release_id: str | None = None
+    canary_max_symbols: int = 0
+    canary_duration_min: float = 0.0
+    canary_stop_on_reject_spike: bool = True
+    canary_max_reject_rate: float = 1.0
+    canary_max_runtime_errors: int = 0
+    canary_require_operator_ack: bool = True
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
     require_exchange_connectivity_for_live: bool = True
@@ -119,6 +135,11 @@ class RuntimeMetrics:
     reconciliation_runs: int = 0
     reconciliation_fail_closed: int = 0
     persistence_enabled: bool = False
+    shadow_decisions: int = 0
+    canary_candidates: int = 0
+    canary_rejects: int = 0
+    canary_runtime_errors: int = 0
+    canary_mutation_attempts: int = 0
 
 
 @dataclass(slots=True)
@@ -167,6 +188,9 @@ class RuntimeOrchestrator:
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
     _exchange_health: list[ExchangeHealth] = field(default_factory=list, init=False)
+    _canary_started_monotonic: float | None = field(default=None, init=False)
+    _canary_stopped: bool = field(default=False, init=False)
+    _canary_stop_reason: str | None = field(default=None, init=False)
     _qualification_samples: tuple[dict[str, Any], ...] = field(default_factory=lambda: (
         {
             "sample_id": "qp-001-btc-long",
@@ -208,6 +232,13 @@ class RuntimeOrchestrator:
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
+        if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK and (self.config.enable_canary_mode or self.config.enable_shadow_mode):
+            self.real_execution_adapter = MutationTrapExecutionAdapter(
+                self.real_execution_adapter,
+                engine=self.persistence_engine,
+                release_id=self.config.release_id,
+                phase="CANARY" if self.config.enable_canary_mode else "SHADOW",
+            )
 
     def _resolve_persistence_engine(self) -> Engine | None:
         if self.persistence_engine is not None:
@@ -656,6 +687,108 @@ class RuntimeOrchestrator:
         for symbol_result in selected:
             await self._process_symbol(symbol_result)
 
+
+    def _release_id(self) -> str | None:
+        return self.config.release_id or os.getenv("ALPHAFORGE_RELEASE_ID") or os.getenv("RELEASE_ID")
+
+    def _persist_canary_event_safe(self, *, event_type: str, status: str, reason: str | None = None, symbol: str | None = None, notional: float | None = None, risk_pct: float | None = None, mutation_attempt: bool = False, payload: Mapping[str, Any] | None = None) -> bool:
+        engine = self._resolve_persistence_engine()
+        release_id = self._release_id()
+        if engine is None or not release_id:
+            return False
+        persist_canary_event(engine, release_id=release_id, event_type=event_type, status=status, reason=reason, symbol=symbol, notional=notional, risk_pct=risk_pct, mutation_attempt=mutation_attempt, payload=payload)
+        return True
+
+    def _record_canary_stop(self, reason: str, *, symbol: str | None = None, payload: Mapping[str, Any] | None = None) -> None:
+        self._canary_stopped = True
+        self._canary_stop_reason = reason
+        self._persist_canary_event_safe(event_type="STOP", status="STOPPED", reason=reason, symbol=symbol, payload={"candidate_count": self.metrics.canary_candidates, "reject_count": self.metrics.canary_rejects, "runtime_error_count": self.metrics.canary_runtime_errors, "mutation_attempt_count": self.metrics.canary_mutation_attempts, **dict(payload or {})})
+
+    def _load_canary_snapshot(self) -> tuple[Any | None, str | None]:
+        engine = self._resolve_persistence_engine()
+        release_id = self._release_id()
+        if engine is None or not release_id:
+            return None, "CANARY_EVIDENCE_MISSING"
+        row = release_snapshot_by_id(engine, release_id)
+        if row is None:
+            return None, "CANARY_EVIDENCE_MISSING"
+        snapshot = release_snapshot_from_row(row)
+        if not snapshot.canary_enabled:
+            return snapshot, "CANARY_EVIDENCE_MISSING"
+        if snapshot.actual_mode != ExecutionMode.LIVE_PRECHECK.value:
+            return snapshot, "CANARY_EVIDENCE_MISSING"
+        if snapshot.live_order_submission_enabled:
+            return snapshot, "CANARY_MUTATION_ATTEMPT"
+        if self.config.canary_require_operator_ack and not latest_valid_operator_ack(engine, release_id):
+            return snapshot, "CANARY_OPERATOR_ACK_MISSING"
+        return snapshot, None
+
+    def _canary_candidate_gate(self, *, symbol: str, notional: float, risk_pct: float) -> tuple[bool, str]:
+        if self.config.execution_mode != ExecutionMode.LIVE_PRECHECK or not self.config.enable_canary_mode:
+            return True, "PASS"
+        if self._canary_started_monotonic is None:
+            self._canary_started_monotonic = time.time()
+            if not self._persist_canary_event_safe(event_type="START", status="RUNNING", reason=None, payload={"release_id": self._release_id()}):
+                return False, "CANARY_EVIDENCE_MISSING"
+        if self._canary_stopped:
+            return False, self._canary_stop_reason or "CANARY_EVIDENCE_MISSING"
+        if self.config.canary_duration_min and (time.time() - self._canary_started_monotonic) > self.config.canary_duration_min * 60.0:
+            self._record_canary_stop("CANARY_DURATION_EXCEEDED", symbol=symbol)
+            return False, "CANARY_DURATION_EXCEEDED"
+        if self.config.canary_max_runtime_errors and self.metrics.canary_runtime_errors >= self.config.canary_max_runtime_errors:
+            self._record_canary_stop("CANARY_RUNTIME_ERROR_LIMIT", symbol=symbol)
+            return False, "CANARY_RUNTIME_ERROR_LIMIT"
+        if self.config.canary_max_symbols and self.metrics.canary_candidates >= self.config.canary_max_symbols:
+            self._record_canary_stop("CANARY_DURATION_EXCEEDED", symbol=symbol, payload={"reason_detail": "CANARY_MAX_SYMBOLS_EXCEEDED"})
+            return False, "CANARY_DURATION_EXCEEDED"
+        snapshot, blocker = self._load_canary_snapshot()
+        if blocker:
+            self.metrics.canary_rejects += 1
+            self._persist_canary_event_safe(event_type="CANDIDATE_REJECTED", status="REJECTED", reason=blocker, symbol=symbol, notional=notional, risk_pct=risk_pct)
+            return False, blocker
+        assert snapshot is not None
+        ok, reason = evaluate_canary_candidate(snapshot, symbol=symbol, notional=notional, risk_pct=risk_pct)
+        self.metrics.canary_candidates += 1
+        if not ok:
+            self.metrics.canary_rejects += 1
+            self._persist_canary_event_safe(event_type="CANDIDATE_REJECTED", status="REJECTED", reason=reason, symbol=symbol, notional=notional, risk_pct=risk_pct)
+            if self.config.canary_stop_on_reject_spike and self.metrics.canary_candidates:
+                reject_rate = self.metrics.canary_rejects / max(1, self.metrics.canary_candidates)
+                if reject_rate > self.config.canary_max_reject_rate:
+                    self._record_canary_stop("CANARY_REJECT_SPIKE", symbol=symbol, payload={"reject_rate": reject_rate})
+                    return False, "CANARY_REJECT_SPIKE"
+            return False, reason
+        if not self._persist_canary_event_safe(event_type="CANDIDATE_ACCEPTED", status="PASS", reason="PASS", symbol=symbol, notional=notional, risk_pct=risk_pct):
+            return False, "CANARY_EVIDENCE_MISSING"
+        return True, "PASS"
+
+    async def _persist_shadow_decision(self, *, signal_id: str, symbol: str, decision: str, reason: str, score: Any, rr: Any, effective_rr: float, execution_ctx: Mapping[str, Any], portfolio_payload: Mapping[str, Any] | None = None) -> None:
+        engine = self._resolve_persistence_engine()
+        self.metrics.shadow_decisions += 1
+        if engine is None:
+            return
+        from alphaforge.persistence import save_order_decision
+        with sessionmaker(bind=engine, expire_on_commit=False, future=True)() as session:
+            save_order_decision(
+                session,
+                decision_id=f"shadow:{signal_id}:{self.metrics.shadow_decisions}",
+                signal_id=signal_id,
+                symbol=symbol,
+                mode="SHADOW",
+                phase="shadow",
+                decision="SHADOW_DECISION",
+                reject_reason="" if decision == "ACCEPTED" else reason,
+                score=score,
+                rr=rr,
+                effective_rr=effective_rr,
+                execution_ctx=dict(execution_ctx),
+                execution_ctx_missing=str(execution_ctx.get("evidence_status", "")).upper() in {"", "UNAVAILABLE", "UNKNOWN"},
+                no_submit_verified=True,
+                parity_result="SHADOW_NON_MUTATING",
+                order_payload={"shadow_decision": decision, "reason": reason, "portfolio": dict(portfolio_payload or {}), "active_position_mutated": False, "pending_order_mutated": False, "submit_cancel_modify_allowed": False},
+            )
+            session.commit()
+
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
         market_ctx.setdefault("mode", self.config.execution_mode.value)
@@ -700,6 +833,8 @@ class RuntimeOrchestrator:
 
         if order_plan.decision != "ACCEPTED":
             reject_reason = canonical_reject_reason(order_plan.reason)
+            if self.config.enable_shadow_mode:
+                await self._persist_shadow_decision(signal_id=signal_id, symbol=selection.symbol, decision="REJECTED", reason=reject_reason, score=getattr(score_ctx, "total_score", None), rr=signal_payload.get("risk_reward"), effective_rr=effective_rr, execution_ctx=execution_ctx)
             await self._persist_reject({
                 "signal_id": signal_id,
                 "symbol": selection.symbol,
@@ -734,6 +869,8 @@ class RuntimeOrchestrator:
 
         if effective_rr < self.config.min_effective_rr:
             reject_reason = "LOW_EFFECTIVE_RR"
+            if self.config.enable_shadow_mode:
+                await self._persist_shadow_decision(signal_id=signal_id, symbol=selection.symbol, decision="REJECTED", reason=reject_reason, score=getattr(score_ctx, "total_score", None), rr=signal_payload.get("risk_reward"), effective_rr=effective_rr, execution_ctx=execution_ctx)
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject(reject_payload)
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
@@ -758,7 +895,26 @@ class RuntimeOrchestrator:
         portfolio_decision = evaluate_portfolio_risk({"symbol": selection.symbol, "side": market_ctx.get("side"), "entry": market_ctx.get("entry"), "quantity": market_ctx.get("quantity", market_ctx.get("qty")), "notional": candidate_notional}, snapshot, self.config, mode=self.config.execution_mode.value)
         if not portfolio_decision.accepted:
             reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
+            if self.config.enable_shadow_mode:
+                await self._persist_shadow_decision(signal_id=signal_id, symbol=selection.symbol, decision="REJECTED", reason=reject_reason, score=getattr(score_ctx, "total_score", None), rr=signal_payload.get("risk_reward"), effective_rr=effective_rr, execution_ctx=execution_ctx, portfolio_payload=portfolio_decision.diagnostics)
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            await self._persist_reject(reject_payload)
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
+            return
+
+        candidate_risk_pct = 0.0
+        try:
+            candidate_risk_pct = float(market_ctx.get("risk_pct") or (float(candidate_notional or 0.0) / float(inferred_equity or 1.0)))
+        except (TypeError, ValueError, ZeroDivisionError):
+            candidate_risk_pct = 0.0
+
+        if self.config.enable_shadow_mode:
+            await self._persist_shadow_decision(signal_id=signal_id, symbol=selection.symbol, decision="ACCEPTED", reason="", score=getattr(score_ctx, "total_score", None), rr=signal_payload.get("risk_reward"), effective_rr=effective_rr, execution_ctx=execution_ctx, portfolio_payload=portfolio_decision.diagnostics)
+            return
+
+        canary_ok, canary_reason = self._canary_candidate_gate(symbol=selection.symbol, notional=float(candidate_notional or 0.0), risk_pct=candidate_risk_pct)
+        if not canary_ok:
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "canary", "decision": "REJECTED", "reason": canary_reason, "reject_reason": canary_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "phase6_canary_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject(reject_payload)
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
             return
@@ -909,6 +1065,11 @@ class RuntimeOrchestrator:
         await self._emit_lifecycle_event(lifecycle_event, symbol, {"reason": reason, "incident_count": self._incident_counters[reason]})
 
     async def _emit_runtime_error(self, symbol: str, signal_id: str, phase: str, exc: Exception) -> None:
+        if self.config.enable_canary_mode:
+            self.metrics.canary_runtime_errors += 1
+            self._persist_canary_event_safe(event_type="RUNTIME_ERROR", status="ERROR", reason="CANARY_RUNTIME_ERROR_LIMIT" if self.config.canary_max_runtime_errors and self.metrics.canary_runtime_errors >= self.config.canary_max_runtime_errors else "RUNTIME_ERROR", symbol=symbol, payload={"phase": phase, "error_type": exc.__class__.__name__})
+            if self.config.canary_max_runtime_errors and self.metrics.canary_runtime_errors >= self.config.canary_max_runtime_errors:
+                self._record_canary_stop("CANARY_RUNTIME_ERROR_LIMIT", symbol=symbol)
         failure_reason = f"{exc.__class__.__name__}: {str(exc)[:220]}".strip()
         await self._emit_lifecycle_event(
             LifecycleState.ERROR.value,
@@ -1154,7 +1315,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, release_id=os.getenv("ALPHAFORGE_RELEASE_ID") or os.getenv("RELEASE_ID"), canary_max_symbols=int(os.getenv("CANARY_MAX_SYMBOLS", "0") or 0), canary_duration_min=float(os.getenv("CANARY_DURATION_MIN", "0") or 0), canary_stop_on_reject_spike=str(os.getenv("CANARY_STOP_ON_REJECT_SPIKE", "1")).lower() not in {"0", "false", "no", "off"}, canary_max_reject_rate=float(os.getenv("CANARY_MAX_REJECT_RATE", "1.0") or 1.0), canary_max_runtime_errors=int(os.getenv("CANARY_MAX_RUNTIME_ERRORS", "0") or 0), canary_require_operator_ack=str(os.getenv("CANARY_REQUIRE_OPERATOR_ACK", "1")).lower() not in {"0", "false", "no", "off"})
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         now_ts = time.time()

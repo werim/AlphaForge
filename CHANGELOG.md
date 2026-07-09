@@ -1,3 +1,28 @@
+## 2026-07-09 - PR269 Phase 6 runtime canary/shadow enforcement
+
+### Added
+- Runtime-enforced LIVE_PRECHECK canary gates before any order execution path, with persisted accept/reject/stop/runtime-error events.
+- Non-mutating shadow decision path that persists `SHADOW` decisions without creating active positions or pending orders.
+- Mutation-trap execution adapter that records submit/cancel/modify attempts as `CANARY_MUTATION_ATTEMPT` evidence.
+- Canary enforcement for duration, reject spike, runtime error limits, symbol scope, notional, risk, operator acknowledgement, and missing evidence.
+
+### Changed
+- Phase 6 readiness now derives canary mutation safety from persisted canary mutation event counts rather than release snapshot booleans.
+- Runtime config carries release/canary controls so release evidence is enforced in the real runtime path.
+
+### Fixed
+- Canary controls are no longer helper-only; `RuntimeOrchestrator` rejects unsafe LIVE_PRECHECK candidates before lifecycle/order execution.
+- Shadow mode now has a real non-mutating runtime path with separated persisted evidence.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; runtime canary enforcement is fail-closed when Phase 6 canary is enabled and release evidence is missing.
+
+### Known Issues
+- GitHub Actions must pass before merge. Real LIVE order submission remains blocked pending a future explicit phase.
+
 ## 2026-07-09 - Phase 6 canary release gates
 
 ### Added
