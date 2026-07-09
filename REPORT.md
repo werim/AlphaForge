@@ -1,3 +1,59 @@
+## 2026-07-09 Phase 6 Canary LIVE_PRECHECK Release Gates
+
+### Root cause summary
+Phase 1-5 established shared decision, lifecycle, execution-realism, portfolio-risk, and runtime-recovery evidence, but production promotion still lacked deterministic release controls. Operator acknowledgement, canary scope, rollback proof, runbook hash, and release snapshots could not be treated as canonical SQL-backed readiness inputs.
+
+### Why the patch was needed
+Production readiness requires more than code correctness: it requires explicit operator controls, dry-run evidence, rollback ability, staged exposure, auditability, and fail-closed release gates. Phase 6 adds that machinery while keeping real LIVE order submission disabled.
+
+### Files changed
+- `src/alphaforge/release_gates.py`: adds `ReleaseGateSnapshot`, release-gate schema bootstrap, operator acknowledgement persistence, canary event persistence, rollback verification persistence, runbook evidence persistence, release snapshot construction/persistence, and canary candidate validation.
+- `src/alphaforge/persistence.py`: bootstraps release-gate tables from `init_db`.
+- `src/alphaforge/live_readiness.py`: adds Phase 6 release gates and prevents all-pass Phase 6 evidence from promoting to real LIVE order readiness.
+- `src/alphaforge/dashboard/app.py`: exposes latest release-gate evidence and `live_order_submission_enabled=false` in dashboard status payload.
+- `RUNBOOK.md`: adds operator procedures for startup, pre-canary, monitoring, kill switch, rollback, incident response, stale data, orphan orders, reconciliation failures, emergency stop, evidence export, and merge/release.
+- `tests/test_phase6_release_gates.py`: adds persistence, acknowledgement, canary limit, mutation, and readiness blocking regressions.
+- `CHANGELOG.md`, `VERSION.md`, `REPORT.md`: document Phase 6 behavior, risks, schema changes, and remaining LIVE blockers.
+
+### Runtime behavior changes
+- Phase 6 canary is modeled as LIVE_PRECHECK/no-submit only.
+- Missing release evidence fails closed.
+- Valid operator acknowledgement is release-scoped, hashed, expiring, and persisted.
+- Canary mutation attempts are persisted as blockers.
+- Real LIVE order readiness remains blocked even if Phase 6 release gates pass.
+
+### Lifecycle changes
+No lifecycle transition model was redesigned. Phase 6 release/canary evidence is separated from trade lifecycle evidence and does not force signals into trades.
+
+### Persistence changes
+Additive SQLite-compatible tables are created: `release_gate_snapshots`, `operator_acknowledgements`, `canary_run_events`, `rollback_verification_events`, and `runbook_evidence`. `live_readiness_reports.release_id` is added when the table already exists.
+
+### Export/schema changes
+Schema changes are additive and preserve existing CSV/runtime tables. Release evidence is now queryable/exportable from SQL instead of dashboard-only state.
+
+### Tests added
+- Release snapshot, operator acknowledgement, canary event, rollback verification, and runbook hash persistence.
+- Missing/wrong/expired acknowledgement blocks canary.
+- Canary symbol/notional/risk/mutation validations fail closed.
+- Readiness fails when release snapshot is missing and never returns `LIVE_REAL_ORDERS_READY` in Phase 6.
+- Canary mutation attempts block release snapshot readiness.
+
+### Tests executed
+- `pytest -q tests/test_phase6_release_gates.py`
+
+### Risks and remaining limitations
+- Phase 6 implements release-control primitives and readiness blockers, not real exchange mutation.
+- Full-suite runtime/dashboard regressions should be run before merge in CI.
+- Paper burn-in evidence is represented in the release snapshot but must be produced by the existing burn-in process.
+
+### Migration concerns
+All schema changes are additive. Existing databases should bootstrap through `init_db`; Alembic migration follow-up may be desirable for non-SQLite deployments.
+
+### Push recommendation
+Safe to push as a Phase 6 LIVE_PRECHECK/canary release-control patch only. Do not use this patch to enable real LIVE orders.
+
+---
+
 ## 2026-07-08 PR268 Phase 5 Pre-merge Blocker Fixes
 
 ### Root cause summary

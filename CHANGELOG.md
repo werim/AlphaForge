@@ -1,3 +1,28 @@
+## 2026-07-09 - Phase 6 canary release gates
+
+### Added
+- Canonical `ReleaseGateSnapshot` with SQL persistence for release, git/version, operator acknowledgement, canary, rollback, runbook, test, and burn-in evidence.
+- Operator acknowledgement persistence with release-scoped risk text hashing and expiry.
+- Canary LIVE_PRECHECK event persistence and fail-closed scope/notional/risk/mutation validation helpers.
+- Rollback verification and runbook evidence tables.
+- Phase 6 runbook covering canary, kill switch, rollback, incident, stale-data, orphan-order, reconciliation, emergency-stop, and release evidence procedures.
+
+### Changed
+- LIVE readiness now requires persisted release-gate evidence and keeps real LIVE orders blocked even when Phase 6 canary gates pass.
+- Dashboard status payload exposes release-gate evidence and hardcodes `live_order_submission_enabled=false` for Phase 6.
+
+### Fixed
+- Release truth is no longer dashboard-only: operator acknowledgement, canary, rollback, runbook, and release snapshots are SQL-backed.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; schema changes are additive.
+
+### Known Issues
+- Phase 6 can only produce LIVE_PRECHECK/CANARY readiness evidence. Real LIVE order submission remains explicitly blocked pending a future phase.
+
 ## 2026-07-08 - PR268 Phase 5 pre-merge blocker fixes
 
 ### Added

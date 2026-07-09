@@ -1,5 +1,21 @@
 # AlphaForge Version
 
+- Current version: Phase 6 canary LIVE_PRECHECK release gates
+- Current phase: Phase 6 - shadow/canary release-control machinery and operator evidence
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed lifecycle, runtime recovery, release gate, operator acknowledgement, runbook, canary, and rollback evidence; LIVE real orders disabled
+- BACKTEST/PAPER/LIVE alignment: shared lower-phase decision and persistence gates remain required; Phase 6 adds LIVE_PRECHECK-only canary controls without enabling real order submission
+- Lifecycle coverage: lifecycle/reject persistence remains required; Phase 6 release snapshots link readiness to release evidence and blockers
+- Execution realism coverage: effective-RR/execution-cost gates remain canonical; canary scope/notional/risk checks fail closed when evidence is missing or limits are exceeded
+- Known critical risks: real LIVE order submission is not ready; missing test evidence, paper burn-in, rollback verification, runbook hash, operator acknowledgement, or canary evidence blocks readiness
+- Last audit date: 2026-07-09
+- Live readiness verdict: NOT_LIVE_READY / LIVE_REAL_ORDERS_BLOCKED; Phase 6 may support LIVE_PRECHECK_READY or CANARY_READY evidence only
+
+---
+
+## Historical version notes
+
+# AlphaForge Version
+
 - Current version: Phase 5 runtime resilience - PR268 fail-closed reconciliation/readiness fixes
 - Current phase: Phase 5 - pre-merge blocker hardening for runtime recovery and exchange-state evidence
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed runtime snapshots; PAPER/LIVE_PRECHECK fail closed without read-only exchange evidence; LIVE disabled

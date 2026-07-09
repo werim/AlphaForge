@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from alphaforge.contracts import canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
+from alphaforge.release_gates import ensure_release_gate_schema
 
 
 
@@ -32,6 +33,7 @@ __all__ = [
     "latest_runtime_state_snapshot",
     "save_timesfm_forecast_evidence",
     "upsert_expectancy_stats",
+    "ensure_release_gate_schema",
 ]
 
 
@@ -363,6 +365,7 @@ def init_db(database_url: str | None = None) -> Engine:
         for statement in ddl:
             conn.execute(text(statement))
         _apply_sqlite_migrations(conn)
+    ensure_release_gate_schema(engine)
     return engine
 
 

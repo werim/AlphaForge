@@ -15,6 +15,7 @@ from alphaforge.contracts import ALLOWED_LIFECYCLE_TRANSITIONS, LifecycleEventTy
 from alphaforge.rollback_evidence import latest_persisted_rollback_evidence
 from alphaforge.runtime_heartbeat import DEFAULT_MAX_AGE_SEC, evaluate_runtime_heartbeat_freshness
 from alphaforge.runtime_state import latest_runtime_state_snapshot
+from alphaforge.release_gates import latest_release_snapshot
 
 CRITICAL_SIGNAL_FIELDS = ("signal_id", "symbol", "mode", "created_at")
 CRITICAL_DECISION_FIELDS = ("decision_id", "signal_id", "symbol", "mode", "decision", "created_at")
@@ -83,6 +84,7 @@ class LiveReadinessEvaluator:
             timesfm_evidence=timesfm_evidence or {},
             paper_burnin_report=paper_burnin_report or {},
             tests_passing_evidence=tests_passing_evidence or {},
+            release_snapshot=latest_release_snapshot(self.engine) or {},
         )
         blockers = [f"{gate.name}:{gate.details}" for gate in gates if not gate.passed]
         verdict = self._verdict_from_gates(gates)
@@ -95,7 +97,7 @@ class LiveReadinessEvaluator:
         observed = {check.name: check.passed for check in checks}
         return all(observed.get(name) is True for name in names)
 
-    def _aggregate_gates(self, checks: list[CheckResult], *, mode_parity: Mapping[str, Any], reconciliation: Mapping[str, Any], observability: Mapping[str, Any], kill_switch_active: bool, operator_ack: bool, dashboard_security: Mapping[str, Any], timesfm_evidence: Mapping[str, Any], paper_burnin_report: Mapping[str, Any], tests_passing_evidence: Mapping[str, Any]) -> list[CheckResult]:
+    def _aggregate_gates(self, checks: list[CheckResult], *, mode_parity: Mapping[str, Any], reconciliation: Mapping[str, Any], observability: Mapping[str, Any], kill_switch_active: bool, operator_ack: bool, dashboard_security: Mapping[str, Any], timesfm_evidence: Mapping[str, Any], paper_burnin_report: Mapping[str, Any], tests_passing_evidence: Mapping[str, Any], release_snapshot: Mapping[str, Any]) -> list[CheckResult]:
         lifecycle = {"lifecycle_no_orphans", "lifecycle_transitions_valid", "entry_exit_completeness"}
         reject = {"rejected_has_reason", "reject_persistence_parity"}
         parity = {"mode_parity"}
@@ -127,6 +129,15 @@ class LiveReadinessEvaluator:
             CheckResult("paper_burnin_report_acceptable", str(paper_burnin_report.get("status", "MISSING")).upper() == "ACCEPTABLE", "PAPER burn-in must be acceptable but never promotes LIVE by itself"),
             CheckResult("full_tests_passing_evidence_recorded", str(tests_passing_evidence.get("status", "MISSING")).upper() == "PASS", "requires current full test evidence"),
             CheckResult("operator_acknowledgement_required", bool(operator_ack), "explicit operator acknowledgement is required"),
+            CheckResult("release_gate_snapshot_present", bool(release_snapshot), "release_gate_snapshots row required"),
+            CheckResult("live_order_submission_disabled_for_phase6", bool(release_snapshot) and not bool(release_snapshot.get("live_order_submission_enabled")), "Phase 6 forbids real LIVE order submission"),
+            CheckResult("operator_ack_valid_for_release", (not bool(release_snapshot.get("operator_ack_required"))) or bool(release_snapshot.get("operator_ack_present")), "operator acknowledgement must be explicit, persisted, unexpired, and release-scoped"),
+            CheckResult("canary_live_precheck_non_mutating", bool(release_snapshot) and bool(release_snapshot.get("live_precheck_enabled")) and not bool(release_snapshot.get("live_order_submission_enabled")), "canary must be LIVE_PRECHECK no-submit only"),
+            CheckResult("rollback_evidence_present", bool(release_snapshot.get("rollback_ready")), "rollback verification evidence must be persisted"),
+            CheckResult("runbook_evidence_present", bool(release_snapshot.get("runbook_present")), "RUNBOOK hash must be persisted"),
+            CheckResult("release_tests_passing_evidence_present", str(release_snapshot.get("test_evidence_status", "MISSING")).upper() == "PASS", "release test evidence must be recorded"),
+            CheckResult("paper_burnin_evidence_present", str(release_snapshot.get("paper_burnin_status", "MISSING")).upper() == "ACCEPTABLE", "paper burn-in evidence must be recorded"),
+            CheckResult("no_canary_mutation_attempts", "CANARY_MUTATION_ATTEMPT" not in str(release_snapshot.get("readiness_blockers_json", "")) and '"mutation_attempt_count": 0' in str(release_snapshot.get("diagnostics_json", "{}")), "canary mutation attempts block readiness"),
         ]
         return gates
 
@@ -140,8 +151,9 @@ class LiveReadinessEvaluator:
             return "NOT_LIVE_READY"
         if not passed.get("phase5_runtime_resilience_complete", False):
             return "NOT_LIVE_READY"
+        # Phase 6 may qualify LIVE_PRECHECK/canary only; real LIVE order readiness remains blocked.
         if all(passed.values()):
-            return "LIVE_REAL_ORDERS_READY"
+            return "LIVE_REAL_ORDERS_BLOCKED"
         if all(value for name, value in passed.items() if name != "operator_acknowledgement_required"):
             return "LIVE_REAL_ORDERS_BLOCKED"
         dry_run_blockers = {"operator_acknowledgement_required", "full_tests_passing_evidence_recorded"}

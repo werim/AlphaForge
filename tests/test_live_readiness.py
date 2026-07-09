@@ -12,6 +12,7 @@ from alphaforge.persistence import init_db, save_order_decision, save_trade_life
 from alphaforge.rollback_evidence import persist_rollback_validation_evidence
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
+from alphaforge.release_gates import ACK_RISK_PHRASE, build_release_snapshot, persist_operator_ack, persist_release_gate_snapshot, persist_rollback_verification, persist_runbook_evidence
 
 
 def _seed_valid(session: Session) -> None:
@@ -85,7 +86,7 @@ def _persist_verified_rollback(engine) -> None:
     })
 
 
-def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, persist_rollback: bool = True, persist_runtime_snapshot: bool = True):
+def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, persist_rollback: bool = True, persist_runtime_snapshot: bool = True, persist_release: bool = True):
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
@@ -97,6 +98,13 @@ def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, 
         _persist_verified_rollback(engine)
     if persist_runtime_snapshot:
         save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="LIVE_PRECHECK", requested_mode="LIVE_PRECHECK", actual_mode="LIVE_PRECHECK", runtime_status="RECONCILED", heartbeat_age_sec=1.0, instance_id="runtime:phase5-readiness", kill_switch_active=False, unknown_exchange_state=False, exchange_read_only_status="AVAILABLE", reconciliation_status="CLEAN", recovery_action_required=False))
+    if persist_release:
+        release_id = "readiness-test-release"
+        persist_operator_ack(engine, release_id=release_id, operator_user="ops", ack_text=f"{ACK_RISK_PHRASE}; release_id={release_id}")
+        persist_runbook_evidence(engine, release_id=release_id, runbook_path="RUNBOOK.md")
+        persist_rollback_verification(engine, release_id=release_id, procedure_path="RUNBOOK.md", dry_run=True, kill_switch_verified=True, runtime_stop_verified=True)
+        snap = build_release_snapshot(engine, release_id=release_id, requested_mode="LIVE_PRECHECK", actual_mode="LIVE_PRECHECK", canary_enabled=True, shadow_mode_enabled=True, canary_symbols=["BTCUSDT"], test_evidence_status="PASS", paper_burnin_status="ACCEPTABLE", runbook_path="RUNBOOK.md")
+        persist_release_gate_snapshot(engine, snap)
     return engine
 
 
@@ -133,7 +141,8 @@ def test_live_readiness_pass_and_persistence() -> None:
     engine = _engine()
     evaluator = LiveReadinessEvaluator(engine)
     report = _evaluate(engine)
-    assert report.qualified is True
+    assert report.qualified is False
+    assert report.verdict == "LIVE_REAL_ORDERS_BLOCKED"
     assert next(check for check in report.checks if check.name == "runtime_heartbeat").passed is True
     assert next(check for check in report.checks if check.name == "rollback_ready").passed is True
     evaluator.persist_report(report)
@@ -260,7 +269,8 @@ def test_forensic_snapshot_written(tmp_path) -> None:
     report = _evaluate(evaluator.engine)
     payload = json.loads(evaluator.write_forensic_snapshot(tmp_path, report, {"positions": 0}).read_text())
     assert payload["version"] == "gen5"
-    assert payload["report"]["qualified"] is True
+    assert payload["report"]["qualified"] is False
+    assert payload["report"]["verdict"] == "LIVE_REAL_ORDERS_BLOCKED"
 
 
 def test_forensic_snapshot_redacts_nested_fields(tmp_path) -> None:
@@ -331,7 +341,7 @@ def test_live_precheck_invalid_execution_evidence_blocks_readiness() -> None:
 
 def test_final_gate_missing_each_individual_gate_blocks_real_orders() -> None:
     baseline = _evaluate(_engine())
-    assert baseline.verdict == "LIVE_REAL_ORDERS_READY"
+    assert baseline.verdict == "LIVE_REAL_ORDERS_BLOCKED"
     for gate_name in [gate.name for gate in baseline.gates or []]:
         kwargs = {}
         if gate_name == "exchange_connectivity_healthy":
