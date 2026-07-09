@@ -1,5 +1,16 @@
 # AlphaForge Version
 
+- Current version: Phase 5 runtime resilience - PR268 fail-closed reconciliation/readiness fixes
+- Current phase: Phase 5 - pre-merge blocker hardening for runtime recovery and exchange-state evidence
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed runtime snapshots; PAPER/LIVE_PRECHECK fail closed without read-only exchange evidence; LIVE disabled
+- BACKTEST/PAPER/LIVE alignment: BACKTEST records `NOT_REQUIRED_BACKTEST`; PAPER/LIVE_PRECHECK require provider-backed read-only reconciliation unless explicit diagnostic mode records LOCAL_ONLY override; LIVE remains blocked
+- Lifecycle coverage: runtime rejects and reconciliation blockers continue through persisted decision/lifecycle evidence without exchange mutation
+- Execution realism coverage: Phase 3 effective-RR cost breakdown remains canonical and is not bypassed by runtime resilience gates
+- Runtime resilience coverage: missing runtime snapshots never satisfy readiness; pending-order recovery uses configured timeout and records stale diagnostics
+- Known critical risks: diagnostic LOCAL_ONLY is not production-safe exchange truth; adapter-specific read-only reconciliation coverage still requires provider validation
+- Last audit date: 2026-07-08
+- Live readiness verdict: NOT LIVE READY
+
 - Current version: Phase 4 portfolio risk & exposure engine - PR267 blocker fixes
 - Current phase: Phase 4 - fail-closed portfolio risk with BACKTEST accounting wired
 - Runtime maturity: BACKTEST/PAPER research runtime with shared portfolio-risk gate; LIVE disabled
