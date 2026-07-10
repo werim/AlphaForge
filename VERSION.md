@@ -1,5 +1,16 @@
 # AlphaForge Version
 
+- Current version: Phase 5 runtime resilience - PR269 read-only dashboard evidence fix
+- Current phase: Phase 5 - read-only evidence helper hardening
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed runtime snapshots; dashboard/API GET paths must not bootstrap evidence schemas; LIVE disabled
+- BACKTEST/PAPER/LIVE alignment: no strategy, reject, lifecycle, or mode decision logic changed
+- Lifecycle coverage: unchanged; missing runtime snapshot evidence remains explicit and does not satisfy readiness
+- Execution realism coverage: unchanged; Phase 3 effective-RR cost breakdown remains canonical
+- Runtime resilience coverage: runtime snapshot read helper now returns no evidence when the table is absent instead of issuing CREATE TABLE during reads
+- Known critical risks: read-only reconciliation/provider evidence still requires adapter validation; missing evidence remains fail-closed
+- Last audit date: 2026-07-10
+- Live readiness verdict: NOT LIVE READY
+
 - Current version: Phase 5 runtime resilience - PR268 fail-closed reconciliation/readiness fixes
 - Current phase: Phase 5 - pre-merge blocker hardening for runtime recovery and exchange-state evidence
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed runtime snapshots; PAPER/LIVE_PRECHECK fail closed without read-only exchange evidence; LIVE disabled

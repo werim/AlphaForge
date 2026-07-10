@@ -1,3 +1,40 @@
+## 2026-07-10 PR269 Read-only Dashboard Evidence Fix
+
+### Root cause summary
+Dashboard/API GET paths must be read-only, but evidence read helpers that call schema bootstrap can issue `CREATE TABLE IF NOT EXISTS` before a SELECT. On read-only SQLite handles this can raise `sqlite3.OperationalError: attempt to write a readonly database` and it also blurs the difference between absent evidence and bootstrapped empty evidence.
+
+### Files changed
+- `src/alphaforge/runtime_state.py`: separates runtime snapshot schema bootstrap from `latest_runtime_state_snapshot()` and returns `None` when the evidence table is absent.
+- `tests/test_dashboard_app.py`: adds regressions for no-DDL runtime snapshot reads and read-only dashboard runtime-control GET behavior.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: document the read-only evidence-access hardening, compatibility impact, and LIVE readiness stance.
+
+### Runtime behavior changes
+No trading/runtime decision logic changed. Snapshot writes still bootstrap schema through save/init paths. Snapshot reads now inspect for table presence and perform only SELECT-style evidence access.
+
+### Lifecycle changes
+None. Missing runtime snapshot evidence remains explicit and does not create lifecycle state or imply readiness.
+
+### Persistence changes
+Read helpers no longer create `runtime_state_snapshots` as a side effect. Writable initialization and save paths remain responsible for schema creation.
+
+### Export/schema changes
+No schema shape changed. The behavioral contract changed only by preventing SELECT-only helpers from bootstrapping absent tables.
+
+### Tests added
+Added dashboard regression coverage that verifies absent snapshot tables return no evidence without creating tables and that `/api/v1/runtime/control` succeeds through the dashboard read-only SQLite runtime connection.
+
+### Tests executed
+Targeted and full test results are recorded in the final response for this patch.
+
+### Risks
+Hidden release-gate helpers introduced after this branch may require the same no-DDL read-helper pattern. Readiness must continue to fail closed when evidence tables/snapshots are absent.
+
+### Migration concerns
+None. Existing databases require no migration; startup/init/save paths still create tables when running with a writable database.
+
+### Push recommendation
+Safe to push after requested targeted and full pytest validation pass. Do not claim LIVE readiness.
+
 ## 2026-07-08 PR268 Phase 5 Pre-merge Blocker Fixes
 
 ### Root cause summary
