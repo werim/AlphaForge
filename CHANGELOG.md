@@ -1,3 +1,24 @@
+## 2026-07-10 - PR269 read-only dashboard evidence fix
+
+### Added
+- Regression coverage proving the runtime snapshot read helper does not create schema when snapshot evidence is absent.
+- Dashboard runtime-control regression coverage for read-only runtime SQLite connections.
+
+### Changed
+- Runtime snapshot reads now separate evidence lookup from schema bootstrap and return no evidence when `runtime_state_snapshots` is absent.
+
+### Fixed
+- Prevented read-only dashboard/API evidence reads from attempting runtime snapshot DDL on read-only SQLite connections.
+
+### Removed
+- Removed implicit schema bootstrap from the runtime snapshot SELECT-only helper.
+
+### Breaking Changes
+- None. Missing runtime snapshot evidence remains missing evidence and does not pass readiness.
+
+### Known Issues
+- LIVE remains NOT READY; this patch only hardens read-only evidence access and does not add release or execution readiness evidence.
+
 ## 2026-07-08 - PR268 Phase 5 pre-merge blocker fixes
 
 ### Added

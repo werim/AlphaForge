@@ -16,6 +16,7 @@ from sqlalchemy.exc import OperationalError
 from alphaforge.dashboard.app import create_app
 from alphaforge.persistence import init_db
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
+from alphaforge.runtime_state import latest_runtime_state_snapshot
 
 
 def test_dashboard_health_and_status_are_read_only_and_honest(tmp_path) -> None:
@@ -41,6 +42,31 @@ def test_existing_runtime_sqlite_is_opened_read_only(tmp_path) -> None:
     with pytest.raises(OperationalError):
         with app.state.engine.begin() as conn:
             conn.execute(text("INSERT INTO order_decisions(decision_id) VALUES ('must-not-write')"))
+
+
+def test_runtime_snapshot_read_helper_does_not_bootstrap_schema(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'missing_snapshot_table.db'}"
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE unrelated_evidence(id INTEGER PRIMARY KEY)"))
+
+    assert latest_runtime_state_snapshot(engine) is None
+
+    with engine.connect() as conn:
+        table = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_state_snapshots'")).first()
+    assert table is None
+
+
+def test_dashboard_runtime_control_get_succeeds_with_read_only_runtime_connection(tmp_path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'readonly_runtime.db'}"
+    seed_engine = init_db(database_url)
+    seed_engine.dispose()
+
+    client = TestClient(create_app(database_url))
+    payload = client.get("/api/v1/runtime/control").json()
+
+    assert payload["mode_requested"] == "PAPER"
+    assert payload["latest_readiness"]["status"] == "NOT_AVAILABLE"
 
 
 def test_fresh_paper_heartbeat_appears_in_dashboard_runtime_status(tmp_path) -> None:

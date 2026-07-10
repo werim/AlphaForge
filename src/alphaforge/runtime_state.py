@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import json, os, uuid
 from typing import Any, Mapping
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 from alphaforge.contracts import canonical_utc_timestamp
@@ -98,7 +98,8 @@ def save_runtime_state_snapshot(engine: Engine, snapshot: RuntimeStateSnapshot) 
         conn.execute(text(f"INSERT INTO runtime_state_snapshots ({cols}) VALUES ({vals})"), rec)
 
 def latest_runtime_state_snapshot(engine: Engine) -> dict[str, Any] | None:
-    ensure_runtime_state_schema(engine)
+    if not inspect(engine).has_table("runtime_state_snapshots"):
+        return None
     with engine.connect() as conn:
         row = conn.execute(text("SELECT * FROM runtime_state_snapshots ORDER BY id DESC LIMIT 1")).mappings().first()
     if not row: return None
