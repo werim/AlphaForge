@@ -18,6 +18,7 @@ from alphaforge.config_registry import config_snapshot, write_dashboard_override
 from alphaforge.contracts import canonical_utc_timestamp
 from alphaforge.runtime import _build_runtime_from_env
 from alphaforge.runtime_control import RuntimeControlStore, RuntimeSupervisor
+from alphaforge.release_gates import release_gate_status
 
 from .backtest_control import default_form_values, parse_backtest_form, run_dashboard_backtest
 
@@ -70,6 +71,7 @@ def _status_payload(engine: Engine, control_store: RuntimeControlStore | None = 
         **heartbeat_status,
         **control,
         "latest_readiness": fetch_latest_readiness(engine),
+        "release_gate": release_gate_status(engine),
     }
 
 

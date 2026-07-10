@@ -1,3 +1,25 @@
+## 2026-07-10 - Phase 6 release-gate read-only evidence fix
+
+### Added
+- Release-gate evidence module with read-only table-existence checks for release snapshots, operator acknowledgements, and canary mutation evidence.
+- Regression coverage proving release SELECT helpers emit no CREATE/ALTER, absent tables return no evidence, read-only SQLite queries do not raise, dashboard GET stays read-only, and Phase 6 readiness fails closed without release evidence.
+
+### Changed
+- Dashboard runtime-control payload now reports `release_gate.status=NO_EVIDENCE` when release-gate tables are absent instead of attempting schema bootstrap.
+- LIVE readiness now includes a Phase 6 release-gate aggregate that requires persisted release snapshot evidence, valid operator acknowledgement, and zero canary mutation attempts.
+
+### Fixed
+- Prevented SELECT-only release/canary/operator read helpers from calling release-gate schema creation on read-only SQLite connections.
+
+### Removed
+- Removed implicit DDL from release-gate read paths; schema creation remains limited to init/bootstrap/write helpers.
+
+### Breaking Changes
+- None. Missing release evidence fails readiness closed and does not alter trading decisions.
+
+### Known Issues
+- LIVE remains NOT READY; Phase 6 operator/runbook evidence still requires representative production-grade artifacts.
+
 ## 2026-07-10 - PR269 read-only dashboard evidence fix
 
 ### Added

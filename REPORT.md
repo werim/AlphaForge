@@ -1,3 +1,50 @@
+## 2026-07-10 Phase 6 Release-gate Read-only Evidence Fix
+
+### Why this patch was needed
+PR 269 CI still failed on a read-only dashboard GET path because release-gate SELECT helpers could call `ensure_release_gate_schema(engine)` before reading evidence. Against SQLite opened with `mode=ro`, even `CREATE TABLE IF NOT EXISTS` is a write attempt and can raise `OperationalError`.
+
+### Root cause
+Schema bootstrap and evidence reads were coupled. Read helpers could not distinguish "table absent/no evidence" from "needs bootstrap", so dashboard GET and readiness reads risked DDL on read-only runtime databases.
+
+### Files changed
+- `src/alphaforge/release_gates.py`: adds release-gate schema/write helpers plus read-only table-existence checks and SELECT-only evidence helpers.
+- `src/alphaforge/dashboard/app.py`: includes release-gate status in runtime-control/status payloads without mutating the runtime DB.
+- `src/alphaforge/live_readiness.py`: adds fail-closed Phase 6 release-gate readiness evidence.
+- `src/alphaforge/persistence.py`: additively includes release-gate tables in explicit DB initialization.
+- `tests/test_phase6_release_gates.py`: adds no-DDL/read-only/absent-table/dashboard GET regressions.
+- `tests/test_live_readiness.py`: seeds valid release evidence for qualified fixtures and adds an absent-release-evidence fail-closed regression.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: document behavior, persistence impact, tests, risks, and LIVE readiness stance.
+
+### Runtime behavior changes
+Dashboard GET `/api/v1/runtime/control` now reads release-gate evidence through SELECT-only helpers. When release tables are absent, it reports `NO_EVIDENCE` and does not create or alter tables. Trading decision logic is unchanged.
+
+### Lifecycle changes
+None. Missing release evidence does not fabricate lifecycle events and does not satisfy readiness.
+
+### Persistence changes
+Release-gate schema creation is limited to `init_db()`, explicit `ensure_release_gate_schema()`, and write helpers before INSERT. SELECT helpers return `None` or missing-evidence status when tables are absent.
+
+### Export/schema changes
+Additive explicit-init tables: `release_gate_snapshots`, `release_operator_acks`, and `canary_mutation_attempts`. No existing schema is altered by read helpers.
+
+### Tests added
+Added regressions for no CREATE/ALTER from `latest_release_snapshot`, absent-table `None` returns, read-only SQLite safety, dashboard runtime-control `NO_EVIDENCE`, and Phase 6 readiness fail-closed behavior.
+
+### Tests executed
+Targeted and broader pytest commands are recorded in the final response. FastAPI/httpx-dependent dashboard tests are skipped in this environment when dependencies are unavailable.
+
+### Risks
+Release-gate table contracts are additive and conservative; future migrations may need richer runbook evidence fields. Missing or malformed release evidence blocks readiness by design.
+
+### Remaining limitations
+This does not make LIVE ready. Representative Phase 6 operator acknowledgement, canary, rollback/runbook, burn-in, and release artifacts remain required.
+
+### Migration concerns
+Existing databases do not require read-time migration. Operators should run explicit bootstrap/init on writable databases before persisting release evidence.
+
+### Push recommendation
+Safe to push after targeted/full validation. Do not claim LIVE readiness.
+
 ## 2026-07-10 PR269 Read-only Dashboard Evidence Fix
 
 ### Root cause summary

@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 from alphaforge.alert_delivery import latest_persisted_alert_delivery_evidence
 from alphaforge.contracts import ALLOWED_LIFECYCLE_TRANSITIONS, LifecycleEventType, canonical_utc_timestamp
 from alphaforge.rollback_evidence import latest_persisted_rollback_evidence
+from alphaforge.release_gates import release_gate_status
 from alphaforge.runtime_heartbeat import DEFAULT_MAX_AGE_SEC, evaluate_runtime_heartbeat_freshness
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 
@@ -70,6 +71,7 @@ class LiveReadinessEvaluator:
             checks.extend(self._check_stats(conn))
         checks.append(self._check_runtime_heartbeat())
         checks.extend(self._check_runtime_state_snapshot())
+        checks.extend(self._check_release_gates())
         checks.extend(self._check_runtime(mode_parity, reconciliation_snapshot))
         checks.extend(self._check_operational(observability_snapshot, canary_enabled, shadow_mode_enabled, operator_ack))
         gates = self._aggregate_gates(
@@ -104,6 +106,7 @@ class LiveReadinessEvaluator:
         phase5_runtime = {"runtime_state_snapshot_present", "runtime_heartbeat_fresh", "runtime_recovery_not_required", "no_unclean_shutdown_unresolved", "kill_switch_state_persisted", "no_orphan_orders", "no_orphan_positions", "no_stale_pending_orders", "exchange_reconciliation_evidence_present", "exchange_reconciliation_clean", "exchange_read_only_evidence_present", "runtime_db_persistence_verified"}
         operational = {"alert_delivery_evidence", "observability_coverage"}
         rollback = {"rollback_ready"}
+        phase6_release = {"phase6_release_gate_evidence"}
         phase3_execution_realism = {"execution_cost_breakdown_present", "effective_rr_available", "execution_rejects_persisted", "no_accepted_trade_with_effective_rr_below_threshold", "no_accepted_trade_with_missing_critical_execution_context", "no_fake_zero_execution_costs"}
         phase4_portfolio_risk = {"portfolio_risk_snapshot_present", "portfolio_risk_rejects_persisted", "no_accepted_trade_over_position_limit", "no_accepted_trade_over_notional_limit", "no_accepted_trade_over_symbol_notional_limit", "no_accepted_trade_after_daily_loss_limit", "no_accepted_trade_with_unknown_portfolio_risk", "correlation_risk_evidence_present", "drawdown_guard_evidence_present", "portfolio_accounting_reconciliation_present", "backtest_and_paper_share_portfolio_risk_engine"}
         gates = [
@@ -126,6 +129,7 @@ class LiveReadinessEvaluator:
             CheckResult("timesfm_evidence_safe_non_ordering", bool(timesfm_evidence.get("non_ordering", False)) and not bool(timesfm_evidence.get("satisfies_execution_readiness", False)), "TimesFM evidence may inform research only and cannot satisfy order/execution gates"),
             CheckResult("paper_burnin_report_acceptable", str(paper_burnin_report.get("status", "MISSING")).upper() == "ACCEPTABLE", "PAPER burn-in must be acceptable but never promotes LIVE by itself"),
             CheckResult("full_tests_passing_evidence_recorded", str(tests_passing_evidence.get("status", "MISSING")).upper() == "PASS", "requires current full test evidence"),
+            CheckResult("phase6_release_gates_verified", self._checks_pass(checks, phase6_release), "requires persisted release snapshot, operator ack, and zero canary mutation attempts"),
             CheckResult("operator_acknowledgement_required", bool(operator_ack), "explicit operator acknowledgement is required"),
         ]
         return gates
@@ -140,6 +144,8 @@ class LiveReadinessEvaluator:
             return "NOT_LIVE_READY"
         if not passed.get("phase5_runtime_resilience_complete", False):
             return "NOT_LIVE_READY"
+        if not passed.get("phase6_release_gates_verified", False):
+            return "LIVE_PRECHECK_READY"
         if all(passed.values()):
             return "LIVE_REAL_ORDERS_READY"
         if all(value for name, value in passed.items() if name != "operator_acknowledgement_required"):
@@ -179,6 +185,20 @@ class LiveReadinessEvaluator:
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path
 
+
+
+    def _check_release_gates(self) -> list[CheckResult]:
+        evidence = release_gate_status(self.engine)
+        passed = bool(evidence.get("passed", False))
+        status = str(evidence.get("status") or "NO_EVIDENCE")
+        details = (
+            f"status={status};snapshot_id={evidence.get('snapshot_id')};"
+            f"operator_ack_present={evidence.get('operator_ack_present')};"
+            f"canary_mutation_attempt_count={evidence.get('canary_mutation_attempt_count')};"
+            f"missing_tables={evidence.get('missing_evidence_tables')};"
+            f"blocking_reasons={evidence.get('blocking_reasons')}"
+        )
+        return [CheckResult("phase6_release_gate_evidence", passed, details)]
 
     def _check_runtime_state_snapshot(self) -> list[CheckResult]:
         try:
