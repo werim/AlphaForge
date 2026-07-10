@@ -1,46 +1,43 @@
-## 2026-07-10 Phase 6 Release-gate Read-only Evidence Fix
+## 2026-07-10 PR269 Phase 6 Release-controls Read-path Compatibility Fix
 
 ### Why this patch was needed
-PR 269 CI still failed on a read-only dashboard GET path because release-gate SELECT helpers could call `ensure_release_gate_schema(engine)` before reading evidence. Against SQLite opened with `mode=ro`, even `CREATE TABLE IF NOT EXISTS` is a write attempt and can raise `OperationalError`.
+The prior PR272 patch solved the read-only SQLite DDL failure by adding a parallel release-gate implementation. That conflicted with PR269's canonical Phase 6 schema/APIs and could also report real LIVE order readiness when every gate passed.
 
 ### Root cause
-Schema bootstrap and evidence reads were coupled. Read helpers could not distinguish "table absent/no evidence" from "needs bootstrap", so dashboard GET and readiness reads risked DDL on read-only runtime databases.
+SELECT-only release evidence helpers must not call schema bootstrap, but the fix must be applied to PR269's canonical release-control surfaces rather than introducing new tables or a separate readiness model. Operator acknowledgement reads also needed expiry validation.
 
 ### Files changed
-- `src/alphaforge/release_gates.py`: adds release-gate schema/write helpers plus read-only table-existence checks and SELECT-only evidence helpers.
-- `src/alphaforge/dashboard/app.py`: includes release-gate status in runtime-control/status payloads without mutating the runtime DB.
-- `src/alphaforge/live_readiness.py`: adds fail-closed Phase 6 release-gate readiness evidence.
-- `src/alphaforge/persistence.py`: additively includes release-gate tables in explicit DB initialization.
-- `tests/test_phase6_release_gates.py`: adds no-DDL/read-only/absent-table/dashboard GET regressions.
-- `tests/test_live_readiness.py`: seeds valid release evidence for qualified fixtures and adds an absent-release-evidence fail-closed regression.
-- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: document behavior, persistence impact, tests, risks, and LIVE readiness stance.
+- `src/alphaforge/release_gates.py`: restores canonical PR269 table/API names and adds read-only table checks, no-DDL readers, expiry-enforced operator acknowledgement reads, write/bootstrap helpers, canary persistence, and mutation-trap adapter compatibility.
+- `src/alphaforge/dashboard/app.py`: includes release-gate status in dashboard runtime payloads through no-DDL read helpers.
+- `src/alphaforge/live_readiness.py`: fails closed on missing/failed Phase 6 evidence and blocks real LIVE order readiness even when Phase 6 gates pass.
+- `src/alphaforge/persistence.py`: additively bootstraps canonical PR269 release-control tables through explicit init only.
+- `tests/test_phase6_release_gates.py`: adds canonical schema, no-DDL, read-only dashboard, expired ack, release/phase match, and canary-ready snapshot regressions.
+- `tests/test_live_readiness.py`: seeds canonical Phase 6 evidence for existing readiness fixtures and verifies missing evidence and all-pass blocked semantics.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: document compatibility scope, persistence impact, readiness behavior, tests, and remaining LIVE risks.
 
 ### Runtime behavior changes
-Dashboard GET `/api/v1/runtime/control` now reads release-gate evidence through SELECT-only helpers. When release tables are absent, it reports `NO_EVIDENCE` and does not create or alter tables. Trading decision logic is unchanged.
+Dashboard GET `/api/v1/runtime/control` can report `NO_EVIDENCE` for absent release-control tables without issuing `CREATE` or `ALTER`. Phase 6 evidence can establish canary/release-control readiness, but real LIVE order readiness remains blocked.
 
 ### Lifecycle changes
-None. Missing release evidence does not fabricate lifecycle events and does not satisfy readiness.
+None. Missing release-control evidence does not synthesize lifecycle events and does not alter Phase 1-5 lifecycle/reject semantics.
 
 ### Persistence changes
-Release-gate schema creation is limited to `init_db()`, explicit `ensure_release_gate_schema()`, and write helpers before INSERT. SELECT helpers return `None` or missing-evidence status when tables are absent.
+Schema creation remains in explicit init/bootstrap/write paths. SELECT-only helpers use metadata inspection and return `None` or explicit no-evidence results when canonical PR269 tables are absent.
 
 ### Export/schema changes
-Additive explicit-init tables: `release_gate_snapshots`, `release_operator_acks`, and `canary_mutation_attempts`. No existing schema is altered by read helpers.
+Canonical PR269 table names are preserved: `release_gate_snapshots`, `operator_acknowledgements`, `canary_run_events`, `rollback_verification_events`, and `runbook_evidence`. The rejected PR272 table names are not introduced.
 
 ### Tests added
-Added regressions for no CREATE/ALTER from `latest_release_snapshot`, absent-table `None` returns, read-only SQLite safety, dashboard runtime-control `NO_EVIDENCE`, and Phase 6 readiness fail-closed behavior.
+Added coverage for dashboard/read-helper no-DDL behavior, canonical schema preservation, expired/malformed acknowledgement fail-closed behavior, release id/phase acknowledgement matching, missing evidence `NOT_LIVE_READY`, and all Phase 6 gates passing still returning `LIVE_REAL_ORDERS_BLOCKED`.
 
 ### Tests executed
-Targeted and broader pytest commands are recorded in the final response. FastAPI/httpx-dependent dashboard tests are skipped in this environment when dependencies are unavailable.
+Targeted and full pytest commands are recorded in the final response. FastAPI/httpx-dependent dashboard tests may skip in this container when those optional dependencies are unavailable.
 
 ### Risks
-Release-gate table contracts are additive and conservative; future migrations may need richer runbook evidence fields. Missing or malformed release evidence blocks readiness by design.
-
-### Remaining limitations
-This does not make LIVE ready. Representative Phase 6 operator acknowledgement, canary, rollback/runbook, burn-in, and release artifacts remain required.
+This is a compatibility patch without access to a separate local PR269 branch in the container; it preserves the named canonical surfaces specified in review. Future PR269-specific runtime canary integration tests may require additional adapter-specific fixture wiring, but the mutation trap and canary event API names are present.
 
 ### Migration concerns
-Existing databases do not require read-time migration. Operators should run explicit bootstrap/init on writable databases before persisting release evidence.
+Existing PR269 databases keep their canonical table names. Operators should run explicit bootstrap/init on writable databases before persisting release-control evidence. Read paths do not migrate.
 
 ### Push recommendation
 Safe to push after targeted/full validation. Do not claim LIVE readiness.

@@ -129,7 +129,7 @@ class LiveReadinessEvaluator:
             CheckResult("timesfm_evidence_safe_non_ordering", bool(timesfm_evidence.get("non_ordering", False)) and not bool(timesfm_evidence.get("satisfies_execution_readiness", False)), "TimesFM evidence may inform research only and cannot satisfy order/execution gates"),
             CheckResult("paper_burnin_report_acceptable", str(paper_burnin_report.get("status", "MISSING")).upper() == "ACCEPTABLE", "PAPER burn-in must be acceptable but never promotes LIVE by itself"),
             CheckResult("full_tests_passing_evidence_recorded", str(tests_passing_evidence.get("status", "MISSING")).upper() == "PASS", "requires current full test evidence"),
-            CheckResult("phase6_release_gates_verified", self._checks_pass(checks, phase6_release), "requires persisted release snapshot, operator ack, and zero canary mutation attempts"),
+            CheckResult("phase6_release_gates_verified", self._checks_pass(checks, phase6_release), "requires Phase 6 release, canary, rollback, runbook, and unexpired operator acknowledgement evidence"),
             CheckResult("operator_acknowledgement_required", bool(operator_ack), "explicit operator acknowledgement is required"),
         ]
         return gates
@@ -145,9 +145,9 @@ class LiveReadinessEvaluator:
         if not passed.get("phase5_runtime_resilience_complete", False):
             return "NOT_LIVE_READY"
         if not passed.get("phase6_release_gates_verified", False):
-            return "LIVE_PRECHECK_READY"
+            return "NOT_LIVE_READY"
         if all(passed.values()):
-            return "LIVE_REAL_ORDERS_READY"
+            return "LIVE_REAL_ORDERS_BLOCKED"
         if all(value for name, value in passed.items() if name != "operator_acknowledgement_required"):
             return "LIVE_REAL_ORDERS_BLOCKED"
         dry_run_blockers = {"operator_acknowledgement_required", "full_tests_passing_evidence_recorded"}
@@ -192,10 +192,12 @@ class LiveReadinessEvaluator:
         passed = bool(evidence.get("passed", False))
         status = str(evidence.get("status") or "NO_EVIDENCE")
         details = (
-            f"status={status};snapshot_id={evidence.get('snapshot_id')};"
-            f"operator_ack_present={evidence.get('operator_ack_present')};"
-            f"canary_mutation_attempt_count={evidence.get('canary_mutation_attempt_count')};"
-            f"missing_tables={evidence.get('missing_evidence_tables')};"
+            f"status={status};release_id={evidence.get('release_id')};phase={evidence.get('phase')};"
+            f"operator_acknowledged={evidence.get('operator_acknowledged')};"
+            f"canary_ready={evidence.get('canary_ready')};"
+            f"rollback_verified={evidence.get('rollback_verified')};"
+            f"runbook_verified={evidence.get('runbook_verified')};"
+            f"mutation_attempt_count={evidence.get('mutation_attempt_count')};"
             f"blocking_reasons={evidence.get('blocking_reasons')}"
         )
         return [CheckResult("phase6_release_gate_evidence", passed, details)]

@@ -1,24 +1,24 @@
-## 2026-07-10 - Phase 6 release-gate read-only evidence fix
+## 2026-07-10 - PR269 Phase 6 release-controls read-path compatibility fix
 
 ### Added
-- Release-gate evidence module with read-only table-existence checks for release snapshots, operator acknowledgements, and canary mutation evidence.
-- Regression coverage proving release SELECT helpers emit no CREATE/ALTER, absent tables return no evidence, read-only SQLite queries do not raise, dashboard GET stays read-only, and Phase 6 readiness fails closed without release evidence.
+- Read-only table-existence checks around canonical release/canary/operator/runbook/rollback evidence readers.
+- Regression coverage for no-DDL dashboard GET/read helpers, canonical PR269 schema names, expired/malformed operator acknowledgements, missing release evidence fail-closed readiness, and all-pass Phase 6 remaining real-order blocked.
 
 ### Changed
-- Dashboard runtime-control payload now reports `release_gate.status=NO_EVIDENCE` when release-gate tables are absent instead of attempting schema bootstrap.
-- LIVE readiness now includes a Phase 6 release-gate aggregate that requires persisted release snapshot evidence, valid operator acknowledgement, and zero canary mutation attempts.
+- Phase 6 readiness now fails `NOT_LIVE_READY` when release evidence is missing or failed, and reports `LIVE_REAL_ORDERS_BLOCKED` rather than real-order ready when all Phase 6 gates pass.
+- Operator acknowledgement reads now require matching release id and phase, parse `valid_until`, and reject expired or malformed expiry evidence.
 
 ### Fixed
-- Prevented SELECT-only release/canary/operator read helpers from calling release-gate schema creation on read-only SQLite connections.
+- Removed DDL from SELECT-only release-gate read paths while preserving PR269 canonical schema/API names.
 
 ### Removed
-- Removed implicit DDL from release-gate read paths; schema creation remains limited to init/bootstrap/write helpers.
+- Removed the parallel PR272 release-gate table/API model in favor of canonical PR269 release-control surfaces.
 
 ### Breaking Changes
-- None. Missing release evidence fails readiness closed and does not alter trading decisions.
+- None to the canonical PR269 schema. Missing or expired release evidence remains a fail-closed blocker.
 
 ### Known Issues
-- LIVE remains NOT READY; Phase 6 operator/runbook evidence still requires representative production-grade artifacts.
+- LIVE remains NOT READY; passing Phase 6 evidence can make canary/release controls ready but never enables real LIVE order submission.
 
 ## 2026-07-10 - PR269 read-only dashboard evidence fix
 

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
-from alphaforge.release_gates import persist_operator_ack, persist_release_snapshot
+from alphaforge.release_gates import build_release_snapshot, persist_canary_event, persist_operator_ack, persist_release_snapshot
 from alphaforge.rollback_evidence import persist_rollback_validation_evidence
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
@@ -86,6 +86,22 @@ def _persist_verified_rollback(engine) -> None:
     })
 
 
+
+
+def _persist_verified_phase6_release(engine, *, release_id: str = "default", phase: str = "PHASE6") -> None:
+    persist_operator_ack(engine, release_id=release_id, phase=phase, valid_until="2099-01-01T00:00:00Z", evidence={"source": "readiness-test"})
+    persist_canary_event(engine, release_id=release_id, phase=phase, mutation_attempted=False, mutation_blocked=True, evidence={"source": "readiness-test"})
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO rollback_verification_events(verification_id, release_id, phase, verified_at, status, evidence_json)
+            VALUES ('rollback:phase6-readiness-test', :release_id, :phase, '2026-01-01T00:00:00Z', 'PASS', '{}')
+        """), {"release_id": release_id, "phase": phase})
+        conn.execute(text("""
+            INSERT INTO runbook_evidence(evidence_id, release_id, phase, recorded_at, status, evidence_json)
+            VALUES ('runbook:phase6-readiness-test', :release_id, :phase, '2026-01-01T00:00:00Z', 'PASS', '{}')
+        """), {"release_id": release_id, "phase": phase})
+    persist_release_snapshot(engine, build_release_snapshot(engine, release_id=release_id, phase=phase))
+
 def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, persist_rollback: bool = True, persist_runtime_snapshot: bool = True):
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
@@ -96,8 +112,7 @@ def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, 
         save_runtime_heartbeat(engine, runtime_instance_id="runtime:live-qualified-test", execution_mode="LIVE", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
     if persist_rollback:
         _persist_verified_rollback(engine)
-    persist_release_snapshot(engine, {"snapshot_id": "release:readiness-test", "phase": "PHASE6", "status": "COMPLETE", "ready": True, "blocking_reasons": [], "evidence_payload": {"source": "test"}})
-    persist_operator_ack(engine, {"ack_id": "ack:readiness-test", "phase": "PHASE6", "acknowledged": True, "evidence_payload": {"source": "test"}})
+    _persist_verified_phase6_release(engine)
     if persist_runtime_snapshot:
         save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="LIVE_PRECHECK", requested_mode="LIVE_PRECHECK", actual_mode="LIVE_PRECHECK", runtime_status="RECONCILED", heartbeat_age_sec=1.0, instance_id="runtime:phase5-readiness", kill_switch_active=False, unknown_exchange_state=False, exchange_read_only_status="AVAILABLE", reconciliation_status="CLEAN", recovery_action_required=False))
     return engine
@@ -136,7 +151,8 @@ def test_live_readiness_pass_and_persistence() -> None:
     engine = _engine()
     evaluator = LiveReadinessEvaluator(engine)
     report = _evaluate(engine)
-    assert report.qualified is True
+    assert report.qualified is False
+    assert report.verdict == "LIVE_REAL_ORDERS_BLOCKED"
     assert next(check for check in report.checks if check.name == "runtime_heartbeat").passed is True
     assert next(check for check in report.checks if check.name == "rollback_ready").passed is True
     evaluator.persist_report(report)
@@ -263,7 +279,8 @@ def test_forensic_snapshot_written(tmp_path) -> None:
     report = _evaluate(evaluator.engine)
     payload = json.loads(evaluator.write_forensic_snapshot(tmp_path, report, {"positions": 0}).read_text())
     assert payload["version"] == "gen5"
-    assert payload["report"]["qualified"] is True
+    assert payload["report"]["qualified"] is False
+    assert payload["report"]["verdict"] == "LIVE_REAL_ORDERS_BLOCKED"
 
 
 def test_forensic_snapshot_redacts_nested_fields(tmp_path) -> None:
@@ -334,7 +351,7 @@ def test_live_precheck_invalid_execution_evidence_blocks_readiness() -> None:
 
 def test_final_gate_missing_each_individual_gate_blocks_real_orders() -> None:
     baseline = _evaluate(_engine())
-    assert baseline.verdict == "LIVE_REAL_ORDERS_READY"
+    assert baseline.verdict == "LIVE_REAL_ORDERS_BLOCKED"
     for gate_name in [gate.name for gate in baseline.gates or []]:
         kwargs = {}
         if gate_name == "exchange_connectivity_healthy":
@@ -422,23 +439,25 @@ def test_phase3_execution_gate_blocks_when_each_required_check_fails() -> None:
 
 
 def test_phase6_readiness_fails_when_release_evidence_absent() -> None:
-    engine = init_db("sqlite+pysqlite:///:memory:")
-    with Session(engine) as session:
-        _seed_valid(session)
-    capture_alert_delivery_evidence(engine, _StaticProvider(_verified_alert()))
-    save_runtime_heartbeat(engine, runtime_instance_id="runtime:missing-release", execution_mode="LIVE", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
-    _persist_verified_rollback(engine)
-    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="LIVE_PRECHECK", requested_mode="LIVE_PRECHECK", actual_mode="LIVE_PRECHECK", runtime_status="RECONCILED", heartbeat_age_sec=1.0, instance_id="runtime:missing-release", kill_switch_active=False, unknown_exchange_state=False, exchange_read_only_status="AVAILABLE", reconciliation_status="CLEAN", recovery_action_required=False))
-
+    engine = _engine()
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS release_gate_snapshots"))
-        conn.execute(text("DROP TABLE IF EXISTS release_operator_acks"))
-        conn.execute(text("DROP TABLE IF EXISTS canary_mutation_attempts"))
+        conn.execute(text("DROP TABLE IF EXISTS operator_acknowledgements"))
+        conn.execute(text("DROP TABLE IF EXISTS canary_run_events"))
+        conn.execute(text("DROP TABLE IF EXISTS rollback_verification_events"))
+        conn.execute(text("DROP TABLE IF EXISTS runbook_evidence"))
 
     report = _evaluate(engine)
     gates = {gate.name: gate for gate in (report.gates or [])}
     checks = {check.name: check for check in report.checks}
     assert report.qualified is False
-    assert report.verdict != "LIVE_REAL_ORDERS_READY"
+    assert report.verdict == "NOT_LIVE_READY"
     assert checks["phase6_release_gate_evidence"].passed is False
     assert gates["phase6_release_gates_verified"].passed is False
+
+
+def test_phase6_all_gates_pass_still_blocks_real_live_orders() -> None:
+    report = _evaluate(_engine())
+    assert report.qualified is False
+    assert report.verdict == "LIVE_REAL_ORDERS_BLOCKED"
+    assert any(g.name == "phase6_release_gates_verified" and g.passed for g in (report.gates or []))
