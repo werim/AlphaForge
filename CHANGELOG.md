@@ -1,3 +1,25 @@
+## 2026-07-10 - PR269 Phase 6 release-controls read-path compatibility fix
+
+### Added
+- Read-only table-existence checks around canonical release/canary/operator/runbook/rollback evidence readers.
+- Regression coverage for no-DDL dashboard GET/read helpers, canonical PR269 schema names, expired/malformed operator acknowledgements, missing release evidence fail-closed readiness, and all-pass Phase 6 remaining real-order blocked.
+
+### Changed
+- Phase 6 readiness now fails `NOT_LIVE_READY` when release evidence is missing or failed, and reports `LIVE_REAL_ORDERS_BLOCKED` rather than real-order ready when all Phase 6 gates pass.
+- Operator acknowledgement reads now require matching release id and phase, parse `valid_until`, and reject expired or malformed expiry evidence.
+
+### Fixed
+- Removed DDL from SELECT-only release-gate read paths while preserving PR269 canonical schema/API names.
+
+### Removed
+- Removed the parallel PR272 release-gate table/API model in favor of canonical PR269 release-control surfaces.
+
+### Breaking Changes
+- None to the canonical PR269 schema. Missing or expired release evidence remains a fail-closed blocker.
+
+### Known Issues
+- LIVE remains NOT READY; passing Phase 6 evidence can make canary/release controls ready but never enables real LIVE order submission.
+
 ## 2026-07-10 - PR269 read-only dashboard evidence fix
 
 ### Added

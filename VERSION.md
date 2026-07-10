@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+- Current version: PR269 Phase 6 release-controls read-path compatibility fix
+- Current phase: Phase 6 - canonical release/canary/operator evidence read-path hardening
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed evidence; dashboard/API GET paths must not bootstrap release-gate schemas; LIVE real orders remain blocked
+- BACKTEST/PAPER/LIVE alignment: no Phase 1-5 strategy, reject, lifecycle, or order decision logic changed; Phase 6 evidence is fail-closed and cannot promote real LIVE readiness
+- Lifecycle coverage: unchanged; missing release evidence does not create lifecycle state and does not satisfy readiness
+- Execution realism coverage: unchanged; Phase 3 effective-RR cost breakdown remains canonical
+- Release-gate coverage: canonical PR269 tables/APIs are preserved; SELECT-only helpers inspect table existence and return no evidence without CREATE/ALTER
+- Known critical risks: representative Phase 6 release artifacts/operator workflows are still required; missing or expired evidence remains fail-closed
+- Last audit date: 2026-07-10
+- Live readiness verdict: NOT LIVE READY
+
+
 - Current version: Phase 5 runtime resilience - PR269 read-only dashboard evidence fix
 - Current phase: Phase 5 - read-only evidence helper hardening
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed runtime snapshots; dashboard/API GET paths must not bootstrap evidence schemas; LIVE disabled
