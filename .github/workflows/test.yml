@@ -3,12 +3,20 @@ name: Tests
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - dev
+      - main
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - dev
+      - main
 
 permissions:
   contents: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
