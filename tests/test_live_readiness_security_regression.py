@@ -65,9 +65,9 @@ def test_live_qualification_fail_closed_with_reconciliation_findings_and_no_inci
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
-    runtime = RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True), ai_brain=_AcceptBrain(Session(engine)), market_scanner=lambda: asyncio.sleep(0, result=[]), real_execution_adapter=object(), persistence_engine=engine, scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", live_reconciliation_provider=_DirtyProvider())
+    runtime = RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True), ai_brain=_AcceptBrain(Session(engine)), market_scanner=lambda: asyncio.sleep(0, result=[]), real_execution_adapter=object(), persistence_engine=engine, scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", live_reconciliation_provider=_DirtyProvider())
     with pytest.raises(RuntimeError, match="readiness qualification failed"):
-        asyncio.run(runtime._run_live_qualification_gate())
+        asyncio.run(runtime._run_live_precheck_qualification_gate())
     with engine.begin() as conn:
         exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reconciliation_incidents'")).scalar_one()
         if exists:
@@ -148,9 +148,9 @@ def test_live_qualification_clean_provider_does_not_write_incidents() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
-    runtime = RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True), ai_brain=_AcceptBrain(Session(engine)), market_scanner=lambda: asyncio.sleep(0, result=[]), real_execution_adapter=object(), persistence_engine=engine, scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", live_reconciliation_provider=_CleanProvider())
+    runtime = RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True), ai_brain=_AcceptBrain(Session(engine)), market_scanner=lambda: asyncio.sleep(0, result=[]), real_execution_adapter=object(), persistence_engine=engine, scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", live_reconciliation_provider=_CleanProvider())
     with pytest.raises(RuntimeError, match="readiness qualification failed"):
-        asyncio.run(runtime._run_live_qualification_gate())
+        asyncio.run(runtime._run_live_precheck_qualification_gate())
     with engine.begin() as conn:
         exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reconciliation_incidents'")).scalar_one()
         if exists:
@@ -276,9 +276,9 @@ class _ExplicitExchangeProvider:
         }
 
 
-def _live_runtime(engine, **overrides):
+def _live_precheck_runtime(engine, **overrides):
     kwargs = dict(
-        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True),
         ai_brain=_AcceptBrain(Session(engine)),
         market_scanner=lambda: asyncio.sleep(0, result=[]),
         real_execution_adapter=object(),
@@ -313,10 +313,10 @@ def test_live_qualification_blocks_when_required_readiness_provider_missing(miss
         "rollback_readiness_probe": _RollbackProbe(),
     }
     kwargs[{"exchange": "exchange_snapshot_provider", "observability": "observability_probe", "rollback": "rollback_readiness_probe"}[missing]] = None
-    runtime = _live_runtime(engine, **kwargs)
+    runtime = _live_precheck_runtime(engine, **kwargs)
 
     with pytest.raises(RuntimeError, match="readiness qualification failed"):
-        asyncio.run(runtime._run_live_qualification_gate())
+        asyncio.run(runtime._run_live_precheck_qualification_gate())
 
     inputs, payload = _latest_readiness_inputs(engine)
     key = {"exchange": "exchange_snapshot", "observability": "observability", "rollback": "rollback"}[missing]
@@ -348,18 +348,110 @@ def test_live_qualification_accepts_only_non_mutating_phase6_verdict_with_explic
         )
 
     monkeypatch.setattr("alphaforge.runtime.LiveReadinessEvaluator.evaluate", _ready_evaluate)
-    runtime = _live_runtime(
+    runtime = _live_precheck_runtime(
         engine,
         exchange_snapshot_provider=_ExplicitExchangeProvider(),
         observability_probe=_ObservedProbe(),
         rollback_readiness_probe=_RollbackProbe(),
     )
-    asyncio.run(runtime._run_live_qualification_gate())
+    asyncio.run(runtime._run_live_precheck_qualification_gate())
     inputs, _payload = _latest_readiness_inputs(engine)
     assert inputs["exchange_snapshot"]["source"] == "AUTHENTICATED_EXCHANGE_SNAPSHOT"
     assert inputs["observability"]["source"] == "MEASURED_OBSERVABILITY_PROBE"
     assert inputs["rollback"]["source"] == "MEASURED_ROLLBACK_PROBE"
     assert all(inputs[name]["timestamp"] for name in ("exchange_snapshot", "observability", "rollback"))
+
+
+@pytest.mark.parametrize("verdict", ["CANARY_READY", "LIVE_REAL_ORDERS_BLOCKED"])
+def test_real_live_rejects_phase6_non_mutating_verdicts_before_operating(monkeypatch, verdict) -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    calls = {"evaluate": 0, "scanner": 0}
+
+    def _evaluate(self, **kwargs):
+        calls["evaluate"] += 1
+        return QualificationReport(
+            qualified=False,
+            checks=[],
+            generated_at="2026-06-24T00:00:03+00:00",
+            deployment_state=verdict,
+            acknowledgement_required=False,
+            verdict=verdict,
+            gates=[],
+            blockers=[],
+        )
+
+    async def _scanner():
+        calls["scanner"] += 1
+        return []
+
+    monkeypatch.setattr("alphaforge.runtime.LiveReadinessEvaluator.evaluate", _evaluate)
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, enable_shadow_mode=True, enable_canary_mode=True, operator_live_acknowledged=True, require_exchange_connectivity_for_live=False),
+        ai_brain=_AcceptBrain(Session(engine)),
+        market_scanner=_scanner,
+        real_execution_adapter=object(),
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+    )
+
+    with pytest.raises(RuntimeError, match="LIVE_REAL_ORDERS_DISABLED_IN_PHASE6"):
+        asyncio.run(runtime.start())
+
+    assert runtime._runtime_status == "STOPPING"
+    assert runtime._tasks == []
+    assert calls["evaluate"] == 0
+    assert calls["scanner"] == 0
+
+
+def test_real_live_rejects_phase6_before_adapter_requirement() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, require_exchange_connectivity_for_live=False),
+        ai_brain=_AcceptBrain(Session(engine)),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        real_execution_adapter=None,
+        persistence_engine=engine,
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+    )
+
+    with pytest.raises(RuntimeError, match="LIVE_REAL_ORDERS_DISABLED_IN_PHASE6"):
+        asyncio.run(runtime.start())
+
+    assert runtime._runtime_status == "STOPPING"
+    assert runtime._tasks == []
+
+
+def test_live_precheck_accepts_canary_ready_as_non_mutating_verdict(monkeypatch) -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        _seed_valid(session)
+
+    def _evaluate(self, **kwargs):
+        return QualificationReport(
+            qualified=False,
+            checks=[],
+            generated_at="2026-06-24T00:00:03+00:00",
+            deployment_state="CANARY_READY",
+            acknowledgement_required=False,
+            verdict="CANARY_READY",
+            gates=[],
+            blockers=[],
+        )
+
+    monkeypatch.setattr("alphaforge.runtime.LiveReadinessEvaluator.evaluate", _evaluate)
+    runtime = _live_precheck_runtime(
+        engine,
+        exchange_snapshot_provider=_ExplicitExchangeProvider(),
+        observability_probe=_ObservedProbe(),
+        rollback_readiness_probe=_RollbackProbe(),
+    )
+
+    asyncio.run(runtime._run_live_precheck_qualification_gate())
+
+    assert runtime._live_order_submission_enabled is False
+    assert runtime._mutation_trap_active is True
+    assert runtime._qualification_report is not None
+    assert runtime._qualification_report.verdict == "CANARY_READY"
 
 
 def test_paper_backtest_readiness_fixture_inputs_can_remain_deterministic_offline() -> None:

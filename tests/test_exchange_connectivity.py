@@ -85,7 +85,7 @@ def test_hyperliquid_connectivity_failure_mocked_if_available(monkeypatch: pytes
     assert "HYPERLIQUID_CONNECTIVITY_ERROR" in (health.error or "")
 
 
-def test_runtime_blocks_live_mode_when_exchange_unhealthy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_phase6_live_disablement_precedes_exchange_health(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Brain:
         pass
 
@@ -109,13 +109,13 @@ def test_runtime_blocks_live_mode_when_exchange_unhealthy(monkeypatch: pytest.Mo
         return [ExchangeHealth("binance", False, False, None, False, None, None, "UNAVAILABLE", "2026-05-21T00:00:00Z", True, True, True)]
 
     monkeypatch.setattr("alphaforge.runtime.check_required_exchanges_health", _failed_health)
-    with pytest.raises(RuntimeError, match="LIVE mode blocked: exchange connectivity unavailable"):
+    with pytest.raises(RuntimeError, match="LIVE_REAL_ORDERS_DISABLED_IN_PHASE6"):
         import asyncio
 
         asyncio.run(rt.start())
 
 
-def test_live_startup_requires_exchange_connectivity_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_startup_phase6_disablement_precedes_default_exchange_connectivity(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Brain:
         pass
 
@@ -137,7 +137,7 @@ def test_live_startup_requires_exchange_connectivity_by_default(monkeypatch: pyt
         return [ExchangeHealth("binance", False, False, None, False, None, None, "UNAVAILABLE", "2026-05-21T00:00:00Z", True, True, True)]
 
     monkeypatch.setattr("alphaforge.runtime.check_required_exchanges_health", _failed_health)
-    with pytest.raises(RuntimeError, match="LIVE mode blocked: exchange connectivity unavailable"):
+    with pytest.raises(RuntimeError, match="LIVE_REAL_ORDERS_DISABLED_IN_PHASE6"):
         import asyncio
 
         asyncio.run(rt.start())

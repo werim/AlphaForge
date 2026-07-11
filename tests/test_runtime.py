@@ -425,11 +425,11 @@ def test_live_start_blocks_safe_scanner_override_through_runtime_wrapper(monkeyp
         asyncio.run(orchestrator.start())
 
 
-def test_live_start_blocks_when_real_execution_adapter_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_start_phase6_disablement_precedes_real_adapter_requirement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")
     orchestrator = _build_runtime_from_env()
-    with pytest.raises(RuntimeError, match="LIVE mode blocked: real execution adapter is not configured"):
+    with pytest.raises(RuntimeError, match="LIVE_REAL_ORDERS_DISABLED_IN_PHASE6"):
         asyncio.run(orchestrator.start())
 
 

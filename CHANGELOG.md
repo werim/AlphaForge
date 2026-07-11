@@ -1,3 +1,25 @@
+## 2026-07-11 - PR273 Phase 6 LIVE startup fail-closed fix
+
+### Added
+- Explicit LIVE fail-closed startup path using `LIVE_REAL_ORDERS_DISABLED_IN_PHASE6`.
+- LIVE/LIVE_PRECHECK regressions proving non-mutating Phase 6 verdicts cannot start real LIVE runtime tasks.
+
+### Changed
+- LIVE_PRECHECK owns the non-mutating Phase 6 qualification path and accepts only `CANARY_READY` or `LIVE_REAL_ORDERS_BLOCKED` with submission disabled and mutation trap active.
+- ExecutionMode.LIVE no longer checks a real adapter before Phase 6 hard-disablement; it fails closed first.
+
+### Fixed
+- Prevented `CANARY_READY` or `LIVE_REAL_ORDERS_BLOCKED` from allowing real LIVE runtime startup or OPERATING state.
+
+### Removed
+- Removed shared LIVE startup dependence on the non-mutating qualification gate.
+
+### Breaking Changes
+- None to schema or BACKTEST/PAPER behavior. ExecutionMode.LIVE is explicitly hard-disabled during Phase 6.
+
+### Known Issues
+- LIVE remains NOT READY; only LIVE_PRECHECK non-mutating canary/readiness operation is allowed.
+
 ## 2026-07-10 - PR269 Phase 6 runtime integration rebase on PR272
 
 ### Added
