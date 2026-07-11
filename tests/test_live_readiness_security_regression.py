@@ -324,7 +324,7 @@ def test_live_qualification_blocks_when_required_readiness_provider_missing(miss
     assert payload["readiness_inputs"][key]
 
 
-def test_live_qualification_passes_only_with_explicit_non_synthetic_provider_results_and_operator_ack(monkeypatch) -> None:
+def test_live_qualification_accepts_only_non_mutating_phase6_verdict_with_explicit_inputs(monkeypatch) -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:
         _seed_valid(session)
@@ -337,12 +337,12 @@ def test_live_qualification_passes_only_with_explicit_non_synthetic_provider_res
         assert observability_snapshot["input_source"] == "MEASURED_ROLLBACK_PROBE"
         assert not reconciliation_snapshot.get("synthetic", False)
         return QualificationReport(
-            qualified=True,
+            qualified=False,
             checks=[],
             generated_at="2026-06-24T00:00:03+00:00",
-            deployment_state="LIVE_REAL_ORDERS_READY",
+            deployment_state="LIVE_REAL_ORDERS_BLOCKED",
             acknowledgement_required=False,
-            verdict="LIVE_REAL_ORDERS_READY",
+            verdict="LIVE_REAL_ORDERS_BLOCKED",
             gates=[],
             blockers=[],
         )

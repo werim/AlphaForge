@@ -503,9 +503,10 @@ class RuntimeOrchestrator:
         evaluator.persist_report(report)
         self._qualification_report = report
         logger.warning("live_readiness_report=%s", report.to_dict())
-        if report.verdict != "LIVE_REAL_ORDERS_READY":
+        allowed_non_mutating_verdicts = {"LIVE_REAL_ORDERS_BLOCKED", "CANARY_READY"}
+        if report.verdict not in allowed_non_mutating_verdicts:
             self._persist_runtime_heartbeat(runtime_state="STOPPING")
-            raise RuntimeError(f"LIVE mode blocked: readiness qualification failed; verdict {report.verdict} is below LIVE_REAL_ORDERS_READY")
+            raise RuntimeError(f"LIVE mode blocked: readiness qualification failed; verdict {report.verdict} is not a non-mutating Phase 6 verdict")
 
 
     @staticmethod

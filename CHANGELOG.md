@@ -1,3 +1,25 @@
+## 2026-07-10 - PR269 Phase 6 runtime integration rebase on PR272
+
+### Added
+- Canary snapshot evidence now records scoped canary event counts alongside mutation counts.
+
+### Changed
+- Phase 6 canary readiness requires at least one canonical `canary_run_events` row, zero mutation attempts, valid release/phase operator acknowledgement, rollback PASS, and runbook PASS.
+- Runtime LIVE precheck accepts only non-mutating Phase 6 verdicts and no longer references real-order-ready promotion.
+
+### Fixed
+- Prevented empty canary tables from satisfying Phase 6 evidence.
+- Ensured readiness qualification remains false even when all Phase 6 gates produce a blocked/canary-ready verdict.
+
+### Removed
+- Removed remaining runtime dependence on a `LIVE_REAL_ORDERS_READY` success verdict.
+
+### Breaking Changes
+- None to schema. Empty canary evidence now fails closed as missing evidence.
+
+### Known Issues
+- LIVE remains NOT READY; real order submission stays disabled.
+
 ## 2026-07-10 - PR269 Phase 6 release-controls read-path compatibility fix
 
 ### Added

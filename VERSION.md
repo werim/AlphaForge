@@ -1,5 +1,18 @@
 # AlphaForge Version
 
+- Current version: PR269 Phase 6 runtime integration rebase on PR272 canonical release gates
+- Current phase: Phase 6 - runtime canary/release-control compatibility hardening
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed evidence; Phase 6 canary/release controls are non-mutating and LIVE real orders remain blocked
+- BACKTEST/PAPER/LIVE alignment: Phase 1-5 gates remain unchanged; Phase 6 release evidence is evaluated fail-closed through canonical read-only helpers
+- Lifecycle coverage: unchanged; missing or failed Phase 6 evidence does not synthesize lifecycle events or satisfy readiness
+- Execution realism coverage: unchanged; Phase 3 effective-RR cost breakdown remains canonical
+- Release-gate coverage: canonical tables are preserved (`release_gate_snapshots`, `operator_acknowledgements`, `canary_run_events`, `rollback_verification_events`, `runbook_evidence`); SELECT-only helpers issue no schema DDL
+- Known critical risks: representative Phase 6 canary/operator/runbook workflows are still required; any mutation attempt, expired ack, or missing evidence fails closed
+- Last audit date: 2026-07-10
+- Live readiness verdict: NOT LIVE READY; real order submission remains disabled
+
+# AlphaForge Version
+
 - Current version: PR269 Phase 6 release-controls read-path compatibility fix
 - Current phase: Phase 6 - canonical release/canary/operator evidence read-path hardening
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed evidence; dashboard/API GET paths must not bootstrap release-gate schemas; LIVE real orders remain blocked

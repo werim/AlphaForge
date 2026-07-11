@@ -1,3 +1,44 @@
+## 2026-07-10 PR269 Phase 6 Runtime Integration Rebase on PR272
+
+### Why this patch was needed
+PR269's broader Phase 6 runtime integration needed to sit on top of PR272's canonical read-only release-gate fixes without reintroducing read-path DDL or real LIVE order readiness semantics.
+
+### Root cause
+The release gate model must require concrete canary evidence, unexpired release/phase-scoped acknowledgement, rollback PASS, and runbook PASS while preserving non-mutating runtime behavior. A table-only canary check and real-order-ready qualification semantics were too permissive for Phase 6.
+
+### Files changed
+- `src/alphaforge/release_gates.py`: requires at least one scoped canary event, keeps mutation attempts in `canary_run_events`, and includes canary event count in snapshot evidence without adding read-path DDL.
+- `src/alphaforge/live_readiness.py`: keeps Phase 6 qualification non-real-order by forcing `qualified=False` even when the verdict is blocked/canary-ready.
+- `src/alphaforge/runtime.py`: allows only non-mutating Phase 6 verdicts (`LIVE_REAL_ORDERS_BLOCKED`/`CANARY_READY`) past readiness precheck and blocks all other LIVE startup states.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: document runtime, persistence, schema, readiness, and risk impacts.
+
+### Runtime behavior changes
+LIVE startup can proceed only into explicitly non-mutating Phase 6 states; it still cannot claim or enable real LIVE order submission. Canary readiness now requires actual canary event evidence, not only an empty canonical table.
+
+### Lifecycle changes
+None. Phase 6 release/canary evidence remains separate from signal lifecycle persistence and missing evidence fails closed.
+
+### Persistence changes
+No schema drift. Canonical PR272/PR269 table names are retained and read helpers remain SELECT-only. Mutation attempts continue to persist as canary events.
+
+### Export/schema changes
+No export shape or table name changes. The compatibility adaptation is behavioral: empty canary event evidence no longer passes Phase 6.
+
+### Tests added
+Existing Phase 6 tests cover canonical schema, no-DDL reads, expired/malformed ack, release/phase scoping, mutation attempts, and all-pass blocked readiness.
+
+### Tests executed
+Targeted/full commands and outcomes are recorded in the final response.
+
+### Risks
+The container has no configured remote or separate PR269 branch ref, so the update was performed on the available working branch containing PR272. Dashboard helper import-path stability was patched so the requested targeted command and full suite pass in this container.
+
+### Migration concerns
+None. Operators should continue using explicit writable bootstrap/init paths before writing release evidence; read paths do not migrate or create release tables.
+
+### Push recommendation
+Safe to push only after CI confirms the dashboard import-path behavior. Do not claim LIVE readiness.
+
 ## 2026-07-10 PR269 Phase 6 Release-controls Read-path Compatibility Fix
 
 ### Why this patch was needed

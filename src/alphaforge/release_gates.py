@@ -234,6 +234,19 @@ def canary_mutation_attempt_count(engine: Engine, *, release_id: str, phase: str
         return None
 
 
+def _canary_event_count(engine: Engine, *, release_id: str, phase: str) -> int | None:
+    if not read_only_table_exists(engine, CANARY_RUN_EVENTS_TABLE):
+        return None
+    try:
+        with engine.connect() as conn:
+            return int(conn.execute(text(f"""
+                SELECT COUNT(*) FROM {CANARY_RUN_EVENTS_TABLE}
+                WHERE release_id = :release_id AND UPPER(phase) = UPPER(:phase)
+            """), {"release_id": release_id, "phase": phase}).scalar_one())
+    except SQLAlchemyError:
+        return None
+
+
 def _latest_status(engine: Engine, table: str, *, release_id: str, phase: str, status_column: str, time_column: str) -> str | None:
     if not read_only_table_exists(engine, table):
         return None
@@ -252,16 +265,16 @@ def _latest_status(engine: Engine, table: str, *, release_id: str, phase: str, s
 def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHASE6", now: datetime | None = None) -> ReleaseGateSnapshot:
     ack = latest_valid_operator_ack(engine, release_id=release_id, phase=phase, now=now)
     mutation_count = canary_mutation_attempt_count(engine, release_id=release_id, phase=phase)
+    canary_event_count = _canary_event_count(engine, release_id=release_id, phase=phase)
     rollback_status = _latest_status(engine, ROLLBACK_VERIFICATION_EVENTS_TABLE, release_id=release_id, phase=phase, status_column="status", time_column="verified_at")
     runbook_status = _latest_status(engine, RUNBOOK_EVIDENCE_TABLE, release_id=release_id, phase=phase, status_column="status", time_column="recorded_at")
-    canary_table_present = read_only_table_exists(engine, CANARY_RUN_EVENTS_TABLE)
-    canary_ready = mutation_count == 0 and canary_table_present
+    canary_ready = mutation_count == 0 and bool(canary_event_count)
     rollback_verified = rollback_status == "PASS"
     runbook_verified = runbook_status == "PASS"
     reasons: list[str] = []
     if ack is None:
         reasons.append("OPERATOR_ACK_MISSING_OR_EXPIRED")
-    if mutation_count is None:
+    if mutation_count is None or canary_event_count in (None, 0):
         reasons.append("CANARY_EVIDENCE_MISSING")
     elif mutation_count > 0:
         reasons.append("CANARY_MUTATION_ATTEMPTED")
@@ -285,7 +298,7 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
         operator_acknowledged=ack is not None,
         mutation_attempt_count=mutation_count,
         blocking_reasons=reasons,
-        evidence={"operator_ack": ack, "rollback_status": rollback_status, "runbook_status": runbook_status},
+        evidence={"operator_ack": ack, "canary_event_count": canary_event_count, "rollback_status": rollback_status, "runbook_status": runbook_status},
     )
 
 

@@ -88,7 +88,7 @@ class LiveReadinessEvaluator:
         )
         blockers = [f"{gate.name}:{gate.details}" for gate in gates if not gate.passed]
         verdict = self._verdict_from_gates(gates)
-        qualified = verdict == "LIVE_REAL_ORDERS_READY"
+        qualified = False  # Phase 6 never enables real LIVE order readiness; it only permits blocked/canary states.
         return QualificationReport(qualified=qualified, checks=checks, gates=gates, blockers=blockers, verdict=verdict, generated_at=canonical_utc_timestamp(), deployment_state=verdict, acknowledgement_required=not operator_ack)
 
 
