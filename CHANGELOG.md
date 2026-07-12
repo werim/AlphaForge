@@ -1,3 +1,30 @@
+## 2026-07-12 - Phase 7 PAPER Burn-in and Canary Qualification Evidence
+
+### Added
+- SQL-backed Phase 7 burn-in schema for runs, observations, trade outcomes, reject outcomes, regime/execution/calibration/drawdown metrics, qualification snapshots, and suspension events.
+- Cost-adjusted qualification engine using conservative lower confidence bound expectancy, reject-quality value, calibration quality, drawdown/loss-cluster checks, execution degradation status, concentration limits, canonical Phase 1-6 release controls, operator acknowledgement, full-test evidence, and runtime reconciliation evidence.
+- Deterministic Phase 7 exports and dashboard/API burn-in evidence surfaces that distinguish unavailable, insufficient, failed, qualified, and suspended evidence without rendering missing metrics as zero.
+- Phase 7 regression tests covering schema bootstrap, no-evidence reads, deterministic hashes, missing costs, canary verdict semantics, and UNKNOWN regime blocking.
+
+### Changed
+- PAPER and LIVE_PRECHECK runtime paths now create immutable release-scoped continuation burn-in runs, persist final decision observations, keep rejects pending until forward labels complete, record PAPER closed-trade outcome evidence only on `POSITION_CLOSED`, emit periodic execution/drawdown metrics, and generate snapshots at runtime/shutdown.
+- Writable database bootstrap now adds Phase 7 tables additively while read helpers/dashboard paths remain SELECT-only; qualification evaluation no longer creates missing schema.
+- Dashboard runtime status includes Phase 7 burn-in evidence and exposes `/burnin` plus `/api/v1/burnin/latest`.
+
+### Fixed
+- Missing cost evidence cannot silently qualify as zero-cost expectancy.
+- `require_operator_ack` and `require_phase1_6_gates` now produce explicit blockers for missing/expired ack, failed release gates, mutation attempts, rollback/runbook gaps, missing full-test evidence, and reconciliation gaps.
+- Closed-trade thresholds now use only realized `POSITION_CLOSED` evidence, pending rejects no longer count toward forward-outcome thresholds, burn-in run counters are reconciled from SQL evidence, and duplicate run IDs/continuation sequences are rejected instead of overwritten.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None to Phase 1-6 tables or runtime strategy behavior.
+
+### Known Issues
+- Phase 7 CANARY_QUALIFIED is not live readiness; LIVE real order submission remains disabled. Real representative PAPER/LIVE_PRECHECK evidence must be collected before any canary qualification can pass.
+
 ## 2026-07-11 - PR273 Phase 6 LIVE startup fail-closed fix
 
 ### Added

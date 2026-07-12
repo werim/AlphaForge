@@ -269,3 +269,49 @@ def fetch_signal_timeline(engine: Engine, signal_id: str) -> dict[str, Any]:
         "has_signal_created": any(str(row.get("lifecycle_state") or "") == "SIGNAL_CREATED" for row in events),
         "rejected_without_reason": rejected_without_reason,
     }
+
+
+def fetch_phase7_burnin(engine: Engine) -> dict[str, Any]:
+    """Read-only Phase 7 burn-in dashboard evidence; intentionally emits no DDL."""
+    if not _has_table(engine, "burnin_qualification_snapshots"):
+        return {"status": "UNAVAILABLE", "reason": "NO_PHASE7_TABLES", "metrics": {}, "blockers": [], "warnings": [], "suspension_reasons": []}
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT * FROM burnin_qualification_snapshots
+                ORDER BY generated_at DESC, id DESC LIMIT 1
+            """)).mappings().first()
+            if row is None:
+                return {"status": "UNAVAILABLE", "reason": "NO_PHASE7_SNAPSHOT", "metrics": {}, "blockers": [], "warnings": [], "suspension_reasons": []}
+            susp = []
+            if _has_table(engine, "burnin_suspension_events"):
+                susp = [dict(r) for r in conn.execute(text("""
+                    SELECT timestamp, reason_codes_json, observed_values_json FROM burnin_suspension_events
+                    WHERE burnin_run_id=:bid ORDER BY timestamp DESC, id DESC LIMIT 5
+                """), {"bid": row["burnin_run_id"]}).mappings().all()]
+    except SQLAlchemyError:
+        return {"status": "UNAVAILABLE", "reason": "PHASE7_QUERY_UNAVAILABLE", "metrics": {}, "blockers": [], "warnings": [], "suspension_reasons": []}
+    def loads(v, fallback):
+        try: return json.loads(v or json.dumps(fallback))
+        except Exception: return fallback
+    return {
+        "status": row["status"],
+        "burnin_run_id": row["burnin_run_id"],
+        "release_id": row["release_id"],
+        "generated_at": row["generated_at"],
+        "sample_status": row["sample_status"],
+        "expectancy_status": row["expectancy_status"],
+        "execution_status": row["execution_status"],
+        "regime_status": row["regime_status"],
+        "reject_quality_status": row["reject_quality_status"],
+        "calibration_status": row["calibration_status"],
+        "drawdown_status": row["drawdown_status"],
+        "concentration_status": row["concentration_status"],
+        "evidence_completeness_status": row["evidence_completeness_status"],
+        "blockers": loads(row["blockers_json"], []),
+        "warnings": loads(row["warnings_json"], []),
+        "thresholds": loads(row["thresholds_json"], {}),
+        "metrics": loads(row["metrics_json"], {}),
+        "evidence_hash": row["evidence_hash"],
+        "suspension_reasons": [loads(r.get("reason_codes_json"), []) for r in susp],
+    }
