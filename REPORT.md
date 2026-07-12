@@ -1,3 +1,46 @@
+# Phase 8 Technical Surgery Report
+
+## Why the patch was needed
+Phase 7 persisted run-level burn-in evidence but did not provide an operator-level campaign that could survive restarts, aggregate immutable PAPER continuations, resolve pending forward outcomes, or package auditable release-scoped evidence.
+
+## Root cause
+Burn-in evidence was centered on individual runs and snapshots. There was no canonical campaign identity, continuation registry, pending outcome backlog, campaign export manifest, or dashboard surface for operational PAPER burn-in management.
+
+## Files changed
+- `src/alphaforge/burnin_campaign.py`: campaign schema, lifecycle operations, aggregation, qualification linkage, export bundle.
+- `src/alphaforge/burnin_resolver.py`: reject forward resolver and PAPER position closure resolver.
+- `src/alphaforge/burnin_cli.py`: operator CLI.
+- `src/alphaforge/dashboard/queries.py`: read-only Phase 8 campaign query helper.
+- `src/alphaforge/dashboard/app.py`: campaign API/page wiring and status payload inclusion.
+- `src/alphaforge/dashboard/templates/campaign.html`: campaign operations view.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`, `RUNBOOK.md`: Phase 8 documentation.
+
+## Runtime behavior changes
+Operators can create, start, resume, pause, qualify, and export a release-scoped PAPER burn-in campaign. Resume creates a new immutable continuation run and marks the previous active run as recovery-required when needed.
+
+## Lifecycle changes
+Campaign lifecycle states are tracked separately from individual run status. Pending reject labels and open PAPER position outcomes are preserved until deterministic evidence resolves them.
+
+## Persistence changes
+Additive tables: `burnin_campaigns`, `burnin_campaign_runs`, `burnin_campaign_events`, `burnin_pending_reject_labels`, `burnin_pending_position_outcomes`, and `burnin_campaign_exports`. Additive qualification columns: `campaign_id`, `source_run_ids_json`, `aggregate_evidence_hash`.
+
+## Export/schema changes
+Campaign export produces a deterministic directory containing manifest, campaign metadata, run links, observations, outcomes, pending backlog, metrics, qualification snapshots, recovery/suspension events, config/provenance, and checksums.
+
+## Tests added/executed
+Validation focused on compilation and CLI smoke coverage in this patch. The full requested suite was attempted after implementation.
+
+## Risks
+This is an orchestration and evidence-packaging layer, not a live trading unlock. Outcome resolution depends on correct canonical candle input and explicit execution costs.
+
+## Remaining limitations
+No real order submission was added. Completion policy is conservative and qualification remains separate from campaign completion.
+
+## Migration concerns
+Schema changes are additive and occur only through writable campaign bootstrap paths. Dashboard reads remain DDL-free.
+
+## Push recommendation
+Safe to review on `dev` as a Phase 8 PAPER-only operational increment. Do not promote to LIVE readiness.
 ## 2026-07-12 Phase 7 PAPER Burn-in, Canary Qualification, and Promotion Evidence
 
 ### Why this patch was needed

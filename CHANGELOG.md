@@ -1,3 +1,27 @@
+# Changelog
+
+## Added
+- Phase 8 burn-in campaign schema for release-scoped campaigns, continuation runs, campaign events, pending reject labels, pending PAPER position outcomes, and campaign exports.
+- Operator CLI for campaign create/start/resume/status/pause/qualify/export flows with JSON and human-readable output.
+- Deterministic reject forward-outcome and PAPER position resolvers that keep ambiguous or incomplete evidence explicit.
+- Campaign aggregation, qualification linkage, and deterministic evidence bundle export with manifest and checksums.
+- Read-only dashboard campaign operations API/page.
+
+## Changed
+- Burn-in qualification snapshots can now carry campaign linkage, source run IDs, and aggregate evidence hashes through additive schema columns.
+
+## Fixed
+- Phase 8 restart/resume preserves prior continuation evidence and emits recovery events instead of overwriting active runs.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- None. Schema changes are additive and require explicit bootstrap through Phase 8 writable paths.
+
+## Known Issues
+- LIVE trading remains disabled and no real order submission is implemented.
+- Resolver quality depends on canonical future candle evidence supplied by the operator/runtime.
 ## 2026-07-12 - Phase 7 PAPER Burn-in and Canary Qualification Evidence
 
 ### Added
