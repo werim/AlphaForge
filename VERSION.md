@@ -1,5 +1,31 @@
 # AlphaForge Version
 
+- Current version: PR273 Phase 6 LIVE startup fail-closed fix
+- Current phase: Phase 6 - explicit LIVE vs LIVE_PRECHECK startup separation
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed evidence; LIVE real orders are hard-disabled before runtime tasks start
+- BACKTEST/PAPER/LIVE alignment: PAPER/BACKTEST unchanged; LIVE_PRECHECK may run only non-mutating qualification, reconciliation, and canary checks
+- Lifecycle coverage: unchanged; real LIVE startup does not scan, execute, or create trade lifecycle progression
+- Execution realism coverage: unchanged; Phase 3 effective-RR cost breakdown remains canonical
+- Release-gate coverage: PR272 canonical read-only release-gate semantics retained; LIVE_PRECHECK accepts only `CANARY_READY` or `LIVE_REAL_ORDERS_BLOCKED` with submission disabled and mutation trap active
+- Known critical risks: LIVE remains disabled; operators must not reinterpret non-mutating canary/precheck evidence as real order readiness
+- Last audit date: 2026-07-11
+- Live readiness verdict: NOT LIVE READY; `LIVE_REAL_ORDERS_DISABLED_IN_PHASE6` is fail-closed for ExecutionMode.LIVE
+
+# AlphaForge Version
+
+- Current version: PR269 Phase 6 runtime integration rebase on PR272 canonical release gates
+- Current phase: Phase 6 - runtime canary/release-control compatibility hardening
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed evidence; Phase 6 canary/release controls are non-mutating and LIVE real orders remain blocked
+- BACKTEST/PAPER/LIVE alignment: Phase 1-5 gates remain unchanged; Phase 6 release evidence is evaluated fail-closed through canonical read-only helpers
+- Lifecycle coverage: unchanged; missing or failed Phase 6 evidence does not synthesize lifecycle events or satisfy readiness
+- Execution realism coverage: unchanged; Phase 3 effective-RR cost breakdown remains canonical
+- Release-gate coverage: canonical tables are preserved (`release_gate_snapshots`, `operator_acknowledgements`, `canary_run_events`, `rollback_verification_events`, `runbook_evidence`); SELECT-only helpers issue no schema DDL
+- Known critical risks: representative Phase 6 canary/operator/runbook workflows are still required; any mutation attempt, expired ack, or missing evidence fails closed
+- Last audit date: 2026-07-10
+- Live readiness verdict: NOT LIVE READY; real order submission remains disabled
+
+# AlphaForge Version
+
 - Current version: PR269 Phase 6 release-controls read-path compatibility fix
 - Current phase: Phase 6 - canonical release/canary/operator evidence read-path hardening
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed evidence; dashboard/API GET paths must not bootstrap release-gate schemas; LIVE real orders remain blocked

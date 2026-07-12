@@ -1,3 +1,84 @@
+## 2026-07-11 PR273 Phase 6 LIVE Startup Fail-closed Fix
+
+### Why this patch was needed
+The prior PR273 patch allowed non-mutating Phase 6 verdicts to pass the startup qualification path used by `ExecutionMode.LIVE`. That could let the real LIVE runtime reach `OPERATING` even though Phase 6 explicitly blocks real LIVE order operation.
+
+### Root cause
+LIVE and LIVE_PRECHECK startup semantics were sharing the same qualification gate. `CANARY_READY` and `LIVE_REAL_ORDERS_BLOCKED` are valid only for non-mutating LIVE_PRECHECK operation, not real LIVE runtime startup.
+
+### Files changed
+- `src/alphaforge/runtime.py`: split the qualification path into `_run_live_precheck_qualification_gate()` and `_reject_real_live_in_phase6()`, hard-failing `ExecutionMode.LIVE` with `LIVE_REAL_ORDERS_DISABLED_IN_PHASE6` before runtime tasks start.
+- `tests/test_live_readiness_security_regression.py`: updates qualification tests to use LIVE_PRECHECK where non-mutating verdicts are expected and adds regressions proving LIVE rejects `CANARY_READY`/`LIVE_REAL_ORDERS_BLOCKED`, never reaches `OPERATING`, never starts scan tasks, and does not require a real adapter before the Phase 6 disablement.
+- `VERSION.md`, `REPORT.md`, `CHANGELOG.md`: document the corrected startup split, persistence/lifecycle impact, and live-readiness stance.
+
+### Runtime behavior changes
+`ExecutionMode.LIVE` now fails closed immediately with `LIVE_REAL_ORDERS_DISABLED_IN_PHASE6`. It does not run Phase 6 qualification as a path to startup, does not reach `OPERATING`, and does not create scan/execution tasks. `ExecutionMode.LIVE_PRECHECK` runs read-only/provider qualification and accepts only non-mutating verdicts while `live_order_submission_enabled` remains false and the mutation trap is active.
+
+### Lifecycle changes
+None for BACKTEST/PAPER/LIVE_PRECHECK decision lifecycle. Real LIVE startup now stops before scan/execution tasks, so it does not create real order lifecycle progression.
+
+### Persistence changes
+No schema changes. LIVE fail-closed startup persists STOPPING/runtime-state evidence only when a persistence engine is available. Release-gate readers remain SELECT-only.
+
+### Export/schema changes
+None. Canonical Phase 6 release-control tables remain unchanged.
+
+### Tests added
+Added security regressions for LIVE fail-closed behavior under `CANARY_READY` and `LIVE_REAL_ORDERS_BLOCKED`, no OPERATING transition, no scan task startup, no scanner calls, and LIVE_PRECHECK accepting `CANARY_READY` only as non-mutating evidence.
+
+### Tests executed
+Targeted and full pytest commands are recorded in the final response.
+
+### Risks
+LIVE remains intentionally unavailable in Phase 6. Any future LIVE enablement must add a separate, explicit post-Phase-6 control and must not reuse LIVE_PRECHECK canary verdicts as real order authorization.
+
+### Migration concerns
+None. This is a startup-control correction with no schema migration.
+
+### Push recommendation
+Safe to push after CI validation. Do not claim LIVE readiness.
+
+## 2026-07-10 PR269 Phase 6 Runtime Integration Rebase on PR272
+
+### Why this patch was needed
+PR269's broader Phase 6 runtime integration needed to sit on top of PR272's canonical read-only release-gate fixes without reintroducing read-path DDL or real LIVE order readiness semantics.
+
+### Root cause
+The release gate model must require concrete canary evidence, unexpired release/phase-scoped acknowledgement, rollback PASS, and runbook PASS while preserving non-mutating runtime behavior. A table-only canary check and real-order-ready qualification semantics were too permissive for Phase 6.
+
+### Files changed
+- `src/alphaforge/release_gates.py`: requires at least one scoped canary event, keeps mutation attempts in `canary_run_events`, and includes canary event count in snapshot evidence without adding read-path DDL.
+- `src/alphaforge/live_readiness.py`: keeps Phase 6 qualification non-real-order by forcing `qualified=False` even when the verdict is blocked/canary-ready.
+- `src/alphaforge/runtime.py`: allows only non-mutating Phase 6 verdicts (`LIVE_REAL_ORDERS_BLOCKED`/`CANARY_READY`) past readiness precheck and blocks all other LIVE startup states.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`: document runtime, persistence, schema, readiness, and risk impacts.
+
+### Runtime behavior changes
+LIVE startup can proceed only into explicitly non-mutating Phase 6 states; it still cannot claim or enable real LIVE order submission. Canary readiness now requires actual canary event evidence, not only an empty canonical table.
+
+### Lifecycle changes
+None. Phase 6 release/canary evidence remains separate from signal lifecycle persistence and missing evidence fails closed.
+
+### Persistence changes
+No schema drift. Canonical PR272/PR269 table names are retained and read helpers remain SELECT-only. Mutation attempts continue to persist as canary events.
+
+### Export/schema changes
+No export shape or table name changes. The compatibility adaptation is behavioral: empty canary event evidence no longer passes Phase 6.
+
+### Tests added
+Existing Phase 6 tests cover canonical schema, no-DDL reads, expired/malformed ack, release/phase scoping, mutation attempts, and all-pass blocked readiness.
+
+### Tests executed
+Targeted/full commands and outcomes are recorded in the final response.
+
+### Risks
+The container has no configured remote or separate PR269 branch ref, so the update was performed on the available working branch containing PR272. Dashboard helper import-path stability was patched so the requested targeted command and full suite pass in this container.
+
+### Migration concerns
+None. Operators should continue using explicit writable bootstrap/init paths before writing release evidence; read paths do not migrate or create release tables.
+
+### Push recommendation
+Safe to push only after CI confirms the dashboard import-path behavior. Do not claim LIVE readiness.
+
 ## 2026-07-10 PR269 Phase 6 Release-controls Read-path Compatibility Fix
 
 ### Why this patch was needed

@@ -166,6 +166,8 @@ class RuntimeOrchestrator:
     _last_repair_signature: set[str] = field(default_factory=set, init=False)
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
+    _live_order_submission_enabled: bool = field(default=False, init=False)
+    _mutation_trap_active: bool = field(default=False, init=False)
     _exchange_health: list[ExchangeHealth] = field(default_factory=list, init=False)
     _qualification_samples: tuple[dict[str, Any], ...] = field(default_factory=lambda: (
         {
@@ -369,8 +371,6 @@ class RuntimeOrchestrator:
                 raise RuntimeError("LIVE mode blocked: market scanner provenance is not verified")
             if scanner_source not in allowed_sources:
                 raise RuntimeError("LIVE mode blocked: exchange-backed market scanner is required")
-            if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
-                raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
         if self.metrics.persistence_enabled:
             self._load_recovery_state()
             self._persist_runtime_state_snapshot("STARTUP")
@@ -390,13 +390,11 @@ class RuntimeOrchestrator:
                 raise RuntimeError("LIVE mode blocked: market scanner provenance is not verified")
             if scanner_source not in allowed_sources:
                 raise RuntimeError("LIVE mode blocked: exchange-backed market scanner is required")
-            if self.config.execution_mode == ExecutionMode.LIVE and self.real_execution_adapter is None:
-                raise RuntimeError("LIVE mode blocked: real execution adapter is not configured")
+            if self.config.execution_mode == ExecutionMode.LIVE:
+                await self._reject_real_live_in_phase6()
             await self._run_live_exchange_connectivity_gate()
-            if self.config.execution_mode == ExecutionMode.LIVE and self.config.require_live_qualification:
-                self._persist_runtime_heartbeat()
-                self._persist_runtime_state_snapshot("OPERATING")
-                await self._run_live_qualification_gate()
+            if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK and self.config.require_live_qualification:
+                await self._run_live_precheck_qualification_gate()
         if self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
             await self._run_reconciliation_once()
             if self._fail_closed_reason and not self.config.diagnostic_mode:
@@ -445,7 +443,24 @@ class RuntimeOrchestrator:
             summary = ",".join(f"{h.exchange}:{h.error or 'UNAVAILABLE'}" for h in failures)
             raise RuntimeError(f"LIVE mode blocked: exchange connectivity unavailable ({summary})")
 
+    async def _reject_real_live_in_phase6(self) -> None:
+        self._live_order_submission_enabled = False
+        self._runtime_status = "STOPPING"
+        self._fail_closed_reason = "LIVE_REAL_ORDERS_DISABLED_IN_PHASE6"
+        self._persist_runtime_heartbeat(runtime_state="STOPPING")
+        self._persist_runtime_state_snapshot("STOPPING")
+        raise RuntimeError("LIVE_REAL_ORDERS_DISABLED_IN_PHASE6")
+
     async def _run_live_qualification_gate(self) -> None:
+        if self.config.execution_mode == ExecutionMode.LIVE:
+            await self._reject_real_live_in_phase6()
+        await self._run_live_precheck_qualification_gate()
+
+    async def _run_live_precheck_qualification_gate(self) -> None:
+        if self.config.execution_mode == ExecutionMode.LIVE:
+            await self._reject_real_live_in_phase6()
+        self._live_order_submission_enabled = False
+        self._mutation_trap_active = True
         engine = self._resolve_persistence_engine()
         if engine is None:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
@@ -503,9 +518,16 @@ class RuntimeOrchestrator:
         evaluator.persist_report(report)
         self._qualification_report = report
         logger.warning("live_readiness_report=%s", report.to_dict())
-        if report.verdict != "LIVE_REAL_ORDERS_READY":
+        allowed_non_mutating_verdicts = {"LIVE_REAL_ORDERS_BLOCKED", "CANARY_READY"}
+        if self._live_order_submission_enabled:
             self._persist_runtime_heartbeat(runtime_state="STOPPING")
-            raise RuntimeError(f"LIVE mode blocked: readiness qualification failed; verdict {report.verdict} is below LIVE_REAL_ORDERS_READY")
+            raise RuntimeError("LIVE_PRECHECK blocked: live_order_submission_enabled must remain false")
+        if not self._mutation_trap_active:
+            self._persist_runtime_heartbeat(runtime_state="STOPPING")
+            raise RuntimeError("LIVE_PRECHECK blocked: mutation trap is not active")
+        if report.verdict not in allowed_non_mutating_verdicts:
+            self._persist_runtime_heartbeat(runtime_state="STOPPING")
+            raise RuntimeError(f"LIVE_PRECHECK blocked: readiness qualification failed; verdict {report.verdict} is not a non-mutating Phase 6 verdict")
 
 
     @staticmethod
