@@ -78,3 +78,84 @@ def test_position_closed_creates_one_realized_burnin_outcome(tmp_path: Path):
     assert len(rows)==1
     assert rows[0][0] == 1.5 and rows[0][1] == 1.429 and rows[0][2] == "TP_HIT"
     assert run[0] == 1 and run[1] == 0
+
+
+def test_persist_burnin_run_rejects_duplicate_run_id(tmp_path: Path):
+    import pytest
+    import sqlite3
+    conn=sqlite3.connect(tmp_path/"dup.db")
+    bootstrap_burnin_schema(conn)
+    run=BurnInRun(burnin_run_id="rdup",release_id="rel",execution_mode="PAPER",git_commit="abc",config_hash=config_hash({"a":1}),strategy_config_hash=config_hash({"s":1}),universe_hash=universe_hash(["BTCUSDT"],["5m"]),source_provenance={"provider":"BINANCE_READONLY"})
+    persist_burnin_run(conn, run)
+    with pytest.raises(sqlite3.IntegrityError):
+        persist_burnin_run(conn, run)
+
+
+def test_continuation_sequence_allocates_without_overwriting(tmp_path: Path):
+    import sqlite3
+    from alphaforge.burnin import next_burnin_continuation_sequence
+    conn=sqlite3.connect(tmp_path/"seq.db")
+    bootstrap_burnin_schema(conn)
+    for expected in [0,1]:
+        seq=next_burnin_continuation_sequence(conn, release_id="rel", execution_mode="PAPER")
+        assert seq == expected
+        run=BurnInRun(burnin_run_id=f"phase7:rel:PAPER:{seq}",release_id="rel",execution_mode="PAPER",continuation_sequence=seq,git_commit="abc",config_hash=config_hash({"a":1}),strategy_config_hash=config_hash({"s":1}),universe_hash=universe_hash(["BTCUSDT"],["5m"]),source_provenance={"provider":"BINANCE_READONLY"},sample_count=99 if seq==0 else 0,end_time="2026-01-01T00:00:00Z" if seq==0 else None)
+        persist_burnin_run(conn, run)
+    rows=conn.execute("SELECT burnin_run_id, continuation_sequence, sample_count, end_time FROM burnin_runs ORDER BY continuation_sequence").fetchall()
+    assert rows[0][0] == "phase7:rel:PAPER:0"
+    assert rows[0][1] == 0 and rows[0][2] == 99 and rows[0][3] == "2026-01-01T00:00:00Z"
+    assert rows[1][0] == "phase7:rel:PAPER:1"
+
+
+def test_unique_release_mode_sequence_blocks_duplicate_sequence(tmp_path: Path):
+    import pytest
+    import sqlite3
+    conn=sqlite3.connect(tmp_path/"uniq.db")
+    bootstrap_burnin_schema(conn)
+    base={"release_id":"rel","execution_mode":"LIVE_PRECHECK","continuation_sequence":0,"git_commit":"abc","config_hash":config_hash({"a":1}),"strategy_config_hash":config_hash({"s":1}),"universe_hash":universe_hash(["BTCUSDT"],["5m"]),"source_provenance":{"provider":"BINANCE_READONLY"},"parent_burnin_run_id":"paper0","parent_qualification_id":"q0"}
+    persist_burnin_run(conn, BurnInRun(burnin_run_id="lp0", **base))
+    with pytest.raises(sqlite3.IntegrityError):
+        persist_burnin_run(conn, BurnInRun(burnin_run_id="lp0-other", **base))
+
+
+def test_runtime_second_paper_startup_creates_sequence_one(tmp_path: Path):
+    import asyncio
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+    from alphaforge.ai_brain import AIBrain
+    from alphaforge.persistence import init_db
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+    db=tmp_path/"paperseq.sqlite"
+    engine=init_db(f"sqlite+pysqlite:///{db}")
+    for _ in range(2):
+        orch=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, phase7_burnin_release_id="rel"), ai_brain=AIBrain(Session(engine)), market_scanner=lambda: asyncio.sleep(0, result=[]), persistence_engine=engine, scanner_source="PAPER_RUNTIME")
+        orch._start_or_resume_burnin_run()
+    with engine.connect() as c:
+        rows=c.execute(text("SELECT burnin_run_id, continuation_sequence FROM burnin_runs WHERE release_id='rel' AND execution_mode='PAPER' ORDER BY continuation_sequence")).fetchall()
+    assert [r[1] for r in rows] == [0,1]
+
+
+def test_runtime_live_precheck_second_startup_sequence_one_and_parent_immutable(tmp_path: Path):
+    import asyncio, json
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+    from alphaforge.ai_brain import AIBrain
+    from alphaforge.persistence import init_db
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+    db=tmp_path/"lpseq.sqlite"
+    engine=init_db(f"sqlite+pysqlite:///{db}")
+    # Seed immutable qualified PAPER lineage.
+    with engine.begin() as c:
+        bootstrap_burnin_schema(c)
+        paper=BurnInRun(burnin_run_id="phase7:rel:PAPER:0",release_id="rel",execution_mode="PAPER",continuation_sequence=0,git_commit="abc",config_hash=config_hash({"a":1}),strategy_config_hash=config_hash({"s":1}),universe_hash=universe_hash(["BTCUSDT"],["5m"]),source_provenance={"provider":"BINANCE_READONLY"},sample_count=77,end_time="2026-01-01T00:00:00Z")
+        persist_burnin_run(c, paper)
+        c.execute(text("INSERT INTO burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,generated_at,status,sample_status,expectancy_status,execution_status,regime_status,reject_quality_status,calibration_status,drawdown_status,concentration_status,reconciliation_status,evidence_completeness_status,blockers_json,warnings_json,thresholds_json,metrics_json,evidence_hash,schema_version) VALUES ('q0','phase7:rel:PAPER:0','rel','now','CANARY_QUALIFIED','PASS','PASS','PASS','PASS','PASS','PASS','PASS','PASS','PASS','PASS','[]','[]','{}','{}','h','v')"))
+    for _ in range(2):
+        orch=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK, phase7_burnin_release_id="rel"), ai_brain=AIBrain(Session(engine)), market_scanner=lambda: asyncio.sleep(0, result=[]), persistence_engine=engine, scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
+        orch._start_or_resume_burnin_run()
+    with engine.connect() as c:
+        lp=c.execute(text("SELECT continuation_sequence,parent_burnin_run_id,parent_qualification_id FROM burnin_runs WHERE release_id='rel' AND execution_mode='LIVE_PRECHECK' ORDER BY continuation_sequence")).fetchall()
+        paper_after=c.execute(text("SELECT sample_count,end_time FROM burnin_runs WHERE burnin_run_id='phase7:rel:PAPER:0'")).first()
+    assert [r[0] for r in lp] == [0,1]
+    assert all(r[1] == "phase7:rel:PAPER:0" and r[2] == "q0" for r in lp)
+    assert paper_after[0] == 77 and paper_after[1] == "2026-01-01T00:00:00Z"

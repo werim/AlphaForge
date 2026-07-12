@@ -29,7 +29,7 @@ from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconcilia
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
-from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters
+from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, latest_runtime_state_snapshot
@@ -464,7 +464,7 @@ class RuntimeOrchestrator:
         release_id = os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id)
         parent_run_id = None
         parent_qualification_id = None
-        sequence = 0
+        sequence = None
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
             try:
                 with engine.connect() as conn:
@@ -488,26 +488,27 @@ class RuntimeOrchestrator:
         cfg = self._canonical_filter_config()
         symbols = list(cfg.get("symbols") or cfg.get("active_symbols") or [])
         intervals = list(cfg.get("intervals") or cfg.get("timeframes") or [])
-        self._burnin_run_id = f"phase7:{release_id}:{self.config.execution_mode.value}:{sequence}"
         source = {"provider": self.scanner_source or "UNKNOWN", "scanner_source": self.scanner_source or "UNKNOWN", "runtime_instance_id": self.runtime_instance_id, "parent_burnin_run_id": parent_run_id, "parent_qualification_id": parent_qualification_id}
-        run = BurnInRun(
-            burnin_run_id=self._burnin_run_id,
-            release_id=release_id,
-            execution_mode=self.config.execution_mode.value,
-            parent_burnin_run_id=parent_run_id,
-            parent_qualification_id=parent_qualification_id,
-            continuation_sequence=sequence,
-            git_commit=self._git_commit(),
-            config_hash=burnin_config_hash(cfg),
-            strategy_config_hash=burnin_config_hash({"min_signal_score": self.config.min_signal_score, "min_effective_rr": self.config.min_effective_rr, "min_rr": self.config.min_rr}),
-            universe_hash=burnin_universe_hash(symbols, intervals),
-            source_provenance=source,
-            symbols=symbols,
-            intervals=intervals,
-        )
         try:
             with engine.begin() as conn:
                 bootstrap_burnin_schema(conn)
+                sequence = next_burnin_continuation_sequence(conn, release_id=release_id, execution_mode=self.config.execution_mode.value)
+                self._burnin_run_id = f"phase7:{release_id}:{self.config.execution_mode.value}:{sequence}"
+                run = BurnInRun(
+                    burnin_run_id=self._burnin_run_id,
+                    release_id=release_id,
+                    execution_mode=self.config.execution_mode.value,
+                    parent_burnin_run_id=parent_run_id,
+                    parent_qualification_id=parent_qualification_id,
+                    continuation_sequence=sequence,
+                    git_commit=self._git_commit(),
+                    config_hash=burnin_config_hash(cfg),
+                    strategy_config_hash=burnin_config_hash({"min_signal_score": self.config.min_signal_score, "min_effective_rr": self.config.min_effective_rr, "min_rr": self.config.min_rr}),
+                    universe_hash=burnin_universe_hash(symbols, intervals),
+                    source_provenance=source,
+                    symbols=symbols,
+                    intervals=intervals,
+                )
                 persist_burnin_run(conn, run)
         except Exception as exc:
             self._burnin_evidence_incomplete = True
