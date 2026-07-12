@@ -494,3 +494,5 @@
 - Known critical risks: missing historical score gaps or selector metrics still constrain evidence quality
 - Last audit date: 2026-07-01
 - Live readiness verdict: NOT LIVE READY; diagnostic evidence only and no production threshold relaxation recommended
+
+- Phase 8 PR275 follow-up: Campaign qualification is now aggregate over compatible PAPER continuation runs, campaign workers are required for RUNNING state, runtime attaches to campaign lineage, and stale workers transition to RECOVERY_REQUIRED.

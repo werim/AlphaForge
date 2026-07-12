@@ -70,3 +70,13 @@ After unclean shutdown, run `resume` with the same campaign ID. Inspect dashboar
 
 ### Remaining blockers for real LIVE
 Real LIVE remains disabled until lifecycle integrity, reject quality, persistence integrity, reconciliation, execution realism, and sustained PAPER qualification are independently verified.
+
+### Phase 8 worker and recovery update
+- Start foreground worker: `PYTHONPATH=src python -m alphaforge.burnin_cli start --campaign-id <campaign> --foreground`.
+- Start detached worker: `PYTHONPATH=src python -m alphaforge.burnin_cli start --campaign-id <campaign> --detach`.
+- Resume uses the same flags and allocates a new continuation while preserving pending labels/positions.
+- Run manual resolver batch: `PYTHONPATH=src python -m alphaforge.burnin_cli resolve --campaign-id <campaign>`.
+- Check stale worker recovery: `PYTHONPATH=src python -m alphaforge.burnin_cli recover-check --campaign-id <campaign>`.
+- Complete only after final qualification: `PYTHONPATH=src python -m alphaforge.burnin_cli complete --campaign-id <campaign>`.
+
+A campaign must not be considered operationally running solely because SQL rows exist. `RUNNING` requires a started worker and fresh heartbeat; stale heartbeat moves the campaign to `RECOVERY_REQUIRED`.

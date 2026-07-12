@@ -17,12 +17,14 @@ def persist_pending_reject_label(conn: Any, *, campaign_id: str, burnin_run_id: 
     _exec(conn,"""INSERT OR IGNORE INTO burnin_pending_reject_labels(pending_label_id,campaign_id,burnin_run_id,reject_decision_id,signal_id,symbol,side,decision_timestamp,entry,stop,target,horizon_seconds,execution_cost_assumptions_json,regime,reject_reason,source_provenance_json,due_at,status,created_at,schema_version) VALUES (:pid,:cid,:bid,:rid,:sid,:sym,:side,:ts,:entry,:stop,:target,:hor,:costs,:reg,:reason,:prov,:due,'PENDING',:now,:sv)""",{"pid":pid,"cid":campaign_id,"bid":burnin_run_id,"rid":reject_decision_id,"sid":signal_id,"sym":symbol,"side":side,"ts":decision_timestamp,"entry":entry,"stop":stop,"target":target,"hor":horizon_seconds,"costs":json.dumps(dict(execution_cost_assumptions),sort_keys=True),"reg":regime,"reason":reject_reason,"prov":json.dumps(dict(source_provenance),sort_keys=True),"due":due_at,"now":utc_now(),"sv":CAMPAIGN_SCHEMA_VERSION})
     return pid
 
-def resolve_pending_rejects(conn: Any, candles_by_symbol: Mapping[str, Sequence[Mapping[str,Any]]] | Sequence[Mapping[str,Any]], *, now: str|None=None) -> dict[str,int]:
-    bootstrap_campaign_schema(conn); now=now or utc_now(); rows=_exec(conn,"SELECT * FROM burnin_pending_reject_labels WHERE status IN ('PENDING','READY') ORDER BY decision_timestamp,id").fetchall(); counts={"resolved":0,"pending":0,"ambiguous":0,"failed":0}
+def resolve_pending_rejects(conn: Any, candles_by_symbol: Mapping[str, Sequence[Mapping[str,Any]]] | Sequence[Mapping[str,Any]], *, now: str|None=None, campaign_id: str|None=None) -> dict[str,int]:
+    bootstrap_campaign_schema(conn); now=now or utc_now(); where="WHERE status IN ('PENDING','READY')" + (" AND campaign_id=:cid" if campaign_id else ""); rows=_exec(conn,f"SELECT * FROM burnin_pending_reject_labels {where} ORDER BY decision_timestamp,id", {"cid": campaign_id} if campaign_id else {}).fetchall(); counts={"resolved":0,"pending":0,"ambiguous":0,"expired":0,"failed":0}
     for row in rows:
         r=dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping); candles = candles_by_symbol.get(r['symbol'], []) if isinstance(candles_by_symbol, Mapping) else candles_by_symbol
         usable=[c for c in candles if _dt(c.get('timestamp') or c.get('open_time') or c.get('time')) > _dt(r['decision_timestamp']) and _dt(c.get('timestamp') or c.get('open_time') or c.get('time')) <= _dt(r['due_at'])]
-        if _dt(now) < _dt(r['due_at']) and not usable: counts['pending']+=1; continue
+        if not usable:
+            if _dt(now) < _dt(r['due_at']): counts['pending']+=1; continue
+            _exec(conn,"UPDATE burnin_pending_reject_labels SET status='EXPIRED', resolved_at=:ts, last_error='NO_CANONICAL_CANDLES' WHERE pending_label_id=:pid", {"ts": utc_now(), "pid": r['pending_label_id']}); counts['expired']+=1; continue
         label='TIMEOUT'; ambiguous=False; gross=0.0
         for c in usable:
             sl,tp=_hit(r['side'], float(c['high']), float(c['low']), r['stop'], r['target'])

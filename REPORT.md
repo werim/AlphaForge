@@ -2088,3 +2088,23 @@ If historical rejected rows did not persist score or selector diagnostics, the n
 
 ### Push recommendation
 Safe to merge as a diagnostic correctness patch. No production threshold relaxation is recommended.
+
+## 2026-07-12 Phase 8 PR275 Follow-up
+
+### Why the patch was needed
+Review identified that the previous Phase 8 implementation aggregated metadata but still qualified only the active run, created campaign rows without a real worker contract, and left resolver scheduling/manual invocation incomplete.
+
+### Runtime behavior changes
+Campaign qualification now uses aggregate evidence from all compatible campaign runs. CLI start/resume requires foreground or detached worker mode. Detached mode launches a worker subprocess and only marks the campaign `RUNNING` after the worker is alive; foreground mode runs the worker directly.
+
+### Lifecycle and persistence changes
+Campaign-bound PAPER runtime attaches to `ALPHAFORGE_BURNIN_CAMPAIGN_ID`, uses the campaign `active_run_id`, persists observations to that run, writes pending reject labels for rejected decisions, writes pending PAPER positions for fills, and updates campaign heartbeats.
+
+### Qualification changes
+Campaign-level qualification explicitly blocks release/config/strategy/universe/execution-cost drift and persists campaign ID, source run IDs, aggregate hash, aggregate metrics, blockers, thresholds, and verdict on the qualification snapshot.
+
+### Resolver/completion changes
+Manual `resolve` executes a deterministic campaign resolver batch and records a campaign event. Completion now requires duration, decision/closed-trade/reject targets, bounded backlog, PASS evidence completeness, and a final qualification snapshot.
+
+### Tests added
+Added regressions proving aggregate qualification includes early losses, incompatible continuation evidence blocks qualification, aggregate evidence hash changes when earlier run evidence changes, worker stale heartbeats produce recovery, completion blocks without final qualification, and manual resolver command processes due pending labels.

@@ -3013,3 +3013,19 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Missing persisted scores or selector diagnostics still limit evidence quality and are intentionally surfaced as unavailable.
+
+## 2026-07-12 Phase 8 PR275 Campaign Qualification/Worker Patch
+
+### Added
+- Campaign-level qualification now evaluates aggregate compatible PAPER evidence across all campaign continuation runs instead of evaluating only the active/latest run.
+- Campaign worker orchestration supports foreground/detached worker modes, worker PID/start time, runtime heartbeat updates, stale-worker detection, and recovery-required transitions.
+- Manual deterministic resolver command: `python -m alphaforge.burnin_cli resolve --campaign-id <campaign>`.
+- Campaign completion checks enforce duration, sample targets, closed-trade targets, resolved reject targets, pending backlog bounds, evidence completeness, and final qualification presence.
+
+### Changed
+- `start`/`resume` no longer leaves a campaign as `RUNNING` unless a worker has been marked started successfully.
+- Campaign-bound PAPER runtime attaches to the campaign active run ID and avoids creating an unrelated standalone Phase 7 run.
+- Reject decisions and PAPER fills in campaign-bound runtime persist pending reject labels and pending position outcomes.
+
+### Known Issues
+- LIVE remains disabled. Phase 8 worker support is PAPER-only.
