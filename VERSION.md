@@ -3,7 +3,7 @@
 - Current version: Phase 7 PAPER burn-in and canary qualification evidence layer
 - Current phase: Phase 7 - PAPER/LIVE_PRECHECK burn-in evidence, expectancy validation, and canary suspension
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed Phase 7 evidence; LIVE real orders remain hard-disabled before runtime tasks start
-- BACKTEST/PAPER/LIVE alignment: PAPER and non-mutating LIVE_PRECHECK may collect burn-in evidence; BACKTEST-only, synthetic, missing-provenance, or LIVE evidence cannot qualify canary operation
+- BACKTEST/PAPER/LIVE alignment: PAPER and non-mutating LIVE_PRECHECK collect burn-in evidence during runtime; BACKTEST-only, synthetic, missing-provenance, or LIVE evidence cannot qualify canary operation
 - Lifecycle coverage: unchanged; Phase 7 observes persisted decisions/outcomes and does not collapse or synthesize lifecycle transitions
 - Execution realism coverage: cost-adjusted net R/PnL requires explicit spread, slippage, fees, funding, latency, volatility, and liquidity costs; missing critical costs block qualification instead of becoming zero
 - Release-gate coverage: Phase 1-6 release/operator/rollback/runbook gates remain required inputs; Phase 7 snapshots persist exact thresholds and evidence hashes

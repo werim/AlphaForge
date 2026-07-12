@@ -15,7 +15,7 @@ Existing burn-in evidence was useful for integrity checks but did not persist a 
 - `VERSION.md`, `CHANGELOG.md`, `REPORT.md`, `RUNBOOK.md`: documented Phase 7 scope, thresholds, evidence requirements, suspension semantics, exports, operator workflow, and LIVE-disabled status.
 
 ### Runtime behavior changes
-Phase 7 adds evidence and qualification surfaces for PAPER and LIVE_PRECHECK without changing strategy decisions, reject logic, risk gates, or order lifecycle behavior. `ExecutionMode.LIVE` remains hard-disabled by the existing Phase 6 guard and cannot be enabled by a Phase 7 canary snapshot.
+Phase 7 now participates in PAPER and LIVE_PRECHECK runtime evidence collection without changing strategy decisions, reject logic, risk gates, or order lifecycle behavior. PAPER/LIVE_PRECHECK create or resume burn-in runs, persist final decision observations, write reject/outcome evidence when available, emit execution/drawdown metrics, and generate qualification snapshots periodically and at shutdown. LIVE_PRECHECK remains non-mutating; if Phase 7 persistence or qualification fails, the canary path fails closed and records STOPPING/suspension evidence. `ExecutionMode.LIVE` remains hard-disabled by the existing Phase 6 guard and cannot be enabled by a Phase 7 canary snapshot.
 
 ### Lifecycle changes
 No lifecycle transitions changed. Phase 7 consumes/persists burn-in observations and outcomes as evidence and does not synthesize lifecycle progression or hide rejected decisions.
@@ -36,7 +36,7 @@ Targeted and full command results are recorded in the final response.
 Qualification is only as representative as collected PAPER/LIVE_PRECHECK evidence. Hidden venue-specific cost fields or incomplete outcome labeling will correctly block qualification until persisted. Phase 1-6 release/operator/rollback/runbook evidence must still be populated by operational workflows.
 
 ### Remaining limitations
-Runtime collection hooks are intentionally minimal in this patch; production burn-in population should map live PAPER/LIVE_PRECHECK observations into the canonical Phase 7 tables without changing strategy behavior. Calibration quality requires real probability outputs and must not fabricate probabilities from scores.
+Runtime collection now writes canonical decisions, PAPER outcome evidence, and periodic runtime metrics, but richer venue-specific forward labels and calibrated probability outputs still depend on upstream model/exchange evidence. Calibration quality requires real probability outputs and must not fabricate probabilities from scores.
 
 ### Migration concerns
 No destructive migrations. Operators should run the normal writable bootstrap before Phase 7 writes; dashboard/API GET paths are safe for read-only SQLite connections and return unavailable evidence when tables or rows are absent.

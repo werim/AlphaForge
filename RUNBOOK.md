@@ -11,13 +11,13 @@ The typed defaults in `BurnInThresholds` require: 7 days observed duration, 500 
 
 ## Evidence requirements
 1. Run writable bootstrap before writing Phase 7 evidence.
-2. Persist `burnin_runs` with git commit, config hash, strategy config hash, universe hash, source provenance, symbols, intervals, duration, sample counts, and completeness statuses.
-3. Persist accepted closed trades with explicit spread, entry/exit slippage, fees, funding, latency, volatility, liquidity, total execution cost, net R, and net PnL. Missing critical costs block qualification.
+2. PAPER and LIVE_PRECHECK runtimes create or resume `burnin_runs` with git commit, config hash, strategy config hash, universe hash, source provenance, symbols, intervals, duration, sample counts, and completeness statuses.
+3. PAPER/LIVE_PRECHECK persist final decision observations; PAPER persists accepted closed-trade outcome evidence when fills/closures are observed. Accepted closed trades require explicit spread, entry/exit slippage, fees, funding, latency, volatility, liquidity, total execution cost, net R, and net PnL. Missing critical costs block qualification.
 4. Persist rejected forward outcomes with avoided loss, missed profit, forward label, evidence horizon, reason, symbol, and regime.
 5. Persist regime, execution, calibration, drawdown, and concentration-relevant evidence before generating a qualification snapshot.
 
 ## Suspension conditions
-Suspend a qualified canary when rolling/lower-bound expectancy drops below threshold, drawdown breaches, execution degrades, slippage spikes, reject value collapses, calibration drifts, reconciliation fails, stale data/runtime errors cluster, mutation attempts occur, evidence persistence fails, operator acknowledgement expires, rollback/runbook evidence invalidates, or concentration limits are breached. Multiple reason codes must be preserved.
+Suspend a qualified canary when rolling/lower-bound expectancy drops below threshold, drawdown breaches, spread/slippage/latency/fill quality degrades, reject value collapses, calibration drifts, reconciliation fails, stale data/runtime errors cluster, mutation attempts occur, evidence persistence fails, operator acknowledgement expires, rollback/runbook evidence invalidates, or symbol/trade/regime concentration limits are breached. LIVE_PRECHECK stops continued canary scanning safely, persists STOPPING/suspension evidence, and keeps the mutation trap active. Multiple reason codes are preserved as separate rows.
 
 ## Dashboard interpretation
 Use `/burnin` or `/api/v1/burnin/latest`. Missing evidence is shown as unavailable rather than zero. Status values are unavailable, insufficient, failed, qualified, or suspended. Blockers are authoritative and should be resolved before further canary operation.
