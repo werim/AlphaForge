@@ -35,3 +35,46 @@ def test_persist_burnin_run_with_deterministic_hashes(tmp_path: Path):
     row=conn.execute("SELECT config_hash, universe_hash FROM burnin_runs WHERE burnin_run_id='r1'").fetchone()
     assert row[0] == config_hash({"a":1,"b":2})
     assert row[1] == universe_hash(["BTCUSDT","ETHUSDT"],["5m"])
+
+
+def test_entry_fill_does_not_create_closed_burnin_outcome(tmp_path: Path):
+    import asyncio
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+    from alphaforge.ai_brain import AIBrain
+    from alphaforge.persistence import init_db
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+    db=tmp_path/"rt.sqlite"
+    engine=init_db(f"sqlite+pysqlite:///{db}")
+    orch=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER), ai_brain=AIBrain(Session(engine)), market_scanner=lambda: asyncio.sleep(0, result=[]), persistence_engine=engine, scanner_source="PAPER_RUNTIME")
+    orch.metrics.persistence_enabled=True
+    orch._start_or_resume_burnin_run()
+    orch._persist_burnin_decision({"signal_id":"s1","symbol":"BTCUSDT","decision":"ACCEPTED","execution_ctx":{"spread_pct":.01,"expected_slippage_pct":.01,"fee_pct":.001,"funding_rate_pct":.0,"market_data_latency_ms":10}}, lifecycle_state="ORDER_PLACED")
+    asyncio.run(orch._execute("BTCUSDT", {"order_type":"MARKET"}, {"entry":100,"rr":2,"execution_ctx":{"spread_pct":.01,"expected_slippage_pct":.01,"fee_pct":.001,"funding_rate_pct":.0,"market_data_latency_ms":10}}))
+    with engine.connect() as c:
+        assert c.execute(text("SELECT COUNT(*) FROM burnin_trade_outcomes")).scalar_one() == 0
+        row=c.execute(text("SELECT closed_trade_count, open_trade_count FROM burnin_runs WHERE burnin_run_id=:bid"), {"bid": orch._burnin_run_id}).first()
+    assert row[0] == 0
+    assert row[1] == 1
+
+
+def test_position_closed_creates_one_realized_burnin_outcome(tmp_path: Path):
+    import asyncio
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+    from alphaforge.ai_brain import AIBrain
+    from alphaforge.persistence import init_db
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+    db=tmp_path/"rt2.sqlite"
+    engine=init_db(f"sqlite+pysqlite:///{db}")
+    orch=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER), ai_brain=AIBrain(Session(engine)), market_scanner=lambda: asyncio.sleep(0, result=[]), persistence_engine=engine, scanner_source="PAPER_RUNTIME")
+    orch.metrics.persistence_enabled=True
+    orch._start_or_resume_burnin_run()
+    orch._persist_burnin_decision({"signal_id":"s1","symbol":"BTCUSDT","decision":"ACCEPTED","execution_ctx":{}}, lifecycle_state="ORDER_PLACED")
+    orch._persist_burnin_closed_trade_from_lifecycle("BTCUSDT", {"trade_id":"t1","gross_pnl":10,"gross_r":1.5,"entry_spread_cost":.01,"entry_slippage_cost":.02,"exit_slippage_cost":.03,"fee_cost":.01,"funding_cost":.0,"latency_cost":.001,"net_pnl":9.929,"net_r":1.429,"mfe":2.0,"mae":-.5,"hold_duration_seconds":300,"exit_reason":"TP_HIT"})
+    with engine.connect() as c:
+        rows=c.execute(text("SELECT gross_r, net_r, exit_reason FROM burnin_trade_outcomes")).fetchall()
+        run=c.execute(text("SELECT closed_trade_count, open_trade_count FROM burnin_runs WHERE burnin_run_id=:bid"), {"bid": orch._burnin_run_id}).first()
+    assert len(rows)==1
+    assert rows[0][0] == 1.5 and rows[0][1] == 1.429 and rows[0][2] == "TP_HIT"
+    assert run[0] == 1 and run[1] == 0

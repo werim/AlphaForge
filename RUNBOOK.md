@@ -12,8 +12,8 @@ The typed defaults in `BurnInThresholds` require: 7 days observed duration, 500 
 ## Evidence requirements
 1. Run writable bootstrap before writing Phase 7 evidence.
 2. PAPER and LIVE_PRECHECK runtimes create or resume `burnin_runs` with git commit, config hash, strategy config hash, universe hash, source provenance, symbols, intervals, duration, sample counts, and completeness statuses.
-3. PAPER/LIVE_PRECHECK persist final decision observations; PAPER persists accepted closed-trade outcome evidence when fills/closures are observed. Accepted closed trades require explicit spread, entry/exit slippage, fees, funding, latency, volatility, liquidity, total execution cost, net R, and net PnL. Missing critical costs block qualification.
-4. Persist rejected forward outcomes with avoided loss, missed profit, forward label, evidence horizon, reason, symbol, and regime.
+3. PAPER/LIVE_PRECHECK persist final decision observations; PAPER persists accepted closed-trade outcome evidence only when canonical lifecycle reaches `POSITION_CLOSED`. Entry fills and `POSITION_OPENED` remain open evidence and do not count toward closed-trade thresholds. Accepted closed trades require explicit spread, entry/exit slippage, fees, funding, latency, volatility, liquidity, total execution cost, net R, and net PnL. Missing critical costs block qualification.
+4. Persist rejected decisions as pending observations at decision time; persist rejected forward outcomes only after the configured horizon completes with TP/SL/timeout/handled-ambiguous labels, hypothetical net R after costs, and complete evidence.
 5. Persist regime, execution, calibration, drawdown, and concentration-relevant evidence before generating a qualification snapshot.
 
 ## Suspension conditions
@@ -31,7 +31,7 @@ Use `export_burnin_evidence(db_path, output_dir, burnin_run_id)` to generate det
 3. Generate periodic Phase 7 snapshots.
 4. Treat `BURN_IN_INSUFFICIENT` as keep collecting evidence.
 5. Treat `BURN_IN_FAILED` as stop promotion and investigate blockers.
-6. Treat `CANARY_QUALIFIED` as permission for continued non-mutating LIVE_PRECHECK only.
+6. Treat `CANARY_QUALIFIED` as permission for continued non-mutating LIVE_PRECHECK only; LIVE_PRECHECK requires a prior release-scoped qualified PAPER snapshot and must not start a disconnected empty lineage.
 7. Treat `CANARY_SUSPENDED` as fail-closed; stop canary operation and resolve all persisted reason codes.
 
 ## Remaining blockers for real LIVE

@@ -17,6 +17,10 @@ def _engine():
 def _run(e):
     with e.begin() as c:
         persist_burnin_run(c, BurnInRun(burnin_run_id="r",release_id="rel",execution_mode="PAPER",git_commit="abc",config_hash=config_hash({"a":1}),strategy_config_hash=config_hash({"s":1}),universe_hash=universe_hash(["BTCUSDT","ETHUSDT","SOLUSDT"],["5m"]),source_provenance={"provider":"BINANCE_READONLY"},symbols=["BTCUSDT","ETHUSDT","SOLUSDT"],intervals=["5m"],observed_duration_seconds=1000,sample_count=10,accepted_count=4,rejected_count=6,closed_trade_count=4,data_completeness_status="PASS",evidence_completeness_status="PASS"))
+        for i in range(4):
+            c.execute(text("INSERT INTO burnin_observations(observation_id,burnin_run_id,release_id,observed_at,execution_mode,symbol,decision,evidence_complete,missing_fields_json,metrics_json,source_provenance_json,schema_version) VALUES (:id,'r','rel','2026-01-01T00:00:00Z','PAPER','BTCUSDT','ACCEPTED',1,'[]','{}','{}','v')"), {"id": f"obs-a-{i}"})
+        for i in range(6):
+            c.execute(text("INSERT INTO burnin_observations(observation_id,burnin_run_id,release_id,observed_at,execution_mode,symbol,decision,evidence_complete,missing_fields_json,metrics_json,source_provenance_json,schema_version) VALUES (:id,'r','rel','2026-01-01T00:00:00Z','PAPER','BTCUSDT','REJECTED',1,'[]','{}','{}','v')"), {"id": f"obs-r-{i}"})
 
 def test_missing_costs_block_qualification():
     e=_engine(); _run(e)
@@ -33,7 +37,7 @@ def test_positive_lcb_can_qualify_but_live_not_enabled():
         for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
             c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"o{i}","sym":sym})
         for i in range(3):
-            c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,avoided_loss,missed_profit,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING',1,0,'{}','v')"), {"id":f"rej{i}"})
+            c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"rej{i}"})
         c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,calibration_error,status,generated_at,schema_version) VALUES ('r','rel','GLOBAL',3,.01,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE','now','v')"))
@@ -97,10 +101,18 @@ def test_all_required_phase7_and_phase6_evidence_canary_qualified():
         for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
             c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"all-o{i}","sym":sym})
         for i in range(3):
-            c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,avoided_loss,missed_profit,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING',1,0,'{}','v')"), {"id":f"all-r{i}"})
+            c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"all-r{i}"})
         c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,calibration_error,status,generated_at,schema_version) VALUES ('r','rel','GLOBAL',3,.01,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,stale_data_count,execution_rejects,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE',1,1,1,1,1,1,.9,.9,0,0,'now','v')"))
     th=BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,minimum_closed_trades=1,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=1,minimum_regime_sample=1,minimum_calibration_sample=1,max_symbol_concentration=.99,max_trade_contribution=.99,max_regime_concentration=1.0,min_lower_confidence_bound_expectancy=.01)
     snap=BurnInQualificationEngine(e, th).evaluate("r")
     assert snap.status == "CANARY_QUALIFIED"
+
+
+def test_pending_reject_does_not_count_as_forward_outcome():
+    e=_engine(); _run(e)
+    snap=BurnInQualificationEngine(e, BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,minimum_closed_trades=0,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=0,minimum_calibration_sample=0,require_operator_ack=False,require_phase1_6_gates=False)).evaluate("r")
+    assert snap.metrics["completed_rejected_forward_outcomes"] == 0
+    assert snap.metrics["pending_rejected_forward_outcomes"] == 6
+    assert any("MINIMUM_REJECTED_FORWARD_OUTCOMES" in b for b in snap.blockers)

@@ -7,7 +7,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from alphaforge.burnin import SCHEMA_VERSION, bootstrap_burnin_schema, canonical_hash, confidence_interval, utc_now
+from alphaforge.burnin import SCHEMA_VERSION, bootstrap_burnin_schema, canonical_hash, confidence_interval, utc_now, update_burnin_run_counters
 from alphaforge.release_gates import latest_valid_operator_ack, release_gate_status, latest_release_snapshot
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 from alphaforge.live_readiness import LiveReadinessEvaluator
@@ -97,15 +97,26 @@ class BurnInQualificationEngine:
             cal=conn.execute(text("SELECT * FROM burnin_calibration_metrics WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
             execm=conn.execute(text("SELECT * FROM burnin_execution_metrics WHERE burnin_run_id=:id ORDER BY id DESC LIMIT 1"),{"id":burnin_run_id}).mappings().first()
             dds=conn.execute(text("SELECT * FROM burnin_drawdown_events WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
-            samples=int(run.get("sample_count") or 0); accepted=int(run.get("accepted_count") or 0); closed=int(run.get("closed_trade_count") or len(trades)); rejected_fwd=len(rejects)
+            derived = update_burnin_run_counters(conn, burnin_run_id)
+            obs_counts = conn.execute(text("SELECT SUM(CASE WHEN UPPER(COALESCE(decision,''))='ACCEPTED' THEN 1 ELSE 0 END) AS accepted, SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected, COUNT(*) AS samples FROM burnin_observations WHERE burnin_run_id=:id"), {"id": burnin_run_id}).mappings().first() or {}
+            samples=int(obs_counts.get("samples") or 0); accepted=int(obs_counts.get("accepted") or 0); rejected_count=int(obs_counts.get("rejected") or 0); closed=len(trades)
+            valid_labels={"TP_BEFORE_SL","SL_BEFORE_TP","TIMEOUT","AMBIGUOUS"}
+            completed_rejects=[r for r in rejects if int(r.get("evidence_complete") or 0)==1 and str(r.get("forward_label") or "").upper() in valid_labels and r.get("hypothetical_net_r_after_costs") is not None]
+            ambiguous_rejects=[r for r in completed_rejects if str(r.get("forward_label") or "").upper()=="AMBIGUOUS"]
+            incomplete_rejects=[r for r in rejects if r not in completed_rejects]
+            pending_rejects=max(0, rejected_count-len(rejects))
+            rejected_fwd=len(completed_rejects)
+            persisted_mismatch = any(int(run.get(k) or 0) != int(v or 0) for k,v in {"sample_count":samples,"accepted_count":accepted,"rejected_count":rejected_count,"closed_trade_count":closed}.items())
+            if persisted_mismatch:
+                blockers.append("BURNIN_COUNTER_RECONCILIATION_FAILED")
             sample_status="PASS"
             for name,obs,limit in [("MINIMUM_DURATION",float(run.get("observed_duration_seconds") or 0),self.thresholds.minimum_duration_seconds),("MINIMUM_TOTAL_DECISIONS",samples,self.thresholds.minimum_total_decisions),("MINIMUM_ACCEPTED_TRADES",accepted,self.thresholds.minimum_accepted_trades),("MINIMUM_CLOSED_TRADES",closed,self.thresholds.minimum_closed_trades),("MINIMUM_REJECTED_FORWARD_OUTCOMES",rejected_fwd,self.thresholds.minimum_rejected_forward_outcomes)]:
                 if obs < limit: sample_status="INSUFFICIENT"; blockers.append(f"{name}:{obs}<{limit}")
-            metrics.update(sample_count=samples,accepted_count=accepted,closed_trade_count=closed,rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=run.get("observed_duration_seconds"))
+            metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=closed,open_trade_count=max(0,accepted-closed),completed_rejected_forward_outcomes=len(completed_rejects),pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=derived.get("observed_duration_seconds") or run.get("observed_duration_seconds"))
             self._compute_expectancy(trades, blockers, metrics)
             expectancy_status="PASS" if (metrics.get("lower_confidence_bound_expectancy") is not None and metrics["lower_confidence_bound_expectancy"]>=self.thresholds.min_lower_confidence_bound_expectancy and not any(b.startswith("INCOMPLETE_COST") or b=="COST_DRAG_EXCESSIVE_OR_MISSING" for b in blockers)) else "FAIL"
             regime_status=self._check_regimes(regimes, blockers, metrics)
-            reject_status=self._compute_reject_quality(rejects, trades, blockers, metrics)
+            reject_status=self._compute_reject_quality(completed_rejects, trades, blockers, metrics)
             cal_status=self._compute_calibration(cal, blockers, metrics)
             dd_status=self._compute_drawdown(dds, blockers, metrics)
             exec_status=self._compute_execution(execm, blockers, metrics)
