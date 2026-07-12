@@ -33,6 +33,7 @@ from .queries import (
     fetch_reject_summary,
     fetch_runtime_heartbeat_status,
     fetch_signal_timeline,
+    fetch_phase7_burnin,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -72,6 +73,7 @@ def _status_payload(engine: Engine, control_store: RuntimeControlStore | None = 
         **control,
         "latest_readiness": fetch_latest_readiness(engine),
         "release_gate": release_gate_status(engine),
+        "phase7_burnin": fetch_phase7_burnin(engine),
     }
 
 
@@ -286,6 +288,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/api/v1/readiness/latest")
     async def api_latest_readiness() -> dict[str, Any]:
         return fetch_latest_readiness(app.state.engine)
+
+    @app.get("/burnin", response_class=HTMLResponse)
+    async def burnin(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(request=request, name="burnin.html", context={"burnin": fetch_phase7_burnin(app.state.engine), "page": "burnin"})
+
+    @app.get("/api/v1/burnin/latest")
+    async def api_burnin_latest() -> dict[str, Any]:
+        return fetch_phase7_burnin(app.state.engine)
 
     @app.get("/api/v1/readiness/probes")
     async def api_readiness_probe_matrix() -> dict[str, Any]:

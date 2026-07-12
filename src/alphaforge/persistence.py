@@ -12,6 +12,7 @@ import logging
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 from alphaforge.contracts import canonical_reject_reason, canonical_utc_timestamp, validate_transition
+from alphaforge.burnin import DDL as PHASE7_BURNIN_DDL
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 
 
@@ -363,6 +364,7 @@ def init_db(database_url: str | None = None) -> Engine:
         "CREATE TABLE IF NOT EXISTS canary_run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, event_type TEXT NOT NULL, event_ts TEXT NOT NULL, shadow_mode INTEGER NOT NULL, canary_mode INTEGER NOT NULL, mutation_attempted INTEGER NOT NULL, mutation_blocked INTEGER NOT NULL, evidence_json TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS rollback_verification_events (id INTEGER PRIMARY KEY AUTOINCREMENT, verification_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, verified_at TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS runbook_evidence (id INTEGER PRIMARY KEY AUTOINCREMENT, evidence_id TEXT NOT NULL UNIQUE, release_id TEXT NOT NULL, phase TEXT NOT NULL, recorded_at TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT NOT NULL)",
+        *PHASE7_BURNIN_DDL,
     ]
     with engine.begin() as conn:
         for statement in ddl:

@@ -1,5 +1,18 @@
 # AlphaForge Version
 
+- Current version: Phase 7 PAPER burn-in and canary qualification evidence layer
+- Current phase: Phase 7 - PAPER/LIVE_PRECHECK burn-in evidence, expectancy validation, and canary suspension
+- Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed Phase 7 evidence; LIVE real orders remain hard-disabled before runtime tasks start
+- BACKTEST/PAPER/LIVE alignment: PAPER and non-mutating LIVE_PRECHECK may collect burn-in evidence; BACKTEST-only, synthetic, missing-provenance, or LIVE evidence cannot qualify canary operation
+- Lifecycle coverage: unchanged; Phase 7 observes persisted decisions/outcomes and does not collapse or synthesize lifecycle transitions
+- Execution realism coverage: cost-adjusted net R/PnL requires explicit spread, slippage, fees, funding, latency, volatility, and liquidity costs; missing critical costs block qualification instead of becoming zero
+- Release-gate coverage: Phase 1-6 release/operator/rollback/runbook gates remain required inputs; Phase 7 snapshots persist exact thresholds and evidence hashes
+- Known critical risks: representative PAPER and LIVE_PRECHECK samples are still required; CANARY_QUALIFIED permits only continued non-mutating precheck, never real order submission
+- Last audit date: 2026-07-12
+- Live readiness verdict: NOT LIVE READY; `LIVE_REAL_ORDERS_DISABLED_IN_PHASE6` remains the real LIVE fail-closed guard
+
+# AlphaForge Version
+
 - Current version: PR273 Phase 6 LIVE startup fail-closed fix
 - Current phase: Phase 6 - explicit LIVE vs LIVE_PRECHECK startup separation
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed evidence; LIVE real orders are hard-disabled before runtime tasks start

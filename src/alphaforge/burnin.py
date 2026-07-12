@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import csv, hashlib, json, math, sqlite3
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+SCHEMA_VERSION = "phase7_burnin_v1"
+ALLOWED_BURNIN_MODES = {"PAPER", "LIVE_PRECHECK"}
+FORBIDDEN_PROVIDER_MARKERS = {"SYNTHETIC", "MOCK", "FAKE", "TEST_PROVIDER"}
+REGIMES = {"TRENDING","MEAN_REVERTING","CHOPPY","PANIC","LOW_LIQUIDITY","BREAKOUT","SHORT_SQUEEZE","RANGE_COMPRESSION","NEWS_DRIVEN","UNKNOWN"}
+CRITICAL_COST_FIELDS = ("spread_cost","entry_slippage_cost","exit_slippage_cost","fee_cost","funding_cost","latency_cost")
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def canonical_hash(payload: Any) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+def config_hash(config: Mapping[str, Any]) -> str:
+    return canonical_hash(dict(config))
+
+def universe_hash(symbols: Sequence[str], intervals: Sequence[str] = ()) -> str:
+    return canonical_hash({"symbols": sorted(map(str, symbols)), "intervals": sorted(map(str, intervals))})
+
+@dataclass(slots=True)
+class BurnInRun:
+    burnin_run_id: str
+    release_id: str
+    phase: str = "PHASE7"
+    execution_mode: str = "PAPER"
+    start_time: str = field(default_factory=utc_now)
+    end_time: str | None = None
+    status: str = "RUNNING"
+    git_commit: str | None = None
+    config_hash: str | None = None
+    strategy_config_hash: str | None = None
+    universe_hash: str | None = None
+    source_provenance: dict[str, Any] = field(default_factory=dict)
+    symbols: list[str] = field(default_factory=list)
+    intervals: list[str] = field(default_factory=list)
+    expected_duration_seconds: float | None = None
+    observed_duration_seconds: float | None = None
+    sample_count: int = 0
+    accepted_count: int = 0
+    rejected_count: int = 0
+    closed_trade_count: int = 0
+    open_trade_count: int = 0
+    data_completeness_status: str = "UNKNOWN"
+    evidence_completeness_status: str = "UNKNOWN"
+    generated_at: str = field(default_factory=utc_now)
+
+    def validate(self) -> None:
+        mode = self.execution_mode.upper()
+        if mode not in ALLOWED_BURNIN_MODES:
+            raise ValueError(f"burn-in evidence only supports PAPER or LIVE_PRECHECK, got {self.execution_mode}")
+        if not self.source_provenance:
+            raise ValueError("missing source provenance blocks burn-in evidence")
+        provider = str(self.source_provenance.get("provider") or self.source_provenance.get("source") or "").upper()
+        if provider in FORBIDDEN_PROVIDER_MARKERS:
+            raise ValueError("synthetic provider evidence cannot qualify burn-in")
+        for name in ("git_commit", "config_hash", "strategy_config_hash", "universe_hash"):
+            if not getattr(self, name):
+                raise ValueError(f"missing mutable provenance field: {name}")
+
+DDL = [
+"""CREATE TABLE IF NOT EXISTS burnin_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,burnin_run_id TEXT NOT NULL UNIQUE,release_id TEXT NOT NULL,phase TEXT NOT NULL,execution_mode TEXT NOT NULL,start_time TEXT NOT NULL,end_time TEXT,status TEXT NOT NULL,git_commit TEXT NOT NULL,config_hash TEXT NOT NULL,strategy_config_hash TEXT NOT NULL,universe_hash TEXT NOT NULL,source_provenance_json TEXT NOT NULL,symbols_json TEXT NOT NULL,intervals_json TEXT NOT NULL,expected_duration_seconds REAL,observed_duration_seconds REAL,sample_count INTEGER NOT NULL,accepted_count INTEGER NOT NULL,rejected_count INTEGER NOT NULL,closed_trade_count INTEGER NOT NULL,open_trade_count INTEGER NOT NULL,data_completeness_status TEXT NOT NULL,evidence_completeness_status TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_observations (id INTEGER PRIMARY KEY AUTOINCREMENT,observation_id TEXT NOT NULL UNIQUE,burnin_run_id TEXT NOT NULL,release_id TEXT NOT NULL,observed_at TEXT NOT NULL,execution_mode TEXT NOT NULL,symbol TEXT,interval TEXT,regime TEXT,decision TEXT,lifecycle_state TEXT,evidence_complete INTEGER NOT NULL,missing_fields_json TEXT NOT NULL,metrics_json TEXT NOT NULL,source_provenance_json TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_trade_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT,outcome_id TEXT NOT NULL UNIQUE,burnin_run_id TEXT NOT NULL,release_id TEXT NOT NULL,trade_id TEXT,symbol TEXT,regime TEXT,closed_at TEXT,gross_r REAL,gross_pnl REAL,spread_cost REAL,entry_slippage_cost REAL,exit_slippage_cost REAL,fee_cost REAL,funding_cost REAL,latency_cost REAL,volatility_penalty REAL,liquidity_penalty REAL,total_execution_cost REAL,net_r REAL,net_pnl REAL,effective_rr_at_entry REAL,realized_effective_rr REAL,hold_duration_seconds REAL,mfe REAL,mae REAL,exit_reason TEXT,evidence_complete INTEGER NOT NULL,missing_cost_fields_json TEXT NOT NULL,payload_json TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_reject_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT,reject_outcome_id TEXT NOT NULL UNIQUE,burnin_run_id TEXT NOT NULL,release_id TEXT NOT NULL,reject_reason TEXT,symbol TEXT,regime TEXT,decision_time TEXT,hypothetical_entry REAL,hypothetical_stop REAL,hypothetical_target REAL,forward_label TEXT,would_tp INTEGER,would_sl INTEGER,timeout INTEGER,ambiguous INTEGER,hypothetical_gross_r REAL,hypothetical_net_r_after_costs REAL,avoided_loss REAL,missed_profit REAL,execution_invalidated INTEGER,evidence_horizon TEXT,payload_json TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_regime_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT,burnin_run_id TEXT NOT NULL,release_id TEXT NOT NULL,regime TEXT NOT NULL,sample_count INTEGER,accepted_count INTEGER,rejected_count INTEGER,mean_net_r REAL,lower_confidence_bound_expectancy REAL,max_drawdown REAL,cost_drag REAL,slippage_distribution_json TEXT,reject_accuracy REAL,execution_failure_count INTEGER,status TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(burnin_run_id,regime))""",
+"""CREATE TABLE IF NOT EXISTS burnin_execution_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT,burnin_run_id TEXT NOT NULL,release_id TEXT NOT NULL,metric_window TEXT NOT NULL,spread_baseline REAL,spread_current REAL,slippage_baseline REAL,slippage_current REAL,latency_baseline REAL,latency_current REAL,fill_probability_baseline REAL,fill_probability_current REAL,liquidity_depth_baseline REAL,liquidity_depth_current REAL,timeout_rate REAL,execution_rejects INTEGER,stale_data_count INTEGER,reconciliation_quality TEXT,funding_cost REAL,price_impact_proxy REAL,status TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_calibration_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT,burnin_run_id TEXT NOT NULL,release_id TEXT NOT NULL,scope TEXT NOT NULL,sample_count INTEGER,brier_score REAL,log_loss REAL,calibration_error REAL,expected_calibration_error REAL,reliability_buckets_json TEXT,observed_vs_predicted_json TEXT,status TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_drawdown_events (id INTEGER PRIMARY KEY AUTOINCREMENT,drawdown_event_id TEXT NOT NULL UNIQUE,burnin_run_id TEXT NOT NULL,release_id TEXT NOT NULL,peak_equity REAL,trough_equity REAL,drawdown_start TEXT,drawdown_end TEXT,drawdown_pct REAL,drawdown_duration_seconds REAL,recovery_duration_seconds REAL,consecutive_losses INTEGER,rolling_loss_cluster_json TEXT,rolling_expectancy REAL,rolling_cost_drag REAL,rolling_slippage REAL,rolling_reject_accuracy REAL,resolved INTEGER NOT NULL,payload_json TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_qualification_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT,qualification_id TEXT NOT NULL UNIQUE,burnin_run_id TEXT NOT NULL,release_id TEXT NOT NULL,generated_at TEXT NOT NULL,status TEXT NOT NULL,sample_status TEXT NOT NULL,expectancy_status TEXT NOT NULL,execution_status TEXT NOT NULL,regime_status TEXT NOT NULL,reject_quality_status TEXT NOT NULL,calibration_status TEXT NOT NULL,drawdown_status TEXT NOT NULL,concentration_status TEXT NOT NULL,reconciliation_status TEXT NOT NULL,evidence_completeness_status TEXT NOT NULL,blockers_json TEXT NOT NULL,warnings_json TEXT NOT NULL,thresholds_json TEXT NOT NULL,metrics_json TEXT NOT NULL,evidence_hash TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_suspension_events (id INTEGER PRIMARY KEY AUTOINCREMENT,suspension_event_id TEXT NOT NULL UNIQUE,release_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,timestamp TEXT NOT NULL,reason_codes_json TEXT NOT NULL,observed_values_json TEXT NOT NULL,thresholds_json TEXT NOT NULL,evidence_payload_json TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+]
+
+def bootstrap_burnin_schema(conn: Any) -> None:
+    for stmt in DDL:
+        conn.execute(stmt if isinstance(conn, sqlite3.Connection) else __import__('sqlalchemy').text(stmt))
+
+def persist_burnin_run(conn: Any, run: BurnInRun) -> None:
+    run.validate(); data=asdict(run)
+    vals = {**data, "source_provenance_json": json.dumps(run.source_provenance, sort_keys=True), "symbols_json": json.dumps(run.symbols, sort_keys=True), "intervals_json": json.dumps(run.intervals, sort_keys=True), "schema_version": SCHEMA_VERSION}
+    sql="""INSERT OR REPLACE INTO burnin_runs(burnin_run_id,release_id,phase,execution_mode,start_time,end_time,status,git_commit,config_hash,strategy_config_hash,universe_hash,source_provenance_json,symbols_json,intervals_json,expected_duration_seconds,observed_duration_seconds,sample_count,accepted_count,rejected_count,closed_trade_count,open_trade_count,data_completeness_status,evidence_completeness_status,generated_at,schema_version) VALUES (:burnin_run_id,:release_id,:phase,:execution_mode,:start_time,:end_time,:status,:git_commit,:config_hash,:strategy_config_hash,:universe_hash,:source_provenance_json,:symbols_json,:intervals_json,:expected_duration_seconds,:observed_duration_seconds,:sample_count,:accepted_count,:rejected_count,:closed_trade_count,:open_trade_count,:data_completeness_status,:evidence_completeness_status,:generated_at,:schema_version)"""
+    conn.execute(sql if isinstance(conn, sqlite3.Connection) else __import__('sqlalchemy').text(sql), vals)
+
+def execution_cost_complete(row: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    missing=[f for f in CRITICAL_COST_FIELDS if row.get(f) is None]
+    return not missing, missing
+
+def net_r_after_costs(row: Mapping[str, Any]) -> float | None:
+    complete, _ = execution_cost_complete(row)
+    if not complete or row.get("gross_r") is None: return None
+    costs=sum(float(row.get(f) or 0.0) for f in CRITICAL_COST_FIELDS) + float(row.get("volatility_penalty") or 0.0) + float(row.get("liquidity_penalty") or 0.0)
+    return float(row["gross_r"]) - costs
+
+def confidence_interval(values: Sequence[float], z: float = 1.96) -> tuple[float | None,float | None,float | None]:
+    vals=[float(v) for v in values if v is not None and math.isfinite(float(v))]
+    if not vals: return None,None,None
+    mean=sum(vals)/len(vals)
+    if len(vals) < 2: return mean, mean, mean
+    var=sum((v-mean)**2 for v in vals)/(len(vals)-1); se=math.sqrt(var/len(vals))
+    return mean, mean-z*se, mean+z*se
+
+def latest_burnin_snapshot(conn: Any, burnin_run_id: str | None = None) -> dict[str, Any]:
+    where="WHERE burnin_run_id = :bid" if burnin_run_id else ""
+    params={"bid": burnin_run_id} if burnin_run_id else {}
+    sql=f"SELECT * FROM burnin_qualification_snapshots {where} ORDER BY generated_at DESC, id DESC LIMIT 1"
+    row=conn.execute(sql if isinstance(conn, sqlite3.Connection) else __import__('sqlalchemy').text(sql), params).fetchone()
+    if row is None: return {"status":"UNAVAILABLE","reason":"NO_PHASE7_BURNIN_QUALIFICATION_EVIDENCE"}
+    m=row if isinstance(row, sqlite3.Row) else row._mapping
+    out=dict(m)
+    for k in ("blockers_json","warnings_json","thresholds_json","metrics_json"):
+        out[k[:-5] if k.endswith('_json') else k]=json.loads(out.get(k) or "{}" if k in {"thresholds_json","metrics_json"} else "[]")
+    return out
+
+def export_burnin_evidence(db_path: str | Path, output_dir: str | Path, burnin_run_id: str) -> dict[str, Path]:
+    out=Path(output_dir); out.mkdir(parents=True, exist_ok=True); conn=sqlite3.connect(str(db_path)); conn.row_factory=sqlite3.Row
+    paths={}
+    try:
+        snap=latest_burnin_snapshot(conn,burnin_run_id); run=conn.execute("SELECT * FROM burnin_runs WHERE burnin_run_id=?",(burnin_run_id,)).fetchone()
+        header={"burnin_run_id":burnin_run_id,"release_id": (run["release_id"] if run else snap.get("release_id")),"git_commit": (run["git_commit"] if run else None),"config_hash": (run["config_hash"] if run else None),"generated_at":utc_now(),"source_provenance": json.loads(run["source_provenance_json"] or "{}") if run else {},"schema_version":SCHEMA_VERSION}
+        for name,payload in {"burnin_summary.json": {**header,"run":dict(run) if run else None}, "burnin_qualification.json": {**header,"qualification":snap}}.items():
+            p=out/name; p.write_text(json.dumps(payload,indent=2,sort_keys=True,default=str)); paths[name]=p
+        tables={"burnin_regime_metrics.csv":"burnin_regime_metrics","burnin_execution_metrics.csv":"burnin_execution_metrics","burnin_reject_quality.csv":"burnin_reject_outcomes","burnin_calibration.csv":"burnin_calibration_metrics","burnin_drawdowns.csv":"burnin_drawdown_events","burnin_suspension_events.csv":"burnin_suspension_events"}
+        for fname,table in tables.items():
+            rows=conn.execute(f"SELECT * FROM {table} WHERE burnin_run_id=? ORDER BY id",(burnin_run_id,)).fetchall(); p=out/fname
+            with p.open('w',newline='') as fh:
+                if rows:
+                    w=csv.DictWriter(fh, fieldnames=list(dict(rows[0]).keys())); w.writeheader(); w.writerows([dict(r) for r in rows])
+                else: csv.writer(fh).writerow([*header.keys()])
+            paths[fname]=p
+        return paths
+    finally: conn.close()

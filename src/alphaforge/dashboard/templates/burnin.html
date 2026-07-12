@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Phase 7 Burn-in Evidence</h1>
+<section class="card">
+  <h2>Qualification</h2>
+  <p>Status: <strong>{{ burnin.status }}</strong></p>
+  <p>Burn-in run: {{ burnin.burnin_run_id or "unavailable" }}</p>
+  <p>Release: {{ burnin.release_id or "unavailable" }}</p>
+  <p>Evidence timestamp: {{ burnin.generated_at or "unavailable" }}</p>
+  <p>Evidence hash: {{ burnin.evidence_hash or "unavailable" }}</p>
+</section>
+<section class="card">
+  <h2>Metrics</h2>
+  <dl>
+    <dt>Observed duration</dt><dd>{{ burnin.metrics.observed_duration_seconds if burnin.metrics.observed_duration_seconds is not none else "unavailable" }}</dd>
+    <dt>Decision samples</dt><dd>{{ burnin.metrics.sample_count if burnin.metrics.sample_count is not none else "unavailable" }}</dd>
+    <dt>Closed trades</dt><dd>{{ burnin.metrics.closed_trade_count if burnin.metrics.closed_trade_count is not none else "unavailable" }}</dd>
+    <dt>Net expectancy</dt><dd>{{ burnin.metrics.mean_net_r if burnin.metrics.mean_net_r is not none else "unavailable" }}</dd>
+    <dt>Lower confidence bound expectancy</dt><dd>{{ burnin.metrics.lower_confidence_bound_expectancy if burnin.metrics.lower_confidence_bound_expectancy is not none else "unavailable" }}</dd>
+    <dt>Max drawdown</dt><dd>{{ burnin.metrics.max_drawdown_pct if burnin.metrics.max_drawdown_pct is not none else "unavailable" }}</dd>
+    <dt>Total execution cost drag</dt><dd>{{ burnin.metrics.total_cost_drag if burnin.metrics.total_cost_drag is not none else "unavailable" }}</dd>
+    <dt>Slippage degradation</dt><dd>{{ burnin.metrics.slippage_degradation if burnin.metrics.slippage_degradation is not none else "unavailable" }}</dd>
+    <dt>Reject value</dt><dd>{{ burnin.metrics.net_reject_value if burnin.metrics.net_reject_value is not none else "unavailable" }}</dd>
+    <dt>Concentration status</dt><dd>{{ burnin.concentration_status or "unavailable" }}</dd>
+  </dl>
+</section>
+<section class="card"><h2>Statuses</h2><ul>
+<li>Sample: {{ burnin.sample_status }}</li><li>Expectancy: {{ burnin.expectancy_status }}</li><li>Execution: {{ burnin.execution_status }}</li><li>Regime: {{ burnin.regime_status }}</li><li>Reject quality: {{ burnin.reject_quality_status }}</li><li>Calibration: {{ burnin.calibration_status }}</li><li>Drawdown: {{ burnin.drawdown_status }}</li><li>Evidence completeness: {{ burnin.evidence_completeness_status }}</li>
+</ul></section>
+<section class="card"><h2>Blockers</h2><ul>{% for b in burnin.blockers %}<li>{{ b }}</li>{% else %}<li>none</li>{% endfor %}</ul></section>
+<section class="card"><h2>Suspension Reasons</h2><ul>{% for group in burnin.suspension_reasons %}{% for r in group %}<li>{{ r }}</li>{% endfor %}{% else %}<li>none</li>{% endfor %}</ul></section>
+{% endblock %}

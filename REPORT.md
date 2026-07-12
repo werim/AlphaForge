@@ -1,3 +1,49 @@
+## 2026-07-12 Phase 7 PAPER Burn-in, Canary Qualification, and Promotion Evidence
+
+### Why this patch was needed
+Phases 1-6 created lifecycle, execution-cost, portfolio-risk, reconciliation, release-gate, and non-mutating canary controls. Phase 7 needed a deterministic evidence layer that can prove whether PAPER and LIVE_PRECHECK behavior has stable positive expectancy after execution costs before any future promotion discussion.
+
+### Root cause
+Existing burn-in evidence was useful for integrity checks but did not persist a canonical burn-in run identity, confidence-bound expectancy, regime robustness, reject value, calibration quality, drawdown/loss-cluster evidence, execution degradation, concentration risk, or automatic suspension reasons as SQL-backed reproducible evidence.
+
+### Files changed
+- `src/alphaforge/burnin.py`: added canonical Phase 7 schema DDL, burn-in run model/provenance validation, deterministic hashing, no-evidence read helper, cost-completeness helpers, confidence interval helper, and deterministic exports.
+- `src/alphaforge/burnin_qualification.py`: added typed thresholds, qualification snapshot model, fail-closed qualification engine, concentration/drawdown/reject/calibration/execution checks, evidence hashes, and suspension event persistence.
+- `src/alphaforge/persistence.py`: added Phase 7 tables to explicit writable bootstrap only.
+- `src/alphaforge/dashboard/queries.py`, `src/alphaforge/dashboard/app.py`, `src/alphaforge/dashboard/templates/burnin.html`: added read-only Phase 7 dashboard/API evidence without DDL on GET paths.
+- `tests/test_phase7_burnin.py`, `tests/test_phase7_qualification.py`: added Phase 7 persistence and qualification regressions.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`, `RUNBOOK.md`: documented Phase 7 scope, thresholds, evidence requirements, suspension semantics, exports, operator workflow, and LIVE-disabled status.
+
+### Runtime behavior changes
+Phase 7 adds evidence and qualification surfaces for PAPER and LIVE_PRECHECK without changing strategy decisions, reject logic, risk gates, or order lifecycle behavior. `ExecutionMode.LIVE` remains hard-disabled by the existing Phase 6 guard and cannot be enabled by a Phase 7 canary snapshot.
+
+### Lifecycle changes
+No lifecycle transitions changed. Phase 7 consumes/persists burn-in observations and outcomes as evidence and does not synthesize lifecycle progression or hide rejected decisions.
+
+### Persistence changes
+Additive SQL tables were introduced through explicit writable bootstrap: `burnin_runs`, `burnin_observations`, `burnin_trade_outcomes`, `burnin_reject_outcomes`, `burnin_regime_metrics`, `burnin_execution_metrics`, `burnin_calibration_metrics`, `burnin_drawdown_events`, `burnin_qualification_snapshots`, and `burnin_suspension_events`. Read helpers return explicit unavailable/no-evidence states and do not issue CREATE/ALTER.
+
+### Export/schema changes
+Phase 7 exports are reproducible from SQL evidence: `burnin_summary.json`, `burnin_qualification.json`, `burnin_regime_metrics.csv`, `burnin_execution_metrics.csv`, `burnin_reject_quality.csv`, `burnin_calibration.csv`, `burnin_drawdowns.csv`, and `burnin_suspension_events.csv`. Each export carries burn-in run id, release id, git commit, config hash, generated timestamp, source provenance, and schema version.
+
+### Tests added
+Added targeted tests for additive schema creation, explicit no-evidence state, deterministic config/universe hashes, provenance/mode rejection, missing-cost qualification blocker, positive canary qualification semantics without LIVE enablement, and UNKNOWN regime fail-closed behavior.
+
+### Tests executed
+Targeted and full command results are recorded in the final response.
+
+### Risks
+Qualification is only as representative as collected PAPER/LIVE_PRECHECK evidence. Hidden venue-specific cost fields or incomplete outcome labeling will correctly block qualification until persisted. Phase 1-6 release/operator/rollback/runbook evidence must still be populated by operational workflows.
+
+### Remaining limitations
+Runtime collection hooks are intentionally minimal in this patch; production burn-in population should map live PAPER/LIVE_PRECHECK observations into the canonical Phase 7 tables without changing strategy behavior. Calibration quality requires real probability outputs and must not fabricate probabilities from scores.
+
+### Migration concerns
+No destructive migrations. Operators should run the normal writable bootstrap before Phase 7 writes; dashboard/API GET paths are safe for read-only SQLite connections and return unavailable evidence when tables or rows are absent.
+
+### Push recommendation
+Safe to push after CI validates the full suite. Do not claim production/live readiness. CANARY_QUALIFIED means continued non-mutating LIVE_PRECHECK only.
+
 ## 2026-07-11 PR273 Phase 6 LIVE Startup Fail-closed Fix
 
 ### Why this patch was needed

@@ -1,3 +1,27 @@
+## 2026-07-12 - Phase 7 PAPER Burn-in and Canary Qualification Evidence
+
+### Added
+- SQL-backed Phase 7 burn-in schema for runs, observations, trade outcomes, reject outcomes, regime/execution/calibration/drawdown metrics, qualification snapshots, and suspension events.
+- Cost-adjusted qualification engine using conservative lower confidence bound expectancy, reject-quality value, calibration quality, drawdown/loss-cluster checks, execution degradation status, and concentration limits.
+- Deterministic Phase 7 exports and dashboard/API burn-in evidence surfaces that distinguish unavailable, insufficient, failed, qualified, and suspended evidence without rendering missing metrics as zero.
+- Phase 7 regression tests covering schema bootstrap, no-evidence reads, deterministic hashes, missing costs, canary verdict semantics, and UNKNOWN regime blocking.
+
+### Changed
+- Writable database bootstrap now adds Phase 7 tables additively while read helpers/dashboard paths remain SELECT-only.
+- Dashboard runtime status includes Phase 7 burn-in evidence and exposes `/burnin` plus `/api/v1/burnin/latest`.
+
+### Fixed
+- Missing cost evidence cannot silently qualify as zero-cost expectancy.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None to Phase 1-6 tables or runtime strategy behavior.
+
+### Known Issues
+- Phase 7 CANARY_QUALIFIED is not live readiness; LIVE real order submission remains disabled. Real representative PAPER/LIVE_PRECHECK evidence must be collected before any canary qualification can pass.
+
 ## 2026-07-11 - PR273 Phase 6 LIVE startup fail-closed fix
 
 ### Added
