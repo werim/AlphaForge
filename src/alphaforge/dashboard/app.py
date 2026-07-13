@@ -34,6 +34,7 @@ from .queries import (
     fetch_runtime_heartbeat_status,
     fetch_signal_timeline,
     fetch_phase7_burnin,
+    fetch_phase8_campaign,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -74,6 +75,7 @@ def _status_payload(engine: Engine, control_store: RuntimeControlStore | None = 
         "latest_readiness": fetch_latest_readiness(engine),
         "release_gate": release_gate_status(engine),
         "phase7_burnin": fetch_phase7_burnin(engine),
+        "phase8_campaign": fetch_phase8_campaign(engine),
     }
 
 
@@ -296,6 +298,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/api/v1/burnin/latest")
     async def api_burnin_latest() -> dict[str, Any]:
         return fetch_phase7_burnin(app.state.engine)
+
+    @app.get("/campaign", response_class=HTMLResponse)
+    async def campaign(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(request=request, name="campaign.html", context={"campaign": fetch_phase8_campaign(app.state.engine), "page": "campaign"})
+
+    @app.get("/api/v1/burnin/campaign")
+    async def api_burnin_campaign(campaign_id: str | None = Query(default=None)) -> dict[str, Any]:
+        return fetch_phase8_campaign(app.state.engine, campaign_id)
 
     @app.get("/api/v1/readiness/probes")
     async def api_readiness_probe_matrix() -> dict[str, Any]:
