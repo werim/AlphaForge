@@ -315,3 +315,55 @@ def fetch_phase7_burnin(engine: Engine) -> dict[str, Any]:
         "evidence_hash": row["evidence_hash"],
         "suspension_reasons": [loads(r.get("reason_codes_json"), []) for r in susp],
     }
+
+
+def fetch_phase8_campaign(engine: Engine, campaign_id: str | None = None) -> dict[str, Any]:
+    """Read-only Phase 8 campaign operations evidence; emits no DDL and never coerces unavailable counts to zero."""
+    if not _has_table(engine, "burnin_campaigns"):
+        return {"status": "UNAVAILABLE", "reason": "NO_PHASE8_CAMPAIGN_TABLES"}
+    where = "WHERE campaign_id=:cid" if campaign_id else ""
+    params = {"cid": campaign_id} if campaign_id else {}
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(f"SELECT * FROM burnin_campaigns {where} ORDER BY created_at DESC, id DESC LIMIT 1"), params).mappings().first()
+            if row is None:
+                return {"status": "UNAVAILABLE", "reason": "NO_PHASE8_CAMPAIGN"}
+            cid = row["campaign_id"]
+            runs = conn.execute(text("SELECT burnin_run_id, continuation_sequence, status FROM burnin_campaign_runs WHERE campaign_id=:cid ORDER BY continuation_sequence"), {"cid": cid}).mappings().all() if _has_table(engine,"burnin_campaign_runs") else []
+            run_ids = [r["burnin_run_id"] for r in runs]
+            def count_table(table: str, expr: str = "COUNT(*)", extra: str = ""):
+                if not run_ids or not _has_table(engine, table): return None
+                ph=",".join([f":r{i}" for i in range(len(run_ids))]); p={f"r{i}":v for i,v in enumerate(run_ids)}
+                return conn.execute(text(f"SELECT {expr} FROM {table} WHERE burnin_run_id IN ({ph}) {extra}"), p).scalar()
+            latest = None
+            if _has_table(engine,"burnin_qualification_snapshots") and row.get("latest_qualification_id"):
+                latest = conn.execute(text("SELECT status, blockers_json, warnings_json, generated_at FROM burnin_qualification_snapshots WHERE qualification_id=:qid"), {"qid": row["latest_qualification_id"]}).mappings().first()
+    except SQLAlchemyError:
+        return {"status":"UNAVAILABLE","reason":"PHASE8_CAMPAIGN_QUERY_UNAVAILABLE"}
+    def loads(v, fallback):
+        try: return json.loads(v or json.dumps(fallback))
+        except Exception: return fallback
+    decisions=count_table("burnin_observations")
+    accepted=count_table("burnin_observations","COUNT(*)","AND UPPER(COALESCE(decision,''))='ACCEPTED'")
+    rejected=count_table("burnin_observations","COUNT(*)","AND UPPER(COALESCE(decision,''))='REJECTED'")
+    closed=count_table("burnin_trade_outcomes","COUNT(*)","AND closed_at IS NOT NULL AND evidence_complete=1")
+    pending_rejects=None
+    pending_positions=None
+    if _has_table(engine,"burnin_pending_reject_labels"):
+        try:
+            with engine.connect() as conn: pending_rejects=conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY')"), {"cid": row["campaign_id"]}).scalar()
+        except SQLAlchemyError: pending_rejects=None
+    if _has_table(engine,"burnin_pending_position_outcomes"):
+        try:
+            with engine.connect() as conn: pending_positions=conn.execute(text("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": row["campaign_id"]}).scalar()
+        except SQLAlchemyError: pending_positions=None
+    heartbeat_age = None
+    try:
+        if row["last_heartbeat_at"]:
+            import datetime as _dt
+            heartbeat_age = max(0.0, (_dt.datetime.now(_dt.timezone.utc) - _dt.datetime.fromisoformat(str(row["last_heartbeat_at"]).replace("Z", "+00:00"))).total_seconds())
+    except Exception:
+        heartbeat_age = None
+    stale_timeout = row.get("stale_worker_timeout_seconds") if hasattr(row, "get") else None
+    stale = None if heartbeat_age is None or stale_timeout is None else heartbeat_age > float(stale_timeout)
+    return {"status": row["campaign_status"], "campaign_id": row["campaign_id"], "release_id": row["release_id"], "active_run_id": row["active_run_id"], "continuation_count": len(runs) if runs is not None else None, "restart_count": row["restart_count"], "worker_pid": row.get("worker_pid"), "worker_started_at": row.get("worker_started_at"), "last_runtime_status": row.get("last_runtime_status"), "heartbeat_age_seconds": heartbeat_age, "stale_worker_timeout_seconds": stale_timeout, "stale_worker": stale, "resolver_failure_count": row.get("resolver_failure_count"), "completion_blockers": loads(row.get("completion_blockers_json"), []), "expected_duration_seconds": row["expected_duration_seconds"], "observed_duration_seconds": row["observed_duration_seconds"], "decisions": decisions, "accepted": accepted, "rejected": rejected, "closed_trades": closed, "open_positions": pending_positions, "pending_reject_labels": pending_rejects, "evidence_completeness": row["evidence_completeness_status"], "latest_qualification": dict(latest) if latest else None, "blockers": loads(latest.get("blockers_json") if latest else None, []), "warnings": loads(latest.get("warnings_json") if latest else None, []), "last_heartbeat": row["last_heartbeat_at"], "last_error": row["last_error"], "config_drift": row["last_error"] == "CONFIG_DRIFT", "export_status": None}

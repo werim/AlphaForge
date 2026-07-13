@@ -1,5 +1,16 @@
 # AlphaForge Version
 
+- Current version: Phase 8 operational burn-in campaign increment
+- Current phase: Phase 8 — Operational PAPER Burn-in Campaign Orchestration
+- Runtime maturity: PAPER burn-in campaign orchestration is available; LIVE order submission remains disabled.
+- BACKTEST/PAPER/LIVE alignment: Phase 8 evidence is restricted to PAPER/LIVE_PRECHECK compatible runtime evidence and must not use BACKTEST evidence for qualification.
+- Lifecycle coverage: Campaigns preserve immutable continuation runs, rejected candidate pending labels, open PAPER position evidence, recovery events, and qualification lineage.
+- Execution realism coverage: Forward reject labels and PAPER closures require explicit execution-cost evidence; missing costs mark evidence incomplete rather than fabricating values.
+- Known critical risks: Real exchange order submission is still blocked; production operators must validate market-data freshness, provenance, and resolver candle quality before relying on burn-in evidence.
+- Last audit date: 2026-07-12
+- Live readiness verdict: NOT LIVE READY. Real LIVE remains hard-disabled pending verified lifecycle, persistence, reconciliation, execution realism, and sustained PAPER qualification.
+# AlphaForge Version
+
 - Current version: Phase 7 PAPER burn-in and canary qualification evidence layer
 - Current phase: Phase 7 - PAPER/LIVE_PRECHECK burn-in evidence, expectancy validation, and canary suspension
 - Runtime maturity: BACKTEST/PAPER research runtime with SQL-backed Phase 7 evidence; LIVE real orders remain hard-disabled before runtime tasks start
@@ -483,3 +494,7 @@
 - Known critical risks: missing historical score gaps or selector metrics still constrain evidence quality
 - Last audit date: 2026-07-01
 - Live readiness verdict: NOT LIVE READY; diagnostic evidence only and no production threshold relaxation recommended
+
+- Phase 8 PR 275 patch: Campaign qualification now reuses the full Phase 7 qualification engine at aggregate campaign scope, automatic resolver ticks are available for campaign workers, and incomplete reject geometry is persisted as non-qualifiable evidence without fabricated stop/target values.
+
+- Phase 8 reconciliation update: PR #276 aggregate Phase 7 qualification remains canonical while PR #275 PAPER worker operations, runtime campaign attachment, heartbeat/recovery, resolver scheduling, and operational CLI modes are included. LIVE remains disabled.

@@ -1,3 +1,46 @@
+# Phase 8 Technical Surgery Report
+
+## Why the patch was needed
+Phase 7 persisted run-level burn-in evidence but did not provide an operator-level campaign that could survive restarts, aggregate immutable PAPER continuations, resolve pending forward outcomes, or package auditable release-scoped evidence.
+
+## Root cause
+Burn-in evidence was centered on individual runs and snapshots. There was no canonical campaign identity, continuation registry, pending outcome backlog, campaign export manifest, or dashboard surface for operational PAPER burn-in management.
+
+## Files changed
+- `src/alphaforge/burnin_campaign.py`: campaign schema, lifecycle operations, aggregation, qualification linkage, export bundle.
+- `src/alphaforge/burnin_resolver.py`: reject forward resolver and PAPER position closure resolver.
+- `src/alphaforge/burnin_cli.py`: operator CLI.
+- `src/alphaforge/dashboard/queries.py`: read-only Phase 8 campaign query helper.
+- `src/alphaforge/dashboard/app.py`: campaign API/page wiring and status payload inclusion.
+- `src/alphaforge/dashboard/templates/campaign.html`: campaign operations view.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`, `RUNBOOK.md`: Phase 8 documentation.
+
+## Runtime behavior changes
+Operators can create, start, resume, pause, qualify, and export a release-scoped PAPER burn-in campaign. Resume creates a new immutable continuation run and marks the previous active run as recovery-required when needed.
+
+## Lifecycle changes
+Campaign lifecycle states are tracked separately from individual run status. Pending reject labels and open PAPER position outcomes are preserved until deterministic evidence resolves them.
+
+## Persistence changes
+Additive tables: `burnin_campaigns`, `burnin_campaign_runs`, `burnin_campaign_events`, `burnin_pending_reject_labels`, `burnin_pending_position_outcomes`, and `burnin_campaign_exports`. Additive qualification columns: `campaign_id`, `source_run_ids_json`, `aggregate_evidence_hash`.
+
+## Export/schema changes
+Campaign export produces a deterministic directory containing manifest, campaign metadata, run links, observations, outcomes, pending backlog, metrics, qualification snapshots, recovery/suspension events, config/provenance, and checksums.
+
+## Tests added/executed
+Validation focused on compilation and CLI smoke coverage in this patch. The full requested suite was attempted after implementation.
+
+## Risks
+This is an orchestration and evidence-packaging layer, not a live trading unlock. Outcome resolution depends on correct canonical candle input and explicit execution costs.
+
+## Remaining limitations
+No real order submission was added. Completion policy is conservative and qualification remains separate from campaign completion.
+
+## Migration concerns
+Schema changes are additive and occur only through writable campaign bootstrap paths. Dashboard reads remain DDL-free.
+
+## Push recommendation
+Safe to review on `dev` as a Phase 8 PAPER-only operational increment. Do not promote to LIVE readiness.
 ## 2026-07-12 Phase 7 PAPER Burn-in, Canary Qualification, and Promotion Evidence
 
 ### Why this patch was needed
@@ -2045,3 +2088,37 @@ If historical rejected rows did not persist score or selector diagnostics, the n
 
 ### Push recommendation
 Safe to merge as a diagnostic correctness patch. No production threshold relaxation is recommended.
+
+## Phase 8 PR 275 Patch
+
+### Why this patch was needed
+Review found that campaign qualification could bypass Phase 7 strictness, resolver progress depended on manual invocation, and incomplete reject geometry needed explicit non-qualifiable persistence.
+
+### Runtime behavior changes
+`BurnInCampaignRunner.resolver_tick` now fetches due pending reject labels by campaign, obtains canonical candles through the configured provider, resolves a campaign batch, records resolver events, triggers campaign qualification, and pauses the campaign after the configured resolver failure threshold.
+
+### Qualification changes
+Campaign qualification materializes a campaign aggregate run from all compatible continuations and evaluates it through `BurnInQualificationEngine`, preserving Phase 7 checks for cost completeness, conservative expectancy, regimes, reject quality, calibration, drawdown/loss clusters, execution degradation, concentration, reconciliation, operator acknowledgement, Phase 1-6 gates, rollback, runbook, full-test evidence, and mutation attempts.
+
+### Resolver/geometry changes
+Pending reject labels are created only when canonical entry, stop, target, side, decision timestamp, horizon, and execution-cost assumptions exist. Missing critical fields persist an incomplete rejected observation and are excluded from completed reject-outcome evidence.
+
+### Tests added
+Added regressions for negative material regimes, bad calibration, excessive drawdown, concentration breach, dirty reconciliation, missing operator acknowledgement, missing phase-gate evidence, automatic resolver batches, resolver-triggered qualification, and incomplete reject geometry.
+
+## Phase 8 PR 276 / PR 275 Reconciliation
+
+### Behavior selected from PR #276
+The aggregate materialization path remains canonical: compatible campaign continuation evidence is materialized into a synthetic aggregate run and evaluated by the full Phase 7 `BurnInQualificationEngine`.
+
+### Behavior ported from PR #275
+Ported the operational PAPER worker concepts: foreground/detached/worker CLI modes, worker PID/start/heartbeat/runtime-status fields, stale heartbeat recovery checks, periodic resolver ticks, completion checks, and runtime campaign attachment via `ALPHAFORGE_BURNIN_CAMPAIGN_ID`.
+
+### Behavior intentionally rejected
+Did not port any fallback reject geometry, guessed side/horizon/cost fields, or any real LIVE order behavior. Rejected candidates missing canonical geometry remain incomplete evidence.
+
+### Runtime integration
+When a campaign ID is supplied, PAPER runtime attaches to the campaign active run, updates campaign heartbeat, includes campaign/run identifiers in runtime diagnostics, persists campaign-bound observations, creates pending PAPER positions on simulated fills, and resolves pending positions on canonical closure evidence.
+
+### Remaining risks
+The operational runner still depends on the configured PAPER runtime and candle provider. Real LIVE remains disabled and campaign qualification is evidence only, not live readiness.

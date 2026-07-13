@@ -179,6 +179,8 @@ class RuntimeOrchestrator:
     _mutation_trap_active: bool = field(default=False, init=False)
     _exchange_health: list[ExchangeHealth] = field(default_factory=list, init=False)
     _burnin_run_id: str | None = field(default=None, init=False)
+    _burnin_campaign_id: str | None = field(default=None, init=False)
+    _burnin_campaign_attached: bool = field(default=False, init=False)
     _burnin_evidence_incomplete: bool = field(default=False, init=False)
     _burnin_suspended: bool = field(default=False, init=False)
     _last_burnin_snapshot_ts: float = field(default=0.0, init=False)
@@ -264,6 +266,14 @@ class RuntimeOrchestrator:
                 "decision_gate_blockers": self._last_scan_gate_blockers,
             },
         )
+        if self._burnin_campaign_id:
+            try:
+                from alphaforge.burnin_campaign import update_campaign_heartbeat
+                with engine.begin() as conn:
+                    update_campaign_heartbeat(conn, self._burnin_campaign_id, runtime_status=runtime_state, worker_pid=os.getpid(), burnin_run_id=self._burnin_run_id)
+            except Exception as exc:
+                self._fail_closed_reason = "PHASE8_CAMPAIGN_PERSISTENCE_FAILURE"
+                logger.exception("phase8_campaign_heartbeat_failed", exc_info=exc)
 
     def _kill_switch_active(self) -> bool:
         if self.config.global_kill_switch:
@@ -318,7 +328,7 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY"},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "burnin_campaign_id": self._burnin_campaign_id, "burnin_run_id": self._burnin_run_id},
         )
 
     def _persist_runtime_state_snapshot(self, status: str | None = None) -> None:
@@ -452,6 +462,38 @@ class RuntimeOrchestrator:
         except Exception:
             return "UNKNOWN_GIT_COMMIT"
 
+
+    def _attach_phase8_campaign(self, engine: Engine, campaign_id: str) -> bool:
+        try:
+            from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign, update_campaign_heartbeat, _exec
+            with engine.begin() as conn:
+                bootstrap_campaign_schema(conn)
+                campaign = get_campaign(conn, campaign_id)
+                if not campaign:
+                    self._fail_closed_reason = "PHASE8_CAMPAIGN_NOT_FOUND"; return False
+                if self.config.execution_mode != ExecutionMode.PAPER:
+                    self._fail_closed_reason = "PHASE8_CAMPAIGN_ATTACH_FAILED"; return False
+                active_run_id = campaign.get("active_run_id")
+                if not active_run_id:
+                    self._fail_closed_reason = "PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING"; return False
+                row = _exec(conn, "SELECT * FROM burnin_runs WHERE burnin_run_id=:bid", {"bid": active_run_id}).fetchone()
+                if row is None:
+                    self._fail_closed_reason = "PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING"; return False
+                mapping = row if hasattr(row, "keys") else row._mapping
+                cfg = self._canonical_filter_config(); symbols = list(cfg.get("symbols") or cfg.get("active_symbols") or []); intervals = list(cfg.get("intervals") or cfg.get("timeframes") or [])
+                expected_config = burnin_config_hash(cfg)
+                expected_strategy = burnin_config_hash({"min_signal_score": self.config.min_signal_score, "min_effective_rr": self.config.min_effective_rr, "min_rr": self.config.min_rr})
+                expected_universe = burnin_universe_hash(symbols, intervals)
+                if mapping["config_hash"] != campaign["config_hash"] or mapping["strategy_config_hash"] != campaign["strategy_config_hash"] or mapping["universe_hash"] != campaign["universe_hash"]:
+                    self._fail_closed_reason = "PHASE8_CAMPAIGN_CONFIG_DRIFT"; return False
+                self._burnin_campaign_id = campaign_id; self._burnin_run_id = str(active_run_id); self._burnin_campaign_attached = True
+                update_campaign_heartbeat(conn, campaign_id, runtime_status="ATTACHED", worker_pid=os.getpid(), burnin_run_id=self._burnin_run_id)
+                return True
+        except Exception as exc:
+            self._fail_closed_reason = "PHASE8_CAMPAIGN_PERSISTENCE_FAILURE"
+            logger.exception("phase8_campaign_attach_failed", exc_info=exc)
+            return False
+
     def _start_or_resume_burnin_run(self) -> None:
         if self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK} or self._burnin_run_id:
             return
@@ -460,6 +502,11 @@ class RuntimeOrchestrator:
             self._burnin_evidence_incomplete = True
             if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
                 self._fail_closed_reason = "PHASE7_BURNIN_PERSISTENCE_UNAVAILABLE"
+            return
+        campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        if campaign_id:
+            if not self._attach_phase8_campaign(engine, campaign_id):
+                self._burnin_evidence_incomplete = True
             return
         release_id = os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id)
         parent_run_id = None
@@ -544,10 +591,13 @@ class RuntimeOrchestrator:
             execution_ctx = dict(payload.get("execution_ctx") or {})
             missing = [name for name in ("signal_id", "symbol", "decision") if not payload.get(name)]
             with engine.begin() as conn:
-                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics={k: payload.get(k) for k in ("score","rr","effective_rr","confidence","spread_pct","expected_slippage_pct","latency_ms","funding_rate_pct")}, source_provenance={"provider": self.scanner_source or "UNKNOWN"}, missing_fields=missing)
+                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics={**{k: payload.get(k) for k in ("score","rr","effective_rr","confidence","spread_pct","expected_slippage_pct","latency_ms","funding_rate_pct")}, "campaign_id": self._burnin_campaign_id, "execution_ctx": execution_ctx}, source_provenance={"provider": self.scanner_source or "UNKNOWN", "campaign_id": self._burnin_campaign_id}, missing_fields=missing)
             self.metrics.burnin_observations += 1
             with engine.begin() as conn:
                 update_burnin_run_counters(conn, self._burnin_run_id)
+                if self._burnin_campaign_id:
+                    from alphaforge.burnin_campaign import update_campaign_heartbeat
+                    update_campaign_heartbeat(conn, self._burnin_campaign_id, runtime_status=self._runtime_status, worker_pid=os.getpid(), burnin_run_id=self._burnin_run_id)
         except Exception as exc:
             self._burnin_evidence_incomplete = True
             self._fail_closed_reason = "PHASE7_BURNIN_PERSISTENCE_FAILURE"
@@ -584,7 +634,11 @@ class RuntimeOrchestrator:
         }
         try:
             with engine.begin() as conn:
-                persist_burnin_trade_outcome(conn, outcome_id=str(details.get("outcome_id") or f"out:{symbol}:{details.get('trade_id') or canonical_utc_timestamp()}"), burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), symbol=symbol, regime=str(details.get("regime") or "UNKNOWN"), trade_id=details.get("trade_id"), gross_r=details.get("gross_r"), gross_pnl=details.get("gross_pnl"), costs=costs, net_r=details.get("net_r"), net_pnl=details.get("net_pnl"), effective_rr_at_entry=details.get("effective_rr_at_entry"), realized_effective_rr=details.get("realized_effective_rr"), hold_duration_seconds=details.get("hold_duration_seconds"), mfe=details.get("mfe"), mae=details.get("mae"), exit_reason=details.get("exit_reason"), payload=dict(details))
+                if self._burnin_campaign_id and details.get("trade_id") and details.get("exit_price") is not None:
+                    from alphaforge.burnin_resolver import resolve_position_closure
+                    resolve_position_closure(conn, trade_id=str(details.get("trade_id")), exit_time=str(details.get("exit_time") or details.get("closed_at") or canonical_utc_timestamp()), exit_price=float(details.get("exit_price")), exit_reason=str(details.get("exit_reason") or "UNKNOWN"), exit_costs={"exit_spread": details.get("exit_spread_cost"), "exit_slippage": details.get("exit_slippage_cost"), "exit_fee": details.get("exit_fee_cost") or details.get("fee_cost"), "funding": details.get("funding_cost"), "latency_impact_penalty": details.get("latency_cost")}, mfe=details.get("mfe"), mae=details.get("mae"))
+                else:
+                    persist_burnin_trade_outcome(conn, outcome_id=str(details.get("outcome_id") or f"out:{symbol}:{details.get('trade_id') or canonical_utc_timestamp()}"), burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), symbol=symbol, regime=str(details.get("regime") or "UNKNOWN"), trade_id=details.get("trade_id"), gross_r=details.get("gross_r"), gross_pnl=details.get("gross_pnl"), costs=costs, net_r=details.get("net_r"), net_pnl=details.get("net_pnl"), effective_rr_at_entry=details.get("effective_rr_at_entry"), realized_effective_rr=details.get("realized_effective_rr"), hold_duration_seconds=details.get("hold_duration_seconds"), mfe=details.get("mfe"), mae=details.get("mae"), exit_reason=details.get("exit_reason"), payload=dict(details))
                 update_burnin_run_counters(conn, self._burnin_run_id)
             self.metrics.burnin_outcomes += 1
         except Exception as exc:
@@ -1059,6 +1113,18 @@ class RuntimeOrchestrator:
             await self._record_incident(symbol, LifecycleState.ENTRY_TIMEOUT.value, "execution_uncertain_state")
             await self._reconcile_symbol_state(symbol, result, market_ctx)
             return
+        if self._burnin_campaign_id and self._burnin_run_id and result_status in {"filled", "partial_fill"}:
+            try:
+                engine = self._resolve_persistence_engine()
+                if engine is not None:
+                    from alphaforge.burnin_resolver import persist_pending_position
+                    exec_ctx = dict(market_ctx.get("execution_ctx") or {})
+                    with engine.begin() as conn:
+                        persist_pending_position(conn, trade_id=order_id, campaign_id=self._burnin_campaign_id, burnin_run_id=self._burnin_run_id, signal_id=market_ctx.get("signal_id"), symbol=symbol, side=market_ctx.get("side"), entry_time=canonical_utc_timestamp(), planned_entry=market_ctx.get("entry"), simulated_fill=result.get("fill_price"), stop=market_ctx.get("stop"), target=market_ctx.get("target"), quantity=market_ctx.get("quantity") or market_ctx.get("qty"), notional=market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional"), entry_spread=exec_ctx.get("spread_pct") or market_ctx.get("spread_pct"), entry_slippage=result.get("expected_slippage_pct") or exec_ctx.get("expected_slippage_pct"), entry_fee=exec_ctx.get("fee_pct") or market_ctx.get("fee_pct"), regime=market_ctx.get("regime") or exec_ctx.get("volatility_regime"), source_provenance={"provider": self.scanner_source or "UNKNOWN", "campaign_id": self._burnin_campaign_id})
+            except Exception as exc:
+                self._burnin_evidence_incomplete = True
+                self._fail_closed_reason = "PHASE8_CAMPAIGN_PERSISTENCE_FAILURE"
+                logger.exception("phase8_pending_position_persistence_failed", exc_info=exc)
         await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
         self._generate_burnin_snapshot(reason="periodic")
         self._active_positions[symbol] = float(market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
@@ -1126,6 +1192,18 @@ class RuntimeOrchestrator:
         self._reject_log.append(payload)
         self.metrics.rejects_persisted += 1
         self._persist_burnin_decision({**payload, "decision": "REJECTED"}, lifecycle_state=LifecycleState.SIGNAL_REJECTED.value)
+        if self._burnin_campaign_id and self._burnin_run_id:
+            try:
+                engine = self._resolve_persistence_engine()
+                if engine is not None:
+                    from alphaforge.burnin_resolver import persist_pending_reject_label
+                    execution_ctx = dict(payload.get("execution_ctx") or {})
+                    with engine.begin() as conn:
+                        persist_pending_reject_label(conn, campaign_id=self._burnin_campaign_id, burnin_run_id=self._burnin_run_id, reject_decision_id=str(payload.get("reject_decision_id") or payload.get("decision_id") or payload.get("signal_id") or canonical_utc_timestamp()), signal_id=payload.get("signal_id"), symbol=payload.get("symbol"), side=payload.get("side") or payload.get("direction"), decision_timestamp=payload.get("decision_timestamp") or payload.get("timestamp"), entry=payload.get("entry"), stop=payload.get("stop"), target=payload.get("target"), horizon_seconds=payload.get("forward_horizon_seconds"), execution_cost_assumptions=payload.get("execution_cost_assumptions"), regime=payload.get("regime") or payload.get("volatility_regime") or execution_ctx.get("volatility_regime"), reject_reason=payload.get("reject_reason") or payload.get("reason"), source_provenance={"provider": self.scanner_source or "UNKNOWN", "campaign_id": self._burnin_campaign_id})
+            except Exception as exc:
+                self._burnin_evidence_incomplete = True
+                self._fail_closed_reason = "PHASE8_CAMPAIGN_PERSISTENCE_FAILURE"
+                logger.exception("phase8_reject_label_persistence_failed", exc_info=exc)
         if self.on_reject_persist is not None:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):

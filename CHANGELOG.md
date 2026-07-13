@@ -1,3 +1,27 @@
+# Changelog
+
+## Added
+- Phase 8 burn-in campaign schema for release-scoped campaigns, continuation runs, campaign events, pending reject labels, pending PAPER position outcomes, and campaign exports.
+- Operator CLI for campaign create/start/resume/status/pause/qualify/export flows with JSON and human-readable output.
+- Deterministic reject forward-outcome and PAPER position resolvers that keep ambiguous or incomplete evidence explicit.
+- Campaign aggregation, qualification linkage, and deterministic evidence bundle export with manifest and checksums.
+- Read-only dashboard campaign operations API/page.
+
+## Changed
+- Burn-in qualification snapshots can now carry campaign linkage, source run IDs, and aggregate evidence hashes through additive schema columns.
+
+## Fixed
+- Phase 8 restart/resume preserves prior continuation evidence and emits recovery events instead of overwriting active runs.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- None. Schema changes are additive and require explicit bootstrap through Phase 8 writable paths.
+
+## Known Issues
+- LIVE trading remains disabled and no real order submission is implemented.
+- Resolver quality depends on canonical future candle evidence supplied by the operator/runtime.
 ## 2026-07-12 - Phase 7 PAPER Burn-in and Canary Qualification Evidence
 
 ### Added
@@ -2989,3 +3013,26 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Missing persisted scores or selector diagnostics still limit evidence quality and are intentionally surfaced as unavailable.
+
+## Phase 8 PR 275 Patch
+
+### Changed
+- Campaign qualification now materializes all compatible campaign continuation evidence into an aggregate run evaluated by the full Phase 7 qualification engine instead of shortcutting campaign verdicts.
+- Campaign resolver progress can be driven by `BurnInCampaignRunner.resolver_tick`, which resolves due labels, records batch events, triggers qualification, and pauses after resolver failure thresholds.
+
+### Fixed
+- Missing reject entry/stop/target/side/timestamp/horizon/cost assumptions now persist incomplete observations and do not create qualifiable pending labels or fabricated geometry.
+- Aggregate campaign qualification now preserves Phase 7 blockers for regimes, calibration, drawdown, execution, concentration, reconciliation, operator acknowledgement, release gates, rollback, runbook, full-test evidence, and mutation attempts.
+
+## Phase 8 PR 276 / PR 275 Reconciliation
+
+### Added
+- Operational PAPER campaign worker support with foreground, detached, and worker CLI flows, heartbeat/PID/runtime-status persistence, stale-worker recovery checks, completion checks, and automatic resolver scheduling.
+- Runtime attachment for `ALPHAFORGE_BURNIN_CAMPAIGN_ID` so PAPER runtime evidence binds to an existing campaign active run instead of creating a standalone Phase 7 run.
+
+### Changed
+- Campaign aggregate qualification remains the canonical PR #276 path and now validates execution mode plus explicit campaign compatibility blockers before materialization.
+- Campaign exports include `execution_cost_config_hash` in config and manifest metadata.
+
+### Fixed
+- Due reject labels with unavailable post-decision candles after horizon are marked `EXPIRED` rather than treated as complete timeout evidence.
