@@ -84,3 +84,8 @@ Run foreground campaign workers with one persistence backend. The worker must st
 Before runtime starts, campaign attachment compares runtime release/config/strategy/universe/execution-cost hashes and requires PAPER mode. Any mismatch pauses the campaign and blocks startup with a Phase 8 campaign drift reason.
 
 Detached worker invocations using `--db` must point to the campaign database so campaign state, runtime observations, pending labels, resolver events, and qualification snapshots remain in one lineage.
+
+### Phase 8 PR 279 CLI Worker Semantics
+Use `start --foreground` for an in-process PAPER campaign worker or `start --detach` for a subprocess worker. `resume` supports the same flags. A start/resume without a worker mode fails closed and must not leave the campaign `RUNNING`.
+
+Continuation allocation belongs to start/resume. Worker processes attach to the active campaign run and must not allocate a second continuation. Detached workers must receive the exact `--db` path used by the operator.

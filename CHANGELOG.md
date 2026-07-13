@@ -3035,3 +3035,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Campaign worker now forces runtime persistence onto the campaign engine so runtime/campaign evidence shares one database.
 - Campaign worker restores campaign and execution-mode environment variables after shutdown or failure.
 - Resolver loop no longer depends on manual CLI resolution for normal campaign progress.
+
+## Phase 8 PR 279 Patch
+
+### Changed
+- Campaign foreground workers now always build and start a real PAPER runtime when no runtime factory is injected.
+- CLI `start`/`resume` now require `--foreground` or `--detach`; start/resume own continuation allocation while worker attachment no longer allocates duplicate continuations.
+
+### Added
+- Detached worker launch path that passes the exact `--db` path, verifies the subprocess remains alive, and persists worker PID/start time.
+
+### Fixed
+- Runtime attachment now reuses the active campaign run for runtime burn-in persistence, preventing disconnected runtime evidence.
+- Worker-only startup no longer marks a campaign running without a worker process.

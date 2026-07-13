@@ -516,7 +516,8 @@ class RuntimeOrchestrator:
                 with contextlib.suppress(Exception): conn.commit()
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
-            burnin_campaign_event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACHED", details={"observed": observed, "runtime_instance_id": self.runtime_instance_id})
+            self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
+            burnin_campaign_event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACHED", details={"observed": observed, "runtime_instance_id": self.runtime_instance_id, "active_run_id": self._burnin_run_id})
 
     def _start_or_resume_burnin_run(self) -> None:
         if self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK} or self._burnin_run_id:

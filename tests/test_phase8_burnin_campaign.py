@@ -243,6 +243,72 @@ def test_run_foreground_sets_same_database_and_restores_environment(tmp_path):
 def test_cli_worker_db_writes_to_exact_database(tmp_path):
     from alphaforge.burnin_cli import main
     db=tmp_path/'cli.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
-    camp=create_campaign(conn,release_id='relcli',duration_days=1,symbols=[],intervals=[]); conn.commit(); conn.close()
+    camp=create_campaign(conn,release_id='relcli',duration_days=1,symbols=[],intervals=[]); start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close()
     assert main(['--db', str(db), 'worker', '--campaign-id', camp.campaign_id, '--once']) == 0
     conn=sqlite3.connect(db); assert conn.execute("select count(*) from burnin_campaign_events where campaign_id=? and event_type='RESOLVER_BATCH'",(camp.campaign_id,)).fetchone()[0] == 1; conn.close()
+
+def test_cli_start_requires_worker_and_does_not_leave_running(tmp_path):
+    from alphaforge.burnin_cli import main
+    db=tmp_path/'start_required.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='relreq',duration_days=1,symbols=[],intervals=[]); conn.commit(); conn.close()
+    assert main(['--db', str(db), 'start', '--campaign-id', camp.campaign_id]) == 3
+    conn=sqlite3.connect(db); assert conn.execute('select campaign_status from burnin_campaigns where campaign_id=?',(camp.campaign_id,)).fetchone()[0] == 'CREATED'; assert conn.execute('select count(*) from burnin_campaign_runs').fetchone()[0] == 0; conn.close()
+
+
+def test_cli_foreground_start_invokes_worker_runtime(monkeypatch, tmp_path):
+    from alphaforge import burnin_cli
+    db=tmp_path/'fg_cli.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='relfgcli',duration_days=1,symbols=[],intervals=[]); conn.commit(); conn.close()
+    called={}
+    async def fake_run(self): called['cid']=self.campaign_id; return {'status':'STOPPED'}
+    monkeypatch.setattr(burnin_cli.BurnInCampaignRunner, 'run_foreground', fake_run)
+    assert burnin_cli.main(['--db', str(db), 'start', '--campaign-id', camp.campaign_id, '--foreground']) == 0
+    assert called['cid'] == camp.campaign_id
+    conn=sqlite3.connect(db); assert conn.execute('select count(*) from burnin_campaign_runs').fetchone()[0] == 1; conn.close()
+
+
+def test_cli_detached_start_launches_live_subprocess_and_persists_pid(monkeypatch, tmp_path):
+    from alphaforge import burnin_cli
+    db=tmp_path/'detach_cli.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='reldet',duration_days=1,symbols=[],intervals=[]); conn.commit(); conn.close()
+    launched={}
+    class Proc:
+        pid=43210
+        def poll(self): return None
+    def fake_popen(cmd, **kw): launched['cmd']=cmd; return Proc()
+    monkeypatch.setattr(burnin_cli.subprocess, 'Popen', fake_popen)
+    assert burnin_cli.main(['--db', str(db), 'start', '--campaign-id', camp.campaign_id, '--detach']) == 0
+    assert str(db) in launched['cmd'] and 'worker' in launched['cmd']
+    conn=sqlite3.connect(db); row=conn.execute('select worker_pid,campaign_status from burnin_campaigns where campaign_id=?',(camp.campaign_id,)).fetchone(); runs=conn.execute('select count(*) from burnin_campaign_runs').fetchone()[0]; conn.close()
+    assert row == (43210,'RUNNING') and runs == 1
+
+
+def test_worker_default_runtime_factory_starts_real_builder(monkeypatch, tmp_path):
+    import alphaforge.runtime as runtime_mod
+    db=tmp_path/'default_builder.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='relbuilder',duration_days=1,symbols=[],intervals=[]); conn.commit(); conn.close(); e=_engine(db)
+    fake=_FakeRuntime(); called={}
+    def builder(): called['built']=True; return fake
+    monkeypatch.setattr(runtime_mod, '_build_runtime_from_env', builder)
+    async def go():
+        runner=BurnInCampaignRunner(e,camp.campaign_id,lambda s,a,b:[],resolver_interval_seconds=999,maintenance_interval_seconds=999)
+        try: await runner.run_foreground()
+        except RuntimeError: pass
+    asyncio.run(go()); e.dispose()
+    assert called['built'] is True and fake.shutdown_called
+
+
+def test_resolver_and_maintenance_loops_run_concurrently_with_runtime(tmp_path):
+    db=tmp_path/'concurrent.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='relconc',duration_days=1,symbols=['BTCUSDT'],intervals=['1h']); run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='conc',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=1,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'}); conn.commit(); conn.close(); e=_engine(db)
+    class SlowRuntime(_FakeRuntime):
+        async def start(self): await asyncio.sleep(0.05); raise RuntimeError('done')
+    fake=SlowRuntime()
+    async def go():
+        runner=BurnInCampaignRunner(e,camp.campaign_id,lambda s,a,b:[{'timestamp':'2026-01-01T00:00:02Z','high':130,'low':99}],runtime_factory=lambda: fake,resolver_interval_seconds=0.01,maintenance_interval_seconds=0.01,qualification_interval_seconds=999999,thresholds=BurnInThresholds(minimum_duration_seconds=0,minimum_total_decisions=0,minimum_accepted_trades=0,minimum_closed_trades=0,minimum_rejected_forward_outcomes=1,minimum_regime_sample=1,minimum_regime_coverage=1,minimum_calibration_sample=1,require_operator_ack=False,require_phase1_6_gates=False))
+        try: await runner.run_foreground()
+        except RuntimeError: pass
+    asyncio.run(go()); e.dispose()
+    conn=sqlite3.connect(db); events=[r[0] for r in conn.execute('select event_type from burnin_campaign_events')]; conn.close()
+    assert 'RESOLVER_BATCH' in events and 'CAMPAIGN_HEARTBEAT' in events

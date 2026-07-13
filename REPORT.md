@@ -2125,3 +2125,20 @@ Detached and foreground campaign workers use the same SQLAlchemy engine for camp
 
 ### Tests added
 Added regressions for automatic resolver progress, maintenance heartbeat/duration/completion checks, resolver threshold pausing, runtime config/strategy/universe/execution-cost/release/mode mismatches, one-database runtime attachment, detached `--db` worker writes, and environment restoration.
+
+## Phase 8 PR 279 Patch
+
+### Why this patch was needed
+Review found that workers could run without creating a runtime task, CLI start/resume semantics no longer launched foreground/detached workers, and worker/start ownership could allocate duplicate continuations.
+
+### Runtime behavior changes
+`BurnInCampaignRunner.run_foreground()` now defaults to `_build_runtime_from_env`, always creates a runtime, forces that runtime onto the campaign engine, attaches the campaign, and starts `runtime.start()` as a required task alongside resolver and maintenance loops.
+
+### CLI behavior changes
+`start` and `resume` require `--foreground` or `--detach`. Foreground runs the campaign worker in-process. Detached launch allocates the continuation, starts a worker subprocess with the exact `--db` path, verifies it remains alive, and persists worker PID/start time. If no worker mode is requested, the command fails closed and does not mark the campaign running.
+
+### Continuation ownership
+Start/resume own campaign continuation allocation. Worker commands attach to the active campaign run and do not allocate another continuation. Runtime attachment sets the runtime burn-in run id to the campaign active run so runtime evidence is connected to the campaign.
+
+### Tests added
+Added coverage for CLI foreground worker invocation, detached subprocess launch, default runtime factory use, no-worker fail-closed start, single continuation allocation, exact DB propagation, concurrent runtime/resolver/maintenance execution, and environment restoration.

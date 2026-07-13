@@ -30,7 +30,7 @@ def bootstrap_campaign_schema(conn: Any) -> None:
     bootstrap_burnin_schema(conn)
     for stmt in PHASE8_DDL: _exec(conn, stmt)
     # additive qualification columns; ignore on older SQLite if duplicate
-    for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT"]:
+    for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN worker_pid INTEGER", "ALTER TABLE burnin_campaigns ADD COLUMN worker_started_at TEXT"]:
         try: _exec(conn, stmt)
         except Exception: pass
 
@@ -354,12 +354,15 @@ class BurnInCampaignRunner:
         runtime = None
         tasks: list[asyncio.Task[Any]] = []
         try:
-            if self.runtime_factory is not None:
-                runtime = self.runtime_factory()
-                setattr(runtime, "persistence_engine", self.engine)
-                attach = getattr(runtime, "_attach_phase8_campaign", None)
-                if callable(attach): attach(self.campaign_id)
-                tasks.append(asyncio.create_task(runtime.start(), name="phase8_runtime_start"))
+            if self.runtime_factory is None:
+                from alphaforge.runtime import _build_runtime_from_env
+                self.runtime_factory = _build_runtime_from_env
+            runtime = self.runtime_factory()
+            setattr(runtime, "persistence_engine", self.engine)
+            attach = getattr(runtime, "_attach_phase8_campaign", None)
+            if callable(attach): attach(self.campaign_id)
+            else: raise RuntimeError("PHASE8_RUNTIME_ATTACH_UNAVAILABLE")
+            tasks.append(asyncio.create_task(runtime.start(), name="phase8_runtime_start"))
             tasks.append(asyncio.create_task(self._resolver_loop(), name="phase8_resolver_loop"))
             tasks.append(asyncio.create_task(self._maintenance_loop(), name="phase8_maintenance_loop"))
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
