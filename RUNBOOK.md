@@ -36,3 +36,44 @@ Use `export_burnin_evidence(db_path, output_dir, burnin_run_id)` to generate det
 
 ## Remaining blockers for real LIVE
 Real LIVE remains blocked until future phases define and verify a separate explicit real-order enablement process. Phase 7 evidence is necessary promotion evidence, not sufficient LIVE readiness.
+
+## Phase 8 PAPER Burn-in Campaign Workflow
+
+1. Create a release-scoped campaign:
+   `PYTHONPATH=src python -m alphaforge.burnin_cli create --release-id <release> --duration-days 7 --symbols BTCUSDT,ETHUSDT --intervals 1h,15m`
+2. Start collection:
+   `PYTHONPATH=src python -m alphaforge.burnin_cli start --campaign-id <campaign>`
+3. Resume after restart:
+   `PYTHONPATH=src python -m alphaforge.burnin_cli resume --campaign-id <campaign>`
+   Resume preserves previous run evidence, allocates the next continuation sequence, increments restart count, and records recovery evidence.
+4. Check status:
+   `PYTHONPATH=src python -m alphaforge.burnin_cli status --campaign-id <campaign> --json`
+5. Generate qualification evidence:
+   `PYTHONPATH=src python -m alphaforge.burnin_cli qualify --campaign-id <campaign>`
+6. Export the evidence bundle:
+   `PYTHONPATH=src python -m alphaforge.burnin_cli export --campaign-id <campaign> --output-dir artifacts/phase8`
+
+### Config drift handling
+If campaign config, strategy config, universe/timeframes, or release association changes, the campaign must pause/fail closed. Incompatible evidence must not be combined; create a new campaign for incompatible evidence.
+
+### Reject-label resolution
+Rejected candidates are persisted as pending labels with entry/stop/target, horizon, costs, regime, reason, provenance, and due time. Resolution only uses candles after the decision timestamp. Same-candle TP/SL reachability is `AMBIGUOUS`, not a win or loss.
+
+### PAPER position outcome resolution
+Open PAPER positions stay open until canonical exit evidence exists. Planned RR is not realized R. Missing exit costs mark evidence incomplete and block complete qualification evidence.
+
+### Qualification interpretation
+Campaign completion and qualification are separate. `COMPLETED + BURN_IN_FAILED` is valid. `CANARY_QUALIFIED` is not LIVE readiness and does not enable real orders.
+
+### Recovery procedures
+After unclean shutdown, run `resume` with the same campaign ID. Inspect dashboard `/campaign` or `/api/v1/burnin/campaign` for restart count, active run, pending backlog, blockers, warnings, last heartbeat, and last error.
+
+### Remaining blockers for real LIVE
+Real LIVE remains disabled until lifecycle integrity, reject quality, persistence integrity, reconciliation, execution realism, and sustained PAPER qualification are independently verified.
+
+### Phase 8 PR 275 Operational Patch
+Campaign qualification must be generated from all compatible continuation runs through the aggregate Phase 7 qualification path. Operators must not treat metric-row presence as sufficient evidence; all Phase 7 blockers remain authoritative at campaign scope.
+
+The campaign worker resolver tick should run periodically during PAPER burn-in. It resolves due pending reject labels using canonical post-decision candles, records resolver batch events, triggers qualification, and pauses the campaign if resolver failures exceed the configured threshold.
+
+Rejected candidates with missing entry, stop, target, side, decision timestamp, horizon, or execution-cost assumptions are incomplete evidence. They must not receive guessed stop/target geometry and must not count as completed forward outcomes.

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Phase 8 PAPER Burn-in Campaign</h1>
+{% if campaign.status == 'UNAVAILABLE' %}<p>{{ campaign.reason }}</p>{% else %}
+<table class="table"><tbody>
+<tr><th>Campaign ID</th><td>{{ campaign.campaign_id }}</td></tr>
+<tr><th>Release ID</th><td>{{ campaign.release_id }}</td></tr>
+<tr><th>Status</th><td>{{ campaign.status }}</td></tr>
+<tr><th>Active run</th><td>{{ campaign.active_run_id or 'unavailable' }}</td></tr>
+<tr><th>Continuations / restarts</th><td>{{ campaign.continuation_count if campaign.continuation_count is not none else 'unavailable' }} / {{ campaign.restart_count if campaign.restart_count is not none else 'unavailable' }}</td></tr>
+<tr><th>Elapsed / required seconds</th><td>{{ campaign.observed_duration_seconds or 'unavailable' }} / {{ campaign.expected_duration_seconds or 'unavailable' }}</td></tr>
+<tr><th>Decisions accepted rejected</th><td>{{ campaign.decisions if campaign.decisions is not none else 'unavailable' }} / {{ campaign.accepted if campaign.accepted is not none else 'unavailable' }} / {{ campaign.rejected if campaign.rejected is not none else 'unavailable' }}</td></tr>
+<tr><th>Open positions / closed trades</th><td>{{ campaign.open_positions if campaign.open_positions is not none else 'unavailable' }} / {{ campaign.closed_trades if campaign.closed_trades is not none else 'unavailable' }}</td></tr>
+<tr><th>Pending rejects</th><td>{{ campaign.pending_reject_labels if campaign.pending_reject_labels is not none else 'unavailable' }}</td></tr>
+<tr><th>Evidence completeness</th><td>{{ campaign.evidence_completeness }}</td></tr>
+<tr><th>Latest qualification</th><td>{{ campaign.latest_qualification.status if campaign.latest_qualification else 'unavailable' }}</td></tr>
+<tr><th>Blockers</th><td>{{ campaign.blockers }}</td></tr>
+<tr><th>Warnings</th><td>{{ campaign.warnings }}</td></tr>
+<tr><th>Last heartbeat</th><td>{{ campaign.last_heartbeat or 'unavailable' }}</td></tr>
+<tr><th>Last error / config drift</th><td>{{ campaign.last_error or 'none' }} / {{ campaign.config_drift }}</td></tr>
+<tr><th>Export status</th><td>{{ campaign.export_status or 'unavailable' }}</td></tr>
+</tbody></table>
+{% endif %}
+{% endblock %}
