@@ -503,6 +503,12 @@ class RuntimeOrchestrator:
             if campaign is None:
                 self._fail_closed_reason = "PHASE8_CAMPAIGN_NOT_FOUND"
                 raise RuntimeError(self._fail_closed_reason)
+            if not campaign.get("active_run_id"):
+                burnin_campaign_exec(conn, "UPDATE burnin_campaigns SET campaign_status='FAILED', last_error='PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING' WHERE campaign_id=:cid", {"cid": campaign_id})
+                burnin_campaign_event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACH_FAILED", details={"reason": "PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING"})
+                with contextlib.suppress(Exception): conn.commit()
+                self._fail_closed_reason = "PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING"
+                raise RuntimeError(self._fail_closed_reason)
             expected = {k: campaign.get(k) for k in ("release_id","config_hash","strategy_config_hash","universe_hash","execution_cost_config_hash")}
             expected["execution_mode"] = "PAPER"
             for key, exp in expected.items():

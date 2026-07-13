@@ -161,6 +161,7 @@ def _campaign_matching_runtime(db, rt):
     conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id=h['release_id'],duration_days=1,symbols=[],intervals=[])
     conn.execute("UPDATE burnin_campaigns SET config_hash=?, strategy_config_hash=?, universe_hash=?, execution_cost_config_hash=? WHERE campaign_id=?",(h['config_hash'],h['strategy_config_hash'],h['universe_hash'],h['execution_cost_config_hash'],camp.campaign_id))
+    start_or_resume_campaign(conn,camp.campaign_id)
     conn.commit(); conn.close(); return camp.campaign_id,h
 
 def test_runtime_attach_blocks_config_strategy_universe_execution_cost_release_and_mode_mismatches(tmp_path):

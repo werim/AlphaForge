@@ -2142,3 +2142,8 @@ Start/resume own campaign continuation allocation. Worker commands attach to the
 
 ### Tests added
 Added coverage for CLI foreground worker invocation, detached subprocess launch, default runtime factory use, no-worker fail-closed start, single continuation allocation, exact DB propagation, concurrent runtime/resolver/maintenance execution, and environment restoration.
+
+## Phase 8 PR 279 Follow-up
+
+### Runtime attachment hardening
+Runtime campaign attachment now requires an active campaign run. If a worker is invoked without start/resume-owned continuation allocation, the campaign is marked failed with `PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING` and runtime startup is refused.

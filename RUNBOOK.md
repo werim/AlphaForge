@@ -89,3 +89,5 @@ Detached worker invocations using `--db` must point to the campaign database so 
 Use `start --foreground` for an in-process PAPER campaign worker or `start --detach` for a subprocess worker. `resume` supports the same flags. A start/resume without a worker mode fails closed and must not leave the campaign `RUNNING`.
 
 Continuation allocation belongs to start/resume. Worker processes attach to the active campaign run and must not allocate a second continuation. Detached workers must receive the exact `--db` path used by the operator.
+
+A worker invoked without an active campaign run is invalid. Operators must create a campaign and use `start --foreground`, `start --detach`, `resume --foreground`, or `resume --detach` so the continuation exists before worker attachment.

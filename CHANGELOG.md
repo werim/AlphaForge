@@ -3048,3 +3048,8 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Fixed
 - Runtime attachment now reuses the active campaign run for runtime burn-in persistence, preventing disconnected runtime evidence.
 - Worker-only startup no longer marks a campaign running without a worker process.
+
+## Phase 8 PR 279 Follow-up
+
+### Fixed
+- Runtime campaign attachment now fails closed when no active campaign run exists, preventing worker-only startup from creating disconnected Phase 7 evidence.
