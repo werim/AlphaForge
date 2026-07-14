@@ -3063,3 +3063,12 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Fixed
 - CLI-created campaigns now derive hashes from the loaded runtime environment instead of a separate ad hoc payload.
 - Resolver no longer treats provider outage as expired evidence; genuine empty completed market windows remain explicit `EXPIRED` pending-label state.
+
+## Phase 8 PR 279 Execution-Cost Identity Patch
+
+### Fixed
+- Phase 8 campaign identity now hashes the effective PAPER slippage value used by the runtime execution simulator instead of relying only on `RuntimeConfig` fields.
+- Runtime attachment now treats changes to effective PAPER slippage as `PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT`, preventing campaigns from combining evidence collected under different PAPER execution-cost assumptions.
+
+### Added
+- Regression coverage for unchanged effective slippage attachment, slippage drift blocking, non-null slippage payload hashing, and execution-cost hash changes when effective slippage changes.

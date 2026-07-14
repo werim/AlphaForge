@@ -1,6 +1,6 @@
 import json, sqlite3
 from sqlalchemy import create_engine, text
-from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, aggregate_campaign, export_campaign_bundle
+from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, aggregate_campaign, export_campaign_bundle, build_phase8_campaign_identity
 from alphaforge.burnin import persist_burnin_observation
 
 
@@ -343,4 +343,34 @@ def test_canonical_identity_drift_reasons_for_filter_strategy_universe_and_cost(
         h=rt._phase8_runtime_hashes(['BTCUSDT'] if False else [], [])
         with engine.begin() as conn:
             conn.execute(text('update burnin_campaigns set config_hash=:c,strategy_config_hash=:s,universe_hash=:u,execution_cost_config_hash=:e where campaign_id=:cid'), {'cid':cid,'c':h['config_hash'],'s':h['strategy_config_hash'],'u':h['universe_hash'],'e':h['execution_cost_config_hash']})
+    engine.dispose()
+
+
+def test_effective_paper_slippage_identity_attaches_and_drifts(tmp_path):
+    db=tmp_path/'effective_slippage.db'; rt, engine=_runtime_for_campaign(db)
+    rt.paper_slippage_bps = 7.5
+    identity = build_phase8_campaign_identity(rt.config, [], [], release_id=rt.config.phase7_burnin_release_id, paper_slippage_bps=rt.paper_slippage_bps)
+    assert identity['execution_cost_payload']['paper_slippage_bps'] == 7.5
+    assert identity['execution_cost_payload']['paper_expected_slippage_pct'] == 0.00075
+    conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id=identity['release_id'],duration_days=1,symbols=[],intervals=[],runtime_config=rt.config,paper_slippage_bps=rt.paper_slippage_bps)
+    start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close()
+    rt._attach_phase8_campaign(camp.campaign_id)
+    rt.paper_slippage_bps = 8.5
+    try:
+        rt._attach_phase8_campaign(camp.campaign_id)
+    except RuntimeError as exc:
+        assert 'PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT' in str(exc)
+    else:
+        raise AssertionError('expected execution-cost drift')
+    engine.dispose()
+
+
+def test_execution_cost_hash_changes_with_effective_slippage(tmp_path):
+    rt, engine=_runtime_for_campaign(tmp_path/'slip_hash.db')
+    a=build_phase8_campaign_identity(rt.config, [], [], release_id='rel', paper_slippage_bps=2.0)
+    b=build_phase8_campaign_identity(rt.config, [], [], release_id='rel', paper_slippage_bps=3.0)
+    assert a['execution_cost_payload']['paper_slippage_bps'] == 2.0
+    assert b['execution_cost_payload']['paper_slippage_bps'] == 3.0
+    assert a['execution_cost_config_hash'] != b['execution_cost_config_hash']
     engine.dispose()

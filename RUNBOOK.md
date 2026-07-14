@@ -96,3 +96,6 @@ A worker invoked without an active campaign run is invalid. Operators must creat
 Campaign identity must be built with the shared Phase 8 identity helper from the same runtime configuration used at attachment time. CLI-created campaigns load the current environment config before hashing.
 
 Resolver workers must use a read-only canonical market-data provider. Provider outages are not completed evidence and must not be converted into expired outcomes. Only a genuine empty completed market window may become `EXPIRED` with explicit `NO_CANDLES_IN_MARKET_WINDOW` evidence.
+
+### Phase 8 PR 279 Effective PAPER Slippage Identity
+Campaign identity must include the effective PAPER slippage used by the runtime simulator. Operators must create a new campaign if PAPER slippage settings change; runtime attachment will pause/refuse an existing campaign with `PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT` rather than mixing incompatible execution-cost evidence.

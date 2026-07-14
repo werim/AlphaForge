@@ -14,6 +14,7 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThr
 from alphaforge.config import runtime_filter_config
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
+DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
 CAMPAIGN_STATUSES = {"CREATED","RUNNING","PAUSED","RECOVERY_REQUIRED","COMPLETED","FAILED","QUALIFIED","SUSPENDED"}
 
 PHASE8_DDL = [
@@ -37,7 +38,7 @@ def bootstrap_campaign_schema(conn: Any) -> None:
         except Exception: pass
 
 
-def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None) -> dict[str, Any]:
+def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None) -> dict[str, Any]:
     """Canonical Phase 8 identity shared by CLI campaign creation and runtime attachment."""
     mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
     config_payload = dict(runtime_filter_config(runtime_config, mode=str(mode or "PAPER")))
@@ -48,6 +49,7 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
         "min_rr": getattr(runtime_config, "min_rr", None),
     }
+    effective_paper_slippage_bps = paper_slippage_bps if paper_slippage_bps is not None else getattr(runtime_config, "paper_slippage_bps", DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS)
     execution_cost_payload = {
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
         "min_rr": getattr(runtime_config, "min_rr", None),
@@ -55,7 +57,8 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "max_expected_slippage_pct": getattr(runtime_config, "max_expected_slippage_pct", None),
         "max_abs_funding_rate_pct": getattr(runtime_config, "max_abs_funding_rate_pct", None),
         "min_liquidity_usd": getattr(runtime_config, "min_liquidity_usd", None),
-        "paper_slippage_bps": getattr(runtime_config, "paper_slippage_bps", None),
+        "paper_slippage_bps": effective_paper_slippage_bps,
+        "paper_expected_slippage_pct": None if effective_paper_slippage_bps is None else float(effective_paper_slippage_bps) / 10_000.0,
     }
     rid = release_id or os.getenv("ALPHAFORGE_RELEASE_ID", getattr(runtime_config, "phase7_burnin_release_id", "default"))
     return {
@@ -86,12 +89,12 @@ def git_commit() -> str:
 def campaign_id_for(release_id: str, payload: Mapping[str, Any]) -> str:
     return "camp_" + canonical_hash({"release_id": release_id, **payload})[:16]
 
-def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
+def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
     bootstrap_campaign_schema(conn)
     prov=dict(source_provenance or {"provider":"PAPER_MARKET_DATA","source":"operator"})
     if not prov: raise ValueError("missing provenance")
     if runtime_config is not None:
-        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id)
+        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id, paper_slippage_bps=paper_slippage_bps)
         ch=ident["config_hash"]; sh=ident["strategy_config_hash"]; uh=ident["universe_hash"]; ech=ident["execution_cost_config_hash"]
     else:
         ch=make_config_hash(config or {"release_id": release_id, "symbols": list(symbols), "intervals": list(intervals)})

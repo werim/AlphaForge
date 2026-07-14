@@ -456,21 +456,13 @@ class RuntimeOrchestrator:
 
 
     def _phase8_execution_cost_config_hash(self) -> str:
-        return burnin_config_hash({
-            "min_effective_rr": self.config.min_effective_rr,
-            "min_rr": self.config.min_rr,
-            "max_spread_pct": self.config.max_spread_pct,
-            "max_expected_slippage_pct": self.config.max_expected_slippage_pct,
-            "max_abs_funding_rate_pct": self.config.max_abs_funding_rate_pct,
-            "min_liquidity_usd": self.config.min_liquidity_usd,
-            "paper_slippage_bps": self.paper_slippage_bps,
-        })
+        return self._phase8_runtime_hashes().get("execution_cost_config_hash", "")
 
     def _phase8_runtime_hashes(self, symbols: list[str] | None = None, intervals: list[str] | None = None) -> dict[str, Any]:
         cfg = self._canonical_filter_config()
         resolved_symbols = list(symbols if symbols is not None else (cfg.get("symbols") or cfg.get("active_symbols") or []))
         resolved_intervals = list(intervals if intervals is not None else (cfg.get("intervals") or cfg.get("timeframes") or []))
-        ident = build_phase8_campaign_identity(self.config, resolved_symbols, resolved_intervals, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id))
+        ident = build_phase8_campaign_identity(self.config, resolved_symbols, resolved_intervals, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), paper_slippage_bps=self.paper_slippage_bps)
         return {**ident, "execution_mode": self.config.execution_mode.value}
 
 

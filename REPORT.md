@@ -2161,3 +2161,17 @@ Added a Binance read-only candle provider that fetches canonical klines after th
 
 ### Tests added
 Added coverage for CLI-created campaign attach, canonical identity drift cases, non-empty provider candles resolving `TP_BEFORE_SL`, provider provenance in resolver payloads, provider outage preserving pending labels, and empty completed horizons becoming expired but incomplete evidence.
+
+## Phase 8 PR 279 Execution-Cost Identity Patch
+
+### Why this patch was needed
+Review found that the shared Phase 8 identity helper read `paper_slippage_bps` from `RuntimeConfig`, but the effective PAPER execution simulator value lives on `RuntimeOrchestrator.paper_slippage_bps`. That could allow campaign/runtime parity to pass while PAPER fills were simulated with a different slippage cost.
+
+### Runtime behavior changes
+`build_phase8_campaign_identity(...)` now accepts explicit effective `paper_slippage_bps` and includes both basis points and derived expected slippage percentage in the execution-cost payload. Runtime attachment passes `self.paper_slippage_bps`, so any effective simulator slippage change causes `PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT`.
+
+### Persistence / compatibility impact
+No destructive schema change. Existing campaigns keep their persisted execution-cost hash; campaigns created or attached after this patch must match the effective PAPER slippage value used by the runtime simulator.
+
+### Tests added / executed
+Added Phase 8 tests for unchanged effective slippage attachment, changed slippage drift blocking, non-null payload identity, and execution-cost hash changes when effective slippage changes.

@@ -500,3 +500,4 @@
 - Phase 8 PR 279 patch: Campaign foreground workers now always start a PAPER runtime task, CLI start/resume require foreground or detached worker modes, detached workers persist PID/start metadata, and worker attachment avoids duplicate continuation allocation.
 - Phase 8 PR 279 follow-up: Runtime campaign attachment now refuses worker-only startup when no active campaign run exists, preventing disconnected Phase 7 evidence.
 - Phase 8 PR 279 identity/provider patch: CLI campaign creation and runtime attachment now share one canonical identity builder, and campaign workers use a Binance read-only candle provider with explicit provenance and fail-closed outage handling.
+- Phase 8 PR 279 execution-cost identity patch: campaign/runtime parity now includes the effective `RuntimeOrchestrator.paper_slippage_bps` used by PAPER execution, preventing qualification evidence from spanning incompatible simulated slippage costs.

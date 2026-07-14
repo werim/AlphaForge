@@ -2,7 +2,7 @@ from __future__ import annotations
 import argparse, json, os, sqlite3, sys, subprocess, time
 from pathlib import Path
 from sqlalchemy import create_engine
-from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, qualify_campaign, export_campaign_bundle, bootstrap_campaign_schema, aggregate_campaign, BurnInCampaignRunner, BinanceReadOnlyCandleProvider
+from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, qualify_campaign, export_campaign_bundle, bootstrap_campaign_schema, aggregate_campaign, BurnInCampaignRunner, BinanceReadOnlyCandleProvider, DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS
 from alphaforge.config import load_config_from_env
 
 def _db_path(args):
@@ -67,7 +67,7 @@ def main(argv=None) -> int:
         try:
             bootstrap_campaign_schema(conn)
             if args.cmd=='create':
-                camp=create_campaign(conn,release_id=args.release_id,duration_days=args.duration_days,symbols=[x for x in args.symbols.split(',') if x],intervals=[x for x in args.intervals.split(',') if x],runtime_config=load_config_from_env().runtime); conn.commit(); _print({'status':'CREATED','campaign_id':camp.campaign_id,'release_id':camp.release_id},args.json); return 0
+                camp=create_campaign(conn,release_id=args.release_id,duration_days=args.duration_days,symbols=[x for x in args.symbols.split(',') if x],intervals=[x for x in args.intervals.split(',') if x],runtime_config=load_config_from_env().runtime,paper_slippage_bps=DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS); conn.commit(); _print({'status':'CREATED','campaign_id':camp.campaign_id,'release_id':camp.release_id},args.json); return 0
             if args.cmd in {'start','resume'}:
                 if not (args.foreground or args.detach):
                     _print({'status':'FAILED_CLOSED','error':'WORKER_MODE_REQUIRED'},args.json); return 3
