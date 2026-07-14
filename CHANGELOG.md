@@ -3053,3 +3053,13 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Fixed
 - Runtime campaign attachment now fails closed when no active campaign run exists, preventing worker-only startup from creating disconnected Phase 7 evidence.
+
+## Phase 8 PR 279 Canonical Identity / Candle Provider Patch
+
+### Added
+- Shared Phase 8 campaign identity builder used by CLI campaign creation and runtime campaign attachment.
+- Binance read-only candle provider for campaign resolver workers with explicit provider/provenance metadata.
+
+### Fixed
+- CLI-created campaigns now derive hashes from the loaded runtime environment instead of a separate ad hoc payload.
+- Resolver no longer treats provider outage as expired evidence; genuine empty completed market windows remain explicit `EXPIRED` pending-label state.

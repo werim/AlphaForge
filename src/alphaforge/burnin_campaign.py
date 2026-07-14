@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse, asyncio, contextlib, csv, hashlib, json, os, sqlite3, subprocess
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -10,6 +11,7 @@ from sqlalchemy.engine import Engine
 
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, canonical_hash, config_hash as make_config_hash, persist_burnin_run, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
+from alphaforge.config import runtime_filter_config
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
 CAMPAIGN_STATUSES = {"CREATED","RUNNING","PAUSED","RECOVERY_REQUIRED","COMPLETED","FAILED","QUALIFIED","SUSPENDED"}
@@ -34,6 +36,39 @@ def bootstrap_campaign_schema(conn: Any) -> None:
         try: _exec(conn, stmt)
         except Exception: pass
 
+
+def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None) -> dict[str, Any]:
+    """Canonical Phase 8 identity shared by CLI campaign creation and runtime attachment."""
+    mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
+    config_payload = dict(runtime_filter_config(runtime_config, mode=str(mode or "PAPER")))
+    config_payload["symbols"] = sorted(map(str, symbols))
+    config_payload["intervals"] = sorted(map(str, intervals))
+    strategy_payload = {
+        "min_signal_score": getattr(runtime_config, "min_signal_score", None),
+        "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
+        "min_rr": getattr(runtime_config, "min_rr", None),
+    }
+    execution_cost_payload = {
+        "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
+        "min_rr": getattr(runtime_config, "min_rr", None),
+        "max_spread_pct": getattr(runtime_config, "max_spread_pct", None),
+        "max_expected_slippage_pct": getattr(runtime_config, "max_expected_slippage_pct", None),
+        "max_abs_funding_rate_pct": getattr(runtime_config, "max_abs_funding_rate_pct", None),
+        "min_liquidity_usd": getattr(runtime_config, "min_liquidity_usd", None),
+        "paper_slippage_bps": getattr(runtime_config, "paper_slippage_bps", None),
+    }
+    rid = release_id or os.getenv("ALPHAFORGE_RELEASE_ID", getattr(runtime_config, "phase7_burnin_release_id", "default"))
+    return {
+        "release_id": rid,
+        "config_hash": make_config_hash(config_payload),
+        "strategy_config_hash": make_config_hash(strategy_payload),
+        "universe_hash": make_universe_hash(symbols, intervals),
+        "execution_cost_config_hash": make_config_hash(execution_cost_payload),
+        "config_payload": config_payload,
+        "strategy_payload": strategy_payload,
+        "execution_cost_payload": execution_cost_payload,
+    }
+
 @dataclass(slots=True)
 class BurnInCampaign:
     campaign_id: str; release_id: str; campaign_status: str = "CREATED"; created_at: str = field(default_factory=utc_now); started_at: str|None=None; completed_at: str|None=None; expected_duration_seconds: float|None=None; observed_duration_seconds: float|None=None; target_decisions: int|None=None; target_closed_trades: int|None=None; target_reject_forward_outcomes: int|None=None; active_run_id: str|None=None; config_hash: str=""; strategy_config_hash: str=""; universe_hash: str=""; git_commit: str=""; execution_cost_config_hash: str|None=None; source_provenance: dict[str,Any]=field(default_factory=dict); symbols: list[str]=field(default_factory=list); intervals: list[str]=field(default_factory=list); restart_count: int=0; last_heartbeat_at: str|None=None; last_error: str|None=None; qualification_status: str|None=None; latest_qualification_id: str|None=None; evidence_completeness_status: str="UNKNOWN"; schema_version: str=CAMPAIGN_SCHEMA_VERSION
@@ -51,15 +86,20 @@ def git_commit() -> str:
 def campaign_id_for(release_id: str, payload: Mapping[str, Any]) -> str:
     return "camp_" + canonical_hash({"release_id": release_id, **payload})[:16]
 
-def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
+def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
     bootstrap_campaign_schema(conn)
     prov=dict(source_provenance or {"provider":"PAPER_MARKET_DATA","source":"operator"})
     if not prov: raise ValueError("missing provenance")
-    ch=make_config_hash(config or {"release_id": release_id, "symbols": list(symbols), "intervals": list(intervals)})
-    sh=make_config_hash(strategy_config or {"strategy":"default"})
-    uh=make_universe_hash(symbols, intervals)
+    if runtime_config is not None:
+        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id)
+        ch=ident["config_hash"]; sh=ident["strategy_config_hash"]; uh=ident["universe_hash"]; ech=ident["execution_cost_config_hash"]
+    else:
+        ch=make_config_hash(config or {"release_id": release_id, "symbols": list(symbols), "intervals": list(intervals)})
+        sh=make_config_hash(strategy_config or {"strategy":"default"})
+        uh=make_universe_hash(symbols, intervals)
+        ech=make_config_hash(execution_cost_config) if execution_cost_config is not None else None
     cid=campaign_id_for(release_id,{"config_hash":ch,"strategy_config_hash":sh,"universe_hash":uh})
-    c=BurnInCampaign(cid, release_id, expected_duration_seconds=float(duration_days)*86400, target_decisions=target_decisions, target_closed_trades=target_closed_trades, target_reject_forward_outcomes=target_reject_forward_outcomes, config_hash=ch, strategy_config_hash=sh, universe_hash=uh, git_commit=git_commit(), execution_cost_config_hash=(make_config_hash(execution_cost_config) if execution_cost_config is not None else None), source_provenance=prov, symbols=list(symbols), intervals=list(intervals))
+    c=BurnInCampaign(cid, release_id, expected_duration_seconds=float(duration_days)*86400, target_decisions=target_decisions, target_closed_trades=target_closed_trades, target_reject_forward_outcomes=target_reject_forward_outcomes, config_hash=ch, strategy_config_hash=sh, universe_hash=uh, git_commit=git_commit(), execution_cost_config_hash=ech, source_provenance=prov, symbols=list(symbols), intervals=list(intervals))
     c.validate()
     _exec(conn,"""INSERT INTO burnin_campaigns(campaign_id,release_id,campaign_status,created_at,started_at,completed_at,expected_duration_seconds,observed_duration_seconds,target_decisions,target_closed_trades,target_reject_forward_outcomes,active_run_id,config_hash,strategy_config_hash,universe_hash,git_commit,execution_cost_config_hash,source_provenance_json,symbols_json,intervals_json,restart_count,last_heartbeat_at,last_error,qualification_status,latest_qualification_id,evidence_completeness_status,schema_version) VALUES (:campaign_id,:release_id,:campaign_status,:created_at,:started_at,:completed_at,:expected_duration_seconds,:observed_duration_seconds,:target_decisions,:target_closed_trades,:target_reject_forward_outcomes,:active_run_id,:config_hash,:strategy_config_hash,:universe_hash,:git_commit,:execution_cost_config_hash,:source_provenance_json,:symbols_json,:intervals_json,:restart_count,:last_heartbeat_at,:last_error,:qualification_status,:latest_qualification_id,:evidence_completeness_status,:schema_version) ON CONFLICT(campaign_id) DO NOTHING""", {**asdict(c),"source_provenance_json":json.dumps(c.source_provenance,sort_keys=True),"symbols_json":json.dumps(c.symbols,sort_keys=True),"intervals_json":json.dumps(c.intervals,sort_keys=True)})
     event(conn,c.campaign_id,"CAMPAIGN_CREATED",details={"release_id":release_id})
@@ -284,6 +324,40 @@ def check_campaign_completion(conn: Any, campaign_id: str) -> dict[str, Any]:
     else:
         event(conn, campaign_id, "CAMPAIGN_COMPLETION_CHECK", details={"blockers": blockers, "metrics": metrics, "pending_rejects": pending_rejects, "pending_positions": pending_positions})
     return {"campaign_id": campaign_id, "complete": not blockers, "blockers": blockers, "metrics": metrics}
+
+
+class CampaignCandleProviderError(RuntimeError): pass
+class MarketDataUnavailable(CampaignCandleProviderError): pass
+class MarketDataStale(CampaignCandleProviderError): pass
+class ProviderFailure(CampaignCandleProviderError): pass
+
+class BinanceReadOnlyCandleProvider:
+    """Read-only canonical candle provider for PAPER burn-in forward labels."""
+    def __init__(self, *, interval: str = "1m", max_staleness_seconds: float | None = None, fetcher: Any | None = None) -> None:
+        self.interval = interval; self.max_staleness_seconds = max_staleness_seconds; self.fetcher = fetcher
+        self.source_provenance = {"provider": "BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE", "market_type": "USD_M_FUTURES", "interval": interval, "order_submission": "DISABLED"}
+
+    def __call__(self, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
+        from alphaforge.historical_market_data import fetch_binance_klines_paginated, HistoricalDataError
+        start_dt = _parse_utc(start); end_dt = _parse_utc(end)
+        if start_dt is None or end_dt is None or end_dt <= start_dt:
+            raise MarketDataUnavailable("MARKET_DATA_UNAVAILABLE")
+        start_ms = int(start_dt.timestamp() * 1000) + 1
+        end_ms = int(end_dt.timestamp() * 1000)
+        try:
+            candles = fetch_binance_klines_paginated(symbol, self.interval, start_ms, end_ms, fetcher=self.fetcher)
+        except HistoricalDataError as exc:
+            msg = str(exc)
+            if "No candles" in msg or "shorter than one complete candle" in msg:
+                return []
+            raise MarketDataUnavailable(f"MARKET_DATA_UNAVAILABLE:{msg}") from exc
+        except Exception as exc:
+            raise ProviderFailure(f"PROVIDER_FAILURE:{exc.__class__.__name__}") from exc
+        if self.max_staleness_seconds is not None and candles:
+            newest = max(c.timestamp for c in candles) / 1000.0
+            if (end_dt.timestamp() - newest) > self.max_staleness_seconds:
+                raise MarketDataStale("MARKET_DATA_STALE")
+        return [{"timestamp": datetime.fromtimestamp(c.timestamp/1000, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"), "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume, "source_provenance": self.source_provenance} for c in candles]
 
 
 class BurnInCampaignRunner:

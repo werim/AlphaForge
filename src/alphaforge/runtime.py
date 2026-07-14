@@ -31,7 +31,7 @@ from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, latest_runtime_state_snapshot
 from alphaforge.config import load_config_from_env, runtime_filter_config
@@ -466,18 +466,13 @@ class RuntimeOrchestrator:
             "paper_slippage_bps": self.paper_slippage_bps,
         })
 
-    def _phase8_runtime_hashes(self) -> dict[str, Any]:
+    def _phase8_runtime_hashes(self, symbols: list[str] | None = None, intervals: list[str] | None = None) -> dict[str, Any]:
         cfg = self._canonical_filter_config()
-        symbols = list(cfg.get("symbols") or cfg.get("active_symbols") or [])
-        intervals = list(cfg.get("intervals") or cfg.get("timeframes") or [])
-        return {
-            "release_id": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id),
-            "execution_mode": self.config.execution_mode.value,
-            "config_hash": burnin_config_hash(cfg),
-            "strategy_config_hash": burnin_config_hash({"min_signal_score": self.config.min_signal_score, "min_effective_rr": self.config.min_effective_rr, "min_rr": self.config.min_rr}),
-            "universe_hash": burnin_universe_hash(symbols, intervals),
-            "execution_cost_config_hash": self._phase8_execution_cost_config_hash(),
-        }
+        resolved_symbols = list(symbols if symbols is not None else (cfg.get("symbols") or cfg.get("active_symbols") or []))
+        resolved_intervals = list(intervals if intervals is not None else (cfg.get("intervals") or cfg.get("timeframes") or []))
+        ident = build_phase8_campaign_identity(self.config, resolved_symbols, resolved_intervals, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id))
+        return {**ident, "execution_mode": self.config.execution_mode.value}
+
 
     def _attach_phase8_campaign(self, campaign_id: str | None = None) -> None:
         campaign_id = campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
@@ -487,7 +482,7 @@ class RuntimeOrchestrator:
         if engine is None:
             self._fail_closed_reason = "PHASE8_CAMPAIGN_PERSISTENCE_UNAVAILABLE"
             raise RuntimeError(self._fail_closed_reason)
-        observed = self._phase8_runtime_hashes()
+        observed = None
         mismatches: dict[str, dict[str, Any]] = {}
         reason_map = {
             "config_hash": "PHASE8_CAMPAIGN_CONFIG_DRIFT",
@@ -509,6 +504,7 @@ class RuntimeOrchestrator:
                 with contextlib.suppress(Exception): conn.commit()
                 self._fail_closed_reason = "PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING"
                 raise RuntimeError(self._fail_closed_reason)
+            observed = self._phase8_runtime_hashes(campaign.get("symbols") or [], campaign.get("intervals") or [])
             expected = {k: campaign.get(k) for k in ("release_id","config_hash","strategy_config_hash","universe_hash","execution_cost_config_hash")}
             expected["execution_mode"] = "PAPER"
             for key, exp in expected.items():

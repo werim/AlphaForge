@@ -2,7 +2,7 @@ from __future__ import annotations
 import argparse, json, os, sqlite3, sys, subprocess, time
 from pathlib import Path
 from sqlalchemy import create_engine
-from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, qualify_campaign, export_campaign_bundle, bootstrap_campaign_schema, aggregate_campaign, BurnInCampaignRunner
+from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, qualify_campaign, export_campaign_bundle, bootstrap_campaign_schema, aggregate_campaign, BurnInCampaignRunner, BinanceReadOnlyCandleProvider
 from alphaforge.config import load_config_from_env
 
 def _db_path(args):
@@ -57,7 +57,7 @@ def main(argv=None) -> int:
         if args.cmd=='worker':
             engine=create_engine(f"sqlite+pysqlite:///{db}",future=True)
             try:
-                runner=BurnInCampaignRunner(engine,args.campaign_id,lambda symbol,start,end:[])
+                runner=BurnInCampaignRunner(engine,args.campaign_id,BinanceReadOnlyCandleProvider())
                 if args.once:
                     with engine.begin() as conn: bootstrap_campaign_schema(conn)
                     res=runner.resolver_tick(); _print(res,args.json); return 0 if res.get('status') in {'OK','PAUSED'} else 1
@@ -67,7 +67,7 @@ def main(argv=None) -> int:
         try:
             bootstrap_campaign_schema(conn)
             if args.cmd=='create':
-                camp=create_campaign(conn,release_id=args.release_id,duration_days=args.duration_days,symbols=[x for x in args.symbols.split(',') if x],intervals=[x for x in args.intervals.split(',') if x]); conn.commit(); _print({'status':'CREATED','campaign_id':camp.campaign_id,'release_id':camp.release_id},args.json); return 0
+                camp=create_campaign(conn,release_id=args.release_id,duration_days=args.duration_days,symbols=[x for x in args.symbols.split(',') if x],intervals=[x for x in args.intervals.split(',') if x],runtime_config=load_config_from_env().runtime); conn.commit(); _print({'status':'CREATED','campaign_id':camp.campaign_id,'release_id':camp.release_id},args.json); return 0
             if args.cmd in {'start','resume'}:
                 if not (args.foreground or args.detach):
                     _print({'status':'FAILED_CLOSED','error':'WORKER_MODE_REQUIRED'},args.json); return 3
@@ -76,7 +76,7 @@ def main(argv=None) -> int:
                     out=_launch_detached_worker(db,args.campaign_id); _print({**res, **out},args.json); return 0
                 engine=create_engine(f"sqlite+pysqlite:///{db}",future=True)
                 try:
-                    runner=BurnInCampaignRunner(engine,args.campaign_id,lambda symbol,start,end:[])
+                    runner=BurnInCampaignRunner(engine,args.campaign_id,BinanceReadOnlyCandleProvider())
                     import asyncio; out=asyncio.run(runner.run_foreground()); _print({**res, **out},args.json); return 0
                 finally: engine.dispose()
             if args.cmd=='pause': pause_campaign(conn,args.campaign_id); conn.commit(); _print({'status':'PAUSED','campaign_id':args.campaign_id},args.json); return 0

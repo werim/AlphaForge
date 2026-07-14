@@ -115,7 +115,7 @@ def test_campaign_worker_runs_resolver_and_triggers_qualification(tmp_path):
     db=tmp_path/'worker.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relw',duration_days=1,symbols=['BTCUSDT'],intervals=['1h'])
     run=start_or_resume_campaign(conn,camp.campaign_id)
-    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='rx',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=1,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='rx',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
     conn.commit(); conn.close()
     e=_engine(db)
     runner=BurnInCampaignRunner(e,camp.campaign_id,lambda symbol,start,end:[{'timestamp':'2026-01-01T00:00:02Z','high':130,'low':99}],resolver_failure_threshold=1,thresholds=BurnInThresholds(minimum_duration_seconds=0,minimum_total_decisions=0,minimum_accepted_trades=0,minimum_closed_trades=0,minimum_rejected_forward_outcomes=1,minimum_regime_sample=1,minimum_regime_coverage=1,minimum_calibration_sample=1,require_operator_ack=False,require_phase1_6_gates=False))
@@ -196,7 +196,7 @@ def test_runtime_attach_accepts_matching_campaign_and_same_database(tmp_path):
 def test_resolver_loop_runs_automatically_without_manual_cli(tmp_path):
     db=tmp_path/'auto.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='rela',duration_days=1,symbols=['BTCUSDT'],intervals=['1h']); run=start_or_resume_campaign(conn,camp.campaign_id)
-    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='auto',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=1,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='auto',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
     conn.commit(); conn.close(); e=_engine(db)
     async def go():
         runner=BurnInCampaignRunner(e,camp.campaign_id,lambda s,a,b:[{'timestamp':'2026-01-01T00:00:02Z','high':130,'low':99}],resolver_interval_seconds=0.01,qualification_interval_seconds=999999,maintenance_interval_seconds=999999,thresholds=BurnInThresholds(minimum_duration_seconds=0,minimum_total_decisions=0,minimum_accepted_trades=0,minimum_closed_trades=0,minimum_rejected_forward_outcomes=1,minimum_regime_sample=1,minimum_regime_coverage=1,minimum_calibration_sample=1,require_operator_ack=False,require_phase1_6_gates=False))
@@ -313,3 +313,34 @@ def test_resolver_and_maintenance_loops_run_concurrently_with_runtime(tmp_path):
     asyncio.run(go()); e.dispose()
     conn=sqlite3.connect(db); events=[r[0] for r in conn.execute('select event_type from burnin_campaign_events')]; conn.close()
     assert 'RESOLVER_BATCH' in events and 'CAMPAIGN_HEARTBEAT' in events
+
+def test_cli_created_campaign_attaches_without_false_config_drift(tmp_path):
+    from alphaforge.burnin_cli import main
+    db=tmp_path/'cli_create_attach.db'
+    assert main(['--db', str(db), '--json', 'create', '--release-id', 'default', '--duration-days', '1', '--symbols', 'BTCUSDT', '--intervals', '1m']) == 0
+    rt, engine=_runtime_for_campaign(db)
+    from alphaforge.config import load_config_from_env
+    env_runtime=load_config_from_env().runtime
+    rt.config.min_effective_rr=env_runtime.min_effective_rr; rt.config.max_spread_pct=env_runtime.max_spread_pct; rt.config.max_expected_slippage_pct=env_runtime.max_expected_slippage_pct
+    with engine.begin() as conn:
+        cid=conn.execute(text('select campaign_id from burnin_campaigns limit 1')).scalar_one()
+        start_or_resume_campaign(conn,cid)
+    rt._attach_phase8_campaign(cid)
+    engine.dispose()
+
+
+def test_canonical_identity_drift_reasons_for_filter_strategy_universe_and_cost(tmp_path):
+    db=tmp_path/'identity_drift.db'; rt, engine=_runtime_for_campaign(db); cid,_=_campaign_matching_runtime(db,rt)
+    cases=[('config_hash','PHASE8_CAMPAIGN_CONFIG_DRIFT'),('strategy_config_hash','PHASE8_CAMPAIGN_STRATEGY_DRIFT'),('universe_hash','PHASE8_CAMPAIGN_UNIVERSE_DRIFT'),('execution_cost_config_hash','PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT')]
+    for col,reason in cases:
+        with engine.begin() as conn:
+            conn.execute(text('update burnin_campaigns set campaign_status=\'RUNNING\', last_error=NULL where campaign_id=:cid'), {'cid':cid})
+            conn.execute(text(f'update burnin_campaigns set {col}=\'changed\' where campaign_id=:cid'), {'cid':cid})
+        try: rt._attach_phase8_campaign(cid)
+        except RuntimeError as exc: assert reason in str(exc)
+        else: raise AssertionError('expected drift')
+        # restore for next case
+        h=rt._phase8_runtime_hashes(['BTCUSDT'] if False else [], [])
+        with engine.begin() as conn:
+            conn.execute(text('update burnin_campaigns set config_hash=:c,strategy_config_hash=:s,universe_hash=:u,execution_cost_config_hash=:e where campaign_id=:cid'), {'cid':cid,'c':h['config_hash'],'s':h['strategy_config_hash'],'u':h['universe_hash'],'e':h['execution_cost_config_hash']})
+    engine.dispose()

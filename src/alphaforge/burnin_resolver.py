@@ -31,6 +31,10 @@ def resolve_campaign_batch(conn: Any, campaign_id: str, candles_by_symbol: Mappi
         r=dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping); candles = candles_by_symbol.get(r['symbol'], []) if isinstance(candles_by_symbol, Mapping) else candles_by_symbol
         usable=[c for c in candles if _dt(c.get('timestamp') or c.get('open_time') or c.get('time')) > _dt(r['decision_timestamp']) and _dt(c.get('timestamp') or c.get('open_time') or c.get('time')) <= _dt(r['due_at'])]
         if _dt(now) < _dt(r['due_at']) and not usable: counts['pending']+=1; continue
+        if not usable:
+            _exec(conn,"UPDATE burnin_pending_reject_labels SET status='EXPIRED', evidence_complete=0, resolved_at=:ts, last_error='NO_CANDLES_IN_MARKET_WINDOW' WHERE pending_label_id=:pid", {"ts": utc_now(), "pid": r['pending_label_id']})
+            counts['failed'] += 1
+            continue
         label='TIMEOUT'; ambiguous=False; gross=0.0
         for c in usable:
             sl,tp=_hit(r['side'], float(c['high']), float(c['low']), r['stop'], r['target'])
@@ -40,7 +44,7 @@ def resolve_campaign_batch(conn: Any, campaign_id: str, candles_by_symbol: Mappi
         costs=json.loads(r.get('execution_cost_assumptions_json') or '{}'); missing=[f for f in CRITICAL_COST_FIELDS if costs.get(f) is None]
         total=None if missing or gross is None else sum(float(costs.get(f) or 0) for f in CRITICAL_COST_FIELDS)
         net=None if total is None or gross is None else gross-total
-        persist_burnin_reject_outcome(conn,reject_outcome_id='rout_'+r['reject_decision_id'],burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),reject_reason=r.get('reject_reason') or 'UNKNOWN',symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',decision_time=r['decision_timestamp'],hypothetical_entry=r['entry'],hypothetical_stop=r['stop'],hypothetical_target=r['target'],forward_label=label,would_tp=label=='TP_BEFORE_SL',would_sl=label=='SL_BEFORE_TP',timeout=label=='TIMEOUT',ambiguous=ambiguous,hypothetical_gross_r=gross,hypothetical_net_r_after_costs=net,avoided_loss=max(0.0,-net) if net is not None else None,missed_profit=max(0.0,net) if net is not None else None,execution_invalidated=bool(missing),evidence_horizon=r['due_at'],payload={'pending_label_id':r['pending_label_id'],'missing_cost_fields':missing})
+        persist_burnin_reject_outcome(conn,reject_outcome_id='rout_'+r['reject_decision_id'],burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),reject_reason=r.get('reject_reason') or 'UNKNOWN',symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',decision_time=r['decision_timestamp'],hypothetical_entry=r['entry'],hypothetical_stop=r['stop'],hypothetical_target=r['target'],forward_label=label,would_tp=label=='TP_BEFORE_SL',would_sl=label=='SL_BEFORE_TP',timeout=label=='TIMEOUT',ambiguous=ambiguous,hypothetical_gross_r=gross,hypothetical_net_r_after_costs=net,avoided_loss=max(0.0,-net) if net is not None else None,missed_profit=max(0.0,net) if net is not None else None,execution_invalidated=bool(missing),evidence_horizon=r['due_at'],payload={'pending_label_id':r['pending_label_id'],'missing_cost_fields':missing,'market_data_provenance': next((c.get('source_provenance') for c in usable if isinstance(c, Mapping) and c.get('source_provenance')), None)})
         status='AMBIGUOUS' if ambiguous else ('RESOLVED' if not missing else 'FAILED')
         _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=:ts,last_error=:err WHERE pending_label_id=:pid",{"s":status,"ec":1 if not missing else 0,"ts":utc_now(),"err":None if not missing else 'MISSING_COSTS',"pid":r['pending_label_id']})
         counts['ambiguous' if ambiguous else ('resolved' if not missing else 'failed')]+=1

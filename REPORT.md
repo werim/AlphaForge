@@ -2147,3 +2147,17 @@ Added coverage for CLI foreground worker invocation, detached subprocess launch,
 
 ### Runtime attachment hardening
 Runtime campaign attachment now requires an active campaign run. If a worker is invoked without start/resume-owned continuation allocation, the campaign is marked failed with `PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING` and runtime startup is refused.
+
+## Phase 8 PR 279 Canonical Identity / Candle Provider Patch
+
+### Why this patch was needed
+Review found that CLI campaign creation and runtime attachment could derive campaign hashes from different payload definitions, and campaign workers used an empty candle provider that could not resolve due reject labels from canonical market evidence.
+
+### Identity changes
+Added `build_phase8_campaign_identity(...)` and wired it into CLI campaign creation and runtime attachment. The helper emits release ID, config hash, strategy hash, universe hash, execution-cost hash, and canonical payloads so unchanged environment campaigns attach without false drift while config/strategy/universe/execution-cost changes still block.
+
+### Candle provider changes
+Added a Binance read-only candle provider that fetches canonical klines after the decision timestamp and within the requested window, carries source provenance, never submits orders, and fails closed on market-data/provider failures. Provider failures leave pending evidence unresolved; genuine empty completed windows are marked explicitly as `EXPIRED`/`NO_CANDLES_IN_MARKET_WINDOW`.
+
+### Tests added
+Added coverage for CLI-created campaign attach, canonical identity drift cases, non-empty provider candles resolving `TP_BEFORE_SL`, provider provenance in resolver payloads, provider outage preserving pending labels, and empty completed horizons becoming expired but incomplete evidence.

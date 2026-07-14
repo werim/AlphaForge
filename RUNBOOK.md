@@ -91,3 +91,8 @@ Use `start --foreground` for an in-process PAPER campaign worker or `start --det
 Continuation allocation belongs to start/resume. Worker processes attach to the active campaign run and must not allocate a second continuation. Detached workers must receive the exact `--db` path used by the operator.
 
 A worker invoked without an active campaign run is invalid. Operators must create a campaign and use `start --foreground`, `start --detach`, `resume --foreground`, or `resume --detach` so the continuation exists before worker attachment.
+
+### Phase 8 PR 279 Canonical Identity and Market Data
+Campaign identity must be built with the shared Phase 8 identity helper from the same runtime configuration used at attachment time. CLI-created campaigns load the current environment config before hashing.
+
+Resolver workers must use a read-only canonical market-data provider. Provider outages are not completed evidence and must not be converted into expired outcomes. Only a genuine empty completed market window may become `EXPIRED` with explicit `NO_CANDLES_IN_MARKET_WINDOW` evidence.
