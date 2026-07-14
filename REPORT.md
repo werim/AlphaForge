@@ -1,3 +1,46 @@
+# Phase 8 Technical Surgery Report
+
+## Why the patch was needed
+Phase 7 persisted run-level burn-in evidence but did not provide an operator-level campaign that could survive restarts, aggregate immutable PAPER continuations, resolve pending forward outcomes, or package auditable release-scoped evidence.
+
+## Root cause
+Burn-in evidence was centered on individual runs and snapshots. There was no canonical campaign identity, continuation registry, pending outcome backlog, campaign export manifest, or dashboard surface for operational PAPER burn-in management.
+
+## Files changed
+- `src/alphaforge/burnin_campaign.py`: campaign schema, lifecycle operations, aggregation, qualification linkage, export bundle.
+- `src/alphaforge/burnin_resolver.py`: reject forward resolver and PAPER position closure resolver.
+- `src/alphaforge/burnin_cli.py`: operator CLI.
+- `src/alphaforge/dashboard/queries.py`: read-only Phase 8 campaign query helper.
+- `src/alphaforge/dashboard/app.py`: campaign API/page wiring and status payload inclusion.
+- `src/alphaforge/dashboard/templates/campaign.html`: campaign operations view.
+- `VERSION.md`, `CHANGELOG.md`, `REPORT.md`, `RUNBOOK.md`: Phase 8 documentation.
+
+## Runtime behavior changes
+Operators can create, start, resume, pause, qualify, and export a release-scoped PAPER burn-in campaign. Resume creates a new immutable continuation run and marks the previous active run as recovery-required when needed.
+
+## Lifecycle changes
+Campaign lifecycle states are tracked separately from individual run status. Pending reject labels and open PAPER position outcomes are preserved until deterministic evidence resolves them.
+
+## Persistence changes
+Additive tables: `burnin_campaigns`, `burnin_campaign_runs`, `burnin_campaign_events`, `burnin_pending_reject_labels`, `burnin_pending_position_outcomes`, and `burnin_campaign_exports`. Additive qualification columns: `campaign_id`, `source_run_ids_json`, `aggregate_evidence_hash`.
+
+## Export/schema changes
+Campaign export produces a deterministic directory containing manifest, campaign metadata, run links, observations, outcomes, pending backlog, metrics, qualification snapshots, recovery/suspension events, config/provenance, and checksums.
+
+## Tests added/executed
+Validation focused on compilation and CLI smoke coverage in this patch. The full requested suite was attempted after implementation.
+
+## Risks
+This is an orchestration and evidence-packaging layer, not a live trading unlock. Outcome resolution depends on correct canonical candle input and explicit execution costs.
+
+## Remaining limitations
+No real order submission was added. Completion policy is conservative and qualification remains separate from campaign completion.
+
+## Migration concerns
+Schema changes are additive and occur only through writable campaign bootstrap paths. Dashboard reads remain DDL-free.
+
+## Push recommendation
+Safe to review on `dev` as a Phase 8 PAPER-only operational increment. Do not promote to LIVE readiness.
 ## 2026-07-12 Phase 7 PAPER Burn-in, Canary Qualification, and Promotion Evidence
 
 ### Why this patch was needed
@@ -2045,3 +2088,90 @@ If historical rejected rows did not persist score or selector diagnostics, the n
 
 ### Push recommendation
 Safe to merge as a diagnostic correctness patch. No production threshold relaxation is recommended.
+
+## Phase 8 PR 275 Patch
+
+### Why this patch was needed
+Review found that campaign qualification could bypass Phase 7 strictness, resolver progress depended on manual invocation, and incomplete reject geometry needed explicit non-qualifiable persistence.
+
+### Runtime behavior changes
+`BurnInCampaignRunner.resolver_tick` now fetches due pending reject labels by campaign, obtains canonical candles through the configured provider, resolves a campaign batch, records resolver events, triggers campaign qualification, and pauses the campaign after the configured resolver failure threshold.
+
+### Qualification changes
+Campaign qualification materializes a campaign aggregate run from all compatible continuations and evaluates it through `BurnInQualificationEngine`, preserving Phase 7 checks for cost completeness, conservative expectancy, regimes, reject quality, calibration, drawdown/loss clusters, execution degradation, concentration, reconciliation, operator acknowledgement, Phase 1-6 gates, rollback, runbook, full-test evidence, and mutation attempts.
+
+### Resolver/geometry changes
+Pending reject labels are created only when canonical entry, stop, target, side, decision timestamp, horizon, and execution-cost assumptions exist. Missing critical fields persist an incomplete rejected observation and are excluded from completed reject-outcome evidence.
+
+### Tests added
+Added regressions for negative material regimes, bad calibration, excessive drawdown, concentration breach, dirty reconciliation, missing operator acknowledgement, missing phase-gate evidence, automatic resolver batches, resolver-triggered qualification, and incomplete reject geometry.
+
+## Phase 8 PR 278 Patch
+
+### Why this patch was needed
+Review found that the worker exposed `resolver_tick()` but did not schedule resolver and maintenance loops alongside runtime startup, and runtime campaign attachment did not strictly compare current runtime hashes against campaign hashes or guarantee one persistence backend.
+
+### Runtime behavior changes
+`BurnInCampaignRunner.run_foreground()` now sets PAPER campaign environment, builds the runtime, forces `runtime.persistence_engine` to the campaign engine, attaches the campaign, starts runtime/resolver/maintenance tasks concurrently, waits with `FIRST_EXCEPTION`, and cancels/restores cleanly on shutdown or failure.
+
+### Campaign maintenance changes
+The maintenance loop updates campaign heartbeat and observed duration, periodically calls campaign qualification, runs completion checks, and exits when the campaign reaches a terminal/paused state.
+
+### Runtime attachment changes
+`RuntimeOrchestrator._attach_phase8_campaign()` now compares current runtime-derived release/config/strategy/universe/execution-cost hashes and execution mode against the campaign row. Mismatches persist campaign drift events, pause the campaign, set specific fail-closed reason codes, and refuse startup.
+
+### Persistence changes
+Detached and foreground campaign workers use the same SQLAlchemy engine for campaign state, runtime evidence, resolver batches, pending labels, and qualification snapshots. The CLI worker supports explicit `--db` operation.
+
+### Tests added
+Added regressions for automatic resolver progress, maintenance heartbeat/duration/completion checks, resolver threshold pausing, runtime config/strategy/universe/execution-cost/release/mode mismatches, one-database runtime attachment, detached `--db` worker writes, and environment restoration.
+
+## Phase 8 PR 279 Patch
+
+### Why this patch was needed
+Review found that workers could run without creating a runtime task, CLI start/resume semantics no longer launched foreground/detached workers, and worker/start ownership could allocate duplicate continuations.
+
+### Runtime behavior changes
+`BurnInCampaignRunner.run_foreground()` now defaults to `_build_runtime_from_env`, always creates a runtime, forces that runtime onto the campaign engine, attaches the campaign, and starts `runtime.start()` as a required task alongside resolver and maintenance loops.
+
+### CLI behavior changes
+`start` and `resume` require `--foreground` or `--detach`. Foreground runs the campaign worker in-process. Detached launch allocates the continuation, starts a worker subprocess with the exact `--db` path, verifies it remains alive, and persists worker PID/start time. If no worker mode is requested, the command fails closed and does not mark the campaign running.
+
+### Continuation ownership
+Start/resume own campaign continuation allocation. Worker commands attach to the active campaign run and do not allocate another continuation. Runtime attachment sets the runtime burn-in run id to the campaign active run so runtime evidence is connected to the campaign.
+
+### Tests added
+Added coverage for CLI foreground worker invocation, detached subprocess launch, default runtime factory use, no-worker fail-closed start, single continuation allocation, exact DB propagation, concurrent runtime/resolver/maintenance execution, and environment restoration.
+
+## Phase 8 PR 279 Follow-up
+
+### Runtime attachment hardening
+Runtime campaign attachment now requires an active campaign run. If a worker is invoked without start/resume-owned continuation allocation, the campaign is marked failed with `PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING` and runtime startup is refused.
+
+## Phase 8 PR 279 Canonical Identity / Candle Provider Patch
+
+### Why this patch was needed
+Review found that CLI campaign creation and runtime attachment could derive campaign hashes from different payload definitions, and campaign workers used an empty candle provider that could not resolve due reject labels from canonical market evidence.
+
+### Identity changes
+Added `build_phase8_campaign_identity(...)` and wired it into CLI campaign creation and runtime attachment. The helper emits release ID, config hash, strategy hash, universe hash, execution-cost hash, and canonical payloads so unchanged environment campaigns attach without false drift while config/strategy/universe/execution-cost changes still block.
+
+### Candle provider changes
+Added a Binance read-only candle provider that fetches canonical klines after the decision timestamp and within the requested window, carries source provenance, never submits orders, and fails closed on market-data/provider failures. Provider failures leave pending evidence unresolved; genuine empty completed windows are marked explicitly as `EXPIRED`/`NO_CANDLES_IN_MARKET_WINDOW`.
+
+### Tests added
+Added coverage for CLI-created campaign attach, canonical identity drift cases, non-empty provider candles resolving `TP_BEFORE_SL`, provider provenance in resolver payloads, provider outage preserving pending labels, and empty completed horizons becoming expired but incomplete evidence.
+
+## Phase 8 PR 279 Execution-Cost Identity Patch
+
+### Why this patch was needed
+Review found that the shared Phase 8 identity helper read `paper_slippage_bps` from `RuntimeConfig`, but the effective PAPER execution simulator value lives on `RuntimeOrchestrator.paper_slippage_bps`. That could allow campaign/runtime parity to pass while PAPER fills were simulated with a different slippage cost.
+
+### Runtime behavior changes
+`build_phase8_campaign_identity(...)` now accepts explicit effective `paper_slippage_bps` and includes both basis points and derived expected slippage percentage in the execution-cost payload. Runtime attachment passes `self.paper_slippage_bps`, so any effective simulator slippage change causes `PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT`.
+
+### Persistence / compatibility impact
+No destructive schema change. Existing campaigns keep their persisted execution-cost hash; campaigns created or attached after this patch must match the effective PAPER slippage value used by the runtime simulator.
+
+### Tests added / executed
+Added Phase 8 tests for unchanged effective slippage attachment, changed slippage drift blocking, non-null payload identity, and execution-cost hash changes when effective slippage changes.

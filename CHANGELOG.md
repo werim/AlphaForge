@@ -1,3 +1,27 @@
+# Changelog
+
+## Added
+- Phase 8 burn-in campaign schema for release-scoped campaigns, continuation runs, campaign events, pending reject labels, pending PAPER position outcomes, and campaign exports.
+- Operator CLI for campaign create/start/resume/status/pause/qualify/export flows with JSON and human-readable output.
+- Deterministic reject forward-outcome and PAPER position resolvers that keep ambiguous or incomplete evidence explicit.
+- Campaign aggregation, qualification linkage, and deterministic evidence bundle export with manifest and checksums.
+- Read-only dashboard campaign operations API/page.
+
+## Changed
+- Burn-in qualification snapshots can now carry campaign linkage, source run IDs, and aggregate evidence hashes through additive schema columns.
+
+## Fixed
+- Phase 8 restart/resume preserves prior continuation evidence and emits recovery events instead of overwriting active runs.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- None. Schema changes are additive and require explicit bootstrap through Phase 8 writable paths.
+
+## Known Issues
+- LIVE trading remains disabled and no real order submission is implemented.
+- Resolver quality depends on canonical future candle evidence supplied by the operator/runtime.
 ## 2026-07-12 - Phase 7 PAPER Burn-in and Canary Qualification Evidence
 
 ### Added
@@ -2989,3 +3013,62 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Missing persisted scores or selector diagnostics still limit evidence quality and are intentionally surfaced as unavailable.
+
+## Phase 8 PR 275 Patch
+
+### Changed
+- Campaign qualification now materializes all compatible campaign continuation evidence into an aggregate run evaluated by the full Phase 7 qualification engine instead of shortcutting campaign verdicts.
+- Campaign resolver progress can be driven by `BurnInCampaignRunner.resolver_tick`, which resolves due labels, records batch events, triggers qualification, and pauses after resolver failure thresholds.
+
+### Fixed
+- Missing reject entry/stop/target/side/timestamp/horizon/cost assumptions now persist incomplete observations and do not create qualifiable pending labels or fabricated geometry.
+- Aggregate campaign qualification now preserves Phase 7 blockers for regimes, calibration, drawdown, execution, concentration, reconciliation, operator acknowledgement, release gates, rollback, runbook, full-test evidence, and mutation attempts.
+
+## Phase 8 PR 278 Patch
+
+### Added
+- Foreground campaign worker orchestration that can run runtime, resolver, and maintenance loops concurrently.
+- Runtime-to-campaign parity checks for release, execution mode, runtime config hash, strategy hash, universe hash, and execution-cost hash.
+- CLI worker command for detached campaign worker evidence writes against an explicit `--db` database.
+
+### Fixed
+- Campaign worker now forces runtime persistence onto the campaign engine so runtime/campaign evidence shares one database.
+- Campaign worker restores campaign and execution-mode environment variables after shutdown or failure.
+- Resolver loop no longer depends on manual CLI resolution for normal campaign progress.
+
+## Phase 8 PR 279 Patch
+
+### Changed
+- Campaign foreground workers now always build and start a real PAPER runtime when no runtime factory is injected.
+- CLI `start`/`resume` now require `--foreground` or `--detach`; start/resume own continuation allocation while worker attachment no longer allocates duplicate continuations.
+
+### Added
+- Detached worker launch path that passes the exact `--db` path, verifies the subprocess remains alive, and persists worker PID/start time.
+
+### Fixed
+- Runtime attachment now reuses the active campaign run for runtime burn-in persistence, preventing disconnected runtime evidence.
+- Worker-only startup no longer marks a campaign running without a worker process.
+
+## Phase 8 PR 279 Follow-up
+
+### Fixed
+- Runtime campaign attachment now fails closed when no active campaign run exists, preventing worker-only startup from creating disconnected Phase 7 evidence.
+
+## Phase 8 PR 279 Canonical Identity / Candle Provider Patch
+
+### Added
+- Shared Phase 8 campaign identity builder used by CLI campaign creation and runtime campaign attachment.
+- Binance read-only candle provider for campaign resolver workers with explicit provider/provenance metadata.
+
+### Fixed
+- CLI-created campaigns now derive hashes from the loaded runtime environment instead of a separate ad hoc payload.
+- Resolver no longer treats provider outage as expired evidence; genuine empty completed market windows remain explicit `EXPIRED` pending-label state.
+
+## Phase 8 PR 279 Execution-Cost Identity Patch
+
+### Fixed
+- Phase 8 campaign identity now hashes the effective PAPER slippage value used by the runtime execution simulator instead of relying only on `RuntimeConfig` fields.
+- Runtime attachment now treats changes to effective PAPER slippage as `PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT`, preventing campaigns from combining evidence collected under different PAPER execution-cost assumptions.
+
+### Added
+- Regression coverage for unchanged effective slippage attachment, slippage drift blocking, non-null slippage payload hashing, and execution-cost hash changes when effective slippage changes.
