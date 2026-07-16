@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from alphaforge.burnin import persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_trade_outcome, utc_now
-from alphaforge.burnin_campaign import create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign
+from alphaforge.burnin_campaign import create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign
 from alphaforge.burnin_ops import (
     audit_payload,
     bootstrap_ops_schema,
@@ -18,10 +18,12 @@ from alphaforge.burnin_ops import (
     recovery_drill,
     verify_worker_attachment,
     watch_once,
+    clock_skew_check,
 )
 
 
 def _conn(tmp_path: Path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     db = tmp_path / "ops.db"
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
@@ -184,7 +186,7 @@ def test_source_evidence_immutable_hash_not_hard_coded(monkeypatch, tmp_path):
     persist_burnin_observation(conn, observation_id="o2", burnin_run_id=run, release_id="rel", execution_mode="PAPER", symbol="BTCUSDT", decision="ACCEPTED", source_provenance={"p": "x"})
     conn.commit()
     audit = audit_payload(conn, camp.campaign_id)
-    assert "source_run_immutable_hashes_unchanged" in audit["violations"]
+    assert audit["status"] == "PASS"
 
 
 def test_canary_qualified_only_canonical_verdict_allows_canary_review(monkeypatch, tmp_path):
@@ -208,6 +210,94 @@ def test_canary_qualified_only_canonical_verdict_allows_canary_review(monkeypatc
     conn.execute("UPDATE burnin_campaigns SET latest_qualification_id='q_alias', qualification_status='PASS' WHERE campaign_id=?", (camp2.campaign_id,))
     conn.commit()
     assert finalize(conn, str(db), camp2.campaign_id, tmp_path / "final_alias")["decision"] != "PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW"
+
+
+def test_running_append_only_allows_growth_but_blocks_mutation_and_delete(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    persist_burnin_observation(conn, observation_id="o1", burnin_run_id=run, release_id="rel", execution_mode="PAPER", symbol="BTCUSDT", decision="REJECTED", source_provenance={"p": "x"})
+    conn.commit()
+    assert audit_payload(conn, camp.campaign_id)["status"] == "PASS"
+    persist_burnin_observation(conn, observation_id="o2", burnin_run_id=run, release_id="rel", execution_mode="PAPER", symbol="BTCUSDT", decision="ACCEPTED", source_provenance={"p": "x"})
+    conn.commit()
+    assert audit_payload(conn, camp.campaign_id)["status"] == "PASS"
+    conn.execute("UPDATE burnin_observations SET decision='MUTATED' WHERE observation_id='o1'")
+    conn.commit()
+    audit = audit_payload(conn, camp.campaign_id)
+    assert "source_run_append_only_or_terminal_immutable" in audit["violations"]
+
+    db2, conn2 = _conn(tmp_path / "delete")
+    camp2, run2 = _campaign(conn2)
+    persist_burnin_observation(conn2, observation_id="o1", burnin_run_id=run2, release_id="rel", execution_mode="PAPER", symbol="BTCUSDT", decision="REJECTED", source_provenance={"p": "x"})
+    conn2.commit()
+    assert audit_payload(conn2, camp2.campaign_id)["status"] == "PASS"
+    conn2.execute("DELETE FROM burnin_observations WHERE observation_id='o1'")
+    conn2.commit()
+    audit2 = audit_payload(conn2, camp2.campaign_id)
+    assert "source_run_append_only_or_terminal_immutable" in audit2["violations"]
+
+
+def test_terminal_run_baseline_blocks_later_additions(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    persist_burnin_observation(conn, observation_id="o1", burnin_run_id=run, release_id="rel", execution_mode="PAPER", symbol="BTCUSDT", decision="REJECTED", source_provenance={"p": "x"})
+    conn.execute("UPDATE burnin_runs SET status='COMPLETED' WHERE burnin_run_id=?", (run,))
+    conn.commit()
+    assert audit_payload(conn, camp.campaign_id)["status"] == "PASS"
+    persist_burnin_observation(conn, observation_id="o2", burnin_run_id=run, release_id="rel", execution_mode="PAPER", symbol="BTCUSDT", decision="ACCEPTED", source_provenance={"p": "x"})
+    conn.commit()
+    audit = audit_payload(conn, camp.campaign_id)
+    assert "source_run_append_only_or_terminal_immutable" in audit["violations"]
+
+
+def test_clock_skew_pass_fail_unavailable_paths(monkeypatch):
+    base = 1_700_000_000_000
+    monkeypatch.setattr("time.time", lambda: base / 1000)
+    ok = clock_skew_check(max_skew_ms=1000, provider=lambda: {"provider_utc_ms": base + 500, "provider_provenance": {"provider": "TEST_READ_ONLY"}})
+    assert ok["status"] == "PASS" and ok["absolute_skew_ms"] == 500
+    bad = clock_skew_check(max_skew_ms=100, provider=lambda: base + 500)
+    assert bad["status"] == "FAIL"
+    unavailable = clock_skew_check(max_skew_ms=100, provider=lambda: (_ for _ in ()).throw(RuntimeError("down")))
+    assert unavailable["status"] == "UNAVAILABLE"
+
+
+def test_failed_worker_termination_creates_no_continuation_or_worker(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET worker_pid=500, worker_started_at=? WHERE campaign_id=?", (utc_now(), camp.campaign_id))
+    conn.commit()
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(ops, "_stop_worker", lambda pid, timeout=10.0: False)
+    launched = {"called": False}
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: launched.update(called=True))
+    before_runs = conn.execute("SELECT COUNT(*) FROM burnin_campaign_runs WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0]
+    before_restart = get_campaign(conn, camp.campaign_id)["restart_count"]
+    out = recovery_drill(conn, camp.campaign_id, attach_timeout_seconds=0.01)
+    after_runs = conn.execute("SELECT COUNT(*) FROM burnin_campaign_runs WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0]
+    after_campaign = get_campaign(conn, camp.campaign_id)
+    assert out["status"] == "FAIL"
+    assert before_runs == after_runs
+    assert after_campaign["restart_count"] == before_restart
+    assert not launched["called"]
+    assert after_campaign["campaign_status"] == "RECOVERY_REQUIRED"
+
+
+def test_null_and_mismatched_aggregate_hash_fail_audit(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("INSERT INTO burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,generated_at,status,sample_status,expectancy_status,execution_status,regime_status,reject_quality_status,calibration_status,drawdown_status,concentration_status,reconciliation_status,evidence_completeness_status,blockers_json,warnings_json,thresholds_json,metrics_json,evidence_hash,schema_version,campaign_id,source_run_ids_json,aggregate_evidence_hash) VALUES ('q_null',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run, "rel", utc_now(), "CANARY_QUALIFIED", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "[]", "[]", "{}", "{}", "hash", "sv", camp.campaign_id, json.dumps([run]), None))
+    conn.execute("INSERT INTO burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,generated_at,status,sample_status,expectancy_status,execution_status,regime_status,reject_quality_status,calibration_status,drawdown_status,concentration_status,reconciliation_status,evidence_completeness_status,blockers_json,warnings_json,thresholds_json,metrics_json,evidence_hash,schema_version,campaign_id,source_run_ids_json,aggregate_evidence_hash) VALUES ('q_bad_hash',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run, "rel", utc_now(), "CANARY_QUALIFIED", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "[]", "[]", "{}", "{}", "hash", "sv", camp.campaign_id, json.dumps([run]), "wrong"))
+    conn.commit()
+    audit = audit_payload(conn, camp.campaign_id)
+    assert "AGGREGATE_EVIDENCE_HASH_MISSING" in audit["violations"]
+    assert "AGGREGATE_EVIDENCE_HASH_MISMATCH" in audit["violations"]
+
 
 
 def test_phase9_audit_detects_incomplete_outcome_and_finalize_never_live(monkeypatch, tmp_path):

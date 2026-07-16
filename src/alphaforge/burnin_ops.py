@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparse, asyncio, csv, hashlib, json, os, signal, sqlite3, subprocess, sys, time
+import argparse, asyncio, csv, hashlib, json, os, signal, sqlite3, subprocess, sys, time, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -50,7 +50,12 @@ def bootstrap_ops_schema(conn: Any) -> None:
     _exec(conn, """CREATE TABLE IF NOT EXISTS burnin_recovery_drills(id INTEGER PRIMARY KEY AUTOINCREMENT, drill_id TEXT UNIQUE NOT NULL, campaign_id TEXT NOT NULL, generated_at TEXT NOT NULL, status TEXT NOT NULL, checks_json TEXT NOT NULL, before_json TEXT NOT NULL, after_json TEXT NOT NULL, schema_version TEXT NOT NULL)""")
     _exec(conn, """CREATE TABLE IF NOT EXISTS burnin_integrity_audits(id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id TEXT UNIQUE NOT NULL, campaign_id TEXT NOT NULL, generated_at TEXT NOT NULL, status TEXT NOT NULL, violations_json TEXT NOT NULL, checks_json TEXT NOT NULL, aggregate_evidence_hash TEXT, schema_version TEXT NOT NULL)""")
     _exec(conn, """CREATE TABLE IF NOT EXISTS burnin_release_decisions(id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT UNIQUE NOT NULL, campaign_id TEXT NOT NULL, generated_at TEXT NOT NULL, decision TEXT NOT NULL, blockers_json TEXT NOT NULL, package_dir TEXT NOT NULL, checksums_json TEXT NOT NULL, schema_version TEXT NOT NULL)""")
-    _exec(conn, """CREATE TABLE IF NOT EXISTS burnin_source_evidence_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id TEXT NOT NULL, burnin_run_id TEXT NOT NULL, captured_at TEXT NOT NULL, evidence_hash TEXT NOT NULL, row_ids_json TEXT NOT NULL, schema_version TEXT NOT NULL, UNIQUE(campaign_id,burnin_run_id))""")
+    _exec(conn, """CREATE TABLE IF NOT EXISTS burnin_source_evidence_hashes(id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id TEXT NOT NULL, burnin_run_id TEXT NOT NULL, captured_at TEXT NOT NULL, evidence_hash TEXT NOT NULL, row_ids_json TEXT NOT NULL, run_status TEXT, baseline_reason TEXT, schema_version TEXT NOT NULL, UNIQUE(campaign_id,burnin_run_id))""")
+    for stmt in ("ALTER TABLE burnin_source_evidence_hashes ADD COLUMN run_status TEXT", "ALTER TABLE burnin_source_evidence_hashes ADD COLUMN baseline_reason TEXT"):
+        try:
+            _exec(conn, stmt)
+        except Exception:
+            pass
 
 
 def _write_json_csv(base: Path, stem: str, payload: Mapping[str, Any]) -> None:
@@ -141,11 +146,27 @@ def _actual_runtime_identity(release_id: str, symbols: Sequence[str], intervals:
                 os.environ[key] = value
 
 
-def _local_clock_progresses() -> bool:
-    wall = time.time()
-    mono = time.monotonic()
-    time.sleep(0.01)
-    return time.time() > wall and time.monotonic() > mono
+def _binance_server_time_ms() -> dict[str, Any]:
+    with urllib.request.urlopen("https://fapi.binance.com/fapi/v1/time", timeout=5) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return {"provider_utc_ms": int(payload["serverTime"]), "provider_provenance": {"provider": "BINANCE_READ_ONLY_SERVER_TIME", "endpoint": "https://fapi.binance.com/fapi/v1/time", "order_submission": "DISABLED"}}
+
+
+def clock_skew_check(*, max_skew_ms: int | None = None, provider: Any | None = None) -> dict[str, Any]:
+    configured = int(max_skew_ms if max_skew_ms is not None else os.getenv("ALPHAFORGE_MAX_CLOCK_SKEW_MS", "5000"))
+    local_ms = int(time.time() * 1000)
+    try:
+        raw = provider() if provider is not None else _binance_server_time_ms()
+        if isinstance(raw, Mapping):
+            provider_ms = int(raw["provider_utc_ms"] if "provider_utc_ms" in raw else raw["serverTime"])
+            provenance = dict(raw.get("provider_provenance") or raw.get("provenance") or {"provider": "READ_ONLY_TIME_PROVIDER"})
+        else:
+            provider_ms = int(raw)
+            provenance = {"provider": "READ_ONLY_TIME_PROVIDER"}
+        skew = abs(local_ms - provider_ms)
+        return {"status": "PASS" if skew <= configured else "FAIL", "local_utc_ms": local_ms, "provider_utc_ms": provider_ms, "absolute_skew_ms": skew, "configured_max_skew_ms": configured, "provider_provenance": provenance}
+    except Exception as exc:
+        return {"status": "UNAVAILABLE", "local_utc_ms": local_ms, "provider_utc_ms": None, "absolute_skew_ms": None, "configured_max_skew_ms": configured, "provider_provenance": {"provider": "BINANCE_READ_ONLY_SERVER_TIME"}, "error": f"{exc.__class__.__name__}:{exc}"}
 
 
 def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, output_dir: str | Path | None = None, require_market_data: bool = True) -> dict[str, Any]:
@@ -223,7 +244,8 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
             add("binance_readonly_klines_reachable", "PASS", symbols[0] if symbols else None)
         except Exception as exc:
             add("binance_readonly_klines_reachable", "FAIL", f"{exc.__class__.__name__}:{exc}")
-    add("clock_skew_acceptable", "PASS" if _local_clock_progresses() else "FAIL", "local wall clock and monotonic clock progressed")
+    skew = clock_skew_check()
+    add("clock_skew_acceptable", skew["status"], skew)
 
     status = "PASS" if not blockers else "FAIL_CLOSED"
     payload = {"preflight_id": "pre_" + canonical_hash({"release_id": release_id, "at": utc_now(), "checks": checks})[:20], "release_id": release_id, "campaign_id": cid, "generated_at": utc_now(), "status": status, "blockers": blockers, "checks": checks, "evidence_locations": {"json": str(out / "burnin_preflight.json"), "csv": str(out / "burnin_preflight.csv")}}
@@ -430,14 +452,63 @@ def _run_source_ids(conn: sqlite3.Connection, campaign_id: str) -> list[str]:
     return [r[0] for r in conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=? ORDER BY continuation_sequence", (campaign_id,)).fetchall()]
 
 
-def _source_row_ids_and_hash(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
+def _source_rows_snapshot(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
     tables = {"observations": "burnin_observations", "trades": "burnin_trade_outcomes", "rejects": "burnin_reject_outcomes", "regimes": "burnin_regime_metrics", "execution": "burnin_execution_metrics", "calibration": "burnin_calibration_metrics", "drawdowns": "burnin_drawdown_events"}
-    payload: dict[str, Any] = {}
+    table_rows: dict[str, dict[str, str]] = {}
+    full_rows: dict[str, list[dict[str, Any]]] = {}
     for name, table in tables.items():
         rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table} WHERE burnin_run_id=? ORDER BY id", (run_id,)).fetchall()]
-        payload[name] = {"ids": [r.get("id") for r in rows], "rows": rows}
-    return {"row_ids": {k: v["ids"] for k, v in payload.items()}, "evidence_hash": canonical_hash(payload)}
+        full_rows[name] = rows
+        table_rows[name] = {str(r["id"]): canonical_hash(r) for r in rows}
+    return {"row_hashes": table_rows, "evidence_hash": canonical_hash(full_rows)}
 
+
+def _source_row_ids_and_hash(conn: sqlite3.Connection, run_id: str) -> dict[str, Any]:
+    snap = _source_rows_snapshot(conn, run_id)
+    return {"row_ids": {table: sorted(ids.keys(), key=lambda x: int(x)) for table, ids in snap["row_hashes"].items()}, "evidence_hash": snap["evidence_hash"], "row_hashes": snap["row_hashes"]}
+
+
+def _run_status(conn: sqlite3.Connection, run_id: str) -> str:
+    row = conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run_id,)).fetchone()
+    return str(row[0] if row else "UNKNOWN").upper()
+
+
+def _terminal_run_status(status: str) -> bool:
+    return status.upper() in {"RECOVERY_REQUIRED", "COMPLETED", "FAILED", "SUSPENDED"}
+
+
+def _check_and_update_source_baseline(conn: sqlite3.Connection, campaign_id: str, run_id: str) -> tuple[bool, dict[str, Any]]:
+    status = _run_status(conn, run_id)
+    terminal = _terminal_run_status(status)
+    current = _source_rows_snapshot(conn, run_id)
+    old = conn.execute("SELECT evidence_hash,row_ids_json,run_status,baseline_reason FROM burnin_source_evidence_hashes WHERE campaign_id=? AND burnin_run_id=?", (campaign_id, run_id)).fetchone()
+    reason = f"TERMINAL_{status}" if terminal else "RUNNING_APPEND_ONLY"
+    if old is None:
+        conn.execute("INSERT INTO burnin_source_evidence_hashes(campaign_id,burnin_run_id,captured_at,evidence_hash,row_ids_json,run_status,baseline_reason,schema_version) VALUES (?,?,?,?,?,?,?,?)", (campaign_id, run_id, utc_now(), current["evidence_hash"], json.dumps(current["row_hashes"], sort_keys=True), status, reason, PHASE9_SCHEMA_VERSION))
+        return True, {"run_id": run_id, "status": status, "baseline_created": True, "baseline_reason": reason}
+    old_hashes = json.loads(old["row_ids_json"] or "{}")
+    old_terminal = str(old["baseline_reason"] or "").startswith("TERMINAL_") or _terminal_run_status(str(old["run_status"] or ""))
+    missing: dict[str, list[str]] = {}
+    mutated: dict[str, list[str]] = {}
+    added: dict[str, list[str]] = {}
+    for table, ids in old_hashes.items():
+        cur_table = current["row_hashes"].get(table, {})
+        for row_id, row_hash in ids.items():
+            if row_id not in cur_table:
+                missing.setdefault(table, []).append(row_id)
+            elif cur_table[row_id] != row_hash:
+                mutated.setdefault(table, []).append(row_id)
+    for table, ids in current["row_hashes"].items():
+        old_table = old_hashes.get(table, {})
+        for row_id in ids:
+            if row_id not in old_table:
+                added.setdefault(table, []).append(row_id)
+    if missing or mutated or (old_terminal and added):
+        return False, {"run_id": run_id, "status": status, "old_status": old["run_status"], "baseline_reason": old["baseline_reason"], "missing_rows": missing, "mutated_rows": mutated, "added_rows": added, "mode": "IMMUTABLE" if old_terminal else "RUNNING_APPEND_ONLY"}
+    # RUNNING runs are append-only: after preservation checks pass, extend the baseline to include appended rows.
+    # When a run first reaches terminal status, freeze the full current snapshot.
+    conn.execute("UPDATE burnin_source_evidence_hashes SET captured_at=?, evidence_hash=?, row_ids_json=?, run_status=?, baseline_reason=?, schema_version=? WHERE campaign_id=? AND burnin_run_id=?", (utc_now(), current["evidence_hash"], json.dumps(current["row_hashes"], sort_keys=True), status, reason, PHASE9_SCHEMA_VERSION, campaign_id, run_id))
+    return True, {"run_id": run_id, "status": status, "baseline_updated": True, "baseline_reason": reason, "added_rows": added}
 
 def evidence_hash(conn: sqlite3.Connection, campaign_id: str) -> str | None:
     return aggregate_campaign(conn, campaign_id).get("evidence_hash")
@@ -476,8 +547,20 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     restart_count = int(campaign.get("restart_count") or 0)
     runs_before = _run_source_ids(conn, campaign_id)
     old_hash = _campaign_source_evidence_hash(conn, campaign_id)
+    old_status = _run_status(conn, old_run) if old_run else "UNKNOWN"
+    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": bool(old_pid and _pid_alive(old_pid)), "active_run_status_running": old_status == "RUNNING"}
+    if not all(prechecks.values()):
+        conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='RECOVERY_DRILL_PRECHECK_FAILED' WHERE campaign_id=?", (campaign_id,))
+        persist_incident(conn, campaign_id, "RECOVERY_DRILL_PRECHECK_FAILED", prechecks)
+        return {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now(), "precheck": prechecks})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "FAIL", "checks": prechecks, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_before, "resume": None, "attach": None}}
     terminated = _stop_worker(old_pid)
+    if not terminated:
+        conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='RECOVERY_DRILL_WORKER_TERMINATION_FAILED' WHERE campaign_id=?", (campaign_id,))
+        persist_incident(conn, campaign_id, "RECOVERY_DRILL_WORKER_TERMINATION_FAILED", {"worker_pid": old_pid, "active_run_id": old_run})
+        return {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now(), "termination_failed": old_pid})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "FAIL", "checks": {**prechecks, "worker_terminated": False, "no_resume_attempted": True}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_before, "resume": None, "attach": None}}
     resume = start_or_resume_campaign(conn, campaign_id, resume=True)
+    if old_run:
+        _check_and_update_source_baseline(conn, campaign_id, old_run)
     worker_started_at = utc_now()
     proc = _launch_worker(db, campaign_id)
     conn.execute("UPDATE burnin_campaigns SET worker_pid=?, worker_started_at=? WHERE campaign_id=?", (proc.pid, worker_started_at, campaign_id))
@@ -573,20 +656,21 @@ def audit_payload(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
         qrows = conn.execute("SELECT source_run_ids_json, aggregate_evidence_hash FROM burnin_qualification_snapshots WHERE campaign_id=? AND source_run_ids_json IS NOT NULL", (campaign_id,)).fetchall()
         chk("qualification_source_run_ids_json_exact", all(json.loads(r["source_run_ids_json"] or "[]") == run_ids for r in qrows), run_ids)
         recomputed = aggregate_campaign(conn, campaign_id).get("evidence_hash")
-        chk("stored_aggregate_evidence_hash_matches_recomputed", all((r["aggregate_evidence_hash"] or recomputed) == recomputed for r in qrows), recomputed)
+        missing_hashes = [idx for idx, r in enumerate(qrows) if r["aggregate_evidence_hash"] is None]
+        mismatched_hashes = [idx for idx, r in enumerate(qrows) if r["aggregate_evidence_hash"] is not None and r["aggregate_evidence_hash"] != recomputed]
+        chk("AGGREGATE_EVIDENCE_HASH_MISSING", not missing_hashes, {"missing_snapshot_indexes": missing_hashes})
+        chk("AGGREGATE_EVIDENCE_HASH_MISMATCH", not mismatched_hashes, {"mismatched_snapshot_indexes": mismatched_hashes, "recomputed": recomputed})
+        chk("stored_aggregate_evidence_hash_matches_recomputed", not missing_hashes and not mismatched_hashes, recomputed)
     agg = aggregate_campaign(conn, campaign_id)
     chk("aggregate_evidence_hash_reproducible", agg.get("evidence_hash") == aggregate_campaign(conn, campaign_id).get("evidence_hash"), agg.get("evidence_hash"))
     immutable_ok = True
     immutable_details = {}
     for rid in run_ids:
-        cur = _source_row_ids_and_hash(conn, rid)
-        old = conn.execute("SELECT evidence_hash, row_ids_json FROM burnin_source_evidence_hashes WHERE campaign_id=? AND burnin_run_id=?", (campaign_id, rid)).fetchone()
-        if old is None:
-            conn.execute("INSERT INTO burnin_source_evidence_hashes(campaign_id,burnin_run_id,captured_at,evidence_hash,row_ids_json,schema_version) VALUES (?,?,?,?,?,?)", (campaign_id, rid, utc_now(), cur["evidence_hash"], json.dumps(cur["row_ids"], sort_keys=True), PHASE9_SCHEMA_VERSION))
-        elif old["evidence_hash"] != cur["evidence_hash"] or json.loads(old["row_ids_json"] or "{}") != cur["row_ids"]:
+        ok, details = _check_and_update_source_baseline(conn, campaign_id, rid)
+        if not ok:
             immutable_ok = False
-            immutable_details[rid] = {"stored_hash": old["evidence_hash"], "current_hash": cur["evidence_hash"]}
-    chk("source_run_immutable_hashes_unchanged", immutable_ok, immutable_details)
+            immutable_details[rid] = details
+    chk("source_run_append_only_or_terminal_immutable", immutable_ok, immutable_details)
     try:
         conn.commit()
         db = conn.execute("PRAGMA database_list").fetchone()[2]
@@ -659,7 +743,7 @@ def finalize(conn: sqlite3.Connection, db: str, campaign_id: str, outdir: str | 
     campaign = get_campaign(conn, campaign_id) or {}
     qrow = conn.execute("SELECT status, aggregate_evidence_hash, source_run_ids_json FROM burnin_qualification_snapshots WHERE qualification_id=?", (campaign.get("latest_qualification_id"),)).fetchone() if campaign.get("latest_qualification_id") else None
     final_qualification = qrow["status"] if qrow else None
-    exact_hash_link = bool(qrow and qrow["aggregate_evidence_hash"] == aggregate_campaign(conn, campaign_id).get("evidence_hash"))
+    exact_hash_link = bool(qrow and qrow["aggregate_evidence_hash"] is not None and qrow["aggregate_evidence_hash"] == aggregate_campaign(conn, campaign_id).get("evidence_hash"))
     bounded_backlog = int(health.get("pending_reject_labels") or 0) == 0 and int(health.get("open_paper_positions") or 0) == 0
     if campaign.get("campaign_status") == "SUSPENDED":
         decision = "PAPER_BURNIN_SUSPENDED"

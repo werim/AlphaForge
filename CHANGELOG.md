@@ -1,4 +1,28 @@
 
+## Phase 9 PR 280 Follow-up Hardening
+
+### Added
+- Append-only source evidence auditing for active RUNNING continuations and immutable baselines for terminal continuations.
+- Binance read-only server-time clock-skew validation with persisted local/provider/skew/provenance fields.
+- Recovery drill fail-fast behavior when the old worker cannot be confirmed terminated before resume.
+
+### Changed
+- Source run baselines now store run status and capture reason, and terminal runs reject row additions, deletions, or mutations.
+- Final aggregate-hash linkage now requires a non-null stored `aggregate_evidence_hash`.
+
+### Fixed
+- Active RUNNING continuations can grow evidence without being falsely flagged as immutable mutations.
+- NULL aggregate evidence hashes no longer pass audit/finalization linkage checks.
+
+### Removed
+- Monotonic/local clock progression as a substitute for real clock-skew validation.
+
+### Breaking Changes
+- Preflight now requires reachable read-only provider time evidence unless explicitly bypassed in tests.
+
+### Known Issues
+- Existing campaigns need an audit pass to establish append-only/terminal source baselines.
+
 ## Phase 9 PR 280 Hardening
 
 ### Added
