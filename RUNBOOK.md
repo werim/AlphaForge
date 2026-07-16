@@ -99,3 +99,57 @@ Resolver workers must use a read-only canonical market-data provider. Provider o
 
 ### Phase 8 PR 279 Effective PAPER Slippage Identity
 Campaign identity must include the effective PAPER slippage used by the runtime simulator. Operators must create a new campaign if PAPER slippage settings change; runtime attachment will pause/refuse an existing campaign with `PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT` rather than mixing incompatible execution-cost evidence.
+
+## Phase 9 PAPER Burn-in Operations
+
+Phase 9 adds production-like PAPER burn-in orchestration only. It never enables LIVE order submission and every release decision is limited to incomplete, failed, suspended, or qualified-for-canary-review.
+
+Canonical Linux/macOS commands:
+
+```bash
+python -m alphaforge.burnin_ops preflight --release-id phase9-YYYYMMDD --symbols BTCUSDT,ETHUSDT --intervals 1h
+python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-days 7 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach
+python -m alphaforge.burnin_ops status --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops health --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops watch --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops recovery-drill --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops pause --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops resume --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops audit --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops report --campaign-id <campaign-id> --output-dir artifacts/burnin/<campaign-id>
+python -m alphaforge.burnin_ops finalize --campaign-id <campaign-id> --output-dir artifacts/burnin/<campaign-id>/final
+```
+
+Windows PowerShell equivalents:
+
+```powershell
+python -m alphaforge.burnin_ops preflight --release-id phase9-YYYYMMDD --symbols BTCUSDT,ETHUSDT --intervals 1h
+python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-days 7 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach
+python -m alphaforge.burnin_ops status --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops health --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops watch --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops recovery-drill --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops pause --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops resume --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops audit --campaign-id <campaign-id>
+python -m alphaforge.burnin_ops report --campaign-id <campaign-id> --output-dir artifacts/burnin/<campaign-id>
+python -m alphaforge.burnin_ops finalize --campaign-id <campaign-id> --output-dir artifacts/burnin/<campaign-id>/final
+```
+
+Default campaign profile: PAPER execution mode, Binance Futures read-only klines, one canonical interval such as `1h`, bounded USDT symbol universe, no forced acceptance, no diagnostic threshold relaxation, no ALL_OFF/rescue profile, and real execution-cost identity from runtime configuration. Blocking preflight failures prevent startup.
+
+### Phase 9 PR 280 hardened operator notes
+
+Detached launch is successful only after worker attachment evidence is present: live PID, `PHASE8_CAMPAIGN_ATTACHED` after launch start, runtime instance ID, heartbeat at or after worker start, and active run parity. Use `--attach-timeout-seconds` to adjust the wait window in slow environments:
+
+```bash
+python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-days 7 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach --attach-timeout-seconds 120
+```
+
+PowerShell:
+
+```powershell
+python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-days 7 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach --attach-timeout-seconds 120
+```
+
+Finalization can qualify only canonical `CANARY_QUALIFIED` Phase 8 qualification snapshots, with completion, integrity, aggregate-hash linkage, healthy state, and bounded backlog all passing. `PASS` or `QUALIFIED` aliases do not qualify a campaign for canary review.

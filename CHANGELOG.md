@@ -1,3 +1,75 @@
+
+## Phase 9 PR 280 Follow-up Hardening
+
+### Added
+- Append-only source evidence auditing for active RUNNING continuations and immutable baselines for terminal continuations.
+- Binance read-only server-time clock-skew validation with persisted local/provider/skew/provenance fields.
+- Recovery drill fail-fast behavior when the old worker cannot be confirmed terminated before resume.
+
+### Changed
+- Source run baselines now store run status and capture reason, and terminal runs reject row additions, deletions, or mutations.
+- Final aggregate-hash linkage now requires a non-null stored `aggregate_evidence_hash`.
+
+### Fixed
+- Active RUNNING continuations can grow evidence without being falsely flagged as immutable mutations.
+- NULL aggregate evidence hashes no longer pass audit/finalization linkage checks.
+
+### Removed
+- Monotonic/local clock progression as a substitute for real clock-skew validation.
+
+### Breaking Changes
+- Preflight now requires reachable read-only provider time evidence unless explicitly bypassed in tests.
+
+### Known Issues
+- Existing campaigns need an audit pass to establish append-only/terminal source baselines.
+
+## Phase 9 PR 280 Hardening
+
+### Added
+- Real worker attachment verification for detached launch, including post-launch attach event, runtime instance evidence, heartbeat freshness, and active run matching.
+- Recovery drill checks for worker termination, exact pending/open evidence preservation, old-run recovery state, source immutable hashes, and qualification source-run inclusion.
+- Watchdog detections for dead/missing workers, stale heartbeat, backlog growth, repeated provider failures, DB write failures, evidence regression, config drift reasons, excessive positions, qualification failures, aggregate contamination, and duplicate continuations.
+
+### Changed
+- Preflight now blocks UNKNOWN/UNAVAILABLE critical checks instead of hard-coding PASS for runtime identity, source provenance, or clock validation.
+- Final release decisions require canonical `CANARY_QUALIFIED`, completion success, integrity PASS, exact aggregate hash linkage, healthy state, and bounded backlog.
+- Daily reporting now includes SQL-derived regime, reject, trade, RR, cost, calibration, drawdown, concentration, backlog, change, and failure-classification sections.
+
+### Fixed
+- Removed hard-coded PASS integrity checks for reject candles, same-candle ambiguity, dashboard/SQL parity, aggregate hash linkage, provider failures, and source immutability.
+- Fixed dashboard campaign counter helper so SQL counts are computed from an open read-only connection.
+
+### Removed
+- Placeholder success checks that masked unavailable operational verification.
+
+### Breaking Changes
+- Phase 9 launch/preflight/finalize are stricter and may fail closed where earlier placeholder logic returned success.
+
+### Known Issues
+- A real operator PAPER run is still required before canary review; LIVE remains unavailable.
+
+## Phase 9 - PAPER Burn-in Operations
+
+### Added
+- Production-like PAPER burn-in operations CLI (`alphaforge.burnin_ops`) with preflight, launch, health, watchdog, recovery drill, audit, report, and finalize commands.
+- Additive persistence for preflight evidence, health history, incidents, recovery drill reports, integrity audits, and release decisions.
+- Machine-readable `release_decision.json` limited to PAPER burn-in/canary-review decisions.
+
+### Changed
+- Dashboard campaign queries expose read-only Phase 9 operations fields such as worker/campaign lineage, incident, integrity, and release-decision evidence.
+
+### Fixed
+- Operational gap where Phase 8 campaign primitives lacked a canonical fail-closed launch and evidence-audit workflow.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- A real multi-day PAPER campaign and provider availability are still required before canary review. LIVE remains unavailable.
+
 # Changelog
 
 ## Added
