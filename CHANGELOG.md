@@ -1,3 +1,26 @@
+
+## Phase 9 - PAPER Burn-in Operations
+
+### Added
+- Production-like PAPER burn-in operations CLI (`alphaforge.burnin_ops`) with preflight, launch, health, watchdog, recovery drill, audit, report, and finalize commands.
+- Additive persistence for preflight evidence, health history, incidents, recovery drill reports, integrity audits, and release decisions.
+- Machine-readable `release_decision.json` limited to PAPER burn-in/canary-review decisions.
+
+### Changed
+- Dashboard campaign queries expose read-only Phase 9 operations fields such as worker/campaign lineage, incident, integrity, and release-decision evidence.
+
+### Fixed
+- Operational gap where Phase 8 campaign primitives lacked a canonical fail-closed launch and evidence-audit workflow.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- A real multi-day PAPER campaign and provider availability are still required before canary review. LIVE remains unavailable.
+
 # Changelog
 
 ## Added
