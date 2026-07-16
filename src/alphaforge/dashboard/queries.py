@@ -334,7 +334,8 @@ def fetch_phase8_campaign(engine: Engine, campaign_id: str | None = None) -> dic
             def count_table(table: str, expr: str = "COUNT(*)", extra: str = ""):
                 if not run_ids or not _has_table(engine, table): return None
                 ph=",".join([f":r{i}" for i in range(len(run_ids))]); p={f"r{i}":v for i,v in enumerate(run_ids)}
-                return conn.execute(text(f"SELECT {expr} FROM {table} WHERE burnin_run_id IN ({ph}) {extra}"), p).scalar()
+                with engine.connect() as count_conn:
+                    return count_conn.execute(text(f"SELECT {expr} FROM {table} WHERE burnin_run_id IN ({ph}) {extra}"), p).scalar()
             latest = None
             if _has_table(engine,"burnin_qualification_snapshots") and row.get("latest_qualification_id"):
                 latest = conn.execute(text("SELECT status, blockers_json, warnings_json, generated_at FROM burnin_qualification_snapshots WHERE qualification_id=:qid"), {"qid": row["latest_qualification_id"]}).mappings().first()

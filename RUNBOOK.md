@@ -137,3 +137,19 @@ python -m alphaforge.burnin_ops finalize --campaign-id <campaign-id> --output-di
 ```
 
 Default campaign profile: PAPER execution mode, Binance Futures read-only klines, one canonical interval such as `1h`, bounded USDT symbol universe, no forced acceptance, no diagnostic threshold relaxation, no ALL_OFF/rescue profile, and real execution-cost identity from runtime configuration. Blocking preflight failures prevent startup.
+
+### Phase 9 PR 280 hardened operator notes
+
+Detached launch is successful only after worker attachment evidence is present: live PID, `PHASE8_CAMPAIGN_ATTACHED` after launch start, runtime instance ID, heartbeat at or after worker start, and active run parity. Use `--attach-timeout-seconds` to adjust the wait window in slow environments:
+
+```bash
+python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-days 7 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach --attach-timeout-seconds 120
+```
+
+PowerShell:
+
+```powershell
+python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-days 7 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach --attach-timeout-seconds 120
+```
+
+Finalization can qualify only canonical `CANARY_QUALIFIED` Phase 8 qualification snapshots, with completion, integrity, aggregate-hash linkage, healthy state, and bounded backlog all passing. `PASS` or `QUALIFIED` aliases do not qualify a campaign for canary review.

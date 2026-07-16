@@ -1,4 +1,29 @@
 
+## Phase 9 PR 280 Hardening
+
+### Added
+- Real worker attachment verification for detached launch, including post-launch attach event, runtime instance evidence, heartbeat freshness, and active run matching.
+- Recovery drill checks for worker termination, exact pending/open evidence preservation, old-run recovery state, source immutable hashes, and qualification source-run inclusion.
+- Watchdog detections for dead/missing workers, stale heartbeat, backlog growth, repeated provider failures, DB write failures, evidence regression, config drift reasons, excessive positions, qualification failures, aggregate contamination, and duplicate continuations.
+
+### Changed
+- Preflight now blocks UNKNOWN/UNAVAILABLE critical checks instead of hard-coding PASS for runtime identity, source provenance, or clock validation.
+- Final release decisions require canonical `CANARY_QUALIFIED`, completion success, integrity PASS, exact aggregate hash linkage, healthy state, and bounded backlog.
+- Daily reporting now includes SQL-derived regime, reject, trade, RR, cost, calibration, drawdown, concentration, backlog, change, and failure-classification sections.
+
+### Fixed
+- Removed hard-coded PASS integrity checks for reject candles, same-candle ambiguity, dashboard/SQL parity, aggregate hash linkage, provider failures, and source immutability.
+- Fixed dashboard campaign counter helper so SQL counts are computed from an open read-only connection.
+
+### Removed
+- Placeholder success checks that masked unavailable operational verification.
+
+### Breaking Changes
+- Phase 9 launch/preflight/finalize are stricter and may fail closed where earlier placeholder logic returned success.
+
+### Known Issues
+- A real operator PAPER run is still required before canary review; LIVE remains unavailable.
+
 ## Phase 9 - PAPER Burn-in Operations
 
 ### Added
