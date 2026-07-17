@@ -12,6 +12,8 @@ from alphaforge.ai_brain import AIBrain
 from alphaforge.persistence import init_db
 from alphaforge import persistence as persistence_module
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
+from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, create_campaign
 
 
 def _brain() -> AIBrain:
@@ -616,3 +618,37 @@ def test_live_precheck_execute_path_is_no_submit_even_if_called_directly() -> No
     assert adapter.submit_calls == 0
     assert orchestrator.metrics.executions == 1
     assert orchestrator._active_positions == {}
+
+
+def test_recovery_scope_prevents_unrelated_paper_history_poisoning_and_keeps_live_strict(tmp_path: Path) -> None:
+    """Production sequence: stale recovery history is audit-only when SQL is clean."""
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'recovery.sqlite3'}")
+    with engine.begin() as conn:
+        bootstrap_campaign_schema(conn)
+        old_campaign = create_campaign(conn, release_id="old", duration_days=1, symbols=["BTCUSDT"], intervals=["1h"])
+        conn.execute(text("UPDATE burnin_campaigns SET campaign_status='FAILED' WHERE campaign_id=:id"), {"id": old_campaign.campaign_id})
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED",
+        instance_id="old", startup_id="old-start", campaign_id=old_campaign.campaign_id, process_id=99999999,
+        unknown_exchange_state=True, fail_closed_reason="EXCHANGE_RECONCILIATION_UNAVAILABLE",
+    ))
+    # A later successful reconciliation is authoritative current evidence.
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO exchange_reconciliation_events(event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json) VALUES ('now','new','new','PAPER','CLEAN',0,0,0,'AVAILABLE','{}')"))
+    paper = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="new-campaign")
+    assert not paper["blocked"]
+    assert paper["scope"] == "UNRELATED_HISTORICAL_RUNTIME"
+    assert paper["current_exposure_check"] == {"active_positions": 0, "pending_orders": 0, "orphan_orders": 0, "orphan_positions": 0}
+    assert evaluate_runtime_recovery(engine, mode="PAPER", campaign_id=old_campaign.campaign_id)["blocked"]
+    assert evaluate_runtime_recovery(engine, mode="LIVE", campaign_id="new-campaign")["blocked"]
+
+
+@pytest.mark.parametrize("table,sql", [
+    ("positions", "INSERT INTO positions(position_id,symbol,qty,status) VALUES ('p','BTCUSDT',1,'OPEN')"),
+])
+def test_recovery_scope_blocks_authoritative_execution_exposure(tmp_path: Path, table: str, sql: str) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / (table + '.sqlite3')}")
+    with engine.begin() as conn: conn.execute(text(sql))
+    result = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="fresh")
+    assert result["blocked"]
+    assert result["scope"] == "GLOBAL_EXECUTION_RISK"
