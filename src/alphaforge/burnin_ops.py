@@ -328,7 +328,7 @@ def _mark_campaign_failed(conn: sqlite3.Connection, campaign_id: str, reason: st
     if active_run_id:
         conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time, ?) WHERE burnin_run_id=? AND status='RUNNING'", (ts, active_run_id))
         conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at, ?) WHERE campaign_id=? AND burnin_run_id=? AND status='RUNNING'", (ts, campaign_id, active_run_id))
-    conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', last_error=? WHERE campaign_id=?", (reason, campaign_id))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', last_error=?, worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (reason, campaign_id))
     event(conn, campaign_id, "PHASE9_CAMPAIGN_FAILED", details={"reason": reason, **dict(details or {})})
     conn.commit()
 
@@ -385,6 +385,19 @@ def _counts(conn: sqlite3.Connection, campaign_id: str) -> dict[str, int]:
         "qualification_failures": cnt("SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? AND event_type LIKE '%QUALIFICATION%' AND details_json LIKE '%error%'", (campaign_id,)),
     }
 
+
+def cleanup_dead_worker(conn: sqlite3.Connection, campaign_id: str) -> bool:
+    """Fail terminally and clear attachment metadata for a dead active worker."""
+    campaign = get_campaign(conn, campaign_id)
+    if not campaign or campaign.get("campaign_status") != "RUNNING":
+        return False
+    pid = campaign.get("worker_pid")
+    if not pid or _pid_alive(pid):
+        return False
+    _mark_campaign_failed(conn, campaign_id, "DEAD_WORKER", {"worker_pid": pid})
+    event(conn, campaign_id, "PHASE9_DEAD_WORKER_CLEANED", burnin_run_id=campaign.get("active_run_id"), details={"worker_pid": pid})
+    conn.commit()
+    return True
 
 def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_age: float = 120.0, max_open_positions: int = 25) -> dict[str, Any]:
     campaign = get_campaign(conn, campaign_id)
@@ -463,6 +476,7 @@ def persist_incident(conn: sqlite3.Connection, campaign_id: str, incident_type: 
 
 
 def watch_once(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
+    cleaned_dead_worker = cleanup_dead_worker(conn, campaign_id)
     try:
         conn.execute("CREATE TEMP TABLE IF NOT EXISTS burnin_watchdog_write_probe(x INTEGER)")
         db_write_ok = True
@@ -474,9 +488,10 @@ def watch_once(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
         failures.append("DB_WRITE_FAILURE")
     if failures:
         persist_incident(conn, campaign_id, "WATCHDOG_FAILURE", {"failures": failures, "health": health})
-        conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='WATCHDOG_FAILURE' WHERE campaign_id=?", (campaign_id,))
+        if not cleaned_dead_worker:
+            conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='WATCHDOG_FAILURE' WHERE campaign_id=?", (campaign_id,))
         conn.commit()
-    return {"status": "OK" if not failures else "RECOVERY_REQUIRED", "failures": failures, "health": health}
+    return {"status": "OK" if not failures else "RECOVERY_REQUIRED", "failures": failures, "health": health, "cleaned_dead_worker": cleaned_dead_worker}
 
 
 def _run_source_ids(conn: sqlite3.Connection, campaign_id: str) -> list[str]:
@@ -806,6 +821,12 @@ def finalize(conn: sqlite3.Connection, db: str, campaign_id: str, outdir: str | 
     return {"decision": decision, "campaign_id": campaign_id, "output_dir": str(out), "blockers": release_decision["blockers"], "checksums": checksums}
 
 
+def _worker_log_paths(campaign_id: str) -> tuple[Path, Path]:
+    root = Path("artifacts") / "burnin" / campaign_id
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "worker.stdout.log", root / "worker.stderr.log"
+
+
 def _launch_worker(db: str, campaign_id: str) -> subprocess.Popen[Any]:
     cmd = [sys.executable, "-m", "alphaforge.burnin_cli", "--db", db, "worker", "--campaign-id", campaign_id]
     conn = _connect(db)
@@ -825,7 +846,14 @@ def _launch_worker(db: str, campaign_id: str) -> subprocess.Popen[Any]:
         conn.close()
     # The persisted campaign is the worker attachment contract; do not inherit an
     # unrelated shell release identity into a new continuation process.
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER"})
+    stdout_path, stderr_path = _worker_log_paths(campaign_id)
+    stdout = stdout_path.open("ab", buffering=0)
+    stderr = stderr_path.open("ab", buffering=0)
+    try:
+        return subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER"})
+    finally:
+        stdout.close()
+        stderr.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -450,3 +450,46 @@ def test_phase9_audit_detects_incomplete_outcome_and_finalize_never_live(monkeyp
     out = finalize(conn, str(db), camp.campaign_id, tmp_path / "final")
     assert out["decision"] != "LIVE_READY"
     assert json.loads((tmp_path / "final" / "release_decision.json").read_text())["decision"] in {"PAPER_BURNIN_FAILED", "PAPER_BURNIN_INCOMPLETE"}
+
+
+def test_watch_cleans_dead_worker_and_terminalizes_both_run_tables(monkeypatch, tmp_path):
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET worker_pid=99999, worker_started_at=? WHERE campaign_id=?", (utc_now(), camp.campaign_id)); conn.commit()
+    monkeypatch.setattr("alphaforge.burnin_ops._pid_alive", lambda pid: False)
+    result = watch_once(conn, camp.campaign_id)
+    assert result["cleaned_dead_worker"] is True
+    assert conn.execute("SELECT status,end_time FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()["status"] == "FAILED"
+    assert conn.execute("SELECT status,ended_at FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()["status"] == "FAILED"
+    row = conn.execute("SELECT campaign_status,worker_pid,worker_started_at FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()
+    assert row["campaign_status"] == "FAILED" and row["worker_pid"] is None and row["worker_started_at"] is None
+
+
+def test_pause_is_operator_activity_not_runtime_heartbeat_and_terminalizes_run(tmp_path):
+    from alphaforge.burnin_campaign import pause_campaign
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    heartbeat = "2026-01-01T00:00:00+00:00"
+    conn.execute("UPDATE burnin_campaigns SET last_heartbeat_at=?,worker_pid=42 WHERE campaign_id=?", (heartbeat, camp.campaign_id))
+    pause_campaign(conn, camp.campaign_id); conn.commit()
+    row = conn.execute("SELECT last_heartbeat_at,last_operator_activity_at,worker_pid,campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()
+    assert row["last_heartbeat_at"] == heartbeat and row["last_operator_activity_at"] and row["worker_pid"] == 42 and row["campaign_status"] == "PAUSED"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()["status"] == "PAUSED"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()["status"] == "PAUSED"
+
+
+def test_post_attach_exception_uses_accurate_event_and_terminalizes(tmp_path):
+    from alphaforge.burnin_campaign import terminalize_active_campaign_run
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    event(conn, camp.campaign_id, "PHASE8_CAMPAIGN_ATTACHED", burnin_run_id=run, details={"runtime_instance_id": "runtime", "active_run_id": run})
+    terminalize_active_campaign_run(conn, camp.campaign_id, run_status="FAILED", campaign_status="FAILED", reason="WORKER_UNCAUGHT_EXCEPTION", event_type="WORKER_UNCAUGHT_EXCEPTION", details={"exception_type": "RuntimeError", "message": "boom", "traceback": "Traceback: boom", "worker_pid": 123, "stdout_log_path": "artifacts/burnin/x/worker.stdout.log", "stderr_log_path": "artifacts/burnin/x/worker.stderr.log"})
+    conn.commit()
+    events = [dict(r) for r in conn.execute("SELECT event_type,details_json FROM burnin_campaign_events WHERE campaign_id=?", (camp.campaign_id,))]
+    crash = next(json.loads(e["details_json"]) for e in events if e["event_type"] == "WORKER_UNCAUGHT_EXCEPTION")
+    assert not any(e["event_type"] == "PHASE8_CAMPAIGN_ATTACH_FAILED" for e in events)
+    assert crash["traceback"] == "Traceback: boom" and crash["stdout_log_path"].endswith("worker.stdout.log")
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "FAILED"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "FAILED"
+    state = conn.execute("SELECT campaign_status,last_error,worker_pid FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()
+    assert tuple(state) == ("FAILED", "WORKER_UNCAUGHT_EXCEPTION", None)
