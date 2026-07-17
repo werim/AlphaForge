@@ -14,6 +14,7 @@
 
 ### Fixed
 - A logically RUNNING continuation with no live worker no longer remains eternally RUNNING during a zero-exposure recovery drill.
+- Dead-worker recovery now checks runtime-owned positions, pending orders, orphan findings, and reconciliation state; pending reject labels remain preserved non-financial evidence.
 - An unrelated unscoped historical PAPER runtime no longer blocks future PAPER campaigns after complete, empty read-only exchange reconciliation is persisted.
 - Active RUNNING continuations can grow evidence without being falsely flagged as immutable mutations.
 - NULL aggregate evidence hashes no longer pass audit/finalization linkage checks.

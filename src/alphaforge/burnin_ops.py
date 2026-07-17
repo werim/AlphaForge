@@ -602,11 +602,38 @@ def _stop_worker(pid: Any, timeout: float = 10.0) -> bool:
     return not _pid_alive(pid)
 
 
+def _authoritative_recovery_exposure(db: str, campaign_id: str) -> dict[str, Any]:
+    """Read the execution-owned recovery gate before advancing a continuation.
+
+    Campaign tables own forward-label and PAPER-position outcomes only.  Orders,
+    orphan findings, and reconciliation completeness are runtime-owned, so a
+    continuation recovery must consult the runtime gate as well.
+    """
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    try:
+        cfg = load_config_from_env()
+        return evaluate_runtime_recovery(
+            engine, mode="PAPER", campaign_id=campaign_id,
+            reconciliation_probe=build_readonly_reconciliation_probe(_readonly_reconciliation_provider(cfg)),
+        )
+    finally:
+        engine.dispose()
+
+
 def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout_seconds: float = 60.0) -> dict[str, Any]:
     db = conn.execute("PRAGMA database_list").fetchone()[2]
     campaign = get_campaign(conn, campaign_id)
     if not campaign:
         raise KeyError("campaign not found")
+    # A completed drill already attached the current continuation.  Replaying its
+    # operator request must not stop that verified worker and allocate another
+    # successor; a later genuinely dead worker bypasses this branch.
+    previous = conn.execute("SELECT * FROM burnin_recovery_drills WHERE campaign_id=? AND status='PASS' ORDER BY id DESC LIMIT 1", (campaign_id,)).fetchone()
+    if previous and campaign.get("worker_pid") and _pid_alive(campaign.get("worker_pid")):
+        previous_after = json.loads(previous["after_json"] or "{}")
+        previous_resume = previous_after.get("resume") or {}
+        if previous_resume.get("burnin_run_id") == campaign.get("active_run_id"):
+            return {"drill_id": previous["drill_id"], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "PASS", "checks": {**json.loads(previous["checks_json"] or "{}"), "idempotent_replay": True}, "before": json.loads(previous["before_json"] or "{}"), "after": {**previous_after, "idempotent_replay": True}}
     source_before = {rid: _source_row_ids_and_hash(conn, rid) for rid in _run_source_ids(conn, campaign_id)}
     pending_ids_before = [r[0] for r in conn.execute("SELECT pending_label_id FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY') ORDER BY pending_label_id", (campaign_id,)).fetchall()]
     position_ids_before = [r[0] for r in conn.execute("SELECT pending_position_id FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN' ORDER BY pending_position_id", (campaign_id,)).fetchall()]
@@ -619,22 +646,27 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     old_status = _run_status(conn, old_run) if old_run else "UNKNOWN"
     old_alive = bool(old_pid and _pid_alive(old_pid))
     exposure = _counts(conn, campaign_id)
-    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"]}
+    runtime_recovery = _authoritative_recovery_exposure(db, campaign_id)
+    runtime_exposure = dict(runtime_recovery.get("current_exposure_check") or {})
+    unsafe_exposure = {name: int(runtime_exposure.get(name) or 0) for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")}
+    recovery_safe = not runtime_recovery.get("blocked") and not any(unsafe_exposure.values())
+    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason")}
     stale_dead_worker = old_status == "RUNNING" and not old_alive
-    if stale_dead_worker and exposure["open_positions"] == 0:
+    if stale_dead_worker and exposure["open_positions"] == 0 and recovery_safe:
         # PID metadata is attachment evidence, not a prerequisite for recovery.
         # Terminalize both linked rows before allocating a successor.
         ts = utc_now()
         conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status='RUNNING'", (ts, old_run))
         conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,?) WHERE campaign_id=? AND burnin_run_id=? AND status='RUNNING'", (ts, campaign_id, old_run))
         conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', worker_pid=NULL, worker_started_at=NULL, last_error='DEAD_WORKER_ZERO_EXPOSURE_RECOVERY_REQUIRED' WHERE campaign_id=?", (campaign_id,))
-        evidence = {"old_run_id": old_run, "old_status": old_status, "worker_pid": old_pid, "worker_alive": old_alive, "heartbeat_at": campaign.get("last_heartbeat_at"), "exposure": exposure, "transition": "RUNNING->RECOVERY_REQUIRED"}
+        evidence = {"old_run_id": old_run, "old_status": old_status, "worker_pid": old_pid, "worker_alive": old_alive, "heartbeat_at": campaign.get("last_heartbeat_at"), "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "transition": "RUNNING->RECOVERY_REQUIRED"}
         event(conn, campaign_id, "PHASE9_STALE_CONTINUATION_RECOVERED", burnin_run_id=old_run, details=evidence)
         persist_incident(conn, campaign_id, "STALE_CONTINUATION_ZERO_EXPOSURE", evidence)
         conn.commit()
     elif not all((bool(old_pid), old_alive, old_status == "RUNNING")):
         conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='RECOVERY_DRILL_PRECHECK_FAILED' WHERE campaign_id=?", (campaign_id,))
-        failure = {"reason": "STALE_OR_INVALID_CONTINUATION_REQUIRES_MANUAL_RECOVERY", "prechecks": prechecks, "old_run_id": old_run, "transition_attempted": None}
+        failure_reason = "UNRESOLVED_RUNTIME_EXPOSURE_OR_RECONCILIATION" if stale_dead_worker else "STALE_OR_INVALID_CONTINUATION_REQUIRES_MANUAL_RECOVERY"
+        failure = {"reason": failure_reason, "prechecks": prechecks, "old_run_id": old_run, "runtime_recovery": runtime_recovery, "transition_attempted": None}
         persist_incident(conn, campaign_id, "RECOVERY_DRILL_PRECHECK_FAILED", failure)
         payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now(), "precheck": prechecks})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "FAIL", "checks": {**prechecks, "failure_reasons": [failure["reason"]]}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_before, "resume": None, "attach": None, "failure": failure}}
         conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], "FAIL", json.dumps(payload["checks"]), json.dumps(payload["before"]), json.dumps(payload["after"]), PHASE9_SCHEMA_VERSION)); conn.commit()
