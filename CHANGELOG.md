@@ -3160,3 +3160,7 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Added
 - Regression coverage for unchanged effective slippage attachment, slippage drift blocking, non-null slippage payload hashing, and execution-cost hash changes when effective slippage changes.
+
+## Unreleased
+### Fixed
+- Persist detached burn-in worker output, terminalize dead workers, and separate operator pause activity from runtime heartbeats.

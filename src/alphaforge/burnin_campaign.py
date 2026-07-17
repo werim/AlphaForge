@@ -36,7 +36,7 @@ def bootstrap_campaign_schema(conn: Any) -> None:
     bootstrap_burnin_schema(conn)
     for stmt in PHASE8_DDL: _exec(conn, stmt)
     # additive qualification columns; ignore on older SQLite if duplicate
-    for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN worker_pid INTEGER", "ALTER TABLE burnin_campaigns ADD COLUMN worker_started_at TEXT"]:
+    for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN worker_pid INTEGER", "ALTER TABLE burnin_campaigns ADD COLUMN worker_started_at TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN last_operator_activity_at TEXT"]:
         try: _exec(conn, stmt)
         except Exception: pass
 
@@ -198,9 +198,17 @@ def fail_active_campaign_run(conn: Any, campaign_id: str, reason: str, *, detail
         event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACH_FAILED", burnin_run_id=run_id, details={"reason": reason, **dict(details or {})})
 
 def pause_campaign(conn: Any, campaign_id: str) -> None:
-    c=get_campaign(conn,campaign_id); 
-    if not c: raise KeyError("campaign not found")
-    _exec(conn,"UPDATE burnin_campaigns SET campaign_status='PAUSED', last_heartbeat_at=:ts WHERE campaign_id=:id",{"id":campaign_id,"ts":utc_now()}); event(conn,campaign_id,"CAMPAIGN_PAUSED",burnin_run_id=c.get("active_run_id"))
+    """Persist an operator pause without fabricating a runtime heartbeat."""
+    c = get_campaign(conn, campaign_id)
+    if not c:
+        raise KeyError("campaign not found")
+    ts = utc_now()
+    run_id = c.get("active_run_id")
+    if run_id:
+        _exec(conn, "UPDATE burnin_runs SET status='PAUSED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'", {"bid": run_id, "ts": ts})
+        _exec(conn, "UPDATE burnin_campaign_runs SET status='PAUSED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'", {"cid": campaign_id, "bid": run_id, "ts": ts})
+    _exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_operator_activity_at=:ts, worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=:id", {"id": campaign_id, "ts": ts})
+    event(conn, campaign_id, "CAMPAIGN_PAUSED", burnin_run_id=run_id, details={"operator_activity_at": ts})
 
 
 def _row_dict(row: Any) -> dict[str, Any]:

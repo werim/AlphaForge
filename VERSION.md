@@ -9,3 +9,5 @@
 - Known critical risks: Real multi-day PAPER evidence is still required; provider data/time outages fail closed; manual operator recovery is required; existing campaigns need one audit to seed source baselines. Zero-sample failed continuations are retained for audit but excluded from aggregate evidence.
 - Last audit date: 2026-07-17
 - Live readiness verdict: NOT LIVE READY; Phase 9 may only produce `PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW` when canonical `CANARY_QUALIFIED` evidence passes all operational gates.
+
+- **2026-07-17 audit:** detached burn-in worker crash observability and dead-worker lifecycle cleanup are implemented; PAPER burn-in remains non-live-ready pending operational validation.
