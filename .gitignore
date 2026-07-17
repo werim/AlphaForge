@@ -17,7 +17,8 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3.env.*
 !.env.example
-
+artifacts/**/*.json
+artifacts/**/*.csv
 reports/
 
 # Python package build metadata
