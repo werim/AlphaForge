@@ -72,6 +72,16 @@
 
 # Changelog
 
+## Fixed
+- Phase 9 PAPER burn-in preflight config-hash parity by retaining all identity-relevant decision-filter settings while constructing `RuntimeConfig` from the environment.
+- Preflight identity evidence now includes both canonical config payloads and every differing key/value; real config drift remains fail-closed.
+
+## Changed
+- Phase 8/9 campaign creation and runtime attachment continue to use the shared canonical campaign identity builder, with explicit mode-aware `RUNTIME_LIMITS_ACTIVE` payload evidence.
+
+## Known Issues
+- Existing campaigns created with a prior mismatched runtime payload may require operator review or recreation; persisted identities are not rewritten automatically.
+
 ## Added
 - Phase 8 burn-in campaign schema for release-scoped campaigns, continuation runs, campaign events, pending reject labels, pending PAPER position outcomes, and campaign exports.
 - Operator CLI for campaign create/start/resume/status/pause/qualify/export flows with JSON and human-readable output.

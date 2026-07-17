@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from alphaforge.burnin import persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_trade_outcome, utc_now
-from alphaforge.burnin_campaign import create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign
+from alphaforge.burnin import config_hash, persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_trade_outcome, utc_now
+from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign
 from alphaforge.burnin_ops import (
     audit_payload,
     bootstrap_ops_schema,
@@ -65,6 +65,80 @@ def test_preflight_cannot_pass_unverified_critical_check(monkeypatch, tmp_path):
     assert out["status"] == "FAIL_CLOSED"
     assert "runtime_identity_matches_campaign_identity" in out["blockers"]
     assert next(c for c in out["checks"] if c["name"] == "runtime_identity_matches_campaign_identity")["status"] == "UNAVAILABLE"
+
+
+def test_phase9_paper_candidate_and_runtime_identity_share_exact_config_payload(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ALPHAFORGE_DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'runtime.db'}")
+    # Non-default values cover the previously dropped RuntimeConfig fields.
+    monkeypatch.setenv("ALPHAFORGE_MIN_SL_PCT", "0.31")
+    monkeypatch.setenv("ALPHAFORGE_STOP_TOO_WIDE_SOFT_SCORE_MIN", "8.4")
+    monkeypatch.setenv("ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY", "7")
+    candidate = ops._candidate_identity("rel", ["BTCUSDT"], ["1h"])
+    runtime = ops._actual_runtime_identity("rel", ["BTCUSDT"], ["1h"])
+
+    assert candidate["config_payload"] == runtime["config_payload"]
+    assert candidate["config_hash"] == runtime["config_hash"]
+    assert candidate["config_payload"]["RUNTIME_LIMITS_ACTIVE"] is True
+
+
+def test_phase8_identity_is_mode_aware_and_component_hashes_are_deterministic():
+    from alphaforge.config import RuntimeSettings
+
+    paper = RuntimeSettings(execution_mode="PAPER")
+    backtest = RuntimeSettings(execution_mode="BACKTEST")
+    paper_identity = build_phase8_campaign_identity(paper, ["ETHUSDT", "BTCUSDT"], ["5m", "1h"], release_id="rel")
+    paper_repeat = build_phase8_campaign_identity(paper, ["BTCUSDT", "ETHUSDT"], ["1h", "5m"], release_id="rel")
+    backtest_identity = build_phase8_campaign_identity(backtest, ["BTCUSDT", "ETHUSDT"], ["1h", "5m"], release_id="rel")
+
+    assert paper_identity["config_hash"] == paper_repeat["config_hash"]
+    assert paper_identity["strategy_config_hash"] == paper_repeat["strategy_config_hash"]
+    assert paper_identity["universe_hash"] == paper_repeat["universe_hash"]
+    assert paper_identity["execution_cost_config_hash"] == paper_repeat["execution_cost_config_hash"]
+    assert paper_identity["config_payload"]["RUNTIME_LIMITS_ACTIVE"] is True
+    assert backtest_identity["config_payload"]["RUNTIME_LIMITS_ACTIVE"] is False
+    assert paper_identity["config_hash"] != backtest_identity["config_hash"]
+
+
+def test_preflight_passes_with_matching_runtime_identity_and_records_payloads(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setattr(ops, "_git_clean", lambda: True)
+    monkeypatch.setattr(ops, "_git_commit", lambda: "commit")
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: "dev\n")
+    monkeypatch.setattr(ops, "clock_skew_check", lambda: {"status": "PASS"})
+    monkeypatch.setattr(ops, "_actual_runtime_identity", lambda release, symbols, intervals: {**ops._candidate_identity(release, symbols, intervals), "execution_mode": "PAPER"})
+
+    out = ops.preflight(str(tmp_path / "pf.db"), "rel", ["BTCUSDT"], ["1h"], require_market_data=False)
+    check = next(c for c in out["checks"] if c["name"] == "runtime_identity_matches_campaign_identity")
+    assert out["status"] == "PASS"
+    assert check["status"] == "PASS"
+    assert check["details"]["config_payload_differences"] == {}
+
+
+def test_preflight_fails_closed_for_derived_runtime_config_drift(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setattr(ops, "_git_clean", lambda: True)
+    monkeypatch.setattr(ops, "_git_commit", lambda: "commit")
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: "dev\n")
+    monkeypatch.setattr(ops, "clock_skew_check", lambda: {"status": "PASS"})
+
+    def drifted_runtime(release, symbols, intervals):
+        identity = {**ops._candidate_identity(release, symbols, intervals), "execution_mode": "PAPER"}
+        payload = {**identity["config_payload"], "MAX_TRADES_GLOBAL_PER_DAY": 999}
+        return {**identity, "config_payload": payload, "config_hash": config_hash(payload)}
+
+    monkeypatch.setattr(ops, "_actual_runtime_identity", drifted_runtime)
+    out = ops.preflight(str(tmp_path / "pf.db"), "rel", ["BTCUSDT"], ["1h"], require_market_data=False)
+    check = next(c for c in out["checks"] if c["name"] == "runtime_identity_matches_campaign_identity")
+    assert out["status"] == "FAIL_CLOSED"
+    assert "runtime_identity_matches_campaign_identity" in out["blockers"]
+    assert check["details"]["config_payload_differences"]["MAX_TRADES_GLOBAL_PER_DAY"] == {"candidate": 10, "runtime": 999}
 
 
 def test_phase9_health_detects_running_without_worker_and_sql_counters(monkeypatch, tmp_path):

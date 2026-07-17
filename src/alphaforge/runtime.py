@@ -94,6 +94,24 @@ class RuntimeConfig:
     max_expected_slippage_pct: float = 0.0020
     max_abs_funding_rate_pct: float = 0.0010
     min_liquidity_usd: float = 5_000_000.0
+    # Keep every decision-filter field that can be environment-configured on
+    # the runtime config.  Phase 8/9 campaign identity hashes this effective
+    # filter configuration, so dropping any of these while building the
+    # orchestrator would make a PAPER preflight compare two different payloads.
+    min_sl_pct: float = 0.15
+    max_sl_pct: float = 1.5
+    min_atr_pct: float = 0.25
+    max_atr_pct: float = 3.0
+    block_unknown_expectancy: bool = True
+    block_chop_market: bool = True
+    require_regime_alignment: bool = True
+    stop_too_wide_hard_reject: bool = True
+    stop_too_wide_soft_score_min: float = 9.0
+    stop_too_wide_soft_effective_rr_min: float = 1.75
+    stop_too_wide_max_risk_scale: float = 0.50
+    stop_too_wide_extreme_mult: float = 1.50
+    max_trades_global_per_day: int = 10
+    max_trades_symbol_per_day: int = 2
     global_kill_switch: bool = False
     require_live_qualification: bool = True
     enable_shadow_mode: bool = False
@@ -1466,7 +1484,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_soft_effective_rr_min=cfg.runtime.stop_too_wide_soft_effective_rr_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day)
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         now_ts = time.time()
