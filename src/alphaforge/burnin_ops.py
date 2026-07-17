@@ -136,8 +136,9 @@ def _actual_runtime_identity(release_id: str, symbols: Sequence[str], intervals:
     try:
         from alphaforge.runtime import _build_runtime_from_env
         runtime = _build_runtime_from_env()
-        hashes = runtime._phase8_runtime_hashes(list(symbols), list(intervals))
-        return {key: hashes.get(key) for key in ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash", "execution_mode")}
+        # Preserve the canonical builder's payloads for an auditable preflight
+        # comparison; callers still enforce all critical hashes below.
+        return runtime._phase8_runtime_hashes(list(symbols), list(intervals))
     finally:
         for key, value in (("ALPHAFORGE_RELEASE_ID", old_release), ("ALPHAFORGE_EXECUTION_MODE", old_exec), ("EXECUTION_MODE", old_mode)):
             if value is None:
@@ -218,7 +219,21 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         expected = {key: ident.get(key) for key in ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash")}
         expected["execution_mode"] = "PAPER"
         mismatches = {key: {"expected": expected[key], "observed": runtime_ident.get(key)} for key in expected if runtime_ident.get(key) != expected[key]}
-        add("runtime_identity_matches_campaign_identity", "PASS" if not mismatches else "FAIL", {"expected": expected, "observed": runtime_ident, "mismatches": mismatches})
+        candidate_payload = ident.get("config_payload", {})
+        runtime_payload = runtime_ident.get("config_payload", {})
+        payload_differences = {
+            key: {"candidate": candidate_payload.get(key), "runtime": runtime_payload.get(key)}
+            for key in sorted(set(candidate_payload) | set(runtime_payload))
+            if candidate_payload.get(key) != runtime_payload.get(key)
+        }
+        add("runtime_identity_matches_campaign_identity", "PASS" if not mismatches else "FAIL", {
+            "expected": expected,
+            "observed": runtime_ident,
+            "mismatches": mismatches,
+            "candidate_config_payload": candidate_payload,
+            "runtime_config_payload": runtime_payload,
+            "config_payload_differences": payload_differences,
+        })
     except Exception as exc:
         add("runtime_identity_matches_campaign_identity", "UNAVAILABLE", f"{exc.__class__.__name__}:{exc}")
     add("execution_cost_identity_complete", "PASS" if ident.get("execution_cost_config_hash") and all(k in ident.get("execution_cost_payload", {}) for k in ("max_spread_pct", "paper_slippage_bps", "min_liquidity_usd")) else "FAIL", ident.get("execution_cost_payload"))
