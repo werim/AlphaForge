@@ -14,6 +14,8 @@ from alphaforge.burnin_campaign import (
     check_campaign_completion, create_campaign, event, export_campaign_bundle,
     get_campaign, pause_campaign, qualify_campaign, start_or_resume_campaign,
     update_campaign_heartbeat, _exec,
+    fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity,
+    identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS,
 )
 from alphaforge.config import load_config_from_env
 
@@ -342,7 +344,15 @@ def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Seq
         start = start_or_resume_campaign(conn, campaign.campaign_id)
         conn.commit()
         if detach:
-            proc = _launch_worker(db, campaign.campaign_id)
+            try:
+                proc = _launch_worker(db, campaign.campaign_id)
+            except RuntimeError as exc:
+                # _launch_worker already persisted a precise fail-closed identity
+                # or mapping failure; do not overwrite it as a spawn failure.
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": str(exc)}
+            except Exception as exc:
+                _mark_campaign_failed(conn, campaign.campaign_id, "PHASE9_WORKER_SPAWN_FAILED", {"error": f"{exc.__class__.__name__}:{exc}"})
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "PHASE9_WORKER_SPAWN_FAILED"}
             worker_started_at = utc_now()
             conn.execute("UPDATE burnin_campaigns SET worker_pid=?, worker_started_at=? WHERE campaign_id=?", (proc.pid, worker_started_at, campaign.campaign_id))
             conn.commit()
@@ -800,10 +810,17 @@ def _launch_worker(db: str, campaign_id: str) -> subprocess.Popen[Any]:
     cmd = [sys.executable, "-m", "alphaforge.burnin_cli", "--db", db, "worker", "--campaign-id", campaign_id]
     conn = _connect(db)
     try:
-        campaign = get_campaign(conn, campaign_id)
-        if campaign is None:
-            raise KeyError("campaign not found")
-        release_id = str(campaign["release_id"])
+        campaign, run, mapping, error = load_active_campaign_attachment(conn, campaign_id)
+        campaign_identity = campaign_attachment_identity(campaign) if campaign else {}
+        run_identity = run_attachment_identity(run) if run else {}
+        mismatches = identity_mismatches(campaign_identity, run_identity, ATTACHMENT_IDENTITY_FIELDS) if run else {"active_run": {"expected": campaign.get("active_run_id") if campaign else None, "observed": None}}
+        if error or mismatches:
+            reason = error or "PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH"
+            if campaign:
+                fail_active_campaign_run(conn, campaign_id, reason, details={"reason": reason, "campaign_identity": campaign_identity, "run_identity": run_identity, "runtime_identity": {}, "campaign_run_mismatches": mismatches, "run_runtime_mismatches": {}, "identity_sources": {"campaign": "burnin_campaigns", "run": "burnin_runs", "runtime_release": None}, "active_run_mapping": mapping or {}})
+                conn.commit()
+            raise RuntimeError(reason)
+        release_id = str(campaign_identity["release_id"])
     finally:
         conn.close()
     # The persisted campaign is the worker attachment contract; do not inherit an

@@ -246,6 +246,35 @@ def test_failed_zero_sample_run_is_terminal_and_excluded_from_aggregate(tmp_path
     assert aggregate_campaign(conn, camp.campaign_id)["metrics"]["source_run_ids"] == [resumed["burnin_run_id"]]
 
 
+def test_campaign_run_identity_mismatch_blocks_worker_spawn_and_is_idempotent(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn, release="phase9_trial")
+    conn.execute("UPDATE burnin_runs SET release_id='stale_release' WHERE burnin_run_id=?", (run,)); conn.commit()
+    monkeypatch.setattr(ops.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn")))
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH"):
+        ops._launch_worker(str(db), camp.campaign_id)
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH"):
+        ops._launch_worker(str(db), camp.campaign_id)
+    state = conn.execute("SELECT campaign_status,last_error FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()
+    rows = conn.execute("SELECT status,ended_at FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()
+    events = conn.execute("SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? AND event_type='PHASE8_CAMPAIGN_ATTACH_FAILED'", (camp.campaign_id,)).fetchone()[0]
+    assert tuple(state) == ("PAUSED", "PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH")
+    assert tuple(rows)[0] == "FAILED" and tuple(rows)[1] and events == 1
+
+
+def test_worker_spawn_failure_terminalizes_created_continuation(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    db = str(tmp_path / "spawn.db")
+    monkeypatch.setattr(ops, "preflight", lambda *a, **k: {"status": "PASS", "evidence_locations": {}})
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: (_ for _ in ()).throw(OSError("spawn failed")))
+    out = launch_campaign(db, "rel", 0, ["BTCUSDT"], ["1h"], detach=True)
+    conn = sqlite3.connect(db); row = conn.execute("SELECT r.status, cr.status FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id").fetchone(); conn.close()
+    assert out["reason"] == "PHASE9_WORKER_SPAWN_FAILED" and row == ("FAILED", "FAILED")
+
+
 def test_recovery_drill_starts_new_worker_and_preserves_exact_pending_ids(monkeypatch, tmp_path):
     import alphaforge.burnin_ops as ops
 

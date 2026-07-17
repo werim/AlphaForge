@@ -166,7 +166,7 @@ def _campaign_matching_runtime(db, rt):
     conn.commit(); conn.close(); return camp.campaign_id,h
 
 def test_runtime_attach_blocks_config_strategy_universe_execution_cost_release_and_mode_mismatches(tmp_path):
-    for key, reason in [('config_hash','PHASE8_CAMPAIGN_CONFIG_DRIFT'),('strategy_config_hash','PHASE8_CAMPAIGN_STRATEGY_DRIFT'),('universe_hash','PHASE8_CAMPAIGN_UNIVERSE_DRIFT'),('execution_cost_config_hash','PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT'),('release_id','PHASE8_CAMPAIGN_RELEASE_MISMATCH')]:
+    for key, reason in [('config_hash','PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH'),('strategy_config_hash','PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH'),('universe_hash','PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH'),('execution_cost_config_hash','PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT'),('release_id','PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH')]:
         db=tmp_path/f'{key}.db'; rt, engine=_runtime_for_campaign(db); cid,h=_campaign_matching_runtime(db,rt)
         col='release_id' if key=='release_id' else key
         with engine.begin() as conn: conn.execute(text(f"UPDATE burnin_campaigns SET {col}='mismatch' WHERE campaign_id=:cid"), {'cid':cid})
@@ -208,9 +208,9 @@ def test_runtime_attachment_records_full_release_mismatch_and_terminalizes_run(m
         event_row=connection.execute(text("SELECT details_json FROM burnin_campaign_events WHERE campaign_id=:cid AND event_type='PHASE8_CAMPAIGN_ATTACH_FAILED' ORDER BY id DESC LIMIT 1"), {'cid': camp.campaign_id}).scalar_one()
         details=json.loads(event_row)
         state=connection.execute(text("SELECT status, ended_at FROM burnin_campaign_runs WHERE burnin_run_id=:bid"), {'bid':run}).one()
-    assert details['expected']['release_id'] == details['expected']['campaign_release_id'] == details['expected']['run_release_id'] == 'phase9_trial'
-    assert details['observed']['release_id'] == 'default'
-    assert details['observed']['release_id_source'] == 'runtime_config:phase7_burnin_release_id'
+    assert details['campaign_identity']['release_id'] == details['run_identity']['release_id'] == 'phase9_trial'
+    assert details['runtime_identity']['release_id'] == 'default'
+    assert details['identity_sources']['runtime_release'] == 'runtime_config:phase7_burnin_release_id'
     assert state.status == 'FAILED' and state.ended_at
     engine.dispose()
 
@@ -352,9 +352,10 @@ def test_cli_created_campaign_attaches_without_false_config_drift(tmp_path):
 
 
 def test_canonical_identity_drift_reasons_for_filter_strategy_universe_and_cost(tmp_path):
-    db=tmp_path/'identity_drift.db'; rt, engine=_runtime_for_campaign(db); cid,_=_campaign_matching_runtime(db,rt)
-    cases=[('config_hash','PHASE8_CAMPAIGN_CONFIG_DRIFT'),('strategy_config_hash','PHASE8_CAMPAIGN_STRATEGY_DRIFT'),('universe_hash','PHASE8_CAMPAIGN_UNIVERSE_DRIFT'),('execution_cost_config_hash','PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT')]
+    db=tmp_path/'identity_drift.db'; rt, engine=_runtime_for_campaign(db)
+    cases=[('config_hash','PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH'),('strategy_config_hash','PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH'),('universe_hash','PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH'),('execution_cost_config_hash','PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT')]
     for col,reason in cases:
+        cid,_=_campaign_matching_runtime(db,rt)
         with engine.begin() as conn:
             conn.execute(text('update burnin_campaigns set campaign_status=\'RUNNING\', last_error=NULL where campaign_id=:cid'), {'cid':cid})
             conn.execute(text(f'update burnin_campaigns set {col}=\'changed\' where campaign_id=:cid'), {'cid':cid})
