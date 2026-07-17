@@ -161,6 +161,14 @@ def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|No
 def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False, config_hash: str|None=None, strategy_config_hash: str|None=None, universe_hash: str|None=None) -> dict[str,Any]:
     bootstrap_campaign_schema(conn); c=get_campaign(conn,campaign_id)
     if not c: raise KeyError("campaign not found")
+    pid = c.get("worker_pid")
+    if pid:
+        try:
+            os.kill(int(pid), 0)
+        except (OSError, ValueError):
+            pass
+        else:
+            raise RuntimeError("WORKER_SHUTDOWN_IN_PROGRESS")
     for k,v in {"config_hash":config_hash,"strategy_config_hash":strategy_config_hash,"universe_hash":universe_hash}.items():
         if v and v != c[k]:
             _exec(conn,"UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:e WHERE campaign_id=:id",{"id":campaign_id,"e":"CONFIG_DRIFT"}); event(conn,campaign_id,"CONFIG_DRIFT",details={k:{"expected":c[k],"observed":v}}); raise ValueError("CONFIG_DRIFT")
@@ -178,24 +186,25 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
     event(conn,campaign_id,"CAMPAIGN_RESUMED" if resume else "CAMPAIGN_STARTED",burnin_run_id=run_id)
     return {"campaign_id":campaign_id,"burnin_run_id":run_id,"continuation_sequence":seq,"status":"RUNNING"}
 
-def fail_active_campaign_run(conn: Any, campaign_id: str, reason: str, *, details: Mapping[str, Any] | None = None) -> None:
-    """Terminally record an unattached continuation without deleting its audit trail."""
+def terminalize_active_campaign_run(conn: Any, campaign_id: str, *, run_status: str, campaign_status: str, reason: str, event_type: str, details: Mapping[str, Any] | None = None, clear_worker_metadata: bool = True) -> None:
+    """Atomically preserve a terminal continuation outcome and its accurate cause."""
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
-    run_id = c.get("active_run_id")
-    ts = utc_now()
-    already_terminal = False
+    run_id, ts = c.get("active_run_id"), utc_now()
+    existing = _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND burnin_run_id IS :bid AND event_type=:event AND details_json LIKE :reason LIMIT 1", {"cid": campaign_id, "bid": run_id, "event": event_type, "reason": f'%"reason": "{reason}"%' }).fetchone()
     if run_id:
-        row = _exec(conn, "SELECT status, end_time FROM burnin_runs WHERE burnin_run_id=:bid", {"bid": run_id}).fetchone()
-        if row is not None:
-            current = _row_dict(row)
-            already_terminal = current.get("status") == "FAILED" and bool(current.get("end_time")) and c.get("last_error") == reason
-        _exec(conn, "UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'", {"bid": run_id, "ts": ts})
-        _exec(conn, "UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'", {"cid": campaign_id, "bid": run_id, "ts": ts})
-    _exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:reason WHERE campaign_id=:cid", {"cid": campaign_id, "reason": reason})
-    if not already_terminal:
-        event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACH_FAILED", burnin_run_id=run_id, details={"reason": reason, **dict(details or {})})
+        _exec(conn, "UPDATE burnin_runs SET status=:status, end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'", {"status": run_status, "bid": run_id, "ts": ts})
+        _exec(conn, "UPDATE burnin_campaign_runs SET status=:status, ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'", {"status": run_status, "cid": campaign_id, "bid": run_id, "ts": ts})
+    metadata = ", worker_pid=NULL, worker_started_at=NULL" if clear_worker_metadata else ""
+    _exec(conn, f"UPDATE burnin_campaigns SET campaign_status=:status, last_error=:reason{metadata} WHERE campaign_id=:cid", {"status": campaign_status, "reason": reason, "cid": campaign_id})
+    if not existing:
+        event(conn, campaign_id, event_type, burnin_run_id=run_id, details={"reason": reason, "campaign_id": campaign_id, "burnin_run_id": run_id, **dict(details or {})})
+
+
+def fail_active_campaign_run(conn: Any, campaign_id: str, reason: str, *, details: Mapping[str, Any] | None = None) -> None:
+    """Record only attachment/identity failures using the attachment-failure event."""
+    terminalize_active_campaign_run(conn, campaign_id, run_status="FAILED", campaign_status="PAUSED", reason=reason, event_type="PHASE8_CAMPAIGN_ATTACH_FAILED", details=details)
 
 def pause_campaign(conn: Any, campaign_id: str) -> None:
     """Persist an operator pause without fabricating a runtime heartbeat."""
@@ -207,7 +216,7 @@ def pause_campaign(conn: Any, campaign_id: str) -> None:
     if run_id:
         _exec(conn, "UPDATE burnin_runs SET status='PAUSED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'", {"bid": run_id, "ts": ts})
         _exec(conn, "UPDATE burnin_campaign_runs SET status='PAUSED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'", {"cid": campaign_id, "bid": run_id, "ts": ts})
-    _exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_operator_activity_at=:ts, worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=:id", {"id": campaign_id, "ts": ts})
+    _exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_operator_activity_at=:ts WHERE campaign_id=:id", {"id": campaign_id, "ts": ts})
     event(conn, campaign_id, "CAMPAIGN_PAUSED", burnin_run_id=run_id, details={"operator_activity_at": ts})
 
 

@@ -3164,3 +3164,4 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ## Unreleased
 ### Fixed
 - Persist detached burn-in worker output, terminalize dead workers, and separate operator pause activity from runtime heartbeats.
+- Corrected post-attachment crash classification so only actual attachment failures emit attachment-failure events; paused workers retain PID tracking until exit.

@@ -2,7 +2,7 @@ from __future__ import annotations
 import argparse, json, os, sqlite3, sys, subprocess, time, traceback
 from pathlib import Path
 from sqlalchemy import create_engine
-from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, qualify_campaign, export_campaign_bundle, bootstrap_campaign_schema, aggregate_campaign, BurnInCampaignRunner, BinanceReadOnlyCandleProvider, DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS, fail_active_campaign_run, event
+from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, qualify_campaign, export_campaign_bundle, bootstrap_campaign_schema, aggregate_campaign, BurnInCampaignRunner, BinanceReadOnlyCandleProvider, DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS, terminalize_active_campaign_run, event
 from alphaforge.config import load_config_from_env
 
 def _db_path(args):
@@ -64,15 +64,24 @@ def main(argv=None) -> int:
                 if args.once:
                     with engine.begin() as conn: bootstrap_campaign_schema(conn)
                     res=runner.resolver_tick(); _print(res,args.json); return 0 if res.get('status') in {'OK','PAUSED'} else 1
-                import asyncio; res=asyncio.run(runner.run_foreground()); _print(res,args.json); return 0
+                import asyncio; res=asyncio.run(runner.run_foreground())
+                conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+                try:
+                    campaign=get_campaign(conn, args.campaign_id)
+                    if campaign and campaign.get("campaign_status") == "PAUSED" and campaign.get("worker_pid") == os.getpid():
+                        conn.execute("UPDATE burnin_campaigns SET worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (args.campaign_id,))
+                        event(conn, args.campaign_id, "WORKER_PAUSED_EXITED", burnin_run_id=campaign.get("active_run_id"), details={"worker_pid": os.getpid()})
+                        conn.commit()
+                finally: conn.close()
+                _print(res,args.json); return 0
             except BaseException as exc:
-                detail={"error": f"{exc.__class__.__name__}:{exc}", "traceback": traceback.format_exc()}
                 conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
                 try:
                     bootstrap_campaign_schema(conn)
-                    fail_active_campaign_run(conn, args.campaign_id, "WORKER_UNCAUGHT_EXCEPTION", details=detail)
-                    conn.execute("UPDATE burnin_campaigns SET worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (args.campaign_id,))
-                    event(conn, args.campaign_id, "WORKER_UNCAUGHT_EXCEPTION", details=detail)
+                    campaign=get_campaign(conn, args.campaign_id) or {}
+                    root=Path("artifacts") / "burnin" / args.campaign_id
+                    detail={"exception_type": exc.__class__.__name__, "message": str(exc), "traceback": traceback.format_exc(), "campaign_id": args.campaign_id, "burnin_run_id": campaign.get("active_run_id"), "worker_pid": campaign.get("worker_pid"), "stdout_log_path": str(root / "worker.stdout.log"), "stderr_log_path": str(root / "worker.stderr.log")}
+                    terminalize_active_campaign_run(conn, args.campaign_id, run_status="FAILED", campaign_status="FAILED", reason="WORKER_UNCAUGHT_EXCEPTION", event_type="WORKER_UNCAUGHT_EXCEPTION", details=detail)
                     conn.commit()
                 finally: conn.close()
                 raise
