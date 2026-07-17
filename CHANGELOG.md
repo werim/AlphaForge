@@ -145,3 +145,13 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Persistence now stores `position_id` on lifecycle events for position-management audit continuity.
 ### Fixed
 - Backtest persistence/export path now carries position-management identity fields across emitted lifecycle events.
+
+## [Unreleased] - 2026-07-17
+### Added
+- Canonical Phase 8/9 burn-in identity payload builder with auditable config payloads.
+### Changed
+- Runtime hash construction now delegates to the campaign identity builder.
+### Fixed
+- PAPER burn-in preflight no longer hashes equivalent runtime-limit configuration through divergent payload paths.
+### Known Issues
+- LIVE readiness remains unchanged and is not implied by burn-in identity parity.

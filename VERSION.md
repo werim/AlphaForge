@@ -133,3 +133,12 @@
 - **Lifecycle coverage:** includes `POSITION_REEVALUATED` and `TIME_STOP_EXIT` emission path and persistence of lifecycle/order/position identities.
 - **Execution realism coverage:** timeout/hold calibration and excursion metrics exported for forward-quality auditing.
 - **Live readiness verdict:** ❌ **NOT LIVE-READY** (unchanged).
+
+## Phase 9 Burn-in Identity Audit (2026-07-17)
+- **Current phase capability:** Canonical Phase 8/9 campaign/runtime identity construction and fail-closed preflight parity checks are now implemented.
+- **BACKTEST/PAPER/LIVE alignment:** Identity hashing now uses the same mode-aware payload builder; PAPER runtime limits cannot be silently omitted from only one identity source.
+- **Lifecycle / execution realism:** No lifecycle or execution economics changed.
+- **Persistence:** No schema or export migration; preflight returns the exact config payload for audit diagnostics.
+- **Known critical risk:** Historical noncanonical campaign hashes may need regeneration and will fail closed rather than being accepted.
+- **Last audit date:** 2026-07-17.
+- **Live readiness verdict:** ❌ **NOT LIVE-READY**; burn-in identity parity is not sufficient for LIVE approval.

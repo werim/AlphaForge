@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from alphaforge.ai_brain import AIBrain
+from alphaforge.burnin_campaign import build_phase8_campaign_identity
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.execution import build_execution_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
@@ -438,6 +439,28 @@ def _int_env(name: str, default: int) -> int:
     if raw is None:
         return default
     return int(raw)
+
+
+def _phase8_runtime_hashes(
+    *,
+    release_id: str,
+    strategy_config: Mapping[str, Any],
+    universe: list[str] | Mapping[str, Any],
+    execution_cost_config: Mapping[str, Any],
+    config: RuntimeConfig,
+    runtime_limits_active: bool = False,
+    runtime_limits: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build runtime burn-in identity through the canonical campaign builder."""
+    return build_phase8_campaign_identity(
+        release_id=release_id,
+        strategy_config=strategy_config,
+        universe=universe,
+        execution_cost_config=execution_cost_config,
+        execution_mode=config.execution_mode.value,
+        runtime_limits_active=runtime_limits_active,
+        runtime_limits=runtime_limits,
+    )
 
 
 def _build_runtime_from_env() -> RuntimeOrchestrator:

@@ -454,3 +454,23 @@
 - Persistence/export/schema changes: lifecycle persistence adds `position_id`; backtest outputs include `probability_calibration.csv` and MFE/MAE R-unit fields.
 - Tests added/executed: targeted scanner tests for calibration exports, LONG/SHORT split, timeout labels, MFE/MAE fields, time-stop emission, and identity continuity.
 - Remaining risks: calibration quality depends on upstream probability signal quality; current management-event simulation is minimal and intentionally conservative.
+
+## 2026-07-17 Patch — Phase 9 burn-in preflight config-hash parity
+
+### Why / root cause
+- Phase 8/9 campaign and runtime identity construction needed one canonical config-payload path. Independent payload construction can add `RUNTIME_LIMITS_ACTIVE` or PAPER runtime limits on only one side, producing a false config-hash mismatch despite matching release, strategy, universe, cost, and mode identity components.
+
+### Files and behavior changed
+- Added `src/alphaforge/burnin_campaign.py` as the canonical Phase 8/9 config payload and identity builder. The exact `config_payload` is retained with the hash for audit comparison. `RUNTIME_LIMITS_ACTIVE` is always represented; runtime-limit values are represented only when the gate is active.
+- Added `src/alphaforge/burnin_ops.py` preflight helpers. Critical identity parity remains exact and drift returns `FAIL_CLOSED`; no bypass was introduced.
+- Updated `src/alphaforge/runtime.py` so `_phase8_runtime_hashes` delegates to `build_phase8_campaign_identity`.
+- Added Phase 9 parity tests for PAPER hash equality, mode-aware BACKTEST/PAPER differences, deterministic component hashes, passing preflight, and real runtime-limit drift rejection.
+
+### Lifecycle / persistence / schema impact
+- No lifecycle transitions, persistence schema, or exports changed. The identity payload is returned for preflight auditability and is not persisted by this patch.
+
+### Compatibility / migration / risks
+- Existing campaign artifacts created with a noncanonical payload may fail closed against the canonical runtime identity and should be regenerated rather than bypassed. LIVE readiness remains unchanged; identity parity is not a live-trading approval.
+
+### Push recommendation
+- Safe to merge after the focused and full test suites pass; preserve fail-closed behavior for all identity drift.
