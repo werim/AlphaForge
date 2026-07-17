@@ -12,7 +12,7 @@ from alphaforge.ai_brain import AIBrain
 from alphaforge.persistence import init_db
 from alphaforge import persistence as persistence_module
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
-from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot
+from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot, latest_runtime_state_snapshot, build_readonly_reconciliation_probe, persist_verified_paper_recovery
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, create_campaign
 
 
@@ -652,3 +652,40 @@ def test_recovery_scope_blocks_authoritative_execution_exposure(tmp_path: Path, 
     result = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="fresh")
     assert result["blocked"]
     assert result["scope"] == "GLOBAL_EXECUTION_RISK"
+
+
+def test_verified_zero_exposure_paper_recovery_supersedes_unscoped_history(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'verified-recovery.sqlite3'}")
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED",
+        instance_id="old", startup_id="old", process_id=99999999, recovery_action_required=True,
+    ))
+    provider = type("Provider", (), {"snapshot": lambda self: {"evidence_status": "COMPLETE", "orders": [], "positions": [], "errors": []}})()
+    decision = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="new", reconciliation_probe=build_readonly_reconciliation_probe(provider))
+    assert decision["blocked"] is False and decision["reconciliation_probe_clean"] is True
+    persist_verified_paper_recovery(engine, probe=decision["reconciliation_probe"], prior_snapshot=decision["latest"])
+    latest = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="new")
+    assert latest["blocked"] is False and latest["latest"]["runtime_status"] == "RECONCILED"
+
+
+def test_unavailable_reconciliation_provider_remains_fail_closed(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'missing-provider.sqlite3'}")
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED", instance_id="old", startup_id="old"))
+    result = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="new", reconciliation_probe=build_readonly_reconciliation_probe(None))
+    assert result["blocked"] is True
+    assert any("read_only_reconciliation_provider_unavailable" in e for e in result["query_errors"])
+
+
+def test_synthetic_reconciled_snapshot_is_not_a_running_worker_and_real_runtime_supersedes_it(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'synthetic-recovery.sqlite3'}")
+    persist_verified_paper_recovery(engine, probe={"evidence_status": "COMPLETE", "orders": [], "positions": [], "errors": []}, prior_snapshot=None)
+    synthetic = latest_runtime_state_snapshot(engine)
+    assert synthetic["runtime_status"] == "RECONCILED"
+    assert synthetic["process_id"] == 0
+    assert evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="new")["previous_process_alive"] is False
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="OPERATING",
+        instance_id="real", startup_id="real", process_id=0, campaign_id="new", burnin_run_id="new_run",
+    ))
+    latest = latest_runtime_state_snapshot(engine)
+    assert latest["instance_id"] == "real" and latest["runtime_status"] == "OPERATING"

@@ -243,3 +243,28 @@ def save_exchange_reconciliation_event(engine: Engine, *, instance_id: str, star
     ensure_runtime_state_schema(engine)
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO exchange_reconciliation_events(event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json) VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d)"), {"ts": canonical_utc_timestamp(),"i":instance_id,"s":startup_id,"m":mode,"st":status,"mc":mismatch_count,"oo":orphan_order_count,"op":orphan_position_count,"ro":exchange_read_only_status,"d":json.dumps(dict(diagnostics or {}), sort_keys=True, default=str)})
+
+
+def persist_verified_paper_recovery(engine: Engine, *, probe: Mapping[str, Any], prior_snapshot: Mapping[str, Any] | None) -> None:
+    """Append verified PAPER recovery evidence; never rewrite an unclean snapshot.
+
+    This is deliberately limited to a complete, empty read-only exchange snapshot.
+    It records both the exchange observation and a new clean runtime state, so a
+    historical unscoped failure cannot remain the latest recovery record forever.
+    """
+    if (str(probe.get("evidence_status") or "").upper() != "COMPLETE" or probe.get("errors")
+            or probe.get("orders") or probe.get("positions")):
+        raise RuntimeError("verified_paper_recovery_requires_complete_zero_exposure_probe")
+    instance_id = f"recovery:{uuid.uuid4().hex}"
+    startup_id = f"recovery:{uuid.uuid4().hex}"
+    save_exchange_reconciliation_event(engine, instance_id=instance_id, startup_id=startup_id,
+                                       mode="PAPER", status="CLEAN", exchange_read_only_status="AVAILABLE",
+                                       diagnostics={"probe": dict(probe), "prior_snapshot_id": (prior_snapshot or {}).get("id"),
+                                                    "recovery_action": "VERIFIED_ZERO_EXPOSURE"})
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECONCILED",
+        instance_id=instance_id, startup_id=startup_id, process_id=0,
+        unknown_exchange_state=False, exchange_read_only_status="AVAILABLE", reconciliation_status="CLEAN",
+        recovery_action_required=False,
+        diagnostics_json={"recovery_action": "VERIFIED_ZERO_EXPOSURE", "prior_snapshot_id": (prior_snapshot or {}).get("id")},
+    ))
