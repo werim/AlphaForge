@@ -3165,3 +3165,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Fixed
 - Persist detached burn-in worker output, terminalize dead workers, and separate operator pause activity from runtime heartbeats.
 - Corrected post-attachment crash classification so only actual attachment failures emit attachment-failure events; paused workers retain PID tracking until exit.
+
+## Recovery scope hardening — 2026-07-17
+
+### Added
+- Append-only recovery-scope events with blocking snapshot provenance and authoritative SQL exposure counts.
+
+### Changed
+- PAPER startup and preflight now share an explicit recovery evaluator that scopes inherited runtime history by campaign and current execution risk.
+
+### Fixed
+- A terminal, dead, unrelated PAPER runtime with no current exposure no longer self-perpetuates `UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED` snapshots.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- Runtime snapshot schema gains nullable campaign/run/release lineage columns through an additive in-place migration.
+
+### Known Issues
+- LIVE and LIVE_PRECHECK intentionally remain strict on every unclean predecessor; operator reconciliation is still required for genuine shared risk.

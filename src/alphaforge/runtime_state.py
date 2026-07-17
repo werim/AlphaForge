@@ -29,6 +29,9 @@ class RuntimeStateSnapshot:
     process_id: int = field(default_factory=os.getpid)
     instance_id: str = ""
     startup_id: str = field(default_factory=lambda: f"startup:{uuid.uuid4().hex}")
+    campaign_id: str | None = None
+    burnin_run_id: str | None = None
+    release_id: str | None = None
     last_start_time: str | None = None
     last_shutdown_time: str | None = None
     last_error: str | None = None
@@ -70,7 +73,7 @@ def ensure_runtime_state_schema(engine: Engine) -> None:
         conn.execute(text("""
         CREATE TABLE IF NOT EXISTS runtime_state_snapshots (
           id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, instance_id TEXT NOT NULL,
-          startup_id TEXT, process_id INTEGER, mode TEXT, requested_mode TEXT, actual_mode TEXT,
+          startup_id TEXT, campaign_id TEXT, burnin_run_id TEXT, release_id TEXT, process_id INTEGER, mode TEXT, requested_mode TEXT, actual_mode TEXT,
           runtime_status TEXT, heartbeat_age_sec REAL, last_start_time TEXT, last_shutdown_time TEXT,
           last_error TEXT, kill_switch_active INTEGER, kill_switch_reason TEXT, active_symbols TEXT,
           active_position_count INTEGER, active_positions TEXT, pending_order_count INTEGER,
@@ -89,6 +92,12 @@ def ensure_runtime_state_schema(engine: Engine) -> None:
           mode TEXT, status TEXT, mismatch_count INTEGER, orphan_order_count INTEGER,
           orphan_position_count INTEGER, exchange_read_only_status TEXT, diagnostics_json TEXT)"""))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_runtime_state_latest ON runtime_state_snapshots(timestamp DESC, id DESC)"))
+        # Existing production databases predate lineage columns.  Additive migration
+        # preserves the append-only snapshot history and is safe on SQLite.
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(runtime_state_snapshots)"))}
+        for name in ("campaign_id", "burnin_run_id", "release_id"):
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE runtime_state_snapshots ADD COLUMN {name} TEXT"))
 
 def save_runtime_state_snapshot(engine: Engine, snapshot: RuntimeStateSnapshot) -> None:
     ensure_runtime_state_schema(engine)
@@ -108,6 +117,67 @@ def latest_runtime_state_snapshot(engine: Engine) -> dict[str, Any] | None:
         try: out[key] = json.loads(out.get(key) or "[]")
         except Exception: out[key] = [] if key != "diagnostics_json" else {}
     return out
+
+
+def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | None = None) -> dict[str, Any]:
+    """Evaluate recovery from authoritative current state, not snapshot counters.
+
+    PAPER may isolate a dead, terminal, unrelated campaign only when SQL exposure
+    and the latest reconciliation evidence are clean.  LIVE variants deliberately
+    retain the historical unclean-start fail-closed rule.
+    """
+    ensure_runtime_state_schema(engine)
+    latest = latest_runtime_state_snapshot(engine)
+    clean_statuses = {"STOPPED", "CLEAN_SHUTDOWN", "STOPPING", "RECONCILED"}
+    exposure = {"active_positions": 0, "pending_orders": 0, "orphan_orders": 0, "orphan_positions": 0}
+    kill_switch = False
+    reconciliation_status = "UNKNOWN"
+    campaign_terminal = True
+    process_alive = False
+    with engine.connect() as conn:
+        def count(sql: str) -> int:
+            try: return int(conn.execute(text(sql)).scalar_one() or 0)
+            except Exception: return 0
+        exposure["active_positions"] = count("SELECT COUNT(*) FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')")
+        exposure["pending_orders"] = count("SELECT COUNT(*) FROM orders WHERE UPPER(COALESCE(status,'')) IN ('PENDING','OPEN','ORDER_PLACED','ENTRY_SUBMITTED')")
+        try:
+            row = conn.execute(text("SELECT status, orphan_order_count, orphan_position_count FROM exchange_reconciliation_events ORDER BY id DESC LIMIT 1")).mappings().first()
+            if row:
+                reconciliation_status = str(row.get("status") or "UNKNOWN").upper()
+                exposure["orphan_orders"] = int(row.get("orphan_order_count") or 0)
+                exposure["orphan_positions"] = int(row.get("orphan_position_count") or 0)
+        except Exception: pass
+        try: kill_switch = bool(conn.execute(text("SELECT kill_switch_active FROM runtime_control_state WHERE id=1")).scalar_one_or_none())
+        except Exception: pass
+        if campaign_id:
+            try:
+                state = conn.execute(text("SELECT campaign_status, worker_pid FROM burnin_campaigns WHERE campaign_id=:id"), {"id": campaign_id}).mappings().first()
+                if state:
+                    campaign_terminal = str(state.get("campaign_status") or "").upper() in {"FAILED", "COMPLETED", "QUALIFIED", "SUSPENDED"}
+            except Exception: pass
+    if latest and latest.get("process_id"):
+        try: os.kill(int(latest["process_id"]), 0); process_alive = True
+        except (OSError, ValueError): pass
+    prior_unclean = bool(latest and str(latest.get("runtime_status") or "").upper() not in clean_statuses)
+    prior_campaign = (latest or {}).get("campaign_id")
+    same_campaign = bool(campaign_id and prior_campaign and campaign_id == prior_campaign)
+    # Reconciliation is global only when its *current* evidence remains dirty.
+    unresolved_reconciliation = reconciliation_status not in {"CLEAN", "NOT_REQUIRED_BACKTEST", "LOCAL_ONLY_DIAGNOSTIC", "UNKNOWN"}
+    # A fresh pending order is loaded and age-validated by the runtime below;
+    # only a stale/unparseable pending order is fail-closed there.  This keeps
+    # legitimate in-flight lifecycle recovery compatible while still blocking
+    # all other current execution exposure here.
+    global_risk = bool(exposure["active_positions"] or exposure["orphan_orders"] or exposure["orphan_positions"] or kill_switch or unresolved_reconciliation)
+    if same_campaign: scope = "SAME_CAMPAIGN"
+    elif global_risk: scope = "GLOBAL_EXECUTION_RISK"
+    elif prior_unclean: scope = "UNRELATED_HISTORICAL_RUNTIME"
+    else: scope = "SAME_RUNTIME_LINEAGE" if latest and latest.get("instance_id") == "" else "UNRELATED_HISTORICAL_RUNTIME"
+    strict_live = str(mode).upper() in {"LIVE", "LIVE_PRECHECK"}
+    blocked = global_risk or (strict_live and prior_unclean) or (same_campaign and prior_unclean) or process_alive
+    return {"blocked": blocked, "scope": scope, "latest": latest, "current_exposure_check": exposure,
+            "kill_switch_active": kill_switch, "reconciliation_status": reconciliation_status,
+            "previous_process_alive": process_alive, "campaign_terminal": campaign_terminal,
+            "prior_unclean": prior_unclean, "original_reason": (latest or {}).get("fail_closed_reason")}
 
 def save_runtime_recovery_event(engine: Engine, *, instance_id: str, startup_id: str, mode: str, status: str, reason: str, diagnostics: Mapping[str, Any] | None = None) -> None:
     ensure_runtime_state_schema(engine)

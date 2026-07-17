@@ -18,6 +18,7 @@ from alphaforge.burnin_campaign import (
     identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS,
 )
 from alphaforge.config import load_config_from_env
+from alphaforge.runtime_state import evaluate_runtime_recovery
 
 PHASE9_SCHEMA_VERSION = "phase9_ops_v2"
 ALLOWED_FINAL_DECISIONS = {"PAPER_BURNIN_INCOMPLETE", "PAPER_BURNIN_FAILED", "PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW", "PAPER_BURNIN_SUSPENDED"}
@@ -253,6 +254,12 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("no_stale_worker_occupying_campaign", "PASS" if int(stale) == 0 else "FAIL", stale)
         rec = conn.execute("SELECT COUNT(*) FROM burnin_campaigns WHERE campaign_status='RECOVERY_REQUIRED'").fetchone()[0]
         add("no_unresolved_recovery_required_state", "PASS" if int(rec) == 0 else "FAIL", rec)
+        recovery_engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
+        try:
+            recovery = evaluate_runtime_recovery(recovery_engine, mode="PAPER", campaign_id=cid)
+            add("runtime_recovery_scope", "PASS" if not recovery["blocked"] else "FAIL", recovery)
+        finally:
+            recovery_engine.dispose()
     usage = __import__("shutil").disk_usage(Path(db).parent if Path(db).parent.exists() else Path.cwd())
     add("disk_space_sufficient", "PASS" if usage.free > 100 * 1024 * 1024 else "FAIL", {"free_bytes": usage.free})
     if require_market_data:

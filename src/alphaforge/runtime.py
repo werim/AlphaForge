@@ -33,7 +33,7 @@ from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
-from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, latest_runtime_state_snapshot
+from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery
 from alphaforge.config import load_config_from_env, runtime_filter_config
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -201,6 +201,7 @@ class RuntimeOrchestrator:
     _burnin_evidence_incomplete: bool = field(default=False, init=False)
     _burnin_suspended: bool = field(default=False, init=False)
     _last_burnin_snapshot_ts: float = field(default=0.0, init=False)
+    _recovery_decision: dict[str, Any] = field(default_factory=dict, init=False)
     _qualification_samples: tuple[dict[str, Any], ...] = field(default_factory=lambda: (
         {
             "sample_id": "qp-001-btc-long",
@@ -312,6 +313,9 @@ class RuntimeOrchestrator:
             heartbeat_age_sec=hb_age,
             instance_id=self.runtime_instance_id,
             startup_id=self.startup_id,
+            campaign_id=os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or None,
+            burnin_run_id=self._burnin_run_id,
+            release_id=os.getenv("ALPHAFORGE_RELEASE_ID") or self.config.phase7_burnin_release_id,
             last_start_time=self._last_start_time,
             last_shutdown_time=self._last_shutdown_time,
             last_error=self._last_error,
@@ -337,7 +341,7 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY"},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision},
         )
 
     def _persist_runtime_state_snapshot(self, status: str | None = None) -> None:
@@ -364,11 +368,17 @@ class RuntimeOrchestrator:
         engine = self._resolve_persistence_engine()
         if engine is None:
             self._recovery_required = True; self._fail_closed_reason = "RUNTIME_DB_UNAVAILABLE"; return
-        latest = latest_runtime_state_snapshot(engine)
-        if latest and str(latest.get("runtime_status")) not in {"STOPPED", "CLEAN_SHUTDOWN", "STOPPING"}:
+        decision = evaluate_runtime_recovery(engine, mode=self.config.execution_mode.value, campaign_id=os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or None)
+        self._recovery_decision = decision
+        latest = decision.get("latest")
+        if decision["blocked"]:
             self._recovery_required = True
-            self._fail_closed_reason = "UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED"
-            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_REQUIRED", reason=self._fail_closed_reason, diagnostics={"previous": latest})
+            self._fail_closed_reason = "UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED" if decision.get("prior_unclean") else "RUNTIME_RECOVERY_REQUIRED"
+            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_REQUIRED", reason=self._fail_closed_reason, diagnostics={"blocking_snapshot_id": (latest or {}).get("id"), "blocking_instance_id": (latest or {}).get("instance_id"), "blocking_startup_id": (latest or {}).get("startup_id"), "original_reason": decision.get("original_reason"), "current_exposure_check": decision["current_exposure_check"], "scope_decision": decision["scope"]})
+        elif latest and decision.get("prior_unclean"):
+            # Append-only audit: do not manufacture a clean shutdown or copy the
+            # inherited failure into this runtime's state.
+            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_SCOPE_EVALUATED", reason="UNRELATED_HISTORY_NON_BLOCKING", diagnostics={"blocking_snapshot_id": latest.get("id"), "blocking_instance_id": latest.get("instance_id"), "blocking_startup_id": latest.get("startup_id"), "original_reason": decision.get("original_reason"), "current_exposure_check": decision["current_exposure_check"], "scope_decision": "UNRELATED_HISTORY_NON_BLOCKING"})
         now = time.time()
         with engine.connect() as conn:
             for row in conn.execute(text("SELECT symbol, qty, status FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')")).mappings():
