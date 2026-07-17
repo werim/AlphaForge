@@ -130,7 +130,10 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
             _exec(conn,"UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:e WHERE campaign_id=:id",{"id":campaign_id,"e":"CONFIG_DRIFT"}); event(conn,campaign_id,"CONFIG_DRIFT",details={k:{"expected":c[k],"observed":v}}); raise ValueError("CONFIG_DRIFT")
     old=c.get("active_run_id"); seq=int((_exec(conn,"SELECT COALESCE(MAX(continuation_sequence),-1)+1 FROM burnin_campaign_runs WHERE campaign_id=:id",{"id":campaign_id}).fetchone()[0]) or 0)
     if old and resume:
-        _exec(conn,"UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'",{"bid":old,"ts":utc_now()}); event(conn,campaign_id,"RECOVERY_REQUIRED",burnin_run_id=old)
+        ts = utc_now()
+        _exec(conn,"UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'",{"bid":old,"ts":ts})
+        _exec(conn,"UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'",{"cid":campaign_id,"bid":old,"ts":ts})
+        event(conn,campaign_id,"RECOVERY_REQUIRED",burnin_run_id=old)
     run_id=f"{campaign_id}_run_{seq:04d}"
     run=BurnInRun(run_id,c["release_id"],phase="PHASE8",execution_mode="PAPER",continuation_sequence=seq,start_time=utc_now(),status="RUNNING",git_commit=c["git_commit"],config_hash=c["config_hash"],strategy_config_hash=c["strategy_config_hash"],universe_hash=c["universe_hash"],source_provenance=c["source_provenance"],symbols=c["symbols"],intervals=c["intervals"],expected_duration_seconds=c.get("expected_duration_seconds"))
     persist_burnin_run(conn,run)
@@ -138,6 +141,19 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
     _exec(conn,"UPDATE burnin_campaigns SET campaign_status='RUNNING', started_at=COALESCE(started_at,:ts), active_run_id=:bid, restart_count=restart_count+:inc, last_heartbeat_at=:ts, last_error=NULL WHERE campaign_id=:cid",{"cid":campaign_id,"bid":run_id,"ts":run.start_time,"inc":1 if resume else 0})
     event(conn,campaign_id,"CAMPAIGN_RESUMED" if resume else "CAMPAIGN_STARTED",burnin_run_id=run_id)
     return {"campaign_id":campaign_id,"burnin_run_id":run_id,"continuation_sequence":seq,"status":"RUNNING"}
+
+def fail_active_campaign_run(conn: Any, campaign_id: str, reason: str, *, details: Mapping[str, Any] | None = None) -> None:
+    """Terminally record an unattached continuation without deleting its audit trail."""
+    c = get_campaign(conn, campaign_id)
+    if not c:
+        raise KeyError("campaign not found")
+    run_id = c.get("active_run_id")
+    ts = utc_now()
+    if run_id:
+        _exec(conn, "UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'", {"bid": run_id, "ts": ts})
+        _exec(conn, "UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'", {"cid": campaign_id, "bid": run_id, "ts": ts})
+    _exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:reason WHERE campaign_id=:cid", {"cid": campaign_id, "reason": reason})
+    event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACH_FAILED", burnin_run_id=run_id, details={"reason": reason, **dict(details or {})})
 
 def pause_campaign(conn: Any, campaign_id: str) -> None:
     c=get_campaign(conn,campaign_id); 
@@ -166,7 +182,7 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
-    runs = [_row_dict(r) for r in _exec(conn, "SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:cid ORDER BY cr.continuation_sequence", {"cid": campaign_id}).fetchall()]
+    runs = [_row_dict(r) for r in _exec(conn, "SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:cid AND (cr.status != 'FAILED' OR EXISTS (SELECT 1 FROM burnin_observations o WHERE o.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_trade_outcomes t WHERE t.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_reject_outcomes j WHERE j.burnin_run_id=r.burnin_run_id)) ORDER BY cr.continuation_sequence", {"cid": campaign_id}).fetchall()]
     if not runs:
         raise KeyError("campaign has no runs")
     incompatible = [r["burnin_run_id"] for r in runs if r.get("release_id") != c["release_id"] or r.get("config_hash") != c["config_hash"] or r.get("strategy_config_hash") != c["strategy_config_hash"] or r.get("universe_hash") != c["universe_hash"]]
@@ -224,7 +240,7 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
 def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     c=get_campaign(conn,campaign_id)
     if not c: return {"status":"UNAVAILABLE","reason":"NO_CAMPAIGN"}
-    runs=[_row_dict(r) for r in _exec(conn,"SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:id ORDER BY cr.continuation_sequence",{"id":campaign_id}).fetchall()]
+    runs=[_row_dict(r) for r in _exec(conn,"SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:id AND (cr.status != 'FAILED' OR EXISTS (SELECT 1 FROM burnin_observations o WHERE o.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_trade_outcomes t WHERE t.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_reject_outcomes j WHERE j.burnin_run_id=r.burnin_run_id)) ORDER BY cr.continuation_sequence",{"id":campaign_id}).fetchall()]
     run_ids=[r["burnin_run_id"] if isinstance(r,dict) else r["burnin_run_id"] for r in runs]
     if not run_ids: return {"status":"NO_EVIDENCE","campaign_id":campaign_id,"run_ids":[]}
     ph=",".join([f":r{i}" for i in range(len(run_ids))]); p={f"r{i}":v for i,v in enumerate(run_ids)}

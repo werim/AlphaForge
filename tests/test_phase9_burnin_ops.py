@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from alphaforge.burnin import config_hash, persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_trade_outcome, utc_now
-from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign
+from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign, fail_active_campaign_run
 from alphaforge.burnin_ops import (
     audit_payload,
     bootstrap_ops_schema,
@@ -209,6 +209,41 @@ def test_foreground_launch_invokes_runner(monkeypatch, tmp_path):
     out = launch_campaign(db, "rel", 0, ["BTCUSDT"], ["1h"], detach=False)
     assert out["status"] == "FOREGROUND_STOPPED"
     assert FakeRunner.called
+
+
+def test_worker_launch_uses_persisted_campaign_release_not_shell_release(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    db, conn = _conn(tmp_path)
+    camp, _ = _campaign(conn, release="phase9_trial")
+    conn.close()
+    captured = {}
+
+    class P:
+        pid = 123
+
+    def fake_popen(cmd, **kwargs):
+        captured.update(kwargs["env"])
+        return P()
+
+    monkeypatch.setenv("ALPHAFORGE_RELEASE_ID", "wrong_shell_release")
+    monkeypatch.setattr(ops.subprocess, "Popen", fake_popen)
+    ops._launch_worker(str(db), camp.campaign_id)
+    assert captured["ALPHAFORGE_RELEASE_ID"] == "phase9_trial"
+    assert captured["ALPHAFORGE_EXECUTION_MODE"] == captured["EXECUTION_MODE"] == "PAPER"
+
+
+def test_failed_zero_sample_run_is_terminal_and_excluded_from_aggregate(tmp_path):
+    db, conn = _conn(tmp_path)
+    camp, failed_run = _campaign(conn, release="phase9_trial")
+    fail_active_campaign_run(conn, camp.campaign_id, "PHASE8_CAMPAIGN_RELEASE_MISMATCH")
+    resumed = start_or_resume_campaign(conn, camp.campaign_id, resume=True)
+    conn.commit()
+
+    rows = conn.execute("SELECT burnin_run_id,status,ended_at FROM burnin_campaign_runs WHERE campaign_id=? ORDER BY continuation_sequence", (camp.campaign_id,)).fetchall()
+    assert rows[0]["burnin_run_id"] == failed_run and rows[0]["status"] == "FAILED" and rows[0]["ended_at"]
+    assert resumed["continuation_sequence"] == 1
+    assert aggregate_campaign(conn, camp.campaign_id)["metrics"]["source_run_ids"] == [resumed["burnin_run_id"]]
 
 
 def test_recovery_drill_starts_new_worker_and_preserves_exact_pending_ids(monkeypatch, tmp_path):

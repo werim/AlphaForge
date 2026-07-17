@@ -320,6 +320,12 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
 
 
 def _mark_campaign_failed(conn: sqlite3.Connection, campaign_id: str, reason: str, details: Mapping[str, Any] | None = None) -> None:
+    campaign = get_campaign(conn, campaign_id)
+    active_run_id = campaign.get("active_run_id") if campaign else None
+    ts = utc_now()
+    if active_run_id:
+        conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time, ?) WHERE burnin_run_id=? AND status='RUNNING'", (ts, active_run_id))
+        conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at, ?) WHERE campaign_id=? AND burnin_run_id=? AND status='RUNNING'", (ts, campaign_id, active_run_id))
     conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', last_error=? WHERE campaign_id=?", (reason, campaign_id))
     event(conn, campaign_id, "PHASE9_CAMPAIGN_FAILED", details={"reason": reason, **dict(details or {})})
     conn.commit()
@@ -792,7 +798,17 @@ def finalize(conn: sqlite3.Connection, db: str, campaign_id: str, outdir: str | 
 
 def _launch_worker(db: str, campaign_id: str) -> subprocess.Popen[Any]:
     cmd = [sys.executable, "-m", "alphaforge.burnin_cli", "--db", db, "worker", "--campaign-id", campaign_id]
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER"})
+    conn = _connect(db)
+    try:
+        campaign = get_campaign(conn, campaign_id)
+        if campaign is None:
+            raise KeyError("campaign not found")
+        release_id = str(campaign["release_id"])
+    finally:
+        conn.close()
+    # The persisted campaign is the worker attachment contract; do not inherit an
+    # unrelated shell release identity into a new continuation process.
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER"})
 
 
 def main(argv: Sequence[str] | None = None) -> int:

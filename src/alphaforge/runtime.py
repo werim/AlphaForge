@@ -31,7 +31,7 @@ from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, fail_active_campaign_run
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, latest_runtime_state_snapshot
 from alphaforge.config import load_config_from_env, runtime_filter_config
@@ -480,8 +480,10 @@ class RuntimeOrchestrator:
         cfg = self._canonical_filter_config()
         resolved_symbols = list(symbols if symbols is not None else (cfg.get("symbols") or cfg.get("active_symbols") or []))
         resolved_intervals = list(intervals if intervals is not None else (cfg.get("intervals") or cfg.get("timeframes") or []))
-        ident = build_phase8_campaign_identity(self.config, resolved_symbols, resolved_intervals, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), paper_slippage_bps=self.paper_slippage_bps)
-        return {**ident, "execution_mode": self.config.execution_mode.value}
+        configured_release = os.getenv("ALPHAFORGE_RELEASE_ID")
+        release_id = configured_release or self.config.phase7_burnin_release_id
+        ident = build_phase8_campaign_identity(self.config, resolved_symbols, resolved_intervals, release_id=release_id, paper_slippage_bps=self.paper_slippage_bps)
+        return {**ident, "execution_mode": self.config.execution_mode.value, "release_id_source": "environment:ALPHAFORGE_RELEASE_ID" if configured_release else "runtime_config:phase7_burnin_release_id"}
 
 
     def _attach_phase8_campaign(self, campaign_id: str | None = None) -> None:
@@ -514,6 +516,11 @@ class RuntimeOrchestrator:
                 with contextlib.suppress(Exception): conn.commit()
                 self._fail_closed_reason = "PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING"
                 raise RuntimeError(self._fail_closed_reason)
+            run = burnin_campaign_exec(conn, "SELECT * FROM burnin_runs WHERE burnin_run_id=:bid", {"bid": campaign["active_run_id"]}).mappings().first()
+            if run is None:
+                fail_active_campaign_run(conn, campaign_id, "PHASE8_CAMPAIGN_ACTIVE_RUN_NOT_FOUND")
+                self._fail_closed_reason = "PHASE8_CAMPAIGN_ACTIVE_RUN_NOT_FOUND"
+                raise RuntimeError(self._fail_closed_reason)
             observed = self._phase8_runtime_hashes(campaign.get("symbols") or [], campaign.get("intervals") or [])
             expected = {k: campaign.get(k) for k in ("release_id","config_hash","strategy_config_hash","universe_hash","execution_cost_config_hash")}
             expected["execution_mode"] = "PAPER"
@@ -523,8 +530,8 @@ class RuntimeOrchestrator:
                     mismatches[key] = {"expected": exp, "observed": obs, "reason": reason_map[key]}
             if mismatches:
                 reason = next(iter(mismatches.values()))["reason"]
-                burnin_campaign_exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:reason WHERE campaign_id=:cid", {"cid": campaign_id, "reason": reason})
-                burnin_campaign_event(conn, campaign_id, "PHASE8_CAMPAIGN_CONFIG_DRIFT", details={"mismatches": mismatches, "observed": observed})
+                expected_details = {**expected, "campaign_id": campaign_id, "active_run_id": campaign["active_run_id"], "campaign_release_id": campaign["release_id"], "run_release_id": run["release_id"]}
+                fail_active_campaign_run(conn, campaign_id, reason, details={"expected": expected_details, "observed": observed, "mismatches": mismatches})
                 with contextlib.suppress(Exception): conn.commit()
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)

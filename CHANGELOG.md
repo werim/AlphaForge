@@ -73,10 +73,14 @@
 # Changelog
 
 ## Fixed
+- Detached PAPER workers now receive `ALPHAFORGE_RELEASE_ID` from their persisted campaign instead of inheriting an unrelated shell release identity.
+- Failed worker attachment terminalizes the active continuation in both run tables; failed zero-sample continuations no longer affect campaign aggregate evidence.
 - Phase 9 PAPER burn-in preflight config-hash parity by retaining all identity-relevant decision-filter settings while constructing `RuntimeConfig` from the environment.
 - Preflight identity evidence now includes both canonical config payloads and every differing key/value; real config drift remains fail-closed.
 
 ## Changed
+- Runtime attachment events now retain expected persisted campaign/run identity, observed runtime identity, and release identity source when fail-closed drift is detected.
+- Resume updates both campaign-run and burn-in-run lifecycle records consistently before creating the next monotonic continuation.
 - Phase 8/9 campaign creation and runtime attachment continue to use the shared canonical campaign identity builder, with explicit mode-aware `RUNTIME_LIMITS_ACTIVE` payload evidence.
 
 ## Known Issues
