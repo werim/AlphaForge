@@ -19,7 +19,9 @@ from alphaforge.burnin_campaign import (
 )
 from alphaforge.config import load_config_from_env
 from alphaforge.runtime_state import evaluate_runtime_recovery
+from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
+from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 
 PHASE9_SCHEMA_VERSION = "phase9_ops_v2"
 ALLOWED_FINAL_DECISIONS = {"PAPER_BURNIN_INCOMPLETE", "PAPER_BURNIN_FAILED", "PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW", "PAPER_BURNIN_SUSPENDED"}
@@ -174,7 +176,16 @@ def clock_skew_check(*, max_skew_ms: int | None = None, provider: Any | None = N
         return {"status": "UNAVAILABLE", "local_utc_ms": local_ms, "provider_utc_ms": None, "absolute_skew_ms": None, "configured_max_skew_ms": configured, "provider_provenance": {"provider": "BINANCE_READ_ONLY_SERVER_TIME"}, "error": f"{exc.__class__.__name__}:{exc}"}
 
 
-def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, output_dir: str | Path | None = None, require_market_data: bool = True) -> dict[str, Any]:
+def _readonly_reconciliation_provider(cfg: Any) -> Any | None:
+    if not getattr(cfg.runtime, "enable_binance_readonly_reconciliation", False):
+        return None
+    key, secret = os.getenv("BINANCE_API_KEY", "").strip(), os.getenv("BINANCE_API_SECRET", "").strip()
+    if not key or not secret:
+        return None
+    return BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url=cfg.exchange.binance.base_url, api_key=key, api_secret=secret, recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms, request_timeout_sec=cfg.runtime.reconciliation_timeout_sec, trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms))
+
+
+def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None) -> dict[str, Any]:
     cfg = load_config_from_env()
     checks: list[dict[str, Any]] = []
     blockers: list[str] = []
@@ -255,7 +266,7 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("no_stale_worker_occupying_campaign", "PASS" if int(stale) == 0 else "FAIL", stale)
         recovery_engine = init_db(f"sqlite+pysqlite:///{db}")
         try:
-            recovery = evaluate_runtime_recovery(recovery_engine, mode="PAPER", campaign_id=cid)
+            recovery = evaluate_runtime_recovery(recovery_engine, mode="PAPER", campaign_id=cid, reconciliation_probe=build_readonly_reconciliation_probe(reconciliation_provider or _readonly_reconciliation_provider(cfg)))
             add("runtime_recovery_scope", "PASS" if not recovery["blocked"] else "FAIL", recovery)
         finally:
             recovery_engine.dispose()

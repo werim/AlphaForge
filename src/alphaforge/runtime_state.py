@@ -10,6 +10,23 @@ from sqlalchemy.engine import Engine
 
 from alphaforge.contracts import canonical_utc_timestamp
 
+
+def build_readonly_reconciliation_probe(provider: Any | None) -> Any:
+    """Return one normalized, read-only probe used by preflight and startup."""
+    def probe() -> dict[str, Any]:
+        if provider is None:
+            raise RuntimeError("read_only_reconciliation_provider_unavailable")
+        raw = dict(provider.snapshot() or {})
+        return {
+            "provider": raw.get("exchange") or provider.__class__.__name__,
+            "retrieved_at": raw.get("retrieved_at") or raw.get("captured_at") or canonical_utc_timestamp(),
+            "evidence_status": str(raw.get("evidence_status") or "INCOMPLETE").upper(),
+            "orders": list(raw.get("orders") or []),
+            "positions": list(raw.get("positions") or []),
+            "errors": list(raw.get("errors") or []),
+        }
+    return probe
+
 RUNTIME_REJECT_REASONS = {
     "RUNTIME_DB_UNAVAILABLE", "KILL_SWITCH_ACTIVE", "RUNTIME_RECOVERY_REQUIRED",
     "UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED", "EXCHANGE_RECONCILIATION_UNAVAILABLE",
@@ -171,7 +188,7 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     same_campaign = bool(campaign_id and prior_campaign and campaign_id == prior_campaign)
     same_lineage = bool(latest and instance_id and startup_id and latest.get("instance_id") == instance_id and latest.get("startup_id") == startup_id)
     probe_clean = False
-    if reconciliation_probe is not None:
+    if reconciliation_probe is not None and prior_unclean:
         try:
             probe = dict(reconciliation_probe() or {})
             probe_clean = str(probe.get("evidence_status") or "").upper() == "COMPLETE" and not probe.get("orders") and not probe.get("positions")
@@ -192,7 +209,7 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
             "kill_switch_active": kill_switch, "reconciliation_status": reconciliation_status,
             "previous_process_alive": process_alive, "campaign_terminal": prior_campaign_terminal,
             "prior_unclean": prior_unclean, "original_reason": (latest or {}).get("fail_closed_reason"), "query_errors": query_errors,
-            "reconciliation_probe_clean": probe_clean}
+            "reconciliation_probe_clean": probe_clean, "reconciliation_probe": probe if reconciliation_probe is not None and 'probe' in locals() else None}
 
 def save_runtime_recovery_event(engine: Engine, *, instance_id: str, startup_id: str, mode: str, status: str, reason: str, diagnostics: Mapping[str, Any] | None = None) -> None:
     ensure_runtime_state_schema(engine)

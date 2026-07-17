@@ -33,7 +33,7 @@ from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
-from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery
+from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
 from alphaforge.config import load_config_from_env, runtime_filter_config
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -369,7 +369,7 @@ class RuntimeOrchestrator:
         if engine is None:
             self._recovery_required = True; self._fail_closed_reason = "RUNTIME_DB_UNAVAILABLE"; return
         provider = self.live_reconciliation_provider or self.exchange_snapshot_provider
-        probe = provider.snapshot if provider is not None else None
+        probe = build_readonly_reconciliation_probe(provider)
         decision = evaluate_runtime_recovery(engine, mode=self.config.execution_mode.value, campaign_id=os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or None, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID") or self.config.phase7_burnin_release_id, instance_id=self.runtime_instance_id, startup_id=self.startup_id, reconciliation_probe=probe)
         self._recovery_decision = decision
         latest = decision.get("latest")
@@ -380,7 +380,7 @@ class RuntimeOrchestrator:
         elif latest and decision.get("prior_unclean"):
             # Append-only audit: do not manufacture a clean shutdown or copy the
             # inherited failure into this runtime's state.
-            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_SCOPE_EVALUATED", reason="UNRELATED_HISTORY_NON_BLOCKING", diagnostics={"blocking_snapshot_id": latest.get("id"), "blocking_instance_id": latest.get("instance_id"), "blocking_startup_id": latest.get("startup_id"), "original_reason": decision.get("original_reason"), "current_exposure_check": decision["current_exposure_check"], "scope_decision": "UNRELATED_HISTORY_NON_BLOCKING"})
+            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_SCOPE_EVALUATED", reason="UNRELATED_HISTORY_NON_BLOCKING", diagnostics={"blocking_snapshot_id": latest.get("id"), "blocking_instance_id": latest.get("instance_id"), "blocking_startup_id": latest.get("startup_id"), "original_reason": decision.get("original_reason"), "current_exposure_check": decision["current_exposure_check"], "scope_decision": "UNRELATED_HISTORY_NON_BLOCKING", "reconciliation_probe": decision.get("reconciliation_probe")})
         now = time.time()
         with engine.connect() as conn:
             for row in conn.execute(text("SELECT symbol, qty, status FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')")).mappings():
@@ -1599,14 +1599,18 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
             session.commit()
 
     live_reconciliation_provider = None
-    if mode == ExecutionMode.LIVE and cfg.runtime.enable_binance_readonly_reconciliation:
+    if mode in {ExecutionMode.PAPER, ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} and cfg.runtime.enable_binance_readonly_reconciliation:
         api_key = str(os.getenv("BINANCE_API_KEY", "")).strip()
         api_secret = str(os.getenv("BINANCE_API_SECRET", "")).strip()
         if bool(api_key) ^ bool(api_secret):
             raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are partial")
         if not api_key or not api_secret:
-            raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are missing")
-        live_reconciliation_provider = BinanceReadonlyReconciliationProvider(
+            if mode == ExecutionMode.PAPER:
+                api_key = api_secret = ""
+            else:
+                raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are missing")
+        if api_key and api_secret:
+            live_reconciliation_provider = BinanceReadonlyReconciliationProvider(
             config=BinanceReadonlyReconciliationConfig(
                 base_url=cfg.exchange.binance.base_url,
                 api_key=api_key,
@@ -1615,7 +1619,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                 request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
                 trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
             )
-        )
+            )
 
     orchestrator = RuntimeOrchestrator(
         config=config,

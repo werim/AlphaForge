@@ -3188,3 +3188,4 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Recovery follow-up
 - Recovery evidence SQL read failures now fail closed as `RECOVERY_EVIDENCE_UNAVAILABLE`; pending predecessor orders are global blockers, and preflight no longer uses a DB-global campaign recovery count.
+- Preflight and runtime now share one normalized read-only reconciliation probe, including provider provenance, timestamp, completeness, orders, and positions.
