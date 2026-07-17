@@ -1,22 +1,1421 @@
-#DEFINE DB
+# AlphaForge Komut Rehberi
+
+Bu sayfa AlphaForge'u kurmak, güncellemek, test etmek, BACKTEST/PAPER çalıştırmak, dashboard açmak ve çok günlük PAPER burn-in kampanyasını yönetmek için doğrulanmış komutları tek yerde toplar.
+
+> **Güvenlik:** AlphaForge varsayılan olarak LIVE-ready değildir. Bu rehber PAPER ve BACKTEST işletimine odaklanır. LIVE modu veya gerçek emir yolu, yerel readiness kanıtları ve bütün fail-closed güvenlik kapıları geçmeden açılmamalıdır.
+
+---
+
+## 1. Repo köküne geç
+
+Bütün komutları repository kökünden çalıştır.
+
+### macOS / Linux
+
+```bash
+cd /Volumes/Slave/Projects/AlphaForge
+```
+
+### Windows PowerShell
+
+```powershell
+cd E:\Projeler\AlphaForge
+```
+
+Konumu doğrula:
+
+```bash
+pwd
+git status
+```
+
+PowerShell:
+
+```powershell
+Get-Location
+git status
+```
+
+---
+
+## 2. `dev` branch'i güncelle
+
+```bash
+git switch dev
+git pull origin dev
+git status
+```
+
+Geçerli commit:
+
+```bash
+git rev-parse --short HEAD
+git log -1 --oneline
+```
+
+Burn-in preflight temiz çalışma ağacı bekler. `git status` çıktısında commitlenmemiş değişiklik bırakma.
+
+---
+
+## 3. Sanal ortam ve kurulum
+
+### macOS / Linux
+
+İlk kurulum:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e '.[dev]'
+```
+
+Sonraki oturumlarda yalnızca:
+
+```bash
+source .venv/bin/activate
+```
+
+### Windows PowerShell
+
+İlk kurulum:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
+```
+
+Sonraki oturumlarda yalnızca:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Kurulumu doğrula:
+
+```bash
+python --version
+python -c "import alphaforge; print(alphaforge.__file__)"
+```
+
+CLI yardım ekranları:
+
+```bash
+python -m alphaforge.burnin_ops --help
+python -m alphaforge.burnin_cli --help
+python backtest_order.py --help
+python -m uvicorn --help
+```
+
+---
+
+## 4. Ortam profilini seç
+
+Tek bir profili `.env` olarak kopyala.
+
+### BACKTEST / yerel teşhis
+
+macOS / Linux:
+
+```bash
+cp .env.test.example .env
+```
+
+PowerShell:
+
+```powershell
+Copy-Item .env.test.example .env
+```
+
+### Dengeli PAPER / dashboard değerlendirmesi
+
+macOS / Linux:
+
+```bash
+cp .env.medium.example .env
+```
+
+PowerShell:
+
+```powershell
+Copy-Item .env.medium.example .env
+```
+
+### LIVE hazırlık şablonu
+
+Bu profil gerçek emirleri kendiliğinden açmaz. Yalnızca readiness hazırlığı içindir.
+
+macOS / Linux:
+
+```bash
+cp .env.live.example .env
+```
+
+PowerShell:
+
+```powershell
+Copy-Item .env.live.example .env
+```
+
+Mod için kanonik değişken:
+
+```text
+ALPHAFORGE_EXECUTION_MODE=BACKTEST|PAPER|LIVE
+```
+
+Geriye uyumluluk alias'ı:
+
+```text
+EXECUTION_MODE=BACKTEST|PAPER|LIVE
+```
+
+PAPER burn-in öncesinde ikisinin de PAPER olduğundan emin ol.
+
+macOS / Linux:
+
+```bash
+export ALPHAFORGE_EXECUTION_MODE=PAPER
+export EXECUTION_MODE=PAPER
+```
+
+PowerShell:
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE="PAPER"
+$env:EXECUTION_MODE="PAPER"
+```
+
+---
+
+## 5. Veritabanını tanımla
+
+### macOS / Linux
+
+```bash
 DB="/Volumes/Slave/Projects/AlphaForge/data/runtime/alphaforge_runtime.db"
 export DB
+export ALPHAFORGE_DB_PATH="$DB"
+```
 
-#PREFLIGHT BURNIN OPS
-python -m alphaforge.burnin_ops \
->   --db "$DB" \
->   preflight \
->   --release-id phase9_trial_2 \
->   --symbols BTCUSDT,ETHUSDT \
->   --intervals 1h
+### Windows PowerShell
 
-#LAUNCH BURNIN OPS
+```powershell
+$DB="E:\Projeler\AlphaForge\data\runtime\alphaforge_runtime.db"
+$env:ALPHAFORGE_DB_PATH=$DB
+```
+
+Dosyayı kontrol et:
+
+macOS / Linux:
+
+```bash
+ls -lh "$DB"
+```
+
+PowerShell:
+
+```powershell
+Get-Item $DB
+```
+
+SQLite bütünlük kontrolü:
+
+```bash
+sqlite3 "$DB" "PRAGMA integrity_check;"
+```
+
+PowerShell:
+
+```powershell
+sqlite3 $DB "PRAGMA integrity_check;"
+```
+
+Beklenen çıktı:
+
+```text
+ok
+```
+
+---
+
+## 6. Migration çalıştır
+
+```bash
+alembic upgrade head
+```
+
+Mevcut migration seviyesini göster:
+
+```bash
+alembic current
+```
+
+Migration geçmişi:
+
+```bash
+alembic history
+```
+
+---
+
+## 7. Testler
+
+### Tam test paketi
+
+```bash
+pytest -q
+```
+
+### İlk hatada dur
+
+```bash
+pytest -q -x
+```
+
+### Ayrıntılı hata çıktısı
+
+```bash
+pytest -vv
+```
+
+### Belirli test dosyası
+
+```bash
+pytest -q tests/test_phase8_burnin_campaign.py
+pytest -q tests/test_phase9_burnin_ops.py
+pytest -q tests/test_dashboard_app.py
+```
+
+### Belirli test adı / anahtar kelime
+
+```bash
+pytest -q -k burnin
+pytest -q -k dashboard
+pytest -q -k runtime
+```
+
+### Son başarısız testleri tekrar çalıştır
+
+```bash
+pytest -q --lf
+```
+
+### Yalnızca önceki başarısızlardan başla, sonra devam et
+
+```bash
+pytest -q --ff
+```
+
+---
+
+## 8. BACKTEST çalıştır
+
+### Doğrudan Python komutu
+
+```bash
+python backtest_order.py \
+  --interval 1h \
+  --last-n-days 30 \
+  --symbols BTCUSDT,ETHUSDT \
+  --output-dir data/backtests/manual_1h_30d
+```
+
+### Binance geçmiş önbelleğini yenile
+
+```bash
+python backtest_order.py \
+  --interval 1h \
+  --last-n-days 30 \
+  --symbols BTCUSDT,ETHUSDT \
+  --output-dir data/backtests/manual_1h_30d \
+  --force-refresh
+```
+
+### Ağ çağrısı yapmayan CI/offline smoke backtest
+
+```bash
+python backtest_order.py \
+  --ci \
+  --interval 1h \
+  --last-n-days 7 \
+  --symbols BTCUSDT \
+  --output-dir data/backtests/ci_smoke
+```
+
+### BACKTEST-only SHORT breakdown rescue karşılaştırması
+
+macOS / Linux:
+
+```bash
+ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED=true \
+python backtest_order.py \
+  --interval 1h \
+  --last-n-days 30 \
+  --symbols BTCUSDT,ETHUSDT \
+  --output-dir data/backtests/rescue_on
+```
+
+PowerShell:
+
+```powershell
+$env:ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED="true"
+python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/rescue_on
+Remove-Item Env:ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED
+```
+
+### Kısayol scriptleri
+
+PowerShell:
+
+```powershell
+.\scripts\run_backtest.ps1 -Interval 1h -Days 30 -Symbols BTCUSDT,ETHUSDT
+```
+
+macOS / Linux:
+
+```bash
+bash scripts/run_backtest.sh 1h 30 BTCUSDT,ETHUSDT
+```
+
+### BACKTEST durdurma
+
+Foreground çalışıyorsa terminalde:
+
+```text
+Ctrl+C
+```
+
+---
+
+## 9. PAPER runtime çalıştır
+
+### Doğrudan çalıştır
+
+macOS / Linux:
+
+```bash
+ALPHAFORGE_MODE=PAPER python -m alphaforge.runtime
+```
+
+PowerShell:
+
+```powershell
+$env:ALPHAFORGE_MODE="PAPER"
+python -m alphaforge.runtime
+```
+
+### Güvenli placeholder scanner ile deterministik smoke
+
+macOS / Linux:
+
+```bash
+ALPHAFORGE_MODE=PAPER ALPHAFORGE_RUNTIME_SAFE_SCANNER=1 python -m alphaforge.runtime
+```
+
+PowerShell:
+
+```powershell
+$env:ALPHAFORGE_MODE="PAPER"
+$env:ALPHAFORGE_RUNTIME_SAFE_SCANNER="1"
+python -m alphaforge.runtime
+```
+
+### Kısayol scriptleri
+
+PowerShell:
+
+```powershell
+.\scripts\run_paper.ps1
+```
+
+macOS / Linux:
+
+```bash
+bash scripts/run_paper.sh
+```
+
+### PAPER runtime durdurma
+
+Foreground çalışıyorsa terminalde:
+
+```text
+Ctrl+C
+```
+
+Durdurduktan sonra runtime/burn-in durumunu ve son hatayı kontrol et. İşletim sistemi seviyesinde zorla öldürme, temiz kapanış kanıtı üretmeyebilir.
+
+---
+
+## 10. Dashboard çalıştır
+
+### Doğrudan çalıştır
+
+```bash
+python -m uvicorn alphaforge.dashboard.app:create_app \
+  --factory \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+Tarayıcı:
+
+```text
+http://127.0.0.1:8000
+```
+
+### Belirli SQLite DB ile çalıştır
+
+macOS / Linux:
+
+```bash
+export ALPHAFORGE_DATABASE_URL="sqlite+pysqlite:///$DB"
+python -m uvicorn alphaforge.dashboard.app:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+PowerShell:
+
+```powershell
+$env:ALPHAFORGE_DATABASE_URL="sqlite+pysqlite:///$($DB -replace '\\','/')"
+python -m uvicorn alphaforge.dashboard.app:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+### Kısayol scriptleri
+
+PowerShell:
+
+```powershell
+.\scripts\run_dashboard.ps1 -Port 8000
+```
+
+macOS / Linux:
+
+```bash
+bash scripts/run_dashboard.sh 8000
+```
+
+### Dashboard durdurma
+
+Foreground çalışıyorsa terminalde:
+
+```text
+Ctrl+C
+```
+
+Portu kullanan süreci bul:
+
+macOS / Linux:
+
+```bash
+lsof -nP -iTCP:8000 -sTCP:LISTEN
+```
+
+PowerShell:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000 -State Listen
+```
+
+---
+
+# PAPER Burn-in Operasyonları
+
+Yeni işletim akışında tercih edilen arayüz `alphaforge.burnin_ops` komutudur.
+
+## 11. Burn-in yardım komutları
+
+```bash
+python -m alphaforge.burnin_ops --help
+python -m alphaforge.burnin_ops preflight --help
+python -m alphaforge.burnin_ops launch --help
+python -m alphaforge.burnin_ops health --help
+python -m alphaforge.burnin_ops watch --help
+python -m alphaforge.burnin_ops recovery-drill --help
+python -m alphaforge.burnin_ops audit --help
+python -m alphaforge.burnin_ops pause --help
+python -m alphaforge.burnin_ops resume --help
+python -m alphaforge.burnin_ops status --help
+python -m alphaforge.burnin_ops report --help
+python -m alphaforge.burnin_ops finalize --help
+```
+
+Makine tarafından işlenecek JSON çıktı için global `--json` seçeneğini `--db` sonrasında ve alt komuttan önce kullan:
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id CAMP_ID
+```
+
+---
+
+## 12. Preflight
+
+`RELEASE_ID` her kampanya için bilinçli seçilmeli ve çalışma boyunca değiştirilmemelidir.
+
+macOS / Linux:
+
+```bash
+RELEASE_ID="phase9_trial_2"
+
 python -m alphaforge.burnin_ops \
->   --db "$DB" \
->   launch \
->   --release-id phase9_trial_2 \
->   --duration-days 3 \
->   --symbols BTCUSDT,ETHUSDT \
->   --intervals 1h \
->   --detach \
->   --attach-timeout-seconds 60
+  --db "$DB" \
+  preflight \
+  --release-id "$RELEASE_ID" \
+  --symbols BTCUSDT,ETHUSDT \
+  --intervals 1h
+```
+
+PowerShell:
+
+```powershell
+$RELEASE_ID="phase9_trial_2"
+
+python -m alphaforge.burnin_ops `
+  --db $DB `
+  preflight `
+  --release-id $RELEASE_ID `
+  --symbols BTCUSDT,ETHUSDT `
+  --intervals 1h
+```
+
+Özel preflight çıktı klasörü:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  preflight \
+  --release-id "$RELEASE_ID" \
+  --symbols BTCUSDT,ETHUSDT \
+  --intervals 1h \
+  --output-dir "artifacts/burnin/preflight_${RELEASE_ID}"
+```
+
+Preflight `PASS` olmadan launch yapma. Özellikle şunları düzelt:
+
+- çalışma ağacı temizliği
+- `dev` branch kontrolü
+- PAPER execution mode
+- DB yazılabilirliği ve schema
+- release/config/strategy/universe/execution-cost identity eşleşmesi
+- sembol ve interval doğrulaması
+- saat sapması ve read-only market data erişimi
+
+---
+
+## 13. Çok günlük kampanyayı başlat
+
+### Detached worker ile önerilen çalıştırma
+
+macOS / Linux:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  launch \
+  --release-id "$RELEASE_ID" \
+  --duration-days 3 \
+  --symbols BTCUSDT,ETHUSDT \
+  --intervals 1h \
+  --detach \
+  --attach-timeout-seconds 60
+```
+
+PowerShell:
+
+```powershell
+python -m alphaforge.burnin_ops `
+  --db $DB `
+  launch `
+  --release-id $RELEASE_ID `
+  --duration-days 3 `
+  --symbols BTCUSDT,ETHUSDT `
+  --intervals 1h `
+  --detach `
+  --attach-timeout-seconds 60
+```
+
+Komut çıktısındaki gerçek `campaign_id` değerini kaydet.
+
+macOS / Linux örneği:
+
+```bash
+CAMPAIGN_ID="camp_xxxxxxxxxxxxxxxx"
+export CAMPAIGN_ID
+```
+
+PowerShell örneği:
+
+```powershell
+$CAMPAIGN_ID="camp_xxxxxxxxxxxxxxxx"
+```
+
+> `campaign_id` tahmin edilmez. Launch çıktısından veya SQL sorgusundan alınır.
+
+---
+
+## 14. Son kampanya ID'sini SQL'den bul
+
+```bash
+sqlite3 "$DB" <<'SQL'
+.headers on
+.mode column
+SELECT
+    campaign_id,
+    release_id,
+    campaign_status,
+    active_run_id,
+    worker_pid,
+    created_at,
+    last_heartbeat_at,
+    last_error
+FROM burnin_campaigns
+ORDER BY created_at DESC
+LIMIT 10;
+SQL
+```
+
+PowerShell tek satır:
+
+```powershell
+sqlite3 $DB "SELECT campaign_id,release_id,campaign_status,active_run_id,worker_pid,created_at,last_heartbeat_at,last_error FROM burnin_campaigns ORDER BY created_at DESC LIMIT 10;"
+```
+
+---
+
+## 15. Kampanya status
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  status \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+JSON:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  status \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+PowerShell:
+
+```powershell
+python -m alphaforge.burnin_ops --db $DB status --campaign-id $CAMPAIGN_ID
+```
+
+---
+
+## 16. Health kontrolü
+
+Tek kontrol:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  health \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+JSON:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  health \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+---
+
+## 17. Watch
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  watch \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+`watch` tek bir operasyon kontrol çevrimi çalıştırır; sürekli terminal ekranı varsayımı yapma. Periyodik izleme gerekiyorsa komutu scheduler veya kontrollü shell döngüsüyle çağır.
+
+macOS / Linux örneği, 60 saniyede bir:
+
+```bash
+while true; do
+  date
+  python -m alphaforge.burnin_ops --db "$DB" watch --campaign-id "$CAMPAIGN_ID"
+  sleep 60
+done
+```
+
+Döngüyü durdur:
+
+```text
+Ctrl+C
+```
+
+---
+
+## 18. Worker loglarını izle
+
+```bash
+tail -n 200 "artifacts/burnin/$CAMPAIGN_ID/worker.stdout.log"
+tail -n 200 "artifacts/burnin/$CAMPAIGN_ID/worker.stderr.log"
+```
+
+Canlı takip:
+
+```bash
+tail -f "artifacts/burnin/$CAMPAIGN_ID/worker.stdout.log"
+```
+
+Hata logunu canlı takip:
+
+```bash
+tail -f "artifacts/burnin/$CAMPAIGN_ID/worker.stderr.log"
+```
+
+PowerShell:
+
+```powershell
+Get-Content "artifacts\burnin\$CAMPAIGN_ID\worker.stdout.log" -Tail 200
+Get-Content "artifacts\burnin\$CAMPAIGN_ID\worker.stderr.log" -Tail 200
+Get-Content "artifacts\burnin\$CAMPAIGN_ID\worker.stderr.log" -Wait -Tail 50
+```
+
+---
+
+## 19. Kampanyayı normal şekilde duraklat
+
+Detached burn-in'i durdurmak için ilk tercih `pause` olmalıdır:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  pause \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+PowerShell:
+
+```powershell
+python -m alphaforge.burnin_ops --db $DB pause --campaign-id $CAMPAIGN_ID
+```
+
+Ardından doğrula:
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
+```
+
+`pause`, kampanyayı silmez ve tamamlanmış gibi işaretlemez.
+
+---
+
+## 20. Kampanyayı devam ettir
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  resume \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+PowerShell:
+
+```powershell
+python -m alphaforge.burnin_ops --db $DB resume --campaign-id $CAMPAIGN_ID
+```
+
+Resume sonrasında:
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
+```
+
+Release/config/strategy/universe/execution-cost identity değiştiyse devam etmeye zorlama. Yeni preflight ve yeni kampanya gerekir.
+
+---
+
+## 21. Recovery drill
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  recovery-drill \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+PowerShell:
+
+```powershell
+python -m alphaforge.burnin_ops --db $DB recovery-drill --campaign-id $CAMPAIGN_ID
+```
+
+Bu komut gerçek bir recovery kanıtı üretir. Sırf status değiştirmek için kullanılmamalıdır.
+
+---
+
+## 22. Integrity audit
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  audit \
+  --campaign-id "$CAMPAIGN_ID"
+```
+
+PowerShell:
+
+```powershell
+python -m alphaforge.burnin_ops --db $DB audit --campaign-id $CAMPAIGN_ID
+```
+
+Finalization öncesinde audit `PASS` olmalıdır.
+
+---
+
+## 23. Günlük rapor
+
+```bash
+REPORT_DIR="artifacts/burnin/$CAMPAIGN_ID/daily_$(date -u +%Y%m%dT%H%M%SZ)"
+
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  report \
+  --campaign-id "$CAMPAIGN_ID" \
+  --output-dir "$REPORT_DIR"
+```
+
+PowerShell:
+
+```powershell
+$REPORT_DIR="artifacts\burnin\$CAMPAIGN_ID\daily_$(Get-Date -Format 'yyyyMMddTHHmmssZ')"
+python -m alphaforge.burnin_ops --db $DB report --campaign-id $CAMPAIGN_ID --output-dir $REPORT_DIR
+```
+
+Rapor klasörü JSON, CSV ve Markdown günlük özet çıktıları üretir.
+
+---
+
+## 24. Finalize
+
+Kampanya süresi tamamlanmadan, health/audit/recovery kanıtları oluşmadan finalize etmek `PAPER_BURNIN_INCOMPLETE` veya `PAPER_BURNIN_FAILED` sonucu verebilir. Bu fail-closed davranıştır.
+
+macOS / Linux:
+
+```bash
+FINAL_DIR="artifacts/burnin/$CAMPAIGN_ID/final"
+
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  finalize \
+  --campaign-id "$CAMPAIGN_ID" \
+  --output-dir "$FINAL_DIR"
+```
+
+PowerShell:
+
+```powershell
+$FINAL_DIR="artifacts\burnin\$CAMPAIGN_ID\final"
+python -m alphaforge.burnin_ops --db $DB finalize --campaign-id $CAMPAIGN_ID --output-dir $FINAL_DIR
+```
+
+Final paketinde en azından şu kanıtları incele:
+
+- `release_decision.json`
+- `final_manifest.json`
+- `checksums.json`
+- export edilen campaign evidence dosyaları
+
+`PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW`, LIVE-ready veya gerçek emir izni değildir.
+
+---
+
+## 25. PAPER burn-in teşhis raporu
+
+Kampanya operatöründen bağımsız, mevcut PAPER runtime DB için deterministik teşhis raporu:
+
+```bash
+python -m alphaforge.paper_burnin \
+  --db "$DB" \
+  --out reports/paper_burnin
+```
+
+Üretilen temel dosyalar:
+
+- `paper_burnin_summary.csv`
+- `paper_burnin_report.md`
+- `paper_burnin_blockers.json`
+
+---
+
+# Legacy / Düşük Seviyeli Burn-in CLI
+
+## 26. `burnin_cli` komutları
+
+Yeni operasyonlarda `burnin_ops` tercih edilir. Aşağıdaki komutlar düşük seviyeli kampanya yönetimi ve teşhis içindir.
+
+Yardım:
+
+```bash
+python -m alphaforge.burnin_cli --help
+```
+
+Kampanya oluştur:
+
+```bash
+python -m alphaforge.burnin_cli \
+  --db "$DB" \
+  create \
+  --release-id "$RELEASE_ID" \
+  --duration-days 3 \
+  --symbols BTCUSDT,ETHUSDT \
+  --intervals 1h
+```
+
+Detached başlat:
+
+```bash
+python -m alphaforge.burnin_cli \
+  --db "$DB" \
+  start \
+  --campaign-id "$CAMPAIGN_ID" \
+  --detach
+```
+
+Foreground başlat:
+
+```bash
+python -m alphaforge.burnin_cli \
+  --db "$DB" \
+  start \
+  --campaign-id "$CAMPAIGN_ID" \
+  --foreground
+```
+
+Status:
+
+```bash
+python -m alphaforge.burnin_cli --db "$DB" status --campaign-id "$CAMPAIGN_ID"
+```
+
+Pause:
+
+```bash
+python -m alphaforge.burnin_cli --db "$DB" pause --campaign-id "$CAMPAIGN_ID"
+```
+
+Resume detached:
+
+```bash
+python -m alphaforge.burnin_cli --db "$DB" resume --campaign-id "$CAMPAIGN_ID" --detach
+```
+
+Tek resolver tick:
+
+```bash
+python -m alphaforge.burnin_cli --db "$DB" worker --campaign-id "$CAMPAIGN_ID" --once
+```
+
+Qualification:
+
+```bash
+python -m alphaforge.burnin_cli --db "$DB" qualify --campaign-id "$CAMPAIGN_ID"
+```
+
+Evidence export:
+
+```bash
+python -m alphaforge.burnin_cli \
+  --db "$DB" \
+  export \
+  --campaign-id "$CAMPAIGN_ID" \
+  --output-dir "artifacts/burnin/$CAMPAIGN_ID/export"
+```
+
+---
+
+# SQL Operasyon Sorguları
+
+## 27. Kampanya özeti
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT
+    campaign_id,
+    release_id,
+    campaign_status,
+    active_run_id,
+    worker_pid,
+    created_at,
+    started_at,
+    last_heartbeat_at,
+    observed_duration_seconds,
+    latest_qualification_id,
+    last_error
+FROM burnin_campaigns
+WHERE campaign_id = '$CAMPAIGN_ID';
+SQL
+```
+
+## 28. Son kampanya olayları
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+.width 6 28 38 38 100
+SELECT
+    id,
+    event_time,
+    event_type,
+    burnin_run_id,
+    details_json
+FROM burnin_campaign_events
+WHERE campaign_id = '$CAMPAIGN_ID'
+ORDER BY id DESC
+LIMIT 50;
+SQL
+```
+
+## 29. Run kayıtları
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT *
+FROM burnin_runs
+WHERE campaign_id = '$CAMPAIGN_ID'
+ORDER BY id DESC;
+SQL
+```
+
+## 30. Health geçmişi
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT
+    id,
+    generated_at,
+    status,
+    unhealthy_reasons_json
+FROM burnin_health_history
+WHERE campaign_id = '$CAMPAIGN_ID'
+ORDER BY id DESC
+LIMIT 30;
+SQL
+```
+
+## 31. Incident geçmişi
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT
+    id,
+    incident_type,
+    severity,
+    status,
+    detected_at,
+    details_json
+FROM burnin_ops_incidents
+WHERE campaign_id = '$CAMPAIGN_ID'
+ORDER BY id DESC;
+SQL
+```
+
+## 32. Recovery drill kayıtları
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT
+    id,
+    drill_id,
+    generated_at,
+    status,
+    checks_json
+FROM burnin_recovery_drills
+WHERE campaign_id = '$CAMPAIGN_ID'
+ORDER BY id DESC;
+SQL
+```
+
+## 33. Integrity audit kayıtları
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT
+    id,
+    audit_id,
+    generated_at,
+    status,
+    violations_json,
+    aggregate_evidence_hash
+FROM burnin_integrity_audits
+WHERE campaign_id = '$CAMPAIGN_ID'
+ORDER BY id DESC;
+SQL
+```
+
+## 34. Final release decision
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT
+    id,
+    decision_id,
+    generated_at,
+    decision,
+    blockers_json,
+    package_dir
+FROM burnin_release_decisions
+WHERE campaign_id = '$CAMPAIGN_ID'
+ORDER BY id DESC;
+SQL
+```
+
+## 35. Karar sayıları
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT
+    decision,
+    COUNT(*) AS count
+FROM burnin_observations
+WHERE burnin_run_id IN (
+    SELECT burnin_run_id
+    FROM burnin_runs
+    WHERE campaign_id = '$CAMPAIGN_ID'
+)
+GROUP BY decision
+ORDER BY count DESC;
+SQL
+```
+
+## 36. Reject nedenleri
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT
+    reject_reason,
+    COUNT(*) AS count
+FROM burnin_reject_outcomes
+WHERE burnin_run_id IN (
+    SELECT burnin_run_id
+    FROM burnin_runs
+    WHERE campaign_id = '$CAMPAIGN_ID'
+)
+GROUP BY reject_reason
+ORDER BY count DESC;
+SQL
+```
+
+## 37. Açık PAPER pozisyonları
+
+Önce tablo şemasını doğrula:
+
+```bash
+sqlite3 "$DB" ".schema burnin_trade_outcomes"
+```
+
+Sonra açık kayıtları say:
+
+```bash
+sqlite3 "$DB" <<SQL
+.headers on
+.mode column
+SELECT COUNT(*) AS open_trade_outcomes
+FROM burnin_trade_outcomes
+WHERE burnin_run_id IN (
+    SELECT burnin_run_id
+    FROM burnin_runs
+    WHERE campaign_id = '$CAMPAIGN_ID'
+)
+AND closed_at IS NULL;
+SQL
+```
+
+---
+
+# Süreç ve Hata Teşhisi
+
+## 38. Worker PID çalışıyor mu?
+
+Kampanya PID'sini getir:
+
+```bash
+sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CAMPAIGN_ID';"
+```
+
+macOS / Linux:
+
+```bash
+PID=$(sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CAMPAIGN_ID';")
+ps -p "$PID" -o pid,ppid,etime,state,command
+```
+
+PowerShell:
+
+```powershell
+$PID_FROM_DB=sqlite3 $DB "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CAMPAIGN_ID';"
+Get-Process -Id $PID_FROM_DB
+```
+
+## 39. Python / Uvicorn süreçlerini listele
+
+macOS / Linux:
+
+```bash
+ps aux | grep -E 'alphaforge|uvicorn|backtest_order' | grep -v grep
+```
+
+PowerShell:
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -match 'alphaforge|uvicorn|backtest_order'
+} | Select-Object ProcessId,Name,CommandLine
+```
+
+## 40. Acil zorla durdurma
+
+Önce her zaman `burnin_ops pause` kullan. Yalnızca süreç cevap vermiyorsa ve operasyonel acil durum varsa PID seviyesinde sonlandır.
+
+macOS / Linux:
+
+```bash
+kill -TERM "$PID"
+```
+
+PowerShell:
+
+```powershell
+Stop-Process -Id $PID_FROM_DB
+```
+
+Zorla sonlandırmadan sonra kampanyayı normal kabul etme. Aşağıdakileri çalıştır:
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" recovery-drill --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" audit --campaign-id "$CAMPAIGN_ID"
+```
+
+`UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED` görülürse bunu status alanını elle değiştirerek gizleme. Recovery kanıtını tamamla veya fail-closed yeni kampanya başlat.
+
+---
+
+# Standart Operasyon Akışı
+
+## 41. Yeni çok günlük PAPER burn-in kontrol listesi
+
+```text
+1. git switch dev && git pull origin dev
+2. .venv aktive et
+3. pip install -e '.[dev]'
+4. PAPER ortam profilini ve DB yolunu doğrula
+5. alembic upgrade head
+6. pytest -q
+7. burnin_ops preflight
+8. preflight PASS ise burnin_ops launch --detach
+9. campaign_id değerini kaydet
+10. status + health + watch + worker loglarını izle
+11. Kontrollü durdurma gerekiyorsa pause
+12. Devam gerekiyorsa identity değişmeden resume
+13. recovery-drill
+14. audit
+15. report
+16. Kampanya tamamlanınca finalize
+17. release_decision.json ve blocker'ları incele
+```
+
+## 42. Günlük kontrol komut seti
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" watch --campaign-id "$CAMPAIGN_ID"
+tail -n 100 "artifacts/burnin/$CAMPAIGN_ID/worker.stderr.log"
+tail -n 100 "artifacts/burnin/$CAMPAIGN_ID/worker.stdout.log"
+```
+
+## 43. Hata sonrası minimum teşhis paketi
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CAMPAIGN_ID"
+tail -n 200 "artifacts/burnin/$CAMPAIGN_ID/worker.stderr.log"
+tail -n 200 "artifacts/burnin/$CAMPAIGN_ID/worker.stdout.log"
+sqlite3 "$DB" "PRAGMA integrity_check;"
+```
+
+Ardından son 30 kampanya olayını ve ilgili run kayıtlarını SQL ile çıkar.
+
+---
+
+## 44. Sık görülen fail-closed durumlar
+
+### `PHASE8_CAMPAIGN_RELEASE_MISMATCH`
+
+Persisted kampanya release kimliği ile process/runtime release kimliği farklıdır. Eski kampanyayı yeni release ile zorla devam ettirme.
+
+### `PHASE8_CAMPAIGN_CONFIG_DRIFT`
+
+Runtime config hash kampanya kimliğiyle eşleşmiyordur. `.env`, dashboard override veya process environment değişmiş olabilir.
+
+### `PHASE8_CAMPAIGN_STRATEGY_DRIFT`
+
+Stratejiye etki eden ayarlar kampanya oluşturulduktan sonra değişmiştir.
+
+### `PHASE8_CAMPAIGN_UNIVERSE_DRIFT`
+
+Sembol veya interval evreni değişmiştir.
+
+### `PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT`
+
+Spread/slippage/latency/funding gibi execution-cost kimliği değişmiştir.
+
+### `UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED`
+
+Önceki worker temiz kapanış kanıtı bırakmamıştır. Recovery drill ve audit yapılmadan normal resume/finalize varsayımı yapma.
+
+### `WORKER_STARTUP_EXITED`
+
+Detached worker başladıktan hemen sonra kapanmıştır. `worker.stderr.log`, `worker.stdout.log`, status ve campaign events incelenmelidir.
+
+---
+
+## 45. Komut yazım kuralları
+
+- Dokümana terminalin continuation prompt karakteri olan `>` ekleme.
+- Bash satır devamında `\`, PowerShell satır devamında backtick `` ` `` kullan.
+- `--db` ve `--json`, alt komuttan önce yazılır.
+- `campaign_id`, `release_id`, semboller ve interval seti çalışma boyunca kaydedilir.
+- Başarısız guard'ı SQL ile elle PASS yapma.
+- PAPER burn-in başarısını LIVE-ready olarak yorumlama.
+- Zorla süreç öldürmek yerine önce uygulamanın `pause`/normal shutdown yolunu kullan.
