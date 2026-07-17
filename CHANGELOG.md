@@ -2,6 +2,8 @@
 ## Phase 9 PR 280 Follow-up Hardening
 
 ### Added
+- Append-only verified zero-exposure PAPER recovery evidence (exchange reconciliation event plus `RECONCILED` runtime snapshot).
+- Recovery-drill evidence for PID-less/dead-worker continuation terminalization, including worker, heartbeat, exposure, and transition details.
 - Append-only source evidence auditing for active RUNNING continuations and immutable baselines for terminal continuations.
 - Binance read-only server-time clock-skew validation with persisted local/provider/skew/provenance fields.
 - Recovery drill fail-fast behavior when the old worker cannot be confirmed terminated before resume.
@@ -11,6 +13,8 @@
 - Final aggregate-hash linkage now requires a non-null stored `aggregate_evidence_hash`.
 
 ### Fixed
+- A logically RUNNING continuation with no live worker no longer remains eternally RUNNING during a zero-exposure recovery drill.
+- An unrelated unscoped historical PAPER runtime no longer blocks future PAPER campaigns after complete, empty read-only exchange reconciliation is persisted.
 - Active RUNNING continuations can grow evidence without being falsely flagged as immutable mutations.
 - NULL aggregate evidence hashes no longer pass audit/finalization linkage checks.
 

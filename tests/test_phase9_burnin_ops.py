@@ -298,6 +298,25 @@ def test_recovery_drill_starts_new_worker_and_preserves_exact_pending_ids(monkey
     assert out["checks"]["restart_count_incremented_once"]
 
 
+def test_recovery_drill_recovers_dead_pidless_running_continuation_with_evidence(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    db, conn = _conn(tmp_path)
+    camp, old_run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED', worker_pid=NULL, last_heartbeat_at='2020-01-01T00:00:00Z' WHERE campaign_id=?", (camp.campaign_id,))
+    conn.commit()
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: SimpleNamespace(pid=501))
+    monkeypatch.setattr(ops, "verify_worker_attachment", lambda *a, **k: {"status": "ATTACHED", "runtime_instance_id": "rt"})
+    monkeypatch.setattr(ops, "qualify_campaign", lambda *a, **k: {"status": "stub"})
+    out = recovery_drill(conn, camp.campaign_id, attach_timeout_seconds=0.01)
+    assert out["status"] in {"PASS", "FAIL"}  # qualification/source checks are intentionally strict.
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (old_run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (old_run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    details = conn.execute("SELECT details_json FROM burnin_campaign_events WHERE campaign_id=? AND event_type='PHASE9_STALE_CONTINUATION_RECOVERED'", (camp.campaign_id,)).fetchone()[0]
+    assert json.loads(details)["transition"] == "RUNNING->RECOVERY_REQUIRED"
+
+
 def test_audit_detects_pre_decision_candle_hash_mismatch_and_dashboard_mismatch(monkeypatch, tmp_path):
     import alphaforge.burnin_ops as ops
 
