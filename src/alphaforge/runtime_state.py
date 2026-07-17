@@ -16,7 +16,16 @@ def build_readonly_reconciliation_probe(provider: Any | None) -> Any:
     def probe() -> dict[str, Any]:
         if provider is None:
             raise RuntimeError("read_only_reconciliation_provider_unavailable")
-        raw = dict(provider.snapshot() or {})
+        raw_value = provider.snapshot()
+        if not isinstance(raw_value, Mapping):
+            raise RuntimeError("read_only_reconciliation_malformed_response")
+        raw = dict(raw_value)
+        required = {"evidence_status", "orders", "positions"}
+        missing = sorted(required.difference(raw))
+        if missing:
+            raise RuntimeError(f"read_only_reconciliation_missing_fields:{','.join(missing)}")
+        if not isinstance(raw["orders"], list) or not isinstance(raw["positions"], list):
+            raise RuntimeError("read_only_reconciliation_malformed_collections")
         return {
             "provider": raw.get("exchange") or provider.__class__.__name__,
             "retrieved_at": raw.get("retrieved_at") or raw.get("captured_at") or canonical_utc_timestamp(),
@@ -181,7 +190,19 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
                     prior_campaign_terminal = str(state.get("campaign_status") or "").upper() in {"FAILED", "COMPLETED", "QUALIFIED", "SUSPENDED"}
             except Exception as exc: query_errors.append(f"campaign:{type(exc).__name__}:{exc}")
     if latest and latest.get("process_id"):
-        try: os.kill(int(latest["process_id"]), 0); process_alive = True
+        try:
+            pid = int(latest["process_id"]); os.kill(pid, 0)
+            # PID existence alone is not lineage evidence: Linux exposes a
+            # command line cheaply; an unrelated reused PID is non-blocking.
+            cmdline_path = f"/proc/{pid}/cmdline"
+            if os.path.exists(cmdline_path):
+                cmdline = open(cmdline_path, "rb").read().decode("utf-8", "replace").replace("\x00", " ").lower()
+                expected = (not latest.get("campaign_id")) or ("alphaforge" in cmdline and str(latest["campaign_id"]).lower() in cmdline)
+                process_alive = expected
+            else:
+                # On platforms without process inspection, only fail closed if
+                # the snapshot has matching campaign lineage.
+                process_alive = bool(latest.get("campaign_id") and latest.get("campaign_id") == campaign_id)
         except (OSError, ValueError): pass
     prior_unclean = bool(latest and str(latest.get("runtime_status") or "").upper() not in clean_statuses)
     prior_campaign = (latest or {}).get("campaign_id")
@@ -191,7 +212,9 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     if reconciliation_probe is not None and prior_unclean:
         try:
             probe = dict(reconciliation_probe() or {})
-            probe_clean = str(probe.get("evidence_status") or "").upper() == "COMPLETE" and not probe.get("orders") and not probe.get("positions")
+            probe_clean = str(probe.get("evidence_status") or "").upper() == "COMPLETE" and not probe.get("errors") and not probe.get("orders") and not probe.get("positions")
+            if not probe_clean and (str(probe.get("evidence_status") or "").upper() != "COMPLETE" or probe.get("errors")):
+                query_errors.append("reconciliation_probe:incomplete_or_error")
         except Exception as exc: query_errors.append(f"reconciliation_probe:{type(exc).__name__}:{exc}")
     unresolved_reconciliation = prior_unclean and reconciliation_status not in {"CLEAN", "NOT_REQUIRED_BACKTEST", "LOCAL_ONLY_DIAGNOSTIC"} and not probe_clean
     # Pending orders are global recovery exposure when a predecessor exists;
