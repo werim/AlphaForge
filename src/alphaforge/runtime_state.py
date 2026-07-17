@@ -119,65 +119,80 @@ def latest_runtime_state_snapshot(engine: Engine) -> dict[str, Any] | None:
     return out
 
 
-def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | None = None) -> dict[str, Any]:
+def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | None = None,
+                              burnin_run_id: str | None = None, release_id: str | None = None,
+                              instance_id: str | None = None, startup_id: str | None = None,
+                              reconciliation_probe: Any | None = None) -> dict[str, Any]:
     """Evaluate recovery from authoritative current state, not snapshot counters.
 
     PAPER may isolate a dead, terminal, unrelated campaign only when SQL exposure
     and the latest reconciliation evidence are clean.  LIVE variants deliberately
     retain the historical unclean-start fail-closed rule.
     """
-    ensure_runtime_state_schema(engine)
-    latest = latest_runtime_state_snapshot(engine)
+    query_errors: list[str] = []
+    try:
+        ensure_runtime_state_schema(engine)
+        latest = latest_runtime_state_snapshot(engine)
+    except Exception as exc:
+        return {"blocked": True, "reason": "RECOVERY_EVIDENCE_UNAVAILABLE", "query_errors": [f"runtime_state:{type(exc).__name__}:{exc}"], "scope": "GLOBAL_EXECUTION_RISK", "latest": None, "current_exposure_check": {}}
     clean_statuses = {"STOPPED", "CLEAN_SHUTDOWN", "STOPPING", "RECONCILED"}
     exposure = {"active_positions": 0, "pending_orders": 0, "orphan_orders": 0, "orphan_positions": 0}
     kill_switch = False
     reconciliation_status = "UNKNOWN"
-    campaign_terminal = True
+    prior_campaign_terminal = False
     process_alive = False
     with engine.connect() as conn:
-        def count(sql: str) -> int:
+        def count(name: str, sql: str) -> int:
             try: return int(conn.execute(text(sql)).scalar_one() or 0)
-            except Exception: return 0
-        exposure["active_positions"] = count("SELECT COUNT(*) FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')")
-        exposure["pending_orders"] = count("SELECT COUNT(*) FROM orders WHERE UPPER(COALESCE(status,'')) IN ('PENDING','OPEN','ORDER_PLACED','ENTRY_SUBMITTED')")
+            except Exception as exc:
+                query_errors.append(f"{name}:{type(exc).__name__}:{exc}"); return 0
+        exposure["active_positions"] = count("positions", "SELECT COUNT(*) FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')")
+        exposure["pending_orders"] = count("orders", "SELECT COUNT(*) FROM orders WHERE UPPER(COALESCE(status,'')) IN ('PENDING','OPEN','ORDER_PLACED','ENTRY_SUBMITTED')")
         try:
             row = conn.execute(text("SELECT status, orphan_order_count, orphan_position_count FROM exchange_reconciliation_events ORDER BY id DESC LIMIT 1")).mappings().first()
             if row:
                 reconciliation_status = str(row.get("status") or "UNKNOWN").upper()
                 exposure["orphan_orders"] = int(row.get("orphan_order_count") or 0)
                 exposure["orphan_positions"] = int(row.get("orphan_position_count") or 0)
-        except Exception: pass
+        except Exception as exc: query_errors.append(f"reconciliation:{type(exc).__name__}:{exc}")
         try: kill_switch = bool(conn.execute(text("SELECT kill_switch_active FROM runtime_control_state WHERE id=1")).scalar_one_or_none())
-        except Exception: pass
-        if campaign_id:
+        except Exception as exc: query_errors.append(f"kill_switch:{type(exc).__name__}:{exc}")
+        if latest and latest.get("campaign_id"):
             try:
-                state = conn.execute(text("SELECT campaign_status, worker_pid FROM burnin_campaigns WHERE campaign_id=:id"), {"id": campaign_id}).mappings().first()
+                state = conn.execute(text("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=:id"), {"id": latest["campaign_id"]}).mappings().first()
                 if state:
-                    campaign_terminal = str(state.get("campaign_status") or "").upper() in {"FAILED", "COMPLETED", "QUALIFIED", "SUSPENDED"}
-            except Exception: pass
+                    prior_campaign_terminal = str(state.get("campaign_status") or "").upper() in {"FAILED", "COMPLETED", "QUALIFIED", "SUSPENDED"}
+            except Exception as exc: query_errors.append(f"campaign:{type(exc).__name__}:{exc}")
     if latest and latest.get("process_id"):
         try: os.kill(int(latest["process_id"]), 0); process_alive = True
         except (OSError, ValueError): pass
     prior_unclean = bool(latest and str(latest.get("runtime_status") or "").upper() not in clean_statuses)
     prior_campaign = (latest or {}).get("campaign_id")
     same_campaign = bool(campaign_id and prior_campaign and campaign_id == prior_campaign)
-    # Reconciliation is global only when its *current* evidence remains dirty.
-    unresolved_reconciliation = reconciliation_status not in {"CLEAN", "NOT_REQUIRED_BACKTEST", "LOCAL_ONLY_DIAGNOSTIC", "UNKNOWN"}
-    # A fresh pending order is loaded and age-validated by the runtime below;
-    # only a stale/unparseable pending order is fail-closed there.  This keeps
-    # legitimate in-flight lifecycle recovery compatible while still blocking
-    # all other current execution exposure here.
-    global_risk = bool(exposure["active_positions"] or exposure["orphan_orders"] or exposure["orphan_positions"] or kill_switch or unresolved_reconciliation)
-    if same_campaign: scope = "SAME_CAMPAIGN"
+    same_lineage = bool(latest and instance_id and startup_id and latest.get("instance_id") == instance_id and latest.get("startup_id") == startup_id)
+    probe_clean = False
+    if reconciliation_probe is not None:
+        try:
+            probe = dict(reconciliation_probe() or {})
+            probe_clean = str(probe.get("evidence_status") or "").upper() == "COMPLETE" and not probe.get("orders") and not probe.get("positions")
+        except Exception as exc: query_errors.append(f"reconciliation_probe:{type(exc).__name__}:{exc}")
+    unresolved_reconciliation = prior_unclean and reconciliation_status not in {"CLEAN", "NOT_REQUIRED_BACKTEST", "LOCAL_ONLY_DIAGNOSTIC"} and not probe_clean
+    # Pending orders are global recovery exposure when a predecessor exists;
+    # an initial clean startup retains the established age-validation flow.
+    global_risk = bool(exposure["active_positions"] or (prior_unclean and exposure["pending_orders"]) or exposure["orphan_orders"] or exposure["orphan_positions"] or kill_switch or unresolved_reconciliation)
+    if same_lineage: scope = "SAME_RUNTIME_LINEAGE"
+    elif same_campaign: scope = "SAME_CAMPAIGN"
     elif global_risk: scope = "GLOBAL_EXECUTION_RISK"
     elif prior_unclean: scope = "UNRELATED_HISTORICAL_RUNTIME"
-    else: scope = "SAME_RUNTIME_LINEAGE" if latest and latest.get("instance_id") == "" else "UNRELATED_HISTORICAL_RUNTIME"
+    else: scope = "UNRELATED_HISTORICAL_RUNTIME"
     strict_live = str(mode).upper() in {"LIVE", "LIVE_PRECHECK"}
-    blocked = global_risk or (strict_live and prior_unclean) or (same_campaign and prior_unclean) or process_alive
-    return {"blocked": blocked, "scope": scope, "latest": latest, "current_exposure_check": exposure,
+    blocked = bool(query_errors) or global_risk or (strict_live and prior_unclean) or (same_campaign and prior_unclean) or process_alive
+    reason = "RECOVERY_EVIDENCE_UNAVAILABLE" if query_errors else ("UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED" if blocked and prior_unclean else ("RUNTIME_RECOVERY_REQUIRED" if blocked else None))
+    return {"blocked": blocked, "reason": reason, "scope": scope, "latest": latest, "current_exposure_check": exposure,
             "kill_switch_active": kill_switch, "reconciliation_status": reconciliation_status,
-            "previous_process_alive": process_alive, "campaign_terminal": campaign_terminal,
-            "prior_unclean": prior_unclean, "original_reason": (latest or {}).get("fail_closed_reason")}
+            "previous_process_alive": process_alive, "campaign_terminal": prior_campaign_terminal,
+            "prior_unclean": prior_unclean, "original_reason": (latest or {}).get("fail_closed_reason"), "query_errors": query_errors,
+            "reconciliation_probe_clean": probe_clean}
 
 def save_runtime_recovery_event(engine: Engine, *, instance_id: str, startup_id: str, mode: str, status: str, reason: str, diagnostics: Mapping[str, Any] | None = None) -> None:
     ensure_runtime_state_schema(engine)

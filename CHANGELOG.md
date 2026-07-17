@@ -3185,3 +3185,6 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - LIVE and LIVE_PRECHECK intentionally remain strict on every unclean predecessor; operator reconciliation is still required for genuine shared risk.
+
+### Recovery follow-up
+- Recovery evidence SQL read failures now fail closed as `RECOVERY_EVIDENCE_UNAVAILABLE`; pending predecessor orders are global blockers, and preflight no longer uses a DB-global campaign recovery count.

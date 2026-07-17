@@ -368,13 +368,15 @@ class RuntimeOrchestrator:
         engine = self._resolve_persistence_engine()
         if engine is None:
             self._recovery_required = True; self._fail_closed_reason = "RUNTIME_DB_UNAVAILABLE"; return
-        decision = evaluate_runtime_recovery(engine, mode=self.config.execution_mode.value, campaign_id=os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or None)
+        provider = self.live_reconciliation_provider or self.exchange_snapshot_provider
+        probe = provider.snapshot if provider is not None else None
+        decision = evaluate_runtime_recovery(engine, mode=self.config.execution_mode.value, campaign_id=os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or None, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID") or self.config.phase7_burnin_release_id, instance_id=self.runtime_instance_id, startup_id=self.startup_id, reconciliation_probe=probe)
         self._recovery_decision = decision
         latest = decision.get("latest")
         if decision["blocked"]:
             self._recovery_required = True
-            self._fail_closed_reason = "UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED" if decision.get("prior_unclean") else "RUNTIME_RECOVERY_REQUIRED"
-            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_REQUIRED", reason=self._fail_closed_reason, diagnostics={"blocking_snapshot_id": (latest or {}).get("id"), "blocking_instance_id": (latest or {}).get("instance_id"), "blocking_startup_id": (latest or {}).get("startup_id"), "original_reason": decision.get("original_reason"), "current_exposure_check": decision["current_exposure_check"], "scope_decision": decision["scope"]})
+            self._fail_closed_reason = decision.get("reason") or ("UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED" if decision.get("prior_unclean") else "RUNTIME_RECOVERY_REQUIRED")
+            save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_REQUIRED", reason=self._fail_closed_reason, diagnostics={"blocking_snapshot_id": (latest or {}).get("id"), "blocking_instance_id": (latest or {}).get("instance_id"), "blocking_startup_id": (latest or {}).get("startup_id"), "original_reason": decision.get("original_reason"), "current_exposure_check": decision["current_exposure_check"], "scope_decision": decision["scope"], "query_errors": decision.get("query_errors", [])})
         elif latest and decision.get("prior_unclean"):
             # Append-only audit: do not manufacture a clean shutdown or copy the
             # inherited failure into this runtime's state.
@@ -413,6 +415,10 @@ class RuntimeOrchestrator:
                 raise RuntimeError("LIVE mode blocked: market scanner provenance is not verified")
             if scanner_source not in allowed_sources:
                 raise RuntimeError("LIVE mode blocked: exchange-backed market scanner is required")
+            if self.config.execution_mode == ExecutionMode.LIVE:
+                # Phase 6 mutation disablement is a deterministic local guard and
+                # must win over persisted recovery history.
+                await self._reject_real_live_in_phase6()
         if self.metrics.persistence_enabled:
             self._load_recovery_state()
             self._persist_runtime_state_snapshot("STARTUP")
