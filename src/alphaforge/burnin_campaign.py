@@ -16,6 +16,9 @@ from alphaforge.config import runtime_filter_config
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
 DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
 CAMPAIGN_STATUSES = {"CREATED","RUNNING","PAUSED","RECOVERY_REQUIRED","COMPLETED","FAILED","QUALIFIED","SUSPENDED"}
+ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode", "git_commit")
+RUNTIME_ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode")
+CAMPAIGN_RUNTIME_IDENTITY_FIELDS = (*RUNTIME_ATTACHMENT_IDENTITY_FIELDS, "execution_cost_config_hash")
 
 PHASE8_DDL = [
 """CREATE TABLE IF NOT EXISTS burnin_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL UNIQUE,release_id TEXT NOT NULL,campaign_status TEXT NOT NULL,created_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,expected_duration_seconds REAL,observed_duration_seconds REAL,target_decisions INTEGER,target_closed_trades INTEGER,target_reject_forward_outcomes INTEGER,active_run_id TEXT,config_hash TEXT NOT NULL,strategy_config_hash TEXT NOT NULL,universe_hash TEXT NOT NULL,git_commit TEXT NOT NULL,execution_cost_config_hash TEXT,source_provenance_json TEXT NOT NULL,symbols_json TEXT NOT NULL,intervals_json TEXT NOT NULL,restart_count INTEGER NOT NULL DEFAULT 0,last_heartbeat_at TEXT,last_error TEXT,qualification_status TEXT,latest_qualification_id TEXT,evidence_completeness_status TEXT NOT NULL DEFAULT 'UNKNOWN',schema_version TEXT NOT NULL,UNIQUE(campaign_id, release_id))""",
@@ -118,6 +121,39 @@ def get_campaign(conn: Any, campaign_id: str) -> dict[str,Any]|None:
         except Exception: d[dst]=fb
     return d
 
+def campaign_attachment_identity(campaign: Mapping[str, Any]) -> dict[str, Any]:
+    """Identity persisted for the campaign-level attachment contract."""
+    return {**{key: campaign.get(key) for key in ATTACHMENT_IDENTITY_FIELDS}, "execution_cost_config_hash": campaign.get("execution_cost_config_hash"), "execution_mode": "PAPER"}
+
+def run_attachment_identity(run: Mapping[str, Any]) -> dict[str, Any]:
+    """Identity persisted by burnin_runs (execution-cost identity is campaign-scoped)."""
+    return {key: run.get(key) for key in ATTACHMENT_IDENTITY_FIELDS}
+
+def identity_mismatches(expected: Mapping[str, Any], observed: Mapping[str, Any], fields: Sequence[str]) -> dict[str, dict[str, Any]]:
+    return {key: {"expected": expected.get(key), "observed": observed.get(key)} for key in fields if expected.get(key) != observed.get(key)}
+
+def load_active_campaign_attachment(conn: Any, campaign_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    """Load campaign/run/mapping without repairing invalid historical identity."""
+    campaign = get_campaign(conn, campaign_id)
+    if not campaign:
+        return None, None, None, "PHASE8_CAMPAIGN_NOT_FOUND"
+    run_id = campaign.get("active_run_id")
+    if not run_id:
+        return campaign, None, None, "PHASE8_CAMPAIGN_ACTIVE_RUN_MISSING"
+    row = _exec(conn, "SELECT * FROM burnin_runs WHERE burnin_run_id=:bid", {"bid": run_id}).fetchone()
+    if row is None:
+        return campaign, None, None, "PHASE8_CAMPAIGN_ACTIVE_RUN_NOT_FOUND"
+    run = _row_dict(row)
+    mapping_row = _exec(conn, "SELECT * FROM burnin_campaign_runs WHERE campaign_id=:cid AND burnin_run_id=:bid", {"cid": campaign_id, "bid": run_id}).fetchone()
+    if mapping_row is None:
+        return campaign, run, None, "PHASE8_CAMPAIGN_ACTIVE_RUN_MAPPING_MISSING"
+    mapping = _row_dict(mapping_row)
+    if int(mapping.get("continuation_sequence")) != int(run.get("continuation_sequence")) or mapping.get("status") != run.get("status"):
+        return campaign, run, mapping, "PHASE8_CAMPAIGN_ACTIVE_RUN_MAPPING_INVALID"
+    if mapping.get("status") != "RUNNING":
+        return campaign, run, mapping, str(campaign.get("last_error") or "PHASE8_CAMPAIGN_ACTIVE_RUN_NOT_RUNNING")
+    return campaign, run, mapping, None
+
 def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|None=None, details: Mapping[str,Any]|None=None) -> None:
     eid="evt_"+canonical_hash({"campaign_id":campaign_id,"type":event_type,"run":burnin_run_id,"at":utc_now(),"details":details or {}})[:24]
     _exec(conn,"INSERT OR IGNORE INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES (:eid,:cid,:bid,:typ,:ts,:det,:sv)",{"eid":eid,"cid":campaign_id,"bid":burnin_run_id,"typ":event_type,"ts":utc_now(),"det":json.dumps(dict(details or {}),sort_keys=True,default=str),"sv":CAMPAIGN_SCHEMA_VERSION})
@@ -130,7 +166,10 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
             _exec(conn,"UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:e WHERE campaign_id=:id",{"id":campaign_id,"e":"CONFIG_DRIFT"}); event(conn,campaign_id,"CONFIG_DRIFT",details={k:{"expected":c[k],"observed":v}}); raise ValueError("CONFIG_DRIFT")
     old=c.get("active_run_id"); seq=int((_exec(conn,"SELECT COALESCE(MAX(continuation_sequence),-1)+1 FROM burnin_campaign_runs WHERE campaign_id=:id",{"id":campaign_id}).fetchone()[0]) or 0)
     if old and resume:
-        _exec(conn,"UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'",{"bid":old,"ts":utc_now()}); event(conn,campaign_id,"RECOVERY_REQUIRED",burnin_run_id=old)
+        ts = utc_now()
+        _exec(conn,"UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'",{"bid":old,"ts":ts})
+        _exec(conn,"UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'",{"cid":campaign_id,"bid":old,"ts":ts})
+        event(conn,campaign_id,"RECOVERY_REQUIRED",burnin_run_id=old)
     run_id=f"{campaign_id}_run_{seq:04d}"
     run=BurnInRun(run_id,c["release_id"],phase="PHASE8",execution_mode="PAPER",continuation_sequence=seq,start_time=utc_now(),status="RUNNING",git_commit=c["git_commit"],config_hash=c["config_hash"],strategy_config_hash=c["strategy_config_hash"],universe_hash=c["universe_hash"],source_provenance=c["source_provenance"],symbols=c["symbols"],intervals=c["intervals"],expected_duration_seconds=c.get("expected_duration_seconds"))
     persist_burnin_run(conn,run)
@@ -138,6 +177,25 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
     _exec(conn,"UPDATE burnin_campaigns SET campaign_status='RUNNING', started_at=COALESCE(started_at,:ts), active_run_id=:bid, restart_count=restart_count+:inc, last_heartbeat_at=:ts, last_error=NULL WHERE campaign_id=:cid",{"cid":campaign_id,"bid":run_id,"ts":run.start_time,"inc":1 if resume else 0})
     event(conn,campaign_id,"CAMPAIGN_RESUMED" if resume else "CAMPAIGN_STARTED",burnin_run_id=run_id)
     return {"campaign_id":campaign_id,"burnin_run_id":run_id,"continuation_sequence":seq,"status":"RUNNING"}
+
+def fail_active_campaign_run(conn: Any, campaign_id: str, reason: str, *, details: Mapping[str, Any] | None = None) -> None:
+    """Terminally record an unattached continuation without deleting its audit trail."""
+    c = get_campaign(conn, campaign_id)
+    if not c:
+        raise KeyError("campaign not found")
+    run_id = c.get("active_run_id")
+    ts = utc_now()
+    already_terminal = False
+    if run_id:
+        row = _exec(conn, "SELECT status, end_time FROM burnin_runs WHERE burnin_run_id=:bid", {"bid": run_id}).fetchone()
+        if row is not None:
+            current = _row_dict(row)
+            already_terminal = current.get("status") == "FAILED" and bool(current.get("end_time")) and c.get("last_error") == reason
+        _exec(conn, "UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'", {"bid": run_id, "ts": ts})
+        _exec(conn, "UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'", {"cid": campaign_id, "bid": run_id, "ts": ts})
+    _exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:reason WHERE campaign_id=:cid", {"cid": campaign_id, "reason": reason})
+    if not already_terminal:
+        event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACH_FAILED", burnin_run_id=run_id, details={"reason": reason, **dict(details or {})})
 
 def pause_campaign(conn: Any, campaign_id: str) -> None:
     c=get_campaign(conn,campaign_id); 
@@ -166,7 +224,7 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
-    runs = [_row_dict(r) for r in _exec(conn, "SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:cid ORDER BY cr.continuation_sequence", {"cid": campaign_id}).fetchall()]
+    runs = [_row_dict(r) for r in _exec(conn, "SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:cid AND (cr.status != 'FAILED' OR EXISTS (SELECT 1 FROM burnin_observations o WHERE o.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_trade_outcomes t WHERE t.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_reject_outcomes j WHERE j.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_regime_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_execution_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_calibration_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_drawdown_events m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_qualification_snapshots q WHERE q.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_suspension_events s WHERE s.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_reject_labels p WHERE p.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_position_outcomes p WHERE p.burnin_run_id=r.burnin_run_id)) ORDER BY cr.continuation_sequence", {"cid": campaign_id}).fetchall()]
     if not runs:
         raise KeyError("campaign has no runs")
     incompatible = [r["burnin_run_id"] for r in runs if r.get("release_id") != c["release_id"] or r.get("config_hash") != c["config_hash"] or r.get("strategy_config_hash") != c["strategy_config_hash"] or r.get("universe_hash") != c["universe_hash"]]
@@ -224,7 +282,7 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
 def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     c=get_campaign(conn,campaign_id)
     if not c: return {"status":"UNAVAILABLE","reason":"NO_CAMPAIGN"}
-    runs=[_row_dict(r) for r in _exec(conn,"SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:id ORDER BY cr.continuation_sequence",{"id":campaign_id}).fetchall()]
+    runs=[_row_dict(r) for r in _exec(conn,"SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:id AND (cr.status != 'FAILED' OR EXISTS (SELECT 1 FROM burnin_observations o WHERE o.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_trade_outcomes t WHERE t.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_reject_outcomes j WHERE j.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_regime_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_execution_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_calibration_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_drawdown_events m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_qualification_snapshots q WHERE q.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_suspension_events s WHERE s.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_reject_labels p WHERE p.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_position_outcomes p WHERE p.burnin_run_id=r.burnin_run_id)) ORDER BY cr.continuation_sequence",{"id":campaign_id}).fetchall()]
     run_ids=[r["burnin_run_id"] if isinstance(r,dict) else r["burnin_run_id"] for r in runs]
     if not run_ids: return {"status":"NO_EVIDENCE","campaign_id":campaign_id,"run_ids":[]}
     ph=",".join([f":r{i}" for i in range(len(run_ids))]); p={f"r{i}":v for i,v in enumerate(run_ids)}
