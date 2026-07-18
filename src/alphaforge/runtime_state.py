@@ -219,7 +219,7 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     unresolved_reconciliation = prior_unclean and reconciliation_status not in {"CLEAN", "NOT_REQUIRED_BACKTEST", "LOCAL_ONLY_DIAGNOSTIC"} and not probe_clean
     # Pending orders are global recovery exposure when a predecessor exists;
     # an initial clean startup retains the established age-validation flow.
-    global_risk = bool(exposure["active_positions"] or (prior_unclean and exposure["pending_orders"]) or exposure["orphan_orders"] or exposure["orphan_positions"] or kill_switch or unresolved_reconciliation)
+    global_risk = bool(exposure["active_positions"] or (prior_unclean and exposure["pending_orders"]) or exposure["orphan_orders"] or exposure["orphan_positions"] or kill_switch or (unresolved_reconciliation and not query_errors))
     if same_lineage: scope = "SAME_RUNTIME_LINEAGE"
     elif same_campaign: scope = "SAME_CAMPAIGN"
     elif global_risk: scope = "GLOBAL_EXECUTION_RISK"
@@ -243,6 +243,31 @@ def save_exchange_reconciliation_event(engine: Engine, *, instance_id: str, star
     ensure_runtime_state_schema(engine)
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO exchange_reconciliation_events(event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json) VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d)"), {"ts": canonical_utc_timestamp(),"i":instance_id,"s":startup_id,"m":mode,"st":status,"mc":mismatch_count,"oo":orphan_order_count,"op":orphan_position_count,"ro":exchange_read_only_status,"d":json.dumps(dict(diagnostics or {}), sort_keys=True, default=str)})
+
+
+def persist_historical_paper_recovery_without_provider(engine: Engine, *, prior_snapshot: Mapping[str, Any] | None, diagnostics: Mapping[str, Any]) -> None:
+    """Append auditable PAPER historical recovery evidence when exchange probe is unavailable.
+
+    This fallback is deliberately weaker than verified exchange reconciliation and
+    is valid only for dead, unrelated historical burn-in runtime recovery after
+    callers have proven local SQL exposure is zero. It records the unavailable
+    provider explicitly and creates a local diagnostic reconciled snapshot so the
+    same stale historical row cannot deadlock future PAPER preflight.
+    """
+    instance_id = f"recovery:{uuid.uuid4().hex}"
+    startup_id = f"recovery:{uuid.uuid4().hex}"
+    evidence = {**dict(diagnostics), "prior_snapshot_id": (prior_snapshot or {}).get("id"), "recovery_action": "UNRELATED_HISTORICAL_ZERO_LOCAL_EXPOSURE_PROVIDER_UNAVAILABLE"}
+    save_runtime_recovery_event(engine, instance_id=instance_id, startup_id=startup_id, mode="PAPER", status="HISTORICAL_RUNTIME_RECOVERED_LOCAL_EVIDENCE", reason="UNRELATED_HISTORICAL_RUNTIME_ZERO_LOCAL_EXPOSURE", diagnostics=evidence)
+    save_exchange_reconciliation_event(engine, instance_id=instance_id, startup_id=startup_id,
+                                       mode="PAPER", status="LOCAL_ONLY_DIAGNOSTIC", exchange_read_only_status="UNAVAILABLE",
+                                       diagnostics=evidence)
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECONCILED",
+        instance_id=instance_id, startup_id=startup_id, process_id=0,
+        unknown_exchange_state=False, exchange_read_only_status="UNAVAILABLE", reconciliation_status="LOCAL_ONLY_DIAGNOSTIC",
+        recovery_action_required=False,
+        diagnostics_json=evidence,
+    ))
 
 
 def persist_verified_paper_recovery(engine: Engine, *, probe: Mapping[str, Any], prior_snapshot: Mapping[str, Any] | None) -> None:

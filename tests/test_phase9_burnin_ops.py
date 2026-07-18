@@ -542,3 +542,63 @@ def test_post_attach_exception_uses_accurate_event_and_terminalizes(tmp_path):
     assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "FAILED"
     state = conn.execute("SELECT campaign_status,last_error,worker_pid FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()
     assert tuple(state) == ("FAILED", "WORKER_UNCAUGHT_EXCEPTION", None)
+
+
+def test_dead_unrelated_historical_provider_unavailable_recovers_with_local_evidence(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    from alphaforge.persistence import init_db
+    from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, latest_runtime_state_snapshot
+
+    db, conn = _conn(tmp_path)
+    camp, old_run = _campaign(conn)
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED", instance_id="old", startup_id="old", process_id=99999999, campaign_id="other", fail_closed_reason="UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED", recovery_action_required=True))
+    engine.dispose()
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', worker_pid=NULL, last_heartbeat_at='2020-01-01T00:00:00Z' WHERE campaign_id=?", (camp.campaign_id,))
+    conn.commit()
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: int(pid or 0) == 501)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: SimpleNamespace(pid=501))
+    monkeypatch.setattr(ops, "verify_worker_attachment", lambda *a, **k: {"status": "ATTACHED", "runtime_instance_id": "rt"})
+
+    out = recovery_drill(conn, camp.campaign_id, attach_timeout_seconds=0.01)
+    assert out["status"] == "PASS"
+    assert out["checks"]["historical_zero_local_fallback"] is True
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (old_run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    details = json.loads(conn.execute("SELECT details_json FROM burnin_campaign_events WHERE campaign_id=? AND event_type='PHASE9_STALE_CONTINUATION_RECOVERED'", (camp.campaign_id,)).fetchone()[0])
+    assert details["runtime_recovery"]["fallback_original_runtime_recovery"]["query_errors"]
+    assert latest_runtime_state_snapshot(init_db(f"sqlite+pysqlite:///{db}"))["reconciliation_status"] == "LOCAL_ONLY_DIAGNOSTIC"
+    evt = conn.execute("SELECT diagnostics_json FROM runtime_recovery_events WHERE status='HISTORICAL_RUNTIME_RECOVERED_LOCAL_EVIDENCE'").fetchone()
+    assert evt and "read_only_reconciliation_provider_unavailable" in evt[0]
+
+
+def test_related_provider_unavailable_remains_blocked(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    from alphaforge.persistence import init_db
+    from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
+
+    db, conn = _conn(tmp_path)
+    camp, old_run = _campaign(conn)
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED", instance_id="old", startup_id="old", process_id=99999999, campaign_id=camp.campaign_id, fail_closed_reason="UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED", recovery_action_required=True))
+    engine.dispose()
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not launch")))
+    out = recovery_drill(conn, camp.campaign_id)
+    assert out["status"] == "FAIL"
+    assert out["checks"].get("historical_zero_local_fallback") is False
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (old_run,)).fetchone()[0] == "RUNNING"
+
+
+def test_live_process_remains_blocked(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, _old_run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET worker_pid=123 WHERE campaign_id=?", (camp.campaign_id,))
+    conn.commit()
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(ops, "_stop_worker", lambda *a, **k: False)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not launch")))
+    out = recovery_drill(conn, camp.campaign_id)
+    assert out["status"] == "FAIL"
+    assert out["checks"]["failure_reasons"] == ["RECOVERY_DRILL_WORKER_TERMINATION_FAILED"]
