@@ -27,6 +27,10 @@ PHASE9_SCHEMA_VERSION = "phase9_ops_v2"
 ALLOWED_FINAL_DECISIONS = {"PAPER_BURNIN_INCOMPLETE", "PAPER_BURNIN_FAILED", "PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW", "PAPER_BURNIN_SUSPENDED"}
 VALID_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"}
 CONFIG_DRIFT_REASONS = {"CONFIG_DRIFT", "PHASE8_CAMPAIGN_CONFIG_DRIFT", "PHASE8_CAMPAIGN_STRATEGY_DRIFT", "PHASE8_CAMPAIGN_UNIVERSE_DRIFT", "PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT", "PHASE8_CAMPAIGN_RELEASE_MISMATCH", "PHASE8_CAMPAIGN_EXECUTION_MODE_INVALID"}
+ACTIVE_CAMPAIGN_STATUSES = {"CREATED", "STARTING", "RUNNING", "PAUSED", "RECOVERY_REQUIRED"}
+TERMINAL_CAMPAIGN_STATUSES = {"COMPLETED", "FAILED", "QUALIFIED", "SUSPENDED"}
+ACTIVE_RUN_STATUSES = {"STARTING", "RUNNING"}
+STARTUP_FAILURE_REASONS = {"WORKER_ATTACHMENT_TIMEOUT", "WORKER_EXITED_BEFORE_ATTACHMENT", "WORKER_ATTACHMENT_INTERRUPTED", "WORKER_IDENTITY_MISMATCH", "WORKER_SPAWN_FAILED", "WORKER_STARTUP_EXITED", "LAUNCH_STARTUP_FAILED", "SYSTEM_EXIT_DURING_ATTACHMENT"}
 
 
 def _db_path(args: Any) -> str:
@@ -107,12 +111,20 @@ def _git_commit() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 
-def _symbols(raw: str) -> list[str]:
-    return [item.strip().upper() for item in raw.split(",") if item.strip()]
+def _symbols(raw: str | Sequence[str]) -> list[str]:
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    parsed: list[str] = []
+    for value in values:
+        parsed.extend(item.strip().upper() for item in str(value).split(",") if item.strip())
+    return parsed
 
 
-def _intervals(raw: str) -> list[str]:
-    return [item.strip() for item in raw.split(",") if item.strip()]
+def _intervals(raw: str | Sequence[str]) -> list[str]:
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    parsed: list[str] = []
+    for value in values:
+        parsed.extend(item.strip() for item in str(value).split(",") if item.strip())
+    return parsed
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
@@ -260,9 +272,9 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("source_provenance_present", "UNAVAILABLE", f"{exc.__class__.__name__}:{exc}")
 
     if conn is not None:
-        dup = conn.execute("SELECT COUNT(*) FROM burnin_campaigns WHERE release_id=? AND config_hash=? AND strategy_config_hash=? AND universe_hash=? AND campaign_status IN ('CREATED','RUNNING','PAUSED','RECOVERY_REQUIRED')", (release_id, ident["config_hash"], ident["strategy_config_hash"], ident["universe_hash"])).fetchone()[0]
+        dup = conn.execute("SELECT COUNT(*) FROM burnin_campaigns WHERE release_id=? AND config_hash=? AND strategy_config_hash=? AND universe_hash=? AND campaign_status IN ('CREATED','STARTING','RUNNING','PAUSED','RECOVERY_REQUIRED')", (release_id, ident["config_hash"], ident["strategy_config_hash"], ident["universe_hash"])).fetchone()[0]
         add("no_duplicate_active_campaign", "PASS" if int(dup) == 0 else "FAIL", {"candidate_campaign_id": cid, "duplicates": dup})
-        stale = conn.execute("SELECT COUNT(*) FROM burnin_campaigns WHERE campaign_id=? AND worker_pid IS NOT NULL", (cid,)).fetchone()[0]
+        stale = conn.execute("SELECT COUNT(*) FROM burnin_campaigns WHERE campaign_id=? AND worker_pid IS NOT NULL AND campaign_status IN ('CREATED','STARTING','RUNNING','PAUSED','RECOVERY_REQUIRED')", (cid,)).fetchone()[0]
         add("no_stale_worker_occupying_campaign", "PASS" if int(stale) == 0 else "FAIL", stale)
         recovery_engine = init_db(f"sqlite+pysqlite:///{db}")
         try:
@@ -311,7 +323,16 @@ def _latest_attach(conn: sqlite3.Connection, campaign_id: str, since: str | None
     return None
 
 
-def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, worker_started_at: str, launch_started_at: str, timeout_seconds: float = 60.0) -> dict[str, Any]:
+def _latest_attach_any(conn: sqlite3.Connection, campaign_id: str, since: str | None = None) -> sqlite3.Row | None:
+    params: list[Any] = [campaign_id]
+    where = "campaign_id=? AND event_type='PHASE8_CAMPAIGN_ATTACHED'"
+    if since:
+        where += " AND event_time >= ?"
+        params.append(since)
+    return conn.execute(f"SELECT * FROM burnin_campaign_events WHERE {where} ORDER BY id DESC LIMIT 1", params).fetchone()
+
+
+def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, worker_started_at: str, launch_started_at: str, timeout_seconds: float = 60.0, process: subprocess.Popen[Any] | None = None) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     last: dict[str, Any] = {}
     while time.monotonic() <= deadline:
@@ -322,69 +343,139 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
             break
         pid = campaign.get("worker_pid")
         active_run_id = campaign.get("active_run_id")
+        raw_attach = _latest_attach_any(conn, campaign_id, since=launch_started_at)
+        raw_details = _event_details(raw_attach)
+        if raw_attach is not None and raw_details.get("active_run_id") != active_run_id:
+            last = {"status": "FAILED", "reason": "WORKER_IDENTITY_MISMATCH", "worker_pid": pid, "active_run_id": active_run_id, "attached_run_id": raw_details.get("active_run_id"), "runtime_instance_id": raw_details.get("runtime_instance_id")}
+            break
         attach = _latest_attach(conn, campaign_id, since=launch_started_at, run_id=active_run_id)
         details = _event_details(attach)
         heartbeat = campaign.get("last_heartbeat_at")
+        worker_exit_code = process.poll() if process is not None else None
         checks = {
             "worker_alive": _pid_alive(pid),
+            "worker_not_exited": worker_exit_code is None,
             "attach_event_after_launch": attach is not None,
             "runtime_instance_evidence": bool(details.get("runtime_instance_id")),
             "heartbeat_newer_than_worker_started": bool(heartbeat and heartbeat >= worker_started_at),
             "active_run_id_matches_attach": bool(active_run_id and details.get("active_run_id") == active_run_id),
         }
-        last = {"status": "ATTACHED" if all(checks.values()) else "WAITING", "checks": checks, "worker_pid": pid, "runtime_instance_id": details.get("runtime_instance_id"), "active_run_id": active_run_id, "heartbeat": heartbeat}
+        last = {"status": "ATTACHED" if all(checks.values()) else "WAITING", "checks": checks, "worker_pid": pid, "worker_exit_code": worker_exit_code, "runtime_instance_id": details.get("runtime_instance_id"), "active_run_id": active_run_id, "heartbeat": heartbeat}
         if all(checks.values()):
             return last
-        if pid and not _pid_alive(pid):
+        if worker_exit_code is not None or (pid and not _pid_alive(pid)):
             last["status"] = "FAILED"
-            last["reason"] = "WORKER_EXITED_BEFORE_ATTACH"
+            last["reason"] = "WORKER_EXITED_BEFORE_ATTACHMENT"
             break
         time.sleep(0.25)
-    _mark_campaign_failed(conn, campaign_id, "PHASE9_WORKER_ATTACH_TIMEOUT", last)
-    return {**last, "status": "FAILED", "reason": last.get("reason") or "PHASE9_WORKER_ATTACH_TIMEOUT"}
-
+    reason = last.get("reason") or "WORKER_ATTACHMENT_TIMEOUT"
+    _mark_campaign_failed(conn, campaign_id, reason, last)
+    return {**last, "status": "FAILED", "reason": reason}
 
 def _mark_campaign_failed(conn: sqlite3.Connection, campaign_id: str, reason: str, details: Mapping[str, Any] | None = None) -> None:
     campaign = get_campaign(conn, campaign_id)
     active_run_id = campaign.get("active_run_id") if campaign else None
     ts = utc_now()
     if active_run_id:
-        conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time, ?) WHERE burnin_run_id=? AND status='RUNNING'", (ts, active_run_id))
-        conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at, ?) WHERE campaign_id=? AND burnin_run_id=? AND status='RUNNING'", (ts, campaign_id, active_run_id))
+        conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time, ?) WHERE burnin_run_id=? AND status IN ('STARTING','RUNNING')", (ts, active_run_id))
+        conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at, ?) WHERE campaign_id=? AND burnin_run_id=? AND status IN ('STARTING','RUNNING')", (ts, campaign_id, active_run_id))
     conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', last_error=?, worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (reason, campaign_id))
     event(conn, campaign_id, "PHASE9_CAMPAIGN_FAILED", details={"reason": reason, **dict(details or {})})
     conn.commit()
 
+
+def _mark_starting(conn: sqlite3.Connection, campaign_id: str, run_id: str) -> None:
+    conn.execute("UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=? AND status='RUNNING'", (run_id,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE campaign_id=? AND burnin_run_id=? AND status='RUNNING'", (campaign_id, run_id))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='STARTING' WHERE campaign_id=? AND campaign_status='RUNNING'", (campaign_id,))
+    event(conn, campaign_id, "PHASE9_CAMPAIGN_STARTING", burnin_run_id=run_id)
+
+
+def _mark_attached_running(conn: sqlite3.Connection, campaign_id: str, run_id: str, details: Mapping[str, Any]) -> None:
+    conn.execute("UPDATE burnin_runs SET status='RUNNING' WHERE burnin_run_id=? AND status='STARTING'", (run_id,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='RUNNING' WHERE campaign_id=? AND burnin_run_id=? AND status='STARTING'", (campaign_id, run_id))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RUNNING', last_error=NULL WHERE campaign_id=? AND campaign_status='STARTING'", (campaign_id,))
+    event(conn, campaign_id, "PHASE9_CAMPAIGN_RUNNING_AFTER_ATTACHMENT", burnin_run_id=run_id, details=details)
+    conn.commit()
+
+
+def _safe_startup_failure(conn: sqlite3.Connection | None, campaign_id: str | None, reason: str, details: Mapping[str, Any] | None = None) -> None:
+    if conn is None or not campaign_id:
+        return
+    try:
+        _mark_campaign_failed(conn, campaign_id, reason, {"startup_failure": True, **dict(details or {})})
+    except BaseException:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
+
+def _startup_diagnostics(campaign_id: str, process: subprocess.Popen[Any] | None = None, **extra: Any) -> dict[str, Any]:
+    stdout_path, stderr_path = _worker_log_paths(campaign_id)
+    worker_exit_code = None
+    if process is not None:
+        try:
+            worker_exit_code = process.poll()
+        except Exception as exc:
+            worker_exit_code = f"POLL_UNAVAILABLE:{exc.__class__.__name__}:{exc}"
+    return {
+        "stdout_log_path": str(stdout_path),
+        "stderr_log_path": str(stderr_path),
+        "worker_exit_code": worker_exit_code,
+        **extra,
+    }
 
 def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], *, detach: bool = False, attach_timeout_seconds: float = 60.0) -> dict[str, Any]:
     pf = preflight(db, release_id, symbols, intervals)
     if pf["status"] != "PASS":
         return {"status": "FAILED_CLOSED", "preflight": pf}
     conn = _connect(db)
+    campaign_id: str | None = None
+    run_id: str | None = None
     try:
         campaign = create_campaign(conn, release_id=release_id, duration_days=duration_days, symbols=symbols, intervals=intervals, runtime_config=load_config_from_env().runtime, source_provenance={"provider": "BINANCE_READ_ONLY_KLINES", "mode": "PAPER"})
+        campaign_id = campaign.campaign_id
         launch_started_at = utc_now()
         start = start_or_resume_campaign(conn, campaign.campaign_id)
+        run_id = start["burnin_run_id"]
+        if detach:
+            _mark_starting(conn, campaign.campaign_id, run_id)
         conn.commit()
         if detach:
             try:
                 proc = _launch_worker(db, campaign.campaign_id)
             except RuntimeError as exc:
-                # _launch_worker already persisted a precise fail-closed identity
-                # or mapping failure; do not overwrite it as a spawn failure.
-                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": str(exc)}
+                reason = str(exc) or "WORKER_LAUNCH_RUNTIME_ERROR"
+                _safe_startup_failure(conn, campaign.campaign_id, reason, _startup_diagnostics(campaign.campaign_id, exception_type=exc.__class__.__name__, error=reason))
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": reason, **_startup_diagnostics(campaign.campaign_id)}
             except Exception as exc:
-                _mark_campaign_failed(conn, campaign.campaign_id, "PHASE9_WORKER_SPAWN_FAILED", {"error": f"{exc.__class__.__name__}:{exc}"})
-                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "PHASE9_WORKER_SPAWN_FAILED"}
+                diagnostics = _startup_diagnostics(campaign.campaign_id, exception_type=exc.__class__.__name__, error=f"{exc.__class__.__name__}:{exc}")
+                _safe_startup_failure(conn, campaign.campaign_id, "WORKER_SPAWN_FAILED", diagnostics)
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "PHASE9_WORKER_SPAWN_FAILED", "startup_failure_reason": "WORKER_SPAWN_FAILED", **diagnostics}
             worker_started_at = utc_now()
             conn.execute("UPDATE burnin_campaigns SET worker_pid=?, worker_started_at=? WHERE campaign_id=?", (proc.pid, worker_started_at, campaign.campaign_id))
             conn.commit()
-            if not _pid_alive(proc.pid):
-                _mark_campaign_failed(conn, campaign.campaign_id, "WORKER_STARTUP_EXITED", {"worker_pid": proc.pid})
-                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "WORKER_STARTUP_EXITED"}
-            attach = verify_worker_attachment(conn, campaign.campaign_id, worker_started_at=worker_started_at, launch_started_at=launch_started_at, timeout_seconds=attach_timeout_seconds)
+            if proc.poll() is not None or not _pid_alive(proc.pid):
+                diagnostics = _startup_diagnostics(campaign.campaign_id, proc, worker_pid=proc.pid)
+                _mark_campaign_failed(conn, campaign.campaign_id, "WORKER_STARTUP_EXITED", diagnostics)
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "WORKER_STARTUP_EXITED", **diagnostics}
+            try:
+                attach = verify_worker_attachment(conn, campaign.campaign_id, worker_started_at=worker_started_at, launch_started_at=launch_started_at, timeout_seconds=attach_timeout_seconds, process=proc)
+            except KeyboardInterrupt:
+                _safe_startup_failure(conn, campaign.campaign_id, "WORKER_ATTACHMENT_INTERRUPTED", _startup_diagnostics(campaign.campaign_id, proc, exception_type="KeyboardInterrupt", worker_pid=proc.pid))
+                raise
+            except SystemExit as exc:
+                _safe_startup_failure(conn, campaign.campaign_id, "SYSTEM_EXIT_DURING_ATTACHMENT", _startup_diagnostics(campaign.campaign_id, proc, exception_type="SystemExit", code=exc.code, worker_pid=proc.pid))
+                raise
+            except BaseException as exc:
+                _safe_startup_failure(conn, campaign.campaign_id, "LAUNCH_STARTUP_FAILED", _startup_diagnostics(campaign.campaign_id, proc, exception_type=exc.__class__.__name__, error=str(exc), worker_pid=proc.pid))
+                raise
             if attach.get("status") != "ATTACHED":
-                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "attachment": attach}
+                diagnostics = _startup_diagnostics(campaign.campaign_id, proc, worker_pid=proc.pid)
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "attachment": {**diagnostics, **attach}, **diagnostics}
+            _mark_attached_running(conn, campaign.campaign_id, run_id, attach)
             return {"status": "LAUNCHED", "campaign_id": campaign.campaign_id, "burnin_run_id": start["burnin_run_id"], "worker_pid": proc.pid, "attachment": attach, "evidence_locations": {"preflight": pf["evidence_locations"], "database": db, "artifacts": f"artifacts/burnin/{campaign.campaign_id}"}}
         engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
         try:
@@ -393,9 +484,12 @@ def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Seq
             return {"status": "FOREGROUND_STOPPED", "campaign_id": campaign.campaign_id, "burnin_run_id": start["burnin_run_id"], "runner": result}
         finally:
             engine.dispose()
+    except Exception as exc:
+        if campaign_id and run_id:
+            _safe_startup_failure(conn, campaign_id, "LAUNCH_STARTUP_FAILED", {"exception_type": exc.__class__.__name__, "error": str(exc)})
+        raise
     finally:
         conn.close()
-
 
 def _counts(conn: sqlite3.Connection, campaign_id: str) -> dict[str, int]:
     def cnt(sql: str, params: tuple[Any, ...] = ()) -> int:
@@ -432,7 +526,7 @@ def _recovery_campaign_exposure(conn: sqlite3.Connection, campaign_id: str) -> d
 def cleanup_dead_worker(conn: sqlite3.Connection, campaign_id: str) -> bool:
     """Fail terminally and clear attachment metadata for a dead active worker."""
     campaign = get_campaign(conn, campaign_id)
-    if not campaign or campaign.get("campaign_status") != "RUNNING":
+    if not campaign or campaign.get("campaign_status") not in {"STARTING", "RUNNING"}:
         return False
     pid = campaign.get("worker_pid")
     if not pid or _pid_alive(pid):
@@ -699,6 +793,21 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     )
     recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and local_runtime_zero_available
     prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False}
+    run_decisions = 0
+    if old_run:
+        run_decisions = int(conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (old_run,)).fetchone()[0] or 0)
+    zero_exposure_failed_startup = (
+        old_status in {"FAILED", "STARTING"}
+        and not old_alive
+        and not bool(old_pid)
+        and campaign.get("campaign_status") in {"FAILED", "RECOVERY_REQUIRED", "STARTING"}
+        and (str(campaign.get("last_error") or "") in STARTUP_FAILURE_REASONS | {"DEAD_WORKER"} or str(campaign.get("last_error") or "").startswith("PHASE8_CAMPAIGN_"))
+        and run_decisions == 0
+        and recovery_safe
+    )
+    prechecks["run_decisions"] = run_decisions
+    prechecks["zero_exposure_failed_startup_terminalizable"] = zero_exposure_failed_startup
+
     if historical_zero_local_fallback_candidate:
         engine = init_db(f"sqlite+pysqlite:///{db}")
         try:
@@ -710,6 +819,14 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
             prechecks["historical_zero_local_fallback"] = recovery_safe
         finally:
             engine.dispose()
+    if zero_exposure_failed_startup:
+        conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (campaign_id,))
+        evidence = {"old_run_id": old_run, "old_status": old_status, "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "run_decisions": run_decisions, "policy": "SAFE_TERMINALIZATION"}
+        event(conn, campaign_id, "PHASE9_ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED", burnin_run_id=old_run, details=evidence)
+        payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now(), "terminalized": old_run})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "PASS", "checks": {**prechecks, "safe_terminalization": True}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_before, "resume": None, "attach": None, "terminalization": evidence}}
+        conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], "PASS", json.dumps(payload["checks"]), json.dumps(payload["before"]), json.dumps(payload["after"], default=str), PHASE9_SCHEMA_VERSION))
+        conn.commit()
+        return payload
     if stale_dead_worker and recovery_safe:
         # PID metadata is attachment evidence, not a prerequisite for recovery.
         # Terminalize both linked rows before allocating a successor.
@@ -983,7 +1100,11 @@ def _launch_worker(db: str, campaign_id: str) -> subprocess.Popen[Any]:
     stdout = stdout_path.open("ab", buffering=0)
     stderr = stderr_path.open("ab", buffering=0)
     try:
-        return subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER"})
+        creationflags = 0
+        if os.name == "nt":
+            creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER"}, creationflags=creationflags)
     finally:
         stdout.close()
         stderr.close()
@@ -994,8 +1115,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--db")
     parser.add_argument("--json", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("preflight"); p.add_argument("--release-id", required=True); p.add_argument("--symbols", required=True); p.add_argument("--intervals", required=True); p.add_argument("--output-dir")
-    l = sub.add_parser("launch"); l.add_argument("--release-id", required=True); l.add_argument("--duration-days", type=float, required=True); l.add_argument("--symbols", required=True); l.add_argument("--intervals", required=True); l.add_argument("--detach", action="store_true"); l.add_argument("--attach-timeout-seconds", type=float, default=60.0)
+    p = sub.add_parser("preflight", epilog="PowerShell example: --symbols BTCUSDT,ETHUSDT --intervals 1h,4h"); p.add_argument("--release-id", required=True); p.add_argument("--symbols", required=True, nargs="+", help="Symbols as comma-separated values (BTCUSDT,ETHUSDT) or as separate values (BTCUSDT ETHUSDT)."); p.add_argument("--intervals", required=True, nargs="+", help="Intervals as comma-separated values (1h,4h) or as separate values (1h 4h)."); p.add_argument("--output-dir")
+    l = sub.add_parser("launch", epilog="PowerShell example: python -m alphaforge.burnin_ops --db $DB launch --release-id $RELEASE_ID --duration-days 3 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach"); l.add_argument("--release-id", required=True); l.add_argument("--duration-days", type=float, required=True); l.add_argument("--symbols", required=True, nargs="+", help="Symbols as comma-separated values (BTCUSDT,ETHUSDT) or as separate values (BTCUSDT ETHUSDT)."); l.add_argument("--intervals", required=True, nargs="+", help="Intervals as comma-separated values (1h,4h) or as separate values (1h 4h)."); l.add_argument("--detach", action="store_true"); l.add_argument("--attach-timeout-seconds", type=float, default=60.0)
     for name in ("health", "watch", "recovery-drill", "audit", "pause", "resume", "status"):
         s = sub.add_parser(name); s.add_argument("--campaign-id", required=True)
     rr = sub.add_parser("recover-runtime"); rr.add_argument("--campaign-id")

@@ -1184,6 +1184,30 @@
 
 ## Unreleased
 
+## Phase 9 Burn-In Startup Interruption Recovery — 2026-07-18
+
+### Added
+- Detached launch now records a `STARTING` startup phase and explicit startup-failure evidence for worker attachment interruption, timeout, spawn failure, runtime launch errors, process exit, and identity mismatch.
+- Recovery drill can safely terminalize zero-decision, zero-exposure startup failures without deleting audit evidence.
+- CLI help documents PowerShell symbol/interval examples and accepts comma-separated or space-separated values.
+
+### Changed
+- Detached campaigns only return to `RUNNING` after worker PID, attachment event, runtime instance evidence, heartbeat, active run ID, and process liveness are verified.
+- Windows worker launch uses a new process group/no-window creation flags where available and still captures stdout/stderr logs.
+
+### Fixed
+- `KeyboardInterrupt`/`SystemExit` and `_launch_worker()` `RuntimeError` paths during startup no longer leave ghost `STARTING`/`RUNNING` campaigns or stale worker ownership.
+- Dead startup workers and failed startup campaigns no longer permanently trigger duplicate/stale preflight blockers once terminalized.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- No schema migration; `STARTING` is an additive status value in existing text status columns.
+
+### Known Issues
+- The exact external source of a Windows `KeyboardInterrupt` cannot be proven from repository code alone; no in-repo code path was found that intentionally raises it during launch.
+
 ### Added
 - Added accepted-trade quality diagnostics for TP/SL rate and expectancy by score bucket, regime, effective-RR bucket, side, symbol, and hour/session.
 - Added score calibration diagnostics comparing score buckets to TP/SL/TIMEOUT, net PnL, effective RR, and expectancy buckets.
