@@ -77,6 +77,25 @@
 
 # Changelog
 
+## Added
+- `python -m alphaforge.burnin_ops recover-runtime` operator entrypoint for recovery without requiring operators to remember the campaign-specific `recovery-drill` command.
+- Append-only local diagnostic recovery evidence for the narrow dead, unrelated historical PAPER runtime case where Binance read-only reconciliation is the only unavailable evidence and all local exposure queries are available and zero.
+
+## Changed
+- Runtime recovery now classifies query errors by source and keeps authoritative local-state query failures as global execution risk; provider-only unavailability is the only fallback-eligible query error.
+
+## Fixed
+- Phase 9 recovery drill no longer deadlocks indefinitely on a stale, unrelated historical PAPER runtime with dead/absent worker PID, zero persisted exposure, no pending labels, and unavailable read-only reconciliation provider.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- None.
+
+## Known Issues
+- The local diagnostic fallback is not exchange-verified and is intentionally limited to unrelated historical PAPER recovery; any nonzero exposure, unavailable local query, live process, related/current lineage, kill switch, or LIVE mode remains blocked.
+
 ## Fixed
 - Runtime and worker startup now fail closed when the persisted active continuation identity differs from its campaign identity; no worker is spawned for a corrupted campaign/run pair.
 - Detached PAPER workers now receive `ALPHAFORGE_RELEASE_ID` from their persisted campaign instead of inheriting an unrelated shell release identity.

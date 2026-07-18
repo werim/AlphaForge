@@ -18,7 +18,7 @@ from alphaforge.burnin_campaign import (
     identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS,
 )
 from alphaforge.config import load_config_from_env
-from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery
+from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider
 from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
@@ -409,6 +409,26 @@ def _counts(conn: sqlite3.Connection, campaign_id: str) -> dict[str, int]:
     }
 
 
+def _recovery_campaign_exposure(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
+    errors: list[str] = []
+    availability = {"campaign_open_positions_available": False, "pending_reject_labels_available": False}
+
+    def cnt(name: str, sql: str) -> int:
+        try:
+            value = int(conn.execute(sql, (campaign_id,)).fetchone()[0] or 0)
+            availability[f"{name}_available"] = True
+            return value
+        except Exception as exc:
+            errors.append(f"{name}:{exc.__class__.__name__}:{exc}")
+            return 0
+
+    return {
+        "pending_reject_labels": cnt("pending_reject_labels", "SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY')"),
+        "open_positions": cnt("campaign_open_positions", "SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN'"),
+        "query_errors": errors,
+        "availability": availability,
+    }
+
 def cleanup_dead_worker(conn: sqlite3.Connection, campaign_id: str) -> bool:
     """Fail terminally and clear attachment metadata for a dead active worker."""
     campaign = get_campaign(conn, campaign_id)
@@ -645,14 +665,52 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     old_hash = _campaign_source_evidence_hash(conn, campaign_id)
     old_status = _run_status(conn, old_run) if old_run else "UNKNOWN"
     old_alive = bool(old_pid and _pid_alive(old_pid))
-    exposure = _counts(conn, campaign_id)
+    exposure = _recovery_campaign_exposure(conn, campaign_id)
     runtime_recovery = _authoritative_recovery_exposure(db, campaign_id)
+    original_runtime_recovery = dict(runtime_recovery)
+
+    def runtime_zero_available(decision: Mapping[str, Any]) -> bool:
+        runtime_exposure_local = dict(decision.get("current_exposure_check") or {})
+        runtime_availability = dict(decision.get("availability") or {})
+        required_available = all(bool(runtime_availability.get(key)) for key in ("active_positions_available", "pending_orders_available", "orphan_evidence_available", "kill_switch_available"))
+        return required_available and not any(int(runtime_exposure_local.get(name) or 0) for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")) and not decision.get("kill_switch_active")
+
     runtime_exposure = dict(runtime_recovery.get("current_exposure_check") or {})
     unsafe_exposure = {name: int(runtime_exposure.get(name) or 0) for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")}
-    recovery_safe = not runtime_recovery.get("blocked") and not any(unsafe_exposure.values())
-    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason")}
     stale_dead_worker = old_status == "RUNNING" and not old_alive
-    if stale_dead_worker and exposure["open_positions"] == 0 and recovery_safe:
+    provider_unavailable_errors = list(runtime_recovery.get("provider_unavailable_errors") or [])
+    all_runtime_query_errors = list(runtime_recovery.get("query_errors") or [])
+    provider_only_error = bool(provider_unavailable_errors) and sorted(provider_unavailable_errors) == sorted(all_runtime_query_errors)
+    campaign_available = all((exposure.get("availability") or {}).values()) and not exposure.get("query_errors")
+    zero_campaign_exposure = exposure["open_positions"] == 0 and exposure["pending_reject_labels"] == 0
+    local_runtime_zero_available = runtime_zero_available(runtime_recovery)
+    mode_safe_for_local_fallback = str((runtime_recovery.get("latest") or {}).get("mode") or "PAPER").upper() not in {"LIVE", "LIVE_PRECHECK"}
+    historical_zero_local_fallback_candidate = (
+        stale_dead_worker
+        and mode_safe_for_local_fallback
+        and runtime_recovery.get("scope") == "UNRELATED_HISTORICAL_RUNTIME"
+        and runtime_recovery.get("previous_process_alive") is False
+        and not bool(old_pid and old_alive)
+        and campaign_available
+        and zero_campaign_exposure
+        and local_runtime_zero_available
+        and runtime_recovery.get("reason") == "RECOVERY_EVIDENCE_UNAVAILABLE"
+        and provider_only_error
+    )
+    recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and local_runtime_zero_available
+    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False}
+    if historical_zero_local_fallback_candidate:
+        engine = init_db(f"sqlite+pysqlite:///{db}")
+        try:
+            persist_historical_paper_recovery_without_provider(engine, prior_snapshot=runtime_recovery.get("latest"), diagnostics={"campaign_id": campaign_id, "old_run_id": old_run, "worker_pid": old_pid, "worker_alive": old_alive, "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "provider_unavailable_reason": "read_only_reconciliation_provider_unavailable"})
+            runtime_recovery = _authoritative_recovery_exposure(db, campaign_id)
+            runtime_recovery["fallback_original_runtime_recovery"] = original_runtime_recovery
+            prechecks["runtime_recovery_after_fallback"] = runtime_recovery
+            recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and runtime_zero_available(runtime_recovery)
+            prechecks["historical_zero_local_fallback"] = recovery_safe
+        finally:
+            engine.dispose()
+    if stale_dead_worker and recovery_safe:
         # PID metadata is attachment evidence, not a prerequisite for recovery.
         # Terminalize both linked rows before allocating a successor.
         ts = utc_now()
@@ -718,8 +776,8 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         "evidence_hash_changes_from_source_evidence": (old_hash != new_hash) == (source_before != {rid: _source_row_ids_and_hash(conn, rid) for rid in runs_after}),
     }
     status = "PASS" if all(checks.values()) else "FAIL"
-    payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now()})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": status, "checks": checks, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_after, "source_hash": new_hash, "resume": resume, "attach": attach, "qualification": q}}
-    conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], status, json.dumps(checks), json.dumps(payload["before"], default=str), json.dumps(payload["after"], default=str), PHASE9_SCHEMA_VERSION))
+    payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now()})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": status, "checks": {**prechecks, **checks}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_after, "source_hash": new_hash, "resume": resume, "attach": attach, "qualification": q}}
+    conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], status, json.dumps(payload["checks"]), json.dumps(payload["before"], default=str), json.dumps(payload["after"], default=str), PHASE9_SCHEMA_VERSION))
     conn.commit()
     return payload
 
@@ -940,6 +998,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     l = sub.add_parser("launch"); l.add_argument("--release-id", required=True); l.add_argument("--duration-days", type=float, required=True); l.add_argument("--symbols", required=True); l.add_argument("--intervals", required=True); l.add_argument("--detach", action="store_true"); l.add_argument("--attach-timeout-seconds", type=float, default=60.0)
     for name in ("health", "watch", "recovery-drill", "audit", "pause", "resume", "status"):
         s = sub.add_parser(name); s.add_argument("--campaign-id", required=True)
+    rr = sub.add_parser("recover-runtime"); rr.add_argument("--campaign-id")
     r = sub.add_parser("report"); r.add_argument("--campaign-id", required=True); r.add_argument("--output-dir", required=True)
     f = sub.add_parser("finalize"); f.add_argument("--campaign-id", required=True); f.add_argument("--output-dir", required=True)
     args = parser.parse_args(argv)
@@ -962,6 +1021,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             out = start_or_resume_campaign(conn, args.campaign_id, resume=True); conn.commit(); code = 0
         elif args.cmd == "recovery-drill":
             out = recovery_drill(conn, args.campaign_id); code = 0 if out["status"] == "PASS" else 1
+        elif args.cmd == "recover-runtime":
+            cid = args.campaign_id
+            if not cid:
+                row = conn.execute("SELECT campaign_id FROM burnin_campaigns WHERE campaign_status='RECOVERY_REQUIRED' ORDER BY id DESC LIMIT 1").fetchone()
+                if not row:
+                    out = {"status": "NO_RECOVERY_REQUIRED", "campaign_id": None}; code = 0
+                else:
+                    cid = row[0]
+            if cid:
+                out = recovery_drill(conn, cid); code = 0 if out["status"] == "PASS" else 1
         elif args.cmd == "audit":
             out = audit_payload(conn, args.campaign_id); _write_json_csv(Path(f"artifacts/burnin/{args.campaign_id}"), "burnin_integrity_audit", out); code = 0 if out["status"] == "PASS" else 1
         elif args.cmd == "report":

@@ -156,39 +156,66 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     retain the historical unclean-start fail-closed rule.
     """
     query_errors: list[str] = []
+    provider_unavailable_errors: list[str] = []
+    local_exposure_query_errors: list[str] = []
+    reconciliation_storage_errors: list[str] = []
+    kill_switch_query_errors: list[str] = []
+    campaign_state_query_errors: list[str] = []
+    availability = {
+        "active_positions_available": False,
+        "pending_orders_available": False,
+        "orphan_evidence_available": False,
+        "kill_switch_available": False,
+        "campaign_state_available": True,
+    }
     try:
         ensure_runtime_state_schema(engine)
         latest = latest_runtime_state_snapshot(engine)
     except Exception as exc:
-        return {"blocked": True, "reason": "RECOVERY_EVIDENCE_UNAVAILABLE", "query_errors": [f"runtime_state:{type(exc).__name__}:{exc}"], "scope": "GLOBAL_EXECUTION_RISK", "latest": None, "current_exposure_check": {}}
-    clean_statuses = {"STOPPED", "CLEAN_SHUTDOWN", "STOPPING", "RECONCILED"}
+        err = f"runtime_state:{type(exc).__name__}:{exc}"
+        return {"blocked": True, "reason": "RECOVERY_EVIDENCE_UNAVAILABLE", "query_errors": [err], "provider_unavailable_errors": [], "local_exposure_query_errors": [err], "reconciliation_storage_errors": [], "kill_switch_query_errors": [], "campaign_state_query_errors": [], "availability": availability, "scope": "GLOBAL_EXECUTION_RISK", "latest": None, "current_exposure_check": {}}
+    clean_statuses = {"STOPPED", "CLEAN_SHUTDOWN", "STOPPING", "RECONCILED", "LOCAL_DIAGNOSTIC_RECOVERY"}
     exposure = {"active_positions": 0, "pending_orders": 0, "orphan_orders": 0, "orphan_positions": 0}
     kill_switch = False
     reconciliation_status = "UNKNOWN"
     prior_campaign_terminal = False
     process_alive = False
     with engine.connect() as conn:
-        def count(name: str, sql: str) -> int:
-            try: return int(conn.execute(text(sql)).scalar_one() or 0)
+        def count(name: str, sql: str, available_key: str) -> int:
+            try:
+                value = int(conn.execute(text(sql)).scalar_one() or 0)
+                availability[available_key] = True
+                return value
             except Exception as exc:
-                query_errors.append(f"{name}:{type(exc).__name__}:{exc}"); return 0
-        exposure["active_positions"] = count("positions", "SELECT COUNT(*) FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')")
-        exposure["pending_orders"] = count("orders", "SELECT COUNT(*) FROM orders WHERE UPPER(COALESCE(status,'')) IN ('PENDING','OPEN','ORDER_PLACED','ENTRY_SUBMITTED')")
+                err = f"{name}:{type(exc).__name__}:{exc}"
+                query_errors.append(err); local_exposure_query_errors.append(err)
+                return 0
+        exposure["active_positions"] = count("positions", "SELECT COUNT(*) FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')", "active_positions_available")
+        exposure["pending_orders"] = count("orders", "SELECT COUNT(*) FROM orders WHERE UPPER(COALESCE(status,'')) IN ('PENDING','OPEN','ORDER_PLACED','ENTRY_SUBMITTED')", "pending_orders_available")
         try:
             row = conn.execute(text("SELECT status, orphan_order_count, orphan_position_count FROM exchange_reconciliation_events ORDER BY id DESC LIMIT 1")).mappings().first()
+            availability["orphan_evidence_available"] = True
             if row:
                 reconciliation_status = str(row.get("status") or "UNKNOWN").upper()
                 exposure["orphan_orders"] = int(row.get("orphan_order_count") or 0)
                 exposure["orphan_positions"] = int(row.get("orphan_position_count") or 0)
-        except Exception as exc: query_errors.append(f"reconciliation:{type(exc).__name__}:{exc}")
-        try: kill_switch = bool(conn.execute(text("SELECT kill_switch_active FROM runtime_control_state WHERE id=1")).scalar_one_or_none())
-        except Exception as exc: query_errors.append(f"kill_switch:{type(exc).__name__}:{exc}")
+        except Exception as exc:
+            err = f"reconciliation:{type(exc).__name__}:{exc}"
+            query_errors.append(err); reconciliation_storage_errors.append(err)
+        try:
+            kill_switch = bool(conn.execute(text("SELECT kill_switch_active FROM runtime_control_state WHERE id=1")).scalar_one_or_none())
+            availability["kill_switch_available"] = True
+        except Exception as exc:
+            err = f"kill_switch:{type(exc).__name__}:{exc}"
+            query_errors.append(err); kill_switch_query_errors.append(err)
         if latest and latest.get("campaign_id"):
             try:
                 state = conn.execute(text("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=:id"), {"id": latest["campaign_id"]}).mappings().first()
                 if state:
                     prior_campaign_terminal = str(state.get("campaign_status") or "").upper() in {"FAILED", "COMPLETED", "QUALIFIED", "SUSPENDED"}
-            except Exception as exc: query_errors.append(f"campaign:{type(exc).__name__}:{exc}")
+            except Exception as exc:
+                err = f"campaign:{type(exc).__name__}:{exc}"
+                query_errors.append(err); campaign_state_query_errors.append(err); availability["campaign_state_available"] = False
     if latest and latest.get("process_id"):
         try:
             pid = int(latest["process_id"]); os.kill(pid, 0)
@@ -215,11 +242,19 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
             probe_clean = str(probe.get("evidence_status") or "").upper() == "COMPLETE" and not probe.get("errors") and not probe.get("orders") and not probe.get("positions")
             if not probe_clean and (str(probe.get("evidence_status") or "").upper() != "COMPLETE" or probe.get("errors")):
                 query_errors.append("reconciliation_probe:incomplete_or_error")
-        except Exception as exc: query_errors.append(f"reconciliation_probe:{type(exc).__name__}:{exc}")
+        except Exception as exc:
+            err = f"reconciliation_probe:{type(exc).__name__}:{exc}"
+            query_errors.append(err)
+            if "read_only_reconciliation_provider_unavailable" in str(exc):
+                provider_unavailable_errors.append(err)
+            else:
+                reconciliation_storage_errors.append(err)
     unresolved_reconciliation = prior_unclean and reconciliation_status not in {"CLEAN", "NOT_REQUIRED_BACKTEST", "LOCAL_ONLY_DIAGNOSTIC"} and not probe_clean
     # Pending orders are global recovery exposure when a predecessor exists;
     # an initial clean startup retains the established age-validation flow.
-    global_risk = bool(exposure["active_positions"] or (prior_unclean and exposure["pending_orders"]) or exposure["orphan_orders"] or exposure["orphan_positions"] or kill_switch or unresolved_reconciliation)
+    authoritative_local_error = bool(local_exposure_query_errors or reconciliation_storage_errors or kill_switch_query_errors)
+    provider_only_unresolved = bool(provider_unavailable_errors) and sorted(provider_unavailable_errors) == sorted(query_errors)
+    global_risk = bool(exposure["active_positions"] or (prior_unclean and exposure["pending_orders"]) or exposure["orphan_orders"] or exposure["orphan_positions"] or kill_switch or authoritative_local_error or (unresolved_reconciliation and not provider_only_unresolved))
     if same_lineage: scope = "SAME_RUNTIME_LINEAGE"
     elif same_campaign: scope = "SAME_CAMPAIGN"
     elif global_risk: scope = "GLOBAL_EXECUTION_RISK"
@@ -232,6 +267,9 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
             "kill_switch_active": kill_switch, "reconciliation_status": reconciliation_status,
             "previous_process_alive": process_alive, "campaign_terminal": prior_campaign_terminal,
             "prior_unclean": prior_unclean, "original_reason": (latest or {}).get("fail_closed_reason"), "query_errors": query_errors,
+            "provider_unavailable_errors": provider_unavailable_errors, "local_exposure_query_errors": local_exposure_query_errors,
+            "reconciliation_storage_errors": reconciliation_storage_errors, "kill_switch_query_errors": kill_switch_query_errors,
+            "campaign_state_query_errors": campaign_state_query_errors, "availability": availability,
             "reconciliation_probe_clean": probe_clean, "reconciliation_probe": probe if reconciliation_probe is not None and 'probe' in locals() else None}
 
 def save_runtime_recovery_event(engine: Engine, *, instance_id: str, startup_id: str, mode: str, status: str, reason: str, diagnostics: Mapping[str, Any] | None = None) -> None:
@@ -243,6 +281,31 @@ def save_exchange_reconciliation_event(engine: Engine, *, instance_id: str, star
     ensure_runtime_state_schema(engine)
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO exchange_reconciliation_events(event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json) VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d)"), {"ts": canonical_utc_timestamp(),"i":instance_id,"s":startup_id,"m":mode,"st":status,"mc":mismatch_count,"oo":orphan_order_count,"op":orphan_position_count,"ro":exchange_read_only_status,"d":json.dumps(dict(diagnostics or {}), sort_keys=True, default=str)})
+
+
+def persist_historical_paper_recovery_without_provider(engine: Engine, *, prior_snapshot: Mapping[str, Any] | None, diagnostics: Mapping[str, Any]) -> None:
+    """Append auditable PAPER historical recovery evidence when exchange probe is unavailable.
+
+    This fallback is deliberately weaker than verified exchange reconciliation and
+    is valid only for dead, unrelated historical burn-in runtime recovery after
+    callers have proven local SQL exposure is zero. It records the unavailable
+    provider explicitly and creates a local diagnostic reconciled snapshot so the
+    same stale historical row cannot deadlock future PAPER preflight.
+    """
+    instance_id = f"recovery:{uuid.uuid4().hex}"
+    startup_id = f"recovery:{uuid.uuid4().hex}"
+    evidence = {**dict(diagnostics), "prior_snapshot_id": (prior_snapshot or {}).get("id"), "recovery_action": "UNRELATED_HISTORICAL_ZERO_LOCAL_EXPOSURE_PROVIDER_UNAVAILABLE"}
+    save_runtime_recovery_event(engine, instance_id=instance_id, startup_id=startup_id, mode="PAPER", status="HISTORICAL_RUNTIME_RECOVERED_LOCAL_EVIDENCE", reason="UNRELATED_HISTORICAL_RUNTIME_ZERO_LOCAL_EXPOSURE", diagnostics=evidence)
+    save_exchange_reconciliation_event(engine, instance_id=instance_id, startup_id=startup_id,
+                                       mode="PAPER", status="LOCAL_ONLY_DIAGNOSTIC", exchange_read_only_status="UNAVAILABLE",
+                                       diagnostics=evidence)
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="LOCAL_DIAGNOSTIC_RECOVERY",
+        instance_id=instance_id, startup_id=startup_id, process_id=0,
+        unknown_exchange_state=True, exchange_read_only_status="UNAVAILABLE", reconciliation_status="LOCAL_ONLY_DIAGNOSTIC",
+        recovery_action_required=False,
+        diagnostics_json=evidence,
+    ))
 
 
 def persist_verified_paper_recovery(engine: Engine, *, probe: Mapping[str, Any], prior_snapshot: Mapping[str, Any] | None) -> None:
