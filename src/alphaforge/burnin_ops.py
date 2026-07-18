@@ -409,6 +409,26 @@ def _counts(conn: sqlite3.Connection, campaign_id: str) -> dict[str, int]:
     }
 
 
+def _recovery_campaign_exposure(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
+    errors: list[str] = []
+    availability = {"campaign_open_positions_available": False, "pending_reject_labels_available": False}
+
+    def cnt(name: str, sql: str) -> int:
+        try:
+            value = int(conn.execute(sql, (campaign_id,)).fetchone()[0] or 0)
+            availability[f"{name}_available"] = True
+            return value
+        except Exception as exc:
+            errors.append(f"{name}:{exc.__class__.__name__}:{exc}")
+            return 0
+
+    return {
+        "pending_reject_labels": cnt("pending_reject_labels", "SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY')"),
+        "open_positions": cnt("campaign_open_positions", "SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN'"),
+        "query_errors": errors,
+        "availability": availability,
+    }
+
 def cleanup_dead_worker(conn: sqlite3.Connection, campaign_id: str) -> bool:
     """Fail terminally and clear attachment metadata for a dead active worker."""
     campaign = get_campaign(conn, campaign_id)
@@ -645,34 +665,49 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     old_hash = _campaign_source_evidence_hash(conn, campaign_id)
     old_status = _run_status(conn, old_run) if old_run else "UNKNOWN"
     old_alive = bool(old_pid and _pid_alive(old_pid))
-    exposure = _counts(conn, campaign_id)
+    exposure = _recovery_campaign_exposure(conn, campaign_id)
     runtime_recovery = _authoritative_recovery_exposure(db, campaign_id)
     original_runtime_recovery = dict(runtime_recovery)
+
+    def runtime_zero_available(decision: Mapping[str, Any]) -> bool:
+        runtime_exposure_local = dict(decision.get("current_exposure_check") or {})
+        runtime_availability = dict(decision.get("availability") or {})
+        required_available = all(bool(runtime_availability.get(key)) for key in ("active_positions_available", "pending_orders_available", "orphan_evidence_available", "kill_switch_available"))
+        return required_available and not any(int(runtime_exposure_local.get(name) or 0) for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")) and not decision.get("kill_switch_active")
+
     runtime_exposure = dict(runtime_recovery.get("current_exposure_check") or {})
     unsafe_exposure = {name: int(runtime_exposure.get(name) or 0) for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")}
     stale_dead_worker = old_status == "RUNNING" and not old_alive
-    provider_unavailable = any("read_only_reconciliation_provider_unavailable" in str(e) for e in runtime_recovery.get("query_errors", []))
+    provider_unavailable_errors = list(runtime_recovery.get("provider_unavailable_errors") or [])
+    all_runtime_query_errors = list(runtime_recovery.get("query_errors") or [])
+    provider_only_error = bool(provider_unavailable_errors) and sorted(provider_unavailable_errors) == sorted(all_runtime_query_errors)
+    campaign_available = all((exposure.get("availability") or {}).values()) and not exposure.get("query_errors")
     zero_campaign_exposure = exposure["open_positions"] == 0 and exposure["pending_reject_labels"] == 0
-    historical_zero_local_fallback = (
+    local_runtime_zero_available = runtime_zero_available(runtime_recovery)
+    mode_safe_for_local_fallback = str((runtime_recovery.get("latest") or {}).get("mode") or "PAPER").upper() not in {"LIVE", "LIVE_PRECHECK"}
+    historical_zero_local_fallback_candidate = (
         stale_dead_worker
+        and mode_safe_for_local_fallback
         and runtime_recovery.get("scope") == "UNRELATED_HISTORICAL_RUNTIME"
         and runtime_recovery.get("previous_process_alive") is False
         and not bool(old_pid and old_alive)
+        and campaign_available
         and zero_campaign_exposure
-        and not any(unsafe_exposure.values())
-        and not runtime_recovery.get("kill_switch_active")
+        and local_runtime_zero_available
         and runtime_recovery.get("reason") == "RECOVERY_EVIDENCE_UNAVAILABLE"
-        and provider_unavailable
+        and provider_only_error
     )
-    recovery_safe = (not runtime_recovery.get("blocked") and not any(unsafe_exposure.values()) and zero_campaign_exposure) or historical_zero_local_fallback
-    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "historical_zero_local_fallback": historical_zero_local_fallback}
-    if historical_zero_local_fallback:
+    recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and local_runtime_zero_available
+    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False}
+    if historical_zero_local_fallback_candidate:
         engine = init_db(f"sqlite+pysqlite:///{db}")
         try:
             persist_historical_paper_recovery_without_provider(engine, prior_snapshot=runtime_recovery.get("latest"), diagnostics={"campaign_id": campaign_id, "old_run_id": old_run, "worker_pid": old_pid, "worker_alive": old_alive, "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "provider_unavailable_reason": "read_only_reconciliation_provider_unavailable"})
             runtime_recovery = _authoritative_recovery_exposure(db, campaign_id)
             runtime_recovery["fallback_original_runtime_recovery"] = original_runtime_recovery
             prechecks["runtime_recovery_after_fallback"] = runtime_recovery
+            recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and runtime_zero_available(runtime_recovery)
+            prechecks["historical_zero_local_fallback"] = recovery_safe
         finally:
             engine.dispose()
     if stale_dead_worker and recovery_safe:
