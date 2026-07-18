@@ -1187,7 +1187,7 @@
 ## Phase 9 Burn-In Startup Interruption Recovery — 2026-07-18
 
 ### Added
-- Detached launch now records a `STARTING` startup phase and explicit startup-failure evidence for worker attachment interruption, timeout, spawn failure, process exit, and identity mismatch.
+- Detached launch now records a `STARTING` startup phase and explicit startup-failure evidence for worker attachment interruption, timeout, spawn failure, runtime launch errors, process exit, and identity mismatch.
 - Recovery drill can safely terminalize zero-decision, zero-exposure startup failures without deleting audit evidence.
 - CLI help documents PowerShell symbol/interval examples and accepts comma-separated or space-separated values.
 
@@ -1196,7 +1196,7 @@
 - Windows worker launch uses a new process group/no-window creation flags where available and still captures stdout/stderr logs.
 
 ### Fixed
-- `KeyboardInterrupt`/`SystemExit` during attachment polling no longer leave a ghost `RUNNING` campaign or stale worker ownership.
+- `KeyboardInterrupt`/`SystemExit` and `_launch_worker()` `RuntimeError` paths during startup no longer leave ghost `STARTING`/`RUNNING` campaigns or stale worker ownership.
 - Dead startup workers and failed startup campaigns no longer permanently trigger duplicate/stale preflight blockers once terminalized.
 
 ### Removed

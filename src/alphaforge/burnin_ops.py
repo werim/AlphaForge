@@ -411,6 +411,22 @@ def _safe_startup_failure(conn: sqlite3.Connection | None, campaign_id: str | No
             pass
 
 
+
+def _startup_diagnostics(campaign_id: str, process: subprocess.Popen[Any] | None = None, **extra: Any) -> dict[str, Any]:
+    stdout_path, stderr_path = _worker_log_paths(campaign_id)
+    worker_exit_code = None
+    if process is not None:
+        try:
+            worker_exit_code = process.poll()
+        except Exception as exc:
+            worker_exit_code = f"POLL_UNAVAILABLE:{exc.__class__.__name__}:{exc}"
+    return {
+        "stdout_log_path": str(stdout_path),
+        "stderr_log_path": str(stderr_path),
+        "worker_exit_code": worker_exit_code,
+        **extra,
+    }
+
 def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], *, detach: bool = False, attach_timeout_seconds: float = 60.0) -> dict[str, Any]:
     pf = preflight(db, release_id, symbols, intervals)
     if pf["status"] != "PASS":
@@ -431,29 +447,34 @@ def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Seq
             try:
                 proc = _launch_worker(db, campaign.campaign_id)
             except RuntimeError as exc:
-                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": str(exc)}
+                reason = str(exc) or "WORKER_LAUNCH_RUNTIME_ERROR"
+                _safe_startup_failure(conn, campaign.campaign_id, reason, _startup_diagnostics(campaign.campaign_id, exception_type=exc.__class__.__name__, error=reason))
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": reason, **_startup_diagnostics(campaign.campaign_id)}
             except Exception as exc:
-                _safe_startup_failure(conn, campaign.campaign_id, "WORKER_SPAWN_FAILED", {"error": f"{exc.__class__.__name__}:{exc}"})
-                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "PHASE9_WORKER_SPAWN_FAILED", "startup_failure_reason": "WORKER_SPAWN_FAILED"}
+                diagnostics = _startup_diagnostics(campaign.campaign_id, exception_type=exc.__class__.__name__, error=f"{exc.__class__.__name__}:{exc}")
+                _safe_startup_failure(conn, campaign.campaign_id, "WORKER_SPAWN_FAILED", diagnostics)
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "PHASE9_WORKER_SPAWN_FAILED", "startup_failure_reason": "WORKER_SPAWN_FAILED", **diagnostics}
             worker_started_at = utc_now()
             conn.execute("UPDATE burnin_campaigns SET worker_pid=?, worker_started_at=? WHERE campaign_id=?", (proc.pid, worker_started_at, campaign.campaign_id))
             conn.commit()
             if proc.poll() is not None or not _pid_alive(proc.pid):
-                _mark_campaign_failed(conn, campaign.campaign_id, "WORKER_STARTUP_EXITED", {"worker_pid": proc.pid, "worker_exit_code": proc.poll()})
-                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "WORKER_STARTUP_EXITED"}
+                diagnostics = _startup_diagnostics(campaign.campaign_id, proc, worker_pid=proc.pid)
+                _mark_campaign_failed(conn, campaign.campaign_id, "WORKER_STARTUP_EXITED", diagnostics)
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "reason": "WORKER_STARTUP_EXITED", **diagnostics}
             try:
                 attach = verify_worker_attachment(conn, campaign.campaign_id, worker_started_at=worker_started_at, launch_started_at=launch_started_at, timeout_seconds=attach_timeout_seconds, process=proc)
             except KeyboardInterrupt:
-                _safe_startup_failure(conn, campaign.campaign_id, "WORKER_ATTACHMENT_INTERRUPTED", {"exception_type": "KeyboardInterrupt", "worker_pid": proc.pid})
+                _safe_startup_failure(conn, campaign.campaign_id, "WORKER_ATTACHMENT_INTERRUPTED", _startup_diagnostics(campaign.campaign_id, proc, exception_type="KeyboardInterrupt", worker_pid=proc.pid))
                 raise
             except SystemExit as exc:
-                _safe_startup_failure(conn, campaign.campaign_id, "SYSTEM_EXIT_DURING_ATTACHMENT", {"exception_type": "SystemExit", "code": exc.code, "worker_pid": proc.pid})
+                _safe_startup_failure(conn, campaign.campaign_id, "SYSTEM_EXIT_DURING_ATTACHMENT", _startup_diagnostics(campaign.campaign_id, proc, exception_type="SystemExit", code=exc.code, worker_pid=proc.pid))
                 raise
             except BaseException as exc:
-                _safe_startup_failure(conn, campaign.campaign_id, "LAUNCH_STARTUP_FAILED", {"exception_type": exc.__class__.__name__, "error": str(exc), "worker_pid": proc.pid})
+                _safe_startup_failure(conn, campaign.campaign_id, "LAUNCH_STARTUP_FAILED", _startup_diagnostics(campaign.campaign_id, proc, exception_type=exc.__class__.__name__, error=str(exc), worker_pid=proc.pid))
                 raise
             if attach.get("status") != "ATTACHED":
-                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "attachment": attach}
+                diagnostics = _startup_diagnostics(campaign.campaign_id, proc, worker_pid=proc.pid)
+                return {"status": "FAILED", "campaign_id": campaign.campaign_id, "attachment": {**diagnostics, **attach}, **diagnostics}
             _mark_attached_running(conn, campaign.campaign_id, run_id, attach)
             return {"status": "LAUNCHED", "campaign_id": campaign.campaign_id, "burnin_run_id": start["burnin_run_id"], "worker_pid": proc.pid, "attachment": attach, "evidence_locations": {"preflight": pf["evidence_locations"], "database": db, "artifacts": f"artifacts/burnin/{campaign.campaign_id}"}}
         engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
@@ -780,7 +801,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         and not old_alive
         and not bool(old_pid)
         and campaign.get("campaign_status") in {"FAILED", "RECOVERY_REQUIRED", "STARTING"}
-        and str(campaign.get("last_error") or "") in STARTUP_FAILURE_REASONS | {"DEAD_WORKER"}
+        and (str(campaign.get("last_error") or "") in STARTUP_FAILURE_REASONS | {"DEAD_WORKER"} or str(campaign.get("last_error") or "").startswith("PHASE8_CAMPAIGN_"))
         and run_decisions == 0
         and recovery_safe
     )
