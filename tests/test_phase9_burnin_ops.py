@@ -673,3 +673,79 @@ def test_post_fallback_re_evaluation_blocked_prevents_terminalization_and_succes
     assert out["status"] == "FAIL"
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (old_run,)).fetchone()[0] == "RUNNING"
     assert conn.execute("SELECT COUNT(*) FROM burnin_campaign_runs WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == 1
+
+
+def _patch_launch_preflight(monkeypatch):
+    import alphaforge.burnin_ops as ops
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setattr(ops, "preflight", lambda *a, **k: {"status": "PASS", "evidence_locations": {}})
+
+
+def test_launch_keyboard_interrupt_during_attachment_terminalizes_startup(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    _patch_launch_preflight(monkeypatch)
+    db = str(tmp_path / "ki.db")
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: SimpleNamespace(pid=444, poll=lambda: None))
+    monkeypatch.setattr(ops, "verify_worker_attachment", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        ops.launch_campaign(db, "rel", 3, ["BTCUSDT"], ["1h"], detach=True)
+    conn = sqlite3.connect(db); conn.row_factory = sqlite3.Row
+    camp = conn.execute("SELECT campaign_id,campaign_status,worker_pid,last_error,active_run_id FROM burnin_campaigns").fetchone()
+    assert camp["campaign_status"] == "FAILED"
+    assert camp["worker_pid"] is None
+    assert camp["last_error"] == "WORKER_ATTACHMENT_INTERRUPTED"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (camp["active_run_id"],)).fetchone()[0] == "FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM burnin_campaign_events WHERE event_type='PHASE9_CAMPAIGN_FAILED' AND details_json LIKE '%KeyboardInterrupt%' ").fetchone()[0] == 1
+
+
+def test_launch_system_exit_during_attachment_terminalizes_startup(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    _patch_launch_preflight(monkeypatch)
+    db = str(tmp_path / "se.db")
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: SimpleNamespace(pid=445, poll=lambda: None))
+    monkeypatch.setattr(ops, "verify_worker_attachment", lambda *a, **k: (_ for _ in ()).throw(SystemExit(7)))
+    with pytest.raises(SystemExit):
+        ops.launch_campaign(db, "rel", 3, ["BTCUSDT"], ["1h"], detach=True)
+    conn = sqlite3.connect(db); conn.row_factory = sqlite3.Row
+    camp = conn.execute("SELECT campaign_status,worker_pid,last_error,active_run_id FROM burnin_campaigns").fetchone()
+    assert camp["campaign_status"] == "FAILED" and camp["worker_pid"] is None
+    assert camp["last_error"] == "SYSTEM_EXIT_DURING_ATTACHMENT"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (camp["active_run_id"],)).fetchone()[0] == "FAILED"
+
+
+def test_worker_exit_during_attachment_is_detected_without_timeout(monkeypatch, tmp_path):
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='STARTING', worker_pid=999, worker_started_at=? WHERE campaign_id=?", (utc_now(), camp.campaign_id))
+    conn.execute("UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.commit()
+    import alphaforge.burnin_ops as ops
+    monkeypatch.setattr(ops, "_pid_alive", lambda pid: False)
+    out = verify_worker_attachment(conn, camp.campaign_id, worker_started_at=utc_now(), launch_started_at=utc_now(), timeout_seconds=60, process=SimpleNamespace(poll=lambda: 9))
+    assert out["reason"] == "WORKER_EXITED_BEFORE_ATTACHMENT"
+    row = conn.execute("SELECT campaign_status,worker_pid,last_error FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()
+    assert row["campaign_status"] == "FAILED" and row["worker_pid"] is None
+
+
+def test_failed_zero_exposure_startup_recovery_drill_safe_terminalization(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', worker_pid=NULL, last_error='WORKER_ATTACHMENT_INTERRUPTED' WHERE campaign_id=?", (camp.campaign_id,))
+    conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=? WHERE burnin_run_id=?", (utc_now(), run))
+    conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=? WHERE burnin_run_id=?", (utc_now(), run))
+    conn.commit()
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *a, **k: {"blocked": False, "current_exposure_check": {"active_positions": 0, "pending_orders": 0, "orphan_orders": 0, "orphan_positions": 0}, "availability": {"active_positions_available": True, "pending_orders_available": True, "orphan_evidence_available": True, "kill_switch_available": True}, "kill_switch_active": False})
+    out = recovery_drill(conn, camp.campaign_id)
+    assert out["status"] == "PASS"
+    assert out["checks"]["safe_terminalization"] is True
+    assert conn.execute("SELECT COUNT(*) FROM burnin_campaign_events WHERE event_type='PHASE9_ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED'").fetchone()[0] == 1
+
+
+def test_cli_symbols_accept_comma_and_space_forms():
+    import alphaforge.burnin_ops as ops
+    assert ops._symbols("BTCUSDT,ETHUSDT") == ["BTCUSDT", "ETHUSDT"]
+    assert ops._symbols(["BTCUSDT", "ETHUSDT"]) == ["BTCUSDT", "ETHUSDT"]

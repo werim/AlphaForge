@@ -15,7 +15,7 @@ from alphaforge.config import runtime_filter_config
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
 DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
-CAMPAIGN_STATUSES = {"CREATED","RUNNING","PAUSED","RECOVERY_REQUIRED","COMPLETED","FAILED","QUALIFIED","SUSPENDED"}
+CAMPAIGN_STATUSES = {"CREATED","STARTING","RUNNING","PAUSED","RECOVERY_REQUIRED","COMPLETED","FAILED","QUALIFIED","SUSPENDED"}
 ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode", "git_commit")
 RUNTIME_ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode")
 CAMPAIGN_RUNTIME_IDENTITY_FIELDS = (*RUNTIME_ATTACHMENT_IDENTITY_FIELDS, "execution_cost_config_hash")
@@ -150,7 +150,7 @@ def load_active_campaign_attachment(conn: Any, campaign_id: str) -> tuple[dict[s
     mapping = _row_dict(mapping_row)
     if int(mapping.get("continuation_sequence")) != int(run.get("continuation_sequence")) or mapping.get("status") != run.get("status"):
         return campaign, run, mapping, "PHASE8_CAMPAIGN_ACTIVE_RUN_MAPPING_INVALID"
-    if mapping.get("status") != "RUNNING":
+    if mapping.get("status") not in {"STARTING", "RUNNING"}:
         return campaign, run, mapping, str(campaign.get("last_error") or "PHASE8_CAMPAIGN_ACTIVE_RUN_NOT_RUNNING")
     return campaign, run, mapping, None
 
