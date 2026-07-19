@@ -568,7 +568,7 @@ python -m alphaforge.burnin_ops \
 PowerShell:
 
 ```powershell
-$RELEASE_ID="phase9_trial_2"
+$RELEASE_ID="phase9_trial_1"
 
 python -m alphaforge.burnin_ops `
   preflight `
@@ -1445,3 +1445,50 @@ Get-Content .env | ForEach-Object {
         "Process"
     )
 }
+
+#FINGERPRINT .ENV KARŞILAŞTIRMA
+@'
+import os
+import hashlib
+from pathlib import Path
+
+def fingerprint(value):
+    return hashlib.sha256(value.encode()).hexdigest()[:16] if value else None
+
+env_values = {}
+
+for raw in Path(".env").read_text(encoding="utf-8").splitlines():
+    line = raw.strip()
+
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+
+    name, value = line.split("=", 1)
+    name = name.strip()
+    value = value.strip()
+
+    if " #" in value:
+        value = value.split(" #", 1)[0].strip()
+
+    if (
+        len(value) >= 2
+        and value[0] == value[-1]
+        and value[0] in {'"', "'"}
+    ):
+        value = value[1:-1]
+
+    env_values[name] = value
+
+for name in ("BINANCE_API_KEY", "BINANCE_BASE_URL"):
+    process_value = os.getenv(name)
+    file_value = env_values.get(name)
+
+    print(
+        name,
+        {
+            "process_fingerprint": fingerprint(process_value),
+            "dotenv_fingerprint": fingerprint(file_value),
+            "match": process_value == file_value,
+        },
+    )
+'@ | python
