@@ -31,6 +31,8 @@ class EnvContractEntry:
     secret: bool = False
     deprecated: bool = False
     description: str = ""
+    behavioral_test: str = ""
+    unsupported_reason: str | None = None
 
     def public_dict(self) -> dict[str, object]:
         row = asdict(self)

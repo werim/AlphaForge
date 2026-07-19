@@ -3259,3 +3259,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Binance Demo endpoints are not embedded because the repository has no verified Demo environment contract; operators must provide both explicit endpoints. LIVE is not ready.
+## Environment contract consumer wiring follow-up — 2026-07-19
+
+### Added
+- Post-loader consumer and behavioral-test metadata for every WIRED setting, strict alias-conflict and mode-metadata audit checks, and explicit unsupported reason codes.
+
+### Changed
+- Promoted runtime operations/risk, persistence/logging, Telegram, Hyperliquid, backtest filter, strategy guardrail, and rescue settings from RESERVED to real canonical consumers.
+- Reduced RESERVED from 93 initial entries to 47 genuinely unsupported, removed, unsafe, deprecated-no-effect, or future-subsystem entries.
+
+### Fixed
+- BACKTEST filter switches now appear as operational registry settings matching their existing decision-gate consumers instead of being mislabeled unsupported.
+
+### Removed
+- Direct Telegram environment reads and direct backtest guardrail/rescue environment parsing outside the canonical registry.
+
+### Breaking Changes
+- Supplying different non-empty canonical and alias values now fails config audit rather than silently selecting one; canonical precedence remains deterministic after the conflict is corrected.
+
+### Known Issues
+- Reserved notification, queue/Redis, experimental, and microstructure controls remain unavailable until their subsystems exist; each now carries an exact reason code.

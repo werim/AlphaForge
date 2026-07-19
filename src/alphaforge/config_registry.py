@@ -26,7 +26,8 @@ class ConfigSetting:
     dashboard_editable: bool = True
     deprecated_aliases: tuple[str, ...] = ()
     classification: str = "WIRED"
-    consumed_by: str = "alphaforge.config"
+    consumed_by: str = ""
+    behavioral_test: str = ""
 
     def parse(self, raw: Any) -> Any:
         if raw is None:
@@ -52,6 +53,32 @@ class ConfigSetting:
 
 
 def _s(env, field, typ, default, category, applies, desc, min_value=None, max_value=None, **kw):
+    consumers = {
+        "Trade Quality Filters": "alphaforge.order.evaluate_trade_quality",
+        "Execution Cost Filters": "alphaforge.execution.build_execution_cost_breakdown",
+        "Runtime Risk Limits": "alphaforge.runtime.RuntimeOrchestrator._evaluate_runtime_risk",
+        "Backtest Settings": "backtest_order.run_backtest",
+        "Mode / Safety": "alphaforge.runtime._build_runtime_from_env",
+        "Operations": "alphaforge.runtime._build_runtime_from_env",
+        "Persistence": "alphaforge.persistence.init_db",
+        "Logging": "alphaforge.runtime.main",
+        "Notifications": "alphaforge.telegram_alert_delivery.telegram_alert_provider_from_config",
+        "Hyperliquid": "alphaforge.exchange_market_scanner._scan_hyperliquid",
+    }
+    tests = {
+        "Trade Quality Filters": "tests/test_env_filters_canonical.py",
+        "Execution Cost Filters": "tests/test_env_filters_canonical.py",
+        "Runtime Risk Limits": "tests/test_runtime_env_config.py",
+        "Backtest Settings": "tests/test_backtest_filter_switches.py",
+        "Mode / Safety": "tests/test_runtime_env_config.py",
+        "Operations": "tests/test_runtime_env_config.py",
+        "Persistence": "tests/test_runtime_env_config.py",
+        "Logging": "tests/test_env_wiring_contract.py",
+        "Notifications": "tests/test_telegram_alert_delivery.py",
+        "Hyperliquid": "tests/test_env_wiring_contract.py",
+    }
+    kw.setdefault("consumed_by", consumers.get(category, "alphaforge.config.load_config_from_env"))
+    kw.setdefault("behavioral_test", tests.get(category, "tests/test_env_wiring_contract.py"))
     return ConfigSetting(env, field, typ, default, category, tuple(applies), desc, min_value=min_value, max_value=max_value, **kw)
 
 CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
@@ -99,6 +126,54 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_BACKTEST_USE_EXECUTION_COSTS", "backtest_use_execution_costs", "bool", True, "Backtest Settings", ("BACKTEST",), "Use execution-cost context in backtests when available."),
     _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", "backtest_short_breakdown_rescue_enabled", "bool", False, "Backtest Settings", ("BACKTEST",), "BACKTEST-only SHORT_BREAKDOWN_RESCUE experiment; disabled by default and does not affect PAPER/LIVE."),
     _s("ALPHAFORGE_BACKTEST_EXPORT_CONFIG_SNAPSHOT", "backtest_export_config_snapshot", "bool", True, "Backtest Settings", ("BACKTEST",), "Export config_snapshot.json with backtest runs."),
+    _s("ALPHAFORGE_SCAN_INTERVAL_SEC", "scan_interval_sec", "float", 1.0, "Operations", ("PAPER", "LIVE"), "Seconds between runtime scans.", 0.01),
+    _s("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", "heartbeat_interval_sec", "float", 30.0, "Operations", ("PAPER", "LIVE"), "Seconds between runtime heartbeats.", 0.01),
+    _s("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", "max_symbols_per_scan", "int", 5, "Operations", ("PAPER", "LIVE"), "Maximum selected symbols per scan.", 1),
+    _s("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", "max_reject_log_entries", "int", 1000, "Operations", ("PAPER", "LIVE"), "In-memory reject log cap.", 1),
+    _s("ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "max_concurrent_positions", "int", 3, "Runtime Risk Limits", ("PAPER", "LIVE"), "Concurrent-position hard cap.", 1, deprecated_aliases=("ALPHAFORGE_MAX_OPEN_POSITIONS",)),
+    _s("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", "max_notional_exposure", "float", 100000.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Portfolio notional hard cap.", 0.0),
+    _s("ALPHAFORGE_MAX_SYMBOL_NOTIONAL", "max_symbol_notional", "float", 50000.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Per-symbol notional hard cap.", 0.0),
+    _s("ALPHAFORGE_MAX_DAILY_LOSS_PCT", "max_daily_loss_pct", "float", 0.03, "Runtime Risk Limits", ("PAPER", "LIVE"), "Daily realized-loss fraction that blocks new risk.", 0.0, 1.0),
+    _s("ALPHAFORGE_STALE_MARKET_DATA_SEC", "stale_market_data_sec", "float", 15.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Maximum market-data age.", 0.0),
+    _s("ALPHAFORGE_ENABLE_SHADOW_MODE", "enable_shadow_mode", "bool", False, "Mode / Safety", ("PAPER", "LIVE"), "Enable shadow-only runtime behavior."),
+    _s("ALPHAFORGE_ENABLE_CANARY_MODE", "enable_canary_mode", "bool", False, "Mode / Safety", ("LIVE",), "Request canary mode; readiness gates remain authoritative."),
+    _s("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", "operator_live_acknowledged", "bool", False, "Mode / Safety", ("LIVE",), "Additional deny-by-default operator acknowledgement."),
+    _s("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", "reconciliation_interval_sec", "float", 5.0, "Operations", ("PAPER", "LIVE"), "Runtime reconciliation interval.", 0.1),
+    _s("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", "reconciliation_timeout_sec", "float", 2.0, "Operations", ("PAPER", "LIVE"), "Runtime reconciliation timeout.", 0.1),
+    _s("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "enable_binance_readonly_reconciliation", "bool", False, "Mode / Safety", ("PAPER", "LIVE"), "Enable signed read-only Binance reconciliation."),
+    _s("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", "binance_reconciliation_trade_lookback_ms", "int", 3600000, "Operations", ("PAPER", "LIVE"), "Read-only fill lookback window.", 1),
+    _s("ALPHAFORGE_BACKTEST_OUTPUT_DIR", "backtest_output_dir", "str", "data/backtest", "Backtest Settings", ("BACKTEST",), "Backtest artifact output directory."),
+    _s("ALPHAFORGE_BACKTEST_INITIAL_BALANCE", "backtest_initial_balance", "float", 1000.0, "Backtest Settings", ("BACKTEST",), "Backtest starting balance.", 0.01),
+    _s("ALPHAFORGE_BACKTEST_RISK_PCT", "backtest_risk_pct", "float", 1.0, "Backtest Settings", ("BACKTEST",), "Backtest risk percentage per accepted order.", 0.0, 100.0),
+    _s("ALPHAFORGE_BACKTEST_STRATEGY_GUARDRAILS_ENABLED", "backtest_guardrails_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable strategy-profile quality guardrails."),
+    _s("ALPHAFORGE_BACKTEST_STRATEGY_PROFILE", "backtest_strategy_profile", "str", "DEFAULT_FILTERS", "Backtest Settings", ("BACKTEST",), "Backtest strategy profile name."),
+    _s("ALPHAFORGE_BACKTEST_MAX_CONSECUTIVE_SL_PAUSE", "backtest_max_consecutive_sl_pause", "int", 4, "Backtest Settings", ("BACKTEST",), "Pause threshold for consecutive stop losses.", 1),
+    _s("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", "backtest_score10_sl_guard", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable score-10 stop-loss dominance guard."),
+    _s("ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD", "backtest_high_vol_guard", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable high-volatility acceptance guard."),
+    _s("ALPHAFORGE_BACKTEST_MIN_PROFIT_FACTOR_FOR_PROFILE_PASS", "backtest_min_profit_factor", "float", 1.2, "Backtest Settings", ("BACKTEST",), "Minimum profile profit factor.", 0.0),
+    _s("ALPHAFORGE_BACKTEST_MAX_LOSS_STREAK_FOR_PROFILE_PASS", "backtest_max_loss_streak", "int", 6, "Backtest Settings", ("BACKTEST",), "Maximum profile loss streak.", 0),
+    _s("ALPHAFORGE_BACKTEST_MAX_DRAWDOWN_PCT_FOR_PROFILE_PASS", "backtest_max_drawdown_pct", "float", 12.0, "Backtest Settings", ("BACKTEST",), "Maximum profile drawdown percent.", 0.0, 100.0),
+    _s("ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS", "backtest_diagnostic_symbols", "str", "BTCUSDT,ETHUSDT", "Backtest Settings", ("BACKTEST",), "Diagnostic symbol allowlist."),
+    _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_SIZE_MULTIPLIER", "backtest_rescue_size_multiplier", "float", 0.25, "Backtest Settings", ("BACKTEST",), "Rescue risk-size multiplier.", 0.0, 1.0),
+    _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MAX_PER_DAY", "backtest_rescue_max_per_day", "int", 1, "Backtest Settings", ("BACKTEST",), "Daily rescue cap.", 0),
+    _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ALLOWED_REASONS", "backtest_rescue_allowed_reasons", "str", "LOW_SCORE,STOP_TOO_WIDE,DAILY_SYMBOL_TRADE_LIMIT", "Backtest Settings", ("BACKTEST",), "Comma-separated rescue-eligible rejects."),
+    _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_EFFECTIVE_RR", "backtest_rescue_min_effective_rr", "float", 1.1, "Backtest Settings", ("BACKTEST",), "Minimum rescue effective RR.", 0.0),
+    _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_SHADOW_EXPECTANCY", "backtest_rescue_min_shadow_expectancy", "float", 0.0, "Backtest Settings", ("BACKTEST",), "Minimum rescue shadow expectancy."),
+    _s("ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED", "backtest_filter_low_score_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable LOW_SCORE rejection."),
+    _s("ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED", "backtest_filter_too_choppy_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable TOO_CHOPPY rejection."),
+    _s("ALPHAFORGE_BACKTEST_FILTER_WEAK_TREND_NO_RANGE_ENABLED", "backtest_filter_weak_trend_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable weak-trend rejection."),
+    _s("ALPHAFORGE_BACKTEST_FILTER_STOP_TOO_WIDE_ENABLED", "backtest_filter_stop_too_wide_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable STOP_TOO_WIDE rejection."),
+    _s("ALPHAFORGE_BACKTEST_FILTER_RR_TOO_LOW_ENABLED", "backtest_filter_rr_too_low_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable RR_TOO_LOW rejection."),
+    _s("ALPHAFORGE_BACKTEST_FILTER_DAILY_SYMBOL_TRADE_LIMIT_ENABLED", "backtest_filter_daily_symbol_limit_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable per-symbol daily cap rejection."),
+    _s("ALPHAFORGE_BACKTEST_FILTER_REGIME_MISMATCH_ENABLED", "backtest_filter_regime_mismatch_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable REGIME_MISMATCH rejection."),
+    _s("ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED", "backtest_filter_panic_enabled", "bool", True, "Backtest Settings", ("BACKTEST",), "Enable PANIC_CONDITIONS rejection."),
+    _s("ALPHAFORGE_PERSISTENCE_ENABLED", "persistence_enabled", "bool", True, "Persistence", MODES, "Enable persistence writes."),
+    _s("ALPHAFORGE_LOG_LEVEL", "log_level", "str", "INFO", "Logging", MODES, "Runtime logging threshold."),
+    _s("HYPERLIQUID_ENABLED", "hyperliquid_enabled", "bool", True, "Hyperliquid", ("PAPER", "LIVE"), "Enable public Hyperliquid scanning and connectivity."),
+    _s("HYPERLIQUID_API_URL", "hyperliquid_api_url", "str", "https://api.hyperliquid.xyz", "Hyperliquid", ("PAPER", "LIVE"), "Hyperliquid public API URL.", dashboard_editable=False),
+    _s("ALPHAFORGE_ENABLE_TELEGRAM", "telegram_enabled", "bool", False, "Notifications", ("PAPER", "LIVE"), "Enable Telegram diagnostic alert delivery."),
+    _s("TELEGRAM_BOT_TOKEN", "telegram_bot_token", "str", "", "Notifications", ("PAPER", "LIVE"), "Telegram bot token.", secret=True, dashboard_editable=False),
+    _s("TELEGRAM_CHAT_ID", "telegram_chat_id", "str", "", "Notifications", ("PAPER", "LIVE"), "Telegram destination chat identifier.", secret=True, dashboard_editable=False),
     _s("BINANCE_ENVIRONMENT", "binance_environment", "str", "production", "Binance", ("PAPER", "LIVE"), "Binance USD-M Futures environment selector.", dashboard_editable=False, deprecated_aliases=("BINANCE_TESTNET",), consumed_by="alphaforge.env_contract.resolve_binance_environment"),
     _s("BINANCE_BASE_URL", "binance_rest_base_url", "str", "", "Binance", MODES, "Optional explicit Binance USD-M REST override.", dashboard_editable=False, consumed_by="scanner, connectivity, reconciliation, historical provider"),
     _s("BINANCE_WS_URL", "binance_ws_base_url", "str", "", "Binance", ("PAPER", "LIVE"), "Optional explicit Binance USD-M websocket override.", dashboard_editable=False, consumed_by="connectivity and environment consistency"),
@@ -115,7 +190,33 @@ FIELD_BY_NAME = {s.field_name: s for s in CONFIG_REGISTRY}
 
 # Former template settings with no canonical subsystem contract.  They remain
 # documented only in a clearly non-operational section for migration/audit.
-RESERVED_VARIABLES: tuple[str, ...] = ('ALPHAFORGE_ALLOW_LIVE_ORDERS', 'ALPHAFORGE_BACKTEST_CI', 'ALPHAFORGE_BACKTEST_FILTER_DAILY_SYMBOL_TRADE_LIMIT_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_REGIME_MISMATCH_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_RR_TOO_LOW_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_STOP_TOO_WIDE_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_WEAK_TREND_NO_RANGE_ENABLED', 'ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD', 'ALPHAFORGE_BACKTEST_INITIAL_BALANCE', 'ALPHAFORGE_BACKTEST_MAX_CONSECUTIVE_SL_PAUSE', 'ALPHAFORGE_BACKTEST_MAX_DRAWDOWN_PCT_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_MAX_LOSS_STREAK_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_MIN_PROFIT_FACTOR_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_OFFLINE', 'ALPHAFORGE_BACKTEST_OUTPUT_DIR', 'ALPHAFORGE_BACKTEST_RISK_PCT', 'ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ALLOWED_REASONS', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MAX_PER_DAY', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_EFFECTIVE_RR', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_SHADOW_EXPECTANCY', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_SIZE_MULTIPLIER', 'ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS', 'ALPHAFORGE_BACKTEST_STRATEGY_GUARDRAILS_ENABLED', 'ALPHAFORGE_BACKTEST_STRATEGY_PROFILE', 'ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS', 'ALPHAFORGE_DB_ECHO', 'ALPHAFORGE_DEBUG', 'ALPHAFORGE_DRY_RUN', 'ALPHAFORGE_DUMP_EXECUTION_CTX', 'ALPHAFORGE_ENABLE_BACKTEST', 'ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION', 'ALPHAFORGE_ENABLE_CANARY_MODE', 'ALPHAFORGE_ENABLE_DISCORD', 'ALPHAFORGE_ENABLE_LIVE_READINESS', 'ALPHAFORGE_ENABLE_NOTIFICATIONS', 'ALPHAFORGE_ENABLE_RECONCILIATION', 'ALPHAFORGE_ENABLE_REJECT_SHADOW_ANALYTICS', 'ALPHAFORGE_ENABLE_SHADOW_MODE', 'ALPHAFORGE_ENABLE_TELEGRAM', 'ALPHAFORGE_ENVIRONMENT', 'ALPHAFORGE_EXPERIMENTAL_ADAPTIVE_THRESHOLDS', 'ALPHAFORGE_EXPERIMENTAL_EXCHANGE_REPAIR', 'ALPHAFORGE_EXPORT_VERIFY_INTEGRITY', 'ALPHAFORGE_HEARTBEAT_INTERVAL_SEC', 'ALPHAFORGE_LOG_FILE', 'ALPHAFORGE_LOG_FORMAT', 'ALPHAFORGE_LOG_LEVEL', 'ALPHAFORGE_MAKER_FEE_PCT', 'ALPHAFORGE_MAX_CONCURRENT_POSITIONS', 'ALPHAFORGE_MAX_DAILY_LOSS_PCT', 'ALPHAFORGE_MAX_NOTIONAL_EXPOSURE', 'ALPHAFORGE_MAX_OPEN_POSITIONS', 'ALPHAFORGE_MAX_SYMBOL_NOTIONAL', 'ALPHAFORGE_METRICS_HEARTBEAT_ENABLED', 'ALPHAFORGE_MIN_TRADE_SCORE', 'ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED', 'ALPHAFORGE_POSTGRES_URL', 'ALPHAFORGE_RECONCILIATION_INTERVAL_SEC', 'ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC', 'ALPHAFORGE_RISK_PCT_PER_TRADE', 'ALPHAFORGE_SCAN_INTERVAL_SEC', 'ALPHAFORGE_SQLITE_PATH', 'ALPHAFORGE_STALE_MARKET_DATA_SEC', 'ALPHAFORGE_TAKER_FEE_PCT', 'ALPHAFORGE_TIMEZONE', 'ALPHAFORGE_TRACE_LIFECYCLE', 'DISCORD_WEBHOOK_URL', 'ENABLE_ABSORPTION_FILTER', 'ENABLE_ORDERBOOK_FILTER', 'ENABLE_REGIME_FILTER', 'ENABLE_SPOOF_DETECTION', 'HYPERLIQUID_API_KEY', 'HYPERLIQUID_API_SECRET', 'HYPERLIQUID_API_URL', 'HYPERLIQUID_ENABLED', 'HYPERLIQUID_TESTNET', 'HYPERLIQUID_WS_URL', 'MAX_CORRELATED_POSITIONS', 'MAX_SLIPPAGE_BPS', 'MAX_SPREAD_BPS', 'QUEUE_BACKEND', 'QUEUE_NAME', 'REDIS_ENABLED', 'REDIS_KEY_PREFIX', 'REDIS_URL', 'REJECT_UNKNOWN_EXPECTANCY', 'RESERVED_NOT_WIRED', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID')
+_RESERVED_CANDIDATES: tuple[str, ...] = ('ALPHAFORGE_ALLOW_LIVE_ORDERS', 'ALPHAFORGE_BACKTEST_CI', 'ALPHAFORGE_BACKTEST_FILTER_DAILY_SYMBOL_TRADE_LIMIT_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_REGIME_MISMATCH_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_RR_TOO_LOW_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_STOP_TOO_WIDE_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_WEAK_TREND_NO_RANGE_ENABLED', 'ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD', 'ALPHAFORGE_BACKTEST_INITIAL_BALANCE', 'ALPHAFORGE_BACKTEST_MAX_CONSECUTIVE_SL_PAUSE', 'ALPHAFORGE_BACKTEST_MAX_DRAWDOWN_PCT_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_MAX_LOSS_STREAK_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_MIN_PROFIT_FACTOR_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_OFFLINE', 'ALPHAFORGE_BACKTEST_OUTPUT_DIR', 'ALPHAFORGE_BACKTEST_RISK_PCT', 'ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ALLOWED_REASONS', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MAX_PER_DAY', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_EFFECTIVE_RR', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_SHADOW_EXPECTANCY', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_SIZE_MULTIPLIER', 'ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS', 'ALPHAFORGE_BACKTEST_STRATEGY_GUARDRAILS_ENABLED', 'ALPHAFORGE_BACKTEST_STRATEGY_PROFILE', 'ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS', 'ALPHAFORGE_DB_ECHO', 'ALPHAFORGE_DEBUG', 'ALPHAFORGE_DRY_RUN', 'ALPHAFORGE_DUMP_EXECUTION_CTX', 'ALPHAFORGE_ENABLE_BACKTEST', 'ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION', 'ALPHAFORGE_ENABLE_CANARY_MODE', 'ALPHAFORGE_ENABLE_DISCORD', 'ALPHAFORGE_ENABLE_LIVE_READINESS', 'ALPHAFORGE_ENABLE_NOTIFICATIONS', 'ALPHAFORGE_ENABLE_RECONCILIATION', 'ALPHAFORGE_ENABLE_REJECT_SHADOW_ANALYTICS', 'ALPHAFORGE_ENABLE_SHADOW_MODE', 'ALPHAFORGE_ENABLE_TELEGRAM', 'ALPHAFORGE_ENVIRONMENT', 'ALPHAFORGE_EXPERIMENTAL_ADAPTIVE_THRESHOLDS', 'ALPHAFORGE_EXPERIMENTAL_EXCHANGE_REPAIR', 'ALPHAFORGE_EXPORT_VERIFY_INTEGRITY', 'ALPHAFORGE_HEARTBEAT_INTERVAL_SEC', 'ALPHAFORGE_LOG_FILE', 'ALPHAFORGE_LOG_FORMAT', 'ALPHAFORGE_LOG_LEVEL', 'ALPHAFORGE_MAKER_FEE_PCT', 'ALPHAFORGE_MAX_CONCURRENT_POSITIONS', 'ALPHAFORGE_MAX_DAILY_LOSS_PCT', 'ALPHAFORGE_MAX_NOTIONAL_EXPOSURE', 'ALPHAFORGE_MAX_OPEN_POSITIONS', 'ALPHAFORGE_MAX_SYMBOL_NOTIONAL', 'ALPHAFORGE_METRICS_HEARTBEAT_ENABLED', 'ALPHAFORGE_MIN_TRADE_SCORE', 'ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED', 'ALPHAFORGE_POSTGRES_URL', 'ALPHAFORGE_RECONCILIATION_INTERVAL_SEC', 'ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC', 'ALPHAFORGE_RISK_PCT_PER_TRADE', 'ALPHAFORGE_SCAN_INTERVAL_SEC', 'ALPHAFORGE_SQLITE_PATH', 'ALPHAFORGE_STALE_MARKET_DATA_SEC', 'ALPHAFORGE_TAKER_FEE_PCT', 'ALPHAFORGE_TIMEZONE', 'ALPHAFORGE_TRACE_LIFECYCLE', 'DISCORD_WEBHOOK_URL', 'ENABLE_ABSORPTION_FILTER', 'ENABLE_ORDERBOOK_FILTER', 'ENABLE_REGIME_FILTER', 'ENABLE_SPOOF_DETECTION', 'HYPERLIQUID_API_KEY', 'HYPERLIQUID_API_SECRET', 'HYPERLIQUID_API_URL', 'HYPERLIQUID_ENABLED', 'HYPERLIQUID_TESTNET', 'HYPERLIQUID_WS_URL', 'MAX_CORRELATED_POSITIONS', 'MAX_SLIPPAGE_BPS', 'MAX_SPREAD_BPS', 'QUEUE_BACKEND', 'QUEUE_NAME', 'REDIS_ENABLED', 'REDIS_KEY_PREFIX', 'REDIS_URL', 'REJECT_UNKNOWN_EXPECTANCY', 'RESERVED_NOT_WIRED', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID')
+
+_CANONICAL_OR_ALIAS = {s.env_name for s in CONFIG_REGISTRY} | {alias for s in CONFIG_REGISTRY for alias in s.deprecated_aliases}
+RESERVED_VARIABLES = tuple(name for name in _RESERVED_CANDIDATES if name not in _CANONICAL_OR_ALIAS)
+
+_RESERVED_REASONS = {
+    "ALPHAFORGE_ALLOW_LIVE_ORDERS": "UNSAFE",
+    "ALPHAFORGE_DRY_RUN": "DEPRECATED_NO_EFFECT",
+    "ALPHAFORGE_ENABLE_LIVE_READINESS": "DEPRECATED_NO_EFFECT",
+    "ALPHAFORGE_EXPORT_VERIFY_INTEGRITY": "DEPRECATED_NO_EFFECT",
+    "RESERVED_NOT_WIRED": "REMOVED",
+}
+
+def _reserved_reason(name: str) -> str:
+    if name in _RESERVED_REASONS:
+        return _RESERVED_REASONS[name]
+    if name.startswith(("REDIS_", "QUEUE_")):
+        return "FUTURE_SUBSYSTEM"
+    if name.startswith(("DISCORD_", "ALPHAFORGE_ENABLE_DISCORD", "ALPHAFORGE_ENABLE_NOTIFICATIONS")):
+        return "NOT_IMPLEMENTED"
+    if name.startswith("ALPHAFORGE_EXPERIMENTAL_"):
+        return "UNSAFE"
+    if name.startswith(("ENABLE_ORDERBOOK", "ENABLE_SPOOF", "ENABLE_ABSORPTION", "ENABLE_REGIME")):
+        return "NOT_IMPLEMENTED"
+    if name.startswith("HYPERLIQUID_"):
+        return "NOT_IMPLEMENTED"
+    return "NOT_IMPLEMENTED"
 
 
 def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
@@ -127,6 +228,7 @@ def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
             default=setting.default, applies_to=setting.applies_to,
             consumed_by=setting.consumed_by, restart_required=setting.restart_required,
             secret=setting.secret, description=setting.description,
+            behavioral_test=setting.behavioral_test,
         ))
         for alias in setting.deprecated_aliases:
             rows.append(EnvContractEntry(
@@ -136,6 +238,7 @@ def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
                 consumed_by="alphaforge.config_registry alias resolution",
                 restart_required=setting.restart_required, secret=setting.secret,
                 deprecated=True, description=f"Deprecated alias for {setting.env_name}; canonical value wins within a source.",
+                behavioral_test="tests/test_env_wiring_contract.py::test_alias_conflicts_fail_audit",
             ))
     for name in RESERVED_VARIABLES:
         secret = any(token in name for token in ("SECRET", "TOKEN", "KEY", "PASSWORD", "WEBHOOK"))
@@ -144,6 +247,7 @@ def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
             value_type="secret" if secret else "string", default=None,
             applies_to=MODES, consumed_by="unsupported/reserved", secret=secret,
             description="Reserved for migration compatibility; supplying it has no operational effect.",
+            unsupported_reason=_reserved_reason(name),
         ))
     return tuple(sorted(rows, key=lambda row: row.name))
 

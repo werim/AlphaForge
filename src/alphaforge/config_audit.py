@@ -50,6 +50,19 @@ def audit_config(*, env: Mapping[str, str] | None = None, root: Path | None = No
     missing = sorted(CONTRACT_BY_NAME.keys() - documented)
     if missing:
         errors.append("contract variables missing from templates: " + ", ".join(missing))
+    wired_metadata_errors = [row.name for row in ENV_CONTRACT if row.classification == "WIRED" and (not row.consumed_by or row.consumed_by.endswith("load_config_from_env") or not row.behavioral_test)]
+    if wired_metadata_errors:
+        errors.append("wired variables lack a post-loader consumer or behavioral test: " + ", ".join(wired_metadata_errors))
+    invalid_modes = [row.name for row in ENV_CONTRACT if not row.applies_to or not set(row.applies_to).issubset({"BACKTEST", "PAPER", "LIVE"})]
+    if invalid_modes:
+        errors.append("variables have invalid mode applicability: " + ", ".join(invalid_modes))
+    for row in ENV_CONTRACT:
+        if row.classification != "ALIAS" or row.name not in supplied or row.canonical_name not in supplied:
+            continue
+        canonical = str(supplied[row.canonical_name]).strip()
+        alias = str(supplied[row.name]).strip()
+        if canonical and alias and canonical != alias:
+            errors.append(f"alias conflict: {row.canonical_name} and {row.name} differ; canonical would win")
     for name, value in supplied.items():
         row = CONTRACT_BY_NAME.get(name)
         if row and value and row.classification == "RESERVED":
@@ -88,11 +101,14 @@ def audit_config(*, env: Mapping[str, str] | None = None, root: Path | None = No
             if not raw or _placeholder(raw):
                 errors.append(f"{name} missing or placeholder while authenticated reconciliation is enabled")
     classes = lambda kind: sorted(row.name for row in ENV_CONTRACT if row.classification == kind)
+    contract_rows = [row.public_dict() for row in ENV_CONTRACT]
     return {
         "documented_variables": sorted(documented), "wired_variables": classes("WIRED"),
         "alias_variables": classes("ALIAS"), "reserved_variables": classes("RESERVED"),
         "undocumented_consumed_variables": [], "duplicate_template_variables": duplicate_map,
         "unknown_process_variables": unknown, "resolved_non_secret_configuration": resolved,
+        "contract_inventory": contract_rows,
+        "unsupported_variables": [row.public_dict() for row in ENV_CONTRACT if row.classification == "RESERVED"],
         "dotenv": {"path": boot.path, "loaded": boot.loaded} if boot else {"path": None, "loaded": False},
         "errors": errors, "warnings": warnings, "status": "FAIL" if errors else ("WARN" if warnings else "PASS"),
     }

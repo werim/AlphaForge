@@ -106,7 +106,10 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
 
 
 def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
-    api_url = str(getattr(getattr(getattr(config, "exchange", object()), "hyperliquid", object()), "api_url", "https://api.hyperliquid.xyz"))
+    hyperliquid = getattr(getattr(config, "exchange", object()), "hyperliquid", object())
+    if not bool(getattr(hyperliquid, "enabled", True)):
+        return []
+    api_url = str(getattr(hyperliquid, "api_url", "https://api.hyperliquid.xyz"))
     req = request.Request(
         f"{api_url.rstrip('/')}/info",
         method="POST",

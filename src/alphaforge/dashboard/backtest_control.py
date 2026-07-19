@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alphaforge.config import load_config_from_env
-from alphaforge.config_registry import config_snapshot
+from alphaforge.config_registry import config_snapshot, effective_config_values
 from alphaforge.contracts import canonical_utc_timestamp
 from alphaforge.historical_market_data import supported_intervals
 from alphaforge.symbols import SymbolListError, normalize_symbol_list
@@ -646,7 +646,10 @@ def _outcome_split(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 
 def _backtest_score10_sl_dominance_enabled() -> bool:
-    return str(os.environ.get("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", "")).strip().lower() in {"1", "true", "yes", "on"}
+    resolved = effective_config_values()["ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD"]
+    # Dashboard calibration export is opt-in even though the strategy runtime
+    # guard itself defaults on; only an explicit source enables this artifact.
+    return bool(resolved["value"]) and resolved["source"] != "default"
 
 
 def _diagnostic_outcome(row: Mapping[str, Any]) -> str:

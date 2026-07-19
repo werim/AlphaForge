@@ -16,7 +16,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input
 from alphaforge.config import load_config_from_env
-from alphaforge.config_registry import decision_filter_config
+from alphaforge.config_registry import decision_filter_config, effective_config_values
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_order_decision, save_signal, save_trade_lifecycle_event
 from alphaforge.portfolio_risk import BacktestPortfolioState, evaluate_portfolio_risk
@@ -168,7 +168,7 @@ DIAGNOSTIC_PROFILE_REASON = (
 
 
 def diagnostic_short_low_score_symbols_from_env() -> tuple[str, ...]:
-    raw = os.getenv("ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS", "")
+    raw = str(effective_config_values()["ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS"]["value"])
     symbols = tuple(s.strip().upper() for s in raw.replace(",", " ").split() if s.strip())
     return symbols or DIAGNOSTIC_PROFILE_DEFAULT_SYMBOLS
 
@@ -192,16 +192,20 @@ def _env_float(name: str, default: float) -> float:
 
 
 def strategy_guardrail_config_from_env(profile: str = "DEFAULT_FILTERS") -> StrategyQualityGuardrailConfig:
+    values = effective_config_values()
+    val = lambda name: values[name]["value"]
     return StrategyQualityGuardrailConfig(
-        enabled=_env_bool("ALPHAFORGE_BACKTEST_STRATEGY_GUARDRAILS_ENABLED", True),
-        profile=str(os.getenv("ALPHAFORGE_BACKTEST_STRATEGY_PROFILE", profile) or profile).upper(),
-        max_accepted_trades_per_day=_env_int("ALPHAFORGE_BACKTEST_MAX_ACCEPTED_TRADES_PER_DAY", 6),
-        max_consecutive_sl_pause=_env_int("ALPHAFORGE_BACKTEST_MAX_CONSECUTIVE_SL_PAUSE", 4),
-        score10_sl_dominance_guard=_env_bool("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD", True),
-        high_vol_acceptance_guard=_env_bool("ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD", True),
-        min_profit_factor_for_profile_pass=_env_float("ALPHAFORGE_BACKTEST_MIN_PROFIT_FACTOR_FOR_PROFILE_PASS", 1.20),
-        max_loss_streak_for_profile_pass=_env_int("ALPHAFORGE_BACKTEST_MAX_LOSS_STREAK_FOR_PROFILE_PASS", 6),
-        max_drawdown_pct_for_profile_pass=_env_float("ALPHAFORGE_BACKTEST_MAX_DRAWDOWN_PCT_FOR_PROFILE_PASS", 12.0),
+        enabled=val("ALPHAFORGE_BACKTEST_STRATEGY_GUARDRAILS_ENABLED"),
+        profile=str(val("ALPHAFORGE_BACKTEST_STRATEGY_PROFILE") or profile).upper(),
+        # Registry value 0 means the general backtest cap is disabled; the
+        # strategy-quality profile retains its independent conservative cap.
+        max_accepted_trades_per_day=val("ALPHAFORGE_BACKTEST_MAX_ACCEPTED_TRADES_PER_DAY") or 6,
+        max_consecutive_sl_pause=val("ALPHAFORGE_BACKTEST_MAX_CONSECUTIVE_SL_PAUSE"),
+        score10_sl_dominance_guard=val("ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD"),
+        high_vol_acceptance_guard=val("ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD"),
+        min_profit_factor_for_profile_pass=val("ALPHAFORGE_BACKTEST_MIN_PROFIT_FACTOR_FOR_PROFILE_PASS"),
+        max_loss_streak_for_profile_pass=val("ALPHAFORGE_BACKTEST_MAX_LOSS_STREAK_FOR_PROFILE_PASS"),
+        max_drawdown_pct_for_profile_pass=val("ALPHAFORGE_BACKTEST_MAX_DRAWDOWN_PCT_FOR_PROFILE_PASS"),
     )
 
 BACKTEST_FILTER_REASONS = (
@@ -4842,6 +4846,8 @@ def build_rejected_shadow_summary(shadows: List[RejectedShadowEvaluation]) -> Di
     }
 def main():
     cfg = load_config_from_env()
+    managed = effective_config_values()
+    managed_value = lambda name: managed[name]["value"]
     p = argparse.ArgumentParser()
     p.add_argument("--start")
     p.add_argument("--end")
@@ -4869,13 +4875,13 @@ def main():
     p.add_argument("--rescue-max-spread-pct", type=float, default=0.0025)
     p.add_argument("--rescue-max-slippage-pct", type=float, default=0.0020)
     p.add_argument("--rescue-allow-cooldown-bypass", action="store_true")
-    p.add_argument("--short-breakdown-rescue-enabled", action="store_true", default=str(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", "false")).lower() in {"1","true","yes","on"}, help="Enable BACKTEST-only SHORT breakdown rescue activation; disabled is reporting-only")
+    p.add_argument("--short-breakdown-rescue-enabled", action="store_true", default=managed_value("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED"), help="Enable BACKTEST-only SHORT breakdown rescue activation; disabled is reporting-only")
     p.add_argument("--short-breakdown-rescue-modes", default="BACKTEST")
-    p.add_argument("--short-breakdown-rescue-size-multiplier", type=float, default=float(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_SIZE_MULTIPLIER", "0.25")))
-    p.add_argument("--short-breakdown-rescue-max-per-day", type=int, default=int(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MAX_PER_DAY", "1")))
-    p.add_argument("--short-breakdown-rescue-allowed-reasons", default=os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ALLOWED_REASONS", "LOW_SCORE,STOP_TOO_WIDE,DAILY_SYMBOL_TRADE_LIMIT"))
-    p.add_argument("--short-breakdown-rescue-min-effective-rr", type=float, default=float(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_EFFECTIVE_RR", "1.10")))
-    p.add_argument("--short-breakdown-rescue-min-shadow-expectancy", type=float, default=float(os.getenv("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_SHADOW_EXPECTANCY", "0.0")))
+    p.add_argument("--short-breakdown-rescue-size-multiplier", type=float, default=managed_value("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_SIZE_MULTIPLIER"))
+    p.add_argument("--short-breakdown-rescue-max-per-day", type=int, default=managed_value("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MAX_PER_DAY"))
+    p.add_argument("--short-breakdown-rescue-allowed-reasons", default=managed_value("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ALLOWED_REASONS"))
+    p.add_argument("--short-breakdown-rescue-min-effective-rr", type=float, default=managed_value("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_EFFECTIVE_RR"))
+    p.add_argument("--short-breakdown-rescue-min-shadow-expectancy", type=float, default=managed_value("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_SHADOW_EXPECTANCY"))
     p.add_argument("--short-breakdown-rescue-max-spread-pct", type=float, default=0.0025)
     p.add_argument("--short-breakdown-rescue-max-slippage-pct", type=float, default=0.0020)
     p.add_argument("--quality-gate-enabled", action="store_true", help="Enable BACKTEST-only reporting comparison for SHORT breakdown/breakout NORMAL-stop gate")
