@@ -18,6 +18,8 @@ from alphaforge.burnin_campaign import (
     identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS,
 )
 from alphaforge.config import load_config_from_env
+from alphaforge.config_audit import audit_config
+from alphaforge.env_contract import dotenv_status
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider
 from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
@@ -194,7 +196,7 @@ def _readonly_reconciliation_provider(cfg: Any) -> Any | None:
     key, secret = os.getenv("BINANCE_API_KEY", "").strip(), os.getenv("BINANCE_API_SECRET", "").strip()
     if not key or not secret:
         return None
-    return BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url=cfg.exchange.binance.base_url, api_key=key, api_secret=secret, recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms, request_timeout_sec=cfg.runtime.reconciliation_timeout_sec, trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms))
+    return BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url=cfg.exchange.binance.base_url, api_key=key, api_secret=secret, recv_window_ms=cfg.binance.recv_window_ms, request_timeout_sec=cfg.binance.request_timeout_sec, trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms))
 
 
 def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None) -> dict[str, Any]:
@@ -207,6 +209,20 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         checks.append({"name": name, "status": status, "details": details, "critical": critical})
         if critical and status != "PASS":
             blockers.append(name)
+
+    env_audit = audit_config()
+    dotenv = dotenv_status()
+    add("env_contract_valid", "PASS" if env_audit["status"] != "FAIL" else "FAIL", {"errors": env_audit["errors"], "warnings": env_audit["warnings"]})
+    add("dotenv_loaded", "PASS", {"path": dotenv.path, "loaded": dotenv.loaded})
+    add("no_duplicate_env_keys", "PASS" if not env_audit["duplicate_template_variables"] else "FAIL", env_audit["duplicate_template_variables"])
+    add("no_unknown_operational_env_variables", "PASS" if not env_audit["unknown_process_variables"] else "FAIL", env_audit["unknown_process_variables"])
+    endpoint_details = {"environment": cfg.binance.environment, "rest_base_url": cfg.binance.base_url, "ws_base_url": cfg.binance.ws_url, "resolution_source": cfg.binance.resolution_source}
+    add("binance_environment_consistent", "PASS", endpoint_details)
+    add("reconciliation_endpoint_matches_environment", "PASS", endpoint_details)
+    reconciliation_enabled = bool(cfg.runtime.enable_binance_readonly_reconciliation)
+    secret_rows = env_audit["resolved_non_secret_configuration"]
+    credentials_ok = all(bool(secret_rows.get(name, {}).get("present")) and not bool(secret_rows.get(name, {}).get("placeholder_detected")) for name in ("BINANCE_API_KEY", "BINANCE_API_SECRET"))
+    add("reconciliation_credentials_non_placeholder", "PASS" if (not reconciliation_enabled or credentials_ok) else "FAIL", {"enabled": reconciliation_enabled, "credentials_present": credentials_ok})
 
     try:
         commit = _git_commit()

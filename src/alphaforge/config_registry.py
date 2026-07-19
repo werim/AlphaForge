@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from alphaforge.env_contract import EnvContractEntry, parse_bool, parse_dotenv
+
 MODES = ("BACKTEST", "PAPER", "LIVE")
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +25,8 @@ class ConfigSetting:
     restart_required: bool = True
     dashboard_editable: bool = True
     deprecated_aliases: tuple[str, ...] = ()
+    classification: str = "WIRED"
+    consumed_by: str = "alphaforge.config"
 
     def parse(self, raw: Any) -> Any:
         if raw is None:
@@ -32,10 +36,7 @@ class ConfigSetting:
         if raw == "":
             return self.default
         if self.value_type == "bool":
-            if isinstance(raw, bool):
-                value = raw
-            else:
-                value = str(raw).lower() in {"1", "true", "yes", "on"}
+            value = parse_bool(self.env_name, raw)
         elif self.value_type == "int":
             value = int(raw)
         elif self.value_type == "float":
@@ -98,26 +99,66 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_BACKTEST_USE_EXECUTION_COSTS", "backtest_use_execution_costs", "bool", True, "Backtest Settings", ("BACKTEST",), "Use execution-cost context in backtests when available."),
     _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", "backtest_short_breakdown_rescue_enabled", "bool", False, "Backtest Settings", ("BACKTEST",), "BACKTEST-only SHORT_BREAKDOWN_RESCUE experiment; disabled by default and does not affect PAPER/LIVE."),
     _s("ALPHAFORGE_BACKTEST_EXPORT_CONFIG_SNAPSHOT", "backtest_export_config_snapshot", "bool", True, "Backtest Settings", ("BACKTEST",), "Export config_snapshot.json with backtest runs."),
+    _s("BINANCE_ENVIRONMENT", "binance_environment", "str", "production", "Binance", ("PAPER", "LIVE"), "Binance USD-M Futures environment selector.", dashboard_editable=False, deprecated_aliases=("BINANCE_TESTNET",), consumed_by="alphaforge.env_contract.resolve_binance_environment"),
+    _s("BINANCE_BASE_URL", "binance_rest_base_url", "str", "", "Binance", MODES, "Optional explicit Binance USD-M REST override.", dashboard_editable=False, consumed_by="scanner, connectivity, reconciliation, historical provider"),
+    _s("BINANCE_WS_URL", "binance_ws_base_url", "str", "", "Binance", ("PAPER", "LIVE"), "Optional explicit Binance USD-M websocket override.", dashboard_editable=False, consumed_by="connectivity and environment consistency"),
+    _s("BINANCE_DEFAULT_QUOTE_ASSET", "binance_default_quote_asset", "str", "USDT", "Binance", MODES, "Quote asset used by the Binance market scanner.", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner"),
+    _s("BINANCE_DEFAULT_MARKET_TYPE", "binance_default_market_type", "str", "USD_M", "Binance", MODES, "Supported Binance Futures market type (USD_M).", dashboard_editable=False, consumed_by="Binance providers"),
+    _s("BINANCE_RECV_WINDOW_MS", "binance_recv_window_ms", "int", 5000, "Binance", ("PAPER", "LIVE"), "Signed request receive window.", 1, dashboard_editable=False, deprecated_aliases=("ALPHAFORGE_BINANCE_RECV_WINDOW_MS",), consumed_by="alphaforge.binance_reconciliation_provider"),
+    _s("BINANCE_REQUEST_TIMEOUT_SEC", "binance_request_timeout_sec", "float", 2.0, "Binance", ("PAPER", "LIVE"), "Binance HTTP request timeout.", 0.1, dashboard_editable=False, consumed_by="scanner, connectivity, reconciliation"),
+    _s("BINANCE_API_KEY", "binance_api_key", "str", "", "Binance", ("PAPER", "LIVE"), "Read-only reconciliation API key.", secret=True, dashboard_editable=False, consumed_by="alphaforge.binance_reconciliation_provider"),
+    _s("BINANCE_API_SECRET", "binance_api_secret", "str", "", "Binance", ("PAPER", "LIVE"), "Read-only reconciliation API secret.", secret=True, dashboard_editable=False, consumed_by="alphaforge.binance_reconciliation_provider"),
 )
 
 REGISTRY_BY_ENV = {s.env_name: s for s in CONFIG_REGISTRY}
 FIELD_BY_NAME = {s.field_name: s for s in CONFIG_REGISTRY}
 
+# Former template settings with no canonical subsystem contract.  They remain
+# documented only in a clearly non-operational section for migration/audit.
+RESERVED_VARIABLES: tuple[str, ...] = ('ALPHAFORGE_ALLOW_LIVE_ORDERS', 'ALPHAFORGE_BACKTEST_CI', 'ALPHAFORGE_BACKTEST_FILTER_DAILY_SYMBOL_TRADE_LIMIT_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_REGIME_MISMATCH_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_RR_TOO_LOW_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_STOP_TOO_WIDE_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED', 'ALPHAFORGE_BACKTEST_FILTER_WEAK_TREND_NO_RANGE_ENABLED', 'ALPHAFORGE_BACKTEST_HIGH_VOL_ACCEPTANCE_GUARD', 'ALPHAFORGE_BACKTEST_INITIAL_BALANCE', 'ALPHAFORGE_BACKTEST_MAX_CONSECUTIVE_SL_PAUSE', 'ALPHAFORGE_BACKTEST_MAX_DRAWDOWN_PCT_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_MAX_LOSS_STREAK_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_MIN_PROFIT_FACTOR_FOR_PROFILE_PASS', 'ALPHAFORGE_BACKTEST_OFFLINE', 'ALPHAFORGE_BACKTEST_OUTPUT_DIR', 'ALPHAFORGE_BACKTEST_RISK_PCT', 'ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ALLOWED_REASONS', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MAX_PER_DAY', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_EFFECTIVE_RR', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_MIN_SHADOW_EXPECTANCY', 'ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_SIZE_MULTIPLIER', 'ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS', 'ALPHAFORGE_BACKTEST_STRATEGY_GUARDRAILS_ENABLED', 'ALPHAFORGE_BACKTEST_STRATEGY_PROFILE', 'ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS', 'ALPHAFORGE_DB_ECHO', 'ALPHAFORGE_DEBUG', 'ALPHAFORGE_DRY_RUN', 'ALPHAFORGE_DUMP_EXECUTION_CTX', 'ALPHAFORGE_ENABLE_BACKTEST', 'ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION', 'ALPHAFORGE_ENABLE_CANARY_MODE', 'ALPHAFORGE_ENABLE_DISCORD', 'ALPHAFORGE_ENABLE_LIVE_READINESS', 'ALPHAFORGE_ENABLE_NOTIFICATIONS', 'ALPHAFORGE_ENABLE_RECONCILIATION', 'ALPHAFORGE_ENABLE_REJECT_SHADOW_ANALYTICS', 'ALPHAFORGE_ENABLE_SHADOW_MODE', 'ALPHAFORGE_ENABLE_TELEGRAM', 'ALPHAFORGE_ENVIRONMENT', 'ALPHAFORGE_EXPERIMENTAL_ADAPTIVE_THRESHOLDS', 'ALPHAFORGE_EXPERIMENTAL_EXCHANGE_REPAIR', 'ALPHAFORGE_EXPORT_VERIFY_INTEGRITY', 'ALPHAFORGE_HEARTBEAT_INTERVAL_SEC', 'ALPHAFORGE_LOG_FILE', 'ALPHAFORGE_LOG_FORMAT', 'ALPHAFORGE_LOG_LEVEL', 'ALPHAFORGE_MAKER_FEE_PCT', 'ALPHAFORGE_MAX_CONCURRENT_POSITIONS', 'ALPHAFORGE_MAX_DAILY_LOSS_PCT', 'ALPHAFORGE_MAX_NOTIONAL_EXPOSURE', 'ALPHAFORGE_MAX_OPEN_POSITIONS', 'ALPHAFORGE_MAX_SYMBOL_NOTIONAL', 'ALPHAFORGE_METRICS_HEARTBEAT_ENABLED', 'ALPHAFORGE_MIN_TRADE_SCORE', 'ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED', 'ALPHAFORGE_POSTGRES_URL', 'ALPHAFORGE_RECONCILIATION_INTERVAL_SEC', 'ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC', 'ALPHAFORGE_RISK_PCT_PER_TRADE', 'ALPHAFORGE_SCAN_INTERVAL_SEC', 'ALPHAFORGE_SQLITE_PATH', 'ALPHAFORGE_STALE_MARKET_DATA_SEC', 'ALPHAFORGE_TAKER_FEE_PCT', 'ALPHAFORGE_TIMEZONE', 'ALPHAFORGE_TRACE_LIFECYCLE', 'DISCORD_WEBHOOK_URL', 'ENABLE_ABSORPTION_FILTER', 'ENABLE_ORDERBOOK_FILTER', 'ENABLE_REGIME_FILTER', 'ENABLE_SPOOF_DETECTION', 'HYPERLIQUID_API_KEY', 'HYPERLIQUID_API_SECRET', 'HYPERLIQUID_API_URL', 'HYPERLIQUID_ENABLED', 'HYPERLIQUID_TESTNET', 'HYPERLIQUID_WS_URL', 'MAX_CORRELATED_POSITIONS', 'MAX_SLIPPAGE_BPS', 'MAX_SPREAD_BPS', 'QUEUE_BACKEND', 'QUEUE_NAME', 'REDIS_ENABLED', 'REDIS_KEY_PREFIX', 'REDIS_URL', 'REJECT_UNKNOWN_EXPECTANCY', 'RESERVED_NOT_WIRED', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID')
+
+
+def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
+    rows: list[EnvContractEntry] = []
+    for setting in CONFIG_REGISTRY:
+        rows.append(EnvContractEntry(
+            name=setting.env_name, canonical_name=setting.env_name,
+            classification="WIRED", value_type=("secret" if setting.secret else "URL" if setting.env_name.endswith(("_URL", "_WS_URL")) else setting.value_type),
+            default=setting.default, applies_to=setting.applies_to,
+            consumed_by=setting.consumed_by, restart_required=setting.restart_required,
+            secret=setting.secret, description=setting.description,
+        ))
+        for alias in setting.deprecated_aliases:
+            rows.append(EnvContractEntry(
+                name=alias, canonical_name=setting.env_name,
+                classification="ALIAS", value_type=setting.value_type,
+                default=None, applies_to=setting.applies_to,
+                consumed_by="alphaforge.config_registry alias resolution",
+                restart_required=setting.restart_required, secret=setting.secret,
+                deprecated=True, description=f"Deprecated alias for {setting.env_name}; canonical value wins within a source.",
+            ))
+    for name in RESERVED_VARIABLES:
+        secret = any(token in name for token in ("SECRET", "TOKEN", "KEY", "PASSWORD", "WEBHOOK"))
+        rows.append(EnvContractEntry(
+            name=name, canonical_name=name, classification="RESERVED",
+            value_type="secret" if secret else "string", default=None,
+            applies_to=MODES, consumed_by="unsupported/reserved", secret=secret,
+            description="Reserved for migration compatibility; supplying it has no operational effect.",
+        ))
+    return tuple(sorted(rows, key=lambda row: row.name))
+
+
+ENV_CONTRACT = env_contract_inventory()
+CONTRACT_BY_NAME = {row.name: row for row in ENV_CONTRACT}
+
 def load_dotenv_file(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
     if not path.exists():
-        return values
-    for line in path.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        k, v = stripped.split("=", 1)
-        values[k.strip()] = v.strip()
-    return values
+        return {}
+    return parse_dotenv(path)
 
 def effective_config_values(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> dict[str, dict[str, Any]]:
     root = root or Path.cwd()
-    env = env or os.environ
+    env = os.environ if env is None else env
     file_values = load_dotenv_file(root / ".env")
     local_values = load_dotenv_file(root / ".env.local")
     override_values = {}
@@ -131,14 +172,11 @@ def effective_config_values(*, env: Mapping[str, str] | None = None, root: Path 
     for setting in CONFIG_REGISTRY:
         source = "default"
         raw = None
-        for source_name, mapping in ((".env", file_values), (".env.local", local_values), ("dashboard override", override_values), ("environment", env)):
-            for name in (setting.env_name, *setting.deprecated_aliases):
-                if name in mapping:
-                    raw = mapping[name]
-                    source = source_name if name == setting.env_name else f"{source_name} ({name})"
-                    break
-            if raw is not None:
-                break
+        for source_name, mapping in (("dotenv", file_values), ("dotenv", local_values), ("dashboard", override_values), ("process_env", env)):
+            selected = next((name for name in (setting.env_name, *setting.deprecated_aliases) if name in mapping), None)
+            if selected is not None:
+                raw = mapping[selected]
+                source = source_name if selected == setting.env_name else f"alias ({selected})"
         value = setting.parse(raw)
         out[setting.env_name] = {"setting": setting, "value": value, "source": source}
     return out

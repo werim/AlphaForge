@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 from alphaforge.config_registry import decision_filter_config, effective_config_values
+from alphaforge.env_contract import bootstrap_environment, resolve_binance_environment
 
 
 def _clean_env_value(raw: str | None) -> str | None:
@@ -115,6 +116,13 @@ class RuntimeSettings:
 @dataclass(slots=True)
 class BinanceSettings:
     base_url: str = "https://fapi.binance.com"
+    ws_url: str = "wss://fstream.binance.com"
+    environment: str = "production"
+    resolution_source: str = "default"
+    default_quote_asset: str = "USDT"
+    default_market_type: str = "USD_M"
+    recv_window_ms: int = 5000
+    request_timeout_sec: float = 2.0
 
 @dataclass(slots=True)
 class HyperliquidSettings:
@@ -231,9 +239,11 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
     return cfg
 
 def load_config_from_env() -> AlphaForgeConfig:
+    bootstrap_environment()
     env = os.environ
     managed = effective_config_values(env=env)
     val = lambda name: managed[name]["value"]
+    resolved_binance = resolve_binance_environment(env)
     runtime = RuntimeSettings(
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
         min_signal_score=val("ALPHAFORGE_MIN_SIGNAL_SCORE"),
@@ -272,17 +282,30 @@ def load_config_from_env() -> AlphaForgeConfig:
         required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
         exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
         enable_binance_readonly_reconciliation=_bool_env(env, "ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", False),
-        binance_reconciliation_recv_window_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECV_WINDOW_MS", 5000),
+        binance_reconciliation_recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
         binance_reconciliation_trade_lookback_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", 3_600_000),
     )
+    binance = BinanceSettings(
+        base_url=resolved_binance.rest_base_url,
+        ws_url=resolved_binance.ws_base_url,
+        environment=resolved_binance.environment,
+        resolution_source=resolved_binance.resolution_source,
+        default_quote_asset=str(val("BINANCE_DEFAULT_QUOTE_ASSET")).upper(),
+        default_market_type=str(val("BINANCE_DEFAULT_MARKET_TYPE")).upper(),
+        recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        request_timeout_sec=float(val("BINANCE_REQUEST_TIMEOUT_SEC")),
+    )
+    if binance.default_market_type != "USD_M":
+        raise ValueError("BINANCE_DEFAULT_MARKET_TYPE must be USD_M")
     exchange = ExchangeSettings(
-        timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", runtime.exchange_connectivity_timeout_sec),
-        binance=BinanceSettings(base_url=_string_env(env, "BINANCE_BASE_URL", "https://fapi.binance.com")),
+        timeout_sec=float(val("BINANCE_REQUEST_TIMEOUT_SEC")),
+        binance=binance,
         hyperliquid=HyperliquidSettings(api_url=_string_env(env, "HYPERLIQUID_API_URL", "https://api.hyperliquid.xyz")),
     )
     return AlphaForgeConfig(
         runtime=runtime,
         exchange=exchange,
+        binance=binance,
         backtest=BacktestSettings(
             top_n=val("ALPHAFORGE_BACKTEST_TOP_N"),
             timeframe=val("ALPHAFORGE_BACKTEST_TIMEFRAME"),

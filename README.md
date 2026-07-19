@@ -244,3 +244,40 @@ The command writes `paper_burnin_summary.csv`, `paper_burnin_report.md`, and `pa
 AlphaForge managed engine settings now have a typed source of truth in `src/alphaforge/config_registry.py`. Effective precedence is: process environment variables > Dashboard override file (`config/runtime_overrides.json`) > `.env.local` > `.env` > typed defaults. Dashboard Settings edits local override values only and does not write secrets.
 
 Settings are grouped as Trade Quality Filters, Execution Cost Filters, Runtime Risk Limits, Backtest Settings, and Mode / Safety. Trade-quality filters can affect BACKTEST/PAPER/LIVE. Runtime risk limits such as `ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY` and `ALPHAFORGE_MAX_TRADES_SYMBOL_PER_DAY` are PAPER/LIVE runtime/session controls and are ignored by BACKTEST by default; BACKTEST caps must use explicit `ALPHAFORGE_BACKTEST_*` settings. LIVE remains readiness-guarded and cannot be enabled from the generic Settings page.
+
+### Environment audit and Windows PowerShell acceptance
+
+The repository-root `.env` is loaded before canonical configuration; an existing process variable wins. Audit without printing secrets:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m alphaforge.config_audit
+if ($LASTEXITCODE -ne 0) { throw "environment contract failed" }
+```
+
+Validate production/testnet selection and explicit override precedence:
+
+```powershell
+$env:BINANCE_ENVIRONMENT = "testnet"
+Remove-Item Env:BINANCE_TESTNET -ErrorAction SilentlyContinue
+Remove-Item Env:BINANCE_BASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:BINANCE_WS_URL -ErrorAction SilentlyContinue
+python -c "from alphaforge.config import load_config_from_env; c=load_config_from_env().binance; print(c.environment,c.base_url,c.ws_url,c.resolution_source)"
+$env:BINANCE_BASE_URL = "https://operator-verified-rest.example"
+$env:BINANCE_WS_URL = "wss://operator-verified-ws.example"
+python -m alphaforge.config_audit
+```
+
+Run matching-environment, read-only Phase 9 reconciliation preflight (enter credentials only in the current process; never commit them):
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION = "true"
+$env:BINANCE_ENVIRONMENT = "testnet" # or demo with both operator-verified explicit URLs
+$env:BINANCE_API_KEY = Read-Host "Read-only Binance key"
+$env:BINANCE_API_SECRET = Read-Host "Read-only Binance secret"
+python -m alphaforge.burnin_ops --db data/runtime/phase9.db preflight --release-id env-contract --symbols BTCUSDT --intervals 1h
+Remove-Item Env:BINANCE_API_KEY,Env:BINANCE_API_SECRET
+```
+
+The command must report `PASS` and COMPLETE reconciliation evidence against the selected account environment; unavailable/mismatched evidence fails closed. It does not establish LIVE readiness.

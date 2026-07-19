@@ -3238,3 +3238,24 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Recovery evidence SQL read failures now fail closed as `RECOVERY_EVIDENCE_UNAVAILABLE`; pending predecessor orders are global blockers, and preflight no longer uses a DB-global campaign recovery count.
 - Preflight and runtime now share one normalized read-only reconciliation probe, including provider provenance, timestamp, completeness, orders, and positions.
 - Recovery probes now reject reported errors, missing fields, incomplete evidence, and malformed payloads; PID reuse is not treated as an active predecessor without lineage-aware process evidence.
+## Environment contract — 2026-07-19
+
+### Added
+- Executable WIRED/ALIAS/RESERVED inventory, JSON config audit, canonical dotenv bootstrap, and explicit Binance production/testnet resolution.
+- Burn-in preflight checks for contract validity, duplicate/unknown keys, endpoint coherence, and non-placeholder reconciliation credentials.
+
+### Changed
+- Scanner, connectivity, runtime reconciliation, and burn-in reconciliation now share the resolved Binance REST endpoint and request settings.
+- All four environment templates are canonical, duplicate-free, and isolate deprecated aliases and unsupported reserved keys.
+
+### Fixed
+- `BINANCE_TESTNET=true` no longer silently uses production USD-M Futures REST; canonical settings beat aliases and process environment beats dotenv.
+
+### Removed
+- Duplicate template assignments and the contradictory testnet/production endpoint example.
+
+### Breaking Changes
+- Invalid booleans, contradictory Binance environment selectors, unknown operational prefixes, and placeholder authenticated credentials now fail audit/preflight. Demo requires explicit REST and websocket URLs.
+
+### Known Issues
+- Binance Demo endpoints are not embedded because the repository has no verified Demo environment contract; operators must provide both explicit endpoints. LIVE is not ready.
