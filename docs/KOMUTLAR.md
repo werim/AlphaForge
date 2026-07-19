@@ -555,7 +555,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id CAMP_ID
 macOS / Linux:
 
 ```bash
-RELEASE_ID="phase9_trial_2"
+$RELEASE_ID="phase9_trial_1"
 
 python -m alphaforge.burnin_ops \
   --db "$DB" \
@@ -571,10 +571,9 @@ PowerShell:
 $RELEASE_ID="phase9_trial_2"
 
 python -m alphaforge.burnin_ops `
-  --db $DB `
   preflight `
   --release-id $RELEASE_ID `
-  --symbols BTCUSDT,ETHUSDT `
+  --symbols BTCUSDT `
   --intervals 1h
 ```
 
@@ -585,7 +584,7 @@ python -m alphaforge.burnin_ops \
   --db "$DB" \
   preflight \
   --release-id "$RELEASE_ID" \
-  --symbols BTCUSDT,ETHUSDT \
+  --symbols BTCUSDT ETHUSDT \
   --intervals 1h \
   --output-dir "artifacts/burnin/preflight_${RELEASE_ID}"
 ```
@@ -623,15 +622,7 @@ python -m alphaforge.burnin_ops \
 PowerShell:
 
 ```powershell
-python -m alphaforge.burnin_ops `
-  --db $DB `
-  launch `
-  --release-id $RELEASE_ID `
-  --duration-days 3 `
-  --symbols BTCUSDT,ETHUSDT `
-  --intervals 1h `
-  --detach `
-  --attach-timeout-seconds 60
+
 ```
 
 Komut çıktısındaki gerçek `campaign_id` değerini kaydet.
@@ -885,7 +876,8 @@ Finalization öncesinde audit `PASS` olmalıdır.
 ## 23. Günlük rapor
 
 ```bash
-REPORT_DIR="artifacts/burnin/$CAMPAIGN_ID/daily_$(date -u +%Y%m%dT%H%M%SZ)"
+REPORT_DIR="artifacts/burnin/$CAMPAIGN_ID/daily_$(date -u +%Y%m%dT%H%M%SZ)
+"
 
 python -m alphaforge.burnin_ops \
   --db "$DB" \
@@ -1419,3 +1411,37 @@ Detached worker başladıktan hemen sonra kapanmıştır. `worker.stderr.log`, `
 - Başarısız guard'ı SQL ile elle PASS yapma.
 - PAPER burn-in başarısını LIVE-ready olarak yorumlama.
 - Zorla süreç öldürmek yerine önce uygulamanın `pause`/normal shutdown yolunu kullan.
+
+.env terminale yükle
+Get-Content .env | ForEach-Object {
+    $line = $_.Trim()
+
+    if (
+        -not $line -or
+        $line.StartsWith("#") -or
+        -not $line.Contains("=")
+    ) {
+        return
+    }
+
+    $name, $value = $line -split "=", 2
+    $name = $name.Trim()
+    $value = $value.Trim()
+
+    if ($value -match '\s+#') {
+        $value = ($value -split '\s+#', 2)[0].Trim()
+    }
+
+    if (
+        ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+        ($value.StartsWith("'") -and $value.EndsWith("'"))
+    ) {
+        $value = $value.Substring(1, $value.Length - 2)
+    }
+
+    [Environment]::SetEnvironmentVariable(
+        $name,
+        $value,
+        "Process"
+    )
+}
