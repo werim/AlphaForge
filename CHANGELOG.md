@@ -3382,3 +3382,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Credentialed Demo acceptance and GitHub CI remain NOT RUN in this network-restricted environment.
+
+## PR #291 merge-readiness validation (2026-07-20)
+
+### Added
+- Compatibility regression coverage for canonical/legacy receive-window resolution, equal-value coexistence, conflict rejection, and environment-template safety.
+
+### Changed
+- No runtime behavior changed; this update is validation-only.
+
+### Fixed
+- Closed the missing test evidence for the receive-window compatibility contract.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Credentialed Demo acceptance, GitHub CI, and remote mergeability remain unverified where GitHub access and credentials are unavailable.

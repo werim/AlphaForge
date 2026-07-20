@@ -57,9 +57,45 @@ def test_all_dashboard_editable_managed_settings_are_documented_in_env_example()
     assert editable.issubset(env_names)
 
 
-def test_reconciliation_recv_window_canonical_precedence():
+def test_reconciliation_recv_window_canonical_alone():
     from alphaforge.config_registry import effective_config_values
-    values = effective_config_values(env={"ALPHAFORGE_BINANCE_RECV_WINDOW_MS":"7000", "BINANCE_RECV_WINDOW_MS":"9000"})
+    values = effective_config_values(env={"ALPHAFORGE_BINANCE_RECV_WINDOW_MS":"7000"})
     row = values["ALPHAFORGE_BINANCE_RECV_WINDOW_MS"]
     assert row["value"] == 7000
     assert row["source"] == "process_env"
+
+
+def test_reconciliation_recv_window_legacy_alias_alone():
+    from alphaforge.config_registry import effective_config_values
+    row = effective_config_values(env={"BINANCE_RECV_WINDOW_MS": "8000"})["ALPHAFORGE_BINANCE_RECV_WINDOW_MS"]
+    assert row["value"] == 8000
+    assert row["source"] == "alias (BINANCE_RECV_WINDOW_MS)"
+
+
+def test_reconciliation_recv_window_equal_canonical_and_alias_are_accepted():
+    from alphaforge.config_audit import audit_config
+    from alphaforge.config_registry import effective_config_values
+    env = {"ALPHAFORGE_BINANCE_RECV_WINDOW_MS": "9000", "BINANCE_RECV_WINDOW_MS": "9000"}
+    assert effective_config_values(env=env)["ALPHAFORGE_BINANCE_RECV_WINDOW_MS"]["value"] == 9000
+    assert audit_config(env=env)["status"] != "FAIL"
+
+
+def test_reconciliation_recv_window_conflict_fails_contract_audit():
+    from alphaforge.config_audit import audit_config
+    report = audit_config(env={"ALPHAFORGE_BINANCE_RECV_WINDOW_MS": "7000", "BINANCE_RECV_WINDOW_MS": "9000"})
+    assert report["status"] == "FAIL"
+    assert any("alias conflict: ALPHAFORGE_BINANCE_RECV_WINDOW_MS and BINANCE_RECV_WINDOW_MS differ" in error for error in report["errors"])
+
+
+def test_reconciliation_recv_window_templates_do_not_conflict():
+    for path in Path(".").glob(".env*example"):
+        values = {}
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.split(" #", 1)[0].strip()
+        canonical = values.get("ALPHAFORGE_BINANCE_RECV_WINDOW_MS", "")
+        alias = values.get("BINANCE_RECV_WINDOW_MS", "")
+        assert canonical
+        assert not alias or alias == canonical
