@@ -1611,14 +1611,16 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                 raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are missing")
         if api_key and api_secret:
             live_reconciliation_provider = BinanceReadonlyReconciliationProvider(
-            config=BinanceReadonlyReconciliationConfig(
-                base_url=cfg.exchange.binance.base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms,
-                request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
-                trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
-            )
+                config=BinanceReadonlyReconciliationConfig(
+                    base_url=cfg.exchange.binance.base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms,
+                    request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
+                    trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
+                    position_epsilon=cfg.runtime.reconciliation_position_epsilon,
+                    max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols,
+                )
             )
 
     orchestrator = RuntimeOrchestrator(

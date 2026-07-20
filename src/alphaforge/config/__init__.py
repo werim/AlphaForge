@@ -111,6 +111,8 @@ class RuntimeSettings:
     enable_binance_readonly_reconciliation: bool = False
     binance_reconciliation_recv_window_ms: int = 5000
     binance_reconciliation_trade_lookback_ms: int = 3_600_000
+    reconciliation_position_epsilon: float = 1e-8
+    reconciliation_max_fill_symbols: int = 20
 
 @dataclass(slots=True)
 class BinanceSettings:
@@ -267,13 +269,15 @@ def load_config_from_env() -> AlphaForgeConfig:
         enable_canary_mode=_bool_env(env, "ALPHAFORGE_ENABLE_CANARY_MODE", False),
         operator_live_acknowledged=_bool_env(env, "ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", False),
         reconciliation_interval_sec=_float_env(env, "ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", 5.0),
-        reconciliation_timeout_sec=_float_env(env, "ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", 2.0),
+        reconciliation_timeout_sec=val("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"),
         require_exchange_connectivity_for_live=_bool_env(env, "ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", True),
         required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
         exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
         enable_binance_readonly_reconciliation=_bool_env(env, "ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", False),
-        binance_reconciliation_recv_window_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECV_WINDOW_MS", 5000),
+        binance_reconciliation_recv_window_ms=val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS"),
         binance_reconciliation_trade_lookback_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", 3_600_000),
+        reconciliation_position_epsilon=val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON"),
+        reconciliation_max_fill_symbols=val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS"),
     )
     exchange = ExchangeSettings(
         timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", runtime.exchange_connectivity_timeout_sec),

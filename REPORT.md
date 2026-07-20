@@ -1,5 +1,27 @@
 # AlphaForge Phase 9 Burn-In Startup Interruption Surgery Report
 
+## 2026-07-20 Binance read-only reconciliation fill-scope surgery
+
+### Why the patch was needed and root cause
+Binance Demo returned the global 53-row position-risk universe, and the provider treated every normalized position row as fill-relevant instead of testing quantity. Sequential per-symbol TLS connections then exceeded request/receive timing bounds and could turn later signatures into Binance `-1021`, making otherwise clean recovery evidence incomplete.
+
+### Files and runtime behavior changed
+`binance_reconciliation_provider.py` now selects the union of tracked symbols, optional recent local-lifecycle symbols, open-order symbols, and positions whose absolute quantity exceeds a canonical epsilon. It fails closed before any fill lookup when the evidenced union exceeds a hard cap. Its default stdlib HTTP client retains one connection, recomputes and signs a timestamp immediately for every attempt, retries only timeouts/handshake timeouts/429/5xx with bounded jitter, and handles one `-1021` by refreshing server time and resigning. Sanitized evidence contains endpoint class, symbol, status/code, retry count, timeout category, and Demo/Production environment without URLs, keys, secrets, or signatures.
+
+### Lifecycle, persistence, export, and schema impact
+No trading lifecycle transitions, database schema, persisted row contract, or CSV export changed. Dust quantities no longer count as orphan active positions. Any unresolved request, malformed payload, authentication failure, server-time refresh failure, or cap breach retains `evidence_status=INCOMPLETE`; no symbols are silently truncated. Snapshot diagnostic fields are additive.
+
+### Configuration and compatibility
+The timeout, Binance receive window, position epsilon (`1e-8` default), and fill-symbol maximum (`20` default) are canonical registry values wired through runtime and burn-in provider construction. Example environment profiles expose both new settings. Operators with more than 20 legitimately relevant symbols must deliberately raise the cap after evaluating request duration/rate limits.
+
+### Tests added and executed
+Regression tests cover 53 zero/dust rows with only BTC tracked, the exact union of two real positions plus tracked/open-order/recent symbols, hard-cap failure evidence, bounded timeout failure, one-shot `-1021` time synchronization with fresh signatures, and canonical configuration sourcing. Targeted tests passed; the full suite result is recorded in the final change summary.
+
+### Risks, limitations, migration, and push recommendation
+Retries can extend wall-clock duration but are tightly bounded and never apply to deterministic 4xx/auth failures. Fill lookups remain serial to avoid rate bursts, but their symbol scope is bounded. No migration is required. Push is recommended only with the full suite passing; LIVE remains not ready.
+
+---
+
 ## Why the patch was needed
 A detached PAPER burn-in launch could be interrupted while the parent was polling worker attachment. Because campaign/run rows had already been committed as `RUNNING`, a dead worker PID and stale heartbeat left a ghost active campaign that blocked subsequent launches with both duplicate-active and stale-worker preflight failures.
 

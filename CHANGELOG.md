@@ -77,6 +77,26 @@
 
 # Changelog
 
+## 2026-07-20 Binance reconciliation request hardening
+
+### Added
+- Canonical position-dust epsilon and maximum fill-symbol scope settings, plus sanitized per-endpoint retry/time-refresh evidence.
+
+### Changed
+- Binance fill lookup now uses only tracked, optional recent-lifecycle, open-order, and epsilon-significant position symbols; signed timestamps are generated for every attempt and the default transport reuses one HTTP connection.
+
+### Fixed
+- Zero/dust rows from global `positionRisk` no longer cause a serial `userTrades` fan-out, timeout cascade, or stale signed timestamp. Transient timeout, handshake, 429, and 5xx failures receive bounded jittered retries; Binance `-1021` refreshes server-time offset once.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- Reconciliation fails closed when relevant fill symbols exceed `ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS`; tiny quantities at or below the configured epsilon are no longer active positions.
+
+### Known Issues
+- Fill requests remain serial and bounded rather than concurrent to avoid exchange burst-rate pressure; exhausted retries remain intentionally incomplete.
+
 ## Added
 - `python -m alphaforge.burnin_ops recover-runtime` operator entrypoint for recovery without requiring operators to remember the campaign-specific `recovery-drill` command.
 - Append-only local diagnostic recovery evidence for the narrow dead, unrelated historical PAPER runtime case where Binance read-only reconciliation is the only unavailable evidence and all local exposure queries are available and zero.
