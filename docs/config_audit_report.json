@@ -22,10 +22,10 @@
       "applies_to": [
         "LIVE"
       ],
-      "behavioral_test": "tests/test_env_safety_and_filters.py::test_live_order_authorization_is_additive_and_fail_closed",
+      "behavioral_test": "tests/test_runtime_live_authorization.py::test_runtime_live_authorization_is_authoritative_and_refreshed",
       "canonical_name": "ALPHAFORGE_ALLOW_LIVE_ORDERS",
       "classification": "WIRED",
-      "consumed_by": "alphaforge.order.execute_order_candidate",
+      "consumed_by": "alphaforge.runtime.RuntimeOrchestrator._execute",
       "default": false,
       "deprecated": false,
       "description": "Additional deny-by-default authorization required before any LIVE adapter call.",

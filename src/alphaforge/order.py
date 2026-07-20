@@ -459,6 +459,33 @@ def _audit(ctx: OrderExecutionContext, candidate: OrderCandidate | None, status_
     ctx.storage.setdefault("audit", []).append(event)
 
 
+def validate_live_order_authorization(ctx: OrderExecutionContext) -> dict[str, bool]:
+    """Re-read authoritative mutable state at the final LIVE mutation boundary."""
+    if ctx.mode != TradingMode.LIVE:
+        return {}
+    provider = ctx.storage.get("live_authorization_provider")
+    if not callable(provider):
+        raise RuntimeError("LIVE_ORDER_AUTHORIZATION_BLOCKED:authoritative_state_missing")
+    authorization = dict(provider() or {})
+    # Retain the exact final snapshot for audit/debugging; it is never trusted
+    # as input on a subsequent call because the provider is invoked every time.
+    ctx.storage["live_authorization"] = authorization
+    from alphaforge.config import load_config_from_env
+    configured_allow_live_orders = bool(load_config_from_env().runtime.allow_live_orders)
+    gates = {
+        "live_trading_enabled": bool(authorization.get("live_trading_enabled", False)),
+        "allow_live_orders": configured_allow_live_orders and bool(ctx.allow_live_orders),
+        "operator_acknowledged": bool(authorization.get("operator_acknowledged", False)),
+        "qualification_passed": bool(authorization.get("qualification_passed", False)),
+        "reconciliation_passed": bool(authorization.get("reconciliation_passed", False)),
+        "kill_switch_inactive": not bool(authorization.get("kill_switch_active", True)),
+    }
+    failed = [name for name, passed in gates.items() if not passed]
+    if failed:
+        raise RuntimeError("LIVE_ORDER_AUTHORIZATION_BLOCKED:" + ",".join(failed))
+    return gates
+
+
 def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContext) -> dict[str, Any]:
     if ctx.mode != TradingMode.LIVE:
         assert ctx.allow_live_orders is False
@@ -466,23 +493,7 @@ def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContex
             ctx.allow_telegram = False
         ctx.allow_telegram = bool(ctx.allow_telegram)
     else:
-        # Re-resolve the canonical setting at the last mutation boundary.  A
-        # caller-provided context flag can only narrow authorization; it cannot
-        # bypass an absent/false environment contract gate.
-        from alphaforge.config import load_config_from_env
-        configured_allow_live_orders = bool(load_config_from_env().runtime.allow_live_orders)
-        authorization = dict(ctx.storage.get("live_authorization") or {})
-        gates = {
-            "live_trading_enabled": bool(authorization.get("live_trading_enabled", False)),
-            "allow_live_orders": configured_allow_live_orders and bool(ctx.allow_live_orders),
-            "operator_acknowledged": bool(authorization.get("operator_acknowledged", False)),
-            "qualification_passed": bool(authorization.get("qualification_passed", False)),
-            "reconciliation_passed": bool(authorization.get("reconciliation_passed", False)),
-            "kill_switch_inactive": not bool(authorization.get("kill_switch_active", True)),
-        }
-        failed = [name for name, passed in gates.items() if not passed]
-        if failed:
-            raise RuntimeError("LIVE_ORDER_AUTHORIZATION_BLOCKED:" + ",".join(failed))
+        validate_live_order_authorization(ctx)
     status = LifecycleState.ORDER_PLACED
     if ctx.mode == TradingMode.BACKTEST:
         result = {"type": "virtual", "candidate": candidate}

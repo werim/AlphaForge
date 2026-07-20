@@ -37,6 +37,7 @@ def test_live_calls_execution_adapter(monkeypatch):
     called = {"order": 0, "balance": 0}
     ctx = OrderExecutionContext(mode=TradingMode.LIVE, timestamp=1, symbol="BTCUSDT", balance=1000, risk_pct=1, allow_live_orders=True, market_ctx=_market_ctx(), storage={
         "live_authorization": LIVE_AUTH,
+        "live_authorization_provider": lambda: dict(LIVE_AUTH),
         "binance_place_order": lambda c: {"id": 1, "ok": called.__setitem__("order", called["order"] + 1)},
         "real_balance_fetcher": lambda: called.__setitem__("balance", called["balance"] + 1) or 1000,
     })
@@ -54,7 +55,7 @@ def test_same_candidate_and_rejection_reason_across_modes_and_quality_filters(mo
     monkeypatch.setenv("ALPHAFORGE_ALLOW_LIVE_ORDERS", "true")
     m = _market_ctx()
     b = OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=1, symbol="BTCUSDT", balance=1000, risk_pct=1, market_ctx=m)
-    l = OrderExecutionContext(mode=TradingMode.LIVE, timestamp=1, symbol="BTCUSDT", balance=1000, risk_pct=1, allow_live_orders=True, market_ctx=m, storage={"live_authorization": LIVE_AUTH, "binance_place_order": lambda c: {"ok": True}, "real_balance_fetcher": lambda: 1000})
+    l = OrderExecutionContext(mode=TradingMode.LIVE, timestamp=1, symbol="BTCUSDT", balance=1000, risk_pct=1, allow_live_orders=True, market_ctx=m, storage={"live_authorization": LIVE_AUTH, "live_authorization_provider": lambda: dict(LIVE_AUTH), "binance_place_order": lambda c: {"ok": True}, "real_balance_fetcher": lambda: 1000})
     rb = run_order_cycle(b)
     rl = run_order_cycle(l)
     assert rb["candidate"] == rl["candidate"]
@@ -62,5 +63,5 @@ def test_same_candidate_and_rejection_reason_across_modes_and_quality_filters(mo
     bad = dict(m)
     bad["score"] = 0.1
     r1 = run_order_cycle(OrderExecutionContext(mode=TradingMode.BACKTEST, timestamp=1, symbol="BTCUSDT", balance=1, risk_pct=1, market_ctx=bad), {"MIN_TRADE_SCORE": 0.5})
-    r2 = run_order_cycle(OrderExecutionContext(mode=TradingMode.LIVE, timestamp=1, symbol="BTCUSDT", balance=1, risk_pct=1, allow_live_orders=True, market_ctx=bad, storage={"live_authorization": LIVE_AUTH, "binance_place_order": lambda c: {}, "real_balance_fetcher": lambda: 1}), {"MIN_TRADE_SCORE": 0.5})
+    r2 = run_order_cycle(OrderExecutionContext(mode=TradingMode.LIVE, timestamp=1, symbol="BTCUSDT", balance=1, risk_pct=1, allow_live_orders=True, market_ctx=bad, storage={"live_authorization": LIVE_AUTH, "live_authorization_provider": lambda: dict(LIVE_AUTH), "binance_place_order": lambda c: {}, "real_balance_fetcher": lambda: 1}), {"MIN_TRADE_SCORE": 0.5})
     assert r1["reason"] == r2["reason"] == "LOW_SCORE"

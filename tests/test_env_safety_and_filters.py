@@ -36,6 +36,7 @@ def _live_context(*, allow: bool, **authorization: bool) -> tuple[OrderExecution
         risk_pct=1.0, allow_live_orders=allow,
         storage={
             "live_authorization": defaults,
+            "live_authorization_provider": lambda: dict(defaults),
             "binance_place_order": lambda candidate: calls.__setitem__("orders", calls["orders"] + 1) or {"id": "test"},
         },
     )

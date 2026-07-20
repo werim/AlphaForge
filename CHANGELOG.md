@@ -3301,3 +3301,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - LIVE remains mutation-disabled at the runtime level and NOT LIVE READY; the new gate does not enable a LIVE execution campaign.
+## Authoritative LIVE authorization integration — 2026-07-20
+
+### Added
+- Runtime-owned LIVE authorization snapshots sourced from runtime config, qualification report, reconciliation state, recovery state, and the persisted kill-switch control store.
+- Final-boundary authorization refresh immediately before every real execution adapter invocation.
+
+### Changed
+- Runtime LIVE submission now constructs its own `OrderExecutionContext`; arbitrary caller dictionaries are not accepted as authoritative input.
+
+### Fixed
+- Closed the gap where only manually constructed tests supplied `live_authorization` to the order layer.
+
+### Removed
+- Trust in a cached `ctx.storage["live_authorization"]` mapping at the final mutation boundary.
+
+### Breaking Changes
+- Direct LIVE `OrderExecutionContext` users must supply an authoritative refresh provider; a static mapping alone fails closed.
+
+### Known Issues
+- Runtime Phase 6 still deliberately blocks real LIVE startup; LIVE remains NOT LIVE READY.
