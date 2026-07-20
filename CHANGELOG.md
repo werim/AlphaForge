@@ -3402,3 +3402,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Credentialed Demo acceptance, GitHub CI, and remote mergeability remain unverified where GitHub access and credentials are unavailable.
+
+## PR #291 Windows diagnostic reliability (2026-07-20)
+
+### Added
+- Multi-error safe `alphaforge.config_check`, focused reconciliation settings loading, PowerShell multi-token symbol grammar, structured diagnostics, and distinct exit codes.
+
+### Changed
+- Binance market aliases normalize to `USD_M`; diagnostic loading no longer depends on unrelated global settings.
+
+### Fixed
+- Daily-loss fraction diagnostics now explain that `0.02` means 2%, and stale process/config provenance is visible instead of masked.
+
+### Removed
+- Generic `configuration_or_authentication_failed` diagnostic masking.
+
+### Breaking Changes
+- None; unsafe `2.0` daily-loss fraction and unsupported market types remain rejected.
+
+### Known Issues
+- Credentialed Demo acceptance and GitHub CI remain external validation requirements.

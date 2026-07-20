@@ -22,3 +22,5 @@
 - **2026-07-18 startup-interruption audit:** Detached launch is now compensating-transition safe for `KeyboardInterrupt`, `SystemExit`, `_launch_worker()` `RuntimeError`, spawn failure, worker early exit, attachment timeout, and identity mismatch. Zero-exposure startup failures can be safely terminalized; exposure-bearing or unavailable evidence remains blocked.
 
 - **2026-07-20 PR #291 validation:** canonical/legacy Binance receive-window compatibility is regression-tested; operational Demo acceptance and green remote CI remain required before merge.
+
+- **2026-07-20 Windows diagnostics:** reconciliation uses a narrow canonical config loader; global invalid settings remain separately visible; daily loss remains a fraction and LIVE remains NOT READY.

@@ -99,3 +99,29 @@ def test_reconciliation_recv_window_templates_do_not_conflict():
         alias = values.get("BINANCE_RECV_WINDOW_MS", "")
         assert canonical
         assert not alias or alias == canonical
+
+
+def test_recv_window_empty_alias_does_not_override_canonical():
+    from alphaforge.config_registry import effective_config_subset
+    row = effective_config_subset(("ALPHAFORGE_BINANCE_RECV_WINDOW_MS",), env={
+        "ALPHAFORGE_BINANCE_RECV_WINDOW_MS":"7000", "BINANCE_RECV_WINDOW_MS":""})["ALPHAFORGE_BINANCE_RECV_WINDOW_MS"]
+    assert row["value"] == 7000
+
+
+def test_market_type_normalization_and_rejection():
+    from alphaforge.config import normalize_binance_market_type
+    for value in ("USD_M", "USDT_M", "USD-M", "USDT-M", "usdt-m"):
+        assert normalize_binance_market_type(value) == "USD_M"
+    for value in ("SPOT", "COIN_M", "COIN-M"):
+        with pytest.raises(ValueError, match="unsupported market type"):
+            normalize_binance_market_type(value)
+
+
+def test_all_env_examples_parse_with_canonical_registry(tmp_path):
+    from alphaforge.config import normalize_binance_market_type
+    from alphaforge.config_registry import effective_config_values
+    from alphaforge.env_contract import parse_dotenv
+    for path in Path(".").glob(".env*example"):
+        values = effective_config_values(env=parse_dotenv(path), root=tmp_path)
+        assert values["ALPHAFORGE_MAX_DAILY_LOSS_PCT"]["value"] <= 1.0
+        assert normalize_binance_market_type(values["BINANCE_DEFAULT_MARKET_TYPE"]["value"]) == "USD_M"

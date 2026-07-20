@@ -203,3 +203,27 @@ python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT,ETHUSDT
 ```
 
 Acceptance requires `campaign_scope_validated=true`, the requested symbol in both `tracked_symbols` and `selected_fill_symbols`, PASS for `positionRisk`, `openOrders`, and `userTrades`, no unresolved `-1021`, a bounded `http_request_count` whose ordered `request_attempts` explain every retry/time refresh, and `evidence_status=COMPLETE`.
+
+## Windows configuration and reconciliation diagnostics
+
+AlphaForge loads `.env` itself. Do not copy it into process scope with a custom PowerShell loop. Effective precedence is: process environment, dashboard override, `.env.local`, `.env`, then typed defaults. The diagnostic output reports safe provenance so a stale process variable is visible.
+
+```powershell
+python -m alphaforge.config_check
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT
+python -m alphaforge.binance_reconciliation_check --symbols "BTCUSDT,ETHUSDT"
+```
+
+`ALPHAFORGE_MAX_DAILY_LOSS_PCT` is a fraction: `0.02` means 2%; `2.0` is rejected rather than silently reinterpreted. Binance market type is internally `USD_M`; `USDT_M`, `USD-M`, and `USDT-M` are safe aliases. Spot and coin-margined values are rejected.
+
+Safe configuration errors contain a stage, reason code, setting name, allowed range/unit when known, and only safe numeric values. Secrets report presence and provenance only. Reconciliation output separately reports `reconciliation_config_status`, `global_config_status`, and `global_config_errors`, so unrelated global errors remain visible without preventing an otherwise valid read-only exchange diagnostic.
+
+Exit codes for `alphaforge.binance_reconciliation_check`:
+
+- `0`: reconciliation configuration valid and exchange evidence complete
+- `1`: exchange evidence incomplete
+- `2`: reconciliation configuration invalid
+- `3`: authentication missing or invalid
+- `4`: CLI usage or symbol error
+
+`alphaforge.config_check` exits `0` on PASS and `2` when one or more safe configuration errors are collected.

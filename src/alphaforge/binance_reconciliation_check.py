@@ -4,13 +4,13 @@ from __future__ import annotations
 import argparse
 from decimal import Decimal
 import json
-import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider, normalize_reconciliation_symbol
 from alphaforge.burnin_ops import parse_symbols
-from alphaforge.config import load_config_from_env
+from alphaforge.config import load_reconciliation_settings
+from alphaforge.config_check import audit_settings, _safe_error
 
 SAFE_POSITION_FIELDS = ("symbol", "positionAmt", "positionSide", "entryPrice", "unRealizedProfit")
 
@@ -24,17 +24,20 @@ def sanitize_position_risk(source: Path, destination: Path) -> None:
 
 
 def run(*, symbols: list[str] | None = None, write_sanitized_position_risk: Path | None = None) -> dict[str, object]:
-    cfg = load_config_from_env()
+    global_audit = audit_settings()
+    cfg = load_reconciliation_settings()
     requested_symbols = list(symbols or [])
-    tracked_symbols = sorted({normalize_reconciliation_symbol(symbol, "tracked") for symbol in requested_symbols})
+    tracked_symbols = list(dict.fromkeys(normalize_reconciliation_symbol(symbol, "tracked") for symbol in requested_symbols))
+    if not cfg.api_key:
+        raise RuntimeError("missing_binance_api_key")
+    if not cfg.api_secret:
+        raise RuntimeError("missing_binance_api_secret")
     provider = BinanceReadonlyReconciliationProvider(
         config=BinanceReadonlyReconciliationConfig(
-            base_url=cfg.binance.base_url,
-            api_key=os.getenv("BINANCE_API_KEY", "").strip(), api_secret=os.getenv("BINANCE_API_SECRET", "").strip(),
-            recv_window_ms=cfg.binance.recv_window_ms, request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
-            trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
-            position_epsilon=Decimal(cfg.runtime.reconciliation_position_epsilon),
-            max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols,
+            base_url=cfg.base_url, api_key=cfg.api_key, api_secret=cfg.api_secret,
+            recv_window_ms=cfg.recv_window_ms, request_timeout_sec=cfg.timeout_sec,
+            trade_lookback_ms=cfg.trade_lookback_ms, position_epsilon=Decimal(cfg.position_epsilon),
+            max_fill_symbols=cfg.max_fill_symbols,
         ), tracked_symbols=lambda: set(tracked_symbols)
     )
     snapshot = dict(provider.snapshot())
@@ -43,10 +46,12 @@ def run(*, symbols: list[str] | None = None, write_sanitized_position_risk: Path
         write_sanitized_position_risk.parent.mkdir(parents=True, exist_ok=True)
         safe_positions = [{key: row.get(key) for key in ("symbol", "qty_exact", "position_side", "entry_price", "unrealized_pnl", "symbol_valid", "exact_zero", "epsilon_filtered", "active")} for row in positions]
         write_sanitized_position_risk.write_text(json.dumps(safe_positions, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    host = urlsplit(cfg.binance.base_url).hostname
+    host = urlsplit(cfg.base_url).hostname
     coverage = snapshot.get("coverage", {})
     return {
-        "environment": cfg.binance.environment, "safe_base_host": host,
+        "environment": cfg.environment, "safe_base_host": host,
+        "reconciliation_config_status": "PASS", "global_config_status": global_audit["status"],
+        "global_config_errors": global_audit["errors"],
         "requested_symbols": requested_symbols, "tracked_symbols": tracked_symbols,
         "tracked_scope_source": "CLI" if tracked_symbols else "NONE",
         "campaign_scope_validated": bool(tracked_symbols),
@@ -73,26 +78,70 @@ def run(*, symbols: list[str] | None = None, write_sanitized_position_risk: Path
     }
 
 
+class _UsageError(ValueError):
+    pass
+
+
+class _SafeParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise _UsageError(message)
+
+
+def _failure(reason: str, *, stage: str, setting: str | None = None, exc_type: str = "ValueError") -> dict[str, object]:
+    error = {"type": exc_type, "reason": reason}
+    if setting:
+        error["setting"] = setting
+    return {"evidence_status": "INCOMPLETE", "failed_stage": stage, "sanitized_errors": [error]}
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = _SafeParser()
     parser.add_argument("--sanitize-position-risk", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--write-sanitized-position-risk", type=Path)
-    parser.add_argument("--symbols")
-    args = parser.parse_args()
+    parser.add_argument("--symbols", nargs="+")
+    try:
+        args = parser.parse_args()
+    except _UsageError:
+        print(json.dumps(_failure("invalid_setting_value", stage="CLI", setting="--symbols"), sort_keys=True))
+        return 4
     if args.sanitize_position_risk:
-        if not args.output: parser.error("--output is required with --sanitize-position-risk")
+        if not args.output:
+            print(json.dumps(_failure("missing_required_setting", stage="CLI", setting="--output"), sort_keys=True))
+            return 4
         sanitize_position_risk(args.sanitize_position_risk, args.output)
         return 0
     try:
         resolved_symbols = parse_symbols(args.symbols) if args.symbols is not None else []
         if args.symbols is not None and not resolved_symbols:
-            raise ValueError("explicit_symbols_empty")
+            print(json.dumps(_failure("missing_required_setting", stage="CLI", setting="--symbols"), sort_keys=True))
+            return 4
+        for symbol in resolved_symbols:
+            normalize_reconciliation_symbol(symbol, "tracked")
         result = run(symbols=resolved_symbols, write_sanitized_position_risk=args.write_sanitized_position_risk)
     except Exception as exc:
-        result = {"evidence_status": "INCOMPLETE", "sanitized_errors": [f"{type(exc).__name__}:configuration_or_authentication_failed"]}
+        if "invalid_symbol" in str(exc):
+            result = _failure("invalid_symbol", stage="CLI", setting="--symbols", exc_type=type(exc).__name__)
+            print(json.dumps(result, sort_keys=True)); return 4
+        if not isinstance(exc, RuntimeError):
+            message = str(exc)
+            if "BINANCE_ENVIRONMENT" in message or "Binance REST" in message or "Binance websocket" in message:
+                result = _failure("environment_resolution_failed", stage="CONFIGURATION", setting="BINANCE_ENVIRONMENT", exc_type=type(exc).__name__)
+                print(json.dumps(result, sort_keys=True)); return 2
+            setting = next((name for name in ("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", "ALPHAFORGE_BINANCE_RECV_WINDOW_MS",
+                                              "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", "ALPHAFORGE_RECONCILIATION_POSITION_EPSILON",
+                                              "ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS") if name in message), "RECONCILIATION_CONFIGURATION")
+            result = {"evidence_status": "INCOMPLETE", "failed_stage": "CONFIGURATION",
+                      "sanitized_errors": [_safe_error(setting, exc)]}
+            print(json.dumps(result, sort_keys=True)); return 2
+        reason = str(exc) if str(exc) in {"missing_binance_api_key", "missing_binance_api_secret"} else "provider_initialization_failed"
+        result = _failure(reason, stage="AUTHENTICATION", exc_type=type(exc).__name__)
+        print(json.dumps(result, sort_keys=True)); return 3
     print(json.dumps(result, sort_keys=True))
-    return 0 if result.get("evidence_status") == "COMPLETE" else 1
+    if result.get("evidence_status") != "COMPLETE":
+        errors = str(result.get("sanitized_errors", ""))
+        return 3 if "ReconciliationAuthError" in errors else 1
+    return 0
 
 
 if __name__ == "__main__":

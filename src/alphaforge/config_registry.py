@@ -151,7 +151,7 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "max_concurrent_positions", "int", 3, "Runtime Risk Limits", ("PAPER", "LIVE"), "Concurrent-position hard cap.", 1, deprecated_aliases=("ALPHAFORGE_MAX_OPEN_POSITIONS",)),
     _s("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", "max_notional_exposure", "float", 100000.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Portfolio notional hard cap.", 0.0),
     _s("ALPHAFORGE_MAX_SYMBOL_NOTIONAL", "max_symbol_notional", "float", 50000.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Per-symbol notional hard cap.", 0.0),
-    _s("ALPHAFORGE_MAX_DAILY_LOSS_PCT", "max_daily_loss_pct", "float", 0.03, "Runtime Risk Limits", ("PAPER", "LIVE"), "Daily realized-loss fraction that blocks new risk.", 0.0, 1.0),
+    _s("ALPHAFORGE_MAX_DAILY_LOSS_PCT", "max_daily_loss_pct", "float", 0.03, "Runtime Risk Limits", ("PAPER", "LIVE"), "Daily realized-loss fraction that blocks new risk (0.02 means 2%; percentage-point values require explicit migration).", 0.0, 1.0),
     _s("ALPHAFORGE_STALE_MARKET_DATA_SEC", "stale_market_data_sec", "float", 15.0, "Runtime Risk Limits", ("PAPER", "LIVE"), "Maximum market-data age.", 0.0),
     _s("ALPHAFORGE_ENABLE_SHADOW_MODE", "enable_shadow_mode", "bool", False, "Mode / Safety", ("PAPER", "LIVE"), "Enable shadow-only runtime behavior."),
     _s("ALPHAFORGE_ENABLE_CANARY_MODE", "enable_canary_mode", "bool", False, "Mode / Safety", ("LIVE",), "Request canary mode; readiness gates remain authoritative."),
@@ -200,7 +200,7 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("BINANCE_BASE_URL", "binance_rest_base_url", "str", "", "Binance", MODES, "Optional explicit Binance USD-M REST override.", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner._scan_binance"),
     _s("BINANCE_WS_URL", "binance_ws_base_url", "str", "", "Binance", ("PAPER", "LIVE"), "Optional explicit Binance USD-M websocket override.", dashboard_editable=False, consumed_by="alphaforge.env_contract.resolve_binance_environment"),
     _s("BINANCE_DEFAULT_QUOTE_ASSET", "binance_default_quote_asset", "str", "USDT", "Binance", MODES, "Quote asset used by the Binance market scanner.", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner._scan_binance"),
-    _s("BINANCE_DEFAULT_MARKET_TYPE", "binance_default_market_type", "str", "USD_M", "Binance", MODES, "Supported Binance Futures market type (USD_M).", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner._scan_binance"),
+    _s("BINANCE_DEFAULT_MARKET_TYPE", "binance_default_market_type", "str", "USD_M", "Binance", MODES, "Canonical USD-M Futures type USD_M; USD-M, USDT_M, and USDT-M are normalized aliases.", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner._scan_binance"),
     _s("ALPHAFORGE_BINANCE_RECV_WINDOW_MS", "binance_recv_window_ms", "int", 5000, "Binance", ("PAPER", "LIVE"), "Canonical signed reconciliation receive window; the legacy BINANCE_RECV_WINDOW_MS alias is lower precedence.", 1000, 60000, dashboard_editable=False, deprecated_aliases=("BINANCE_RECV_WINDOW_MS",), consumed_by="alphaforge.binance_reconciliation_provider"),
     _s("BINANCE_REQUEST_TIMEOUT_SEC", "binance_request_timeout_sec", "float", 2.0, "Binance", ("PAPER", "LIVE"), "Binance HTTP request timeout.", 0.1, dashboard_editable=False, consumed_by="alphaforge.binance_reconciliation_provider.BinanceReadonlyReconciliationProvider._signed_get"),
     _s("BINANCE_API_KEY", "binance_api_key", "str", "", "Binance", ("PAPER", "LIVE"), "Read-only reconciliation API key.", secret=True, dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env"),
@@ -309,30 +309,42 @@ def load_dotenv_file(path: Path) -> dict[str, str]:
         return {}
     return parse_dotenv(path)
 
-def effective_config_values(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> dict[str, dict[str, Any]]:
+
+def effective_config_subset(names: tuple[str, ...], *, env: Mapping[str, str] | None = None,
+                            root: Path | None = None, fail_on_alias_conflict: bool = False) -> dict[str, dict[str, Any]]:
+    """Resolve only requested registry settings using canonical source precedence."""
     root = root or Path.cwd()
     env = os.environ if env is None else env
-    file_values = load_dotenv_file(root / ".env")
-    local_values = load_dotenv_file(root / ".env.local")
-    override_values = {}
+    sources = (("dotenv", load_dotenv_file(root / ".env")),
+               ("dotenv_local", load_dotenv_file(root / ".env.local")))
     override_path = root / "config" / "runtime_overrides.json"
-    if override_path.exists():
-        try:
-            override_values = json.loads(override_path.read_text())
-        except json.JSONDecodeError:
-            override_values = {}
+    try:
+        overrides = json.loads(override_path.read_text()) if override_path.exists() else {}
+    except json.JSONDecodeError:
+        overrides = {}
+    sources += (("dashboard", overrides), ("process_env", env))
     out: dict[str, dict[str, Any]] = {}
-    for setting in CONFIG_REGISTRY:
-        source = "default"
+    for name in names:
+        setting = REGISTRY_BY_ENV[name]
         raw = None
-        for source_name, mapping in (("dotenv", file_values), ("dotenv", local_values), ("dashboard", override_values), ("process_env", env)):
-            selected = next((name for name in (setting.env_name, *setting.deprecated_aliases) if name in mapping), None)
-            if selected is not None:
-                raw = mapping[selected]
-                source = source_name if selected == setting.env_name else f"alias ({selected})"
-        value = setting.parse(raw)
-        out[setting.env_name] = {"setting": setting, "value": value, "source": source}
+        source = "default"
+        for source_name, mapping in sources:
+            present = [(candidate, str(mapping[candidate]).strip()) for candidate in (setting.env_name, *setting.deprecated_aliases)
+                       if candidate in mapping and str(mapping[candidate]).strip()]
+            if not present:
+                continue
+            canonical = next((value for candidate, value in present if candidate == setting.env_name), None)
+            aliases = [(candidate, value) for candidate, value in present if candidate != setting.env_name]
+            if fail_on_alias_conflict and canonical is not None and any(value != canonical for _, value in aliases):
+                alias = next(candidate for candidate, value in aliases if value != canonical)
+                raise ValueError(f"alias conflict: {setting.env_name} and {alias} differ")
+            selected, raw = (setting.env_name, canonical) if canonical is not None else aliases[0]
+            source = source_name if selected == setting.env_name else f"alias ({selected})"
+        out[name] = {"setting": setting, "value": setting.parse(raw), "source": source}
     return out
+
+def effective_config_values(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> dict[str, dict[str, Any]]:
+    return effective_config_subset(tuple(setting.env_name for setting in CONFIG_REGISTRY), env=env, root=root)
 
 def decision_filter_config(mode: str, *, env: Mapping[str, str] | None = None, root: Path | None = None) -> dict[str, Any]:
     snap = effective_config_values(env=env, root=root)

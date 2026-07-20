@@ -1,3 +1,15 @@
+# PR #291 Windows Configuration Diagnostic Report
+
+## Root causes
+PowerShell emits comma expressions and space-separated values as multiple argv tokens, while the CLI accepted only one token. The CLI loaded the complete runtime configuration, so an unrelated risk-setting error prevented the narrow exchange diagnostic, then replaced the real cause with a generic label. Repository tracing shows `ALPHAFORGE_MAX_DAILY_LOSS_PCT` is consistently stored and compared as a fraction (`0.02` is 2%); accepting `2.0` would disable the intended limit until 200% loss, so it remains fail-closed with explicit migration guidance. Binance configuration exposed multiple common spellings but validated only `USD_M` without normalization.
+
+## Behavior, precedence, and safety
+The CLI now accepts quoted comma lists, multiple PowerShell tokens, and mixed forms; it normalizes, validates, and deduplicates them. A focused loader resolves only reconciliation settings through the canonical registry, while a separate multi-error global audit remains visible. Safe failures include stage/reason/setting metadata and use distinct exit codes. Market aliases normalize to `USD_M`; spot/coin modes fail. Resolution precedence remains process > dashboard > `.env.local` > `.env` > defaults; canonical/alias conflicts fail and empty aliases do not override. Runtime loading remains globally fail-fast. No daily-loss, exchange-state, orphan, kill-switch, LIVE, identity, persistence, or qualification safety gate was weakened.
+
+## Persistence, migration, risks
+No schema migration. Operators using `ALPHAFORGE_MAX_DAILY_LOSS_PCT=2.0` must explicitly migrate to `0.02` for 2%. No dashboard-specific daily-loss formatter exists in the current tree; persisted/runtime values remain fractions. Credentialed Demo acceptance is **NOT RUN** and LIVE remains **NOT READY**.
+
+---
 # PR #291 Merge-Readiness Validation Addendum
 
 ## Need and scope
