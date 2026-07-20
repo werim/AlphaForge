@@ -93,6 +93,7 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_BINANCE_RECV_WINDOW_MS", "binance_reconciliation_recv_window_ms", "int", 5000, "Runtime Reconciliation", ("PAPER", "LIVE"), "Binance signed reconciliation receive window.", 1, 60000),
     _s("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON", "reconciliation_position_epsilon", "float", 1e-8, "Runtime Reconciliation", ("PAPER", "LIVE"), "Absolute position quantity at or below which floating-point dust is inactive.", 0.0),
     _s("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS", "reconciliation_max_fill_symbols", "int", 20, "Runtime Reconciliation", ("PAPER", "LIVE"), "Hard maximum relevant symbols queried for Binance fills.", 1),
+    _s("ALPHAFORGE_RECONCILIATION_RECENT_LIFECYCLE_LOOKBACK_MS", "reconciliation_recent_lifecycle_lookback_ms", "int", 86_400_000, "Runtime Reconciliation", ("PAPER", "LIVE"), "Bounded lookback supplied to the local lifecycle symbol resolver.", 0),
     _s("ALPHAFORGE_BACKTEST_LAST_N_DAYS", "backtest_days", "int", 7, "Backtest Settings", ("BACKTEST",), "Default dashboard backtest horizon.", 1),
     _s("ALPHAFORGE_BACKTEST_TIMEFRAME", "backtest_interval", "str", "1m", "Backtest Settings", ("BACKTEST",), "Default backtest candle interval."),
     _s("ALPHAFORGE_BACKTEST_TOP_N", "backtest_max_symbols", "int", 100, "Backtest Settings", ("BACKTEST",), "Backtest universe size cap.", 1),

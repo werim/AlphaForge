@@ -1,3 +1,27 @@
+# Changelog
+
+## 2026-07-20 PR #290 operational-validation follow-up
+
+### Added
+- Sanitized 53-row Binance Demo incident fixture and distribution/acceptance regressions.
+- Opt-in `alphaforge.binance_reconciliation_check` command with allow-listed output and PowerShell runbook.
+- Stateful pooled-connection, elapsed-time, symbol-validation, and bounded lifecycle-scope tests.
+
+### Changed
+- Recent lifecycle symbol providers receive a canonical lookback cutoff; open-order scope accepts only open statuses; fill symbols require normalized ASCII alphanumeric format.
+- Retry evidence records timestamp refresh and final outcomes.
+
+### Fixed
+- Failed HTTP connections are closed and cleared before retry or later snapshots, preventing poisoned connection reuse.
+
+### Removed
+- Synthetic `DUST<n>USDT` fixture that did not reproduce the incident payload.
+
+### Breaking Changes
+- Corrupt fill symbols fail closed, and closed order statuses no longer expand fill scope.
+
+### Known Issues
+- Credentialed Demo acceptance, dev integration, GitHub CI, and mergeability could not be verified in this environment; PR #290 must not merge without them.
 
 ## Phase 9 PR 280 Follow-up Hardening
 

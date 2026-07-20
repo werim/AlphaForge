@@ -194,7 +194,7 @@ def _readonly_reconciliation_provider(cfg: Any) -> Any | None:
     key, secret = os.getenv("BINANCE_API_KEY", "").strip(), os.getenv("BINANCE_API_SECRET", "").strip()
     if not key or not secret:
         return None
-    return BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url=cfg.exchange.binance.base_url, api_key=key, api_secret=secret, recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms, request_timeout_sec=cfg.runtime.reconciliation_timeout_sec, trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms, position_epsilon=cfg.runtime.reconciliation_position_epsilon, max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols))
+    return BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url=cfg.exchange.binance.base_url, api_key=key, api_secret=secret, recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms, request_timeout_sec=cfg.runtime.reconciliation_timeout_sec, trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms, position_epsilon=cfg.runtime.reconciliation_position_epsilon, max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols, recent_lifecycle_lookback_ms=cfg.runtime.reconciliation_recent_lifecycle_lookback_ms))
 
 
 def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None) -> dict[str, Any]:

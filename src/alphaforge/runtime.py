@@ -1620,6 +1620,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                     trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
                     position_epsilon=cfg.runtime.reconciliation_position_epsilon,
                     max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols,
+                    recent_lifecycle_lookback_ms=cfg.runtime.reconciliation_recent_lifecycle_lookback_ms,
                 )
             )
 

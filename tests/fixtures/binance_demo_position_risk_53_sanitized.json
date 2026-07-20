@@ -1,0 +1,373 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "positionAmt": "0.001",
+    "positionSide": "BOTH",
+    "entryPrice": "65000.0",
+    "unRealizedProfit": "1.25"
+  },
+  {
+    "symbol": "ETHUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "BNBUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "XRPUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "ADAUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "SOLUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "TRXUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "LINKUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "DOTUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "MATICUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "LTCUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "BCHUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "AVAXUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "ATOMUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "UNIUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "ETCUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "FILUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "APTUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "NEARUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "OPUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "ARBUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "SUIUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "INJUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "RUNEUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "AAVEUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "ALGOUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "XLMUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "VETUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "ICPUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "FTMUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "SANDUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "MANAUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "AXSUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "GALAUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "EOSUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "KAVAUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "FLOWUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "CHZUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "CRVUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "LDOUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "MKRUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "SNXUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "COMPUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "ZECUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "DASHUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "XMRUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "NEOUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "IOTAUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "THETAUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "EGLDUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "KSMUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  },
+  {
+    "symbol": "WAVESUSDT",
+    "positionAmt": "0.000",
+    "positionSide": "BOTH",
+    "entryPrice": "0.0",
+    "unRealizedProfit": "0.0"
+  }
+]

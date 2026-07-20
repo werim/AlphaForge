@@ -153,3 +153,25 @@ python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-d
 ```
 
 Finalization can qualify only canonical `CANARY_QUALIFIED` Phase 8 qualification snapshots, with completion, integrity, aggregate-hash linkage, healthy state, and bounded backlog all passing. `PASS` or `QUALIFIED` aliases do not qualify a campaign for canary review.
+# Binance Demo read-only reconciliation acceptance check
+
+Run this opt-in check only with read-only Demo credentials. The output is
+allow-listed and includes the resolved environment, safe base host, bounded
+fill scope, request evidence, and sanitized errors; it never prints signed
+URLs, request headers, credentials, secrets, or signatures.
+
+```powershell
+$env:BINANCE_BASE_URL = "https://demo-fapi.binance.com"
+$env:BINANCE_API_KEY = "<demo-read-only-api-key>"
+$env:BINANCE_API_SECRET = "<demo-read-only-api-secret>"
+$env:ALPHAFORGE_RECONCILIATION_POSITION_EPSILON = "0.00000001"
+$env:ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS = "20"
+python -m alphaforge.binance_reconciliation_check --tracked-symbols BTCUSDT
+$LASTEXITCODE
+```
+
+Exit code `0` means the snapshot was `COMPLETE`; any `INCOMPLETE` snapshot or
+missing credentials exits nonzero. A changed failure reason such as
+`max_fill_symbols_exceeded` is not acceptance success.
+
+---

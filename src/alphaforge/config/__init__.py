@@ -113,6 +113,7 @@ class RuntimeSettings:
     binance_reconciliation_trade_lookback_ms: int = 3_600_000
     reconciliation_position_epsilon: float = 1e-8
     reconciliation_max_fill_symbols: int = 20
+    reconciliation_recent_lifecycle_lookback_ms: int = 86_400_000
 
 @dataclass(slots=True)
 class BinanceSettings:
@@ -278,6 +279,7 @@ def load_config_from_env() -> AlphaForgeConfig:
         binance_reconciliation_trade_lookback_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", 3_600_000),
         reconciliation_position_epsilon=val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON"),
         reconciliation_max_fill_symbols=val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS"),
+        reconciliation_recent_lifecycle_lookback_ms=val("ALPHAFORGE_RECONCILIATION_RECENT_LIFECYCLE_LOOKBACK_MS"),
     )
     exchange = ExchangeSettings(
         timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", runtime.exchange_connectivity_timeout_sec),

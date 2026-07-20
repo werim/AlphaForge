@@ -1,12 +1,12 @@
 # AlphaForge Version
 
-- Current version: Phase 9 Binance read-only reconciliation fill-scope and transport hardening
+- Current version: Phase 9 Binance reconciliation operational-validation follow-up
 - Current phase: Phase 9 - production-like PAPER burn-in execution, evidence audit, and release decision hardening
-- Runtime maturity: PAPER operational workflow with fail-closed preflight and bounded Binance read-only reconciliation; fill history is scoped to tracked, recently active, open-order, and epsilon-significant position symbols, with pooled transport and bounded retries. LIVE trading remains unavailable.
+- Runtime maturity: PAPER operational workflow with fail-closed, format-validated, time-bounded Binance fill scope; failed pooled connections are discarded before retry or reuse. Local automated validation is complete, but credentialed Demo acceptance and GitHub CI/mergeability evidence are unavailable in this environment. LIVE trading remains unavailable.
 - BACKTEST/PAPER/LIVE alignment: Phase 9 requires campaign == active continuation == runtime identity parity for PAPER attachment; runtime limits remain mode-aware, while persisted or runtime config drift fails closed.
 - Lifecycle coverage: startup interruptions terminalize explicitly with worker ownership cleared; dead PID-less RUNNING continuations transition explicitly to terminal `RECOVERY_REQUIRED` in both run tables only after runtime-owned position/order/orphan/reconciliation checks are clean, or after the narrow unrelated-historical PAPER fallback proves zero local exposure, dead process, absent/dead PID, no kill switch, no pending labels, and records provider unavailability; pending reject labels are preserved as non-financial evidence; RUNNING source runs are append-only; RECOVERY_REQUIRED/COMPLETED/FAILED/SUSPENDED source runs are immutable.
 - Execution realism coverage: Uses runtime execution-cost identity, Binance read-only market-data/time provenance, dust-aware position activity, fresh per-attempt signed timestamps, resolver/provider failure separation, and no synthetic trade generation.
-- Known critical risks: Real multi-day PAPER evidence is still required; reconciliation still requires credentials and unresolved transport/auth/payload errors or excessive relevant-symbol scope fail closed; nonzero/unknown exposure still requires manual recovery.
+- Known critical risks: Credentialed Demo acceptance has not been executed here because Binance credentials are absent; GitHub remote/dev/CI state is unavailable because this checkout has no remote and outbound GitHub access is blocked. Reconciliation transport/auth/payload/scope errors remain fail closed.
 - Last audit date: 2026-07-20
 - Live readiness verdict: NOT LIVE READY; Phase 9 may only produce `PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW` when canonical `CANARY_QUALIFIED` evidence passes all operational gates.
 

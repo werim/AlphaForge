@@ -1,5 +1,24 @@
 # AlphaForge Phase 9 Burn-In Startup Interruption Surgery Report
 
+## 2026-07-20 PR #290 operational-validation follow-up
+
+### Root cause and real-fixture findings
+The first regression generated synthetic `DUST<n>USDT` rows, so it did not preserve Binance symbols or establish the incident quantity distribution. The sanitized 53-row incident fixture now retains only `symbol`, `positionAmt`, `positionSide`, `entryPrice`, and `unRealizedProfit`: 52 rows are exactly zero, one row is nonzero (`BTCUSDT`), zero rows are nonzero at or below the default `1e-8` epsilon, and one row remains position-relevant above epsilon. The acceptance regression therefore performs three signed operations instead of the unsafe 55-request pattern: one global position-risk request, one global open-order request, and one BTC fill request.
+
+### Transport, timing, and scope corrections
+Every failed pooled operation now closes and clears the cached connection, including timeout/URL transport errors, HTTP errors, malformed responses, and `http.client` connection-state failures. Retried operations create a distinct connection. Timestamp construction remains inside the attempt loop, so retry sleep and connection replacement precede fresh signing. `-1021` refreshes time on the same configured host at most once per signed request and evidence now records the old code, refresh action, retry/final outcome, endpoint, and symbol. Fill scope accepts only ASCII alphanumeric Binance-style symbols; invalid/corrupt symbols fail closed. Only genuinely open order statuses are included, and recent lifecycle resolution receives a canonical bounded cutoff.
+
+### Operator check and operational status
+`python -m alphaforge.binance_reconciliation_check` prints only the environment, safe host, evidence status, selected symbols, request evidence, and sanitized errors, and exits nonzero unless complete. Exact PowerShell instructions are in `RUNBOOK.md`. This environment has no Binance credentials, so the command returned `INCOMPLETE` with `missing_binance_credentials`; no credentialed Demo claim is made. It also has no Git remote/dev ref and outbound GitHub access is blocked, so dev integration, GitHub Actions status, CI link, and mergeability cannot be verified here. PR #290 is not represented as ready to merge until an operator runs the Demo command and GitHub reports green/mergeable.
+
+### Lifecycle, persistence, schema, compatibility, and risks
+There is no lifecycle, database schema, persistence, CSV export, qualification-gate, recovery-scope, LIVE mutation, or orphan-detection weakening. Scope diagnostics are additive. Closed orders and invalid symbols that previously entered fill scope may now be excluded or fail closed, respectively. No migration is required. Remaining blockers are external operational acceptance and GitHub CI/mergeability evidence.
+
+### Tests
+Tests cover the 53-row distribution and exact acceptance result; max-scope failure; invalid symbols; closed-order filtering; bounded lifecycle cutoff; stateful connection replacement, idempotent close, and clean subsequent snapshots; elapsed time beyond `recvWindow`; one-shot `-1021` refresh/final evidence; CLI secret redaction; and canonical settings. Full-suite results are recorded after execution.
+
+---
+
 ## 2026-07-20 Binance read-only reconciliation fill-scope surgery
 
 ### Why the patch was needed and root cause

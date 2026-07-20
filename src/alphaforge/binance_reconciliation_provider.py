@@ -8,12 +8,23 @@ import http.client
 import io
 import json
 import random
+import re
 import socket
 import ssl
 import time
 from urllib import error
 import urllib.parse
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol
+
+
+class HttpConnection(Protocol):
+    host: str
+    port: int | None
+    timeout: float
+
+    def request(self, method: str, url: str, *, headers: Mapping[str, str]) -> None: ...
+    def getresponse(self) -> Any: ...
+    def close(self) -> None: ...
 
 class ReconciliationAuthError(RuntimeError):
     pass
@@ -24,7 +35,7 @@ class ReconciliationPayloadError(RuntimeError):
 
 
 class ReconciliationRequestError(RuntimeError):
-    def __init__(self, *, endpoint_class: str, environment: str, symbol: str | None = None, http_status: int | None = None, binance_code: int | None = None, retry_count: int = 0, timeout_category: str | None = None, reason: str = "request_failed") -> None:
+    def __init__(self, *, endpoint_class: str, environment: str, symbol: str | None = None, http_status: int | None = None, binance_code: int | None = None, retry_count: int = 0, timeout_category: str | None = None, reason: str = "request_failed", details: Mapping[str, Any] | None = None) -> None:
         super().__init__(reason)
         self.diagnostic = {
             "reason": reason,
@@ -36,6 +47,7 @@ class ReconciliationRequestError(RuntimeError):
             "timeout_category": timeout_category,
             "environment": environment,
         }
+        self.diagnostic.update(dict(details or {}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +61,7 @@ class BinanceReadonlyReconciliationConfig:
     position_epsilon: float = 1e-8
     max_fill_symbols: int = 20
     max_retries: int = 2
+    recent_lifecycle_lookback_ms: int = 86_400_000
 
 
 class BinanceReadonlyReconciliationProvider:
@@ -57,29 +70,36 @@ class BinanceReadonlyReconciliationProvider:
         *,
         config: BinanceReadonlyReconciliationConfig,
         tracked_symbols: Callable[[], set[str]] | None = None,
-        recently_active_symbols: Callable[[], set[str]] | None = None,
+        recently_active_symbols: Callable[[int], set[str]] | None = None,
         now_ms: Callable[[], int] | None = None,
         http_get_json: Callable[[str, Mapping[str, str], float], Any] | None = None,
+        connection_factory: Callable[[str, str, int | None, float], HttpConnection] | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         if not config.api_key or not config.api_secret:
             raise ReconciliationAuthError("missing_binance_credentials")
-        if config.position_epsilon < 0 or config.max_fill_symbols < 1 or config.max_retries < 0:
+        if config.position_epsilon < 0 or config.max_fill_symbols < 1 or config.max_retries < 0 or config.recent_lifecycle_lookback_ms < 0:
             raise ValueError("invalid_binance_reconciliation_bounds")
         self._cfg = config
         self._tracked_symbols = tracked_symbols or (lambda: set())
-        self._recently_active_symbols = recently_active_symbols or (lambda: set())
+        self._recently_active_symbols = recently_active_symbols or (lambda _cutoff_ms: set())
         self._now_ms = now_ms or (lambda: int(datetime.now(UTC).timestamp() * 1000))
         self._sleep = sleep or time.sleep
-        self._client: http.client.HTTPConnection | None = None
+        self._client: HttpConnection | None = None
+        self._connection_factory = connection_factory or self._new_connection
         self._http_get_json = http_get_json or self._default_http_get_json
         self._server_time_offset_ms = 0
         self._request_evidence: list[dict[str, Any]] = []
 
     def close(self) -> None:
+        self._reset_connection()
+
+    def _reset_connection(self) -> None:
         if self._client is not None:
-            self._client.close()
-            self._client = None
+            try:
+                self._client.close()
+            finally:
+                self._client = None
 
     def snapshot(self) -> Mapping[str, Any]:
         retrieved_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -134,18 +154,23 @@ class BinanceReadonlyReconciliationProvider:
             url = f"{self._cfg.base_url.rstrip('/')}{path}?{query}&signature={signature}"
             try:
                 result = self._http_get_json(url, {"X-MBX-APIKEY": self._cfg.api_key}, self._cfg.request_timeout_sec)
-                self._request_evidence.append({"endpoint_class": endpoint_class, "symbol": symbol, "retry_count": transient_retry_count, "timestamp_refresh": timestamp_retry_used, "environment": self._environment()})
+                self._request_evidence.append({"endpoint_class": endpoint_class, "symbol": symbol, "retry_count": transient_retry_count, "timestamp_refresh": timestamp_retry_used, "outcome": "SUCCESS", "environment": self._environment()})
                 return result
             except Exception as exc:  # noqa: BLE001
+                # Any failed exchange operation can leave an HTTP/1.1 connection
+                # in an indeterminate state. Never carry it into a retry or the
+                # next snapshot, including deterministic failures.
+                self._reset_connection()
                 status, code, timeout_category = self._failure_details(exc)
                 if code == -1021 and not timestamp_retry_used:
                     try:
                         self._refresh_server_time_offset()
                     except Exception as refresh_exc:  # noqa: BLE001
                         refresh_status, refresh_code, refresh_timeout = self._failure_details(refresh_exc)
+                        self._request_evidence.append({"endpoint_class": endpoint_class, "symbol": symbol, "old_failure_code": -1021, "action": "server_time_offset_refresh_failed", "outcome": "FAILED", "environment": self._environment()})
                         raise ReconciliationRequestError(endpoint_class=endpoint_class, symbol=symbol, http_status=refresh_status, binance_code=refresh_code or -1021, retry_count=transient_retry_count, timeout_category=refresh_timeout, environment=self._environment(), reason="server_time_refresh_failed") from refresh_exc
                     timestamp_retry_used = True
-                    self._request_evidence.append({"endpoint_class": endpoint_class, "symbol": symbol, "binance_code": -1021, "action": "server_time_offset_refreshed", "environment": self._environment()})
+                    self._request_evidence.append({"endpoint_class": endpoint_class, "symbol": symbol, "old_failure_code": -1021, "action": "server_time_offset_refreshed", "outcome": "RETRYING", "environment": self._environment()})
                     continue
                 retryable = timeout_category is not None or status == 429 or (status is not None and 500 <= status <= 599)
                 if retryable and transient_retry_count < self._cfg.max_retries:
@@ -153,7 +178,9 @@ class BinanceReadonlyReconciliationProvider:
                     self._sleep(random.uniform(0.025, 0.075) * transient_retry_count)
                     continue
                 if status in {401, 403} or code in {-2014, -2015}:
+                    self._request_evidence.append({"endpoint_class": endpoint_class, "symbol": symbol, "old_failure_code": code, "retry_count": transient_retry_count, "outcome": "FAILED", "environment": self._environment()})
                     raise ReconciliationRequestError(endpoint_class=endpoint_class, symbol=symbol, http_status=status, binance_code=code, retry_count=transient_retry_count, timeout_category=timeout_category, environment=self._environment(), reason="binance_auth_failed") from exc
+                self._request_evidence.append({"endpoint_class": endpoint_class, "symbol": symbol, "old_failure_code": code, "retry_count": transient_retry_count, "outcome": "FAILED", "environment": self._environment()})
                 raise ReconciliationRequestError(endpoint_class=endpoint_class, symbol=symbol, http_status=status, binance_code=code, retry_count=transient_retry_count, timeout_category=timeout_category, environment=self._environment()) from exc
 
     def _refresh_server_time_offset(self) -> None:
@@ -165,20 +192,28 @@ class BinanceReadonlyReconciliationProvider:
 
     def _default_http_get_json(self, url: str, headers: Mapping[str, str], timeout_sec: float) -> Any:
         parsed = urllib.parse.urlsplit(url)
-        connection_type = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-        if self._client is None or self._client.host != parsed.hostname or self._client.port != parsed.port:
-            if self._client is not None:
-                self._client.close()
-            self._client = connection_type(parsed.hostname, parsed.port, timeout=timeout_sec)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if self._client is None or self._client.host != parsed.hostname or self._client.port != port:
+            self._reset_connection()
+            self._client = self._connection_factory(parsed.scheme, parsed.hostname or "", port, timeout_sec)
         else:
             self._client.timeout = timeout_sec
         target = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
-        self._client.request("GET", target, headers=dict(headers))
-        response = self._client.getresponse()
-        body = response.read()
-        if response.status >= 400:
-            raise error.HTTPError(url, response.status, response.reason, response.headers, io.BytesIO(body))
-        return json.loads(body.decode("utf-8"))
+        try:
+            self._client.request("GET", target, headers=dict(headers))
+            response = self._client.getresponse()
+            body = response.read()
+            if response.status >= 400:
+                raise error.HTTPError(url, response.status, response.reason, response.headers, io.BytesIO(body))
+            return json.loads(body.decode("utf-8"))
+        except Exception:
+            self._reset_connection()
+            raise
+
+    @staticmethod
+    def _new_connection(scheme: str, host: str, port: int | None, timeout_sec: float) -> HttpConnection:
+        connection_type = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+        return connection_type(host, port, timeout=timeout_sec)
 
     @staticmethod
     def _failure_details(exc: Exception) -> tuple[int | None, int | None, str | None]:
@@ -193,10 +228,14 @@ class BinanceReadonlyReconciliationProvider:
                 body = None
         if isinstance(exc, (TimeoutError, socket.timeout)):
             timeout_category = "timeout"
-        elif isinstance(exc, error.URLError):
+        elif isinstance(exc, (http.client.RemoteDisconnected, http.client.CannotSendRequest, http.client.ResponseNotReady, http.client.IncompleteRead, ConnectionResetError)):
+            timeout_category = "connection_state_error"
+        elif isinstance(exc, error.URLError) and status is None:
             reason = exc.reason
             if isinstance(reason, (TimeoutError, socket.timeout, ssl.SSLError)) and "timed out" in str(reason).lower():
                 timeout_category = "tls_or_connection_timeout"
+            else:
+                timeout_category = "transport_error"
         code = None
         if body:
             try:
@@ -234,10 +273,20 @@ class BinanceReadonlyReconciliationProvider:
         return out
 
     def _symbols_for_fills(self, orders: list[dict[str, Any]], positions: list[dict[str, Any]]) -> set[str]:
-        symbols = set(self._tracked_symbols()) | set(self._recently_active_symbols())
-        symbols.update(str(o.get("symbol") or "") for o in orders if o.get("symbol"))
-        symbols.update(str(p.get("symbol") or "") for p in positions if abs(float(p.get("qty", 0) or 0)) > self._cfg.position_epsilon)
-        return {symbol.strip().upper() for symbol in symbols if symbol and symbol.strip()}
+        cutoff_ms = self._now_ms() - self._cfg.recent_lifecycle_lookback_ms
+        sources: dict[str, set[str]] = {
+            "tracked": set(self._tracked_symbols()),
+            "recent_lifecycle": set(self._recently_active_symbols(cutoff_ms)),
+            "open_order": {str(o.get("symbol") or "") for o in orders if o.get("symbol") and str(o.get("status") or "").upper() in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}},
+            "active_position": {str(p.get("symbol") or "") for p in positions if abs(float(p.get("qty", 0) or 0)) > self._cfg.position_epsilon},
+        }
+        symbols = set().union(*sources.values())
+        normalized = {str(symbol).strip().upper() for symbol in symbols if symbol and str(symbol).strip()}
+        for symbol in sorted(normalized):
+            if not re.fullmatch(r"[A-Z0-9]{5,30}", symbol, flags=re.ASCII):
+                symbol_sources = sorted(name for name, values in sources.items() if any(str(value).strip().upper() == symbol for value in values))
+                raise ReconciliationRequestError(endpoint_class="USER_TRADES_SCOPE", environment=self._environment(), symbol=symbol, reason="invalid_fill_symbol", details={"symbol_sources": symbol_sources})
+        return normalized
 
     def _environment(self) -> str:
         host = urllib.parse.urlparse(self._cfg.base_url).hostname or "unknown"
