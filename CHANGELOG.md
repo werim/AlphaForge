@@ -3362,3 +3362,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Credentialed Demo acceptance and GitHub CI remain NOT RUN in this network-restricted environment.
+
+## PR #291 campaign-scope/count correction (2026-07-20)
+
+### Added
+- CLI `--symbols` campaign scope plus ordered per-HTTP-operation attempt evidence and exact request counts.
+
+### Changed
+- Demo acceptance now distinguishes unscoped diagnostics from Phase 9-equivalent tracked-symbol validation.
+
+### Fixed
+- Retries and server-time refreshes are no longer omitted from operational request counts.
+
+### Removed
+- No functionality removed.
+
+### Breaking Changes
+- None; no-symbol diagnostics remain available but explicitly report `campaign_scope_validated=false`.
+
+### Known Issues
+- Credentialed Demo acceptance and GitHub CI remain NOT RUN in this network-restricted environment.

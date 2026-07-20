@@ -114,12 +114,15 @@ def _git_commit() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 
-def _symbols(raw: str | Sequence[str]) -> list[str]:
+def parse_symbols(raw: str | Sequence[str]) -> list[str]:
     values = raw if isinstance(raw, (list, tuple)) else [raw]
     parsed: list[str] = []
     for value in values:
         parsed.extend(item.strip().upper() for item in str(value).split(",") if item.strip())
     return parsed
+
+
+_symbols = parse_symbols
 
 
 def _intervals(raw: str | Sequence[str]) -> list[str]:

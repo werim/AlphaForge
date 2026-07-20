@@ -223,6 +223,8 @@ def test_default_transport_1021_refreshes_same_host_and_resigns_once(monkeypatch
     assert paths[2].startswith("/fapi/v3/positionRisk?") and paths[2] != paths[0]
     assert sum(path == "/fapi/v1/time" for path in paths) == 1
     assert snap["request_evidence"][0]["time_refresh_performed"] is True
+    assert snap["http_request_count"] == 4
+    assert [a["request_kind"] for a in snap["request_attempts"]] == ["SIGNED", "SERVER_TIME", "SIGNED", "SIGNED"]
     assert made[0].closed and all(connection.closed for connection in made)
 
 
@@ -233,7 +235,8 @@ def test_default_transport_deterministic_400_not_retried(monkeypatch):
     snap = provider.snapshot()
     assert snap["evidence_status"] == "INCOMPLETE"
     assert "status=400:code=-1100" in snap["errors"][0]
-    assert snap["request_count"] == 1 and snap["request_evidence"][0]["binance_code"] == -1100
+    assert snap["request_count"] == 1 and snap["http_request_count"] == 1
+    assert snap["request_evidence"][0]["binance_code"] == -1100
     assert len(made) == 1 and made[0].closed == 1
 
 
@@ -335,3 +338,56 @@ def test_1021_refresh_failure_preserves_prior_evidence():
     assert snap["failed_endpoint"] == "userTrades" and snap["failed_symbol"] == "BTCUSDT"
     assert snap["unknown_unreconciled_symbols"] == ["BTCUSDT"]
     assert snap["orphan_orders"] is snap["orphan_positions"] is None
+
+
+def test_http_count_clean_empty_and_resets_each_snapshot():
+    provider, _ = _provider([])
+    first = provider.snapshot(); second = provider.snapshot()
+    assert first["http_request_count"] == second["http_request_count"] == 2
+    assert [a["sequence"] for a in second["request_attempts"]] == [1, 2]
+
+
+def test_http_count_tracked_one_and_two_symbols():
+    one, _ = _provider([], tracked={"BTCUSDT"})
+    two, _ = _provider([], tracked={"BTCUSDT", "ETHUSDT"})
+    assert one.snapshot()["http_request_count"] == 3
+    snap = two.snapshot()
+    assert snap["http_request_count"] == 4
+    assert [a["symbol"] for a in snap["request_attempts"] if a["endpoint_class"] == "userTrades"] == ["BTCUSDT", "ETHUSDT"]
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("timeout"), error.HTTPError("safe", 429, "rate", {}, io.BytesIO(b'{"code":-1003}')), error.HTTPError("safe", 503, "server", {}, io.BytesIO(b'{"code":-1000}'))])
+def test_http_count_transient_retry_then_success(failure):
+    calls = 0
+    def http(url, headers, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1: raise failure
+        return []
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s", transport_retries=1), http_get_json=http)
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "COMPLETE" and snap["http_request_count"] == 3
+    assert [a["outcome"] for a in snap["request_attempts"]] == ["RETRY", "PASS", "PASS"]
+
+
+def test_http_count_auth_and_user_trade_failure_are_exact():
+    auth = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s"),
+        http_get_json=lambda url, headers, timeout: (_ for _ in ()).throw(error.HTTPError("safe", 401, "auth", {}, io.BytesIO(b'{"code":-2015}'))))
+    assert auth.snapshot()["http_request_count"] == 1
+    def http(url, headers, timeout):
+        if "positionRisk" in url or "openOrders" in url: return []
+        raise TimeoutError("fill")
+    fills = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s", transport_retries=0),
+        tracked_symbols=lambda:{"BTCUSDT"}, http_get_json=http)
+    snap = fills.snapshot()
+    assert snap["http_request_count"] == 3 and snap["failed_endpoint"] == "userTrades"
+
+
+def test_http_attempt_evidence_is_secret_free():
+    provider, _ = _provider([], tracked={"BTCUSDT"})
+    blob = json.dumps(provider.snapshot()["request_attempts"])
+    assert "signature=" not in blob and "api_key" not in blob.lower() and "secret" not in blob.lower()
+    assert "?" not in blob and "timestamp" not in blob.lower()

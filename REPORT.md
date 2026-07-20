@@ -1,3 +1,12 @@
+# PR #291 Final Scope and Request-Count Correction
+
+## Why, root cause, and behavior
+The diagnostic CLI did not supply Phase 9 campaign symbols, so an empty account could complete without exercising `userTrades(BTCUSDT)`. Terminal endpoint summaries also undercounted actual HTTP traffic by omitting failed attempts, retries, and `/fapi/v1/time`. The CLI now reuses `burnin_ops.parse_symbols`, validates/deduplicates tracked scope through the provider, and reports requested/tracked/selected scope plus whether campaign scope was validated. Every provider HTTP operation now passes through one accounting wrapper that increments immediately before transport invocation and appends ordered, sanitized attempt evidence. Counters reset per snapshot; endpoint results remain separate.
+
+## Compatibility, persistence, lifecycle, and risk
+No schema, persistence, export, lifecycle, recovery-scope, orphan, PAPER identity, LIVE mutation, or qualification behavior changed. No migration is required. No-symbol mode remains operational but cannot be represented as campaign-equivalent evidence. Credentialed Demo acceptance is **NOT RUN**. GitHub CI and remote mergeability require verification after network access and push; LIVE remains **NOT READY**.
+
+---
 # PR #291 Corrective Reconciliation Report
 
 ## Need and root cause

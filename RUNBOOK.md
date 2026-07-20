@@ -189,3 +189,17 @@ if ($LASTEXITCODE -ne 0) { throw "Binance reconciliation evidence is incomplete"
 ```
 
 Exact-zero rows with invalid venue symbols are retained using a one-way symbol hash, reported as `zero_exposure_invalid_symbol` warnings, excluded from `userTrades`, and do not alone make financially authoritative evidence incomplete. Invalid symbols with any nonzero quantity—including epsilon-filtered quantities—remain blockers. The generated artifact is local operator evidence and must not be committed automatically.
+
+### Campaign-scoped Demo acceptance (PR #291)
+
+A no-symbol diagnostic can verify global endpoints but is **not** Phase 9 campaign-scoped acceptance. Use the same symbols as preflight:
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION = "true"
+$env:BINANCE_BASE_URL = "https://demo-fapi.binance.com"
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT,ETHUSDT
+```
+
+Acceptance requires `campaign_scope_validated=true`, the requested symbol in both `tracked_symbols` and `selected_fill_symbols`, PASS for `positionRisk`, `openOrders`, and `userTrades`, no unresolved `-1021`, a bounded `http_request_count` whose ordered `request_attempts` explain every retry/time refresh, and `evidence_status=COMPLETE`.

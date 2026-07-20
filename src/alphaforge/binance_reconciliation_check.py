@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
+from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider, normalize_reconciliation_symbol
+from alphaforge.burnin_ops import parse_symbols
 from alphaforge.config import load_config_from_env
 
 SAFE_POSITION_FIELDS = ("symbol", "positionAmt", "positionSide", "entryPrice", "unRealizedProfit")
@@ -22,8 +23,10 @@ def sanitize_position_risk(source: Path, destination: Path) -> None:
     destination.write_text(json.dumps(safe, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def run(*, write_sanitized_position_risk: Path | None = None) -> dict[str, object]:
+def run(*, symbols: list[str] | None = None, write_sanitized_position_risk: Path | None = None) -> dict[str, object]:
     cfg = load_config_from_env()
+    requested_symbols = list(symbols or [])
+    tracked_symbols = sorted({normalize_reconciliation_symbol(symbol, "tracked") for symbol in requested_symbols})
     provider = BinanceReadonlyReconciliationProvider(
         config=BinanceReadonlyReconciliationConfig(
             base_url=cfg.binance.base_url,
@@ -32,7 +35,7 @@ def run(*, write_sanitized_position_risk: Path | None = None) -> dict[str, objec
             trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
             position_epsilon=Decimal(cfg.runtime.reconciliation_position_epsilon),
             max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols,
-        )
+        ), tracked_symbols=lambda: set(tracked_symbols)
     )
     snapshot = dict(provider.snapshot())
     positions = snapshot.get("positions", [])
@@ -44,6 +47,9 @@ def run(*, write_sanitized_position_risk: Path | None = None) -> dict[str, objec
     coverage = snapshot.get("coverage", {})
     return {
         "environment": cfg.binance.environment, "safe_base_host": host,
+        "requested_symbols": requested_symbols, "tracked_symbols": tracked_symbols,
+        "tracked_scope_source": "CLI" if tracked_symbols else "NONE",
+        "campaign_scope_validated": bool(tracked_symbols),
         "endpoint_statuses": {"positionRisk": "PASS" if coverage.get("positionRisk") else "FAIL",
                               "openOrders": "PASS" if coverage.get("openOrders") else "FAIL",
                               "userTrades": "PASS" if len(coverage.get("userTrades", [])) == snapshot.get("selected_count") else "FAIL"},
@@ -56,8 +62,10 @@ def run(*, write_sanitized_position_risk: Path | None = None) -> dict[str, objec
         "invalid_nonzero_symbol_count": sum(1 for p in positions if not p.get("symbol_valid") and not p.get("exact_zero")),
         "invalid_symbols": [p.get("symbol") for p in positions if not p.get("symbol_valid")],
         "open_order_count": len(snapshot.get("orders", [])), "selected_fill_symbols": snapshot.get("selected_symbols", []),
-        "symbol_sources": snapshot.get("symbol_sources", {}), "request_count": snapshot.get("request_count", 0),
-        "request_evidence": snapshot.get("request_evidence", []), "evidence_status": snapshot.get("evidence_status"),
+        "symbol_sources": snapshot.get("symbol_sources", {}),
+        "http_request_count": snapshot.get("http_request_count", 0),
+        "request_attempts": snapshot.get("request_attempts", []),
+        "endpoint_results": snapshot.get("endpoint_results", []), "evidence_status": snapshot.get("evidence_status"),
         "failed_endpoint": snapshot.get("failed_endpoint"), "failed_symbol": snapshot.get("failed_symbol"),
         "unknown_unreconciled_symbols": snapshot.get("unknown_unreconciled_symbols", []),
         "position_warnings": snapshot.get("position_warnings", []),
@@ -70,13 +78,17 @@ def main() -> int:
     parser.add_argument("--sanitize-position-risk", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--write-sanitized-position-risk", type=Path)
+    parser.add_argument("--symbols")
     args = parser.parse_args()
     if args.sanitize_position_risk:
         if not args.output: parser.error("--output is required with --sanitize-position-risk")
         sanitize_position_risk(args.sanitize_position_risk, args.output)
         return 0
     try:
-        result = run(write_sanitized_position_risk=args.write_sanitized_position_risk)
+        resolved_symbols = parse_symbols(args.symbols) if args.symbols is not None else []
+        if args.symbols is not None and not resolved_symbols:
+            raise ValueError("explicit_symbols_empty")
+        result = run(symbols=resolved_symbols, write_sanitized_position_risk=args.write_sanitized_position_risk)
     except Exception as exc:
         result = {"evidence_status": "INCOMPLETE", "sanitized_errors": [f"{type(exc).__name__}:configuration_or_authentication_failed"]}
     print(json.dumps(result, sort_keys=True))

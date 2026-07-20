@@ -10,6 +10,7 @@ import io
 import json
 import random
 import re
+import socket
 import ssl
 import time
 import urllib.parse
@@ -89,6 +90,13 @@ _SYMBOL = re.compile(r"^[A-Z0-9]{2,20}$")
 _OPEN_STATUSES = {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}
 
 
+def normalize_reconciliation_symbol(raw: Any, source: str = "tracked") -> str:
+    symbol = str(raw or "").strip().upper()
+    if not _SYMBOL.fullmatch(symbol):
+        raise ReconciliationScopeError(f"invalid_symbol:{source}")
+    return symbol
+
+
 class BinanceReadonlyReconciliationProvider:
     def __init__(self, *, config: BinanceReadonlyReconciliationConfig,
                  tracked_symbols: Callable[[], set[str]] | None = None,
@@ -105,6 +113,8 @@ class BinanceReadonlyReconciliationProvider:
         self._time_offset_ms = 0
         self._last_timestamp_ms = 0
         self._request_evidence: list[dict[str, Any]] = []
+        self._request_attempts: list[dict[str, Any]] = []
+        self._http_request_count = 0
 
     def close(self) -> None:
         self._transport.close()
@@ -116,6 +126,8 @@ class BinanceReadonlyReconciliationProvider:
         fills: list[dict[str, Any]] = []
         coverage = {"positionRisk": False, "openOrders": False, "userTrades": []}
         self._request_evidence = []
+        self._request_attempts = []
+        self._http_request_count = 0
         selected: list[str] = []
         sources: dict[str, list[str]] = {}
         failed_endpoint: str | None = None
@@ -166,7 +178,9 @@ class BinanceReadonlyReconciliationProvider:
                 "selected_count": len(selected), "configured_max": self._cfg.max_fill_symbols,
                 "selected_symbols": selected, "symbol_sources": sources,
                 "position_warnings": position_warnings,
-                "request_count": len(self._request_evidence), "request_evidence": list(self._request_evidence),
+                "http_request_count": self._http_request_count, "request_count": self._http_request_count,
+                "request_attempts": list(self._request_attempts),
+                "endpoint_results": list(self._request_evidence), "request_evidence": list(self._request_evidence),
                 "orphan_coverage": "GLOBAL_OPEN_ORDERS_AND_GLOBAL_POSITION_RISK"}
 
     def _signed_get(self, path: str, params: Mapping[str, Any], endpoint: str, symbol: str | None = None) -> Any:
@@ -174,6 +188,7 @@ class BinanceReadonlyReconciliationProvider:
         transient_retries = 0
         timestamp_retry = 0
         while True:
+            retry_attempt: dict[str, Any] | None = None
             timestamp = max(self._now_ms() + self._time_offset_ms, self._last_timestamp_ms + 1)
             self._last_timestamp_ms = timestamp  # unique and generated immediately before signing
             payload = {**params, "timestamp": timestamp, "recvWindow": self._cfg.recv_window_ms}
@@ -182,16 +197,21 @@ class BinanceReadonlyReconciliationProvider:
             url = f"{self._cfg.base_url.rstrip('/')}{path}?{query}&signature={signature}"
             code: int | None = None
             try:
-                result = self._http_get_json(url, {"X-MBX-APIKEY": self._cfg.api_key}, self._cfg.request_timeout_sec)
+                result, attempt = self._http_operation(url, {"X-MBX-APIKEY": self._cfg.api_key}, endpoint, symbol,
+                                                       "SIGNED", transient_retries + timestamp_retry + 1, None)
                 if isinstance(result, Mapping) and isinstance(result.get("code"), int) and int(result["code"]) < 0:
                     code = int(result["code"])
                     if code == -1021 and timestamp_retry == 0:
+                        attempt.update({"outcome": "RETRY", "retry_reason": "BINANCE_-1021", "binance_code": code,
+                                        "time_refresh_performed": True})
                         self._refresh_server_time(); time_refreshed = True; timestamp_retry = 1
                         continue
+                    attempt.update({"outcome": "FAIL", "binance_code": code})
                     raise ReconciliationAuthError(f"binance_error_code_{code}")
                 self._record(endpoint, symbol, code, time_refreshed, transient_retries + timestamp_retry, "PASS")
                 return result
             except error.HTTPError as exc:
+                retry_attempt = getattr(exc, "_alphaforge_attempt", None)
                 http_status = exc.code
                 binance_code = None
                 binance_message = None
@@ -200,8 +220,13 @@ class BinanceReadonlyReconciliationProvider:
                     binance_code = int(body.get("code")) if isinstance(body, Mapping) else None
                     binance_message = self._safe_binance_message(body.get("msg")) if isinstance(body, Mapping) else None
                 except Exception:
-                    pass
+                    binance_code = getattr(exc, "_alphaforge_binance_code", None)
+                    binance_message = getattr(exc, "_alphaforge_binance_message", None)
                 if binance_code == -1021 and timestamp_retry == 0:
+                    attempt = getattr(exc, "_alphaforge_attempt", None)
+                    if attempt is not None:
+                        attempt.update({"outcome": "RETRY", "retry_reason": "BINANCE_-1021", "binance_code": binance_code,
+                                        "time_refresh_performed": True})
                     self.close(); self._refresh_server_time(); time_refreshed = True; timestamp_retry = 1
                     continue
                 transient = http_status == 429 or 500 <= http_status < 600
@@ -211,19 +236,67 @@ class BinanceReadonlyReconciliationProvider:
                 if not transient or transient_retries >= self._cfg.transport_retries:
                     self._record(endpoint, symbol, binance_code, time_refreshed, transient_retries + timestamp_retry, "FAIL", http_status, binance_message)
                     raise ReconciliationPayloadError(f"binance_http_error:status={http_status}:code={binance_code}") from exc
-            except (TimeoutError, OSError, ssl.SSLError, http.client.HTTPException, error.URLError, json.JSONDecodeError, UnicodeDecodeError):
+            except (TimeoutError, OSError, ssl.SSLError, http.client.HTTPException, error.URLError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                retry_attempt = getattr(exc, "_alphaforge_attempt", None)
                 if transient_retries >= self._cfg.transport_retries:
                     self._record(endpoint, symbol, code, time_refreshed, transient_retries + timestamp_retry, "FAIL"); raise
             self.close()
+            if retry_attempt is not None:
+                retry_attempt.update({"outcome": "RETRY", "retry_reason": "TRANSIENT_FAILURE"})
             transient_retries += 1
             time.sleep(random.uniform(0.01, 0.05) * transient_retries)
 
     def _refresh_server_time(self) -> None:
         url = f"{self._cfg.base_url.rstrip('/')}/fapi/v1/time"
-        payload = self._http_get_json(url, {}, self._cfg.request_timeout_sec)
+        payload, _ = self._http_operation(url, {}, "serverTime", None, "SERVER_TIME", 1, "BINANCE_-1021")
         if not isinstance(payload, Mapping) or not isinstance(payload.get("serverTime"), int):
             raise ReconciliationPayloadError("server_time_payload_invalid")
         self._time_offset_ms = int(payload["serverTime"]) - self._now_ms()
+
+    def _http_operation(self, url: str, headers: Mapping[str, str], endpoint: str, symbol: str | None,
+                        request_kind: str, attempt_number: int, retry_reason: str | None) -> tuple[Any, dict[str, Any]]:
+        self._http_request_count += 1
+        attempt = {"sequence": self._http_request_count, "endpoint_class": endpoint, "symbol": symbol,
+                   "request_kind": request_kind, "attempt_number": attempt_number, "retry_reason": retry_reason,
+                   "http_status": None, "binance_code": None, "transport_category": None, "outcome": "FAIL",
+                   "time_refresh_performed": request_kind == "SERVER_TIME",
+                   "environment": urllib.parse.urlsplit(self._cfg.base_url).hostname}
+        self._request_attempts.append(attempt)
+        try:
+            payload = self._http_get_json(url, headers, self._cfg.request_timeout_sec)
+            attempt["outcome"] = "PASS"
+            return payload, attempt
+        except error.HTTPError as exc:
+            attempt["http_status"] = exc.code
+            attempt["transport_category"] = "HTTP"
+            try:
+                body_bytes = exc.read()
+                body = json.loads(body_bytes.decode("utf-8"))
+                attempt["binance_code"] = int(body.get("code")) if isinstance(body, Mapping) and body.get("code") is not None else None
+                exc.fp = io.BytesIO(body_bytes)
+                exc.file = exc.fp
+                setattr(exc, "_alphaforge_binance_code", attempt["binance_code"])
+                setattr(exc, "_alphaforge_binance_message", self._safe_binance_message(body.get("msg")) if isinstance(body, Mapping) else None)
+            except Exception:
+                pass
+            setattr(exc, "_alphaforge_attempt", attempt)
+            raise
+        except Exception as exc:
+            attempt["transport_category"] = self._transport_category(exc)
+            setattr(exc, "_alphaforge_attempt", attempt)
+            raise
+
+    @staticmethod
+    def _transport_category(exc: Exception) -> str:
+        if isinstance(exc, (TimeoutError, socket.timeout)):
+            return "TIMEOUT"
+        if isinstance(exc, ssl.SSLError):
+            return "TLS"
+        if isinstance(exc, error.URLError):
+            return "URL"
+        if isinstance(exc, http.client.HTTPException):
+            return "HTTP_PROTOCOL"
+        return "TRANSPORT"
 
     def _record(self, endpoint: str, symbol: str | None, code: int | None, refreshed: bool, retries: int, outcome: str,
                 http_status: int | None = None, message: str | None = None) -> None:
@@ -299,9 +372,7 @@ class BinanceReadonlyReconciliationProvider:
 
     @staticmethod
     def _valid_symbol(raw: Any, source: str) -> str:
-        symbol = str(raw or "").strip().upper()
-        if not _SYMBOL.fullmatch(symbol): raise ReconciliationScopeError(f"invalid_symbol:{source}")
-        return symbol
+        return normalize_reconciliation_symbol(raw, source)
 
     @staticmethod
     def _sanitized_symbol(raw: Any) -> str:
