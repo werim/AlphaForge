@@ -3279,3 +3279,25 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Reserved notification, queue/Redis, experimental, and microstructure controls remain unavailable until their subsystems exist; each now carries an exact reason code.
+## Environment contract safety/behavior closure — 2026-07-19
+
+### Added
+- A final mutation-boundary `ALPHAFORGE_ALLOW_LIVE_ORDERS` gate that is additive to LIVE enablement, operator acknowledgement, qualification, reconciliation, and kill-switch checks.
+- Canonical `ALPHAFORGE_ENABLE_ORDERBOOK_FILTER` behavior with missing-context and extreme imbalance/spoof-risk rejections.
+- Static audit validation for concrete consumer symbols and full pytest node IDs.
+
+### Changed
+- `ENABLE_REGIME_FILTER` is now a deprecated alias of `ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT`; `ENABLE_ORDERBOOK_FILTER` is a deprecated alias of the canonical orderbook setting.
+- Reserved entries now state a key-specific explanation, template-removal recommendation, and intended future subsystem.
+
+### Fixed
+- Typed snapshot changes are no longer described as behavioral evidence.
+
+### Removed
+- `ALPHAFORGE_ALLOW_LIVE_ORDERS`, `ENABLE_REGIME_FILTER`, and `ENABLE_ORDERBOOK_FILTER` from the unsupported set.
+
+### Breaking Changes
+- Direct LIVE adapter calls now require the canonical allow flag plus all authorization evidence; a context boolean alone is insufficient.
+
+### Known Issues
+- LIVE remains mutation-disabled at the runtime level and NOT LIVE READY; the new gate does not enable a LIVE execution campaign.

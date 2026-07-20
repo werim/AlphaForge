@@ -33,6 +33,9 @@ class EnvContractEntry:
     description: str = ""
     behavioral_test: str = ""
     unsupported_reason: str | None = None
+    unsupported_explanation: str | None = None
+    remove_from_templates: bool = False
+    intended_future_subsystem: str | None = None
 
     def public_dict(self) -> dict[str, object]:
         row = asdict(self)

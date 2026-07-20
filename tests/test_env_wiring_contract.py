@@ -28,18 +28,19 @@ def _alternate(setting):
 
 @pytest.mark.parametrize("setting", CONFIG_REGISTRY, ids=lambda setting: setting.env_name)
 def test_every_wired_value_has_typed_observable_resolution(setting, tmp_path):
-    """Registry-wide regression: changing a WIRED input changes its typed snapshot.
-
-    Runtime/decision tests named by ``behavioral_test`` cover each post-loader
-    consumer; this test prevents a setting from becoming an inert parser entry.
-    """
+    """Parsing regression only; this is not behavioral-wiring evidence."""
     alternate = _alternate(setting)
     baseline = effective_config_values(env={}, root=tmp_path)[setting.env_name]["value"]
     changed = effective_config_values(env={setting.env_name: alternate}, root=tmp_path)[setting.env_name]["value"]
     assert changed != baseline
-    row = next(item for item in ENV_CONTRACT if item.name == setting.env_name)
-    assert row.consumed_by and not row.consumed_by.endswith("load_config_from_env")
-    assert row.behavioral_test.startswith("tests/")
+
+
+def test_wired_metadata_resolves_to_specific_consumers_and_pytest_nodes():
+    report = audit_config(env={})
+    assert report["status"] != "FAIL", json.dumps(report, indent=2)
+    wired = [row for row in ENV_CONTRACT if row.classification == "WIRED"]
+    assert all("::" in row.behavioral_test for row in wired)
+    assert all(row.consumed_by and not row.consumed_by.endswith("load_config_from_env") for row in wired)
 
 
 def test_alias_conflicts_fail_audit_but_equal_values_are_accepted():

@@ -1,6 +1,7 @@
 """Machine-readable audit of AlphaForge's executable environment contract."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -13,6 +14,49 @@ from alphaforge.env_contract import bootstrap_environment, repository_root, reso
 
 TEMPLATES = (".env.example", ".env.test.example", ".env.medium.example", ".env.live.example")
 PLACEHOLDERS = {"changeme", "change-me", "your_api_key", "your_api_secret", "example", "test", "demo"}
+
+
+def _python_symbol_exists(reference: str, root: Path) -> bool:
+    """Resolve a dotted module/class/function reference without importing it."""
+    parts = reference.split(".")
+    module_path: Path | None = None
+    symbols: list[str] = []
+    for split_at in range(len(parts), 0, -1):
+        relative = "/".join(parts[:split_at])
+        if relative.startswith("alphaforge/"):
+            relative = "src/" + relative
+        candidate = root / f"{relative}.py"
+        package = root / relative / "__init__.py"
+        if candidate.is_file() or package.is_file():
+            module_path = package if package.is_file() else candidate
+            symbols = parts[split_at:]
+            break
+    if module_path is None:
+        return False
+    nodes = ast.parse(module_path.read_text(encoding="utf-8")).body
+    for name in symbols:
+        match = next((node for node in nodes if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name), None)
+        if match is None:
+            return False
+        nodes = match.body
+    return True
+
+
+def _pytest_node_exists(node_id: str, root: Path) -> bool:
+    if "::" not in node_id:
+        return False
+    filename, *symbols = node_id.split("::")
+    path = root / filename
+    if not path.is_file() or not symbols:
+        return False
+    nodes = ast.parse(path.read_text(encoding="utf-8")).body
+    for raw_name in symbols:
+        name = raw_name.split("[", 1)[0]
+        match = next((node for node in nodes if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name), None)
+        if match is None:
+            return False
+        nodes = match.body
+    return True
 
 
 def _template_keys(path: Path) -> tuple[list[str], list[str]]:
@@ -50,9 +94,15 @@ def audit_config(*, env: Mapping[str, str] | None = None, root: Path | None = No
     missing = sorted(CONTRACT_BY_NAME.keys() - documented)
     if missing:
         errors.append("contract variables missing from templates: " + ", ".join(missing))
-    wired_metadata_errors = [row.name for row in ENV_CONTRACT if row.classification == "WIRED" and (not row.consumed_by or row.consumed_by.endswith("load_config_from_env") or not row.behavioral_test)]
+    wired_metadata_errors = [row.name for row in ENV_CONTRACT if row.classification == "WIRED" and (not row.consumed_by or not row.behavioral_test or "::" not in row.behavioral_test)]
     if wired_metadata_errors:
         errors.append("wired variables lack a post-loader consumer or behavioral test: " + ", ".join(wired_metadata_errors))
+    missing_consumers = [row.name for row in ENV_CONTRACT if row.classification == "WIRED" and not _python_symbol_exists(row.consumed_by, root)]
+    if missing_consumers:
+        errors.append("wired consumer references do not resolve: " + ", ".join(missing_consumers))
+    missing_tests = [row.name for row in ENV_CONTRACT if row.classification == "WIRED" and not _pytest_node_exists(row.behavioral_test, root)]
+    if missing_tests:
+        errors.append("wired behavioral-test node IDs do not resolve: " + ", ".join(missing_tests))
     invalid_modes = [row.name for row in ENV_CONTRACT if not row.applies_to or not set(row.applies_to).issubset({"BACKTEST", "PAPER", "LIVE"})]
     if invalid_modes:
         errors.append("variables have invalid mode applicability: " + ", ".join(invalid_modes))

@@ -21,6 +21,8 @@ def _scan_exchange_markets_sync(config: Any) -> list[dict[str, Any]]:
 
 def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
     binance = getattr(getattr(config, "exchange", object()), "binance", object())
+    if str(getattr(binance, "default_market_type", "USD_M")).upper() != "USD_M":
+        return []
     base_url = str(getattr(binance, "base_url", "https://fapi.binance.com"))
     quote_asset = str(getattr(binance, "default_quote_asset", "USDT")).upper()
     try:

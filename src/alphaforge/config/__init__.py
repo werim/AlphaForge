@@ -96,6 +96,7 @@ class RuntimeSettings:
     block_unknown_expectancy: bool = True
     block_chop_market: bool = True
     require_regime_alignment: bool = True
+    enable_orderbook_filter: bool = False
     stop_too_wide_hard_reject: bool = True
     stop_too_wide_soft_score_min: float = 9.0
     stop_too_wide_soft_effective_rr_min: float = 1.75
@@ -107,6 +108,7 @@ class RuntimeSettings:
     enable_shadow_mode: bool = False
     enable_canary_mode: bool = False
     operator_live_acknowledged: bool = False
+    allow_live_orders: bool = False
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
     require_exchange_connectivity_for_live: bool = True
@@ -230,6 +232,7 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         "BLOCK_UNKNOWN_EXPECTANCY": getattr(runtime, "block_unknown_expectancy", True),
         "BLOCK_CHOP_MARKET": getattr(runtime, "block_chop_market", True),
         "REQUIRE_REGIME_ALIGNMENT": getattr(runtime, "require_regime_alignment", True),
+        "ENABLE_ORDERBOOK_FILTER": getattr(runtime, "enable_orderbook_filter", False),
         "STOP_TOO_WIDE_HARD_REJECT": getattr(runtime, "stop_too_wide_hard_reject", True),
         "STOP_TOO_WIDE_SOFT_SCORE_MIN": getattr(runtime, "stop_too_wide_soft_score_min", 9.0),
         "STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN": getattr(runtime, "stop_too_wide_soft_effective_rr_min", 1.75),
@@ -281,6 +284,7 @@ def load_config_from_env() -> AlphaForgeConfig:
         min_atr_pct=val("ALPHAFORGE_MIN_ATR_PCT"), max_atr_pct=val("ALPHAFORGE_MAX_ATR_PCT"),
         block_unknown_expectancy=val("ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY"), block_chop_market=val("ALPHAFORGE_BLOCK_CHOP_MARKET"),
         require_regime_alignment=val("ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT"), stop_too_wide_hard_reject=val("ALPHAFORGE_STOP_TOO_WIDE_HARD_REJECT"),
+        enable_orderbook_filter=val("ALPHAFORGE_ENABLE_ORDERBOOK_FILTER"),
         stop_too_wide_soft_score_min=val("ALPHAFORGE_STOP_TOO_WIDE_SOFT_SCORE_MIN"), stop_too_wide_soft_effective_rr_min=val("ALPHAFORGE_STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN"),
         stop_too_wide_max_risk_scale=val("ALPHAFORGE_STOP_TOO_WIDE_MAX_RISK_SCALE"), stop_too_wide_extreme_mult=val("ALPHAFORGE_STOP_TOO_WIDE_EXTREME_MULT"),
         max_latency_ms=val("ALPHAFORGE_MAX_LATENCY_MS"),
@@ -289,6 +293,7 @@ def load_config_from_env() -> AlphaForgeConfig:
         enable_shadow_mode=val("ALPHAFORGE_ENABLE_SHADOW_MODE"),
         enable_canary_mode=val("ALPHAFORGE_ENABLE_CANARY_MODE"),
         operator_live_acknowledged=val("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED"),
+        allow_live_orders=val("ALPHAFORGE_ALLOW_LIVE_ORDERS"),
         reconciliation_interval_sec=val("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC"),
         reconciliation_timeout_sec=val("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"),
         require_exchange_connectivity_for_live=_bool_env(env, "ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", True),

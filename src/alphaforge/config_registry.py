@@ -57,28 +57,46 @@ def _s(env, field, typ, default, category, applies, desc, min_value=None, max_va
         "Trade Quality Filters": "alphaforge.order.evaluate_trade_quality",
         "Execution Cost Filters": "alphaforge.execution.build_execution_cost_breakdown",
         "Runtime Risk Limits": "alphaforge.runtime.RuntimeOrchestrator._evaluate_runtime_risk",
-        "Backtest Settings": "backtest_order.run_backtest",
+        "Backtest Settings": "backtest_order.main",
         "Mode / Safety": "alphaforge.runtime._build_runtime_from_env",
         "Operations": "alphaforge.runtime._build_runtime_from_env",
         "Persistence": "alphaforge.persistence.init_db",
         "Logging": "alphaforge.runtime.main",
-        "Notifications": "alphaforge.telegram_alert_delivery.telegram_alert_provider_from_config",
+        "Notifications": "alphaforge.telegram_alert_delivery.telegram_alert_provider_from_env",
         "Hyperliquid": "alphaforge.exchange_market_scanner._scan_hyperliquid",
+        "Binance": "alphaforge.env_contract.resolve_binance_environment",
     }
     tests = {
-        "Trade Quality Filters": "tests/test_env_filters_canonical.py",
-        "Execution Cost Filters": "tests/test_env_filters_canonical.py",
-        "Runtime Risk Limits": "tests/test_runtime_env_config.py",
-        "Backtest Settings": "tests/test_backtest_filter_switches.py",
-        "Mode / Safety": "tests/test_runtime_env_config.py",
-        "Operations": "tests/test_runtime_env_config.py",
-        "Persistence": "tests/test_runtime_env_config.py",
-        "Logging": "tests/test_env_wiring_contract.py",
-        "Notifications": "tests/test_telegram_alert_delivery.py",
-        "Hyperliquid": "tests/test_env_wiring_contract.py",
+        "Trade Quality Filters": "tests/test_env_filters_canonical.py::test_env_score_threshold_changes_backtest_and_paper_decisions",
+        "Execution Cost Filters": "tests/test_env_filters_canonical.py::test_runtime_risk_uses_canonical_spread_slippage_funding_liquidity_and_stale",
+        "Runtime Risk Limits": "tests/test_runtime_env_config.py::test_runtime_env_loads_runtime_config_fields",
+        "Backtest Settings": "tests/test_backtest_filter_switches.py::test_backtest_trade_quality_switches_are_real_decision_gates",
+        "Mode / Safety": "tests/test_runtime_env_config.py::test_runtime_env_prefers_canonical_execution_mode",
+        "Operations": "tests/test_runtime_env_config.py::test_runtime_env_loads_runtime_config_fields",
+        "Persistence": "tests/test_runtime_env_config.py::test_runtime_env_db_url_prefers_alphaforge_database_url",
+        "Logging": "tests/test_env_wiring_contract.py::test_every_wired_value_has_typed_observable_resolution",
+        "Notifications": "tests/test_telegram_alert_delivery.py::test_telegram_send_confirmation_is_persisted_without_credentials",
+        "Hyperliquid": "tests/test_env_wiring_contract.py::test_hyperliquid_enabled_controls_scanner_without_network",
+        "Binance": "tests/test_env_contract.py::test_binance_explicit_override_and_testnet_backward_compatibility",
     }
-    kw.setdefault("consumed_by", consumers.get(category, "alphaforge.config.load_config_from_env"))
-    kw.setdefault("behavioral_test", tests.get(category, "tests/test_env_wiring_contract.py"))
+    # Resolve by setting family before falling back to category.  This keeps
+    # metadata tied to the function that actually reads the effective field,
+    # rather than claiming that every setting in a broad category shares one
+    # consumer merely because it is parsed by the same loader.
+    if env.startswith("ALPHAFORGE_BACKTEST_FILTER_"):
+        consumer = "alphaforge.config.BacktestFilterSwitches.disabled_filters"
+        behavior = "tests/test_backtest_filter_switches.py::test_backtest_trade_quality_switches_are_real_decision_gates"
+    elif env.startswith("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_"):
+        consumer = "backtest_order.main"
+        behavior = "tests/test_backtest_order_scanner.py::test_short_breakdown_rescue_enabled_marks_rows_and_original_reason"
+    elif env.startswith("ALPHAFORGE_BACKTEST_") and any(token in env for token in ("STRATEGY", "GUARD", "PROFILE_PASS", "CONSECUTIVE", "DIAGNOSTIC_SYMBOLS")):
+        consumer = "backtest_order.strategy_guardrail_config_from_env"
+        behavior = "tests/test_strategy_quality_guardrails.py::test_loss_streak_pause_rejects_after_configured_consecutive_sls"
+    else:
+        consumer = consumers.get(category, "alphaforge.config.load_config_from_env")
+        behavior = tests.get(category, "tests/test_env_wiring_contract.py::test_every_wired_value_has_typed_observable_resolution")
+    kw.setdefault("consumed_by", consumer)
+    kw.setdefault("behavioral_test", behavior)
     return ConfigSetting(env, field, typ, default, category, tuple(applies), desc, min_value=min_value, max_value=max_value, **kw)
 
 CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
@@ -97,7 +115,7 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_MAX_ATR_PCT", "max_atr_pct", "float", 3.0, "Trade Quality Filters", MODES, "Maximum ATR percent when ATR exists.", 0.0, 100.0),
     _s("ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY", "block_unknown_expectancy", "bool", True, "Trade Quality Filters", MODES, "Reject candidates without expectancy context."),
     _s("ALPHAFORGE_BLOCK_CHOP_MARKET", "block_chop_market", "bool", True, "Trade Quality Filters", MODES, "Reject candidates marked as chop."),
-    _s("ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT", "require_regime_alignment", "bool", True, "Trade Quality Filters", MODES, "Require setup/regime alignment."),
+    _s("ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT", "require_regime_alignment", "bool", True, "Trade Quality Filters", MODES, "Require setup/regime alignment.", deprecated_aliases=("ENABLE_REGIME_FILTER",), behavioral_test="tests/test_env_safety_and_filters.py::test_regime_alias_changes_actual_decision"),
     _s("ALPHAFORGE_STOP_TOO_WIDE_HARD_REJECT", "stop_too_wide_hard_reject", "bool", True, "Trade Quality Filters", MODES, "Hard-reject wide stops unless softening applies."),
     _s("ALPHAFORGE_STOP_TOO_WIDE_SOFT_SCORE_MIN", "stop_too_wide_soft_score_min", "float", 9.0, "Trade Quality Filters", MODES, "Minimum score for wide-stop softening.", 0.0, 10.0),
     _s("ALPHAFORGE_STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN", "stop_too_wide_soft_effective_rr_min", "float", 1.75, "Trade Quality Filters", MODES, "Minimum effective RR for wide-stop softening.", 0.0, 10.0),
@@ -141,6 +159,8 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", "reconciliation_interval_sec", "float", 5.0, "Operations", ("PAPER", "LIVE"), "Runtime reconciliation interval.", 0.1),
     _s("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", "reconciliation_timeout_sec", "float", 2.0, "Operations", ("PAPER", "LIVE"), "Runtime reconciliation timeout.", 0.1),
     _s("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "enable_binance_readonly_reconciliation", "bool", False, "Mode / Safety", ("PAPER", "LIVE"), "Enable signed read-only Binance reconciliation."),
+    _s("ALPHAFORGE_ALLOW_LIVE_ORDERS", "allow_live_orders", "bool", False, "Mode / Safety", ("LIVE",), "Additional deny-by-default authorization required before any LIVE adapter call.", dashboard_editable=False, consumed_by="alphaforge.order.execute_order_candidate", behavioral_test="tests/test_env_safety_and_filters.py::test_live_order_authorization_is_additive_and_fail_closed"),
+    _s("ALPHAFORGE_ENABLE_ORDERBOOK_FILTER", "enable_orderbook_filter", "bool", False, "Execution Cost Filters", MODES, "Enable orderbook-context availability and extreme imbalance/spoof-risk rejection.", deprecated_aliases=("ENABLE_ORDERBOOK_FILTER",), consumed_by="alphaforge.order.evaluate_trade_quality", behavioral_test="tests/test_env_safety_and_filters.py::test_orderbook_filter_changes_decision_without_disabling_other_gates"),
     _s("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", "binance_reconciliation_trade_lookback_ms", "int", 3600000, "Operations", ("PAPER", "LIVE"), "Read-only fill lookback window.", 1),
     _s("ALPHAFORGE_BACKTEST_OUTPUT_DIR", "backtest_output_dir", "str", "data/backtest", "Backtest Settings", ("BACKTEST",), "Backtest artifact output directory."),
     _s("ALPHAFORGE_BACKTEST_INITIAL_BALANCE", "backtest_initial_balance", "float", 1000.0, "Backtest Settings", ("BACKTEST",), "Backtest starting balance.", 0.01),
@@ -175,14 +195,14 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("TELEGRAM_BOT_TOKEN", "telegram_bot_token", "str", "", "Notifications", ("PAPER", "LIVE"), "Telegram bot token.", secret=True, dashboard_editable=False),
     _s("TELEGRAM_CHAT_ID", "telegram_chat_id", "str", "", "Notifications", ("PAPER", "LIVE"), "Telegram destination chat identifier.", secret=True, dashboard_editable=False),
     _s("BINANCE_ENVIRONMENT", "binance_environment", "str", "production", "Binance", ("PAPER", "LIVE"), "Binance USD-M Futures environment selector.", dashboard_editable=False, deprecated_aliases=("BINANCE_TESTNET",), consumed_by="alphaforge.env_contract.resolve_binance_environment"),
-    _s("BINANCE_BASE_URL", "binance_rest_base_url", "str", "", "Binance", MODES, "Optional explicit Binance USD-M REST override.", dashboard_editable=False, consumed_by="scanner, connectivity, reconciliation, historical provider"),
-    _s("BINANCE_WS_URL", "binance_ws_base_url", "str", "", "Binance", ("PAPER", "LIVE"), "Optional explicit Binance USD-M websocket override.", dashboard_editable=False, consumed_by="connectivity and environment consistency"),
-    _s("BINANCE_DEFAULT_QUOTE_ASSET", "binance_default_quote_asset", "str", "USDT", "Binance", MODES, "Quote asset used by the Binance market scanner.", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner"),
-    _s("BINANCE_DEFAULT_MARKET_TYPE", "binance_default_market_type", "str", "USD_M", "Binance", MODES, "Supported Binance Futures market type (USD_M).", dashboard_editable=False, consumed_by="Binance providers"),
+    _s("BINANCE_BASE_URL", "binance_rest_base_url", "str", "", "Binance", MODES, "Optional explicit Binance USD-M REST override.", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner._scan_binance"),
+    _s("BINANCE_WS_URL", "binance_ws_base_url", "str", "", "Binance", ("PAPER", "LIVE"), "Optional explicit Binance USD-M websocket override.", dashboard_editable=False, consumed_by="alphaforge.env_contract.resolve_binance_environment"),
+    _s("BINANCE_DEFAULT_QUOTE_ASSET", "binance_default_quote_asset", "str", "USDT", "Binance", MODES, "Quote asset used by the Binance market scanner.", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner._scan_binance"),
+    _s("BINANCE_DEFAULT_MARKET_TYPE", "binance_default_market_type", "str", "USD_M", "Binance", MODES, "Supported Binance Futures market type (USD_M).", dashboard_editable=False, consumed_by="alphaforge.exchange_market_scanner._scan_binance"),
     _s("BINANCE_RECV_WINDOW_MS", "binance_recv_window_ms", "int", 5000, "Binance", ("PAPER", "LIVE"), "Signed request receive window.", 1, dashboard_editable=False, deprecated_aliases=("ALPHAFORGE_BINANCE_RECV_WINDOW_MS",), consumed_by="alphaforge.binance_reconciliation_provider"),
-    _s("BINANCE_REQUEST_TIMEOUT_SEC", "binance_request_timeout_sec", "float", 2.0, "Binance", ("PAPER", "LIVE"), "Binance HTTP request timeout.", 0.1, dashboard_editable=False, consumed_by="scanner, connectivity, reconciliation"),
-    _s("BINANCE_API_KEY", "binance_api_key", "str", "", "Binance", ("PAPER", "LIVE"), "Read-only reconciliation API key.", secret=True, dashboard_editable=False, consumed_by="alphaforge.binance_reconciliation_provider"),
-    _s("BINANCE_API_SECRET", "binance_api_secret", "str", "", "Binance", ("PAPER", "LIVE"), "Read-only reconciliation API secret.", secret=True, dashboard_editable=False, consumed_by="alphaforge.binance_reconciliation_provider"),
+    _s("BINANCE_REQUEST_TIMEOUT_SEC", "binance_request_timeout_sec", "float", 2.0, "Binance", ("PAPER", "LIVE"), "Binance HTTP request timeout.", 0.1, dashboard_editable=False, consumed_by="alphaforge.binance_reconciliation_provider.BinanceReadonlyReconciliationProvider._signed_get"),
+    _s("BINANCE_API_KEY", "binance_api_key", "str", "", "Binance", ("PAPER", "LIVE"), "Read-only reconciliation API key.", secret=True, dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env"),
+    _s("BINANCE_API_SECRET", "binance_api_secret", "str", "", "Binance", ("PAPER", "LIVE"), "Read-only reconciliation API secret.", secret=True, dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env"),
 )
 
 REGISTRY_BY_ENV = {s.env_name: s for s in CONFIG_REGISTRY}
@@ -219,6 +239,29 @@ def _reserved_reason(name: str) -> str:
     return "NOT_IMPLEMENTED"
 
 
+def _reserved_details(name: str) -> tuple[str, bool, str | None]:
+    reason = _reserved_reason(name)
+    subsystem = None
+    if name.startswith("REDIS_"):
+        subsystem = "distributed cache/coordination"
+    elif name.startswith("QUEUE_"):
+        subsystem = "detached job queue"
+    elif "DISCORD" in name or "NOTIFICATION" in name:
+        subsystem = "notification delivery"
+    elif name.startswith("HYPERLIQUID_"):
+        subsystem = "authenticated Hyperliquid client"
+    elif name.startswith("ENABLE_"):
+        subsystem = "market microstructure filter"
+    explanations = {
+        "UNSAFE": f"{name} is intentionally inactive because enabling an unqualified experimental or mutation path would weaken fail-closed safety.",
+        "DEPRECATED_NO_EFFECT": f"{name} belonged to a superseded control and has no authoritative runtime meaning; migrate to the canonical safety/configuration gates.",
+        "REMOVED": f"{name} represents behavior removed from the production contract and is retained only so audit can identify stale .env files.",
+        "FUTURE_SUBSYSTEM": f"{name} cannot be consumed until the {subsystem or 'planned'} subsystem exists with persistence and failure semantics.",
+        "NOT_IMPLEMENTED": f"{name} has no safe production consumer today; implementing it requires the {subsystem or 'corresponding runtime'} subsystem rather than a parser-only flag.",
+    }
+    return explanations[reason], reason not in {"FUTURE_SUBSYSTEM"}, subsystem
+
+
 def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
     rows: list[EnvContractEntry] = []
     for setting in CONFIG_REGISTRY:
@@ -242,12 +285,16 @@ def env_contract_inventory() -> tuple[EnvContractEntry, ...]:
             ))
     for name in RESERVED_VARIABLES:
         secret = any(token in name for token in ("SECRET", "TOKEN", "KEY", "PASSWORD", "WEBHOOK"))
+        explanation, remove, future = _reserved_details(name)
         rows.append(EnvContractEntry(
             name=name, canonical_name=name, classification="RESERVED",
             value_type="secret" if secret else "string", default=None,
             applies_to=MODES, consumed_by="unsupported/reserved", secret=secret,
-            description="Reserved for migration compatibility; supplying it has no operational effect.",
+            description=explanation,
             unsupported_reason=_reserved_reason(name),
+            unsupported_explanation=explanation,
+            remove_from_templates=remove,
+            intended_future_subsystem=future,
         ))
     return tuple(sorted(rows, key=lambda row: row.name))
 
@@ -309,6 +356,7 @@ def decision_filter_config(mode: str, *, env: Mapping[str, str] | None = None, r
         "BLOCK_UNKNOWN_EXPECTANCY": val("ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY"),
         "BLOCK_CHOP_MARKET": val("ALPHAFORGE_BLOCK_CHOP_MARKET"),
         "REQUIRE_REGIME_ALIGNMENT": val("ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT"),
+        "ENABLE_ORDERBOOK_FILTER": val("ALPHAFORGE_ENABLE_ORDERBOOK_FILTER"),
         "STOP_TOO_WIDE_HARD_REJECT": val("ALPHAFORGE_STOP_TOO_WIDE_HARD_REJECT"),
         "STOP_TOO_WIDE_SOFTEN_FOR_HIGH_SCORE": True,
         "STOP_TOO_WIDE_SOFT_SCORE_MIN": val("ALPHAFORGE_STOP_TOO_WIDE_SOFT_SCORE_MIN"),

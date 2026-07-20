@@ -10,7 +10,7 @@
 - Last audit date: 2026-07-19
 - Live readiness verdict: NOT LIVE READY; Phase 9 may only produce `PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW` when canonical `CANARY_QUALIFIED` evidence passes all operational gates.
 
-- Configuration maturity: all four environment templates are generated from one WIRED/ALIAS/RESERVED registry; 101 settings have post-loader consumers and behavioral-test references, 14 are deterministic aliases, and the remaining 47 unsupported entries carry reviewable reason codes. Dotenv precedence, typed validation, duplicate/conflict detection, secret redaction, mode metadata, and production/testnet Binance resolution are tested. Demo requires explicit paired endpoints and LIVE remains fail closed.
+- Configuration maturity: all four environment templates are generated from one WIRED/ALIAS/RESERVED registry; 103 settings have resolvable concrete consumers and full behavioral-test node IDs, 16 are deterministic aliases, and 44 unsupported entries carry key-specific explanations/removal guidance. LIVE allow-orders is an additional final deny gate; regime/orderbook aliases and behavioral orderbook filtering are tested. Dotenv precedence, typed validation, duplicate/conflict detection, secret redaction, mode metadata, and Binance resolution remain tested. LIVE remains fail closed.
 
 - **2026-07-17 audit:** detached burn-in worker crash observability and dead-worker lifecycle cleanup are implemented; PAPER burn-in remains non-live-ready pending operational validation.
 - **2026-07-17 follow-up:** post-attach worker failures and pause shutdown attribution are lifecycle-correct; worker identity guards remain fail-closed.
