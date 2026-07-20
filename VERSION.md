@@ -1,6 +1,6 @@
 # AlphaForge Version
 
-- Current version: Phase 9 bounded Binance read-only reconciliation evidence
+- Current version: Phase 9 PR #291 corrected Binance reconciliation evidence
 - Current phase: Phase 9 - production-like PAPER burn-in execution, evidence audit, and release decision hardening
 - Runtime maturity: PAPER operational workflow with fail-closed preflight, STARTING-to-RUNNING verified worker attachment, explicit startup-failure terminalization, verified recovery evidence, historical local-zero-exposure diagnostic fallback evidence, stale-continuation terminalization, watchdog incidents, append-only/terminal source evidence audit, daily report, and final package; LIVE trading remains unavailable.
 - BACKTEST/PAPER/LIVE alignment: Phase 9 requires campaign == active continuation == runtime identity parity for PAPER attachment; runtime limits remain mode-aware, while persisted or runtime config drift fails closed.

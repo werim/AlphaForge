@@ -3341,3 +3341,24 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Credentialed Binance Demo acceptance was not run in this environment; LIVE remains unavailable.
+
+## PR #291 corrective hardening (2026-07-20)
+
+### Added
+- Safe invalid-zero-symbol warnings, sanitized position-distribution output, and stateful default-transport coverage.
+
+### Changed
+- `ALPHAFORGE_BINANCE_RECV_WINDOW_MS` is canonical; `BINANCE_RECV_WINDOW_MS` remains a deprecated, lower-precedence alias.
+
+### Fixed
+- HTTP error bodies now survive `HTTPError`, enabling real `-1021` detection and same-host time refresh.
+- Position quantities are parsed before symbol policy: invalid exact-zero symbols cannot fan out, while every invalid nonzero symbol fails closed.
+
+### Removed
+- No behavior removed.
+
+### Breaking Changes
+- The canonical receive-window name changed; the legacy alias remains compatible.
+
+### Known Issues
+- Credentialed Demo acceptance and GitHub CI remain NOT RUN in this network-restricted environment.

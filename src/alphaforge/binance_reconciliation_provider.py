@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import hmac
 import http.client
+import io
 import json
 import random
 import re
@@ -26,6 +27,12 @@ class ReconciliationPayloadError(RuntimeError):
 
 class ReconciliationScopeError(RuntimeError):
     pass
+
+
+class ReconciliationExposureError(ReconciliationPayloadError):
+    def __init__(self, message: str, positions: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.positions = positions
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +78,7 @@ class BinanceHttpTransport:
             response = self._connection.getresponse()
             body = response.read()
             if response.status >= 400:
-                raise error.HTTPError(url, response.status, response.reason, response.headers, None)
+                raise error.HTTPError(url, response.status, response.reason, response.headers, io.BytesIO(body))
             return json.loads(body.decode("utf-8"))
         except Exception:
             self.close()
@@ -113,10 +120,11 @@ class BinanceReadonlyReconciliationProvider:
         sources: dict[str, list[str]] = {}
         failed_endpoint: str | None = None
         failed_symbol: str | None = None
+        position_warnings: list[dict[str, Any]] = []
         try:
             failed_endpoint = "positionRisk"
             raw_positions = self._signed_get("/fapi/v3/positionRisk", {}, "positionRisk")
-            positions = self._normalize_positions(raw_positions)
+            positions, position_warnings = self._normalize_positions(raw_positions)
             coverage["positionRisk"] = True
             failed_endpoint = "openOrders"
             orders = self._normalize_orders(self._signed_get("/fapi/v1/openOrders", {}, "openOrders"))
@@ -131,14 +139,16 @@ class BinanceReadonlyReconciliationProvider:
                 fills.extend(self._normalize_fills(raw))
                 coverage["userTrades"].append(symbol)
             active = sum(1 for p in positions if p["active"])
-            return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources) | {
+            return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources, position_warnings) | {
                 "orphan_orders": len(orders), "orphan_positions": active, "duplicate_fills": 0,
                 "evidence_status": "COMPLETE", "errors": [], "failed_endpoint": None,
                 "failed_symbol": None, "unknown_unreconciled_symbols": [],
             }
         except Exception as exc:  # fail closed while preserving completed evidence
+            if isinstance(exc, ReconciliationExposureError):
+                positions = exc.positions
             unknown = [s for s in selected if s not in coverage["userTrades"]]
-            return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources) | {
+            return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources, position_warnings) | {
                 "orphan_orders": None, "orphan_positions": None, "duplicate_fills": None,
                 "evidence_status": "INCOMPLETE", "errors": [self._sanitize_error(exc)],
                 "failed_endpoint": failed_endpoint, "failed_symbol": failed_symbol,
@@ -150,11 +160,12 @@ class BinanceReadonlyReconciliationProvider:
 
     def _snapshot_base(self, at: str, positions: list[dict[str, Any]], orders: list[dict[str, Any]],
                        fills: list[dict[str, Any]], coverage: dict[str, Any], selected: list[str],
-                       sources: dict[str, list[str]]) -> dict[str, Any]:
+                       sources: dict[str, list[str]], position_warnings: list[dict[str, Any]]) -> dict[str, Any]:
         return {"exchange": "binance", "market_type": "USDT_M", "retrieved_at": at, "captured_at": at,
                 "orders": orders, "positions": positions, "fills": fills, "coverage": coverage,
                 "selected_count": len(selected), "configured_max": self._cfg.max_fill_symbols,
                 "selected_symbols": selected, "symbol_sources": sources,
+                "position_warnings": position_warnings,
                 "request_count": len(self._request_evidence), "request_evidence": list(self._request_evidence),
                 "orphan_coverage": "GLOBAL_OPEN_ORDERS_AND_GLOBAL_POSITION_RISK"}
 
@@ -181,22 +192,25 @@ class BinanceReadonlyReconciliationProvider:
                 self._record(endpoint, symbol, code, time_refreshed, transient_retries + timestamp_retry, "PASS")
                 return result
             except error.HTTPError as exc:
-                code = exc.code
+                http_status = exc.code
                 binance_code = None
+                binance_message = None
                 try:
                     body = json.loads(exc.read().decode("utf-8"))
                     binance_code = int(body.get("code")) if isinstance(body, Mapping) else None
+                    binance_message = self._safe_binance_message(body.get("msg")) if isinstance(body, Mapping) else None
                 except Exception:
                     pass
                 if binance_code == -1021 and timestamp_retry == 0:
                     self.close(); self._refresh_server_time(); time_refreshed = True; timestamp_retry = 1
                     continue
-                transient = exc.code == 429 or 500 <= exc.code < 600
-                if exc.code in {401, 403}:
-                    self._record(endpoint, symbol, code, time_refreshed, transient_retries + timestamp_retry, "FAIL")
-                    raise ReconciliationAuthError(f"binance_auth_failed_status_{exc.code}") from exc
+                transient = http_status == 429 or 500 <= http_status < 600
+                if http_status in {401, 403}:
+                    self._record(endpoint, symbol, binance_code, time_refreshed, transient_retries + timestamp_retry, "FAIL", http_status, binance_message)
+                    raise ReconciliationAuthError(f"binance_auth_failed_status_{http_status}") from exc
                 if not transient or transient_retries >= self._cfg.transport_retries:
-                    self._record(endpoint, symbol, code, time_refreshed, transient_retries + timestamp_retry, "FAIL"); raise
+                    self._record(endpoint, symbol, binance_code, time_refreshed, transient_retries + timestamp_retry, "FAIL", http_status, binance_message)
+                    raise ReconciliationPayloadError(f"binance_http_error:status={http_status}:code={binance_code}") from exc
             except (TimeoutError, OSError, ssl.SSLError, http.client.HTTPException, error.URLError, json.JSONDecodeError, UnicodeDecodeError):
                 if transient_retries >= self._cfg.transport_retries:
                     self._record(endpoint, symbol, code, time_refreshed, transient_retries + timestamp_retry, "FAIL"); raise
@@ -211,28 +225,43 @@ class BinanceReadonlyReconciliationProvider:
             raise ReconciliationPayloadError("server_time_payload_invalid")
         self._time_offset_ms = int(payload["serverTime"]) - self._now_ms()
 
-    def _record(self, endpoint: str, symbol: str | None, code: int | None, refreshed: bool, retries: int, outcome: str) -> None:
+    def _record(self, endpoint: str, symbol: str | None, code: int | None, refreshed: bool, retries: int, outcome: str,
+                http_status: int | None = None, message: str | None = None) -> None:
         self._request_evidence.append({"endpoint_class": endpoint, "symbol": symbol, "binance_code": code,
+                                       "http_status": http_status, "binance_message": message,
                                        "time_refresh_performed": refreshed, "retry_count": retries, "final_outcome": outcome})
 
-    def _normalize_positions(self, payload: Any) -> list[dict[str, Any]]:
+    def _normalize_positions(self, payload: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not isinstance(payload, list): raise ReconciliationPayloadError("position_risk_payload_not_list")
         out = []
+        warnings: list[dict[str, Any]] = []
         for row in payload:
             if not isinstance(row, Mapping): raise ReconciliationPayloadError("position_risk_row_not_object")
-            symbol = self._valid_symbol(row.get("symbol"), "position")
             raw_qty = row.get("positionAmt")
             try:
+                if raw_qty is None: raise InvalidOperation
                 qty = Decimal(str(raw_qty))
                 if not qty.is_finite(): raise InvalidOperation
             except (InvalidOperation, ValueError, TypeError):
-                raise ReconciliationPayloadError(f"malformed_position_amount:{symbol}") from None
-            out.append({"symbol": symbol, "qty": float(qty), "qty_exact": str(qty),
-                        "active": abs(qty) > self._cfg.position_epsilon,
-                        "epsilon_filtered": qty != 0 and abs(qty) <= self._cfg.position_epsilon,
+                raise ReconciliationExposureError("malformed_position_amount", out) from None
+            raw_symbol = row.get("symbol")
+            normalized = str(raw_symbol or "").strip().upper()
+            valid = bool(_SYMBOL.fullmatch(normalized))
+            exact_zero = qty == 0
+            epsilon_filtered = not exact_zero and abs(qty) <= self._cfg.position_epsilon
+            active = abs(qty) > self._cfg.position_epsilon
+            symbol = normalized if valid else self._sanitized_symbol(raw_symbol)
+            normalized_row = {"symbol": symbol, "symbol_valid": valid, "qty": float(qty), "qty_exact": str(qty),
+                        "active": active, "epsilon_filtered": epsilon_filtered, "exact_zero": exact_zero,
                         "entry_price": float(row.get("entryPrice", 0) or 0), "position_side": str(row.get("positionSide") or "BOTH"),
-                        "unrealized_pnl": float(row.get("unRealizedProfit", 0) or 0)})
-        return out
+                        "unrealized_pnl": float(row.get("unRealizedProfit", 0) or 0)}
+            out.append(normalized_row)
+            if not valid and exact_zero:
+                warnings.append({"category": "zero_exposure_invalid_symbol", "symbol": symbol})
+            elif not valid:
+                classification = "active_position_invalid_symbol" if active else "epsilon_position_invalid_symbol"
+                raise ReconciliationExposureError(classification, out)
+        return out, warnings
 
     def _normalize_orders(self, payload: Any) -> list[dict[str, Any]]:
         if not isinstance(payload, list): raise ReconciliationPayloadError("open_orders_payload_not_list")
@@ -273,6 +302,19 @@ class BinanceReadonlyReconciliationProvider:
         symbol = str(raw or "").strip().upper()
         if not _SYMBOL.fullmatch(symbol): raise ReconciliationScopeError(f"invalid_symbol:{source}")
         return symbol
+
+    @staticmethod
+    def _sanitized_symbol(raw: Any) -> str:
+        digest = hashlib.sha256(str(raw or "").encode("utf-8", errors="replace")).hexdigest()[:12]
+        return f"INVALID_SYMBOL_SHA256_{digest}"
+
+    @staticmethod
+    def _safe_binance_message(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        message = str(raw).replace("\r", " ").replace("\n", " ")[:200]
+        message = re.sub(r"(?i)(signature|api[-_ ]?key|secret)\s*[=:]\s*[^ &]+", r"\1=REDACTED", message)
+        return message
 
     @staticmethod
     def _sanitize_error(exc: Exception) -> str:

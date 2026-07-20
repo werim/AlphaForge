@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import json
 import os
 from pathlib import Path
@@ -22,7 +22,7 @@ def sanitize_position_risk(source: Path, destination: Path) -> None:
     destination.write_text(json.dumps(safe, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def run() -> dict[str, object]:
+def run(*, write_sanitized_position_risk: Path | None = None) -> dict[str, object]:
     cfg = load_config_from_env()
     provider = BinanceReadonlyReconciliationProvider(
         config=BinanceReadonlyReconciliationConfig(
@@ -36,6 +36,10 @@ def run() -> dict[str, object]:
     )
     snapshot = dict(provider.snapshot())
     positions = snapshot.get("positions", [])
+    if write_sanitized_position_risk is not None:
+        write_sanitized_position_risk.parent.mkdir(parents=True, exist_ok=True)
+        safe_positions = [{key: row.get(key) for key in ("symbol", "qty_exact", "position_side", "entry_price", "unrealized_pnl", "symbol_valid", "exact_zero", "epsilon_filtered", "active")} for row in positions]
+        write_sanitized_position_risk.write_text(json.dumps(safe_positions, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     host = urlsplit(cfg.binance.base_url).hostname
     coverage = snapshot.get("coverage", {})
     return {
@@ -46,11 +50,17 @@ def run() -> dict[str, object]:
         "position_row_count": len(positions),
         "exact_zero_position_count": sum(1 for p in positions if p.get("qty_exact") == "0" or Decimal(str(p.get("qty_exact"))) == 0),
         "non_zero_position_count": sum(1 for p in positions if Decimal(str(p.get("qty_exact"))) != 0),
-        "epsilon_filtered_count": sum(1 for p in positions if p.get("epsilon_filtered")),
+        "epsilon_filtered_position_count": sum(1 for p in positions if p.get("epsilon_filtered")),
         "active_position_count": sum(1 for p in positions if p.get("active")),
+        "invalid_zero_exposure_symbol_count": sum(1 for p in positions if not p.get("symbol_valid") and p.get("exact_zero")),
+        "invalid_nonzero_symbol_count": sum(1 for p in positions if not p.get("symbol_valid") and not p.get("exact_zero")),
+        "invalid_symbols": [p.get("symbol") for p in positions if not p.get("symbol_valid")],
         "open_order_count": len(snapshot.get("orders", [])), "selected_fill_symbols": snapshot.get("selected_symbols", []),
         "symbol_sources": snapshot.get("symbol_sources", {}), "request_count": snapshot.get("request_count", 0),
         "request_evidence": snapshot.get("request_evidence", []), "evidence_status": snapshot.get("evidence_status"),
+        "failed_endpoint": snapshot.get("failed_endpoint"), "failed_symbol": snapshot.get("failed_symbol"),
+        "unknown_unreconciled_symbols": snapshot.get("unknown_unreconciled_symbols", []),
+        "position_warnings": snapshot.get("position_warnings", []),
         "sanitized_errors": snapshot.get("errors", []),
     }
 
@@ -59,13 +69,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sanitize-position-risk", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--write-sanitized-position-risk", type=Path)
     args = parser.parse_args()
     if args.sanitize_position_risk:
         if not args.output: parser.error("--output is required with --sanitize-position-risk")
         sanitize_position_risk(args.sanitize_position_risk, args.output)
         return 0
     try:
-        result = run()
+        result = run(write_sanitized_position_risk=args.write_sanitized_position_risk)
     except Exception as exc:
         result = {"evidence_status": "INCOMPLETE", "sanitized_errors": [f"{type(exc).__name__}:configuration_or_authentication_failed"]}
     print(json.dumps(result, sort_keys=True))

@@ -55,3 +55,11 @@ def test_all_dashboard_editable_managed_settings_are_documented_in_env_example()
     env_names = _env_names_from_example()
     editable = {s.env_name for s in CONFIG_REGISTRY if s.dashboard_editable and not s.secret}
     assert editable.issubset(env_names)
+
+
+def test_reconciliation_recv_window_canonical_precedence():
+    from alphaforge.config_registry import effective_config_values
+    values = effective_config_values(env={"ALPHAFORGE_BINANCE_RECV_WINDOW_MS":"7000", "BINANCE_RECV_WINDOW_MS":"9000"})
+    row = values["ALPHAFORGE_BINANCE_RECV_WINDOW_MS"]
+    assert row["value"] == 7000
+    assert row["source"] == "process_env"

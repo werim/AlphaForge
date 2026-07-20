@@ -175,3 +175,17 @@ python -m alphaforge.binance_reconciliation_check --sanitize-position-risk .\pos
 ```
 
 Exit code zero means `evidence_status=COMPLETE`; every incomplete endpoint, malformed exposure, invalid symbol, cap breach, or exhausted bounded retry exits nonzero. Confirm `positionRisk` and `openOrders` are `PASS`, the selected fill scope is bounded, and no unresolved `-1021` remains before accepting the evidence.
+
+### PR #291 corrective Demo capture
+
+Run with read-only credentials already present in the process environment:
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION = "true"
+$env:BINANCE_BASE_URL = "https://demo-fapi.binance.com"
+python -m alphaforge.binance_reconciliation_check --write-sanitized-position-risk .\artifacts\binance_position_risk_safe.json
+if ($LASTEXITCODE -ne 0) { throw "Binance reconciliation evidence is incomplete" }
+```
+
+Exact-zero rows with invalid venue symbols are retained using a one-way symbol hash, reported as `zero_exposure_invalid_symbol` warnings, excluded from `userTrades`, and do not alone make financially authoritative evidence incomplete. Invalid symbols with any nonzero quantity—including epsilon-filtered quantities—remain blockers. The generated artifact is local operator evidence and must not be committed automatically.

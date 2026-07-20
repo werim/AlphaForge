@@ -302,7 +302,7 @@ def load_config_from_env() -> AlphaForgeConfig:
         required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
         exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
         enable_binance_readonly_reconciliation=val("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION"),
-        binance_reconciliation_recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        binance_reconciliation_recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
         binance_reconciliation_trade_lookback_ms=val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS"),
         reconciliation_position_epsilon=val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON"),
         reconciliation_max_fill_symbols=val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS"),
@@ -314,7 +314,7 @@ def load_config_from_env() -> AlphaForgeConfig:
         resolution_source=resolved_binance.resolution_source,
         default_quote_asset=str(val("BINANCE_DEFAULT_QUOTE_ASSET")).upper(),
         default_market_type=str(val("BINANCE_DEFAULT_MARKET_TYPE")).upper(),
-        recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
         request_timeout_sec=float(val("BINANCE_REQUEST_TIMEOUT_SEC")),
     )
     if binance.default_market_type != "USD_M":

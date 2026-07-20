@@ -162,3 +162,176 @@ def test_later_fill_failure_preserves_positions_orders_and_unknown_counts():
     assert snap["orphan_orders"] is snap["orphan_positions"] is None
     assert snap["unknown_unreconciled_symbols"] == ["BTCUSDT"]
     assert "secret" not in str(snap) and "signature=" not in str(snap)
+
+import io
+import ssl
+import urllib.parse
+from alphaforge.binance_reconciliation_provider import BinanceHttpTransport
+import alphaforge.binance_reconciliation_provider as provider_module
+
+
+class _Response:
+    def __init__(self, status=200, payload=None, reason="OK"):
+        self.status = status; self.reason = reason; self.headers = {"content-type": "application/json"}
+        self._body = json.dumps([] if payload is None else payload).encode()
+    def read(self): return self._body
+
+
+class _Connection:
+    def __init__(self, responses, failure=None):
+        self.responses = responses; self.failure = failure; self.closed = 0; self.requests = []
+    def request(self, method, path, headers):
+        self.requests.append(path)
+        if self.failure: raise self.failure
+    def getresponse(self): return self.responses.pop(0)
+    def close(self): self.closed += 1
+
+
+def _install_connections(monkeypatch, responses_or_failures):
+    made = []
+    queue = list(responses_or_failures)
+    def factory(host, port, timeout):
+        item = queue.pop(0)
+        connection = _Connection(item if isinstance(item, list) else [], item if isinstance(item, BaseException) else None)
+        made.append(connection); return connection
+    monkeypatch.setattr(provider_module.http.client, "HTTPSConnection", factory)
+    monkeypatch.setattr(provider_module.time, "sleep", lambda _: None)
+    return made
+
+
+def test_default_transport_preserves_http_error_body(monkeypatch):
+    made = _install_connections(monkeypatch, [[_Response(400, {"code": -1100, "msg": "Illegal characters"})]])
+    transport = BinanceHttpTransport()
+    with pytest.raises(error.HTTPError) as caught:
+        transport.get_json("https://demo-fapi.binance.com/fapi/v3/positionRisk?secret=query", {}, 1)
+    assert json.loads(caught.value.read()) == {"code": -1100, "msg": "Illegal characters"}
+    assert made[0].closed == 1 and transport._connection is None
+
+
+def test_default_transport_1021_refreshes_same_host_and_resigns_once(monkeypatch):
+    made = _install_connections(monkeypatch, [
+        [_Response(400, {"code": -1021, "msg": "Timestamp for this request is outside of the recvWindow."})],
+        [_Response(200, {"serverTime": 1700000001000}), _Response(200, []), _Response(200, [])],
+    ])
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s"), now_ms=lambda: 1700000000000)
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "COMPLETE"
+    paths = [path for connection in made for path in connection.requests]
+    assert paths[0].startswith("/fapi/v3/positionRisk?")
+    assert paths[1] == "/fapi/v1/time"
+    assert paths[2].startswith("/fapi/v3/positionRisk?") and paths[2] != paths[0]
+    assert sum(path == "/fapi/v1/time" for path in paths) == 1
+    assert snap["request_evidence"][0]["time_refresh_performed"] is True
+    assert made[0].closed and all(connection.closed for connection in made)
+
+
+def test_default_transport_deterministic_400_not_retried(monkeypatch):
+    made = _install_connections(monkeypatch, [[_Response(400, {"code": -1100, "msg": "Illegal characters"})]])
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s"))
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "INCOMPLETE"
+    assert "status=400:code=-1100" in snap["errors"][0]
+    assert snap["request_count"] == 1 and snap["request_evidence"][0]["binance_code"] == -1100
+    assert len(made) == 1 and made[0].closed == 1
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("timeout"), ssl.SSLError("tls")])
+def test_default_transport_failure_closes_cached_connection(monkeypatch, failure):
+    made = _install_connections(monkeypatch, [failure])
+    transport = BinanceHttpTransport()
+    with pytest.raises(type(failure)):
+        transport.get_json("https://demo-fapi.binance.com/fapi/v1/time", {}, 1)
+    assert made[0].closed == 1 and transport._connection is None
+    transport.close(); transport.close()
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_default_transport_transient_http_retry_uses_new_connection(monkeypatch, status):
+    made = _install_connections(monkeypatch, [
+        [_Response(status, {"code": -1003, "msg": "transient"})],
+        [_Response(200, []), _Response(200, [])],
+    ])
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s", transport_retries=1))
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "COMPLETE"
+    assert len(made) == 2 and made[0] is not made[1] and made[0].closed == 1
+
+
+def test_failed_snapshot_does_not_poison_next_snapshot(monkeypatch):
+    made = _install_connections(monkeypatch, [TimeoutError("first"), TimeoutError("retry"), [_Response(200, []), _Response(200, [])]])
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s", transport_retries=1))
+    assert provider.snapshot()["evidence_status"] == "INCOMPLETE"
+    assert provider.snapshot()["evidence_status"] == "COMPLETE"
+    assert all(connection.closed for connection in made)
+
+
+@pytest.mark.parametrize("symbol", ["????USDT", "éUSDT", "\ufffd\ufffdUSDT"])
+def test_exact_zero_invalid_symbol_is_preserved_warning_without_fanout(symbol):
+    provider, calls = _provider([{"symbol": symbol, "positionAmt": "0"}])
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "COMPLETE"
+    assert snap["positions"][0]["exact_zero"] and not snap["positions"][0]["symbol_valid"]
+    assert snap["position_warnings"][0]["category"] == "zero_exposure_invalid_symbol"
+    assert snap["selected_symbols"] == [] and not any("userTrades" in call for call in calls)
+    assert symbol not in str(snap)
+
+
+@pytest.mark.parametrize(("amount", "reason"), [("0.000000001", "epsilon_position_invalid_symbol"), ("1", "active_position_invalid_symbol")])
+def test_nonzero_invalid_symbol_fails_closed_and_is_preserved(amount, reason):
+    provider, calls = _provider([{"symbol": "????USDT", "positionAmt": amount}])
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "INCOMPLETE" and reason in snap["errors"][0]
+    assert len(snap["positions"]) == 1 and Decimal(snap["positions"][0]["qty_exact"]) == Decimal(amount)
+    assert snap["orphan_positions"] is None and not any("userTrades" in call for call in calls)
+
+
+def test_malformed_amount_precedes_invalid_symbol_policy():
+    provider, _ = _provider([{"symbol": "????USDT", "positionAmt": "bad"}])
+    snap = provider.snapshot()
+    assert "malformed_position_amount" in snap["errors"][0]
+    assert "invalid_symbol" not in snap["errors"][0]
+
+
+def test_completed_fill_evidence_survives_later_symbol_failure():
+    def http(url, headers, timeout):
+        if "positionRisk" in url: return [{"symbol":"AAAUSDT", "positionAmt":"1"}, {"symbol":"BBBUSDT", "positionAmt":"1"}]
+        if "openOrders" in url: return []
+        if "symbol=AAAUSDT" in url: return [{"id":1, "orderId":2, "symbol":"AAAUSDT", "qty":"1", "price":"1"}]
+        raise TimeoutError("second fill failed")
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s", transport_retries=0), http_get_json=http)
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "INCOMPLETE" and len(snap["positions"]) == 2
+    assert [fill["symbol"] for fill in snap["fills"]] == ["AAAUSDT"]
+    assert snap["coverage"]["userTrades"] == ["AAAUSDT"]
+    assert snap["unknown_unreconciled_symbols"] == ["BBBUSDT"]
+    assert snap["orphan_orders"] is snap["orphan_positions"] is snap["duplicate_fills"] is None
+
+
+def test_invalid_zero_warning_does_not_erase_valid_exchange_evidence():
+    provider, _ = _provider(
+        [{"symbol":"BTCUSDT", "positionAmt":"1"}, {"symbol":"????USDT", "positionAmt":"0"}],
+        orders=[{"symbol":"ETHUSDT", "status":"NEW"}])
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "COMPLETE" and len(snap["positions"]) == 2 and len(snap["orders"]) == 1
+    assert snap["selected_symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert len(snap["position_warnings"]) == 1
+
+
+def test_1021_refresh_failure_preserves_prior_evidence():
+    def http(url, headers, timeout):
+        if url.endswith("/fapi/v1/time"): raise TimeoutError("time unavailable")
+        if "positionRisk" in url: return [{"symbol":"BTCUSDT", "positionAmt":"1"}]
+        if "openOrders" in url: return []
+        raise error.HTTPError(url, 400, "Bad Request", {}, io.BytesIO(json.dumps({"code":-1021,"msg":"timestamp"}).encode()))
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s", transport_retries=0), http_get_json=http)
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "INCOMPLETE" and len(snap["positions"]) == 1 and snap["orders"] == []
+    assert snap["failed_endpoint"] == "userTrades" and snap["failed_symbol"] == "BTCUSDT"
+    assert snap["unknown_unreconciled_symbols"] == ["BTCUSDT"]
+    assert snap["orphan_orders"] is snap["orphan_positions"] is None
