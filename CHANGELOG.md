@@ -3238,3 +3238,86 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Recovery evidence SQL read failures now fail closed as `RECOVERY_EVIDENCE_UNAVAILABLE`; pending predecessor orders are global blockers, and preflight no longer uses a DB-global campaign recovery count.
 - Preflight and runtime now share one normalized read-only reconciliation probe, including provider provenance, timestamp, completeness, orders, and positions.
 - Recovery probes now reject reported errors, missing fields, incomplete evidence, and malformed payloads; PID reuse is not treated as an active predecessor without lineage-aware process evidence.
+## Environment contract — 2026-07-19
+
+### Added
+- Executable WIRED/ALIAS/RESERVED inventory, JSON config audit, canonical dotenv bootstrap, and explicit Binance production/testnet resolution.
+- Burn-in preflight checks for contract validity, duplicate/unknown keys, endpoint coherence, and non-placeholder reconciliation credentials.
+
+### Changed
+- Scanner, connectivity, runtime reconciliation, and burn-in reconciliation now share the resolved Binance REST endpoint and request settings.
+- All four environment templates are canonical, duplicate-free, and isolate deprecated aliases and unsupported reserved keys.
+
+### Fixed
+- `BINANCE_TESTNET=true` no longer silently uses production USD-M Futures REST; canonical settings beat aliases and process environment beats dotenv.
+
+### Removed
+- Duplicate template assignments and the contradictory testnet/production endpoint example.
+
+### Breaking Changes
+- Invalid booleans, contradictory Binance environment selectors, unknown operational prefixes, and placeholder authenticated credentials now fail audit/preflight. Demo requires explicit REST and websocket URLs.
+
+### Known Issues
+- Binance Demo endpoints are not embedded because the repository has no verified Demo environment contract; operators must provide both explicit endpoints. LIVE is not ready.
+## Environment contract consumer wiring follow-up — 2026-07-19
+
+### Added
+- Post-loader consumer and behavioral-test metadata for every WIRED setting, strict alias-conflict and mode-metadata audit checks, and explicit unsupported reason codes.
+
+### Changed
+- Promoted runtime operations/risk, persistence/logging, Telegram, Hyperliquid, backtest filter, strategy guardrail, and rescue settings from RESERVED to real canonical consumers.
+- Reduced RESERVED from 93 initial entries to 47 genuinely unsupported, removed, unsafe, deprecated-no-effect, or future-subsystem entries.
+
+### Fixed
+- BACKTEST filter switches now appear as operational registry settings matching their existing decision-gate consumers instead of being mislabeled unsupported.
+
+### Removed
+- Direct Telegram environment reads and direct backtest guardrail/rescue environment parsing outside the canonical registry.
+
+### Breaking Changes
+- Supplying different non-empty canonical and alias values now fails config audit rather than silently selecting one; canonical precedence remains deterministic after the conflict is corrected.
+
+### Known Issues
+- Reserved notification, queue/Redis, experimental, and microstructure controls remain unavailable until their subsystems exist; each now carries an exact reason code.
+## Environment contract safety/behavior closure — 2026-07-19
+
+### Added
+- A final mutation-boundary `ALPHAFORGE_ALLOW_LIVE_ORDERS` gate that is additive to LIVE enablement, operator acknowledgement, qualification, reconciliation, and kill-switch checks.
+- Canonical `ALPHAFORGE_ENABLE_ORDERBOOK_FILTER` behavior with missing-context and extreme imbalance/spoof-risk rejections.
+- Static audit validation for concrete consumer symbols and full pytest node IDs.
+
+### Changed
+- `ENABLE_REGIME_FILTER` is now a deprecated alias of `ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT`; `ENABLE_ORDERBOOK_FILTER` is a deprecated alias of the canonical orderbook setting.
+- Reserved entries now state a key-specific explanation, template-removal recommendation, and intended future subsystem.
+
+### Fixed
+- Typed snapshot changes are no longer described as behavioral evidence.
+
+### Removed
+- `ALPHAFORGE_ALLOW_LIVE_ORDERS`, `ENABLE_REGIME_FILTER`, and `ENABLE_ORDERBOOK_FILTER` from the unsupported set.
+
+### Breaking Changes
+- Direct LIVE adapter calls now require the canonical allow flag plus all authorization evidence; a context boolean alone is insufficient.
+
+### Known Issues
+- LIVE remains mutation-disabled at the runtime level and NOT LIVE READY; the new gate does not enable a LIVE execution campaign.
+## Authoritative LIVE authorization integration — 2026-07-20
+
+### Added
+- Runtime-owned LIVE authorization snapshots sourced from runtime config, qualification report, reconciliation state, recovery state, and the persisted kill-switch control store.
+- Final-boundary authorization refresh immediately before every real execution adapter invocation.
+
+### Changed
+- Runtime LIVE submission now constructs its own `OrderExecutionContext`; arbitrary caller dictionaries are not accepted as authoritative input.
+
+### Fixed
+- Closed the gap where only manually constructed tests supplied `live_authorization` to the order layer.
+
+### Removed
+- Trust in a cached `ctx.storage["live_authorization"]` mapping at the final mutation boundary.
+
+### Breaking Changes
+- Direct LIVE `OrderExecutionContext` users must supply an authoritative refresh provider; a static mapping alone fails closed.
+
+### Known Issues
+- Runtime Phase 6 still deliberately blocks real LIVE startup; LIVE remains NOT LIVE READY.
