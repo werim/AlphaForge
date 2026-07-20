@@ -24,3 +24,5 @@
 - **2026-07-20 PR #291 validation:** canonical/legacy Binance receive-window compatibility is regression-tested; operational Demo acceptance and green remote CI remain required before merge.
 
 - **2026-07-20 Windows diagnostics:** reconciliation uses a narrow canonical config loader; global invalid settings remain separately visible; daily loss remains a fraction and LIVE remains NOT READY.
+
+- **2026-07-20 dotenv correction:** operator diagnostics bootstrap canonical `.env` once; explicit mapping APIs remain isolated; LIVE remains NOT READY.

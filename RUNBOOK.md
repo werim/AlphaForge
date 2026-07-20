@@ -227,3 +227,5 @@ Exit codes for `alphaforge.binance_reconciliation_check`:
 - `4`: CLI usage or symbol error
 
 `alphaforge.config_check` exits `0` on PASS and `2` when one or more safe configuration errors are collected.
+
+The two diagnostic module entrypoints call AlphaForge's canonical `bootstrap_environment()` exactly once. Run them directly from the repository; quoted values and inline comments in `.env` are supported, and an already-set PowerShell process variable retains precedence. Library functions supplied an explicit environment mapping do not bootstrap or read host dotenv state.

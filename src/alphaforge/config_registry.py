@@ -311,12 +311,13 @@ def load_dotenv_file(path: Path) -> dict[str, str]:
 
 
 def effective_config_subset(names: tuple[str, ...], *, env: Mapping[str, str] | None = None,
-                            root: Path | None = None, fail_on_alias_conflict: bool = False) -> dict[str, dict[str, Any]]:
+                            root: Path | None = None, fail_on_alias_conflict: bool = False,
+                            include_files: bool = True) -> dict[str, dict[str, Any]]:
     """Resolve only requested registry settings using canonical source precedence."""
     root = root or Path.cwd()
     env = os.environ if env is None else env
     sources = (("dotenv", load_dotenv_file(root / ".env")),
-               ("dotenv_local", load_dotenv_file(root / ".env.local")))
+               ("dotenv_local", load_dotenv_file(root / ".env.local"))) if include_files else ()
     override_path = root / "config" / "runtime_overrides.json"
     try:
         overrides = json.loads(override_path.read_text()) if override_path.exists() else {}

@@ -11,6 +11,7 @@ from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconcilia
 from alphaforge.burnin_ops import parse_symbols
 from alphaforge.config import load_reconciliation_settings
 from alphaforge.config_check import audit_settings, _safe_error
+from alphaforge.env_contract import bootstrap_environment
 
 SAFE_POSITION_FIELDS = ("symbol", "positionAmt", "positionSide", "entryPrice", "unRealizedProfit")
 
@@ -51,6 +52,7 @@ def run(*, symbols: list[str] | None = None, write_sanitized_position_risk: Path
     return {
         "environment": cfg.environment, "safe_base_host": host,
         "reconciliation_config_status": "PASS", "global_config_status": global_audit["status"],
+        "reconciliation_config_sources": dict(cfg.sources),
         "global_config_errors": global_audit["errors"],
         "requested_symbols": requested_symbols, "tracked_symbols": tracked_symbols,
         "tracked_scope_source": "CLI" if tracked_symbols else "NONE",
@@ -105,6 +107,7 @@ def main() -> int:
     except _UsageError:
         print(json.dumps(_failure("invalid_setting_value", stage="CLI", setting="--symbols"), sort_keys=True))
         return 4
+    bootstrap_environment()
     if args.sanitize_position_risk:
         if not args.output:
             print(json.dumps(_failure("missing_required_setting", stage="CLI", setting="--output"), sort_keys=True))

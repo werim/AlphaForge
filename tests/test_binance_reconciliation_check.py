@@ -58,7 +58,7 @@ def _cli_cfg():
 def _reconciliation_cfg():
     return SimpleNamespace(base_url="https://demo-fapi.binance.com", environment="demo", recv_window_ms=7000,
                            timeout_sec=3, trade_lookback_ms=1000, position_epsilon="0.00000001",
-                           max_fill_symbols=10, api_key="k", api_secret="s")
+                           max_fill_symbols=10, api_key="k", api_secret="s", sources={})
 
 
 def test_cli_tracked_symbols_exercise_campaign_fill_scope(monkeypatch):
@@ -172,3 +172,26 @@ def test_exchange_incomplete_exit_one(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["binance_reconciliation_check", "--symbols", "BTCUSDT"])
     assert check.main() == 1
     assert json.loads(capsys.readouterr().out)["evidence_status"] == "INCOMPLETE"
+
+
+def test_reconciliation_cli_bootstraps_dotenv_and_matches_config_sources(monkeypatch, tmp_path, capsys):
+    import alphaforge.binance_reconciliation_check as module
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='temporary'\nversion='0'\n")
+    (tmp_path / "src" / "alphaforge").mkdir(parents=True)
+    (tmp_path / ".env").write_text('BINANCE_API_KEY="dotenv-key" # safe\nBINANCE_API_SECRET="dotenv-secret"\nALPHAFORGE_RECONCILIATION_TIMEOUT_SEC="3.5" # seconds\n')
+    monkeypatch.chdir(tmp_path)
+    for key in ("BINANCE_API_KEY", "BINANCE_API_SECRET", "ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(module.BinanceReadonlyReconciliationProvider, "snapshot", lambda self: {
+        "positions":[], "orders":[], "coverage":{"positionRisk":True,"openOrders":True,"userTrades":["BTCUSDT"]},
+        "selected_count":1, "selected_symbols":["BTCUSDT"], "symbol_sources":{"BTCUSDT":["tracked"]},
+        "evidence_status":"COMPLETE", "errors":[]})
+    real = module.bootstrap_environment; calls=[]
+    monkeypatch.setattr(module, "bootstrap_environment", lambda: (calls.append(1), real())[1])
+    monkeypatch.setattr(sys, "argv", ["binance_reconciliation_check", "--symbols", "BTCUSDT"])
+    assert module.main() == 0
+    text = capsys.readouterr().out; payload = json.loads(text)
+    assert calls == [1]
+    assert payload["reconciliation_config_sources"]["BINANCE_API_KEY"] == "DOTENV"
+    assert payload["reconciliation_config_sources"]["ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"] == "DOTENV"
+    assert "dotenv-key" not in text and "dotenv-secret" not in text

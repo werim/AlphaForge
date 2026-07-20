@@ -8,7 +8,7 @@ from typing import Any, Mapping
 
 from alphaforge.config import normalize_binance_market_type
 from alphaforge.config_registry import CONFIG_REGISTRY, effective_config_subset
-from alphaforge.env_contract import resolve_binance_environment
+from alphaforge.env_contract import bootstrap_environment, dotenv_status, resolve_binance_environment
 
 SECRET_NAMES = {setting.env_name for setting in CONFIG_REGISTRY if setting.secret}
 
@@ -46,7 +46,7 @@ def audit_settings(*, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     settings: dict[str, dict[str, Any]] = {}
     for setting in CONFIG_REGISTRY:
         try:
-            result = effective_config_subset((setting.env_name,), env=env, fail_on_alias_conflict=True)[setting.env_name]
+            result = effective_config_subset((setting.env_name,), env=env, fail_on_alias_conflict=True, include_files=False)[setting.env_name]
             value = result["value"]
             if setting.env_name == "BINANCE_DEFAULT_MARKET_TYPE":
                 value = normalize_binance_market_type(value)
@@ -58,7 +58,11 @@ def audit_settings(*, env: Mapping[str, str] | None = None) -> dict[str, Any]:
                         raise InvalidOperation
                 except InvalidOperation:
                     raise ValueError("invalid reconciliation epsilon") from None
-            row = {"source": str(result["source"]).upper()}
+            source = str(result["source"]).upper()
+            loaded_keys = set(dotenv_status().keys_loaded) if env is os.environ else set()
+            if setting.env_name in loaded_keys or any(alias in loaded_keys for alias in setting.deprecated_aliases):
+                source = "DOTENV"
+            row = {"source": source}
             if setting.secret:
                 row["is_set"] = bool(value)
             else:
@@ -70,7 +74,7 @@ def audit_settings(*, env: Mapping[str, str] | None = None) -> dict[str, Any]:
             raw = env.get(setting.env_name)
             errors.append(_safe_error(setting.env_name, exc, raw))
     try:
-        endpoint_values = effective_config_subset(("BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL"), env=env)
+        endpoint_values = effective_config_subset(("BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL"), env=env, include_files=False)
         endpoint_env = {name: str(endpoint_values[name]["value"]) for name in endpoint_values if endpoint_values[name]["value"]}
         if str(endpoint_values["BINANCE_ENVIRONMENT"]["source"]).startswith("alias (BINANCE_TESTNET)"):
             endpoint_env["BINANCE_TESTNET"] = endpoint_env.pop("BINANCE_ENVIRONMENT")
@@ -82,6 +86,7 @@ def audit_settings(*, env: Mapping[str, str] | None = None) -> dict[str, Any]:
 
 
 def main() -> int:
+    bootstrap_environment()
     result = audit_settings()
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] == "PASS" else 2

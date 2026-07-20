@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset
-from alphaforge.env_contract import bootstrap_environment, resolve_binance_environment
+from alphaforge.env_contract import bootstrap_environment, dotenv_status, resolve_binance_environment
 
 
 def _clean_env_value(raw: str | None) -> str | None:
@@ -150,6 +150,7 @@ class ReconciliationSettings:
     max_fill_symbols: int
     api_key: str
     api_secret: str
+    sources: Mapping[str, str]
 
 
 def load_reconciliation_settings(*, env: Mapping[str, str] | None = None) -> ReconciliationSettings:
@@ -158,7 +159,7 @@ def load_reconciliation_settings(*, env: Mapping[str, str] | None = None) -> Rec
              "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", "ALPHAFORGE_RECONCILIATION_POSITION_EPSILON",
              "ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS", "BINANCE_API_KEY", "BINANCE_API_SECRET",
              "BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL")
-    values = effective_config_subset(names, env=env, fail_on_alias_conflict=True)
+    values = effective_config_subset(names, env=env, fail_on_alias_conflict=True, include_files=False)
     val = lambda name: values[name]["value"]
     endpoint_env = {name: str(val(name)) for name in ("BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL") if val(name)}
     environment_source = str(values["BINANCE_ENVIRONMENT"]["source"])
@@ -172,6 +173,14 @@ def load_reconciliation_settings(*, env: Mapping[str, str] | None = None) -> Rec
             raise InvalidOperation
     except InvalidOperation:
         raise ValueError("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON invalid decimal") from None
+    loaded_keys = set(dotenv_status().keys_loaded) if env is os.environ else set()
+    sources = {}
+    for name, item in values.items():
+        source = str(item["source"]).upper()
+        aliases = item["setting"].deprecated_aliases
+        if name in loaded_keys or any(alias in loaded_keys for alias in aliases):
+            source = "DOTENV"
+        sources[name] = source
     return ReconciliationSettings(
         base_url=resolved.rest_base_url, environment=resolved.environment,
         recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
@@ -179,7 +188,7 @@ def load_reconciliation_settings(*, env: Mapping[str, str] | None = None) -> Rec
         trade_lookback_ms=int(val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS")),
         position_epsilon=str(epsilon),
         max_fill_symbols=int(val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS")),
-        api_key=str(val("BINANCE_API_KEY")), api_secret=str(val("BINANCE_API_SECRET")))
+        api_key=str(val("BINANCE_API_KEY")), api_secret=str(val("BINANCE_API_SECRET")), sources=sources)
 
 @dataclass(slots=True)
 class HyperliquidSettings:

@@ -3422,3 +3422,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Credentialed Demo acceptance and GitHub CI remain external validation requirements.
+
+## PR #291 dotenv bootstrap correction (2026-07-20)
+
+### Added
+- CLI bootstrap/source-isolation tests for quoted/commented dotenv values, secret redaction, and process precedence.
+
+### Changed
+- Operator entrypoints now bootstrap the canonical repository `.env` exactly once before reading settings.
+
+### Fixed
+- `config_check` and Binance reconciliation no longer require a manual PowerShell dotenv import.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Credentialed Demo acceptance and remote CI remain pending.
