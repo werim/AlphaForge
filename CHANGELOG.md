@@ -3321,3 +3321,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Runtime Phase 6 still deliberately blocks real LIVE startup; LIVE remains NOT LIVE READY.
+
+## Binance read-only reconciliation hardening (2026-07-20)
+
+### Added
+- Bounded, source-attributed fill scope, Decimal exposure classification, sanitized request evidence, same-host `-1021` time recovery, and an operator diagnostic/sanitizer CLI.
+
+### Changed
+- PAPER reconciliation reuses a serial connection within a snapshot and uses canonical timeout, receive-window, lookback, epsilon, and fill-scope settings.
+
+### Fixed
+- Zero `positionRisk` rows no longer cause `userTrades` universe fan-out; partial successful evidence is retained on later failure and unknown orphan counts remain unknown.
+
+### Removed
+- Implicit treatment of the complete `positionRisk` universe as active fill scope.
+
+### Breaking Changes
+- Malformed exposure, invalid symbols, or more than 10 relevant symbols now fail closed before fill fan-out; operators may explicitly raise the bounded cap (maximum 100) after review.
+
+### Known Issues
+- Credentialed Binance Demo acceptance was not run in this environment; LIVE remains unavailable.

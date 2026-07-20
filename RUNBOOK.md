@@ -153,3 +153,25 @@ python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-d
 ```
 
 Finalization can qualify only canonical `CANARY_QUALIFIED` Phase 8 qualification snapshots, with completion, integrity, aggregate-hash linkage, healthy state, and bounded backlog all passing. `PASS` or `QUALIFIED` aliases do not qualify a campaign for canary review.
+
+## Binance Demo read-only reconciliation acceptance
+
+This check uses the runtime's canonical Binance environment, credentials, timeout, receive window, lookback, Decimal epsilon, scope cap, and provider. It never submits orders and prints only sanitized JSON. A successful synthetic test is not credentialed Demo evidence.
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION = "true"
+$env:BINANCE_BASE_URL = "https://demo-fapi.binance.com"
+$env:BINANCE_API_KEY = Read-Host "Binance Demo read-only API key"
+$env:BINANCE_API_SECRET = Read-Host "Binance Demo API secret"
+python -m alphaforge.binance_reconciliation_check
+if ($LASTEXITCODE -ne 0) { throw "Binance reconciliation evidence is incomplete" }
+```
+
+To sanitize a locally captured `positionRisk` response for private incident analysis (do not commit it automatically):
+
+```powershell
+python -m alphaforge.binance_reconciliation_check --sanitize-position-risk .\positionRisk.raw.json --output .\positionRisk.safe.json
+```
+
+Exit code zero means `evidence_status=COMPLETE`; every incomplete endpoint, malformed exposure, invalid symbol, cap breach, or exhausted bounded retry exits nonzero. Confirm `positionRisk` and `openOrders` are `PASS`, the selected fill scope is bounded, and no unresolved `-1021` remains before accepting the evidence.

@@ -117,6 +117,8 @@ class RuntimeSettings:
     enable_binance_readonly_reconciliation: bool = False
     binance_reconciliation_recv_window_ms: int = 5000
     binance_reconciliation_trade_lookback_ms: int = 3_600_000
+    reconciliation_position_epsilon: str = "0.00000001"
+    reconciliation_max_fill_symbols: int = 10
 
 @dataclass(slots=True)
 class BinanceSettings:
@@ -302,6 +304,8 @@ def load_config_from_env() -> AlphaForgeConfig:
         enable_binance_readonly_reconciliation=val("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION"),
         binance_reconciliation_recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
         binance_reconciliation_trade_lookback_ms=val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS"),
+        reconciliation_position_epsilon=val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON"),
+        reconciliation_max_fill_symbols=val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS"),
     )
     binance = BinanceSettings(
         base_url=resolved_binance.rest_base_url,
