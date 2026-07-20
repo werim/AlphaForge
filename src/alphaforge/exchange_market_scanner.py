@@ -20,7 +20,11 @@ def _scan_exchange_markets_sync(config: Any) -> list[dict[str, Any]]:
 
 
 def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
-    base_url = str(getattr(getattr(getattr(config, "exchange", object()), "binance", object()), "base_url", "https://fapi.binance.com"))
+    binance = getattr(getattr(config, "exchange", object()), "binance", object())
+    if str(getattr(binance, "default_market_type", "USD_M")).upper() != "USD_M":
+        return []
+    base_url = str(getattr(binance, "base_url", "https://fapi.binance.com"))
+    quote_asset = str(getattr(binance, "default_quote_asset", "USDT")).upper()
     try:
         tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/24hr", timeout_sec=timeout_sec)
         book_tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/bookTicker", timeout_sec=timeout_sec)
@@ -52,7 +56,7 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         symbol = str(item.get("symbol") or "")
-        if not symbol.endswith("USDT"):
+        if not symbol.endswith(quote_asset):
             continue
 
         last_price = float(item.get("lastPrice", 0.0) or 0.0)
@@ -104,7 +108,10 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
 
 
 def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
-    api_url = str(getattr(getattr(getattr(config, "exchange", object()), "hyperliquid", object()), "api_url", "https://api.hyperliquid.xyz"))
+    hyperliquid = getattr(getattr(config, "exchange", object()), "hyperliquid", object())
+    if not bool(getattr(hyperliquid, "enabled", True)):
+        return []
+    api_url = str(getattr(hyperliquid, "api_url", "https://api.hyperliquid.xyz"))
     req = request.Request(
         f"{api_url.rstrip('/')}/info",
         method="POST",

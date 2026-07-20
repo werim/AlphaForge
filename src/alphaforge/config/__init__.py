@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 from alphaforge.config_registry import decision_filter_config, effective_config_values
+from alphaforge.env_contract import bootstrap_environment, resolve_binance_environment
 
 
 def _clean_env_value(raw: str | None) -> str | None:
@@ -67,6 +68,8 @@ def _resolve_database_url(env: Mapping[str, str]) -> str:
 @dataclass(slots=True)
 class RuntimeSettings:
     execution_mode: str = "PAPER"
+    paper_enabled: bool = True
+    live_enabled: bool = False
     min_signal_score: float = 0.62
     scan_interval_sec: float = 1.0
     heartbeat_interval_sec: float = 30.0
@@ -76,6 +79,7 @@ class RuntimeSettings:
     symbol_cooldown_sec: float = 120.0
     max_notional_exposure: float = 100_000.0
     max_symbol_notional: float = 50_000.0
+    max_daily_loss_pct: float = 0.03
     stale_market_data_sec: float = 15.0
     min_rr: float = 1.20
     min_effective_rr: float = 1.10
@@ -92,6 +96,7 @@ class RuntimeSettings:
     block_unknown_expectancy: bool = True
     block_chop_market: bool = True
     require_regime_alignment: bool = True
+    enable_orderbook_filter: bool = False
     stop_too_wide_hard_reject: bool = True
     stop_too_wide_soft_score_min: float = 9.0
     stop_too_wide_soft_effective_rr_min: float = 1.75
@@ -103,6 +108,7 @@ class RuntimeSettings:
     enable_shadow_mode: bool = False
     enable_canary_mode: bool = False
     operator_live_acknowledged: bool = False
+    allow_live_orders: bool = False
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
     require_exchange_connectivity_for_live: bool = True
@@ -115,10 +121,18 @@ class RuntimeSettings:
 @dataclass(slots=True)
 class BinanceSettings:
     base_url: str = "https://fapi.binance.com"
+    ws_url: str = "wss://fstream.binance.com"
+    environment: str = "production"
+    resolution_source: str = "default"
+    default_quote_asset: str = "USDT"
+    default_market_type: str = "USD_M"
+    recv_window_ms: int = 5000
+    request_timeout_sec: float = 2.0
 
 @dataclass(slots=True)
 class HyperliquidSettings:
     api_url: str = "https://api.hyperliquid.xyz"
+    enabled: bool = True
 
 @dataclass(slots=True)
 class ExchangeSettings:
@@ -177,6 +191,11 @@ class PersistenceSettings:
 class LoggingSettings:
     level: str = "INFO"
 @dataclass(slots=True)
+class NotificationSettings:
+    telegram_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+@dataclass(slots=True)
 class FeatureFlags: pass
 @dataclass(slots=True)
 class AppConfig: pass
@@ -193,6 +212,7 @@ class AlphaForgeConfig:
     execution: ExecutionSettings = field(default_factory=ExecutionSettings)
     persistence: PersistenceSettings = field(default_factory=PersistenceSettings)
     logging: LoggingSettings = field(default_factory=LoggingSettings)
+    notifications: NotificationSettings = field(default_factory=NotificationSettings)
     feature_flags: FeatureFlags = field(default_factory=FeatureFlags)
 
 
@@ -212,6 +232,7 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         "BLOCK_UNKNOWN_EXPECTANCY": getattr(runtime, "block_unknown_expectancy", True),
         "BLOCK_CHOP_MARKET": getattr(runtime, "block_chop_market", True),
         "REQUIRE_REGIME_ALIGNMENT": getattr(runtime, "require_regime_alignment", True),
+        "ENABLE_ORDERBOOK_FILTER": getattr(runtime, "enable_orderbook_filter", False),
         "STOP_TOO_WIDE_HARD_REJECT": getattr(runtime, "stop_too_wide_hard_reject", True),
         "STOP_TOO_WIDE_SOFT_SCORE_MIN": getattr(runtime, "stop_too_wide_soft_score_min", 9.0),
         "STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN": getattr(runtime, "stop_too_wide_soft_effective_rr_min", 1.75),
@@ -231,21 +252,26 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
     return cfg
 
 def load_config_from_env() -> AlphaForgeConfig:
+    bootstrap_environment()
     env = os.environ
     managed = effective_config_values(env=env)
     val = lambda name: managed[name]["value"]
+    resolved_binance = resolve_binance_environment(env)
     runtime = RuntimeSettings(
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
+        paper_enabled=val("ALPHAFORGE_ENABLE_PAPER_TRADING"),
+        live_enabled=val("ALPHAFORGE_ENABLE_LIVE_TRADING"),
         min_signal_score=val("ALPHAFORGE_MIN_SIGNAL_SCORE"),
-        scan_interval_sec=_float_env(env, "ALPHAFORGE_SCAN_INTERVAL_SEC", 1.0),
-        heartbeat_interval_sec=_float_env(env, "ALPHAFORGE_HEARTBEAT_INTERVAL_SEC", 30.0),
-        max_symbols_per_scan=_int_env(env, "ALPHAFORGE_MAX_SYMBOLS_PER_SCAN", 5),
-        max_reject_log_entries=_int_env(env, "ALPHAFORGE_MAX_REJECT_LOG_ENTRIES", 1000),
-        max_concurrent_positions=int(_alias(env, "ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "ALPHAFORGE_MAX_OPEN_POSITIONS") or "3"),
+        scan_interval_sec=val("ALPHAFORGE_SCAN_INTERVAL_SEC"),
+        heartbeat_interval_sec=val("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC"),
+        max_symbols_per_scan=val("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN"),
+        max_reject_log_entries=val("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES"),
+        max_concurrent_positions=val("ALPHAFORGE_MAX_CONCURRENT_POSITIONS"),
         symbol_cooldown_sec=val("ALPHAFORGE_SYMBOL_COOLDOWN_SEC"),
-        max_notional_exposure=_float_env(env, "ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", 100_000.0),
-        max_symbol_notional=_float_env(env, "ALPHAFORGE_MAX_SYMBOL_NOTIONAL", 50_000.0),
-        stale_market_data_sec=_float_env(env, "ALPHAFORGE_STALE_MARKET_DATA_SEC", 15.0),
+        max_notional_exposure=val("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE"),
+        max_symbol_notional=val("ALPHAFORGE_MAX_SYMBOL_NOTIONAL"),
+        max_daily_loss_pct=val("ALPHAFORGE_MAX_DAILY_LOSS_PCT"),
+        stale_market_data_sec=val("ALPHAFORGE_STALE_MARKET_DATA_SEC"),
         min_rr=val("ALPHAFORGE_MIN_RR"),
         min_effective_rr=val("MIN_EFFECTIVE_RR"),
         max_spread_pct=val("ALPHAFORGE_MAX_SPREAD_PCT"),
@@ -258,37 +284,52 @@ def load_config_from_env() -> AlphaForgeConfig:
         min_atr_pct=val("ALPHAFORGE_MIN_ATR_PCT"), max_atr_pct=val("ALPHAFORGE_MAX_ATR_PCT"),
         block_unknown_expectancy=val("ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY"), block_chop_market=val("ALPHAFORGE_BLOCK_CHOP_MARKET"),
         require_regime_alignment=val("ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT"), stop_too_wide_hard_reject=val("ALPHAFORGE_STOP_TOO_WIDE_HARD_REJECT"),
+        enable_orderbook_filter=val("ALPHAFORGE_ENABLE_ORDERBOOK_FILTER"),
         stop_too_wide_soft_score_min=val("ALPHAFORGE_STOP_TOO_WIDE_SOFT_SCORE_MIN"), stop_too_wide_soft_effective_rr_min=val("ALPHAFORGE_STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN"),
         stop_too_wide_max_risk_scale=val("ALPHAFORGE_STOP_TOO_WIDE_MAX_RISK_SCALE"), stop_too_wide_extreme_mult=val("ALPHAFORGE_STOP_TOO_WIDE_EXTREME_MULT"),
         max_latency_ms=val("ALPHAFORGE_MAX_LATENCY_MS"),
         global_kill_switch=val("ALPHAFORGE_GLOBAL_KILL_SWITCH"),
         require_live_qualification=val("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION"),
-        enable_shadow_mode=_bool_env(env, "ALPHAFORGE_ENABLE_SHADOW_MODE", False),
-        enable_canary_mode=_bool_env(env, "ALPHAFORGE_ENABLE_CANARY_MODE", False),
-        operator_live_acknowledged=_bool_env(env, "ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", False),
-        reconciliation_interval_sec=_float_env(env, "ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", 5.0),
-        reconciliation_timeout_sec=_float_env(env, "ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", 2.0),
+        enable_shadow_mode=val("ALPHAFORGE_ENABLE_SHADOW_MODE"),
+        enable_canary_mode=val("ALPHAFORGE_ENABLE_CANARY_MODE"),
+        operator_live_acknowledged=val("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED"),
+        allow_live_orders=val("ALPHAFORGE_ALLOW_LIVE_ORDERS"),
+        reconciliation_interval_sec=val("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC"),
+        reconciliation_timeout_sec=val("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"),
         require_exchange_connectivity_for_live=_bool_env(env, "ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", True),
         required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
         exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
-        enable_binance_readonly_reconciliation=_bool_env(env, "ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", False),
-        binance_reconciliation_recv_window_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECV_WINDOW_MS", 5000),
-        binance_reconciliation_trade_lookback_ms=_int_env(env, "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", 3_600_000),
+        enable_binance_readonly_reconciliation=val("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION"),
+        binance_reconciliation_recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        binance_reconciliation_trade_lookback_ms=val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS"),
     )
+    binance = BinanceSettings(
+        base_url=resolved_binance.rest_base_url,
+        ws_url=resolved_binance.ws_base_url,
+        environment=resolved_binance.environment,
+        resolution_source=resolved_binance.resolution_source,
+        default_quote_asset=str(val("BINANCE_DEFAULT_QUOTE_ASSET")).upper(),
+        default_market_type=str(val("BINANCE_DEFAULT_MARKET_TYPE")).upper(),
+        recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        request_timeout_sec=float(val("BINANCE_REQUEST_TIMEOUT_SEC")),
+    )
+    if binance.default_market_type != "USD_M":
+        raise ValueError("BINANCE_DEFAULT_MARKET_TYPE must be USD_M")
     exchange = ExchangeSettings(
-        timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", runtime.exchange_connectivity_timeout_sec),
-        binance=BinanceSettings(base_url=_string_env(env, "BINANCE_BASE_URL", "https://fapi.binance.com")),
-        hyperliquid=HyperliquidSettings(api_url=_string_env(env, "HYPERLIQUID_API_URL", "https://api.hyperliquid.xyz")),
+        timeout_sec=float(val("BINANCE_REQUEST_TIMEOUT_SEC")),
+        binance=binance,
+        hyperliquid=HyperliquidSettings(api_url=val("HYPERLIQUID_API_URL"), enabled=val("HYPERLIQUID_ENABLED")),
     )
     return AlphaForgeConfig(
         runtime=runtime,
         exchange=exchange,
+        binance=binance,
         backtest=BacktestSettings(
             top_n=val("ALPHAFORGE_BACKTEST_TOP_N"),
             timeframe=val("ALPHAFORGE_BACKTEST_TIMEFRAME"),
-            output_dir=_string_env(env, "ALPHAFORGE_BACKTEST_OUTPUT_DIR", "data/backtest"),
-            initial_balance=_float_env(env, "ALPHAFORGE_BACKTEST_INITIAL_BALANCE", 1000.0),
-            risk_pct=_float_env(env, "ALPHAFORGE_BACKTEST_RISK_PCT", 1.0),
+            output_dir=val("ALPHAFORGE_BACKTEST_OUTPUT_DIR"),
+            initial_balance=val("ALPHAFORGE_BACKTEST_INITIAL_BALANCE"),
+            risk_pct=val("ALPHAFORGE_BACKTEST_RISK_PCT"),
             max_trades=val("ALPHAFORGE_BACKTEST_MAX_TRADES"),
             max_accepted_trades_per_day=val("ALPHAFORGE_BACKTEST_MAX_ACCEPTED_TRADES_PER_DAY"),
             max_symbol_trades_per_day=val("ALPHAFORGE_BACKTEST_MAX_SYMBOL_TRADES_PER_DAY"),
@@ -296,16 +337,17 @@ def load_config_from_env() -> AlphaForgeConfig:
             export_config_snapshot=val("ALPHAFORGE_BACKTEST_EXPORT_CONFIG_SNAPSHOT"),
             days=val("ALPHAFORGE_BACKTEST_LAST_N_DAYS"),
             filter_switches=BacktestFilterSwitches(
-                low_score_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED", True),
-                too_choppy_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED", True),
-                weak_trend_no_range_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_WEAK_TREND_NO_RANGE_ENABLED", True),
-                stop_too_wide_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_STOP_TOO_WIDE_ENABLED", True),
-                rr_too_low_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_RR_TOO_LOW_ENABLED", True),
-                daily_symbol_trade_limit_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_DAILY_SYMBOL_TRADE_LIMIT_ENABLED", True),
-                regime_mismatch_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_REGIME_MISMATCH_ENABLED", True),
-                panic_conditions_enabled=_bool_env(env, "ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED", True),
+                low_score_enabled=val("ALPHAFORGE_BACKTEST_FILTER_LOW_SCORE_ENABLED"),
+                too_choppy_enabled=val("ALPHAFORGE_BACKTEST_FILTER_TOO_CHOPPY_ENABLED"),
+                weak_trend_no_range_enabled=val("ALPHAFORGE_BACKTEST_FILTER_WEAK_TREND_NO_RANGE_ENABLED"),
+                stop_too_wide_enabled=val("ALPHAFORGE_BACKTEST_FILTER_STOP_TOO_WIDE_ENABLED"),
+                rr_too_low_enabled=val("ALPHAFORGE_BACKTEST_FILTER_RR_TOO_LOW_ENABLED"),
+                daily_symbol_trade_limit_enabled=val("ALPHAFORGE_BACKTEST_FILTER_DAILY_SYMBOL_TRADE_LIMIT_ENABLED"),
+                regime_mismatch_enabled=val("ALPHAFORGE_BACKTEST_FILTER_REGIME_MISMATCH_ENABLED"),
+                panic_conditions_enabled=val("ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED"),
             ),
         ),
-        persistence=PersistenceSettings(database_url=_resolve_database_url(env), enabled=_bool_env(env, "ALPHAFORGE_PERSISTENCE_ENABLED", True)),
-        logging=LoggingSettings(level=_string_env(env, "ALPHAFORGE_LOG_LEVEL", "INFO")),
+        persistence=PersistenceSettings(database_url=_resolve_database_url(env), enabled=val("ALPHAFORGE_PERSISTENCE_ENABLED")),
+        logging=LoggingSettings(level=val("ALPHAFORGE_LOG_LEVEL")),
+        notifications=NotificationSettings(telegram_enabled=val("ALPHAFORGE_ENABLE_TELEGRAM"), telegram_bot_token=val("TELEGRAM_BOT_TOKEN"), telegram_chat_id=val("TELEGRAM_CHAT_ID")),
     )

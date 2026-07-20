@@ -246,7 +246,8 @@ def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_p
     assert any((str(row.phase).startswith("ai_internal_")) for row in runtime_rows)
 
 
-def test_reconciliation_event_on_timeout_like_execution_state() -> None:
+def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_ALLOW_LIVE_ORDERS", "true")
     events: list[dict] = []
 
     class _Adapter:
@@ -257,12 +258,14 @@ def test_reconciliation_event_on_timeout_like_execution_state() -> None:
         return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
-        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, live_trading_enabled=True, allow_live_orders=True, operator_live_acknowledged=True),
         ai_brain=_AlwaysAcceptBrain(),
         market_scanner=scanner,
         real_execution_adapter=_Adapter(),
         on_lifecycle_event=lambda e: events.append(e),
     )
+    orchestrator._qualification_report = type("Qualified", (), {"qualified": True, "verdict": "LIVE_READY"})()
+    orchestrator._reconciliation_status = "CLEAN"
     asyncio.run(orchestrator._scan_once())
     assert any(evt["lifecycle_event_type"] == "RECONCILIATION_REPAIR" for evt in events)
 

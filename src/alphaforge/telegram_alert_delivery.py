@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import os
 from typing import Any, Callable, Mapping
 from urllib.request import Request, urlopen
 import uuid
@@ -119,11 +118,13 @@ def telegram_alert_provider_from_env(
     transport: TelegramTransport | None = None,
     probe_id_factory: Callable[[], str] | None = None,
 ) -> TelegramAlertDeliveryEvidenceProvider:
+    from alphaforge.config import load_config_from_env
+    notifications = load_config_from_env().notifications
     return TelegramAlertDeliveryEvidenceProvider(
         TelegramAlertDeliveryConfig(
-            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-            enabled=os.getenv("ALPHAFORGE_ENABLE_TELEGRAM", "").strip().lower() == "true",
+            bot_token=notifications.telegram_bot_token,
+            chat_id=notifications.telegram_chat_id,
+            enabled=notifications.telegram_enabled,
         ),
         transport=transport,
         probe_id_factory=probe_id_factory,

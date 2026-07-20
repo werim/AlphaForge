@@ -249,6 +249,12 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     min_trade_score = float(cfg["MIN_TRADE_SCORE"])
     score_eval = score if min_trade_score <= 1.0 else (score * 10.0 if 0.0 <= score < 1.0 else score)
     pattern_flags = [str(f).upper() for f in (market_ctx.get("pattern_flags", []) or [])]
+    orderbook_imbalance = _nullable_float(market_ctx.get("orderbook_imbalance"))
+    spoof_risk = _nullable_float(market_ctx.get("spoof_risk"))
+    orderbook_status = str(market_ctx.get("orderbook_status") or ("MEASURED" if orderbook_imbalance is not None else "UNAVAILABLE")).upper()
+    orderbook_filter_enabled = bool(cfg.get("ENABLE_ORDERBOOK_FILTER", False))
+    orderbook_missing = orderbook_imbalance is None or orderbook_status in {"", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"}
+    orderbook_risky = (orderbook_imbalance is not None and abs(orderbook_imbalance) >= 0.90) or (spoof_risk is not None and spoof_risk >= 0.80)
     all_failed_gates: list[str] = []
     def _check(cond: bool, gate: str) -> bool:
         if not cond:
@@ -271,6 +277,8 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     elif "RANGE_MEAN_REVERSION" in setup_type:
         regime_ok = regime == "RANGE"
     _check((not cfg["REQUIRE_REGIME_ALIGNMENT"]) or regime_ok, "regime")
+    _check((not orderbook_filter_enabled) or (not orderbook_missing), "orderbook_present")
+    _check((not orderbook_filter_enabled) or (not orderbook_risky), "orderbook_quality")
     _check(sl_pct >= float(cfg["MIN_SL_PCT"]), "min_sl")
     _check(sl_pct <= float(cfg["MAX_SL_PCT"]), "max_sl")
     _check(spread_pct <= float(cfg["MAX_SPREAD_PCT"]), "spread")
@@ -316,6 +324,10 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         reject_reason, failed_filter = "CHOP_MARKET_BLOCK", "pattern_flags"
     elif cfg["REQUIRE_REGIME_ALIGNMENT"] and not regime_ok and not _bypass("REGIME_MISMATCH"):
         reject_reason, failed_filter = "REGIME_MISMATCH", "regime"
+    elif orderbook_filter_enabled and orderbook_missing and bool(cfg.get("REJECT_UNKNOWN_EXECUTION_CONTEXT", True)):
+        reject_reason, failed_filter = "ORDERBOOK_CONTEXT_MISSING", "orderbook_present"
+    elif orderbook_filter_enabled and orderbook_risky:
+        reject_reason, failed_filter = "ORDERBOOK_RISK", "orderbook_quality"
     elif sl_pct < float(cfg["MIN_SL_PCT"]):
         reject_reason, failed_filter = "STOP_TOO_TIGHT", "sl_pct"
     elif sl_pct > float(cfg["MAX_SL_PCT"]):
@@ -447,12 +459,41 @@ def _audit(ctx: OrderExecutionContext, candidate: OrderCandidate | None, status_
     ctx.storage.setdefault("audit", []).append(event)
 
 
+def validate_live_order_authorization(ctx: OrderExecutionContext) -> dict[str, bool]:
+    """Re-read authoritative mutable state at the final LIVE mutation boundary."""
+    if ctx.mode != TradingMode.LIVE:
+        return {}
+    provider = ctx.storage.get("live_authorization_provider")
+    if not callable(provider):
+        raise RuntimeError("LIVE_ORDER_AUTHORIZATION_BLOCKED:authoritative_state_missing")
+    authorization = dict(provider() or {})
+    # Retain the exact final snapshot for audit/debugging; it is never trusted
+    # as input on a subsequent call because the provider is invoked every time.
+    ctx.storage["live_authorization"] = authorization
+    from alphaforge.config import load_config_from_env
+    configured_allow_live_orders = bool(load_config_from_env().runtime.allow_live_orders)
+    gates = {
+        "live_trading_enabled": bool(authorization.get("live_trading_enabled", False)),
+        "allow_live_orders": configured_allow_live_orders and bool(ctx.allow_live_orders),
+        "operator_acknowledged": bool(authorization.get("operator_acknowledged", False)),
+        "qualification_passed": bool(authorization.get("qualification_passed", False)),
+        "reconciliation_passed": bool(authorization.get("reconciliation_passed", False)),
+        "kill_switch_inactive": not bool(authorization.get("kill_switch_active", True)),
+    }
+    failed = [name for name, passed in gates.items() if not passed]
+    if failed:
+        raise RuntimeError("LIVE_ORDER_AUTHORIZATION_BLOCKED:" + ",".join(failed))
+    return gates
+
+
 def execute_order_candidate(candidate: OrderCandidate, ctx: OrderExecutionContext) -> dict[str, Any]:
     if ctx.mode != TradingMode.LIVE:
         assert ctx.allow_live_orders is False
         if "allow_telegram" not in ctx.diagnostics:
             ctx.allow_telegram = False
         ctx.allow_telegram = bool(ctx.allow_telegram)
+    else:
+        validate_live_order_authorization(ctx)
     status = LifecycleState.ORDER_PLACED
     if ctx.mode == TradingMode.BACKTEST:
         result = {"type": "virtual", "candidate": candidate}

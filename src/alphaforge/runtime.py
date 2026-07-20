@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
-from alphaforge.order import LifecycleState
+from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
 from alphaforge.execution import build_execution_context, build_execution_cost_model
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
@@ -117,6 +117,8 @@ class RuntimeConfig:
     enable_shadow_mode: bool = False
     enable_canary_mode: bool = False
     operator_live_acknowledged: bool = False
+    allow_live_orders: bool = False
+    live_trading_enabled: bool = False
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
     require_exchange_connectivity_for_live: bool = True
@@ -1135,6 +1137,48 @@ class RuntimeOrchestrator:
             "confidence": order_plan.confidence,
         }, market_ctx=market_ctx)
 
+    def _authoritative_live_authorization(self) -> dict[str, bool]:
+        report = self._qualification_report
+        qualification_passed = bool(
+            report is not None
+            and bool(getattr(report, "qualified", False))
+            and str(getattr(report, "verdict", "")).upper() in {"LIVE_READY", "CANARY_QUALIFIED"}
+        )
+        reconciliation_passed = bool(
+            self._reconciliation_status == "CLEAN"
+            and not self._unknown_exchange_state
+            and not self._unreconciled_symbols
+            and not self._orphan_orders
+            and not self._orphan_positions
+            and not self._recovery_required
+        )
+        return {
+            "live_trading_enabled": bool(self.config.live_trading_enabled),
+            "operator_acknowledged": bool(self.config.operator_live_acknowledged),
+            "qualification_passed": qualification_passed,
+            "reconciliation_passed": reconciliation_passed,
+            # This method re-reads RuntimeControlStore on every invocation.
+            "kill_switch_active": bool(self._kill_switch_active()),
+        }
+
+    def _build_live_order_execution_context(self, symbol: str, market_ctx: Mapping[str, Any]) -> OrderExecutionContext:
+        snapshot = self._authoritative_live_authorization()
+        return OrderExecutionContext(
+            mode=TradingMode.LIVE,
+            timestamp=int(time.time() * 1000),
+            symbol=symbol,
+            balance=0.0,
+            risk_pct=0.0,
+            allow_live_orders=bool(self.config.allow_live_orders),
+            market_ctx=dict(market_ctx),
+            storage={
+                "live_authorization": snapshot,
+                # The final validator calls this bound authoritative provider;
+                # it never trusts the potentially stale snapshot above.
+                "live_authorization_provider": self._authoritative_live_authorization,
+            },
+        )
+
     async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> None:
         if self._kill_switch_active():
             raise RuntimeError("KILL_SWITCH_ACTIVE")
@@ -1146,6 +1190,8 @@ class RuntimeOrchestrator:
         elif mode == ExecutionMode.LIVE:
             if self.real_execution_adapter is None:
                 raise RuntimeError("LIVE mode requires real_execution_adapter")
+            authorization_ctx = self._build_live_order_execution_context(symbol, market_ctx)
+            validate_live_order_authorization(authorization_ctx)
             result = await self.real_execution_adapter.submit(decision, market_ctx)
         else:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
@@ -1512,7 +1558,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_soft_effective_rr_min=cfg.runtime.stop_too_wide_soft_effective_rr_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_soft_effective_rr_min=cfg.runtime.stop_too_wide_soft_effective_rr_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day)
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         now_ts = time.time()
@@ -1616,7 +1662,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                 api_key=api_key,
                 api_secret=api_secret,
                 recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms,
-                request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
+                request_timeout_sec=cfg.binance.request_timeout_sec,
                 trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
             )
             )
@@ -1638,6 +1684,11 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
 
 async def main() -> None:
     cfg = load_config_from_env()
+    mode = execution_mode_from_env(cfg.runtime.execution_mode)
+    if mode == ExecutionMode.PAPER and not cfg.runtime.paper_enabled:
+        raise RuntimeError("PAPER mode blocked: ALPHAFORGE_ENABLE_PAPER_TRADING is false")
+    if mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} and not cfg.runtime.live_enabled:
+        raise RuntimeError("LIVE mode blocked: ALPHAFORGE_ENABLE_LIVE_TRADING is false")
     logging.basicConfig(level=cfg.logging.level)
     orchestrator = _build_runtime_from_env()
     logger.info("runtime_starting mode=%s scan_interval_sec=%.3f", orchestrator.config.execution_mode.value, orchestrator.config.scan_interval_sec)
