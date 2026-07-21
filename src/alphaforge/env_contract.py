@@ -16,6 +16,7 @@ PRODUCTION_REST_URL = "https://fapi.binance.com"
 PRODUCTION_WS_URL = "wss://fstream.binance.com"
 TESTNET_REST_URL = "https://testnet.binancefuture.com"
 TESTNET_WS_URL = "wss://stream.binancefuture.com"
+DEMO_REST_URL = "https://demo-fapi.binance.com"
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +146,15 @@ def _valid_url(name: str, value: str, schemes: set[str]) -> str:
     return value.rstrip("/")
 
 
-def resolve_binance_environment(env: Mapping[str, str]) -> BinanceEnvironment:
+def resolve_binance_environment(
+    env: Mapping[str, str], *, require_websocket: bool = True
+) -> BinanceEnvironment:
+    """Resolve a fail-closed Binance endpoint identity.
+
+    Demo Trading has a canonical REST endpoint but this project does not claim a
+    canonical demo websocket endpoint.  Read-only REST consumers may therefore
+    opt out of websocket resolution; streaming/runtime consumers may not.
+    """
     explicit_environment = str(env.get("BINANCE_ENVIRONMENT", "")).strip().lower()
     legacy_present = str(env.get("BINANCE_TESTNET", "")).strip() != ""
     legacy_testnet = parse_bool("BINANCE_TESTNET", env["BINANCE_TESTNET"]) if legacy_present else False
@@ -160,20 +169,20 @@ def resolve_binance_environment(env: Mapping[str, str]) -> BinanceEnvironment:
         environment = "testnet" if legacy_testnet else "production"
         source = "alias" if legacy_present else "default"
     if environment == "demo":
-        # Demo Trading is intentionally not guessed or collapsed into Futures Testnet.
-        if not env.get("BINANCE_BASE_URL") or not env.get("BINANCE_WS_URL"):
-            raise ValueError("BINANCE_ENVIRONMENT=demo requires explicit BINANCE_BASE_URL and BINANCE_WS_URL")
-        derived_rest = derived_ws = ""
+        derived_rest, derived_ws = DEMO_REST_URL, ""
     elif environment == "testnet":
         derived_rest, derived_ws = TESTNET_REST_URL, TESTNET_WS_URL
     else:
         derived_rest, derived_ws = PRODUCTION_REST_URL, PRODUCTION_WS_URL
     rest = _valid_url("BINANCE_BASE_URL", str(env.get("BINANCE_BASE_URL") or derived_rest), {"http", "https"})
-    ws = _valid_url("BINANCE_WS_URL", str(env.get("BINANCE_WS_URL") or derived_ws), {"ws", "wss"})
+    ws_raw = str(env.get("BINANCE_WS_URL") or derived_ws)
+    if require_websocket and not ws_raw:
+        raise ValueError("BINANCE_WS_URL is required for websocket consumers in demo environment")
+    ws = _valid_url("BINANCE_WS_URL", ws_raw, {"ws", "wss"}) if ws_raw else ""
     rest_source = "process_env" if env.get("BINANCE_BASE_URL") else source
     ws_source = "process_env" if env.get("BINANCE_WS_URL") else source
     # Known endpoints may not be crossed. Custom paired overrides are allowed and audited.
-    known_rest = {PRODUCTION_REST_URL: "production", TESTNET_REST_URL: "testnet"}
+    known_rest = {PRODUCTION_REST_URL: "production", TESTNET_REST_URL: "testnet", DEMO_REST_URL: "demo"}
     known_ws = {PRODUCTION_WS_URL: "production", TESTNET_WS_URL: "testnet"}
     for url, known, label in ((rest, known_rest, "REST"), (ws, known_ws, "websocket")):
         if url in known and known[url] != environment:

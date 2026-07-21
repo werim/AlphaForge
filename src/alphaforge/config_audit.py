@@ -133,7 +133,9 @@ def audit_config(*, env: Mapping[str, str] | None = None, root: Path | None = No
                 resolved[name] = {"present": bool(raw), "source": source, "fingerprint": hashlib.sha256(raw.encode()).hexdigest()[:12] if raw else None, "placeholder_detected": _placeholder(raw)}
             elif name != "BINANCE_ENVIRONMENT":
                 resolved[name] = {"value": item["value"], "source": source}
-        binance = resolve_binance_environment(supplied)
+        # The audit/reconciliation contract is REST-only.  Runtime websocket
+        # consumers validate their stronger requirement during startup.
+        binance = resolve_binance_environment(supplied, require_websocket=False)
         resolved.update({
             "binance_environment": {"value": binance.environment, "source": binance.resolution_source},
             "binance_rest_base_url": {"value": binance.rest_base_url, "source": binance.rest_source},
