@@ -1,5 +1,52 @@
 # AlphaForge Phase 9 Burn-In Startup Interruption Surgery Report
 
+## Configuration remediation and Binance Demo REST surgery (2026-07-20)
+
+### Why and root cause
+The audit could enumerate configuration errors but left every correction to the
+operator. In addition, the Binance resolver accepted `demo` as an enum while
+requiring both REST and websocket overrides; consequently the canonical
+`https://demo-fapi.binance.com` REST configuration failed even for read-only
+reconciliation. The project has no canonical Demo websocket contract.
+
+### Files and runtime behavior
+`env_contract.py` now explicitly binds known production, testnet, and Demo REST
+hosts to their environment identities. REST-only consumers may request resolution
+without a websocket; ordinary runtime resolution retains the websocket
+requirement. `binance_reconciliation_provider.py` exposes an independent
+REST-only settings loader. `config_check.py` provides the requested module alias,
+while `config_fix.py` implements deterministic planning and bounded apply/re-audit.
+No strategy, threshold, sizing, order execution, drawdown, recovery, or burn-in
+identity logic changed.
+
+The duplicate provider-local reconciliation loader was removed. The canonical
+config loader now owns recv-window alias conflict detection, timeout, trade
+lookback, exact Decimal position epsilon, maximum fill-symbol scope, bounds,
+and provenance. Demo support changes only its call to the shared endpoint
+resolver (`require_websocket=False`); streaming/runtime resolution remains
+strict.
+
+### File safety, provenance, and compatibility
+Only repository `.env` is mutable. Dry-run is default. Apply validates syntax,
+backs up the original, writes UTF-8 through a same-directory temporary file,
+fsyncs, validates the result, and atomically replaces the target. Comments,
+ordering, and newline style are retained where practical. Process overrides and
+dashboard/default/code problems are never represented as file fixes. Secret
+values and secret clear commands are redacted. No persistence, lifecycle, export,
+or database schema changed, so no migration is required.
+
+### Tests and remaining risks
+Tests cover dry-run immutability, backup/restore, atomic valid output, aliases,
+canonical preservation, process precedence, redaction, exact daily-loss migration,
+ambiguous risk review, enum normalization, duplicate handling, idempotence,
+invalid syntax, iteration bounds, Demo resolution, endpoint mismatches, and the
+REST/websocket consumer split. Automatic conversions remain intentionally narrow;
+unknown or safety-relevant values require manual review. LIVE remains unavailable
+and no merge/readiness recommendation is made without CI and credentialed Demo
+reconciliation evidence.
+
+---
+
 ## Why the patch was needed
 A detached PAPER burn-in launch could be interrupted while the parent was polling worker attachment. Because campaign/run rows had already been committed as `RUNNING`, a dead worker PID and stale heartbeat left a ghost active campaign that blocked subsequent launches with both duplicate-active and stale-worker preflight failures.
 

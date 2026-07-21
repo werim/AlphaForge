@@ -77,6 +77,28 @@
 
 # Changelog
 
+## Configuration remediation and Binance Demo resolution
+
+### Added
+- Dry-run-by-default `python -m alphaforge.config_fix` with source-aware classifications, secret-safe output, timestamped backup, atomic `.env` writes, bounded re-audit, and PowerShell next steps.
+- REST-only reconciliation configuration loading independent of websocket availability.
+
+### Changed
+- Binance environment identity now explicitly recognizes production, testnet, and the canonical USD-M Demo REST host.
+- Reconciliation configuration is loaded only by the canonical config layer; `ALPHAFORGE_BINANCE_RECV_WINDOW_MS` remains canonical and `BINANCE_RECV_WINDOW_MS` remains a conflict-checked compatibility alias.
+
+### Fixed
+- `BINANCE_ENVIRONMENT=demo` with `https://demo-fapi.binance.com` no longer fails REST-only configuration audit solely because the project has no claimed Demo websocket endpoint.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- Streaming/runtime consumers still require an explicit websocket endpoint for Demo and fail precisely when it is absent.
+
+### Known Issues
+- Automatic remediation is intentionally narrow; ambiguous risk units, dashboard/process overrides, credentials, and unsupported values require operator review.
+
 ## Added
 - `python -m alphaforge.burnin_ops recover-runtime` operator entrypoint for recovery without requiring operators to remember the campaign-specific `recovery-drill` command.
 - Append-only local diagnostic recovery evidence for the narrow dead, unrelated historical PAPER runtime case where Binance read-only reconciliation is the only unavailable evidence and all local exposure queries are available and zero.

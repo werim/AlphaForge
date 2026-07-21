@@ -2,11 +2,70 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping
 
 from alphaforge.config_registry import decision_filter_config, effective_config_values
 from alphaforge.env_contract import bootstrap_environment, resolve_binance_environment
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationSettings:
+    """Canonical, validated read-only reconciliation configuration contract."""
+    base_url: str
+    api_key: str
+    api_secret: str
+    recv_window_ms: int
+    timeout_sec: float
+    trade_lookback_ms: int
+    position_epsilon: Decimal
+    max_fill_symbols: int
+    provenance: Mapping[str, str]
+
+
+def load_reconciliation_settings(
+    env: Mapping[str, str], *, require_websocket: bool = False
+) -> ReconciliationSettings:
+    """Resolve reconciliation settings once through the canonical registry contract."""
+    canonical = _clean_env_value(env.get("ALPHAFORGE_BINANCE_RECV_WINDOW_MS"))
+    legacy = _clean_env_value(env.get("BINANCE_RECV_WINDOW_MS"))
+    if canonical is not None and legacy is not None and canonical != legacy:
+        raise ValueError("alias conflict: ALPHAFORGE_BINANCE_RECV_WINDOW_MS and BINANCE_RECV_WINDOW_MS differ")
+    recv_raw = canonical if canonical is not None else legacy
+    recv_window = int(recv_raw or 5000)
+    timeout = float(_clean_env_value(env.get("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC")) or 2.0)
+    lookback = int(_clean_env_value(env.get("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS")) or 3_600_000)
+    max_symbols = int(_clean_env_value(env.get("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS")) or 50)
+    try:
+        epsilon = Decimal(_clean_env_value(env.get("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON")) or "0.00000001")
+    except InvalidOperation as exc:
+        raise ValueError("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON must be a decimal") from exc
+    if not 1 <= recv_window <= 60_000:
+        raise ValueError("ALPHAFORGE_BINANCE_RECV_WINDOW_MS must be between 1 and 60000")
+    if not 0.1 <= timeout <= 300:
+        raise ValueError("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC must be between 0.1 and 300")
+    if lookback < 1:
+        raise ValueError("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS must be positive")
+    if epsilon < 0 or not epsilon.is_finite():
+        raise ValueError("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON must be finite and non-negative")
+    if not 1 <= max_symbols <= 1000:
+        raise ValueError("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS must be between 1 and 1000")
+    resolved = resolve_binance_environment(env, require_websocket=require_websocket)
+    return ReconciliationSettings(
+        base_url=resolved.rest_base_url,
+        api_key=str(env.get("BINANCE_API_KEY", "")),
+        api_secret=str(env.get("BINANCE_API_SECRET", "")),
+        recv_window_ms=recv_window,
+        timeout_sec=timeout,
+        trade_lookback_ms=lookback,
+        position_epsilon=epsilon,
+        max_fill_symbols=max_symbols,
+        provenance={
+            "recv_window_ms": "canonical" if canonical is not None else ("deprecated_alias" if legacy is not None else "default"),
+            "environment": resolved.resolution_source,
+        },
+    )
 
 
 def _clean_env_value(raw: str | None) -> str | None:
@@ -300,7 +359,7 @@ def load_config_from_env() -> AlphaForgeConfig:
         required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
         exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
         enable_binance_readonly_reconciliation=val("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION"),
-        binance_reconciliation_recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        binance_reconciliation_recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
         binance_reconciliation_trade_lookback_ms=val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS"),
     )
     binance = BinanceSettings(
@@ -310,7 +369,7 @@ def load_config_from_env() -> AlphaForgeConfig:
         resolution_source=resolved_binance.resolution_source,
         default_quote_asset=str(val("BINANCE_DEFAULT_QUOTE_ASSET")).upper(),
         default_market_type=str(val("BINANCE_DEFAULT_MARKET_TYPE")).upper(),
-        recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
         request_timeout_sec=float(val("BINANCE_REQUEST_TIMEOUT_SEC")),
     )
     if binance.default_market_type != "USD_M":

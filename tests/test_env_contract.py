@@ -8,7 +8,7 @@ from alphaforge.config import load_config_from_env
 from alphaforge.config_audit import TEMPLATES, audit_config
 from alphaforge.config_registry import CONTRACT_BY_NAME
 from alphaforge.env_contract import (
-    PRODUCTION_REST_URL, TESTNET_REST_URL, bootstrap_environment, parse_dotenv,
+    DEMO_REST_URL, PRODUCTION_REST_URL, TESTNET_REST_URL, bootstrap_environment, parse_dotenv,
     resolve_binance_environment,
 )
 
@@ -55,7 +55,7 @@ def test_binance_explicit_override_and_testnet_backward_compatibility():
 @pytest.mark.parametrize("env", [
     {"BINANCE_ENVIRONMENT": "production", "BINANCE_TESTNET": "true"},
     {"BINANCE_ENVIRONMENT": "testnet", "BINANCE_BASE_URL": PRODUCTION_REST_URL},
-    {"BINANCE_ENVIRONMENT": "demo"},
+    {"BINANCE_ENVIRONMENT": "demo", "BINANCE_BASE_URL": DEMO_REST_URL},
 ])
 def test_binance_contradictions_fail_closed(env):
     with pytest.raises(ValueError):
@@ -70,6 +70,19 @@ def test_reconciliation_and_scanner_share_resolved_binance_url(monkeypatch):
     cfg = load_config_from_env()
     assert cfg.binance.base_url == TESTNET_REST_URL
     assert cfg.exchange.binance is cfg.binance
+
+
+def test_demo_rest_only_resolution_and_environment_host_parity():
+    demo = resolve_binance_environment({"BINANCE_ENVIRONMENT": "demo", "BINANCE_BASE_URL": DEMO_REST_URL}, require_websocket=False)
+    assert demo.rest_base_url == DEMO_REST_URL and demo.ws_base_url == ""
+    with pytest.raises(ValueError, match="websocket"):
+        resolve_binance_environment({"BINANCE_ENVIRONMENT": "demo", "BINANCE_BASE_URL": DEMO_REST_URL})
+    for env in (
+        {"BINANCE_ENVIRONMENT": "demo", "BINANCE_BASE_URL": PRODUCTION_REST_URL},
+        {"BINANCE_ENVIRONMENT": "production", "BINANCE_BASE_URL": DEMO_REST_URL},
+    ):
+        with pytest.raises(ValueError, match="endpoint is"):
+            resolve_binance_environment(env, require_websocket=False)
 
 
 def test_secret_audit_never_emits_secret_and_placeholder_fails():

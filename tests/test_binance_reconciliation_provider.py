@@ -4,7 +4,12 @@ from urllib import error
 
 import pytest
 
-from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
+from alphaforge.binance_reconciliation_provider import (
+    BinanceReadonlyReconciliationConfig,
+    BinanceReadonlyReconciliationProvider,
+)
+from alphaforge.config import load_reconciliation_settings
+from alphaforge.env_contract import DEMO_REST_URL
 
 
 def test_signature_and_headers_deterministic() -> None:
@@ -76,3 +81,45 @@ def test_provider_fail_closed_and_redacts_secrets() -> None:
 def test_provider_missing_credentials_rejected() -> None:
     with pytest.raises(Exception):
         BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url="https://fapi.binance.com", api_key="", api_secret="s"))
+
+
+def test_demo_reconciliation_settings_do_not_require_websocket() -> None:
+    settings = load_reconciliation_settings({
+        "BINANCE_ENVIRONMENT": "demo",
+        "BINANCE_BASE_URL": DEMO_REST_URL,
+        "BINANCE_WS_URL": "",
+        "BINANCE_API_KEY": "key",
+        "BINANCE_API_SECRET": "secret",
+    })
+    assert settings.base_url == DEMO_REST_URL
+
+
+def test_canonical_reconciliation_settings_preserve_all_safety_fields() -> None:
+    settings = load_reconciliation_settings({
+        "BINANCE_ENVIRONMENT": "demo",
+        "BINANCE_BASE_URL": DEMO_REST_URL,
+        "ALPHAFORGE_BINANCE_RECV_WINDOW_MS": "30000",
+        "ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC": "7.5",
+        "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS": "90000",
+        "ALPHAFORGE_RECONCILIATION_POSITION_EPSILON": "0.000000001",
+        "ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS": "17",
+    })
+    assert settings.recv_window_ms == 30000
+    assert settings.timeout_sec == 7.5
+    assert settings.trade_lookback_ms == 90000
+    assert str(settings.position_epsilon) == "1E-9"
+    assert settings.max_fill_symbols == 17
+    assert settings.provenance["recv_window_ms"] == "canonical"
+
+
+def test_legacy_recv_window_compatibility_and_conflict_fail_closed() -> None:
+    base = {"BINANCE_ENVIRONMENT": "production"}
+    legacy = load_reconciliation_settings({**base, "BINANCE_RECV_WINDOW_MS": "7000"})
+    assert legacy.recv_window_ms == 7000
+    assert legacy.provenance["recv_window_ms"] == "deprecated_alias"
+    with pytest.raises(ValueError, match="alias conflict"):
+        load_reconciliation_settings({
+            **base,
+            "ALPHAFORGE_BINANCE_RECV_WINDOW_MS": "5000",
+            "BINANCE_RECV_WINDOW_MS": "7000",
+        })
