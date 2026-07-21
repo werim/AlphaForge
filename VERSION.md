@@ -1,6 +1,6 @@
 # AlphaForge Version
 
-- Current version: Phase 9 executable environment contract and Binance endpoint coherence
+- Current version: Phase 9 PR #291 campaign-scoped reconciliation evidence counting
 - Current phase: Phase 9 - production-like PAPER burn-in execution, evidence audit, and release decision hardening
 - Runtime maturity: PAPER operational workflow with fail-closed preflight, STARTING-to-RUNNING verified worker attachment, explicit startup-failure terminalization, verified recovery evidence, historical local-zero-exposure diagnostic fallback evidence, stale-continuation terminalization, watchdog incidents, append-only/terminal source evidence audit, daily report, and final package; LIVE trading remains unavailable.
 - BACKTEST/PAPER/LIVE alignment: Phase 9 requires campaign == active continuation == runtime identity parity for PAPER attachment; runtime limits remain mode-aware, while persisted or runtime config drift fails closed.
@@ -20,3 +20,9 @@
 - **2026-07-17 recovery audit:** PAPER recovery is now scope-aware and evaluates current SQL positions/orders, reconciliation evidence, and kill switch before inheriting history. Snapshot provenance is append-only with nullable campaign/run/release lineage columns. LIVE/LIVE_PRECHECK remain strict; LIVE remains NOT LIVE READY.
 
 - **2026-07-18 startup-interruption audit:** Detached launch is now compensating-transition safe for `KeyboardInterrupt`, `SystemExit`, `_launch_worker()` `RuntimeError`, spawn failure, worker early exit, attachment timeout, and identity mismatch. Zero-exposure startup failures can be safely terminalized; exposure-bearing or unavailable evidence remains blocked.
+
+- **2026-07-20 PR #291 validation:** canonical/legacy Binance receive-window compatibility is regression-tested; operational Demo acceptance and green remote CI remain required before merge.
+
+- **2026-07-20 Windows diagnostics:** reconciliation uses a narrow canonical config loader; global invalid settings remain separately visible; daily loss remains a fraction and LIVE remains NOT READY.
+
+- **2026-07-20 dotenv correction:** operator diagnostics bootstrap canonical `.env` once; explicit mapping APIs remain isolated; LIVE remains NOT READY.
