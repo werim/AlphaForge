@@ -4,7 +4,12 @@ from urllib import error
 
 import pytest
 
-from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
+from alphaforge.binance_reconciliation_provider import (
+    BinanceReadonlyReconciliationConfig,
+    BinanceReadonlyReconciliationProvider,
+    load_reconciliation_settings,
+)
+from alphaforge.env_contract import DEMO_REST_URL
 
 
 def test_signature_and_headers_deterministic() -> None:
@@ -76,3 +81,14 @@ def test_provider_fail_closed_and_redacts_secrets() -> None:
 def test_provider_missing_credentials_rejected() -> None:
     with pytest.raises(Exception):
         BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url="https://fapi.binance.com", api_key="", api_secret="s"))
+
+
+def test_demo_reconciliation_settings_do_not_require_websocket() -> None:
+    settings = load_reconciliation_settings({
+        "BINANCE_ENVIRONMENT": "demo",
+        "BINANCE_BASE_URL": DEMO_REST_URL,
+        "BINANCE_WS_URL": "",
+        "BINANCE_API_KEY": "key",
+        "BINANCE_API_SECRET": "secret",
+    })
+    assert settings.base_url == DEMO_REST_URL

@@ -9,6 +9,8 @@ import urllib.parse
 from urllib import error, request
 from typing import Any, Callable, Mapping
 
+from alphaforge.env_contract import resolve_binance_environment
+
 
 class ReconciliationAuthError(RuntimeError):
     pass
@@ -26,6 +28,19 @@ class BinanceReadonlyReconciliationConfig:
     recv_window_ms: int = 5000
     request_timeout_sec: float = 2.0
     trade_lookback_ms: int = 3_600_000
+
+
+def load_reconciliation_settings(env: Mapping[str, str]) -> BinanceReadonlyReconciliationConfig:
+    """Load the REST-only reconciliation contract independently of websocket runtime."""
+    resolved = resolve_binance_environment(env, require_websocket=False)
+    return BinanceReadonlyReconciliationConfig(
+        base_url=resolved.rest_base_url,
+        api_key=str(env.get("BINANCE_API_KEY", "")),
+        api_secret=str(env.get("BINANCE_API_SECRET", "")),
+        recv_window_ms=int(env.get("BINANCE_RECV_WINDOW_MS") or 5000),
+        request_timeout_sec=float(env.get("BINANCE_REQUEST_TIMEOUT_SEC") or 2.0),
+        trade_lookback_ms=int(env.get("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS") or 3_600_000),
+    )
 
 
 class BinanceReadonlyReconciliationProvider:
