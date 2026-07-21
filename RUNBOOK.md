@@ -153,3 +153,79 @@ python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-d
 ```
 
 Finalization can qualify only canonical `CANARY_QUALIFIED` Phase 8 qualification snapshots, with completion, integrity, aggregate-hash linkage, healthy state, and bounded backlog all passing. `PASS` or `QUALIFIED` aliases do not qualify a campaign for canary review.
+
+## Binance Demo read-only reconciliation acceptance
+
+This check uses the runtime's canonical Binance environment, credentials, timeout, receive window, lookback, Decimal epsilon, scope cap, and provider. It never submits orders and prints only sanitized JSON. A successful synthetic test is not credentialed Demo evidence.
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION = "true"
+$env:BINANCE_BASE_URL = "https://demo-fapi.binance.com"
+$env:BINANCE_API_KEY = Read-Host "Binance Demo read-only API key"
+$env:BINANCE_API_SECRET = Read-Host "Binance Demo API secret"
+python -m alphaforge.binance_reconciliation_check
+if ($LASTEXITCODE -ne 0) { throw "Binance reconciliation evidence is incomplete" }
+```
+
+To sanitize a locally captured `positionRisk` response for private incident analysis (do not commit it automatically):
+
+```powershell
+python -m alphaforge.binance_reconciliation_check --sanitize-position-risk .\positionRisk.raw.json --output .\positionRisk.safe.json
+```
+
+Exit code zero means `evidence_status=COMPLETE`; every incomplete endpoint, malformed exposure, invalid symbol, cap breach, or exhausted bounded retry exits nonzero. Confirm `positionRisk` and `openOrders` are `PASS`, the selected fill scope is bounded, and no unresolved `-1021` remains before accepting the evidence.
+
+### PR #291 corrective Demo capture
+
+Run with read-only credentials already present in the process environment:
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION = "true"
+$env:BINANCE_BASE_URL = "https://demo-fapi.binance.com"
+python -m alphaforge.binance_reconciliation_check --write-sanitized-position-risk .\artifacts\binance_position_risk_safe.json
+if ($LASTEXITCODE -ne 0) { throw "Binance reconciliation evidence is incomplete" }
+```
+
+Exact-zero rows with invalid venue symbols are retained using a one-way symbol hash, reported as `zero_exposure_invalid_symbol` warnings, excluded from `userTrades`, and do not alone make financially authoritative evidence incomplete. Invalid symbols with any nonzero quantity—including epsilon-filtered quantities—remain blockers. The generated artifact is local operator evidence and must not be committed automatically.
+
+### Campaign-scoped Demo acceptance (PR #291)
+
+A no-symbol diagnostic can verify global endpoints but is **not** Phase 9 campaign-scoped acceptance. Use the same symbols as preflight:
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION = "true"
+$env:BINANCE_BASE_URL = "https://demo-fapi.binance.com"
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT,ETHUSDT
+```
+
+Acceptance requires `campaign_scope_validated=true`, the requested symbol in both `tracked_symbols` and `selected_fill_symbols`, PASS for `positionRisk`, `openOrders`, and `userTrades`, no unresolved `-1021`, a bounded `http_request_count` whose ordered `request_attempts` explain every retry/time refresh, and `evidence_status=COMPLETE`.
+
+## Windows configuration and reconciliation diagnostics
+
+AlphaForge loads `.env` itself. Do not copy it into process scope with a custom PowerShell loop. Effective precedence is: process environment, dashboard override, `.env.local`, `.env`, then typed defaults. The diagnostic output reports safe provenance so a stale process variable is visible.
+
+```powershell
+python -m alphaforge.config_check
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT
+python -m alphaforge.binance_reconciliation_check --symbols "BTCUSDT,ETHUSDT"
+```
+
+`ALPHAFORGE_MAX_DAILY_LOSS_PCT` is a fraction: `0.02` means 2%; `2.0` is rejected rather than silently reinterpreted. Binance market type is internally `USD_M`; `USDT_M`, `USD-M`, and `USDT-M` are safe aliases. Spot and coin-margined values are rejected.
+
+Safe configuration errors contain a stage, reason code, setting name, allowed range/unit when known, and only safe numeric values. Secrets report presence and provenance only. Reconciliation output separately reports `reconciliation_config_status`, `global_config_status`, and `global_config_errors`, so unrelated global errors remain visible without preventing an otherwise valid read-only exchange diagnostic.
+
+Exit codes for `alphaforge.binance_reconciliation_check`:
+
+- `0`: reconciliation configuration valid and exchange evidence complete
+- `1`: exchange evidence incomplete
+- `2`: reconciliation configuration invalid
+- `3`: authentication missing or invalid
+- `4`: CLI usage or symbol error
+
+`alphaforge.config_check` exits `0` on PASS and `2` when one or more safe configuration errors are collected.
+
+The two diagnostic module entrypoints call AlphaForge's canonical `bootstrap_environment()` exactly once. Run them directly from the repository; quoted values and inline comments in `.env` are supported, and an already-set PowerShell process variable retains precedence. Library functions supplied an explicit environment mapping do not bootstrap or read host dotenv state.
