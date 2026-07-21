@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-from alphaforge.config_registry import decision_filter_config, effective_config_values
-from alphaforge.env_contract import bootstrap_environment, resolve_binance_environment
+from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset
+from alphaforge.env_contract import bootstrap_environment, dotenv_status, resolve_binance_environment
 
 
 def _clean_env_value(raw: str | None) -> str | None:
@@ -117,6 +117,8 @@ class RuntimeSettings:
     enable_binance_readonly_reconciliation: bool = False
     binance_reconciliation_recv_window_ms: int = 5000
     binance_reconciliation_trade_lookback_ms: int = 3_600_000
+    reconciliation_position_epsilon: str = "0.00000001"
+    reconciliation_max_fill_symbols: int = 10
 
 @dataclass(slots=True)
 class BinanceSettings:
@@ -128,6 +130,65 @@ class BinanceSettings:
     default_market_type: str = "USD_M"
     recv_window_ms: int = 5000
     request_timeout_sec: float = 2.0
+
+
+def normalize_binance_market_type(value: object) -> str:
+    normalized = str(value or "").strip().upper().replace("-", "_")
+    if normalized in {"USD_M", "USDT_M"}:
+        return "USD_M"
+    raise ValueError("BINANCE_DEFAULT_MARKET_TYPE unsupported market type; expected USD_M/USDT_M")
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationSettings:
+    base_url: str
+    environment: str
+    recv_window_ms: int
+    timeout_sec: float
+    trade_lookback_ms: int
+    position_epsilon: str
+    max_fill_symbols: int
+    api_key: str
+    api_secret: str
+    sources: Mapping[str, str]
+
+
+def load_reconciliation_settings(*, env: Mapping[str, str] | None = None) -> ReconciliationSettings:
+    env = os.environ if env is None else env
+    names = ("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", "ALPHAFORGE_BINANCE_RECV_WINDOW_MS",
+             "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", "ALPHAFORGE_RECONCILIATION_POSITION_EPSILON",
+             "ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS", "BINANCE_API_KEY", "BINANCE_API_SECRET",
+             "BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL")
+    values = effective_config_subset(names, env=env, fail_on_alias_conflict=True, include_files=False)
+    val = lambda name: values[name]["value"]
+    endpoint_env = {name: str(val(name)) for name in ("BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL") if val(name)}
+    environment_source = str(values["BINANCE_ENVIRONMENT"]["source"])
+    if environment_source.startswith("alias (BINANCE_TESTNET)"):
+        endpoint_env["BINANCE_TESTNET"] = endpoint_env.pop("BINANCE_ENVIRONMENT")
+    resolved = resolve_binance_environment(endpoint_env)
+    from decimal import Decimal, InvalidOperation
+    try:
+        epsilon = Decimal(str(val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON")))
+        if not epsilon.is_finite() or epsilon < 0:
+            raise InvalidOperation
+    except InvalidOperation:
+        raise ValueError("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON invalid decimal") from None
+    loaded_keys = set(dotenv_status().keys_loaded) if env is os.environ else set()
+    sources = {}
+    for name, item in values.items():
+        source = str(item["source"]).upper()
+        aliases = item["setting"].deprecated_aliases
+        if name in loaded_keys or any(alias in loaded_keys for alias in aliases):
+            source = "DOTENV"
+        sources[name] = source
+    return ReconciliationSettings(
+        base_url=resolved.rest_base_url, environment=resolved.environment,
+        recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
+        timeout_sec=float(val("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC")),
+        trade_lookback_ms=int(val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS")),
+        position_epsilon=str(epsilon),
+        max_fill_symbols=int(val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS")),
+        api_key=str(val("BINANCE_API_KEY")), api_secret=str(val("BINANCE_API_SECRET")), sources=sources)
 
 @dataclass(slots=True)
 class HyperliquidSettings:
@@ -300,8 +361,10 @@ def load_config_from_env() -> AlphaForgeConfig:
         required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
         exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
         enable_binance_readonly_reconciliation=val("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION"),
-        binance_reconciliation_recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        binance_reconciliation_recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
         binance_reconciliation_trade_lookback_ms=val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS"),
+        reconciliation_position_epsilon=val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON"),
+        reconciliation_max_fill_symbols=val("ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS"),
     )
     binance = BinanceSettings(
         base_url=resolved_binance.rest_base_url,
@@ -309,12 +372,10 @@ def load_config_from_env() -> AlphaForgeConfig:
         environment=resolved_binance.environment,
         resolution_source=resolved_binance.resolution_source,
         default_quote_asset=str(val("BINANCE_DEFAULT_QUOTE_ASSET")).upper(),
-        default_market_type=str(val("BINANCE_DEFAULT_MARKET_TYPE")).upper(),
-        recv_window_ms=int(val("BINANCE_RECV_WINDOW_MS")),
+        default_market_type=normalize_binance_market_type(val("BINANCE_DEFAULT_MARKET_TYPE")),
+        recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
         request_timeout_sec=float(val("BINANCE_REQUEST_TIMEOUT_SEC")),
     )
-    if binance.default_market_type != "USD_M":
-        raise ValueError("BINANCE_DEFAULT_MARKET_TYPE must be USD_M")
     exchange = ExchangeSettings(
         timeout_sec=float(val("BINANCE_REQUEST_TIMEOUT_SEC")),
         binance=binance,

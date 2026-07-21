@@ -13,6 +13,7 @@ import uuid
 import subprocess
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
@@ -1662,8 +1663,10 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
                 api_key=api_key,
                 api_secret=api_secret,
                 recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms,
-                request_timeout_sec=cfg.binance.request_timeout_sec,
+                request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
                 trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
+                position_epsilon=Decimal(cfg.runtime.reconciliation_position_epsilon),
+                max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols,
             )
             )
 

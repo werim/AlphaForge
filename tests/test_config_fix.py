@@ -48,8 +48,8 @@ def test_alias_conflict_preserves_canonical_and_multiple_fixes(tmp_path):
     root = _root(tmp_path, "BINANCE_RECV_WINDOW_MS=30000\nALPHAFORGE_BINANCE_RECV_WINDOW_MS=5000\nBINANCE_DEFAULT_MARKET_TYPE=USDT-M\n")
     report, _ = run(apply=True, root=root, process_env={}, audit_fn=_audit)
     values = parse_dotenv(root / ".env")
-    assert values["BINANCE_RECV_WINDOW_MS"] == "30000"
-    assert "ALPHAFORGE_BINANCE_RECV_WINDOW_MS" not in values
+    assert values["ALPHAFORGE_BINANCE_RECV_WINDOW_MS"] == "5000"
+    assert "BINANCE_RECV_WINDOW_MS" not in values
     assert values["BINANCE_DEFAULT_MARKET_TYPE"] == "USD_M"
     assert len(report["applied_changes"]) == 2
 

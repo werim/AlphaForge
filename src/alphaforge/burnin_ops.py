@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse, asyncio, csv, hashlib, json, os, signal, sqlite3, subprocess, sys, time, urllib.request
+from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -113,12 +114,15 @@ def _git_commit() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 
-def _symbols(raw: str | Sequence[str]) -> list[str]:
+def parse_symbols(raw: str | Sequence[str]) -> list[str]:
     values = raw if isinstance(raw, (list, tuple)) else [raw]
     parsed: list[str] = []
     for value in values:
         parsed.extend(item.strip().upper() for item in str(value).split(",") if item.strip())
     return parsed
+
+
+_symbols = parse_symbols
 
 
 def _intervals(raw: str | Sequence[str]) -> list[str]:
@@ -190,13 +194,13 @@ def clock_skew_check(*, max_skew_ms: int | None = None, provider: Any | None = N
         return {"status": "UNAVAILABLE", "local_utc_ms": local_ms, "provider_utc_ms": None, "absolute_skew_ms": None, "configured_max_skew_ms": configured, "provider_provenance": {"provider": "BINANCE_READ_ONLY_SERVER_TIME"}, "error": f"{exc.__class__.__name__}:{exc}"}
 
 
-def _readonly_reconciliation_provider(cfg: Any) -> Any | None:
+def _readonly_reconciliation_provider(cfg: Any, symbols: Sequence[str] = ()) -> Any | None:
     if not getattr(cfg.runtime, "enable_binance_readonly_reconciliation", False):
         return None
     key, secret = os.getenv("BINANCE_API_KEY", "").strip(), os.getenv("BINANCE_API_SECRET", "").strip()
     if not key or not secret:
         return None
-    return BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url=cfg.exchange.binance.base_url, api_key=key, api_secret=secret, recv_window_ms=cfg.binance.recv_window_ms, request_timeout_sec=cfg.binance.request_timeout_sec, trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms))
+    return BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url=cfg.exchange.binance.base_url, api_key=key, api_secret=secret, recv_window_ms=cfg.binance.recv_window_ms, request_timeout_sec=cfg.runtime.reconciliation_timeout_sec, trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms, position_epsilon=Decimal(cfg.runtime.reconciliation_position_epsilon), max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols), tracked_symbols=lambda: set(_symbols(symbols)))
 
 
 def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None) -> dict[str, Any]:
@@ -294,7 +298,7 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("no_stale_worker_occupying_campaign", "PASS" if int(stale) == 0 else "FAIL", stale)
         recovery_engine = init_db(f"sqlite+pysqlite:///{db}")
         try:
-            recovery = evaluate_runtime_recovery(recovery_engine, mode="PAPER", campaign_id=cid, reconciliation_probe=build_readonly_reconciliation_probe(reconciliation_provider or _readonly_reconciliation_provider(cfg)))
+            recovery = evaluate_runtime_recovery(recovery_engine, mode="PAPER", campaign_id=cid, reconciliation_probe=build_readonly_reconciliation_probe(reconciliation_provider or _readonly_reconciliation_provider(cfg, symbols)))
             # A complete empty account snapshot is the required exchange evidence
             # for clearing an unrelated PAPER predecessor.  Preserve it append-only;
             # never edit the predecessor's unclean snapshot in place.

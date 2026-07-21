@@ -3342,3 +3342,124 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Runtime Phase 6 still deliberately blocks real LIVE startup; LIVE remains NOT LIVE READY.
+
+## Binance read-only reconciliation hardening (2026-07-20)
+
+### Added
+- Bounded, source-attributed fill scope, Decimal exposure classification, sanitized request evidence, same-host `-1021` time recovery, and an operator diagnostic/sanitizer CLI.
+
+### Changed
+- PAPER reconciliation reuses a serial connection within a snapshot and uses canonical timeout, receive-window, lookback, epsilon, and fill-scope settings.
+
+### Fixed
+- Zero `positionRisk` rows no longer cause `userTrades` universe fan-out; partial successful evidence is retained on later failure and unknown orphan counts remain unknown.
+
+### Removed
+- Implicit treatment of the complete `positionRisk` universe as active fill scope.
+
+### Breaking Changes
+- Malformed exposure, invalid symbols, or more than 10 relevant symbols now fail closed before fill fan-out; operators may explicitly raise the bounded cap (maximum 100) after review.
+
+### Known Issues
+- Credentialed Binance Demo acceptance was not run in this environment; LIVE remains unavailable.
+
+## PR #291 corrective hardening (2026-07-20)
+
+### Added
+- Safe invalid-zero-symbol warnings, sanitized position-distribution output, and stateful default-transport coverage.
+
+### Changed
+- `ALPHAFORGE_BINANCE_RECV_WINDOW_MS` is canonical; `BINANCE_RECV_WINDOW_MS` remains a deprecated, lower-precedence alias.
+
+### Fixed
+- HTTP error bodies now survive `HTTPError`, enabling real `-1021` detection and same-host time refresh.
+- Position quantities are parsed before symbol policy: invalid exact-zero symbols cannot fan out, while every invalid nonzero symbol fails closed.
+
+### Removed
+- No behavior removed.
+
+### Breaking Changes
+- The canonical receive-window name changed; the legacy alias remains compatible.
+
+### Known Issues
+- Credentialed Demo acceptance and GitHub CI remain NOT RUN in this network-restricted environment.
+
+## PR #291 campaign-scope/count correction (2026-07-20)
+
+### Added
+- CLI `--symbols` campaign scope plus ordered per-HTTP-operation attempt evidence and exact request counts.
+
+### Changed
+- Demo acceptance now distinguishes unscoped diagnostics from Phase 9-equivalent tracked-symbol validation.
+
+### Fixed
+- Retries and server-time refreshes are no longer omitted from operational request counts.
+
+### Removed
+- No functionality removed.
+
+### Breaking Changes
+- None; no-symbol diagnostics remain available but explicitly report `campaign_scope_validated=false`.
+
+### Known Issues
+- Credentialed Demo acceptance and GitHub CI remain NOT RUN in this network-restricted environment.
+
+## PR #291 merge-readiness validation (2026-07-20)
+
+### Added
+- Compatibility regression coverage for canonical/legacy receive-window resolution, equal-value coexistence, conflict rejection, and environment-template safety.
+
+### Changed
+- No runtime behavior changed; this update is validation-only.
+
+### Fixed
+- Closed the missing test evidence for the receive-window compatibility contract.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Credentialed Demo acceptance, GitHub CI, and remote mergeability remain unverified where GitHub access and credentials are unavailable.
+
+## PR #291 Windows diagnostic reliability (2026-07-20)
+
+### Added
+- Multi-error safe `alphaforge.config_check`, focused reconciliation settings loading, PowerShell multi-token symbol grammar, structured diagnostics, and distinct exit codes.
+
+### Changed
+- Binance market aliases normalize to `USD_M`; diagnostic loading no longer depends on unrelated global settings.
+
+### Fixed
+- Daily-loss fraction diagnostics now explain that `0.02` means 2%, and stale process/config provenance is visible instead of masked.
+
+### Removed
+- Generic `configuration_or_authentication_failed` diagnostic masking.
+
+### Breaking Changes
+- None; unsafe `2.0` daily-loss fraction and unsupported market types remain rejected.
+
+### Known Issues
+- Credentialed Demo acceptance and GitHub CI remain external validation requirements.
+
+## PR #291 dotenv bootstrap correction (2026-07-20)
+
+### Added
+- CLI bootstrap/source-isolation tests for quoted/commented dotenv values, secret redaction, and process precedence.
+
+### Changed
+- Operator entrypoints now bootstrap the canonical repository `.env` exactly once before reading settings.
+
+### Fixed
+- `config_check` and Binance reconciliation no longer require a manual PowerShell dotenv import.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- Credentialed Demo acceptance and remote CI remain pending.
