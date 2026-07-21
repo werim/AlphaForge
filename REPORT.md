@@ -45,6 +45,11 @@ unknown or safety-relevant values require manual review. LIVE remains unavailabl
 and no merge/readiness recommendation is made without CI and credentialed Demo
 reconciliation evidence.
 
+Conflict-resolution regression coverage also asserts that the provider module
+does not expose an environment settings loader; `alphaforge.config` remains the
+single reconciliation parsing authority. No runtime, persistence, lifecycle,
+schema, strategy, sizing, or LIVE-readiness behavior changed.
+
 ---
 
 ## Why the patch was needed

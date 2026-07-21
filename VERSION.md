@@ -14,6 +14,7 @@
 
 - Configuration maturity: dry-run remediation classifies source-aware findings and apply mode is restricted to provably safe `.env` edits with backup, atomic replacement, bounded re-audit, and secret redaction. Production/testnet/Demo REST identity remains fail closed; no LIVE or websocket safety gate is weakened.
 - Reconciliation configuration authority: the config layer exclusively parses canonical `ALPHAFORGE_BINANCE_RECV_WINDOW_MS`, its deprecated alias, timeout, lookback, Decimal epsilon, and fill-symbol cap; the provider contains no environment loader.
+- Conflict-resolution audit: provider-local reconciliation loader absence is regression-tested; credentialed Demo evidence and CI remain pending.
 
 - **2026-07-17 audit:** detached burn-in worker crash observability and dead-worker lifecycle cleanup are implemented; PAPER burn-in remains non-live-ready pending operational validation.
 - **2026-07-17 follow-up:** post-attach worker failures and pause shutdown attribution are lifecycle-correct; worker identity guards remain fail-closed.

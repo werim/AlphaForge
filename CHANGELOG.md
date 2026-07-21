@@ -89,6 +89,7 @@
 
 ### Fixed
 - `BINANCE_ENVIRONMENT=demo` with `https://demo-fapi.binance.com` no longer fails REST-only configuration audit solely because the project has no claimed Demo websocket endpoint.
+- Added a regression guard preventing provider-local reconciliation environment parsing from being reintroduced during conflict resolution.
 
 ### Removed
 - Nothing.

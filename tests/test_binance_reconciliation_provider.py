@@ -10,6 +10,7 @@ from alphaforge.binance_reconciliation_provider import (
 )
 from alphaforge.config import load_reconciliation_settings
 from alphaforge.env_contract import DEMO_REST_URL
+import alphaforge.binance_reconciliation_provider as provider_module
 
 
 def test_signature_and_headers_deterministic() -> None:
@@ -123,3 +124,8 @@ def test_legacy_recv_window_compatibility_and_conflict_fail_closed() -> None:
             "ALPHAFORGE_BINANCE_RECV_WINDOW_MS": "5000",
             "BINANCE_RECV_WINDOW_MS": "7000",
         })
+
+
+def test_provider_module_does_not_own_environment_settings_loader() -> None:
+    """Conflict resolution must not reintroduce a second parsing authority."""
+    assert not hasattr(provider_module, "load_reconciliation_settings")
