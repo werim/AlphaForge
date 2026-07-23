@@ -145,7 +145,14 @@ def _valid_url(name: str, value: str, schemes: set[str]) -> str:
     return value.rstrip("/")
 
 
-def resolve_binance_environment(env: Mapping[str, str]) -> BinanceEnvironment:
+def resolve_binance_environment(
+    env: Mapping[str, str], *, require_websocket: bool = True
+) -> BinanceEnvironment:
+    """Resolve endpoints while keeping streaming consumers fail closed.
+
+    REST-only reconciliation may opt out of websocket resolution.  Runtime and
+    market-stream callers use the strict default.
+    """
     explicit_environment = str(env.get("BINANCE_ENVIRONMENT", "")).strip().lower()
     legacy_present = str(env.get("BINANCE_TESTNET", "")).strip() != ""
     legacy_testnet = parse_bool("BINANCE_TESTNET", env["BINANCE_TESTNET"]) if legacy_present else False
@@ -161,15 +168,18 @@ def resolve_binance_environment(env: Mapping[str, str]) -> BinanceEnvironment:
         source = "alias" if legacy_present else "default"
     if environment == "demo":
         # Demo Trading is intentionally not guessed or collapsed into Futures Testnet.
-        if not env.get("BINANCE_BASE_URL") or not env.get("BINANCE_WS_URL"):
-            raise ValueError("BINANCE_ENVIRONMENT=demo requires explicit BINANCE_BASE_URL and BINANCE_WS_URL")
+        if not env.get("BINANCE_BASE_URL"):
+            raise ValueError("BINANCE_ENVIRONMENT=demo requires explicit BINANCE_BASE_URL")
+        if require_websocket and not env.get("BINANCE_WS_URL"):
+            raise ValueError("BINANCE_ENVIRONMENT=demo runtime requires explicit BINANCE_WS_URL")
         derived_rest = derived_ws = ""
     elif environment == "testnet":
         derived_rest, derived_ws = TESTNET_REST_URL, TESTNET_WS_URL
     else:
         derived_rest, derived_ws = PRODUCTION_REST_URL, PRODUCTION_WS_URL
     rest = _valid_url("BINANCE_BASE_URL", str(env.get("BINANCE_BASE_URL") or derived_rest), {"http", "https"})
-    ws = _valid_url("BINANCE_WS_URL", str(env.get("BINANCE_WS_URL") or derived_ws), {"ws", "wss"})
+    ws_raw = str(env.get("BINANCE_WS_URL") or derived_ws)
+    ws = _valid_url("BINANCE_WS_URL", ws_raw, {"ws", "wss"}) if ws_raw else ""
     rest_source = "process_env" if env.get("BINANCE_BASE_URL") else source
     ws_source = "process_env" if env.get("BINANCE_WS_URL") else source
     # Known endpoints may not be crossed. Custom paired overrides are allowed and audited.

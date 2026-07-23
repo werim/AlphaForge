@@ -35,7 +35,7 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
-from alphaforge.config import load_config_from_env, runtime_filter_config
+from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
@@ -1657,17 +1657,18 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
             else:
                 raise RuntimeError("LIVE mode blocked: Binance reconciliation credentials are missing")
         if api_key and api_secret:
+            reconciliation = load_reconciliation_settings()
             live_reconciliation_provider = BinanceReadonlyReconciliationProvider(
-            config=BinanceReadonlyReconciliationConfig(
-                base_url=cfg.exchange.binance.base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                recv_window_ms=cfg.runtime.binance_reconciliation_recv_window_ms,
-                request_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
-                trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms,
-                position_epsilon=Decimal(cfg.runtime.reconciliation_position_epsilon),
-                max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols,
-            )
+                config=BinanceReadonlyReconciliationConfig(
+                    base_url=reconciliation.base_url,
+                    api_key=reconciliation.api_key,
+                    api_secret=reconciliation.api_secret,
+                    recv_window_ms=reconciliation.recv_window_ms,
+                    request_timeout_sec=reconciliation.timeout_sec,
+                    trade_lookback_ms=reconciliation.trade_lookback_ms,
+                    position_epsilon=Decimal(reconciliation.position_epsilon),
+                    max_fill_symbols=reconciliation.max_fill_symbols,
+                )
             )
 
     orchestrator = RuntimeOrchestrator(
