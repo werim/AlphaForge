@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import hashlib
 
 from alphaforge.burnin import config_hash, persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_trade_outcome, utc_now
 from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign, fail_active_campaign_run
@@ -19,6 +20,9 @@ from alphaforge.burnin_ops import (
     verify_worker_attachment,
     watch_once,
     clock_skew_check,
+    database_diagnosis,
+    _readonly_sqlite_uri,
+    main as burnin_ops_main,
 )
 
 
@@ -45,6 +49,131 @@ def _campaign(conn, *, release="rel", targets_zero=True):
     run = start_or_resume_campaign(conn, camp.campaign_id)["burnin_run_id"]
     conn.commit()
     return camp, run
+
+
+def test_database_diagnosis_is_read_only_and_fails_closed_on_unknown_exposure(tmp_path):
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET worker_pid=NULL,last_heartbeat_at='2020-01-01T00:00:00Z' WHERE campaign_id=?", (camp.campaign_id,))
+    conn.commit()
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    schema_before = conn.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall()
+    rows_before = conn.execute("SELECT COUNT(*) FROM burnin_campaigns").fetchone()[0]
+    payload = database_diagnosis(str(db), max_heartbeat_age=1)
+    after = hashlib.sha256(db.read_bytes()).hexdigest()
+    assert before == after
+    assert payload["read_only"] is True
+    state = payload["campaigns"][0]
+    assert state["active_continuation"]["burnin_run_id"] == run
+    assert state["stale_continuation"] is True
+    assert state["runtime_pending_orders"] is None
+    assert state["runtime_pending_orders_available"] is False
+    assert payload["cleanup_plan"][0]["classification"] == "MANUAL_REVIEW"
+    assert payload["cleanup_plan"][0]["convert_unknown_exposure_to_zero"] is False
+    assert not db.with_name(db.name + "-wal").exists()
+    assert not db.with_name(db.name + "-shm").exists()
+    assert conn.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall() == schema_before
+    assert conn.execute("SELECT COUNT(*) FROM burnin_campaigns").fetchone()[0] == rows_before
+    conn.close()
+
+
+def _runtime_table(conn, camp, run, *, omit=(), pending_orders="[]", campaign_id=None, timestamp=None,
+                   reconciliation_status="CLEAN", unknown_exchange_state=0):
+    definitions = {
+        "id": "INTEGER PRIMARY KEY", "campaign_id": "TEXT", "burnin_run_id": "TEXT", "release_id": "TEXT",
+        "active_position_count": "INTEGER", "active_positions": "TEXT", "pending_order_count": "INTEGER", "pending_orders": "TEXT",
+        "orphan_position_count": "INTEGER", "orphan_order_count": "INTEGER", "unknown_exchange_state": "INTEGER",
+        "recovery_action_required": "INTEGER", "reconciliation_status": "TEXT", "exchange_read_only_status": "TEXT",
+        "diagnostics_json": "TEXT", "timestamp": "TEXT",
+    }
+    columns = [name for name in definitions if name not in omit]
+    conn.execute("DROP TABLE IF EXISTS runtime_state_snapshots")
+    conn.execute("CREATE TABLE runtime_state_snapshots(" + ",".join(f"{name} {definitions[name]}" for name in columns) + ")")
+    values = {"id": 1, "campaign_id": campaign_id or camp.campaign_id, "burnin_run_id": run, "release_id": camp.release_id,
+              "active_position_count": 0, "active_positions": "[]", "pending_order_count": 0, "pending_orders": pending_orders,
+              "orphan_position_count": 0, "orphan_order_count": 0, "unknown_exchange_state": unknown_exchange_state,
+              "recovery_action_required": 0, "reconciliation_status": reconciliation_status, "exchange_read_only_status": "AVAILABLE",
+              "diagnostics_json": json.dumps({"evidence_status": "COMPLETE", "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT"}),
+              "timestamp": timestamp or utc_now()}
+    conn.execute(f"INSERT INTO runtime_state_snapshots({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})", [values[c] for c in columns])
+    conn.commit()
+
+
+@pytest.mark.parametrize("case", ["absent", "historical", "missing_counter", "malformed_json", "other_campaign", "stale", "local_only", "unknown_exchange"])
+def test_database_diagnosis_historical_runtime_compatibility(tmp_path, case):
+    db, conn = _conn(tmp_path / case)
+    camp, run = _campaign(conn)
+    if case == "absent":
+        conn.execute("DROP TABLE IF EXISTS runtime_state_snapshots"); conn.commit()
+    elif case == "historical":
+        _runtime_table(conn, camp, run, omit={"campaign_id", "burnin_run_id", "release_id", "diagnostics_json"})
+    elif case == "missing_counter":
+        _runtime_table(conn, camp, run, omit={"orphan_order_count"})
+    elif case == "malformed_json":
+        _runtime_table(conn, camp, run, pending_orders="not-json")
+    elif case == "other_campaign":
+        _runtime_table(conn, camp, run, campaign_id="another-campaign")
+    elif case == "stale":
+        _runtime_table(conn, camp, run, timestamp="2020-01-01T00:00:00Z")
+    elif case == "local_only":
+        _runtime_table(conn, camp, run, reconciliation_status="LOCAL_ONLY_DIAGNOSTIC")
+    else:
+        _runtime_table(conn, camp, run, unknown_exchange_state=1)
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    out = database_diagnosis(str(db), max_heartbeat_age=120)
+    assert out["status"] == "COMPLETE"
+    assert out["cleanup_plan"][0]["classification"] == "MANUAL_REVIEW"
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before
+    conn.close()
+
+
+@pytest.mark.parametrize("table,availability,value", [
+    ("burnin_pending_position_outcomes", "campaign_open_positions_available", "campaign_open_positions"),
+    ("burnin_pending_reject_labels", "pending_reject_labels_available", "pending_reject_labels"),
+])
+def test_database_diagnosis_missing_local_evidence_table_is_unavailable(tmp_path, table, availability, value):
+    db, conn = _conn(tmp_path / table)
+    _campaign(conn)
+    conn.execute(f"DROP TABLE {table}"); conn.commit()
+    out = database_diagnosis(str(db))
+    assert out["campaigns"][0][availability] is False
+    assert out["campaigns"][0][value] is None
+    assert out["cleanup_plan"][0]["classification"] == "MANUAL_REVIEW"
+    conn.close()
+
+
+def test_database_diagnosis_query_failure_is_structured(monkeypatch, tmp_path):
+    db, conn = _conn(tmp_path)
+    _campaign(conn); conn.close()
+    real = __import__("alphaforge.burnin_ops", fromlist=["_connect_readonly"])._connect_readonly
+
+    class Proxy:
+        def __init__(self, wrapped): self.wrapped = wrapped
+        def execute(self, sql, params=()):
+            if sql.startswith("SELECT pending_position_id"):
+                raise sqlite3.OperationalError("injected read failure")
+            return self.wrapped.execute(sql, params)
+        def close(self): self.wrapped.close()
+
+    monkeypatch.setattr("alphaforge.burnin_ops._connect_readonly", lambda path: Proxy(real(path)))
+    out = database_diagnosis(str(db))
+    state = out["campaigns"][0]
+    assert state["campaign_open_positions_available"] is False
+    assert state["campaign_open_positions"] is None
+    assert any("injected read failure" in row.get("query_error", "") for row in state["query_errors"])
+
+
+def test_database_diagnosis_missing_database_has_structured_cli_failure(tmp_path, capsys):
+    missing = tmp_path / "missing.db"
+    assert burnin_ops_main(["--db", str(missing), "diagnose-db"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "BLOCKED_DATABASE_STATE"
+    assert "Traceback" not in json.dumps(payload)
+
+
+def test_readonly_sqlite_uri_cross_platform_paths():
+    assert _readonly_sqlite_uri("C:\\Alpha Forge\\burnin.db", platform="nt") == "file:C:/Alpha%20Forge/burnin.db?mode=ro"
+    assert _readonly_sqlite_uri("/var/lib/alpha forge/burnin.db", platform="posix") == "file:/var/lib/alpha%20forge/burnin.db?mode=ro"
 
 
 def test_phase9_preflight_rejects_non_paper(monkeypatch, tmp_path):

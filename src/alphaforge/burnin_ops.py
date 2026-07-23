@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse, asyncio, csv, hashlib, json, os, signal, sqlite3, subprocess, sys, time, urllib.request
+from pathlib import Path, PureWindowsPath
+from urllib.parse import quote
 from decimal import Decimal
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from sqlalchemy import create_engine
@@ -53,6 +54,172 @@ def _connect(db: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     bootstrap_ops_schema(conn)
     return conn
+
+
+def _readonly_sqlite_uri(db: str, *, platform: str | None = None) -> str:
+    """Build a SQLite read-only URI without losing Windows drive letters."""
+    target_platform = platform or os.name
+    if target_platform == "nt":
+        raw = PureWindowsPath(db).as_posix()
+        if not PureWindowsPath(db).is_absolute():
+            raw = PureWindowsPath(Path(db).resolve()).as_posix()
+        return f"file:{quote(raw, safe='/:')}?mode=ro"
+    return f"file:{quote(Path(db).expanduser().resolve().as_posix(), safe='/:')}?mode=ro"
+
+
+def _connect_readonly(db: str) -> sqlite3.Connection:
+    """Open an existing SQLite database without bootstrap or journal writes."""
+    path = Path(db).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"database_not_found:{path}")
+    conn = sqlite3.connect(_readonly_sqlite_uri(str(path)), uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+
+def database_diagnosis(db: str, *, max_heartbeat_age: float = 120.0) -> dict[str, Any]:
+    """Return campaign state and a conservative cleanup plan without mutation."""
+    try:
+        conn = _connect_readonly(db)
+    except Exception as exc:
+        return {"status": "BLOCKED_DATABASE_STATE", "read_only": True, "database": str(db),
+                "campaigns_available": False, "campaigns": None, "cleanup_plan": None,
+                "query_errors": [{"source": "database", "query_error": f"{exc.__class__.__name__}:{exc}"}]}
+    try:
+        query_errors: list[dict[str, Any]] = []
+        try:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            schemas = {table: {row[1] for row in conn.execute(f"PRAGMA table_info({table})")} for table in tables}
+        except Exception as exc:
+            return {"status": "BLOCKED_DATABASE_STATE", "read_only": True, "campaigns_available": False,
+                    "campaigns": None, "cleanup_plan": None,
+                    "query_errors": [{"source": "schema", "query_error": f"{exc.__class__.__name__}:{exc}"}]}
+
+        def safe_rows(source: str, table: str, columns: Sequence[str], *, where: str = "", params: Sequence[Any] = (), order: str = "") -> tuple[bool, list[dict[str, Any]] | None]:
+            missing = sorted(set(columns) - schemas.get(table, set()))
+            if table not in tables or missing:
+                error = {"source": source, "available": False, "missing_schema": {"table": table if table not in tables else None, "columns": missing}}
+                query_errors.append(error)
+                return False, None
+            sql = f"SELECT {','.join(columns)} FROM {table}"
+            if where:
+                sql += f" WHERE {where}"
+            if order:
+                sql += f" ORDER BY {order}"
+            try:
+                return True, [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
+            except Exception as exc:
+                query_errors.append({"source": source, "available": False, "query_error": f"{exc.__class__.__name__}:{exc}"})
+                return False, None
+
+        campaign_columns = ["campaign_id", "campaign_status", "active_run_id", "worker_pid", "last_heartbeat_at", "release_id", "git_commit", "config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash"]
+        if "burnin_campaigns" not in tables or "campaign_id" not in schemas.get("burnin_campaigns", set()):
+            query_errors.append({"source": "campaigns", "available": False, "missing_schema": {"table": "burnin_campaigns" if "burnin_campaigns" not in tables else None, "columns": ["campaign_id"]}})
+            return {"status": "BLOCKED_DATABASE_STATE", "read_only": True, "campaigns_available": False,
+                    "campaigns": None, "cleanup_plan": None, "query_errors": query_errors}
+        available_campaign_columns = [column for column in campaign_columns if column in schemas["burnin_campaigns"]]
+        missing_campaign_columns = sorted(set(campaign_columns) - set(available_campaign_columns))
+        if missing_campaign_columns:
+            query_errors.append({"source": "campaigns", "available": False, "missing_schema": {"table": None, "columns": missing_campaign_columns}})
+        try:
+            campaign_rows = [dict(row) for row in conn.execute(f"SELECT {','.join(available_campaign_columns)} FROM burnin_campaigns ORDER BY campaign_id").fetchall()]
+            for row in campaign_rows:
+                for column in missing_campaign_columns:
+                    row[column] = None
+        except Exception as exc:
+            query_errors.append({"source": "campaigns", "available": False, "query_error": f"{exc.__class__.__name__}:{exc}"})
+            return {"status": "BLOCKED_DATABASE_STATE", "read_only": True, "campaigns_available": False,
+                    "campaigns": None, "cleanup_plan": None, "query_errors": query_errors}
+
+        campaigns: list[dict[str, Any]] = []
+        cleanup_plan: list[dict[str, Any]] = []
+        for campaign in campaign_rows or []:
+            cid = campaign["campaign_id"]
+            campaign_errors_start = len(query_errors)
+            continuation_columns = ["campaign_id", "burnin_run_id", "continuation_sequence", "status", "started_at", "ended_at"]
+            continuations_ok, continuations = safe_rows("continuations", "burnin_campaign_runs", continuation_columns, where="campaign_id=?", params=(cid,), order="continuation_sequence")
+            active = next((row for row in (continuations or []) if row["burnin_run_id"] == campaign.get("active_run_id")), None) if continuations_ok else None
+            pid = campaign.get("worker_pid")
+            heartbeat_age = _age(campaign.get("last_heartbeat_at"))
+            worker_alive = _pid_alive(pid) if pid else False
+            stale = heartbeat_age is None or heartbeat_age > max_heartbeat_age
+            orphaned = [row for row in (continuations or []) if row["status"] in ACTIVE_RUN_STATUSES and row["burnin_run_id"] != campaign.get("active_run_id")] if continuations_ok else None
+            position_columns = ["pending_position_id", "trade_id", "burnin_run_id", "symbol", "side", "status", "entry_time"]
+            positions_ok, open_positions = safe_rows("campaign_open_positions", "burnin_pending_position_outcomes", position_columns, where="campaign_id=? AND status='OPEN'", params=(cid,))
+            reject_columns = ["pending_label_id", "reject_decision_id", "burnin_run_id", "symbol", "status", "due_at", "reject_reason"]
+            rejects_ok, pending_rejects = safe_rows("pending_reject_labels", "burnin_pending_reject_labels", reject_columns, where="campaign_id=? AND status IN ('PENDING','READY')", params=(cid,))
+            runtime_columns = ["id", "campaign_id", "burnin_run_id", "release_id", "active_position_count", "active_positions", "pending_order_count", "pending_orders", "orphan_position_count", "orphan_order_count", "unknown_exchange_state", "recovery_action_required", "reconciliation_status", "exchange_read_only_status", "diagnostics_json", "timestamp"]
+            runtime_ok, runtime_rows = safe_rows("runtime_snapshot", "runtime_state_snapshots", runtime_columns, where="campaign_id=?", params=(cid,), order="id DESC")
+            latest_runtime = runtime_rows[0] if runtime_ok and runtime_rows else None
+
+            def decoded_runtime(field: str, source: str) -> tuple[bool, Any]:
+                if latest_runtime is None:
+                    return False, None
+                try:
+                    value = json.loads(latest_runtime[field])
+                    if not isinstance(value, list):
+                        raise ValueError("expected_json_array")
+                    return True, value
+                except Exception as exc:
+                    query_errors.append({"source": source, "available": False, "query_error": f"{exc.__class__.__name__}:{exc}"})
+                    return False, None
+
+            runtime_positions_ok, runtime_positions = decoded_runtime("active_positions", "runtime_positions")
+            runtime_orders_ok, runtime_orders = decoded_runtime("pending_orders", "runtime_pending_orders")
+            try:
+                diagnostics = json.loads(latest_runtime["diagnostics_json"] or "{}") if latest_runtime else None
+                if latest_runtime and not isinstance(diagnostics, dict):
+                    raise ValueError("expected_json_object")
+            except Exception as exc:
+                diagnostics = None
+                query_errors.append({"source": "reconciliation_evidence", "available": False, "query_error": f"{exc.__class__.__name__}:{exc}"})
+            reconciliation_ok = bool(latest_runtime and diagnostics is not None)
+            reconciliation_status = latest_runtime.get("reconciliation_status") if latest_runtime else None
+            recovery_required = campaign.get("campaign_status") == "RECOVERY_REQUIRED" or bool(latest_runtime and latest_runtime.get("recovery_action_required"))
+            terminal = campaign.get("campaign_status") in TERMINAL_CAMPAIGN_STATUSES
+            identity = {key: campaign.get(key) for key in ("release_id", "git_commit", "config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash")}
+            lineage_matches = bool(latest_runtime and latest_runtime.get("campaign_id") == cid and latest_runtime.get("release_id") == campaign.get("release_id") and latest_runtime.get("burnin_run_id") == campaign.get("active_run_id"))
+            snapshot_age = _age(latest_runtime.get("timestamp")) if latest_runtime else None
+            snapshot_fresh = snapshot_age is not None and snapshot_age <= max_heartbeat_age
+            orphan_ok = bool(latest_runtime and latest_runtime.get("orphan_position_count") is not None and latest_runtime.get("orphan_order_count") is not None)
+            authenticated_complete = bool(reconciliation_ok and diagnostics.get("evidence_status") == "COMPLETE" and (diagnostics.get("input_source") == "AUTHENTICATED_EXCHANGE_SNAPSHOT" or diagnostics.get("authenticated") is True))
+            item = {"campaign_id": cid, "campaign_status": campaign.get("campaign_status"),
+                    "active_continuation": active, "continuations_available": continuations_ok, "continuations": continuations,
+                    "worker": {"pid": pid, "alive": worker_alive, "last_heartbeat_at": campaign.get("last_heartbeat_at"), "heartbeat_age_seconds": heartbeat_age, "fresh": not stale},
+                    "identity": identity,
+                    "campaign_open_positions_available": positions_ok, "campaign_open_positions": open_positions,
+                    "pending_reject_labels_available": rejects_ok, "pending_reject_labels": pending_rejects,
+                    "runtime_positions_available": runtime_ok and runtime_positions_ok, "runtime_positions": runtime_positions,
+                    "runtime_pending_orders_available": runtime_ok and runtime_orders_ok, "runtime_pending_orders": runtime_orders,
+                    "orphan_evidence_available": orphan_ok, "orphan_position_count": latest_runtime.get("orphan_position_count") if orphan_ok else None, "orphan_order_count": latest_runtime.get("orphan_order_count") if orphan_ok else None,
+                    "reconciliation_evidence_available": reconciliation_ok, "reconciliation_status": reconciliation_status, "reconciliation_evidence": diagnostics,
+                    "latest_runtime_state": latest_runtime, "runtime_lineage_matches": lineage_matches,
+                    "runtime_snapshot_age_seconds": snapshot_age, "runtime_snapshot_fresh": snapshot_fresh,
+                    "recovery_required": recovery_required, "stale_continuation": bool(active and active.get("status") in ACTIVE_RUN_STATUSES and (stale or not worker_alive)),
+                    "orphaned_continuations": orphaned, "query_errors": query_errors[campaign_errors_start:]}
+            campaigns.append(item)
+            all_available = all((positions_ok, rejects_ok, runtime_ok, runtime_positions_ok, runtime_orders_ok, orphan_ok, reconciliation_ok, continuations_ok))
+            counters_zero = bool(latest_runtime and all(latest_runtime.get(key) == 0 for key in ("active_position_count", "pending_order_count", "orphan_position_count", "orphan_order_count")))
+            collections_zero = all_available and not open_positions and not pending_rejects and not runtime_positions and not runtime_orders
+            safe_exchange = bool(latest_runtime and latest_runtime.get("unknown_exchange_state") in (0, False) and latest_runtime.get("recovery_action_required") in (0, False) and reconciliation_status != "LOCAL_ONLY_DIAGNOSTIC" and latest_runtime.get("exchange_read_only_status") != "UNAVAILABLE" and authenticated_complete)
+            verified_zero = bool(all_available and not item["query_errors"] and counters_zero and collections_zero and lineage_matches and snapshot_fresh and safe_exchange)
+            if terminal and verified_zero:
+                classification, action, reason = "ARCHIVABLE", "ARCHIVE_EVIDENCE_PACKAGE", "terminal with verified zero local/runtime exposure and no pending labels"
+            elif terminal:
+                classification, action, reason = "MANUAL_REVIEW", "PRESERVE_AND_REVIEW", "terminal campaign retains pending or unknown evidence"
+            elif item["stale_continuation"] and not open_positions and not pending_rejects and verified_zero:
+                classification, action, reason = "RECOVERABLE", "RUN_AUTHENTICATED_RECONCILIATION_THEN_RECOVERY_DRILL", "stale worker with verified zero exposure; recovery must remain gated"
+            else:
+                classification, action, reason = "MANUAL_REVIEW", "DO_NOT_CLEAR", "active, exposed, pending, or unknown state must fail closed"
+            cleanup_plan.append({"campaign_id": cid, "classification": classification, "action": action, "reason": reason,
+                                 "delete_evidence_rows": False, "convert_unknown_exposure_to_zero": False,
+                                 "automatically_clear_live_or_reconciliation_blockers": False})
+        return {"status": "COMPLETE", "read_only": True, "database": str(Path(db).resolve()),
+                "campaigns_available": True, "campaign_count": len(campaigns), "campaigns": campaigns, "cleanup_plan": cleanup_plan, "query_errors": query_errors,
+                "safety": {"database_mutated": False, "evidence_deletion": "DISABLED", "live_mutation": "DISABLED"}}
+    finally:
+        conn.close()
 
 
 def bootstrap_ops_schema(conn: Any) -> None:
@@ -1154,9 +1321,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     rr = sub.add_parser("recover-runtime"); rr.add_argument("--campaign-id")
     r = sub.add_parser("report"); r.add_argument("--campaign-id", required=True); r.add_argument("--output-dir", required=True)
     f = sub.add_parser("finalize"); f.add_argument("--campaign-id", required=True); f.add_argument("--output-dir", required=True)
+    d = sub.add_parser("diagnose-db", help="read-only campaign state diagnosis and safe cleanup plan"); d.add_argument("--max-heartbeat-age", type=float, default=120.0)
     args = parser.parse_args(argv)
     db = _db_path(args)
     try:
+        if args.cmd == "diagnose-db":
+            out = database_diagnosis(db, max_heartbeat_age=args.max_heartbeat_age)
+            print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out.get("status") == "COMPLETE" else 2
         if args.cmd == "preflight":
             out = preflight(db, args.release_id, _symbols(args.symbols), _intervals(args.intervals), output_dir=args.output_dir)
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out["status"] == "PASS" else 3

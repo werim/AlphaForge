@@ -3464,3 +3464,44 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Credentialed Demo acceptance and remote CI were not available in this environment. LIVE remains disabled and NOT LIVE READY.
+
+## Phase 9 Operational Acceptance - 2026-07-23
+
+### Added
+- Read-only `burnin_ops diagnose-db` campaign, continuation, worker, identity, exposure, reconciliation, recovery, and cleanup-plan report.
+- Cross-platform credentialed Demo reconciliation and PAPER acceptance commands.
+
+### Changed
+- Operator diagnosis now distinguishes terminal, recoverable, and manual-review campaigns without mutation.
+
+### Fixed
+- Unknown runtime exposure can no longer be presented as zero in a cleanup recommendation.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; no schema migration is required.
+
+### Known Issues
+- Credentialed Binance Demo and a real multi-day campaign require operator credentials and elapsed runtime evidence; LIVE remains disabled and not ready.
+
+## PR #297 Historical Diagnosis Safety Correction - 2026-07-23
+
+### Added
+- Per-source availability, null unavailable values, structured schema/query errors, lineage/freshness/authentication gates, and cross-platform SQLite URI tests.
+
+### Changed
+- ARCHIVABLE and RECOVERABLE now require complete fresh authenticated zero-exposure evidence; every other case is MANUAL_REVIEW.
+
+### Fixed
+- Historical missing columns/tables and malformed JSON no longer crash or infer empty/zero evidence.
+
+### Removed
+- Unsafe assumptions that every database has the current runtime schema.
+
+### Breaking Changes
+- None; diagnosis output is expanded and no schema migration is performed.
+
+### Known Issues
+- Historical databases without complete campaign-scoped authenticated snapshots cannot be auto-classified as safe. LIVE remains NOT LIVE READY.
