@@ -1492,3 +1492,56 @@ for name in ("BINANCE_API_KEY", "BINANCE_BASE_URL"):
         },
     )
 '@ | python
+---
+
+## Phase 9 operational acceptance (PAPER only, 2026-07-23)
+
+These commands are read-only until the explicit PAPER `launch` command. They never submit or cancel orders. Keep `ALPHAFORGE_EXECUTION_MODE=PAPER`, `EXECUTION_MODE=PAPER`, and `ALPHAFORGE_ENABLE_LIVE_EXECUTION=false`. REST-only reconciliation does **not** require a websocket; the runtime/streaming preflight still validates its websocket configuration strictly.
+
+### PowerShell
+
+```powershell
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_ENABLE_LIVE_EXECUTION = "false"
+$DB = "artifacts/burnin/phase9.db"
+$RELEASE_ID = "phase9-$(git rev-parse --short HEAD)"
+$CAMPAIGN_ID = "<campaign_id-from-launch-output>"
+
+python -m alphaforge.config_check
+python -m alphaforge.config_fix --json
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT | Tee-Object -FilePath artifacts/burnin/reconciliation.json
+python -m alphaforge.burnin_ops --db $DB --json diagnose-db --max-heartbeat-age 120 | Tee-Object -FilePath artifacts/burnin/database_diagnosis.json
+python -m alphaforge.burnin_ops --db $DB --json preflight --release-id $RELEASE_ID --symbols BTCUSDT,ETHUSDT --intervals 1h --output-dir artifacts/burnin/preflight
+python -m alphaforge.burnin_ops --db $DB --json launch --release-id $RELEASE_ID --duration-days 3 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach
+python -m alphaforge.burnin_ops --db $DB --json status --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB --json health --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB --json watch --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB --json audit --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB --json finalize --campaign-id $CAMPAIGN_ID --output-dir artifacts/burnin/final
+```
+
+### Bash (macOS/Linux)
+
+```bash
+export ALPHAFORGE_EXECUTION_MODE=PAPER
+export EXECUTION_MODE=PAPER
+export ALPHAFORGE_ENABLE_LIVE_EXECUTION=false
+DB=artifacts/burnin/phase9.db
+RELEASE_ID="phase9-$(git rev-parse --short HEAD)"
+CAMPAIGN_ID='<campaign_id-from-launch-output>'
+
+python -m alphaforge.config_check
+python -m alphaforge.config_fix --json
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT | tee artifacts/burnin/reconciliation.json
+python -m alphaforge.burnin_ops --db "$DB" --json diagnose-db --max-heartbeat-age 120 | tee artifacts/burnin/database_diagnosis.json
+python -m alphaforge.burnin_ops --db "$DB" --json preflight --release-id "$RELEASE_ID" --symbols BTCUSDT,ETHUSDT --intervals 1h --output-dir artifacts/burnin/preflight
+python -m alphaforge.burnin_ops --db "$DB" --json launch --release-id "$RELEASE_ID" --duration-days 3 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach
+python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" --json watch --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" --json audit --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" --json finalize --campaign-id "$CAMPAIGN_ID" --output-dir artifacts/burnin/final
+```
+
+Credential variables (`BINANCE_API_KEY` and `BINANCE_API_SECRET`) must be supplied through the normal environment/dotenv contract and must never be echoed. Accept reconciliation only when `evidence_status` is `COMPLETE`, `sanitized_errors` is empty, `unknown_unreconciled_symbols` is empty, and all endpoint statuses pass. A local diagnostic recovery is never authenticated exchange evidence. Run `recovery-drill` only after both the database diagnosis and authenticated reconciliation prove zero positions and zero pending orders.

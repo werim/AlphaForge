@@ -55,6 +55,90 @@ def _connect(db: str) -> sqlite3.Connection:
     return conn
 
 
+def _connect_readonly(db: str) -> sqlite3.Connection:
+    """Open an existing SQLite database without bootstrap or journal writes."""
+    path = Path(db).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"database_not_found:{path}")
+    conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+
+def database_diagnosis(db: str, *, max_heartbeat_age: float = 120.0) -> dict[str, Any]:
+    """Return campaign state and a conservative cleanup plan without mutation."""
+    conn = _connect_readonly(db)
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        required = {"burnin_campaigns", "burnin_campaign_runs", "burnin_runs"}
+        if not required.issubset(tables):
+            return {"status": "BLOCKED_DATABASE_STATE", "read_only": True,
+                    "missing_tables": sorted(required - tables), "campaigns": [], "cleanup_plan": []}
+
+        def rows(sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
+            return [dict(row) for row in conn.execute(sql, tuple(params)).fetchall()]
+
+        campaigns: list[dict[str, Any]] = []
+        cleanup_plan: list[dict[str, Any]] = []
+        for campaign in rows("SELECT * FROM burnin_campaigns ORDER BY created_at, campaign_id"):
+            cid = campaign["campaign_id"]
+            continuations = rows(
+                "SELECT cr.*,r.release_id,r.execution_mode,r.git_commit,r.config_hash,"
+                "r.strategy_config_hash,r.universe_hash FROM burnin_campaign_runs cr "
+                "LEFT JOIN burnin_runs r ON r.burnin_run_id=cr.burnin_run_id "
+                "WHERE cr.campaign_id=? ORDER BY cr.continuation_sequence", (cid,))
+            active = next((row for row in continuations if row["burnin_run_id"] == campaign.get("active_run_id")), None)
+            pid = campaign.get("worker_pid")
+            heartbeat_age = _age(campaign.get("last_heartbeat_at"))
+            worker_alive = _pid_alive(pid) if pid else False
+            stale = heartbeat_age is None or heartbeat_age > max_heartbeat_age
+            orphaned = [row for row in continuations if row["status"] in ACTIVE_RUN_STATUSES and row["burnin_run_id"] != campaign.get("active_run_id")]
+            open_positions = rows("SELECT pending_position_id,trade_id,burnin_run_id,symbol,side,status,entry_time FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN' ORDER BY id", (cid,)) if "burnin_pending_position_outcomes" in tables else []
+            pending_rejects = rows("SELECT pending_label_id,reject_decision_id,burnin_run_id,symbol,status,due_at,reject_reason FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY') ORDER BY id", (cid,)) if "burnin_pending_reject_labels" in tables else []
+            # PAPER positions are authoritative here; exchange/runtime orders remain unknown
+            # unless an explicit runtime snapshot provides them.
+            runtime_columns = {row[1] for row in conn.execute("PRAGMA table_info(runtime_state_snapshots)")} if "runtime_state_snapshots" in tables else set()
+            runtime = rows("SELECT runtime_status,recovery_action_required,reconciliation_status,exchange_read_only_status,active_position_count,active_positions,pending_order_count,pending_orders,orphan_position_count,orphan_order_count,heartbeat_age_sec,timestamp,created_at FROM runtime_state_snapshots WHERE campaign_id=? ORDER BY id DESC LIMIT 1", (cid,)) if "campaign_id" in runtime_columns else []
+            latest_runtime = runtime[0] if runtime else None
+            pending_order_count = None if latest_runtime is None else latest_runtime.get("pending_order_count")
+            try:
+                pending_orders = None if latest_runtime is None else json.loads(latest_runtime.get("pending_orders") or "[]")
+            except (TypeError, ValueError):
+                pending_orders = None
+            reconciliation_status = None if latest_runtime is None else latest_runtime.get("reconciliation_status")
+            recovery_required = campaign.get("campaign_status") == "RECOVERY_REQUIRED" or bool(latest_runtime and latest_runtime.get("recovery_action_required"))
+            terminal = campaign.get("campaign_status") in TERMINAL_CAMPAIGN_STATUSES
+            identity = {key: campaign.get(key) for key in ("release_id", "git_commit", "config_hash", "strategy_config_hash", "universe_hash", "execution_cost_config_hash")}
+            item = {"campaign_id": cid, "campaign_status": campaign.get("campaign_status"),
+                    "active_continuation": active, "continuations": continuations,
+                    "worker": {"pid": pid, "alive": worker_alive, "last_heartbeat_at": campaign.get("last_heartbeat_at"), "heartbeat_age_seconds": heartbeat_age, "fresh": not stale},
+                    "identity": identity, "open_positions": open_positions,
+                    "pending_orders": pending_orders, "pending_order_count": pending_order_count, "pending_reject_labels": pending_rejects,
+                    "reconciliation_status": reconciliation_status, "latest_runtime_state": latest_runtime,
+                    "recovery_required": recovery_required, "stale_continuation": bool(active and active.get("status") in ACTIVE_RUN_STATUSES and (stale or not worker_alive)),
+                    "orphaned_continuations": orphaned}
+            campaigns.append(item)
+            unknown_exposure = pending_orders is None or (latest_runtime is not None and any(latest_runtime.get(k) is None for k in ("active_position_count", "pending_order_count", "orphan_position_count", "orphan_order_count")))
+            verified_zero = bool(latest_runtime) and not unknown_exposure and all(int(latest_runtime.get(k)) == 0 for k in ("active_position_count", "pending_order_count", "orphan_position_count", "orphan_order_count"))
+            if terminal and not open_positions and not pending_rejects and verified_zero:
+                classification, action, reason = "ARCHIVABLE", "ARCHIVE_EVIDENCE_PACKAGE", "terminal with verified zero local/runtime exposure and no pending labels"
+            elif terminal:
+                classification, action, reason = "MANUAL_REVIEW", "PRESERVE_AND_REVIEW", "terminal campaign retains pending or unknown evidence"
+            elif item["stale_continuation"] and not open_positions and not pending_rejects and verified_zero:
+                classification, action, reason = "RECOVERABLE", "RUN_AUTHENTICATED_RECONCILIATION_THEN_RECOVERY_DRILL", "stale worker with verified zero exposure; recovery must remain gated"
+            else:
+                classification, action, reason = "MANUAL_REVIEW", "DO_NOT_CLEAR", "active, exposed, pending, or unknown state must fail closed"
+            cleanup_plan.append({"campaign_id": cid, "classification": classification, "action": action, "reason": reason,
+                                 "delete_evidence_rows": False, "convert_unknown_exposure_to_zero": False,
+                                 "automatically_clear_live_or_reconciliation_blockers": False})
+        return {"status": "COMPLETE", "read_only": True, "database": str(Path(db).resolve()),
+                "campaign_count": len(campaigns), "campaigns": campaigns, "cleanup_plan": cleanup_plan,
+                "safety": {"database_mutated": False, "evidence_deletion": "DISABLED", "live_mutation": "DISABLED"}}
+    finally:
+        conn.close()
+
+
 def bootstrap_ops_schema(conn: Any) -> None:
     bootstrap_campaign_schema(conn)
     _exec(conn, """CREATE TABLE IF NOT EXISTS burnin_preflight_reports(id INTEGER PRIMARY KEY AUTOINCREMENT, preflight_id TEXT UNIQUE NOT NULL, campaign_id TEXT, release_id TEXT NOT NULL, generated_at TEXT NOT NULL, status TEXT NOT NULL, blockers_json TEXT NOT NULL, checks_json TEXT NOT NULL, output_dir TEXT, schema_version TEXT NOT NULL)""")
@@ -1154,9 +1238,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     rr = sub.add_parser("recover-runtime"); rr.add_argument("--campaign-id")
     r = sub.add_parser("report"); r.add_argument("--campaign-id", required=True); r.add_argument("--output-dir", required=True)
     f = sub.add_parser("finalize"); f.add_argument("--campaign-id", required=True); f.add_argument("--output-dir", required=True)
+    d = sub.add_parser("diagnose-db", help="read-only campaign state diagnosis and safe cleanup plan"); d.add_argument("--max-heartbeat-age", type=float, default=120.0)
     args = parser.parse_args(argv)
     db = _db_path(args)
     try:
+        if args.cmd == "diagnose-db":
+            out = database_diagnosis(db, max_heartbeat_age=args.max_heartbeat_age)
+            print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out.get("status") == "COMPLETE" else 2
         if args.cmd == "preflight":
             out = preflight(db, args.release_id, _symbols(args.symbols), _intervals(args.intervals), output_dir=args.output_dir)
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out["status"] == "PASS" else 3

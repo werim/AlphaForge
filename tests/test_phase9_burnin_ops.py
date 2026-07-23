@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import hashlib
 
 from alphaforge.burnin import config_hash, persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_trade_outcome, utc_now
 from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign, fail_active_campaign_run
@@ -19,6 +20,7 @@ from alphaforge.burnin_ops import (
     verify_worker_attachment,
     watch_once,
     clock_skew_check,
+    database_diagnosis,
 )
 
 
@@ -45,6 +47,25 @@ def _campaign(conn, *, release="rel", targets_zero=True):
     run = start_or_resume_campaign(conn, camp.campaign_id)["burnin_run_id"]
     conn.commit()
     return camp, run
+
+
+def test_database_diagnosis_is_read_only_and_fails_closed_on_unknown_exposure(tmp_path):
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET worker_pid=NULL,last_heartbeat_at='2020-01-01T00:00:00Z' WHERE campaign_id=?", (camp.campaign_id,))
+    conn.commit()
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    payload = database_diagnosis(str(db), max_heartbeat_age=1)
+    after = hashlib.sha256(db.read_bytes()).hexdigest()
+    assert before == after
+    assert payload["read_only"] is True
+    state = payload["campaigns"][0]
+    assert state["active_continuation"]["burnin_run_id"] == run
+    assert state["stale_continuation"] is True
+    assert state["pending_orders"] is None
+    assert payload["cleanup_plan"][0]["classification"] == "MANUAL_REVIEW"
+    assert payload["cleanup_plan"][0]["convert_unknown_exposure_to_zero"] is False
+    conn.close()
 
 
 def test_phase9_preflight_rejects_non_paper(monkeypatch, tmp_path):
