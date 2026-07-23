@@ -1496,7 +1496,7 @@ for name in ("BINANCE_API_KEY", "BINANCE_BASE_URL"):
 
 ## Phase 9 operational acceptance (PAPER only, 2026-07-23)
 
-These commands are read-only until the explicit PAPER `launch` command. They never submit or cancel orders. Keep `ALPHAFORGE_EXECUTION_MODE=PAPER`, `EXECUTION_MODE=PAPER`, and `ALPHAFORGE_ENABLE_LIVE_EXECUTION=false`. REST-only reconciliation does **not** require a websocket; the runtime/streaming preflight still validates its websocket configuration strictly.
+`diagnose-db` is database read-only. `config_check` and the default `config_fix` dry-run do not mutate configuration. **Preflight is not read-only:** it may create or update local database evidence. None of these commands submit or cancel exchange orders. Keep `ALPHAFORGE_EXECUTION_MODE=PAPER`, `EXECUTION_MODE=PAPER`, and `ALPHAFORGE_ENABLE_LIVE_EXECUTION=false`. REST-only reconciliation does **not** require a websocket; runtime/streaming websocket requirements remain strict.
 
 ### PowerShell
 
@@ -1508,10 +1508,15 @@ $DB = "artifacts/burnin/phase9.db"
 $RELEASE_ID = "phase9-$(git rev-parse --short HEAD)"
 $CAMPAIGN_ID = "<campaign_id-from-launch-output>"
 
+### A. Diagnose an existing database
+
 python -m alphaforge.config_check
 python -m alphaforge.config_fix --json
-python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT | Tee-Object -FilePath artifacts/burnin/reconciliation.json
 python -m alphaforge.burnin_ops --db $DB --json diagnose-db --max-heartbeat-age 120 | Tee-Object -FilePath artifacts/burnin/database_diagnosis.json
+
+### B. Start a new clean campaign
+
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT | Tee-Object -FilePath artifacts/burnin/reconciliation.json
 python -m alphaforge.burnin_ops --db $DB --json preflight --release-id $RELEASE_ID --symbols BTCUSDT,ETHUSDT --intervals 1h --output-dir artifacts/burnin/preflight
 python -m alphaforge.burnin_ops --db $DB --json launch --release-id $RELEASE_ID --duration-days 3 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach
 python -m alphaforge.burnin_ops --db $DB --json status --campaign-id $CAMPAIGN_ID
@@ -1531,10 +1536,15 @@ DB=artifacts/burnin/phase9.db
 RELEASE_ID="phase9-$(git rev-parse --short HEAD)"
 CAMPAIGN_ID='<campaign_id-from-launch-output>'
 
+# A. Diagnose an existing database
+
 python -m alphaforge.config_check
 python -m alphaforge.config_fix --json
-python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT | tee artifacts/burnin/reconciliation.json
 python -m alphaforge.burnin_ops --db "$DB" --json diagnose-db --max-heartbeat-age 120 | tee artifacts/burnin/database_diagnosis.json
+
+# B. Start a new clean campaign
+
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT | tee artifacts/burnin/reconciliation.json
 python -m alphaforge.burnin_ops --db "$DB" --json preflight --release-id "$RELEASE_ID" --symbols BTCUSDT,ETHUSDT --intervals 1h --output-dir artifacts/burnin/preflight
 python -m alphaforge.burnin_ops --db "$DB" --json launch --release-id "$RELEASE_ID" --duration-days 3 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach
 python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CAMPAIGN_ID"

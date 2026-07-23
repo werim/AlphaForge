@@ -344,3 +344,16 @@ No lifecycle transition or database row is written by diagnosis. No schema, CSV,
 
 ## Tests, risks, and recommendation
 The repository suite, compileall, config audit, dry-run config remediation, and diff checks are recorded in the delivery summary. Credentialed Demo reconciliation and a multi-day elapsed campaign cannot be claimed without operator credentials/runtime; therefore readiness remains blocked configuration/reconciliation until that evidence is complete. LIVE remains disabled and **NOT LIVE READY**. Push is appropriate for PAPER operational review only.
+
+---
+
+# PR #297 Historical Database Safety Correction (2026-07-23)
+
+## Why and root cause
+The first diagnosis assumed current runtime and campaign schemas. It could select absent historical columns, treated missing local evidence tables as empty collections, and allowed zero counters without proving snapshot lineage, freshness, authenticated reconciliation, or known exchange state. Those assumptions were unsafe for partially migrated databases.
+
+## Behavior, persistence, and compatibility
+Diagnosis now inventories every table and column with `PRAGMA table_info`, builds SELECT lists only from verified columns, and returns unavailable sources as `available=false`, `value=null`, plus structured `missing_schema` or `query_error` evidence. Local positions, pending labels, runtime positions/orders, orphan evidence, and reconciliation evidence have independent availability. ARCHIVABLE/RECOVERABLE requires every source, exact zero collections/counters, no query errors, campaign/run/release lineage, a fresh snapshot, known exchange state, no recovery action, authenticated COMPLETE evidence, and non-local/available read-only reconciliation. Otherwise it is MANUAL_REVIEW. Windows drive-letter and POSIX paths are encoded by a tested URI builder. No lifecycle, trading, recovery, reject, score, RR, persistence, schema, or LIVE control changes were made.
+
+## Tests, migration, and remaining risk
+Compatibility tests cover absent/historical runtime snapshots, absent counter columns, malformed JSON, absent local evidence tables, unrelated/stale/local-only/unknown-exchange snapshots, injected query failure, missing DB CLI behavior, checksum/schema/row/WAL/SHM immutability, and Windows/POSIX paths. No migration is required. Diagnosis intentionally cannot certify exposure when old databases lack authenticated, campaign-scoped runtime evidence. LIVE remains disabled and NOT LIVE READY.
