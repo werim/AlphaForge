@@ -153,3 +153,33 @@ python -m alphaforge.burnin_ops launch --release-id phase9-YYYYMMDD --duration-d
 ```
 
 Finalization can qualify only canonical `CANARY_QUALIFIED` Phase 8 qualification snapshots, with completion, integrity, aggregate-hash linkage, healthy state, and bounded backlog all passing. `PASS` or `QUALIFIED` aliases do not qualify a campaign for canary review.
+# Safe configuration remediation (PowerShell)
+
+The fixer is dry-run by default and reports every proposed mutation without
+printing credential values. It modifies only the repository `.env`; apply mode
+creates a timestamped backup and uses atomic replacement.
+
+```powershell
+# Review the deterministic plan
+python -m alphaforge.config_fix
+
+# Apply only AUTO_FIX_SAFE actions
+python -m alphaforge.config_fix --apply
+
+# Verify the complete contract
+python -m alphaforge.config_check
+
+# After PASS, exercise read-only reconciliation
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT
+```
+
+Process environment has precedence over `.env`. The fixer will not pretend an
+`.env` edit can remove such an override; inspect and clear it in the current
+PowerShell session, then rerun the dry-run:
+
+```powershell
+Get-ChildItem Env:BINANCE*
+Remove-Item Env:BINANCE_TESTNET -ErrorAction SilentlyContinue
+```
+
+Secret-bearing variable clear commands are intentionally never printed.
