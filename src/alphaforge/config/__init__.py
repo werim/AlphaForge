@@ -165,7 +165,7 @@ def load_reconciliation_settings(*, env: Mapping[str, str] | None = None) -> Rec
     environment_source = str(values["BINANCE_ENVIRONMENT"]["source"])
     if environment_source.startswith("alias (BINANCE_TESTNET)"):
         endpoint_env["BINANCE_TESTNET"] = endpoint_env.pop("BINANCE_ENVIRONMENT")
-    resolved = resolve_binance_environment(endpoint_env)
+    resolved = resolve_binance_environment(endpoint_env, require_websocket=False)
     from decimal import Decimal, InvalidOperation
     try:
         epsilon = Decimal(str(val("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON")))

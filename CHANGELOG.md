@@ -3442,3 +3442,25 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Credentialed Demo acceptance and remote CI remain pending.
+
+## Canonical remediation and Demo REST reconciliation (2026-07-23)
+
+### Added
+- Dry-run-first `alphaforge.config_fix` with explicit `--apply`, atomic backup/replacement, deterministic re-audit, idempotence, and redacted JSON output.
+- Regression coverage for canonical-loader uniqueness and consumer parity, Demo transport separation, alias conflicts/precedence, remediation safety, and secret redaction.
+
+### Changed
+- Runtime, burn-in, and diagnostic reconciliation provider construction now consumes `alphaforge.config.load_reconciliation_settings` exclusively.
+- Demo read-only reconciliation requires only its explicit REST URL; runtime and streaming resolution still requires an explicit supported websocket URL.
+
+### Fixed
+- Removed consumer-local reconciliation setting selection and prevented REST-only Demo diagnostics from being blocked by an irrelevant websocket requirement.
+
+### Removed
+- Duplicate runtime and burn-in reconciliation provider parsing.
+
+### Breaking Changes
+- None. Conflicting canonical/legacy receive-window values continue to fail closed.
+
+### Known Issues
+- Credentialed Demo acceptance and remote CI were not available in this environment. LIVE remains disabled and NOT LIVE READY.

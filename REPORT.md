@@ -240,6 +240,27 @@ Preflight and runtime use `build_readonly_reconciliation_probe` with identical p
 
 ### Probe validation and process identity follow-up
 A COMPLETE probe is usable only with empty provider errors and validated list-shaped orders/positions. Missing, malformed, timeout, or incomplete probe evidence fails closed as `RECOVERY_EVIDENCE_UNAVAILABLE`. PID liveness now validates `/proc` command-line lineage when available; a reused unrelated PID with campaign lineage is not a predecessor.
+
+---
+# Canonical Configuration Remediation and Demo REST Reconciliation — 2026-07-23
+
+## Why and root cause
+Three remote proposals (#293, #294, and #295) were reported to duplicate configuration remediation and Demo REST work. Their refs and metadata could not be fetched in this container because GitHub access returned CONNECT tunnel HTTP 403, so a truthful commit-by-commit/file-by-file remote comparison and remote PR closure could not be completed here. The supplied clean `dev` merge commit was audited directly. It already had the correct bounded fill scope, Decimal epsilon, canonical receive-window alias contract, and canonical reconciliation loader, but runtime and burn-in still selected provider fields locally and Demo resolution unnecessarily required a websocket for REST-only reconciliation.
+
+## Files changed and runtime behavior
+`env_contract.py` now distinguishes a REST-only resolver call from strict runtime/streaming resolution. `config/__init__.py` is the sole definition of `load_reconciliation_settings` and opts into REST-only resolution. Runtime, burn-in, and the existing reconciliation CLI all use that loader for endpoint, credentials, receive window, timeout, lookback, Decimal epsilon, and fill cap. `config_fix.py` performs only the mechanically safe receive-window alias canonicalization; dry-run is the default and mutation requires `--apply`.
+
+## Lifecycle, persistence, export, and schema impact
+No trading decision, lifecycle transition, reject behavior, persistence row, export, database schema, strategy threshold, score, RR, or acceptance rule changed. No migration is required. LIVE remains disabled. Demo runtime startup still fails closed without a supported explicit websocket, while signed read-only REST reconciliation can operate without one.
+
+## Remediation safety and compatibility
+Application writes an atomic `.env.bak` before atomically replacing `.env`. Equal duplicate aliases are removed, conflicts and duplicate ambiguity block without mutation, and a second application is a no-op. Secret values, LIVE controls, and ambiguous risk values are never remediation targets or emitted. The legacy receive-window alias remains accepted when unambiguous; canonical/alias conflicts remain errors.
+
+## Tests and validation
+New tests prove one loader definition, all three consumers, Demo REST/runtime separation, conflict closure, deterministic mapping precedence, atomic remediation, secret/LIVE/risk preservation, backup integrity, idempotence, and redaction. The full suite, compileall, config audit, dry-run fixer, and whitespace checks are the required release checks.
+
+## Risks, limitations, migration, and push recommendation
+Credentialed Demo network acceptance remains unexecuted. GitHub refs, CI state, and remote closure of superseded PRs must be performed by an operator with GitHub connectivity; no claim is made that those remote actions occurred. There is no schema or configuration migration beyond optionally running `python -m alphaforge.config_fix --apply` after reviewing its dry-run. Push the replacement for review only after required checks pass; do not enable LIVE.
 # Executable Environment Contract Surgery Report — 2026-07-19
 
 ## Why and root cause

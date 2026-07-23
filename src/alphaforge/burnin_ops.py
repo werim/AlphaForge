@@ -18,7 +18,7 @@ from alphaforge.burnin_campaign import (
     fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity,
     identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS,
 )
-from alphaforge.config import load_config_from_env
+from alphaforge.config import load_config_from_env, load_reconciliation_settings
 from alphaforge.config_audit import audit_config
 from alphaforge.env_contract import dotenv_status
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider
@@ -197,10 +197,22 @@ def clock_skew_check(*, max_skew_ms: int | None = None, provider: Any | None = N
 def _readonly_reconciliation_provider(cfg: Any, symbols: Sequence[str] = ()) -> Any | None:
     if not getattr(cfg.runtime, "enable_binance_readonly_reconciliation", False):
         return None
-    key, secret = os.getenv("BINANCE_API_KEY", "").strip(), os.getenv("BINANCE_API_SECRET", "").strip()
-    if not key or not secret:
+    reconciliation = load_reconciliation_settings()
+    if not reconciliation.api_key.strip() or not reconciliation.api_secret.strip():
         return None
-    return BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(base_url=cfg.exchange.binance.base_url, api_key=key, api_secret=secret, recv_window_ms=cfg.binance.recv_window_ms, request_timeout_sec=cfg.runtime.reconciliation_timeout_sec, trade_lookback_ms=cfg.runtime.binance_reconciliation_trade_lookback_ms, position_epsilon=Decimal(cfg.runtime.reconciliation_position_epsilon), max_fill_symbols=cfg.runtime.reconciliation_max_fill_symbols), tracked_symbols=lambda: set(_symbols(symbols)))
+    return BinanceReadonlyReconciliationProvider(
+        config=BinanceReadonlyReconciliationConfig(
+            base_url=reconciliation.base_url,
+            api_key=reconciliation.api_key,
+            api_secret=reconciliation.api_secret,
+            recv_window_ms=reconciliation.recv_window_ms,
+            request_timeout_sec=reconciliation.timeout_sec,
+            trade_lookback_ms=reconciliation.trade_lookback_ms,
+            position_epsilon=Decimal(reconciliation.position_epsilon),
+            max_fill_symbols=reconciliation.max_fill_symbols,
+        ),
+        tracked_symbols=lambda: set(_symbols(symbols)),
+    )
 
 
 def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Sequence[str], *, output_dir: str | Path | None = None, require_market_data: bool = True, reconciliation_provider: Any | None = None) -> dict[str, Any]:
