@@ -3591,3 +3591,25 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Full local test execution requires the declared Alembic dependency; network policy prevented installing it in this environment.
+## 2026-07-24 — PR #302 Alembic/runtime schema compatibility v3
+
+### Added
+- SQLite declared-type affinity comparison and trusted repository Alembic-head detection.
+- Dedicated `runtime_positions`/`runtime_orders` adapter tables for the Alembic domain schema.
+- Migration `2026_07_24_runtime_exposure_v3` with schema family, revision, adapter, added-column, row-count, and semantic-validation evidence.
+
+### Changed
+- Runtime exposure validation selects canonical `positions`/`orders` for the lightweight runtime family and dedicated runtime exposure tables for known Alembic head databases.
+
+### Fixed
+- `BIGINT` identifiers and `VARCHAR(24)` statuses no longer fail SQLite compatibility through literal declared-type comparisons.
+- Empty repository Alembic-head databases can pass additive runtime initialization in both bootstrap directions.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Non-empty Alembic domain `positions`/`orders` cannot initialize an empty runtime adapter without explicit reconciliation.
+
+### Known Issues
+- GitHub Actions for this commit has not yet reported; merge remains gated on a green full suite.

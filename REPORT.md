@@ -537,3 +537,18 @@ Added NULL/blank/unknown position and order states, terminal/active groups, unre
 Update PR #302 for CI validation. Do not merge until the full CI suite, including Alembic revision tests, passes.
 
 ---
+## 2026-07-24 — PR #302 Alembic-head compatibility correction
+
+### Root cause and exact Alembic schema
+Repository revision `0001_phase1_init` defines domain `positions(id BIGINT PK, symbol_id BIGINT FK NOT NULL, side enum/VARCHAR NOT NULL, size NUMERIC(20,10) NOT NULL)` and `orders(id BIGINT PK, order_intent_id BIGINT FK NOT NULL, external_order_id VARCHAR(128), status VARCHAR(24) NOT NULL)`. Revision `0005_core_identifier_normalization` additively supplies nullable lifecycle identifiers: positions receive `position_id`, `signal_id`, `symbol`, `timeframe`, `mode`, `created_at`, `updated_at`; orders receive `order_id`, `signal_id`, `position_id`, `symbol`, `timeframe`, `mode`, `created_at`, `updated_at`. These are order-intent/domain persistence models, not the lightweight runtime exposure contract (`qty` plus lifecycle `status`). Literal type comparison also incorrectly rejected SQLite-compatible `BIGINT`/`VARCHAR` declarations.
+
+### Selected compatibility design
+The preferred separate-surface design was selected. A known `alembic_version=0005_core_identifier_normalization` plus expected core tables and exact domain identifiers establishes trusted `ALEMBIC_HEAD` identity. Empty trusted databases add dedicated `runtime_positions` and `runtime_orders`; runtime recovery and `exposure_count` select those tables. The Alembic domain tables are not polluted with meaningless nullable `qty/status` columns. If either domain table already contains rows before adapter establishment, migration blocks with `ALEMBIC_DOMAIN_EXPOSURE_REQUIRES_RECONCILIATION` rather than claiming zero runtime exposure. Unknown revisions and foreign shapes remain blocked.
+
+### Migration and persistence impact
+`2026_07_24_runtime_exposure_v3` is a new checksummed migration; v1/v2 checksums are unchanged and still verified. Evidence records detected schema family, Alembic revision, chosen adapter, columns/tables added, pre/post row counts, affected rows, and semantic outcome. All changes remain additive and transactional. Both `init_db → Alembic head → init_db` and `Alembic head → init_db → Alembic head` preserve identifiers and data without drops or rewrites.
+
+### Tests, remaining risk, and push recommendation
+Added affinity tests for BIGINT/INT/SMALLINT, VARCHAR/CHAR/CLOB, FLOAT/DOUBLE/REAL and NUMERIC; compatible declared-schema validation; trusted/foreign Alembic identities; empty adapter initialization; domain-row fail-closed behavior; v3 evidence and idempotency; and preserved checksum enforcement. Local targeted results: schema doctor 41 passed; SQLite bootstrap 14 passed and 3 Alembic-dependent skips; runtime state 3 passed; Phase 9 ops 70 passed. This environment still lacks the Alembic distribution, so the two unchanged mixed-bootstrap tests cannot execute locally. GitHub Actions has not yet reported for this commit. Push to update PR #302, but do not merge until Actions reports the full suite with zero failures. LIVE remains NOT READY.
+
+---

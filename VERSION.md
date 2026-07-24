@@ -1,12 +1,12 @@
 # AlphaForge Version
 
-- Current version: Phase 9 schema doctor migration-integrity follow-up
+- Current version: Phase 9 schema doctor Alembic/runtime compatibility v3
 - Current phase: Phase 9 - fail-closed schema, recovery, and persistence hardening
-- Runtime maturity: PAPER/BACKTEST recovery accepts exposure evidence only when both canonical tables, identifiers, migration integrity, and every persisted state are authoritative; missing/unknown evidence blocks.
+- Runtime maturity: PAPER/BACKTEST recovery accepts exposure evidence only when canonical runtime tables, identifiers, migration integrity, and every persisted state are authoritative; repository Alembic head uses dedicated runtime exposure tables while missing/unknown evidence blocks.
 - BACKTEST/PAPER/LIVE alignment: canonical exposure validation is shared by runtime recovery and operational preflight; LIVE/LIVE_PRECHECK remain fully fail-closed.
 - Lifecycle coverage: Startup recovery audits lifecycle execution states and recognized position/order terminal or active states while preserving rows append-only.
 - Execution realism coverage: Provider unavailability is recorded explicitly and never substitutes for zero SQL execution/exposure evidence.
-- Known critical risks: PostgreSQL doctor parity, real PAPER burn-in, Demo acceptance, and CI execution with Alembic installed remain outstanding; ambiguous legacy states require manual migration.
+- Known critical risks: GitHub Actions confirmation for v3, PostgreSQL doctor parity, real PAPER burn-in, and Demo acceptance remain outstanding; non-empty Alembic domain positions/orders require explicit reconciliation.
 - Last audit date: 2026-07-24
 - Live readiness verdict: NOT LIVE READY; migration correctness does not authorize LIVE execution.
 

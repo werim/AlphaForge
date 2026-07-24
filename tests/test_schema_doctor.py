@@ -19,6 +19,7 @@ from alphaforge.schema_doctor import (
     exposure_count,
     inspect_database_schema,
     normalize_database_path,
+    sqlite_type_affinity,
     validate_required_schema,
 )
 
@@ -197,6 +198,80 @@ def test_deployed_v1_checksum_remains_valid_and_v2_is_added(tmp_path):
     assert report.schema_status == "MIGRATED"
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations WHERE version IN (?,?)", (PREVIOUS_SCHEMA_VERSION, SCHEMA_VERSION)).fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("declared,affinity", [
+    ("BIGINT", "INTEGER"), ("INT", "INTEGER"), ("SMALLINT", "INTEGER"),
+    ("VARCHAR(24)", "TEXT"), ("CHAR(8)", "TEXT"), ("CLOB", "TEXT"),
+    ("FLOAT", "REAL"), ("DOUBLE", "REAL"), ("REAL", "REAL"), ("NUMERIC(20,10)", "NUMERIC"),
+])
+def test_sqlite_type_affinity_matches_declared_type_families(declared, affinity):
+    assert sqlite_type_affinity(declared) == affinity
+
+
+def test_schema_validation_accepts_compatible_declared_affinities(tmp_path):
+    db = tmp_path / "affinities.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE positions(id BIGINT PRIMARY KEY,symbol VARCHAR(64),qty DOUBLE,status VARCHAR(24))")
+        conn.execute("CREATE TABLE orders(id SMALLINT PRIMARY KEY,order_id CHAR(32),symbol CLOB,status VARCHAR(24))")
+    report = ensure_database_schema(db)
+    assert report.schema_status == "MIGRATED"
+    assert report.type_mismatches == []
+
+
+def _create_alembic_head_shape(conn, *, with_rows=False):
+    conn.execute("CREATE TABLE alembic_version(version_num VARCHAR(32) NOT NULL)")
+    conn.execute("INSERT INTO alembic_version VALUES('0005_core_identifier_normalization')")
+    conn.execute("CREATE TABLE exchange_symbols(id BIGINT PRIMARY KEY)")
+    conn.execute("CREATE TABLE order_intents(id BIGINT PRIMARY KEY)")
+    conn.execute("CREATE TABLE positions(id BIGINT PRIMARY KEY,symbol_id BIGINT NOT NULL,side VARCHAR(4) NOT NULL,size NUMERIC(20,10) NOT NULL,position_id TEXT,signal_id TEXT,symbol TEXT,timeframe TEXT,mode TEXT,created_at TEXT,updated_at TEXT)")
+    conn.execute("CREATE TABLE orders(id BIGINT PRIMARY KEY,order_intent_id BIGINT NOT NULL,external_order_id VARCHAR(128),status VARCHAR(24) NOT NULL,order_id TEXT,signal_id TEXT,position_id TEXT,symbol TEXT,timeframe TEXT,mode TEXT,created_at TEXT,updated_at TEXT)")
+    if with_rows:
+        conn.execute("INSERT INTO positions(id,symbol_id,side,size) VALUES(1,1,'BUY',2)")
+        conn.execute("INSERT INTO orders(id,order_intent_id,status) VALUES(1,1,'FILLED')")
+
+
+def test_known_empty_alembic_head_uses_dedicated_runtime_exposure_adapter(tmp_path):
+    db = tmp_path / "alembic-head.db"
+    with sqlite3.connect(db) as conn:
+        _create_alembic_head_shape(conn)
+    first = ensure_database_schema(db)
+    second = ensure_database_schema(db)
+    assert first.schema_status == "MIGRATED"
+    assert first.schema_family == "ALEMBIC_HEAD"
+    assert first.alembic_revision == "0005_core_identifier_normalization"
+    assert first.exposure_tables == {"positions": "runtime_positions", "orders": "runtime_orders"}
+    assert second.schema_status == "VALID"
+    with sqlite3.connect(db) as conn:
+        assert exposure_count(conn, "positions") == 0
+        assert exposure_count(conn, "orders") == 0
+        details = json.loads(conn.execute("SELECT details_json FROM schema_migrations WHERE version=?", (SCHEMA_VERSION,)).fetchone()[0])
+        assert details["schema_family"] == "ALEMBIC_HEAD"
+        assert details["alembic_revision"] == "0005_core_identifier_normalization"
+        assert details["adapter"] == "dedicated_runtime_exposure"
+
+
+def test_alembic_domain_rows_block_adapter_until_reconciled(tmp_path):
+    db = tmp_path / "alembic-rows.db"
+    with sqlite3.connect(db) as conn:
+        _create_alembic_head_shape(conn, with_rows=True)
+    report = ensure_database_schema(db)
+    assert report.schema_status == "BLOCKED"
+    assert report.reason == "ALEMBIC_DOMAIN_EXPOSURE_REQUIRES_RECONCILIATION"
+    assert {row["table"] for row in report.affected_rows} == {"positions", "orders"}
+    with sqlite3.connect(db) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "runtime_positions" not in tables
+
+
+def test_unknown_foreign_alembic_revision_remains_blocked(tmp_path):
+    db = tmp_path / "foreign-head.db"
+    with sqlite3.connect(db) as conn:
+        _create_alembic_head_shape(conn)
+        conn.execute("UPDATE alembic_version SET version_num='foreign_head'")
+    report = ensure_database_schema(db)
+    assert report.schema_status == "BLOCKED"
+    assert report.reason == "DATABASE_IDENTITY_UNVERIFIED"
 
 
 @pytest.mark.parametrize("missing_from", ["positions", "orders"])

@@ -12,14 +12,19 @@ from typing import Any
 
 PREVIOUS_SCHEMA_VERSION = "2026_07_24_runtime_exposure_v1"
 PREVIOUS_MIGRATION_CHECKSUM = hashlib.sha256("positions.status<-state|closed_at|exit_time;orders.status<-order_status".encode()).hexdigest()
-SCHEMA_VERSION = "2026_07_24_runtime_exposure_v2"
+V2_SCHEMA_VERSION = "2026_07_24_runtime_exposure_v2"
+V2_MIGRATION_CHECKSUM = hashlib.sha256("positions.status<-state|closed_at|exit_time;orders.status<-order_status;semantic-validation-v2".encode()).hexdigest()
+SCHEMA_VERSION = "2026_07_24_runtime_exposure_v3"
 MIGRATION_NAME = "canonical runtime exposure status adapters"
-MIGRATION_SQL = "positions.status<-state|closed_at|exit_time;orders.status<-order_status;semantic-validation-v2"
+MIGRATION_SQL = "sqlite-affinity;trusted-alembic-0005;dedicated-runtime-exposure-tables"
 MIGRATION_CHECKSUM = hashlib.sha256(MIGRATION_SQL.encode()).hexdigest()
 KNOWN_MIGRATION_CHECKSUMS = {
     PREVIOUS_SCHEMA_VERSION: PREVIOUS_MIGRATION_CHECKSUM,
+    V2_SCHEMA_VERSION: V2_MIGRATION_CHECKSUM,
     SCHEMA_VERSION: MIGRATION_CHECKSUM,
 }
+
+KNOWN_ALEMBIC_HEADS = frozenset({"0005_core_identifier_normalization"})
 
 POSITION_ACTIVE = frozenset({"OPEN", "POSITION_OPENED", "ACTIVE"})
 POSITION_TERMINAL = frozenset({"CLOSED", "POSITION_CLOSED", "EXITED", "CANCELLED"})
@@ -48,6 +53,9 @@ class SchemaReport:
     unsupported_legacy_shapes: list[dict[str, Any]] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     affected_rows: list[dict[str, Any]] = field(default_factory=list)
+    schema_family: str = "UNKNOWN"
+    alembic_revision: str | None = None
+    exposure_tables: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -69,6 +77,9 @@ class MigrationReport:
     unsafe_changes_required: list[str] = field(default_factory=list)
     affected_features: list[str] = field(default_factory=list)
     next_action: str = "none"
+    schema_family: str = "UNKNOWN"
+    alembic_revision: str | None = None
+    exposure_tables: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -110,7 +121,8 @@ def _connection(target: Any, *, create: bool = False) -> tuple[Any | None, bool,
 
 
 def _unknown_state_rows(conn: sqlite3.Connection, table: str) -> list[dict[str, Any]]:
-    allowed = RECOGNIZED_STATES[table]
+    logical_table = "positions" if table in {"positions", "runtime_positions"} else "orders"
+    allowed = RECOGNIZED_STATES[logical_table]
     placeholders = ",".join("?" for _ in allowed)
     rows = conn.execute(
         f"""SELECT id, status FROM {table}
@@ -122,10 +134,46 @@ def _unknown_state_rows(conn: sqlite3.Connection, table: str) -> list[dict[str, 
     return [{"table": table, "id": row[0], "status": row[1]} for row in rows]
 
 
+def sqlite_type_affinity(declared_type: str) -> str:
+    """Return SQLite's canonical affinity for a declared type."""
+    value = str(declared_type or "").strip().upper()
+    if "INT" in value:
+        return "INTEGER"
+    if any(token in value for token in ("CHAR", "CLOB", "TEXT")):
+        return "TEXT"
+    if "BLOB" in value or not value:
+        return "BLOB"
+    if any(token in value for token in ("REAL", "FLOA", "DOUB")):
+        return "REAL"
+    return "NUMERIC"
+
+
+def _affinity_compatible(expected: str, declared: str) -> bool:
+    actual = sqlite_type_affinity(declared)
+    expected_affinity = sqlite_type_affinity(expected)
+    return actual == expected_affinity or (expected_affinity == "REAL" and actual == "NUMERIC")
+
+
+def _schema_identity(conn: sqlite3.Connection, tables: dict[str, dict[str, dict[str, Any]]]) -> tuple[str, str | None, dict[str, str]]:
+    revision = None
+    if "alembic_version" in tables:
+        row = conn.execute("SELECT version_num FROM alembic_version LIMIT 1").fetchone()
+        revision = str(row[0]) if row else None
+    pcols = set(tables.get("positions", {}))
+    ocols = set(tables.get("orders", {}))
+    if {"id", "qty", "status"}.issubset(pcols) and {"id", "status"}.issubset(ocols):
+        return "RUNTIME_CANONICAL", revision, {"positions": "positions", "orders": "orders"}
+    alembic_core = {"exchange_symbols", "order_intents", "positions", "orders"}.issubset(tables)
+    alembic_shapes = {"id", "symbol_id", "side", "size"}.issubset(pcols) and {"id", "order_intent_id", "external_order_id", "status"}.issubset(ocols)
+    if revision in KNOWN_ALEMBIC_HEADS and alembic_core and alembic_shapes:
+        return "ALEMBIC_HEAD", revision, {"positions": "runtime_positions", "orders": "runtime_orders"}
+    return "LEGACY_OR_UNKNOWN", revision, {"positions": "positions", "orders": "orders"}
+
+
 def inspect_database_schema(target: Any) -> SchemaReport:
     conn, owned, database = _connection(target)
     if conn is None:
-        return SchemaReport(database=database, database_exists=False, missing_tables=sorted(RUNTIME_SCHEMA), reasons=["DATABASE_IDENTITY_UNVERIFIED", "EXPOSURE_TABLES_MISSING"])
+        return SchemaReport(database=database, database_exists=False, missing_tables=sorted(RUNTIME_SCHEMA), reasons=["DATABASE_IDENTITY_UNVERIFIED", "EXPOSURE_TABLES_MISSING"], schema_family="FRESH", exposure_tables={"positions": "positions", "orders": "orders"})
     try:
         report = SchemaReport(database=database)
         names = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -134,7 +182,11 @@ def inspect_database_schema(target: Any) -> SchemaReport:
                 str(row[1]): {"type": str(row[2] or "").upper(), "nullable": not bool(row[3]), "default": row[4], "primary_key": bool(row[5])}
                 for row in conn.execute(f'PRAGMA table_info("{table}")')
             }
-        for table, required in RUNTIME_SCHEMA.items():
+        report.schema_family, report.alembic_revision, report.exposure_tables = _schema_identity(conn, report.tables)
+        if report.alembic_revision and report.alembic_revision not in KNOWN_ALEMBIC_HEADS:
+            report.reasons.append("DATABASE_IDENTITY_UNVERIFIED")
+        for logical_table, required in RUNTIME_SCHEMA.items():
+            table = report.exposure_tables[logical_table]
             if table not in names:
                 report.missing_tables.append(table)
                 continue
@@ -144,17 +196,19 @@ def inspect_database_schema(target: Any) -> SchemaReport:
                     report.missing_columns.append({"table": table, "column": column})
                     if column == "id":
                         report.reasons.append("IDENTIFIER_COLUMN_MISSING")
-                elif columns[column]["type"] and expected_type not in columns[column]["type"]:
+                elif not _affinity_compatible(expected_type, columns[column]["type"]):
                     report.type_mismatches.append({"table": table, "column": column, "expected": expected_type, "actual": columns[column]["type"]})
         if report.missing_tables:
             report.reasons.append("EXPOSURE_TABLES_MISSING")
-        pcols = report.tables.get("positions", {})
-        if pcols and "status" not in pcols and not ({"state", "closed_at", "exit_time"} & pcols.keys()):
+        ptable = report.exposure_tables["positions"]
+        otable = report.exposure_tables["orders"]
+        pcols = report.tables.get(ptable, {})
+        if report.schema_family != "ALEMBIC_HEAD" and pcols and "status" not in pcols and not ({"state", "closed_at", "exit_time"} & pcols.keys()):
             report.unsupported_legacy_shapes.append({"table": "positions", "reason": "no status/state/closed timestamp evidence"})
-        ocols = report.tables.get("orders", {})
-        if ocols and "status" not in ocols and "order_status" not in ocols:
+        ocols = report.tables.get(otable, {})
+        if report.schema_family != "ALEMBIC_HEAD" and ocols and "status" not in ocols and "order_status" not in ocols:
             report.unsupported_legacy_shapes.append({"table": "orders", "reason": "no status/order_status evidence"})
-        for table in RUNTIME_SCHEMA:
+        for table in report.exposure_tables.values():
             if {"id", "status"}.issubset(report.tables.get(table, {})):
                 report.affected_rows.extend(_unknown_state_rows(conn, table))
         if report.affected_rows:
@@ -208,6 +262,8 @@ def _blocked(report: SchemaReport, reasons: list[str] | None = None) -> Migratio
         affected_rows=report.affected_rows, unsafe_changes_required=["manual schema/data migration required"],
         affected_features=["runtime_recovery", "reconciliation", "burnin_preflight"],
         next_action="verify database identity and perform a manual migration",
+        schema_family=report.schema_family, alembic_revision=report.alembic_revision,
+        exposure_tables=report.exposure_tables,
     )
 
 
@@ -216,9 +272,21 @@ def ensure_database_schema(target: Any, *, allow_fresh_bootstrap: bool = False) 
     if not before.database_exists and not allow_fresh_bootstrap:
         return _blocked(before)
     existing_user_tables = set(before.tables) - {"sqlite_sequence", "schema_migrations"}
-    if before.missing_tables and existing_user_tables:
+    trusted_alembic = before.schema_family == "ALEMBIC_HEAD"
+    domain_counts: dict[str, int] = {}
+    if trusted_alembic and before.missing_tables:
+        conn, owned, _ = _connection(target)
+        try:
+            domain_counts = {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in ("positions", "orders")}
+        finally:
+            if owned:
+                conn.close()
+        if any(domain_counts.values()):
+            before.affected_rows = [{"table": table, "row_count": count} for table, count in domain_counts.items() if count]
+            return _blocked(before, ["ALEMBIC_DOMAIN_EXPOSURE_REQUIRES_RECONCILIATION"])
+    elif before.missing_tables and existing_user_tables:
         return _blocked(before, ["DATABASE_IDENTITY_UNVERIFIED", "EXPOSURE_TABLES_MISSING"])
-    if before.missing_tables and not allow_fresh_bootstrap:
+    if before.missing_tables and not allow_fresh_bootstrap and not trusted_alembic:
         return _blocked(before, ["EXPOSURE_TABLES_MISSING"])
     if before.unsupported_legacy_shapes or before.type_mismatches or "IDENTIFIER_COLUMN_MISSING" in before.reasons or "UNKNOWN_EXPOSURE_STATE" in before.reasons:
         return _blocked(before)
@@ -227,38 +295,48 @@ def ensure_database_schema(target: Any, *, allow_fresh_bootstrap: bool = False) 
     if conn is None:
         return _blocked(before)
     applied: list[str] = []
-    details: dict[str, Any] = {"additive": True, "row_counts_before": {}, "row_counts_after": {}, "affected_rows": []}
+    details: dict[str, Any] = {"additive": True, "schema_family": before.schema_family, "alembic_revision": before.alembic_revision, "columns_added": [], "adapter": "dedicated_runtime_exposure" if trusted_alembic else "canonical", "domain_row_counts": domain_counts if trusted_alembic else None, "row_counts_before": {}, "row_counts_after": {}, "affected_rows": [], "semantic_validation": "PENDING"}
     try:
         integrity = _migration_integrity(conn)
         if integrity in {"MIGRATION_CHECKSUM_MISMATCH", "MIGRATION_PREVIOUSLY_FAILED"}:
             return _blocked(before, [integrity])
         conn.execute("BEGIN")
         _migration_table(conn)
-        if allow_fresh_bootstrap:
+        if allow_fresh_bootstrap and not trusted_alembic:
             conn.execute("CREATE TABLE IF NOT EXISTS positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT)")
-        for table in RUNTIME_SCHEMA:
+        if trusted_alembic:
+            conn.execute("CREATE TABLE IF NOT EXISTS runtime_positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS runtime_orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT)")
+            details["columns_added"] = ["runtime_positions.*", "runtime_orders.*"]
+        exposure_tables = before.exposure_tables
+        for table in exposure_tables.values():
             details["row_counts_before"][table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-        pcols = {row[1] for row in conn.execute("PRAGMA table_info(positions)")}
+        ptable, otable = exposure_tables["positions"], exposure_tables["orders"]
+        pcols = {row[1] for row in conn.execute(f"PRAGMA table_info({ptable})")}
         for column, ddl in (("symbol", "TEXT"), ("qty", "REAL")):
             if column not in pcols:
-                conn.execute(f"ALTER TABLE positions ADD COLUMN {column} {ddl}")
+                conn.execute(f"ALTER TABLE {ptable} ADD COLUMN {column} {ddl}")
+                details["columns_added"].append(f"{ptable}.{column}")
         if "status" not in pcols:
-            conn.execute("ALTER TABLE positions ADD COLUMN status TEXT")
+            conn.execute(f"ALTER TABLE {ptable} ADD COLUMN status TEXT")
+            details["columns_added"].append(f"{ptable}.status")
             if "state" in pcols:
-                conn.execute("UPDATE positions SET status=UPPER(TRIM(state))")
+                conn.execute(f"UPDATE {ptable} SET status=UPPER(TRIM(state))")
             elif "closed_at" in pcols:
-                conn.execute("UPDATE positions SET status=CASE WHEN closed_at IS NULL THEN 'OPEN' ELSE 'CLOSED' END")
+                conn.execute(f"UPDATE {ptable} SET status=CASE WHEN closed_at IS NULL THEN 'OPEN' ELSE 'CLOSED' END")
             elif "exit_time" in pcols:
-                conn.execute("UPDATE positions SET status=CASE WHEN exit_time IS NULL THEN 'OPEN' ELSE 'CLOSED' END")
-        ocols = {row[1] for row in conn.execute("PRAGMA table_info(orders)")}
+                conn.execute(f"UPDATE {ptable} SET status=CASE WHEN exit_time IS NULL THEN 'OPEN' ELSE 'CLOSED' END")
+        ocols = {row[1] for row in conn.execute(f"PRAGMA table_info({otable})")}
         for column, ddl in (("order_id", "TEXT"), ("symbol", "TEXT")):
             if column not in ocols:
-                conn.execute(f"ALTER TABLE orders ADD COLUMN {column} {ddl}")
+                conn.execute(f"ALTER TABLE {otable} ADD COLUMN {column} {ddl}")
+                details["columns_added"].append(f"{otable}.{column}")
         if "status" not in ocols:
-            conn.execute("ALTER TABLE orders ADD COLUMN status TEXT")
-            conn.execute("UPDATE orders SET status=UPPER(TRIM(order_status))")
-        for table in RUNTIME_SCHEMA:
+            conn.execute(f"ALTER TABLE {otable} ADD COLUMN status TEXT")
+            details["columns_added"].append(f"{otable}.status")
+            conn.execute(f"UPDATE {otable} SET status=UPPER(TRIM(order_status))")
+        for table in exposure_tables.values():
             details["row_counts_after"][table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             details["affected_rows"].extend(_unknown_state_rows(conn, table))
         if details["row_counts_before"] != details["row_counts_after"] or details["affected_rows"]:
@@ -266,8 +344,9 @@ def ensure_database_schema(target: Any, *, allow_fresh_bootstrap: bool = False) 
             after = inspect_database_schema(target)
             after.affected_rows = list(details["affected_rows"])
             return _blocked(after, ["UNKNOWN_EXPOSURE_STATE"] if details["affected_rows"] else ["MIGRATION_ROW_COUNT_MISMATCH"])
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_positions_status ON positions(status)")
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_orders_status ON orders(status)")
+        details["semantic_validation"] = "PASS"
+        conn.execute(f"CREATE INDEX IF NOT EXISTS ix_{ptable}_status ON {ptable}(status)")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS ix_{otable}_status ON {otable}(status)")
         if integrity != "OK":
             conn.execute("INSERT INTO schema_migrations(version,name,applied_at,checksum,success,details_json,notes) VALUES(?,?,?,?,1,?,?)",
                          (SCHEMA_VERSION, MIGRATION_NAME, datetime.now(timezone.utc).isoformat(), MIGRATION_CHECKSUM, json.dumps(details, sort_keys=True), MIGRATION_NAME))
@@ -301,7 +380,9 @@ def validate_required_schema(target: Any, scope: str = "runtime") -> MigrationRe
     blocked = bool(report.missing_tables or report.missing_columns or report.type_mismatches or report.unsupported_legacy_shapes or report.reasons)
     if blocked:
         return _blocked(report)
-    return MigrationReport(database=report.database, schema_status="VALID", schema_version=SCHEMA_VERSION)
+    return MigrationReport(database=report.database, schema_status="VALID", schema_version=SCHEMA_VERSION,
+                           schema_family=report.schema_family, alembic_revision=report.alembic_revision,
+                           exposure_tables=report.exposure_tables)
 
 
 def exposure_count(conn: Any, table: str) -> int:
@@ -313,8 +394,9 @@ def exposure_count(conn: Any, table: str) -> int:
     states = ACTIVE_STATES[table]
     placeholders = ",".join("?" for _ in states)
     raw, _, _ = _connection(conn)
+    physical_table = validation.exposure_tables[table]
     row = raw.execute(
-        f"SELECT COUNT(*) FROM {table} WHERE UPPER(TRIM(CAST(status AS TEXT))) IN ({placeholders})",
+        f"SELECT COUNT(*) FROM {physical_table} WHERE UPPER(TRIM(CAST(status AS TEXT))) IN ({placeholders})",
         tuple(sorted(states)),
     ).fetchone()
     return int(row[0] or 0)
