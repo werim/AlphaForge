@@ -78,6 +78,26 @@
 # Changelog
 
 ## Added
+- Regression coverage for terminal PAPER provider failures, decision/execution/lifecycle evidence, every runtime exposure class, SQL evidence failure, LIVE mode, and later unrelated campaign recovery scope.
+
+## Changed
+- Recovery drill now collects explicit SQL-backed run mode, decision, execution, and execution-lifecycle evidence before considering zero-exposure startup terminalization.
+
+## Fixed
+- Terminal zero-decision PAPER startup failures can append an audited local recovery marker when provider unavailability is the only error, preventing their stale runtime snapshot from indefinitely blocking later PAPER preflights.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- None; recovery remains fail-closed for any execution/exposure evidence, unavailable SQL evidence, kill switch, live lineage, or non-provider reconciliation error.
+
+## Known Issues
+- Local terminalization records provider unavailability rather than claiming authenticated exchange reconciliation; LIVE remains NOT READY.
+
+## Previous release
+
+## Added
 - Regression coverage for empty, schema-compatible partially initialized, repeatedly upgraded, and explicitly incompatible SQLite Alembic databases.
 
 ## Changed

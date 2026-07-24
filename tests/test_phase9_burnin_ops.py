@@ -874,6 +874,121 @@ def test_failed_zero_exposure_startup_recovery_drill_safe_terminalization(monkey
     assert conn.execute("SELECT COUNT(*) FROM burnin_campaign_events WHERE event_type='PHASE9_ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED'").fetchone()[0] == 1
 
 
+def _terminal_provider_failure(conn, camp, run):
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', worker_pid=NULL, last_error='EXCHANGE_RECONCILIATION_UNAVAILABLE' WHERE campaign_id=?", (camp.campaign_id,))
+    conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=? WHERE burnin_run_id=?", (utc_now(), run))
+    conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=? WHERE burnin_run_id=?", (utc_now(), run))
+    conn.commit()
+
+
+def test_terminal_paper_provider_failure_with_zero_execution_is_terminalized_and_unblocks_future_scope(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    from alphaforge.persistence import init_db
+    from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot
+
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    _terminal_provider_failure(conn, camp, run)
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED",
+        instance_id="failed-startup", startup_id="failed-startup", process_id=0,
+        campaign_id=camp.campaign_id, burnin_run_id=run, release_id=camp.release_id,
+        fail_closed_reason="EXCHANGE_RECONCILIATION_UNAVAILABLE", recovery_action_required=True,
+    ))
+    engine.dispose()
+    monkeypatch.setattr(ops, "_pid_alive", lambda _pid: False)
+
+    out = recovery_drill(conn, camp.campaign_id)
+
+    assert out["status"] == "PASS"
+    assert out["checks"]["provider_only_error"] is True
+    assert out["checks"]["zero_exposure_failed_startup_terminalizable"] is True
+    assert out["checks"]["startup_terminalization_evidence"] == {
+        "decisions": 0, "executions": 0, "lifecycle_executions": 0,
+        "run_mode": "PAPER", "run_status": "FAILED", "query_errors": [], "available": True,
+    }
+    audit = json.loads(conn.execute("SELECT details_json FROM burnin_campaign_events WHERE event_type='PHASE9_ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED' ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert audit["runtime_recovery"]["fallback_original_runtime_recovery"]["scope"] == "SAME_CAMPAIGN"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "FAILED"
+    assert conn.execute("SELECT COUNT(*) FROM runtime_state_snapshots WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == 1
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    later = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="camp_unrelated_new")
+    engine.dispose()
+    assert later["blocked"] is False
+    assert later["scope"] == "UNRELATED_HISTORICAL_RUNTIME"
+
+
+@pytest.mark.parametrize("evidence_kind", ["decision", "execution", "lifecycle_execution"])
+def test_terminal_paper_provider_failure_with_any_execution_evidence_remains_blocked(monkeypatch, tmp_path, evidence_kind):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    _terminal_provider_failure(conn, camp, run)
+    if evidence_kind in {"decision", "lifecycle_execution"}:
+        lifecycle = "ORDER_PLACED" if evidence_kind == "lifecycle_execution" else "SIGNAL_REJECTED"
+        persist_burnin_observation(
+            conn, observation_id=f"obs-{evidence_kind}", burnin_run_id=run, release_id=camp.release_id,
+            execution_mode="PAPER", observed_at=utc_now(), symbol="BTCUSDT", interval="1h",
+            regime="UNKNOWN", decision="REJECT", lifecycle_state=lifecycle,
+        )
+    else:
+        conn.execute("INSERT INTO burnin_pending_position_outcomes(pending_position_id,trade_id,campaign_id,burnin_run_id,signal_id,symbol,side,entry_time,source_provenance_json,status,missing_fields_json,created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,'CLOSED','[]',?,?)", ("pp", "trade", camp.campaign_id, run, "sig", "BTCUSDT", "LONG", utc_now(), "{}", utc_now(), "test"))
+    conn.commit()
+    provider = "reconciliation_probe:RuntimeError:read_only_reconciliation_provider_unavailable"
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *a, **k: {
+        "blocked": True, "reason": "RECOVERY_EVIDENCE_UNAVAILABLE", "scope": "SAME_CAMPAIGN",
+        "latest": {"mode": "PAPER"}, "previous_process_alive": False, "kill_switch_active": False,
+        "query_errors": [provider], "provider_unavailable_errors": [provider],
+        "current_exposure_check": {name: 0 for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")},
+        "availability": {"active_positions_available": True, "pending_orders_available": True, "orphan_evidence_available": True, "kill_switch_available": True},
+    })
+    out = recovery_drill(conn, camp.campaign_id)
+    assert out["status"] == "FAIL"
+    assert out["checks"]["zero_exposure_failed_startup_terminalizable"] is False
+
+
+@pytest.mark.parametrize("mode,exposure", [
+    ("PAPER", "active_positions"), ("PAPER", "pending_orders"),
+    ("PAPER", "orphan_orders"), ("PAPER", "orphan_positions"), ("LIVE", None),
+])
+def test_terminal_provider_failure_fallback_rejects_runtime_exposure_and_live(monkeypatch, tmp_path, mode, exposure):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    _terminal_provider_failure(conn, camp, run)
+    counts = {name: 0 for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")}
+    if exposure:
+        counts[exposure] = 1
+    provider = "reconciliation_probe:RuntimeError:read_only_reconciliation_provider_unavailable"
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *a, **k: {
+        "blocked": True, "reason": "RECOVERY_EVIDENCE_UNAVAILABLE", "scope": "SAME_CAMPAIGN",
+        "latest": {"mode": mode}, "previous_process_alive": False, "kill_switch_active": False,
+        "query_errors": [provider], "provider_unavailable_errors": [provider], "current_exposure_check": counts,
+        "availability": {"active_positions_available": True, "pending_orders_available": True, "orphan_evidence_available": True, "kill_switch_available": True},
+    })
+    out = recovery_drill(conn, camp.campaign_id)
+    assert out["status"] == "FAIL"
+    assert out["checks"]["historical_zero_local_fallback"] is False
+
+
+def test_terminal_provider_failure_sql_evidence_error_remains_blocked(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    _terminal_provider_failure(conn, camp, run)
+    monkeypatch.setattr(ops, "_startup_terminalization_evidence", lambda *a, **k: {
+        "decisions": 0, "executions": 0, "lifecycle_executions": 0, "run_mode": "PAPER",
+        "run_status": "FAILED", "query_errors": ["decisions:OperationalError:simulated"], "available": False,
+    })
+    out = recovery_drill(conn, camp.campaign_id)
+    assert out["status"] == "FAIL"
+    assert out["checks"]["startup_terminalization_evidence"]["available"] is False
+
+
 def test_cli_symbols_accept_comma_and_space_forms():
     import alphaforge.burnin_ops as ops
     assert ops._symbols("BTCUSDT,ETHUSDT") == ["BTCUSDT", "ETHUSDT"]

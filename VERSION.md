@@ -1,12 +1,12 @@
 # AlphaForge Version
 
-- Current version: Phase 9 cross-platform Alembic bootstrap correction
-- Current phase: Phase 9 - migration portability and persistence bootstrap hardening
-- Runtime maturity: PAPER operational workflow unchanged; initial schema creation is ordered and inspector-cache safe on SQLite, idempotent on PostgreSQL, compatible with explicit revision-0001/current-init schema families, and fail-closed for unknown partial shapes.
-- BACKTEST/PAPER/LIVE alignment: No decision, reject, or lifecycle semantics changed; all modes retain the same persisted schema contract.
-- Lifecycle coverage: Unchanged by this migration-only correction.
-- Execution realism coverage: Unchanged by this migration-only correction.
-- Known critical risks: PostgreSQL idempotency is implemented but requires credentialed PostgreSQL acceptance; real PAPER burn-in and Demo acceptance remain outstanding.
+- Current version: Phase 9 terminal PAPER startup recovery correction
+- Current phase: Phase 9 - fail-closed recovery scope and persistence hardening
+- Runtime maturity: A dead, terminal PAPER startup that has complete SQL-backed zero-decision, zero-execution, zero-lifecycle, zero-position/order/orphan, inactive-kill-switch evidence may be terminalized when provider unavailability is the only reconciliation error; all incomplete or nonzero evidence remains blocked.
+- BACKTEST/PAPER/LIVE alignment: PAPER gains only the narrow startup terminalization path; LIVE/LIVE_PRECHECK remain fully fail-closed and decision/reject semantics are unchanged.
+- Lifecycle coverage: Startup recovery audits lifecycle execution states and preserves existing campaign/run/runtime rows append-only.
+- Execution realism coverage: Provider unavailability is recorded explicitly and never substitutes for zero SQL execution/exposure evidence.
+- Known critical risks: Provider-unavailable recovery cannot prove remote exchange state and is therefore restricted to PAPER runs proven never to have reached any decision or execution; real PAPER burn-in and Demo acceptance remain outstanding.
 - Last audit date: 2026-07-24
 - Live readiness verdict: NOT LIVE READY; migration correctness does not authorize LIVE execution.
 
