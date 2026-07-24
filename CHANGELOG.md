@@ -78,6 +78,28 @@
 # Changelog
 
 ## Added
+- Regression coverage for empty, schema-compatible partially initialized, repeatedly upgraded, and explicitly incompatible SQLite Alembic databases.
+
+## Changed
+- Initial migration schema checks now use fresh SQLAlchemy inspectors and install append-only triggers only after verifying their tables exist.
+- PostgreSQL append-only function/trigger installation is idempotent, and CI dependencies now include Alembic.
+- Alembic revision tests import the required dependency directly instead of silently skipping executable migration coverage.
+
+## Fixed
+- Cross-platform SQLite bootstrap failure where stale inspector state could leave `config_snapshots` absent at trigger creation.
+- Partially initialized databases with missing required columns now fail before revision stamping instead of being reported as usable.
+- Alembic revision 0001 now recognizes the complete current normalized `init_db` schema family for lifecycle, position, and order tables instead of misclassifying supported mixed-bootstrap databases as corrupt.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- None; the intended schema and stored data contract are unchanged.
+
+## Known Issues
+- PostgreSQL migration acceptance still requires a configured PostgreSQL integration environment; incompatible pre-existing table shapes require explicit repair and are not rewritten automatically.
+
+## Added
 - `python -m alphaforge.burnin_ops recover-runtime` operator entrypoint for recovery without requiring operators to remember the campaign-specific `recovery-drill` command.
 - Append-only local diagnostic recovery evidence for the narrow dead, unrelated historical PAPER runtime case where Binance read-only reconciliation is the only unavailable evidence and all local exposure queries are available and zero.
 
