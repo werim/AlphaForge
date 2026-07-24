@@ -1,3 +1,54 @@
+# Terminal PAPER startup recovery surgery — 2026-07-24
+
+## Why the patch was needed and root cause
+Recovery had two independently narrow escape paths that did not cover the observed
+campaign. The provider-unavailable local fallback required a stale `RUNNING`
+continuation in `UNRELATED_HISTORICAL_RUNTIME` scope, while startup terminalization
+required an allow-listed launcher error and an already unblocked runtime recovery.
+A terminal same-campaign snapshot failed both predicates: provider failure kept the
+runtime gate blocked, and `EXCHANGE_RECONCILIATION_UNAVAILABLE` was not a launcher
+error. No durable recovery marker could become the latest runtime state, so every
+later PAPER preflight continued to inherit the stale blocker.
+
+## Files and exact behavior changed
+- `src/alphaforge/burnin_ops.py` adds a fail-closed SQL evidence collector for run
+  mode/status, observations (decisions), trade/pending-position execution rows, and
+  execution lifecycle states. Recovery permits the provider-unavailable append-only
+  fallback for a terminal, dead, PID-less PAPER startup only when every count is
+  available and zero, campaign/runtime exposure is available and zero, the kill
+  switch is inactive, and provider unavailability is the complete query-error set.
+- `tests/test_phase9_burnin_ops.py` covers the observed safe case, persisted audit
+  evidence, unchanged historical rows, later unrelated runtime scope, decisions,
+  executions, lifecycle executions, positions, orders, both orphan classes, SQL
+  evidence failure, and LIVE mode.
+
+## Runtime, lifecycle, persistence, export, and schema impact
+The safe case appends `runtime_recovery_events`, `exchange_reconciliation_events`,
+and a `LOCAL_DIAGNOSTIC_RECOVERY` runtime snapshot, then persists the existing
+Phase 9 campaign recovery event/drill evidence. It does not delete or overwrite the
+failed campaign, run, or prior runtime snapshot. The appended clean-for-local-PAPER
+scope marker prevents the historical row from remaining the latest global blocker.
+No schema or CSV contract changes. Any observed decision, trade/pending-position
+execution, execution lifecycle, position/order/orphan, kill switch, SQL error, live
+mode, alive worker, running state, or non-provider reconciliation error remains
+fail-closed.
+
+## Tests executed
+- `python -m pytest tests/test_phase9_burnin_ops.py -q`
+- `python -m pytest -q`
+- `python -m compileall -q src tests`
+- `git diff --check`
+
+## Risks, limitations, migration concerns, and push recommendation
+The local diagnostic marker explicitly does not claim authenticated remote exchange
+state. Its safety rests on the stronger condition that SQL proves this PAPER run
+never produced a decision or any execution/lifecycle evidence and all local runtime
+exposure sources are available and empty. Historical databases missing any queried
+table/column fail closed. No migration is required. LIVE remains NOT READY. Push is
+appropriate after the targeted and full suites pass.
+
+---
+
 # Cross-platform Alembic bootstrap surgery — 2026-07-24
 
 ## Why the patch was needed and root cause

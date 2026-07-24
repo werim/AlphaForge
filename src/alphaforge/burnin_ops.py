@@ -722,6 +722,61 @@ def _recovery_campaign_exposure(conn: sqlite3.Connection, campaign_id: str) -> d
         "availability": availability,
     }
 
+
+def _startup_terminalization_evidence(conn: sqlite3.Connection, campaign_id: str, run_id: str | None) -> dict[str, Any]:
+    """Collect fail-closed SQL evidence that a PAPER startup never traded."""
+    errors: list[str] = []
+    counts: dict[str, int | None] = {
+        "decisions": None,
+        "executions": None,
+        "lifecycle_executions": None,
+    }
+    run_mode: str | None = None
+    run_status: str | None = None
+
+    def count(name: str, sql: str, params: Sequence[Any]) -> None:
+        try:
+            counts[name] = int(conn.execute(sql, tuple(params)).fetchone()[0] or 0)
+        except Exception as exc:
+            errors.append(f"{name}:{exc.__class__.__name__}:{exc}")
+
+    if not run_id:
+        errors.append("run:missing_active_run_id")
+    else:
+        try:
+            row = conn.execute(
+                "SELECT r.execution_mode, r.status FROM burnin_runs r "
+                "JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id "
+                "WHERE cr.campaign_id=? AND r.burnin_run_id=?",
+                (campaign_id, run_id),
+            ).fetchone()
+            if row is None:
+                errors.append("run:missing_campaign_run_lineage")
+            else:
+                run_mode, run_status = str(row[0] or "").upper(), str(row[1] or "").upper()
+        except Exception as exc:
+            errors.append(f"run:{exc.__class__.__name__}:{exc}")
+        count("decisions", "SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (run_id,))
+        count(
+            "executions",
+            "SELECT (SELECT COUNT(*) FROM burnin_trade_outcomes WHERE burnin_run_id=?) + "
+            "(SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND burnin_run_id=?)",
+            (run_id, campaign_id, run_id),
+        )
+        count(
+            "lifecycle_executions",
+            "SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=? AND UPPER(COALESCE(lifecycle_state,'')) "
+            "IN ('ENTRY_TRIGGERED','ORDER_PLACED','PARTIAL_FILL','FILLED','TP_HIT','SL_HIT','CANCELLED','OPEN_AT_END')",
+            (run_id,),
+        )
+    return {
+        **counts,
+        "run_mode": run_mode,
+        "run_status": run_status,
+        "query_errors": errors,
+        "available": not errors and all(value is not None for value in counts.values()),
+    }
+
 def cleanup_dead_worker(conn: sqlite3.Connection, campaign_id: str) -> bool:
     """Fail terminally and clear attachment metadata for a dead active worker."""
     campaign = get_campaign(conn, campaign_id)
@@ -959,6 +1014,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     old_status = _run_status(conn, old_run) if old_run else "UNKNOWN"
     old_alive = bool(old_pid and _pid_alive(old_pid))
     exposure = _recovery_campaign_exposure(conn, campaign_id)
+    startup_evidence = _startup_terminalization_evidence(conn, campaign_id, old_run)
     runtime_recovery = _authoritative_recovery_exposure(db, campaign_id)
     original_runtime_recovery = dict(runtime_recovery)
 
@@ -990,27 +1046,47 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         and runtime_recovery.get("reason") == "RECOVERY_EVIDENCE_UNAVAILABLE"
         and provider_only_error
     )
+    terminal_zero_startup_fallback_candidate = (
+        campaign.get("campaign_status") == "FAILED"
+        and old_status == "FAILED"
+        and not old_alive
+        and not bool(old_pid)
+        and startup_evidence["available"]
+        and startup_evidence["run_mode"] == "PAPER"
+        and startup_evidence["decisions"] == 0
+        and startup_evidence["executions"] == 0
+        and startup_evidence["lifecycle_executions"] == 0
+        and mode_safe_for_local_fallback
+        and runtime_recovery.get("previous_process_alive") is False
+        and campaign_available
+        and zero_campaign_exposure
+        and local_runtime_zero_available
+        and runtime_recovery.get("reason") == "RECOVERY_EVIDENCE_UNAVAILABLE"
+        and provider_only_error
+    )
     recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and local_runtime_zero_available
-    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False}
-    run_decisions = 0
-    if old_run:
-        run_decisions = int(conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (old_run,)).fetchone()[0] or 0)
+    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "startup_terminalization_evidence": startup_evidence, "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False}
+    run_decisions = startup_evidence.get("decisions")
     zero_exposure_failed_startup = (
         old_status in {"FAILED", "STARTING"}
         and not old_alive
         and not bool(old_pid)
         and campaign.get("campaign_status") in {"FAILED", "RECOVERY_REQUIRED", "STARTING"}
         and (str(campaign.get("last_error") or "") in STARTUP_FAILURE_REASONS | {"DEAD_WORKER"} or str(campaign.get("last_error") or "").startswith("PHASE8_CAMPAIGN_"))
+        and startup_evidence["available"]
+        and startup_evidence["run_mode"] == "PAPER"
         and run_decisions == 0
+        and startup_evidence["executions"] == 0
+        and startup_evidence["lifecycle_executions"] == 0
         and recovery_safe
     )
     prechecks["run_decisions"] = run_decisions
     prechecks["zero_exposure_failed_startup_terminalizable"] = zero_exposure_failed_startup
 
-    if historical_zero_local_fallback_candidate:
+    if historical_zero_local_fallback_candidate or terminal_zero_startup_fallback_candidate:
         engine = init_db(f"sqlite+pysqlite:///{db}")
         try:
-            persist_historical_paper_recovery_without_provider(engine, prior_snapshot=runtime_recovery.get("latest"), diagnostics={"campaign_id": campaign_id, "old_run_id": old_run, "worker_pid": old_pid, "worker_alive": old_alive, "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "provider_unavailable_reason": "read_only_reconciliation_provider_unavailable"})
+            persist_historical_paper_recovery_without_provider(engine, prior_snapshot=runtime_recovery.get("latest"), diagnostics={"campaign_id": campaign_id, "old_run_id": old_run, "worker_pid": old_pid, "worker_alive": old_alive, "campaign_exposure": exposure, "startup_terminalization_evidence": startup_evidence, "runtime_recovery": runtime_recovery, "provider_unavailable_reason": "read_only_reconciliation_provider_unavailable", "recovery_scope": "TERMINAL_ZERO_EXECUTION_STARTUP" if terminal_zero_startup_fallback_candidate else "UNRELATED_HISTORICAL_RUNTIME"})
             runtime_recovery = _authoritative_recovery_exposure(db, campaign_id)
             runtime_recovery["fallback_original_runtime_recovery"] = original_runtime_recovery
             prechecks["runtime_recovery_after_fallback"] = runtime_recovery
@@ -1018,6 +1094,9 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
             prechecks["historical_zero_local_fallback"] = recovery_safe
         finally:
             engine.dispose()
+        if terminal_zero_startup_fallback_candidate:
+            zero_exposure_failed_startup = recovery_safe
+            prechecks["zero_exposure_failed_startup_terminalizable"] = zero_exposure_failed_startup
     if zero_exposure_failed_startup:
         conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (campaign_id,))
         evidence = {"old_run_id": old_run, "old_status": old_status, "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "run_decisions": run_decisions, "policy": "SAFE_TERMINALIZATION"}
