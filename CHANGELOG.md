@@ -3547,3 +3547,69 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Historical databases without complete campaign-scoped authenticated snapshots cannot be auto-classified as safe. LIVE remains NOT LIVE READY.
+## 2026-07-24 — Schema compatibility doctor
+
+### Added
+- Central SQLite schema inspection, validation, additive migration history, legacy exposure adapters, and `db-doctor` CLI.
+- Regression coverage for legacy position/order shapes, idempotency, rollback, path normalization, fail-closed behavior, and raw exposure SQL identifiers.
+
+### Changed
+- Burn-in database startup now initializes the canonical persistence schema before operational tables and reports the resolved database path.
+
+### Fixed
+- Legacy `positions.state`, `positions.closed_at`, `positions.exit_time`, and `orders.order_status` databases no longer reach incompatible runtime `status` queries.
+- Missing or ambiguous exposure evidence is blocked instead of being interpreted as zero exposure.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Unknown or type-incompatible exposure schemas now require manual migration and block safety-sensitive startup.
+
+### Known Issues
+- Automatic migration is SQLite-only and deliberately refuses destructive type conversion or ambiguous state inference.
+## 2026-07-24 — PR #302 migration-integrity follow-up
+
+### Added
+- Authoritative active/terminal state registries, affected-row diagnostics, migration checksum/failed-state verification, and runtime recovery integration.
+- Explicit fresh-bootstrap authorization and identifier-column fail-closed policy.
+- A separate `2026_07_24_runtime_exposure_v2` migration record; deployed v1 checksums remain stable and verifiable.
+
+### Changed
+- `db-doctor --apply`, preflight, recovery, and existing database validation no longer create missing exposure tables.
+- Legacy state backfills are semantically validated before migration success is recorded.
+
+### Fixed
+- NULL, blank, and unrecognized exposure states can no longer be interpreted as inactive.
+- Existing unrelated or incorrect database paths can no longer become clean through empty exposure-table creation.
+
+### Removed
+- Implicit fresh exposure bootstrap from ordinary doctor apply mode.
+
+### Breaking Changes
+- Existing databases without both exposure tables or stable `id` columns now block and require identity verification/manual migration.
+
+### Known Issues
+- Full local test execution requires the declared Alembic dependency; network policy prevented installing it in this environment.
+## 2026-07-24 — PR #302 Alembic/runtime schema compatibility v3
+
+### Added
+- SQLite declared-type affinity comparison and trusted repository Alembic-head detection.
+- Dedicated `runtime_positions`/`runtime_orders` adapter tables for the Alembic domain schema.
+- Migration `2026_07_24_runtime_exposure_v3` with schema family, revision, adapter, added-column, row-count, and semantic-validation evidence.
+
+### Changed
+- Runtime exposure validation selects canonical `positions`/`orders` for the lightweight runtime family and dedicated runtime exposure tables for known Alembic head databases.
+
+### Fixed
+- `BIGINT` identifiers and `VARCHAR(24)` statuses no longer fail SQLite compatibility through literal declared-type comparisons.
+- Empty repository Alembic-head databases can pass additive runtime initialization in both bootstrap directions.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Non-empty Alembic domain `positions`/`orders` cannot initialize an empty runtime adapter without explicit reconciliation.
+
+### Known Issues
+- GitHub Actions for this commit has not yet reported; merge remains gated on a green full suite.

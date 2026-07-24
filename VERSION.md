@@ -1,12 +1,12 @@
 # AlphaForge Version
 
-- Current version: Phase 9 terminal PAPER startup recovery correction
-- Current phase: Phase 9 - fail-closed recovery scope and persistence hardening
-- Runtime maturity: A dead, terminal PAPER startup that has complete SQL-backed zero-decision, zero-execution, zero-lifecycle, zero-position/order/orphan, inactive-kill-switch evidence may be terminalized when provider unavailability is the only reconciliation error; all incomplete or nonzero evidence remains blocked.
-- BACKTEST/PAPER/LIVE alignment: PAPER gains only the narrow startup terminalization path; LIVE/LIVE_PRECHECK remain fully fail-closed and decision/reject semantics are unchanged.
-- Lifecycle coverage: Startup recovery audits lifecycle execution states and preserves existing campaign/run/runtime rows append-only.
+- Current version: Phase 9 schema doctor Alembic/runtime compatibility v3
+- Current phase: Phase 9 - fail-closed schema, recovery, and persistence hardening
+- Runtime maturity: PAPER/BACKTEST recovery accepts exposure evidence only when canonical runtime tables, identifiers, migration integrity, and every persisted state are authoritative; repository Alembic head uses dedicated runtime exposure tables while missing/unknown evidence blocks.
+- BACKTEST/PAPER/LIVE alignment: canonical exposure validation is shared by runtime recovery and operational preflight; LIVE/LIVE_PRECHECK remain fully fail-closed.
+- Lifecycle coverage: Startup recovery audits lifecycle execution states and recognized position/order terminal or active states while preserving rows append-only.
 - Execution realism coverage: Provider unavailability is recorded explicitly and never substitutes for zero SQL execution/exposure evidence.
-- Known critical risks: Provider-unavailable recovery cannot prove remote exchange state and is therefore restricted to PAPER runs proven never to have reached any decision or execution; real PAPER burn-in and Demo acceptance remain outstanding.
+- Known critical risks: GitHub Actions confirmation for v3, PostgreSQL doctor parity, real PAPER burn-in, and Demo acceptance remain outstanding; non-empty Alembic domain positions/orders require explicit reconciliation.
 - Last audit date: 2026-07-24
 - Live readiness verdict: NOT LIVE READY; migration correctness does not authorize LIVE execution.
 
@@ -40,3 +40,13 @@
 - **2026-07-20 dotenv correction:** operator diagnostics bootstrap canonical `.env` once; explicit mapping APIs remain isolated; LIVE remains NOT READY.
 
 - **2026-07-23 PR #297 correction:** `diagnose-db` is schema-adaptive and read-only across historical databases; safe classifications require fresh, lineage-matched, authenticated COMPLETE zero-exposure evidence. Missing evidence remains manual review. LIVE remains disabled and NOT LIVE READY.
+## 0.1.1 — Schema compatibility hardening (2026-07-24)
+
+- **Phase:** persistence/runtime safety audit
+- **Runtime maturity:** PAPER/BACKTEST persistence operational; LIVE remains blocked
+- **Mode alignment:** canonical SQLite bootstrap and exposure schema validation now shared by runtime and burn-in preflight
+- **Lifecycle coverage:** unchanged; lifecycle persistence remains additive and auditable
+- **Execution realism:** unchanged
+- **Critical risks:** non-SQLite schema doctor coverage and ambiguous legacy exposure shapes require manual migration
+- **Last audit:** 2026-07-24
+- **Live readiness:** **NOT READY** — full suite and production database validation remain operator gates

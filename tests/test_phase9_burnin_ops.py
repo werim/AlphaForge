@@ -29,6 +29,8 @@ from alphaforge.burnin_ops import (
 def _conn(tmp_path: Path):
     tmp_path.mkdir(parents=True, exist_ok=True)
     db = tmp_path / "ops.db"
+    from alphaforge.persistence import init_db
+    init_db(f"sqlite+pysqlite:///{db}").dispose()
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     bootstrap_ops_schema(conn)

@@ -265,7 +265,7 @@ def test_run_foreground_sets_same_database_and_restores_environment(tmp_path):
 
 def test_cli_worker_db_writes_to_exact_database(tmp_path):
     from alphaforge.burnin_cli import main
-    db=tmp_path/'cli.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    db=tmp_path/'cli.db'; init_db(f"sqlite+pysqlite:///{db}").dispose(); conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relcli',duration_days=1,symbols=[],intervals=[]); start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close()
     assert main(['--db', str(db), 'worker', '--campaign-id', camp.campaign_id, '--once']) == 0
     conn=sqlite3.connect(db); assert conn.execute("select count(*) from burnin_campaign_events where campaign_id=? and event_type='RESOLVER_BATCH'",(camp.campaign_id,)).fetchone()[0] == 1; conn.close()
@@ -280,7 +280,7 @@ def test_cli_start_requires_worker_and_does_not_leave_running(tmp_path):
 
 def test_cli_foreground_start_invokes_worker_runtime(monkeypatch, tmp_path):
     from alphaforge import burnin_cli
-    db=tmp_path/'fg_cli.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    db=tmp_path/'fg_cli.db'; init_db(f"sqlite+pysqlite:///{db}").dispose(); conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relfgcli',duration_days=1,symbols=[],intervals=[]); conn.commit(); conn.close()
     called={}
     async def fake_run(self): called['cid']=self.campaign_id; return {'status':'STOPPED'}

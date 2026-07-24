@@ -108,6 +108,11 @@ def _sqlite_columns(db_path: str, table_name: str) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
+def _create_verified_exposure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
+    conn.execute("CREATE TABLE orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT)")
+
+
 def test_init_db_bootstraps_timesfm_evidence_before_indexes(tmp_path) -> None:
     db_path = tmp_path / "fresh_timesfm.db"
 
@@ -219,6 +224,7 @@ def test_init_db_preserves_existing_timesfm_evidence_rows_on_repeated_calls(tmp_
 def test_init_db_migrates_legacy_order_decisions_schema(tmp_path) -> None:
     db_path = tmp_path / "legacy_order_decisions.db"
     with sqlite3.connect(db_path) as conn:
+        _create_verified_exposure_schema(conn)
         conn.execute("CREATE TABLE order_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT UNIQUE, signal_id TEXT, decision TEXT)")
         conn.commit()
 
@@ -237,6 +243,7 @@ def test_init_db_migrates_legacy_order_decisions_schema(tmp_path) -> None:
 def test_init_db_migrates_legacy_ai_decision_features_schema(tmp_path) -> None:
     db_path = tmp_path / "legacy_ai_features.db"
     with sqlite3.connect(db_path) as conn:
+        _create_verified_exposure_schema(conn)
         conn.execute("CREATE TABLE ai_decision_features (id INTEGER PRIMARY KEY AUTOINCREMENT)")
         conn.commit()
 
@@ -270,6 +277,7 @@ def test_init_db_migrates_legacy_ai_decision_features_schema(tmp_path) -> None:
 def test_init_db_migrations_are_idempotent_and_preserve_data(tmp_path) -> None:
     db_path = tmp_path / "legacy_idempotent.db"
     with sqlite3.connect(db_path) as conn:
+        _create_verified_exposure_schema(conn)
         conn.execute("CREATE TABLE order_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT UNIQUE)")
         conn.execute("INSERT INTO order_decisions (decision_id) VALUES ('preserved-row')")
         conn.commit()
@@ -439,8 +447,8 @@ def test_mixed_init_db_and_alembic_preserve_core_identifier_schema(tmp_path) -> 
 def test_legacy_identifier_tables_are_additively_repaired_and_insertable(tmp_path) -> None:
     db_path = tmp_path / "legacy_core_ids.db"
     with sqlite3.connect(db_path) as conn:
-        conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT UNIQUE)")
-        conn.execute("INSERT INTO orders (order_id) VALUES ('order-preserved')")
+        _create_verified_exposure_schema(conn)
+        conn.execute("INSERT INTO orders (order_id, status) VALUES ('order-preserved', 'FILLED')")
         conn.execute("CREATE TABLE paper_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE)")
         conn.commit()
 
