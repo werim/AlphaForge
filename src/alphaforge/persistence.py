@@ -124,6 +124,24 @@ def init_db(database_url: str | None = None) -> Engine:
         or "sqlite+pysqlite:///:memory:"
     )
     _ensure_sqlite_parent_dir(resolved_database_url)
+    url = make_url(resolved_database_url)
+    sqlite_database = url.database if url.get_backend_name().startswith("sqlite") else None
+    sqlite_path = None
+    confirmed_fresh = False
+    if sqlite_database and sqlite_database != ":memory:":
+        sqlite_path = Path(sqlite_database).expanduser()
+        if not sqlite_path.is_absolute():
+            sqlite_path = Path.cwd() / sqlite_path
+        confirmed_fresh = not sqlite_path.exists()
+        if not confirmed_fresh:
+            # Existing files must prove their exposure identity before the broad
+            # CREATE TABLE bootstrap can add empty safety tables and mask a
+            # wrong/historical database path.
+            from alphaforge.schema_doctor import ensure_database_schema
+
+            compatibility = ensure_database_schema(sqlite_path, allow_fresh_bootstrap=False)
+            if compatibility.schema_status == "BLOCKED":
+                raise RuntimeError(f"DATABASE_SCHEMA_BLOCKED:{json.dumps(compatibility.as_dict(), sort_keys=True)}")
     engine = create_engine(resolved_database_url, future=True)
     ddl = [
         """
@@ -370,13 +388,13 @@ def init_db(database_url: str | None = None) -> Engine:
         for statement in ddl:
             conn.execute(text(statement))
         _apply_sqlite_migrations(conn)
-    if engine.dialect.name == "sqlite" and engine.url.database not in {None, ":memory:"}:
+    if engine.dialect.name == "sqlite" and sqlite_path is not None:
         # Run the central exposure migration only after the bootstrap
         # transaction commits.  This preserves existing rows and prevents
         # runtime recovery from reaching status queries against legacy shapes.
         from alphaforge.schema_doctor import ensure_database_schema
 
-        ensure_database_schema(str(engine.url.database))
+        ensure_database_schema(sqlite_path, allow_fresh_bootstrap=confirmed_fresh)
     return engine
 
 

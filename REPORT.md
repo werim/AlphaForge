@@ -513,3 +513,27 @@ PostgreSQL and arbitrary ORM drift are reported by existing Alembic checks but a
 
 ### Push recommendation
 Push for PAPER/BACKTEST validation after the full test suite passes. Do not authorize LIVE trading based on this patch alone.
+## 2026-07-24 — PR #302 fail-open and migration-integrity closure
+
+### Need and root cause
+The first schema doctor revision validated column shapes but still used `COALESCE(status,'')` for exposure, created missing exposure tables in ordinary apply mode, trusted an existing migration version without validating checksum/success, and declared `id` required without an explicit legacy policy. Those gaps could turn unknown state or a wrong database path into apparent zero exposure.
+
+### Files and behavior changed
+- `schema_doctor.py` now owns recognized active/terminal state registries, affected-row diagnostics, non-mutating inspection, explicit `allow_fresh_bootstrap`, checksum/failed-history verification, identifier fail-closed policy, semantic post-backfill validation, row-count invariants, and validated exposure counting.
+- `persistence.init_db` proves file freshness before broad bootstrap; existing files are validated/migrated before any missing exposure table could be created.
+- `runtime_state.evaluate_runtime_recovery` consumes `exposure_count`; unknown state, invalid schema, checksum failure, or query failure leaves availability false and blocks recovery.
+- Burn-in and SQLite bootstrap fixtures now initialize canonical exposure schema explicitly. New runtime-state tests exercise terminal, active, and unknown recovery evidence.
+
+### Lifecycle, persistence, schema, and compatibility impact
+No table, column, or row is removed. Recognized legacy `state`, `closed_at`, `exit_time`, and `order_status` values remain additively migratable. NULL/blank/unrecognized source or result values roll back, do not record migration success, and return `UNKNOWN_EXPOSURE_STATE` plus affected row IDs. Missing legacy identifiers return `IDENTIFIER_COLUMN_MISSING`; no surrogate identity is invented. Existing unrelated databases return `DATABASE_IDENTITY_UNVERIFIED`/`EXPOSURE_TABLES_MISSING`. Fully recognized terminal states are authoritative zero exposure; active states remain blocking exposure.
+
+### Migration integrity
+Existing `2026_07_24_runtime_exposure_v1` rows retain and are checked against their original checksum; this follow-up is recorded separately as `2026_07_24_runtime_exposure_v2`. Every known row must have the version-specific checksum and successful state. Mismatch returns `MIGRATION_CHECKSUM_MISMATCH`; false/missing success returns `MIGRATION_PREVIOUSLY_FAILED`. Successful v2 details record pre/post row counts, affected rows, and additive intent. Migration and semantic checks remain transactional and idempotent.
+
+### Tests and risks
+Added NULL/blank/unknown position and order states, terminal/active groups, unrelated/wrong paths, non-mutating check/apply, explicit fresh bootstrap, checksum mismatch, prior failure, missing identifiers, semantic rollback, and runtime recovery tests. Targeted schema doctor, Phase 9, runtime-state, runtime, and SQLite bootstrap suites pass. Full local suite still requires Alembic; package installation was attempted but blocked by the environment's 403 network policy. CI must pass the complete declared dependency suite before merge. PostgreSQL schema-doctor parity and ambiguous manual data mappings remain known limitations. LIVE remains NOT READY.
+
+### Push recommendation
+Update PR #302 for CI validation. Do not merge until the full CI suite, including Alembic revision tests, passes.
+
+---

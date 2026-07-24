@@ -1,12 +1,12 @@
 # AlphaForge Version
 
-- Current version: Phase 9 terminal PAPER startup recovery correction
-- Current phase: Phase 9 - fail-closed recovery scope and persistence hardening
-- Runtime maturity: A dead, terminal PAPER startup that has complete SQL-backed zero-decision, zero-execution, zero-lifecycle, zero-position/order/orphan, inactive-kill-switch evidence may be terminalized when provider unavailability is the only reconciliation error; all incomplete or nonzero evidence remains blocked.
-- BACKTEST/PAPER/LIVE alignment: PAPER gains only the narrow startup terminalization path; LIVE/LIVE_PRECHECK remain fully fail-closed and decision/reject semantics are unchanged.
-- Lifecycle coverage: Startup recovery audits lifecycle execution states and preserves existing campaign/run/runtime rows append-only.
+- Current version: Phase 9 schema doctor migration-integrity follow-up
+- Current phase: Phase 9 - fail-closed schema, recovery, and persistence hardening
+- Runtime maturity: PAPER/BACKTEST recovery accepts exposure evidence only when both canonical tables, identifiers, migration integrity, and every persisted state are authoritative; missing/unknown evidence blocks.
+- BACKTEST/PAPER/LIVE alignment: canonical exposure validation is shared by runtime recovery and operational preflight; LIVE/LIVE_PRECHECK remain fully fail-closed.
+- Lifecycle coverage: Startup recovery audits lifecycle execution states and recognized position/order terminal or active states while preserving rows append-only.
 - Execution realism coverage: Provider unavailability is recorded explicitly and never substitutes for zero SQL execution/exposure evidence.
-- Known critical risks: Provider-unavailable recovery cannot prove remote exchange state and is therefore restricted to PAPER runs proven never to have reached any decision or execution; real PAPER burn-in and Demo acceptance remain outstanding.
+- Known critical risks: PostgreSQL doctor parity, real PAPER burn-in, Demo acceptance, and CI execution with Alembic installed remain outstanding; ambiguous legacy states require manual migration.
 - Last audit date: 2026-07-24
 - Live readiness verdict: NOT LIVE READY; migration correctness does not authorize LIVE execution.
 

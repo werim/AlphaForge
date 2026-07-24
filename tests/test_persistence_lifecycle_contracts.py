@@ -51,6 +51,8 @@ def test_fetch_expectancy_stat_detail_keeps_metadata_separate_from_scalar_api() 
 def test_init_db_repairs_legacy_lifecycle_and_decision_compat_columns(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy_runtime.db"
     with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
+        conn.execute("CREATE TABLE orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT)")
         conn.execute("CREATE TABLE order_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT UNIQUE)")
         conn.execute("CREATE TABLE trade_lifecycle_events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE)")
         conn.execute("INSERT INTO order_decisions (decision_id) VALUES ('preserve-decision')")

@@ -3568,3 +3568,26 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Automatic migration is SQLite-only and deliberately refuses destructive type conversion or ambiguous state inference.
+## 2026-07-24 — PR #302 migration-integrity follow-up
+
+### Added
+- Authoritative active/terminal state registries, affected-row diagnostics, migration checksum/failed-state verification, and runtime recovery integration.
+- Explicit fresh-bootstrap authorization and identifier-column fail-closed policy.
+- A separate `2026_07_24_runtime_exposure_v2` migration record; deployed v1 checksums remain stable and verifiable.
+
+### Changed
+- `db-doctor --apply`, preflight, recovery, and existing database validation no longer create missing exposure tables.
+- Legacy state backfills are semantically validated before migration success is recorded.
+
+### Fixed
+- NULL, blank, and unrecognized exposure states can no longer be interpreted as inactive.
+- Existing unrelated or incorrect database paths can no longer become clean through empty exposure-table creation.
+
+### Removed
+- Implicit fresh exposure bootstrap from ordinary doctor apply mode.
+
+### Breaking Changes
+- Existing databases without both exposure tables or stable `id` columns now block and require identity verification/manual migration.
+
+### Known Issues
+- Full local test execution requires the declared Alembic dependency; network policy prevented installing it in this environment.

@@ -4,6 +4,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, qualify_campaign, export_campaign_bundle, bootstrap_campaign_schema, aggregate_campaign, BurnInCampaignRunner, BinanceReadOnlyCandleProvider, DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS, terminalize_active_campaign_run, event
 from alphaforge.config import load_config_from_env
+from alphaforge.persistence import init_db
 
 def _db_path(args):
     if getattr(args,'db',None): return args.db
@@ -55,10 +56,14 @@ def main(argv=None) -> int:
     args=ap.parse_args(argv)
     try:
         db=_db_path(args)
+        if args.cmd == 'create' and not Path(db).expanduser().exists():
+            # Campaign creation is the only CLI path that can prove this is a
+            # fresh canonical database. All existing paths remain fail-closed.
+            init_db(f"sqlite+pysqlite:///{Path(db).expanduser().resolve()}").dispose()
         if args.cmd=='export':
             out=export_campaign_bundle(db,args.output_dir,args.campaign_id); _print(out,args.json); return 0
         if args.cmd=='worker':
-            engine=create_engine(f"sqlite+pysqlite:///{db}",future=True)
+            engine=init_db(f"sqlite+pysqlite:///{db}")
             try:
                 runner=BurnInCampaignRunner(engine,args.campaign_id,BinanceReadOnlyCandleProvider())
                 if args.once:
@@ -97,7 +102,7 @@ def main(argv=None) -> int:
                 res=start_or_resume_campaign(conn,args.campaign_id,resume=(args.cmd=='resume')); conn.commit()
                 if args.detach:
                     out=_launch_detached_worker(db,args.campaign_id); _print({**res, **out},args.json); return 0
-                engine=create_engine(f"sqlite+pysqlite:///{db}",future=True)
+                engine=init_db(f"sqlite+pysqlite:///{db}")
                 try:
                     runner=BurnInCampaignRunner(engine,args.campaign_id,BinanceReadOnlyCandleProvider())
                     import asyncio; out=asyncio.run(runner.run_foreground()); _print({**res, **out},args.json); return 0

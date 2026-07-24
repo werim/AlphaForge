@@ -9,6 +9,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 from alphaforge.contracts import canonical_utc_timestamp
+from alphaforge.schema_doctor import ExposureStateError, exposure_count
 
 
 def build_readonly_reconciliation_probe(provider: Any | None) -> Any:
@@ -181,17 +182,18 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     prior_campaign_terminal = False
     process_alive = False
     with engine.connect() as conn:
-        def count(name: str, sql: str, available_key: str) -> int:
+        def count(name: str, available_key: str) -> int:
             try:
-                value = int(conn.execute(text(sql)).scalar_one() or 0)
+                value = exposure_count(conn, name)
                 availability[available_key] = True
                 return value
             except Exception as exc:
-                err = f"{name}:{type(exc).__name__}:{exc}"
+                reason = exc.report.reason if isinstance(exc, ExposureStateError) else type(exc).__name__
+                err = f"{name}:{reason}:{exc}"
                 query_errors.append(err); local_exposure_query_errors.append(err)
                 return 0
-        exposure["active_positions"] = count("positions", "SELECT COUNT(*) FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')", "active_positions_available")
-        exposure["pending_orders"] = count("orders", "SELECT COUNT(*) FROM orders WHERE UPPER(COALESCE(status,'')) IN ('PENDING','OPEN','ORDER_PLACED','ENTRY_SUBMITTED')", "pending_orders_available")
+        exposure["active_positions"] = count("positions", "active_positions_available")
+        exposure["pending_orders"] = count("orders", "pending_orders_available")
         try:
             row = conn.execute(text("SELECT status, orphan_order_count, orphan_position_count FROM exchange_reconciliation_events ORDER BY id DESC LIMIT 1")).mappings().first()
             availability["orphan_evidence_available"] = True
