@@ -1,3 +1,51 @@
+# Cross-platform Alembic bootstrap surgery — 2026-07-24
+
+## Why the patch was needed and root cause
+Revision `0001_phase1_init` retained one SQLAlchemy `Inspector` while interleaving
+schema inspection and table DDL. Inspector reflection is cached, so a migration
+decision could use a stale pre-DDL schema view. On SQLite/macOS this left
+`config_snapshots` absent when SQLite validated the target of its append-only
+trigger, correctly raising `no such table`. PostgreSQL's trigger path also used
+unconditional function and trigger creation, which was not safe after a partial
+initialization. The error is not suppressed.
+
+GitHub Actions did not exercise the failing migration because `requirements.txt`
+did not install Alembic while the revision-graph tests use `pytest.importorskip`;
+the executable Alembic checks were therefore reported as skipped in that install
+path.
+
+## Files and exact behavior changed
+- `alembic/versions/0001_phase1_init.py` now obtains a fresh inspector for every
+  create-if-missing decision, completes all table DDL before trigger DDL, and
+  verifies all three append-only tables exist before installing triggers.
+- PostgreSQL functions use `CREATE OR REPLACE FUNCTION`, and trigger creation is
+  guarded by a catalog check scoped to the target relation. SQLite retains
+  `CREATE TRIGGER IF NOT EXISTS` only after table existence is freshly verified.
+- `tests/test_alembic_revision_graph.py` now covers a partially initialized
+  SQLite database, preservation of an existing row/table, and a repeated upgrade.
+- `requirements.txt` now installs Alembic so CI cannot silently skip executable
+  migration checks.
+
+## Runtime, lifecycle, persistence, export, and schema impact
+Runtime decision flow, lifecycle ordering, execution logic, and exports are
+unchanged. The intended schema is unchanged. Empty databases create all tables
+before triggers; partially initialized databases preserve existing tables and
+rows and add missing objects. Existing schemas require no data migration.
+
+## Tests executed
+- `pytest tests/test_alembic_revision_graph.py -q`
+- `pytest -q`
+
+## Risks, limitations, migration concerns, and push recommendation
+The migration intentionally does not attempt to reshape an existing table whose
+name is present but whose columns are incompatible; such schema drift still
+requires an explicit follow-up migration. Credentialed PostgreSQL execution is
+not available locally, so PostgreSQL behavior is covered by conservative native
+DDL rather than an integration run. Push after both requested pytest commands
+pass. LIVE remains NOT READY.
+
+---
+
 # PR #291 Dotenv Bootstrap Consistency Addendum
 
 ## Root cause and correction

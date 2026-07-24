@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+- Current version: Phase 9 cross-platform Alembic bootstrap correction
+- Current phase: Phase 9 - migration portability and persistence bootstrap hardening
+- Runtime maturity: PAPER operational workflow unchanged; initial schema creation is now ordered and inspector-cache safe on SQLite and idempotent on PostgreSQL.
+- BACKTEST/PAPER/LIVE alignment: No decision, reject, or lifecycle semantics changed; all modes retain the same persisted schema contract.
+- Lifecycle coverage: Unchanged by this migration-only correction.
+- Execution realism coverage: Unchanged by this migration-only correction.
+- Known critical risks: PostgreSQL idempotency is implemented but requires credentialed PostgreSQL acceptance; real PAPER burn-in and Demo acceptance remain outstanding.
+- Last audit date: 2026-07-24
+- Live readiness verdict: NOT LIVE READY; migration correctness does not authorize LIVE execution.
+
+## Prior operational baseline
+
 - Current version: Phase 9 cross-platform PAPER operational acceptance and read-only database diagnosis
 - Current phase: Phase 9 - production-like PAPER burn-in execution, evidence audit, and release decision hardening
 - Runtime maturity: PAPER operational workflow with fail-closed preflight, read-only database-wide diagnosis/cleanup planning, STARTING-to-RUNNING verified worker attachment, explicit startup-failure terminalization, verified recovery evidence, watchdog incidents, append-only/terminal source evidence audit, daily report, and final package; LIVE trading remains unavailable.

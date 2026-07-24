@@ -93,3 +93,32 @@ def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Pa
             """
         ).fetchall()
         assert trigger_rows == [('trg_config_snapshots_no_delete',), ('trg_config_snapshots_no_update',)]
+
+
+def test_alembic_upgrade_head_is_idempotent_on_partially_initialized_sqlite_database(tmp_path: Path) -> None:
+    pytest.importorskip("alembic.command")
+    from alembic import command
+    from alembic.config import Config
+
+    db_path = tmp_path / "partially_initialized.db"
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE exchange_symbols (id BIGINT PRIMARY KEY, sentinel TEXT)")
+        conn.execute("INSERT INTO exchange_symbols (id, sentinel) VALUES (1, 'preserve-me')")
+
+    config = Config(str(REPO_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{db_path}")
+
+    command.upgrade(config, "head")
+    command.upgrade(config, "head")
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT sentinel FROM exchange_symbols WHERE id = 1").fetchone() == ('preserve-me',)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'config_snapshots'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'config_snapshots'"
+        ).fetchone() == (2,)
