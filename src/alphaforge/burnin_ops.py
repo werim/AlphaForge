@@ -25,6 +25,7 @@ from alphaforge.env_contract import dotenv_status
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider
 from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
+from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 
 PHASE9_SCHEMA_VERSION = "phase9_ops_v2"
@@ -50,6 +51,10 @@ def _db_path(args: Any) -> str:
 
 
 def _connect(db: str) -> sqlite3.Connection:
+    # Bootstrap the same canonical persistence database used by runtime before
+    # adding burn-in operational tables.  Previously preflight could prepare
+    # only ops tables and then query an obsolete core schema.
+    init_db(f"sqlite+pysqlite:///{Path(db).expanduser().resolve()}").dispose()
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     bootstrap_ops_schema(conn)
@@ -431,8 +436,10 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         conn = _connect(db)
         conn.execute("CREATE TABLE IF NOT EXISTS burnin_ops_write_probe(x INTEGER)")
         conn.commit()
-        add("database_writable", "PASS", db)
-        add("schema_current", "PASS", {"campaign_schema": CAMPAIGN_SCHEMA_VERSION, "ops_schema": PHASE9_SCHEMA_VERSION})
+        canonical_db = str(Path(db).expanduser().resolve())
+        add("database_writable", "PASS", canonical_db)
+        schema = validate_required_schema(conn)
+        add("schema_current", "PASS" if schema.schema_status == "VALID" else "FAIL", {**schema.as_dict(), "campaign_schema": CAMPAIGN_SCHEMA_VERSION, "ops_schema": PHASE9_SCHEMA_VERSION})
     except Exception as exc:
         add("database_writable", "FAIL", str(exc))
         add("schema_current", "UNAVAILABLE", "database unavailable")
@@ -1401,9 +1408,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     r = sub.add_parser("report"); r.add_argument("--campaign-id", required=True); r.add_argument("--output-dir", required=True)
     f = sub.add_parser("finalize"); f.add_argument("--campaign-id", required=True); f.add_argument("--output-dir", required=True)
     d = sub.add_parser("diagnose-db", help="read-only campaign state diagnosis and safe cleanup plan"); d.add_argument("--max-heartbeat-age", type=float, default=120.0)
+    doctor = sub.add_parser("db-doctor", help="inspect or safely migrate the canonical SQLite schema")
+    doctor_mode = doctor.add_mutually_exclusive_group(); doctor_mode.add_argument("--check-only", action="store_true"); doctor_mode.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
     db = _db_path(args)
     try:
+        if args.cmd == "db-doctor":
+            report = ensure_database_schema(db) if args.apply else validate_required_schema(db)
+            print(json.dumps(report.as_dict(), indent=2, sort_keys=True, default=str))
+            return 0 if report.schema_status in {"VALID", "MIGRATED"} else 2
         if args.cmd == "diagnose-db":
             out = database_diagnosis(db, max_heartbeat_age=args.max_heartbeat_age)
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out.get("status") == "COMPLETE" else 2

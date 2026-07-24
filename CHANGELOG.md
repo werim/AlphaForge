@@ -3547,3 +3547,24 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Historical databases without complete campaign-scoped authenticated snapshots cannot be auto-classified as safe. LIVE remains NOT LIVE READY.
+## 2026-07-24 — Schema compatibility doctor
+
+### Added
+- Central SQLite schema inspection, validation, additive migration history, legacy exposure adapters, and `db-doctor` CLI.
+- Regression coverage for legacy position/order shapes, idempotency, rollback, path normalization, fail-closed behavior, and raw exposure SQL identifiers.
+
+### Changed
+- Burn-in database startup now initializes the canonical persistence schema before operational tables and reports the resolved database path.
+
+### Fixed
+- Legacy `positions.state`, `positions.closed_at`, `positions.exit_time`, and `orders.order_status` databases no longer reach incompatible runtime `status` queries.
+- Missing or ambiguous exposure evidence is blocked instead of being interpreted as zero exposure.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Unknown or type-incompatible exposure schemas now require manual migration and block safety-sensitive startup.
+
+### Known Issues
+- Automatic migration is SQLite-only and deliberately refuses destructive type conversion or ambiguous state inference.

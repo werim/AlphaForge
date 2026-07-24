@@ -40,3 +40,13 @@
 - **2026-07-20 dotenv correction:** operator diagnostics bootstrap canonical `.env` once; explicit mapping APIs remain isolated; LIVE remains NOT READY.
 
 - **2026-07-23 PR #297 correction:** `diagnose-db` is schema-adaptive and read-only across historical databases; safe classifications require fresh, lineage-matched, authenticated COMPLETE zero-exposure evidence. Missing evidence remains manual review. LIVE remains disabled and NOT LIVE READY.
+## 0.1.1 — Schema compatibility hardening (2026-07-24)
+
+- **Phase:** persistence/runtime safety audit
+- **Runtime maturity:** PAPER/BACKTEST persistence operational; LIVE remains blocked
+- **Mode alignment:** canonical SQLite bootstrap and exposure schema validation now shared by runtime and burn-in preflight
+- **Lifecycle coverage:** unchanged; lifecycle persistence remains additive and auditable
+- **Execution realism:** unchanged
+- **Critical risks:** non-SQLite schema doctor coverage and ambiguous legacy exposure shapes require manual migration
+- **Last audit:** 2026-07-24
+- **Live readiness:** **NOT READY** — full suite and production database validation remain operator gates

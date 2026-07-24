@@ -370,6 +370,13 @@ def init_db(database_url: str | None = None) -> Engine:
         for statement in ddl:
             conn.execute(text(statement))
         _apply_sqlite_migrations(conn)
+    if engine.dialect.name == "sqlite" and engine.url.database not in {None, ":memory:"}:
+        # Run the central exposure migration only after the bootstrap
+        # transaction commits.  This preserves existing rows and prevents
+        # runtime recovery from reaching status queries against legacy shapes.
+        from alphaforge.schema_doctor import ensure_database_schema
+
+        ensure_database_schema(str(engine.url.database))
     return engine
 
 

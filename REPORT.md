@@ -478,3 +478,38 @@ Diagnosis now inventories every table and column with `PRAGMA table_info`, build
 
 ## Tests, migration, and remaining risk
 Compatibility tests cover absent/historical runtime snapshots, absent counter columns, malformed JSON, absent local evidence tables, unrelated/stale/local-only/unknown-exchange snapshots, injected query failure, missing DB CLI behavior, checksum/schema/row/WAL/SHM immutability, and Windows/POSIX paths. No migration is required. Diagnosis intentionally cannot certify exposure when old databases lack authenticated, campaign-scoped runtime evidence. LIVE remains disabled and NOT LIVE READY.
+## 2026-07-24 — Repository schema compatibility surgery
+
+### Why / root cause
+Persistence bootstrap, Alembic revisions, burn-in operational bootstrap, and runtime recovery had evolved independently. The canonical bootstrap created `positions.status` and `orders.status`, while recovery queried those columns directly and burn-in preflight initialized only its operational tables. Consequently, legacy databases could reach business queries before core migration. Existing migration bookkeeping also lacked checksums and success/details fields, and exposure query errors could carry a numeric zero beside an unavailable flag.
+
+### Schema inventory (important owners)
+- `persistence.init_db`: signals, decisions, lifecycle/evidence/review tables, positions, orders, fills, paper/backtest events, runtime state/control/reconciliation, release evidence, TimesFM evidence, expectancy/calibration, and Phase 7 burn-in tables.
+- `burnin_campaign.bootstrap_campaign_schema`: Phase 8 campaign, run, observation, outcome, qualification, and resolver tables.
+- `burnin_ops.bootstrap_ops_schema`: preflight, incidents, health, recovery drills, integrity, release decisions, and evidence hashes.
+- `models.schema` plus Alembic `0001`–`0005`: SQLAlchemy production metadata and revision history. The SQLite runtime bootstrap remains a compatibility surface and is not replaced.
+- `schema_doctor.RUNTIME_SCHEMA`: the single safety-critical registry for runtime exposure columns; SQLite introspection additionally reports every discovered column's type, nullability, default, and primary-key flag.
+
+### Mismatches found
+TABLE: `positions`; EXPECTED BY: runtime recovery/startup; ACTUAL SCHEMA: legacy `state`, `closed_at`, or `exit_time`; MISSING/MISMATCHED: canonical `status`; AFFECTED QUERIES: active exposure counts and startup snapshot load; RISK: raw OperationalError or false-clean recovery evidence; FIX: additive `status` migration with explicit legacy adapter and index.
+
+TABLE: `orders`; EXPECTED BY: runtime recovery/startup; ACTUAL SCHEMA: legacy `order_status`; MISSING/MISMATCHED: canonical `status`; AFFECTED QUERIES: pending order counts and startup snapshot load; RISK: hidden pending exposure; FIX: additive `status` migration/backfill and index.
+
+TABLE: `schema_migrations`; EXPECTED BY: auditable centralized migration; ACTUAL SCHEMA: `version/applied_at/notes`; MISSING/MISMATCHED: name, checksum, success, details; RISK: unverifiable partial history; FIX: additive bookkeeping columns and a checksummed version row.
+
+PATH: CLI `--db`, `ALPHAFORGE_DB_PATH`, and persistence URLs could resolve differently; FIX: doctor/preflight report the absolute SQLite target and preflight bootstraps that exact file.
+
+### Runtime, lifecycle, persistence, export/schema impact
+Runtime and burn-in now migrate then validate before safety queries. Known legacy states retain rows and gain a canonical status; missing fresh tables are created empty. Ambiguous shapes and type mismatches are never rewritten. Lifecycle and export schemas are unchanged, so CSV/JSON contracts and lifecycle ordering are unaffected. No table/column is dropped and no user row is deleted.
+
+### Migrations
+- `2026_07_24_runtime_exposure_v1`: creates missing exposure tables, adds identifier/status columns, maps only recognized legacy evidence, adds status indexes, and records checksum/success/details. It is transactional and idempotent.
+
+### Tests added/executed
+Added fresh/current/legacy shapes, active/closed exposure, missing and unsupported shapes, wrong type refusal, repeat application, injected rollback, preservation, CLI check/apply, path behavior, inventory metadata, and static raw-SQL registry tests. Targeted schema/bootstrap/burn-in suites passed (95 passed, 3 skipped). The full suite reached 924 passed and 14 skipped; four Alembic graph tests could not import the Alembic package in the current environment (the repository's local `alembic/` namespace was found, but the declared dependency was not installed).
+
+### Risks / limitations / migration concerns
+PostgreSQL and arbitrary ORM drift are reported by existing Alembic checks but are outside this SQLite doctor. Nullable legacy status rows are not guessed; they remain non-active but schema-valid, so operators should validate data semantics before LIVE consideration. Foreign-key reconstruction and type changes are destructive in SQLite and intentionally require a manual plan. Static SQL checking targets the safety-critical positions/orders class rather than attempting to parse all dynamic SQL.
+
+### Push recommendation
+Push for PAPER/BACKTEST validation after the full test suite passes. Do not authorize LIVE trading based on this patch alone.
