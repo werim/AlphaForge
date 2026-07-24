@@ -77,6 +77,30 @@
 
 # Changelog
 
+## Phase 9 runtime exposure startup correction (2026-07-24)
+
+## Added
+- Central validated exposure-table resolution plus normalized active-position and pending-order readers.
+- Regression coverage for Alembic-head and lightweight table selection, active/terminal/unknown states, missing fields, and the absence of stale direct startup SQL.
+
+## Changed
+- Runtime startup/recovery now consumes schema-doctor readers instead of querying physical `positions` and `orders` tables.
+- The runtime pending-order contract now explicitly requires and migrates `created_at`.
+
+## Fixed
+- Alembic-head PAPER workers no longer request `qty` or runtime status from the domain `positions` table after preflight succeeds.
+
+## Removed
+- Direct safety-sensitive exposure SQL from `runtime.py`.
+
+## Breaking Changes
+- Exposure schemas without pending-order `created_at` are additively migrated; invalid migration checksums, missing required fields, and unknown states remain fail-closed.
+
+## Known Issues
+- PostgreSQL schema-doctor parity and sustained credentialed PAPER burn-in remain operator acceptance gates; LIVE remains NOT READY.
+
+## Previous release
+
 ## Added
 - Regression coverage for terminal PAPER provider failures, decision/execution/lifecycle evidence, every runtime exposure class, SQL evidence failure, LIVE mode, and later unrelated campaign recovery scope.
 
