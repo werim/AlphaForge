@@ -34,7 +34,11 @@ Runtime decision flow, lifecycle ordering, execution logic, and exports are
 unchanged. The intended schema is unchanged. Empty databases create all tables
 before triggers; schema-compatible partially initialized databases preserve
 existing tables and rows and add missing objects. Existing tables missing any
-revision-required column fail clearly and are not stamped as upgraded.
+supported schema family fail clearly and are not stamped as upgraded. The three
+shared baseline tables with known divergence (`trade_lifecycle_events`,
+`positions`, and `orders`) explicitly accept either the complete revision-0001
+shape or the complete current normalized `init_db` shape; arbitrary partial
+hybrids remain rejected.
 
 ## Tests executed
 - `python -c "import alembic; print(alembic.__version__)"`
@@ -51,6 +55,16 @@ revision's compatibility check. Credentialed PostgreSQL execution is
 not available locally, so PostgreSQL behavior is covered by conservative native
 DDL rather than an integration run. Push after both requested pytest commands
 pass. LIVE remains NOT READY.
+
+## PR #299 CI schema-family correction
+GitHub Actions exposed that the first fail-closed implementation treated only
+revision-0001 columns as valid. Current `init_db` intentionally owns normalized
+`trade_lifecycle_events`, `positions`, and `orders` shapes, so the mixed bootstrap
+path was supported rather than corrupt. Revision 0001 now recognizes both named,
+complete schema families for those tables and still rejects tables matching
+neither. No table is rewritten or silently exempted from validation. This restores
+`init_db -> alembic head`, `alembic head -> init_db`, and repeated upgrade
+compatibility without changing persistence data or runtime lifecycle semantics.
 
 ---
 

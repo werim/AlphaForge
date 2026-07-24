@@ -88,6 +88,7 @@
 ## Fixed
 - Cross-platform SQLite bootstrap failure where stale inspector state could leave `config_snapshots` absent at trigger creation.
 - Partially initialized databases with missing required columns now fail before revision stamping instead of being reported as usable.
+- Alembic revision 0001 now recognizes the complete current normalized `init_db` schema family for lifecycle, position, and order tables instead of misclassifying supported mixed-bootstrap databases as corrupt.
 
 ## Removed
 - Nothing.
