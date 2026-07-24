@@ -30,6 +30,7 @@ from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconcilia
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
+from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
@@ -386,9 +387,9 @@ class RuntimeOrchestrator:
             save_runtime_recovery_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status="RECOVERY_SCOPE_EVALUATED", reason="UNRELATED_HISTORY_NON_BLOCKING", diagnostics={"blocking_snapshot_id": latest.get("id"), "blocking_instance_id": latest.get("instance_id"), "blocking_startup_id": latest.get("startup_id"), "original_reason": decision.get("original_reason"), "current_exposure_check": decision["current_exposure_check"], "scope_decision": "UNRELATED_HISTORY_NON_BLOCKING", "reconciliation_probe": decision.get("reconciliation_probe")})
         now = time.time()
         with engine.connect() as conn:
-            for row in conn.execute(text("SELECT symbol, qty, status FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','POSITION_OPENED','ACTIVE')")).mappings():
+            for row in load_active_positions(conn):
                 self._active_positions[str(row['symbol'])] = float(row.get('qty') or 0.0)
-            for row in conn.execute(text("SELECT order_id, symbol, status, created_at FROM orders WHERE UPPER(COALESCE(status,'')) IN ('PENDING','OPEN','ORDER_PLACED','ENTRY_SUBMITTED')")).mappings():
+            for row in load_pending_orders(conn):
                 self._pending_orders[str(row['symbol'])] = dict(row)
             for row in conn.execute(text("SELECT symbol, cooldown_remaining_sec FROM cooldown_states WHERE cooldown_remaining_sec > 0")).mappings():
                 self._symbol_cooldown_until[str(row['symbol'])] = now + float(row['cooldown_remaining_sec'] or 0)

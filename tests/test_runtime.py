@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+import inspect
 
 import pytest
 from sqlalchemy import text
@@ -14,11 +15,20 @@ from alphaforge import persistence as persistence_module
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
 from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot, latest_runtime_state_snapshot, build_readonly_reconciliation_probe, persist_verified_paper_recovery
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, create_campaign
+import alphaforge.runtime as runtime_module
 
 
 def _brain() -> AIBrain:
     engine = init_db("sqlite+pysqlite:///:memory:")
     return AIBrain(Session(engine), min_accept_score=0.62)
+
+
+def test_runtime_startup_has_no_direct_exposure_table_sql() -> None:
+    source = inspect.getsource(runtime_module)
+    assert "FROM positions" not in source
+    assert "FROM orders" not in source
+    assert "load_active_positions(conn)" in source
+    assert "load_pending_orders(conn)" in source
 
 
 

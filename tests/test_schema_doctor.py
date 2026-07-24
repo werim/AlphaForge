@@ -21,6 +21,9 @@ from alphaforge.schema_doctor import (
     normalize_database_path,
     sqlite_type_affinity,
     validate_required_schema,
+    load_active_positions,
+    load_pending_orders,
+    resolve_exposure_tables,
 )
 
 
@@ -249,6 +252,50 @@ def test_known_empty_alembic_head_uses_dedicated_runtime_exposure_adapter(tmp_pa
         assert details["schema_family"] == "ALEMBIC_HEAD"
         assert details["alembic_revision"] == "0005_core_identifier_normalization"
         assert details["adapter"] == "dedicated_runtime_exposure"
+
+
+def test_alembic_head_readers_never_treat_domain_tables_as_exposure(tmp_path):
+    db = tmp_path / "alembic-reader.db"
+    with sqlite3.connect(db) as conn:
+        _create_alembic_head_shape(conn)
+    assert ensure_database_schema(db).schema_status == "MIGRATED"
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO runtime_positions(symbol,qty,status) VALUES('BTCUSDT',2,'OPEN')")
+        conn.execute("INSERT INTO runtime_positions(symbol,qty,status) VALUES('ETHUSDT',4,'CLOSED')")
+        conn.execute("INSERT INTO runtime_orders(order_id,symbol,status,created_at) VALUES('o1','SOLUSDT','PENDING','2026-07-24T00:00:00Z')")
+        assert resolve_exposure_tables(conn) == {"positions": "runtime_positions", "orders": "runtime_orders"}
+        assert load_active_positions(conn) == [{"symbol": "BTCUSDT", "qty": 2.0, "status": "OPEN"}]
+        assert load_pending_orders(conn) == [{"order_id": "o1", "symbol": "SOLUSDT", "status": "PENDING", "created_at": "2026-07-24T00:00:00Z"}]
+
+
+def test_lightweight_readers_use_canonical_tables(tmp_path):
+    db = tmp_path / "canonical-reader.db"
+    ensure_database_schema(db, allow_fresh_bootstrap=True)
+    with sqlite3.connect(db) as conn:
+        assert resolve_exposure_tables(conn) == {"positions": "positions", "orders": "orders"}
+
+
+def test_reader_missing_qty_fails_with_explicit_runtime_schema_error(tmp_path):
+    db = tmp_path / "missing-runtime-qty.db"
+    with sqlite3.connect(db) as conn:
+        _create_alembic_head_shape(conn)
+    ensure_database_schema(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE runtime_positions RENAME TO old_runtime_positions")
+        conn.execute("CREATE TABLE runtime_positions(id INTEGER PRIMARY KEY,symbol TEXT,status TEXT)")
+        with pytest.raises(RuntimeError, match="^RUNTIME_EXPOSURE_SCHEMA_UNAVAILABLE"):
+            load_active_positions(conn)
+
+
+def test_unknown_runtime_status_blocks_reader(tmp_path):
+    db = tmp_path / "unknown-runtime-state.db"
+    with sqlite3.connect(db) as conn:
+        _create_alembic_head_shape(conn)
+    ensure_database_schema(db)
+    with sqlite3.connect(db) as conn:
+        conn.execute("INSERT INTO runtime_positions(symbol,qty,status) VALUES('BTCUSDT',1,'MYSTERY')")
+        with pytest.raises(RuntimeError, match="^UNKNOWN_EXPOSURE_STATE"):
+            load_active_positions(conn)
 
 
 def test_alembic_domain_rows_block_adapter_until_reconciled(tmp_path):

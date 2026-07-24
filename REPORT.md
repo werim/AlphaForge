@@ -1,3 +1,56 @@
+# Runtime exposure startup schema-bypass surgery — 2026-07-24
+
+## Why the patch was needed and root cause
+PR #302 made schema diagnosis and recovery counting schema-family aware, but
+`RuntimeOrchestrator._load_recovery_state` retained two physical-table SQL strings.
+On an Alembic-head database, preflight correctly selected `runtime_positions` and
+`runtime_orders`, then the detached worker queried domain `positions.qty/status`
+and exited with `sqlite3.OperationalError`. The stale locations were
+`src/alphaforge/runtime.py` lines 389 and 391 before this patch.
+
+## Files and exact behavior changed
+- `src/alphaforge/schema_doctor.py` now owns validated exposure resolution and
+  normalized readers for active positions and pending orders. It detects schema
+  family, checks required columns and migration checksums, validates every state,
+  and emits `RUNTIME_EXPOSURE_SCHEMA_UNAVAILABLE`, `UNKNOWN_EXPOSURE_STATE`, or
+  `MIGRATION_CHECKSUM_MISMATCH` rather than leaking a missing-column SQL error.
+- `src/alphaforge/runtime.py` uses those readers during startup. A repository-wide
+  scan found no other production Python/SQL direct reads or writes matching the
+  requested safety-sensitive physical-table patterns; the removed two statements
+  were runtime exposure/recovery uses. Domain persistence remains owned by its
+  ORM/Alembic layer, lifecycle storage remains separate, reconciliation uses the
+  central exposure count path, and dashboard/reporting has no direct matching SQL.
+- `tests/test_schema_doctor.py` covers both schema families, normalized fields,
+  active and terminal filtering, missing quantity, and unknown status behavior.
+  `tests/test_runtime.py` prevents reintroduction of direct exposure SQL.
+
+## Runtime, lifecycle, persistence, export, and schema impact
+ALEMBIC_HEAD resolves to `runtime_positions/runtime_orders`; lightweight runtime
+schemas resolve to `positions/orders`. Domain Alembic tables are neither altered
+nor interpreted as runtime exposure. Runtime order adapters now explicitly carry
+`created_at`, which is added by the v4 additive migration so pending-order timeout
+recovery retains its exact prior contract. Lifecycle ordering and CSV exports are
+unchanged. Unknown state, missing field/table, untrusted schema identity, or bad
+migration checksum blocks startup before an exposure SELECT is attempted.
+
+## Tests executed
+- `pytest -q tests/test_runtime.py`
+- `pytest -q tests/test_schema_doctor.py`
+- `pytest -q tests/test_runtime_state.py`
+- `pytest -q tests/test_phase9_burnin_ops.py`
+- `pytest -q tests/test_sqlite_schema_bootstrap.py`
+- Full `pytest -q` and detached Alembic-head smoke results are recorded before push.
+
+## Risks, limitations, migration concerns, and push recommendation
+Existing valid runtime schemas receive the additive `orders.created_at` column and
+a v4 migration record; historical checksums remain recognized. PostgreSQL doctor
+parity is not introduced by this SQLite-specific correction. Empty `created_at`
+on a pending order intentionally triggers stale-order recovery rather than being
+invented. LIVE remains NOT READY. Push is recommended only after the requested
+full suite and detached-worker attachment smoke pass.
+
+---
+
 # Terminal PAPER startup recovery surgery — 2026-07-24
 
 ## Why the patch was needed and root cause

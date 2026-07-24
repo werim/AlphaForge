@@ -14,13 +14,16 @@ PREVIOUS_SCHEMA_VERSION = "2026_07_24_runtime_exposure_v1"
 PREVIOUS_MIGRATION_CHECKSUM = hashlib.sha256("positions.status<-state|closed_at|exit_time;orders.status<-order_status".encode()).hexdigest()
 V2_SCHEMA_VERSION = "2026_07_24_runtime_exposure_v2"
 V2_MIGRATION_CHECKSUM = hashlib.sha256("positions.status<-state|closed_at|exit_time;orders.status<-order_status;semantic-validation-v2".encode()).hexdigest()
-SCHEMA_VERSION = "2026_07_24_runtime_exposure_v3"
+V3_SCHEMA_VERSION = "2026_07_24_runtime_exposure_v3"
+V3_MIGRATION_CHECKSUM = hashlib.sha256("sqlite-affinity;trusted-alembic-0005;dedicated-runtime-exposure-tables".encode()).hexdigest()
+SCHEMA_VERSION = "2026_07_24_runtime_exposure_v4"
 MIGRATION_NAME = "canonical runtime exposure status adapters"
-MIGRATION_SQL = "sqlite-affinity;trusted-alembic-0005;dedicated-runtime-exposure-tables"
+MIGRATION_SQL = "central-runtime-exposure-readers;runtime-orders-created-at"
 MIGRATION_CHECKSUM = hashlib.sha256(MIGRATION_SQL.encode()).hexdigest()
 KNOWN_MIGRATION_CHECKSUMS = {
     PREVIOUS_SCHEMA_VERSION: PREVIOUS_MIGRATION_CHECKSUM,
     V2_SCHEMA_VERSION: V2_MIGRATION_CHECKSUM,
+    V3_SCHEMA_VERSION: V3_MIGRATION_CHECKSUM,
     SCHEMA_VERSION: MIGRATION_CHECKSUM,
 }
 
@@ -38,7 +41,7 @@ ACTIVE_STATES = {"positions": POSITION_ACTIVE, "orders": ORDER_ACTIVE}
 
 RUNTIME_SCHEMA: dict[str, dict[str, str]] = {
     "positions": {"id": "INTEGER", "symbol": "TEXT", "qty": "REAL", "status": "TEXT"},
-    "orders": {"id": "INTEGER", "order_id": "TEXT", "symbol": "TEXT", "status": "TEXT"},
+    "orders": {"id": "INTEGER", "order_id": "TEXT", "symbol": "TEXT", "status": "TEXT", "created_at": "TEXT"},
 }
 
 
@@ -304,10 +307,10 @@ def ensure_database_schema(target: Any, *, allow_fresh_bootstrap: bool = False) 
         _migration_table(conn)
         if allow_fresh_bootstrap and not trusted_alembic:
             conn.execute("CREATE TABLE IF NOT EXISTS positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
-            conn.execute("CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT,created_at TEXT)")
         if trusted_alembic:
             conn.execute("CREATE TABLE IF NOT EXISTS runtime_positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
-            conn.execute("CREATE TABLE IF NOT EXISTS runtime_orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS runtime_orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT,created_at TEXT)")
             details["columns_added"] = ["runtime_positions.*", "runtime_orders.*"]
         exposure_tables = before.exposure_tables
         for table in exposure_tables.values():
@@ -328,7 +331,7 @@ def ensure_database_schema(target: Any, *, allow_fresh_bootstrap: bool = False) 
             elif "exit_time" in pcols:
                 conn.execute(f"UPDATE {ptable} SET status=CASE WHEN exit_time IS NULL THEN 'OPEN' ELSE 'CLOSED' END")
         ocols = {row[1] for row in conn.execute(f"PRAGMA table_info({otable})")}
-        for column, ddl in (("order_id", "TEXT"), ("symbol", "TEXT")):
+        for column, ddl in (("order_id", "TEXT"), ("symbol", "TEXT"), ("created_at", "TEXT")):
             if column not in ocols:
                 conn.execute(f"ALTER TABLE {otable} ADD COLUMN {column} {ddl}")
                 details["columns_added"].append(f"{otable}.{column}")
@@ -400,3 +403,46 @@ def exposure_count(conn: Any, table: str) -> int:
         tuple(sorted(states)),
     ).fetchone()
     return int(row[0] or 0)
+
+
+def resolve_exposure_tables(conn: Any) -> dict[str, str]:
+    """Resolve validated physical exposure tables, failing closed on ambiguity."""
+    validation = validate_required_schema(conn)
+    if validation.schema_status != "VALID":
+        # Keep the stable operator-facing schema code ahead of doctor detail.
+        if validation.reason == "MIGRATION_CHECKSUM_MISMATCH":
+            raise ExposureStateError(validation)
+        if validation.reason == "UNKNOWN_EXPOSURE_STATE":
+            raise ExposureStateError(validation)
+        validation.reason = "RUNTIME_EXPOSURE_SCHEMA_UNAVAILABLE"
+        validation.reasons = list(dict.fromkeys([validation.reason, *validation.reasons]))
+        raise ExposureStateError(validation)
+    tables = validation.exposure_tables
+    if set(tables) != {"positions", "orders"} or any(
+        table not in {"positions", "orders", "runtime_positions", "runtime_orders"}
+        for table in tables.values()
+    ):
+        validation.reason = "RUNTIME_EXPOSURE_SCHEMA_UNAVAILABLE"
+        raise ExposureStateError(validation)
+    return dict(tables)
+
+
+def _load_active_exposure(conn: Any, logical_table: str, fields: tuple[str, ...]) -> list[dict[str, Any]]:
+    tables = resolve_exposure_tables(conn)
+    raw, _, _ = _connection(conn)
+    states = ACTIVE_STATES[logical_table]
+    placeholders = ",".join("?" for _ in states)
+    rows = raw.execute(
+        f"SELECT {','.join(fields)} FROM {tables[logical_table]} "
+        f"WHERE UPPER(TRIM(CAST(status AS TEXT))) IN ({placeholders})",
+        tuple(sorted(states)),
+    ).fetchall()
+    return [dict(zip(fields, row)) for row in rows]
+
+
+def load_active_positions(conn: Any) -> list[dict[str, Any]]:
+    return _load_active_exposure(conn, "positions", ("symbol", "qty", "status"))
+
+
+def load_pending_orders(conn: Any) -> list[dict[str, Any]]:
+    return _load_active_exposure(conn, "orders", ("order_id", "symbol", "status", "created_at"))
