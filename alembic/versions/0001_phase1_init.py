@@ -35,6 +35,16 @@ def upgrade() -> None:
         # visible to subsequent migration work.
         if not sa.inspect(bind).has_table(name):
             op.create_table(name, *cols)
+            return
+
+        expected_columns = {column.name for column in cols if isinstance(column, sa.Column)}
+        existing_columns = {column["name"] for column in sa.inspect(bind).get_columns(name)}
+        missing_columns = sorted(expected_columns - existing_columns)
+        if missing_columns:
+            raise RuntimeError(
+                f"existing table {name!r} is incompatible with revision {revision}; "
+                f"missing required columns: {', '.join(missing_columns)}"
+            )
 
     create_table_if_missing("exchange_symbols", sa.Column("id", sa.BigInteger(), primary_key=True), sa.Column("venue", sa.String(32), nullable=False), sa.Column("market_type", market_type, nullable=False), sa.Column("symbol", sa.String(64), nullable=False), sa.Column("pair", sa.String(64), nullable=False), sa.Column("contract_type", sa.String(32), nullable=False), sa.Column("base_asset", sa.String(32), nullable=False), sa.Column("quote_asset", sa.String(32), nullable=False), sa.Column("margin_asset", sa.String(32), nullable=False), sa.Column("status", sa.String(16), nullable=False), sa.Column("onboard_date", sa.DateTime(timezone=True)), sa.Column("delivery_date", sa.DateTime(timezone=True)), sa.Column("price_precision", sa.Integer(), nullable=False), sa.Column("quantity_precision", sa.Integer(), nullable=False), sa.Column("tick_size", sa.Numeric(20,10), nullable=False), sa.Column("step_size", sa.Numeric(20,10), nullable=False), sa.Column("min_qty", sa.Numeric(20,10), nullable=False), sa.Column("min_notional", sa.Numeric(20,10), nullable=False), sa.Column("contract_size", sa.Numeric(20,10), nullable=False), sa.Column("last_synced_at", sa.DateTime(timezone=True), server_default=sa.text("CURRENT_TIMESTAMP"), nullable=False), sa.Column("raw_exchange_info_json", json_t, nullable=False), sa.UniqueConstraint("venue", "market_type", "symbol", name="uq_exchange_symbol"), sa.CheckConstraint("price_precision >= 0"), sa.CheckConstraint("quantity_precision >= 0"))
 

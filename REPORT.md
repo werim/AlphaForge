@@ -10,7 +10,7 @@ unconditional function and trigger creation, which was not safe after a partial
 initialization. The error is not suppressed.
 
 GitHub Actions did not exercise the failing migration because `requirements.txt`
-did not install Alembic while the revision-graph tests use `pytest.importorskip`;
+did not install Alembic while the revision-graph tests used `pytest.importorskip`;
 the executable Alembic checks were therefore reported as skipped in that install
 path.
 
@@ -22,24 +22,32 @@ path.
   guarded by a catalog check scoped to the target relation. SQLite retains
   `CREATE TRIGGER IF NOT EXISTS` only after table existence is freshly verified.
 - `tests/test_alembic_revision_graph.py` now covers a partially initialized
-  SQLite database, preservation of an existing row/table, and a repeated upgrade.
+  SQLite database using the complete revision-0001 `exchange_symbols` schema,
+  preservation of a real row, a repeated upgrade, and fail-closed rejection of
+  an incompatible existing table before the database is stamped.
 - `requirements.txt` now installs Alembic so CI cannot silently skip executable
-  migration checks.
+  migration checks. The tests now import Alembic directly rather than skipping
+  when it is absent.
 
 ## Runtime, lifecycle, persistence, export, and schema impact
 Runtime decision flow, lifecycle ordering, execution logic, and exports are
 unchanged. The intended schema is unchanged. Empty databases create all tables
-before triggers; partially initialized databases preserve existing tables and
-rows and add missing objects. Existing schemas require no data migration.
+before triggers; schema-compatible partially initialized databases preserve
+existing tables and rows and add missing objects. Existing tables missing any
+revision-required column fail clearly and are not stamped as upgraded.
 
 ## Tests executed
-- `pytest tests/test_alembic_revision_graph.py -q`
-- `pytest -q`
+- `python -c "import alembic; print(alembic.__version__)"`
+- `python -m pytest tests/test_alembic_revision_graph.py -q -rs`
+- `python -m pytest -q`
+- `python -m compileall -q src tests alembic`
+- `git diff --check`
 
 ## Risks, limitations, migration concerns, and push recommendation
-The migration intentionally does not attempt to reshape an existing table whose
-name is present but whose columns are incompatible; such schema drift still
-requires an explicit follow-up migration. Credentialed PostgreSQL execution is
+The migration intentionally does not attempt to reshape an incompatible existing
+table; it fails closed and requires an explicit repair migration. Column presence
+is validated, while deeper type/constraint equivalence remains outside this
+revision's compatibility check. Credentialed PostgreSQL execution is
 not available locally, so PostgreSQL behavior is covered by conservative native
 DDL rather than an integration run. Push after both requested pytest commands
 pass. LIVE remains NOT READY.

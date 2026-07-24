@@ -2,7 +2,7 @@
 
 - Current version: Phase 9 cross-platform Alembic bootstrap correction
 - Current phase: Phase 9 - migration portability and persistence bootstrap hardening
-- Runtime maturity: PAPER operational workflow unchanged; initial schema creation is now ordered and inspector-cache safe on SQLite and idempotent on PostgreSQL.
+- Runtime maturity: PAPER operational workflow unchanged; initial schema creation is ordered and inspector-cache safe on SQLite, idempotent on PostgreSQL, and fail-closed for existing tables missing required columns.
 - BACKTEST/PAPER/LIVE alignment: No decision, reject, or lifecycle semantics changed; all modes retain the same persisted schema contract.
 - Lifecycle coverage: Unchanged by this migration-only correction.
 - Execution realism coverage: Unchanged by this migration-only correction.
