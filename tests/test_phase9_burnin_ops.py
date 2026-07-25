@@ -891,6 +891,8 @@ def test_terminal_paper_provider_failure_with_zero_execution_is_terminalized_and
     db, conn = _conn(tmp_path)
     camp, run = _campaign(conn)
     _terminal_provider_failure(conn, camp, run)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED' WHERE campaign_id=?", (camp.campaign_id,))
+    conn.commit()
     engine = init_db(f"sqlite+pysqlite:///{db}")
     save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
         mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED",
@@ -906,6 +908,7 @@ def test_terminal_paper_provider_failure_with_zero_execution_is_terminalized_and
     assert out["status"] == "PASS"
     assert out["checks"]["provider_only_error"] is True
     assert out["checks"]["zero_exposure_failed_startup_terminalizable"] is True
+    assert conn.execute("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == "FAILED"
     assert out["checks"]["startup_terminalization_evidence"] == {
         "decisions": 0, "executions": 0, "lifecycle_executions": 0,
         "run_mode": "PAPER", "run_status": "FAILED", "query_errors": [], "available": True,
@@ -919,6 +922,45 @@ def test_terminal_paper_provider_failure_with_zero_execution_is_terminalized_and
     engine.dispose()
     assert later["blocked"] is False
     assert later["scope"] == "UNRELATED_HISTORICAL_RUNTIME"
+
+
+@pytest.mark.parametrize("blocker", [
+    "campaign_position", "pending_reject", "worker_alive", "local_unavailable", "non_provider_error",
+])
+def test_paused_terminal_provider_failure_requires_complete_zero_exposure_evidence(monkeypatch, tmp_path, blocker):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    _terminal_provider_failure(conn, camp, run)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED' WHERE campaign_id=?", (camp.campaign_id,))
+    if blocker == "worker_alive":
+        conn.execute("UPDATE burnin_campaigns SET worker_pid=999 WHERE campaign_id=?", (camp.campaign_id,))
+    if blocker == "campaign_position":
+        conn.execute("INSERT INTO burnin_pending_position_outcomes(pending_position_id,trade_id,campaign_id,burnin_run_id,signal_id,symbol,side,entry_time,source_provenance_json,status,missing_fields_json,created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,'OPEN','[]',?,?)", ("open", "trade", camp.campaign_id, run, "sig", "BTCUSDT", "LONG", utc_now(), "{}", utc_now(), "test"))
+    if blocker == "pending_reject":
+        conn.execute("INSERT INTO burnin_pending_reject_labels(pending_label_id,campaign_id,burnin_run_id,reject_decision_id,signal_id,symbol,side,decision_timestamp,entry,stop,target,horizon_seconds,execution_cost_assumptions_json,regime,reject_reason,source_provenance_json,due_at,status,created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", ("reject", camp.campaign_id, run, "reject-decision", "sig", "BTCUSDT", "LONG", utc_now(), 1, .9, 1.2, 3600, "{}", "UNKNOWN", "LOW_CONFIDENCE", "{}", utc_now(), "PENDING", utc_now(), "test"))
+    conn.commit()
+    provider = "reconciliation_probe:RuntimeError:read_only_reconciliation_provider_unavailable"
+    extra = "reconciliation:OperationalError:simulated" if blocker == "non_provider_error" else None
+    errors = [provider] + ([extra] if extra else [])
+    availability = {"active_positions_available": True, "pending_orders_available": True, "orphan_evidence_available": True, "kill_switch_available": True}
+    if blocker == "local_unavailable":
+        availability["pending_orders_available"] = False
+    monkeypatch.setattr(ops, "_pid_alive", lambda _pid: blocker == "worker_alive")
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *a, **k: {
+        "blocked": True, "reason": "RECOVERY_EVIDENCE_UNAVAILABLE", "scope": "SAME_CAMPAIGN",
+        "latest": {"mode": "PAPER"}, "previous_process_alive": blocker == "worker_alive", "kill_switch_active": False,
+        "query_errors": errors, "provider_unavailable_errors": [provider],
+        "current_exposure_check": {name: 0 for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")},
+        "availability": availability,
+    })
+
+    out = recovery_drill(conn, camp.campaign_id)
+
+    assert out["status"] == "FAIL"
+    assert out["checks"]["zero_exposure_failed_startup_terminalizable"] is False
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "FAILED"
 
 
 @pytest.mark.parametrize("evidence_kind", ["decision", "execution", "lifecycle_execution"])

@@ -77,6 +77,26 @@
 
 # Changelog
 
+## Phase 9 PAUSED failed-startup recovery correction (2026-07-25)
+
+## Added
+- Regression coverage for PAUSED PAPER campaigns with FAILED zero-activity runs, including campaign exposure, pending reject, worker, local-query, and mixed reconciliation-error blockers.
+
+## Changed
+- The existing provider-only, append-only PAPER startup terminalization gate now treats PAUSED as an eligible campaign state; successful recovery transitions it to FAILED and never resumes the run.
+
+## Fixed
+- PAUSED campaign metadata no longer deadlocks a provably zero-activity FAILED PAPER startup behind `runtime_recovery_scope` solely because read-only reconciliation is unavailable.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- None; persistence and export schemas are unchanged.
+
+## Known Issues
+- Any unknown/nonzero exposure, activity evidence, live worker, mixed provider/local failure, or LIVE mode remains fail-closed and requires reconciliation or manual recovery.
+
 ## Phase 9 runtime exposure startup correction (2026-07-24)
 
 ## Added
