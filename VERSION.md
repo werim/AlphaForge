@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+- Current version: Phase 9 Binance USD-M reconciliation symbol validation v7
+- Current phase: Phase 9 - fail-closed exchange exposure evidence hardening
+- Runtime maturity: Account-wide Binance position and order reconciliation validates USD-M delivery symbols against public `exchangeInfo`; malformed active exposure remains blocking.
+- BACKTEST/PAPER/LIVE alignment: Reconciliation behavior is unchanged outside the shared provider; PAPER and LIVE recovery consume the same fail-closed evidence contract.
+- Lifecycle coverage: Unchanged; no trade lifecycle transition or persistence contract changed.
+- Execution realism coverage: Global `positionRisk` and `openOrders` remain authoritative, while delivery-contract membership is exchange-sourced rather than assumed.
+- Known critical risks: The exact historical raw failing symbol was irreversibly represented only by its safe SHA-256 identifier; rerunning the diagnostic is required to identify it, and authenticated Demo acceptance remains outstanding.
+- Last audit date: 2026-07-25
+- Live readiness verdict: NOT LIVE READY; reconciliation hardening does not authorize LIVE execution.
+
 - Current version: Phase 9 PAPER failed-startup recovery v6
 - Current phase: Phase 9 - fail-closed schema, recovery, and persistence hardening
 - Runtime maturity: PAPER recovery may terminalize a PAUSED/FAILED campaign, or a RECOVERY_REQUIRED campaign stamped specifically by a prior recovery-drill precheck failure, only when its FAILED run has complete zero-activity and zero-local-exposure SQL evidence and read-only reconciliation is the only unavailable evidence; every broader case remains blocked.

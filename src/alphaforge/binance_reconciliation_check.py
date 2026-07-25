@@ -57,9 +57,10 @@ def run(*, symbols: list[str] | None = None, write_sanitized_position_risk: Path
         "requested_symbols": requested_symbols, "tracked_symbols": tracked_symbols,
         "tracked_scope_source": "CLI" if tracked_symbols else "NONE",
         "campaign_scope_validated": bool(tracked_symbols),
-        "endpoint_statuses": {"positionRisk": "PASS" if coverage.get("positionRisk") else "FAIL",
-                              "openOrders": "PASS" if coverage.get("openOrders") else "FAIL",
-                              "userTrades": "PASS" if len(coverage.get("userTrades", [])) == snapshot.get("selected_count") else "FAIL"},
+        "endpoint_statuses": snapshot.get("endpoint_statuses", {
+            "positionRisk": "PASS" if coverage.get("positionRisk") else "NOT_ATTEMPTED",
+            "openOrders": "PASS" if coverage.get("openOrders") else "NOT_ATTEMPTED",
+            "userTrades": "PASS" if len(coverage.get("userTrades", [])) == snapshot.get("selected_count") else "NOT_ATTEMPTED"}),
         "position_row_count": len(positions),
         "exact_zero_position_count": sum(1 for p in positions if p.get("qty_exact") == "0" or Decimal(str(p.get("qty_exact"))) == 0),
         "non_zero_position_count": sum(1 for p in positions if Decimal(str(p.get("qty_exact"))) != 0),
