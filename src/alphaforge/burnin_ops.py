@@ -1053,11 +1053,17 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         and runtime_recovery.get("reason") == "RECOVERY_EVIDENCE_UNAVAILABLE"
         and provider_only_error
     )
+    campaign_status = campaign.get("campaign_status")
+    campaign_last_error = campaign.get("last_error")
+    campaign_state_terminalizable = (
+        campaign_status in {"FAILED", "PAUSED"}
+        or (campaign_status == "RECOVERY_REQUIRED" and campaign_last_error == "RECOVERY_DRILL_PRECHECK_FAILED")
+    )
     terminal_zero_startup_fallback_candidate = (
-        # PAUSED is an operator/campaign state, not evidence that a FAILED run
-        # traded.  Permit it only through this provider-only, zero-activity
-        # terminalization path; the campaign is never resumed below.
-        campaign.get("campaign_status") in {"FAILED", "PAUSED"}
+        # PAUSED is an operator state, while the narrowly stamped recovery state
+        # can be this drill's own prior mutation. Permit either only through this
+        # provider-only zero-activity path; the campaign is never resumed below.
+        campaign_state_terminalizable
         and old_status == "FAILED"
         and not old_alive
         and not bool(old_pid)
@@ -1075,7 +1081,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         and provider_only_error
     )
     recovery_safe = not runtime_recovery.get("blocked") and campaign_available and zero_campaign_exposure and local_runtime_zero_available
-    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "startup_terminalization_evidence": startup_evidence, "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False}
+    prechecks = {"worker_pid_present": bool(old_pid), "worker_alive_before_stop": old_alive, "active_run_status_running": old_status == "RUNNING", "campaign_status": campaign_status, "last_error": campaign_last_error, "campaign_state_terminalizable": campaign_state_terminalizable, "campaign_open_positions": exposure["open_positions"], "pending_reject_labels": exposure["pending_reject_labels"], "campaign_exposure_available": campaign_available, "campaign_query_errors": exposure.get("query_errors", []), "startup_terminalization_evidence": startup_evidence, "runtime_exposure": unsafe_exposure, "runtime_recovery_blocked": bool(runtime_recovery.get("blocked")), "runtime_recovery_reason": runtime_recovery.get("reason"), "runtime_availability": runtime_recovery.get("availability", {}), "provider_only_error": provider_only_error, "historical_zero_local_fallback": False, "terminal_zero_startup_fallback_candidate": terminal_zero_startup_fallback_candidate}
     run_decisions = startup_evidence.get("decisions")
     zero_exposure_failed_startup = (
         old_status in {"FAILED", "STARTING"}

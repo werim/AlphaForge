@@ -1,3 +1,48 @@
+# RECOVERY_REQUIRED failed-startup recovery surgery — 2026-07-25
+
+## Why the patch was needed and root cause
+PR #304 admitted FAILED and PAUSED campaigns to the narrow provider-only,
+zero-activity PAPER startup fallback. Before that fix, however, the general drill
+failure branch had already changed affected PAUSED campaigns to RECOVERY_REQUIRED
+and stamped `RECOVERY_DRILL_PRECHECK_FAILED`. On retry, every exposure and startup
+predicate could pass while the stale campaign-state allowlist alone rejected the
+campaign, producing a self-created recovery deadlock.
+
+## Files and exact behavior changed
+- `src/alphaforge/burnin_ops.py` recognizes RECOVERY_REQUIRED only when paired
+  exactly with `RECOVERY_DRILL_PRECHECK_FAILED`, proving this recovery mechanism
+  produced the state. Diagnostics expose the observed status/error, that narrow
+  state predicate, and the complete terminal fallback result.
+- `tests/test_phase9_burnin_ops.py` executes the actual two-attempt transition and
+  verifies terminal FAILED state, no resume/launch, append-only drill/reconciliation
+  evidence, and cleared later recovery scope. Negative cases cover other/null
+  provenance, decisions, executions, lifecycle execution, PID/liveness, campaign
+  and runtime exposure, pending rejects, unavailable local evidence, mixed errors,
+  and LIVE/LIVE_PRECHECK.
+
+## Runtime, lifecycle, persistence, export, and schema impact
+Successful repair changes only the campaign status to FAILED and clears worker
+ownership. The active run stays FAILED; no successor or worker is created.
+Recovery drills, incidents, runtime snapshots, reconciliation events, and the
+terminalization event remain append-only. No lifecycle data is rewritten, no CSV
+contract or schema changes, and no migration is required.
+
+## Tests executed
+- `pytest -q tests/test_phase9_burnin_ops.py`
+- `pytest -q` (attempted; environment lacks the Alembic package and collection fails at `tests/test_alembic_revision_graph.py`)
+- `python -m compileall -q src tests`
+- `git diff --check`
+
+## Risks, remaining limitations, migration concerns, and push recommendation
+The exception deliberately cannot repair arbitrary RECOVERY_REQUIRED campaigns.
+All prior safety gates remain conjunctive, including PAPER-only mode, complete
+zero local activity/exposure, absent/dead process and worker, inactive kill switch,
+and provider-unavailability as the only query failure. Ambiguity remains manual;
+LIVE is NOT READY. No migration is needed. Push is recommended after targeted and
+full-suite verification.
+
+---
+
 # PAUSED zero-exposure PAPER failed-startup recovery surgery — 2026-07-25
 
 ## Why the patch was needed and root cause
