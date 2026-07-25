@@ -1,3 +1,50 @@
+# PAUSED zero-exposure PAPER failed-startup recovery surgery — 2026-07-25
+
+## Why the patch was needed and root cause
+The provider-only terminal startup fallback in `recovery_drill` required
+`campaign_status == FAILED`. The observed run row was correctly FAILED, dead, and
+empty, but its campaign remained PAUSED. That single campaign-state predicate
+prevented creation of append-only local recovery evidence; the later general
+terminalization predicate also excludes PAUSED and requires an already-clear
+runtime gate, so the drill returned manual recovery and preflight retained its
+`runtime_recovery_scope` blocker.
+
+## Files and exact behavior changed
+- `src/alphaforge/burnin_ops.py` admits PAUSED alongside FAILED only to the narrow
+  terminal zero-startup fallback. All existing predicates remain mandatory:
+  FAILED PAPER run, dead and absent worker PID, available zero decision/execution/
+  lifecycle counts, available zero campaign and runtime exposure, inactive kill
+  switch, dead prior process, and provider unavailability as the entire error set.
+- `tests/test_phase9_burnin_ops.py` exercises the observed PAUSED state through
+  real append-only recovery persistence and asserts the terminal FAILED campaign,
+  preserved FAILED run, and unblocked later PAPER scope. Additional regression
+  cases cover campaign positions, pending rejects, an alive worker, unavailable
+  local exposure, and a non-provider reconciliation error; existing tests cover
+  decisions, executions, lifecycle executions, runtime orders/orphans, and LIVE.
+
+## Runtime, lifecycle, persistence, export, and schema impact
+The failed run is never resumed or rewritten. Recovery appends the decision,
+provider-unavailable reconciliation event, local diagnostic runtime snapshot,
+campaign terminalization event, and recovery drill, then changes only the campaign
+from PAUSED to FAILED. Historical snapshots and evidence rows are retained. The
+diagnostic explicitly preserves unknown exchange state and does not claim it is
+zero. Lifecycle, CSV exports, and schemas are unchanged; no migration is needed.
+
+## Tests executed
+- `python -m pytest tests/test_phase9_burnin_ops.py -q`
+- `python -m pytest -q`
+- `python -m compileall -q src tests`
+- `git diff --check`
+
+## Risks, remaining limitations, migration concerns, and push recommendation
+This exception is intentionally PAPER-only and proves the failed run had no local
+activity before accepting unavailable remote evidence. Any missing SQL evidence or
+possible exposure remains manual recovery. LIVE remains NOT LIVE READY and fully
+fail-closed. No migration or compatibility action is required. Push is recommended
+after targeted and full-suite verification.
+
+---
+
 # Runtime exposure startup schema-bypass surgery — 2026-07-24
 
 ## Why the patch was needed and root cause

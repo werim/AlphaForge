@@ -1054,7 +1054,10 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         and provider_only_error
     )
     terminal_zero_startup_fallback_candidate = (
-        campaign.get("campaign_status") == "FAILED"
+        # PAUSED is an operator/campaign state, not evidence that a FAILED run
+        # traded.  Permit it only through this provider-only, zero-activity
+        # terminalization path; the campaign is never resumed below.
+        campaign.get("campaign_status") in {"FAILED", "PAUSED"}
         and old_status == "FAILED"
         and not old_alive
         and not bool(old_pid)
