@@ -1,5 +1,51 @@
 # Binance USD-M reconciliation symbol-validation surgery — 2026-07-25
 
+## Unicode catalog follow-up (v8)
+
+### Why needed and root cause
+PR #306 limited authoritative `exchangeInfo` validation to delivery-pattern
+candidates. Legitimate Demo Unicode symbols therefore still failed the ordinary
+ASCII grammar despite exact catalog membership. The scanner also lacked explicit
+catalog-status gating, which could not prove that reconciliation visibility and
+new-trade eligibility remained separate.
+
+### Files and behavior changed
+- `src/alphaforge/binance_reconciliation_provider.py` rejects empty, surrounding
+  whitespace, Unicode/ASCII control, and invisible-format input before catalog
+  access. Every other grammar exception requires exact, case-preserving catalog
+  membership. The verified spelling flows unchanged into signed `userTrades`;
+  standard URL encoding percent-encodes its UTF-8 bytes. Catalog status is not a
+  reconciliation filter, preserving existing exposure visibility.
+- `src/alphaforge/exchange_market_scanner.py` fetches `exchangeInfo` and emits
+  Binance candidates only for exact `TRADING` members. `PENDING_TRADING` remains
+  ineligible even when ticker, book, and funding data exist.
+- Provider and scanner tests cover the four observed symbols, absence, a Unicode
+  lookalike, unsafe raw inputs, encoded URLs, pending status, and legacy ASCII and
+  delivery behavior.
+
+### Lifecycle, persistence, export/schema, and compatibility
+No lifecycle transition, persistence row, CSV export, database schema, or
+migration changes. Reconciliation selection expands only to exchange-verified
+symbols representing existing exposure/orders/tracking. Scanner compatibility is
+intentionally stricter: catalog absence, malformed payload, non-`TRADING` status,
+or request failure yields no Binance new-trade candidate.
+
+### Tests executed
+- `pytest -q tests/test_binance_reconciliation_provider.py tests/test_exchange_market_scanner.py`
+- `pytest -q` (1,065 passed and 6 skipped; 4 Alembic tests could not run because
+  the environment does not have the Alembic package installed)
+- `python -m compileall -q src tests`
+- `git diff --check`
+
+### Risks, limitations, migration, and push recommendation
+Unicode comparison is deliberately exact: no normalization or lookalike folding is
+performed. Catalog availability is required only when reconciliation encounters a
+safe grammar exception, while scanning always requires fresh status evidence.
+Credentialed Demo verification remains outstanding, so LIVE is NOT READY. No
+migration is needed; push is recommended after the targeted and full test suites.
+
+---
+
 ## Why the patch was needed and root cause
 The provider accepted only `[A-Z0-9]{2,20}`. Binance USD-M delivery contracts use
 an underscore plus a six-digit delivery date (for example `BTCUSDT_250627`), so a

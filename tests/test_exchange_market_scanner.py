@@ -44,6 +44,7 @@ def test_scan_exchange_markets_uses_public_endpoints_only(monkeypatch: pytest.Mo
         "urllib.request.urlopen",
         _urlopen_multi(
             [
+                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
                 [{"symbol": "BTCUSDT", "lastPrice": "100.05", "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
                 [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.1"}],
                 [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
@@ -64,6 +65,7 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
         "urllib.request.urlopen",
         _urlopen_multi(
             [
+                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
                 [{"symbol": "BTCUSDT", "lastPrice": "100.10", "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
                 [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.2"}],
                 [{"symbol": "BTCUSDT", "lastFundingRate": "0.0003"}],
@@ -90,6 +92,7 @@ def test_binance_urls_use_fapi_v1_endpoints(monkeypatch: pytest.MonkeyPatch) -> 
         "urllib.request.urlopen",
         _urlopen_multi(
             [
+                {"symbols": []},
                 [],
                 [],
                 [],
@@ -111,6 +114,7 @@ def test_scan_exchange_markets_returns_empty_on_malformed_binance_payload(monkey
         "urllib.request.urlopen",
         _urlopen_multi(
             [
+                {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
                 {"symbol": "BTCUSDT"},
                 [{"symbol": "BTCUSDT", "bidPrice": "100", "askPrice": "100.1"}],
                 [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
@@ -134,10 +138,23 @@ def test_scan_exchange_markets_handles_exchange_failure(monkeypatch: pytest.Monk
 
 
 def test_hyperliquid_mid_only_sets_unavailable_spread(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("urllib.request.urlopen", _urlopen_multi([[], [], [], {"ETH": "2500.0"}]))
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen_multi([{"symbols": []}, [], [], [], {"ETH": "2500.0"}]))
     cfg = load_config_from_env()
     rows = asyncio.run(scan_exchange_markets(cfg))
     eth = next(row for row in rows if row.get("source_exchange") == "hyperliquid")
     assert eth["spread_pct"] is None
     assert eth["spread_status"] == "UNAVAILABLE"
     assert eth["spread_source"] == "MID_ONLY_NO_BOOK"
+
+
+def test_binance_pending_unicode_is_not_a_new_trade_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    symbol = "龙虾USDT"
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen_multi([
+        {"symbols": [{"symbol": symbol, "status": "PENDING_TRADING"}]},
+        [{"symbol": symbol, "lastPrice": "1", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+        [{"symbol": symbol, "bidPrice": "0.99", "askPrice": "1.01"}],
+        [{"symbol": symbol, "lastFundingRate": "0"}],
+        {},
+    ]))
+    rows = asyncio.run(scan_exchange_markets(load_config_from_env()))
+    assert not any(row["symbol"] == symbol for row in rows)

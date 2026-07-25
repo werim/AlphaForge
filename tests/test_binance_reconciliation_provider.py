@@ -92,7 +92,8 @@ def _provider(positions, orders=(), tracked=(), **config):
         if "exchangeInfo" in url:
             return {"symbols": [{"symbol": row["symbol"]} for row in positions
                                 if isinstance(row, dict) and isinstance(row.get("symbol"), str)
-                                and "_" in row["symbol"]]}
+                                and ("_" in row["symbol"] or row["symbol"] in {
+                                    "测试测试USDT", "币安人生USDT", "我踏马来了USDT", "龙虾USDT"})]}
         if "openOrders" in url: return list(orders)
         if "userTrades" in url: return []
         return {"serverTime": 1700000000001}
@@ -300,11 +301,44 @@ def test_legitimate_usdm_delivery_symbol_is_verified_by_exchange_info_then_recon
             for url in calls] == ["positionRisk", "exchangeInfo", "openOrders", "userTrades"]
 
 
+@pytest.mark.parametrize("symbol", ["测试测试USDT", "币安人生USDT", "我踏马来了USDT", "龙虾USDT"])
+def test_catalog_listed_unicode_position_is_reconciled_with_exact_encoded_symbol(symbol):
+    provider, calls = _provider([{"symbol": symbol, "positionAmt": "1"}])
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "COMPLETE"
+    assert snap["positions"][0]["symbol"] == symbol
+    assert snap["selected_symbols"] == [symbol]
+    user_trades_url = next(url for url in calls if "userTrades" in url)
+    assert f"symbol={urllib.parse.quote_plus(symbol)}" in user_trades_url
+    assert symbol not in user_trades_url
+
+
+@pytest.mark.parametrize("symbol", ["测试测试USDT", "币安人生USDT", "我踏马来了USDT", "龙虾USDT", "ＢＴＣUSDT"])
+def test_unlisted_unicode_position_is_rejected(symbol):
+    def http(url, headers, timeout):
+        if "positionRisk" in url: return [{"symbol": symbol, "positionAmt": "1"}]
+        if "exchangeInfo" in url: return {"symbols": [{"symbol": "BTCUSDT"}]}
+        raise AssertionError("must stop after catalog validation")
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s"), http_get_json=http)
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "INCOMPLETE"
+    assert "reason=not_in_exchange_info" in snap["errors"][0]
+
+
+@pytest.mark.parametrize("symbol", [" 测试测试USDT", "测试测试USDT ", "测试\u200b测试USDT", "测试\x00测试USDT"])
+def test_unsafe_raw_unicode_symbol_is_rejected_before_catalog_lookup(symbol):
+    provider, calls = _provider([{"symbol": symbol, "positionAmt": "1"}])
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "INCOMPLETE"
+    assert not any("exchangeInfo" in url for url in calls)
+
+
 @pytest.mark.parametrize(("symbol", "reason"), [
     ("A" * 28, "overlong"),
     (" BTCUSDT", "surrounding_whitespace"),
     ("BTCUSDT\n", "control_character"),
-    ("ＢＴＣUSDT", "non_ascii"),
+    ("ＢＴＣUSDT", "not_in_exchange_info"),
 ])
 def test_active_malformed_symbol_reasons_are_safe_and_fail_closed(symbol, reason):
     provider, calls = _provider([{"symbol": symbol, "positionAmt": "1"}])

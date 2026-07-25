@@ -1,12 +1,12 @@
 # AlphaForge Version
 
-- Current version: Phase 9 Binance USD-M reconciliation symbol validation v7
+- Current version: Phase 9 Binance USD-M Unicode catalog validation v8
 - Current phase: Phase 9 - fail-closed exchange exposure evidence hardening
-- Runtime maturity: Account-wide Binance position and order reconciliation validates USD-M delivery symbols against public `exchangeInfo`; malformed active exposure remains blocking.
-- BACKTEST/PAPER/LIVE alignment: Reconciliation behavior is unchanged outside the shared provider; PAPER and LIVE recovery consume the same fail-closed evidence contract.
+- Runtime maturity: Account-wide Binance position and order reconciliation accepts grammar-exception symbols only by exact public `exchangeInfo` membership; unsafe raw input remains blocking before catalog lookup.
+- BACKTEST/PAPER/LIVE alignment: PAPER and LIVE reconciliation share exact catalog validation, while the public strategy scanner independently admits only `TRADING` catalog members.
 - Lifecycle coverage: Unchanged; no trade lifecycle transition or persistence contract changed.
-- Execution realism coverage: Global `positionRisk` and `openOrders` remain authoritative, while delivery-contract membership is exchange-sourced rather than assumed.
-- Known critical risks: The exact historical raw failing symbol was irreversibly represented only by its safe SHA-256 identifier; rerunning the diagnostic is required to identify it, and authenticated Demo acceptance remains outstanding.
+- Execution realism coverage: Global exposure remains visible for any safe catalog-listed status, including `PENDING_TRADING`; only `TRADING` symbols enter the new-trade universe.
+- Known critical risks: Authenticated Demo acceptance and sustained PAPER validation remain outstanding; catalog outages fail closed for grammar-exception exposure.
 - Last audit date: 2026-07-25
 - Live readiness verdict: NOT LIVE READY; reconciliation hardening does not authorize LIVE execution.
 
