@@ -902,11 +902,34 @@ def test_terminal_paper_provider_failure_with_zero_execution_is_terminalized_and
     ))
     engine.dispose()
     monkeypatch.setattr(ops, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *a, **k: pytest.fail("terminal recovery must not launch a worker"))
+
+    # Reproduce the pre-#304 attempt: provider unavailability accompanied by a
+    # local query error fails closed and stamps the campaign as recovery-owned.
+    authoritative_recovery = ops._authoritative_recovery_exposure
+    provider = "reconciliation_probe:RuntimeError:read_only_reconciliation_provider_unavailable"
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *a, **k: {
+        "blocked": True, "reason": "RECOVERY_EVIDENCE_UNAVAILABLE", "scope": "SAME_CAMPAIGN",
+        "latest": {"mode": "PAPER"}, "previous_process_alive": False, "kill_switch_active": False,
+        "query_errors": [provider, "pending_orders:OperationalError:simulated"],
+        "provider_unavailable_errors": [provider],
+        "current_exposure_check": {name: 0 for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")},
+        "availability": {"active_positions_available": True, "pending_orders_available": True, "orphan_evidence_available": True, "kill_switch_available": True},
+    })
+    old_attempt = recovery_drill(conn, camp.campaign_id)
+    assert old_attempt["status"] == "FAIL"
+    assert tuple(conn.execute("SELECT campaign_status,last_error FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()) == ("RECOVERY_REQUIRED", "RECOVERY_DRILL_PRECHECK_FAILED")
+
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", authoritative_recovery)
 
     out = recovery_drill(conn, camp.campaign_id)
 
     assert out["status"] == "PASS"
     assert out["checks"]["provider_only_error"] is True
+    assert out["checks"]["campaign_status"] == "RECOVERY_REQUIRED"
+    assert out["checks"]["last_error"] == "RECOVERY_DRILL_PRECHECK_FAILED"
+    assert out["checks"]["campaign_state_terminalizable"] is True
+    assert out["checks"]["terminal_zero_startup_fallback_candidate"] is True
     assert out["checks"]["zero_exposure_failed_startup_terminalizable"] is True
     assert conn.execute("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == "FAILED"
     assert out["checks"]["startup_terminalization_evidence"] == {
@@ -916,6 +939,8 @@ def test_terminal_paper_provider_failure_with_zero_execution_is_terminalized_and
     audit = json.loads(conn.execute("SELECT details_json FROM burnin_campaign_events WHERE event_type='PHASE9_ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED' ORDER BY id DESC LIMIT 1").fetchone()[0])
     assert audit["runtime_recovery"]["fallback_original_runtime_recovery"]["scope"] == "SAME_CAMPAIGN"
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "FAILED"
+    assert out["after"]["resume"] is None and out["after"]["attach"] is None
+    assert conn.execute("SELECT COUNT(*) FROM burnin_recovery_drills WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == 2
     assert conn.execute("SELECT COUNT(*) FROM runtime_state_snapshots WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == 1
     engine = init_db(f"sqlite+pysqlite:///{db}")
     later = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="camp_unrelated_new")
@@ -924,17 +949,44 @@ def test_terminal_paper_provider_failure_with_zero_execution_is_terminalized_and
     assert later["scope"] == "UNRELATED_HISTORICAL_RUNTIME"
 
 
-@pytest.mark.parametrize("blocker", [
-    "campaign_position", "pending_reject", "worker_alive", "local_unavailable", "non_provider_error",
-])
-def test_paused_terminal_provider_failure_requires_complete_zero_exposure_evidence(monkeypatch, tmp_path, blocker):
+@pytest.mark.parametrize("last_error", [None, "DEAD_WORKER_ZERO_EXPOSURE_RECOVERY_REQUIRED"])
+def test_recovery_required_terminal_provider_failure_requires_recovery_drill_provenance(monkeypatch, tmp_path, last_error):
     import alphaforge.burnin_ops as ops
 
     _, conn = _conn(tmp_path)
     camp, run = _campaign(conn)
     _terminal_provider_failure(conn, camp, run)
-    conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED' WHERE campaign_id=?", (camp.campaign_id,))
-    if blocker == "worker_alive":
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',last_error=? WHERE campaign_id=?", (last_error, camp.campaign_id))
+    conn.commit()
+    provider = "reconciliation_probe:RuntimeError:read_only_reconciliation_provider_unavailable"
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *a, **k: {
+        "blocked": True, "reason": "RECOVERY_EVIDENCE_UNAVAILABLE", "scope": "SAME_CAMPAIGN",
+        "latest": {"mode": "PAPER"}, "previous_process_alive": False, "kill_switch_active": False,
+        "query_errors": [provider], "provider_unavailable_errors": [provider],
+        "current_exposure_check": {name: 0 for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")},
+        "availability": {"active_positions_available": True, "pending_orders_available": True, "orphan_evidence_available": True, "kill_switch_available": True},
+    })
+
+    out = recovery_drill(conn, camp.campaign_id)
+
+    assert out["status"] == "FAIL"
+    assert out["checks"]["campaign_status"] == "RECOVERY_REQUIRED"
+    assert out["checks"]["last_error"] == last_error
+    assert out["checks"]["campaign_state_terminalizable"] is False
+    assert out["checks"]["terminal_zero_startup_fallback_candidate"] is False
+
+
+@pytest.mark.parametrize("blocker", [
+    "campaign_position", "pending_reject", "worker_pid_dead", "worker_alive", "local_unavailable", "non_provider_error",
+])
+def test_recovery_required_terminal_provider_failure_requires_complete_zero_exposure_evidence(monkeypatch, tmp_path, blocker):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    _terminal_provider_failure(conn, camp, run)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',last_error='RECOVERY_DRILL_PRECHECK_FAILED' WHERE campaign_id=?", (camp.campaign_id,))
+    if blocker in {"worker_pid_dead", "worker_alive"}:
         conn.execute("UPDATE burnin_campaigns SET worker_pid=999 WHERE campaign_id=?", (camp.campaign_id,))
     if blocker == "campaign_position":
         conn.execute("INSERT INTO burnin_pending_position_outcomes(pending_position_id,trade_id,campaign_id,burnin_run_id,signal_id,symbol,side,entry_time,source_provenance_json,status,missing_fields_json,created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,'OPEN','[]',?,?)", ("open", "trade", camp.campaign_id, run, "sig", "BTCUSDT", "LONG", utc_now(), "{}", utc_now(), "test"))
@@ -970,6 +1022,7 @@ def test_terminal_paper_provider_failure_with_any_execution_evidence_remains_blo
     _, conn = _conn(tmp_path)
     camp, run = _campaign(conn)
     _terminal_provider_failure(conn, camp, run)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',last_error='RECOVERY_DRILL_PRECHECK_FAILED' WHERE campaign_id=?", (camp.campaign_id,))
     if evidence_kind in {"decision", "lifecycle_execution"}:
         lifecycle = "ORDER_PLACED" if evidence_kind == "lifecycle_execution" else "SIGNAL_REJECTED"
         persist_burnin_observation(
@@ -995,7 +1048,7 @@ def test_terminal_paper_provider_failure_with_any_execution_evidence_remains_blo
 
 @pytest.mark.parametrize("mode,exposure", [
     ("PAPER", "active_positions"), ("PAPER", "pending_orders"),
-    ("PAPER", "orphan_orders"), ("PAPER", "orphan_positions"), ("LIVE", None),
+    ("PAPER", "orphan_orders"), ("PAPER", "orphan_positions"), ("LIVE", None), ("LIVE_PRECHECK", None),
 ])
 def test_terminal_provider_failure_fallback_rejects_runtime_exposure_and_live(monkeypatch, tmp_path, mode, exposure):
     import alphaforge.burnin_ops as ops
@@ -1003,6 +1056,7 @@ def test_terminal_provider_failure_fallback_rejects_runtime_exposure_and_live(mo
     _, conn = _conn(tmp_path)
     camp, run = _campaign(conn)
     _terminal_provider_failure(conn, camp, run)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',last_error='RECOVERY_DRILL_PRECHECK_FAILED' WHERE campaign_id=?", (camp.campaign_id,))
     counts = {name: 0 for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")}
     if exposure:
         counts[exposure] = 1

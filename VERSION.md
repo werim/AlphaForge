@@ -1,12 +1,12 @@
 # AlphaForge Version
 
-- Current version: Phase 9 PAPER failed-startup recovery v5
+- Current version: Phase 9 PAPER failed-startup recovery v6
 - Current phase: Phase 9 - fail-closed schema, recovery, and persistence hardening
-- Runtime maturity: PAPER recovery may terminalize a PAUSED campaign whose FAILED run has complete zero-activity and zero-local-exposure SQL evidence when read-only reconciliation is the only unavailable evidence; every broader case remains blocked.
+- Runtime maturity: PAPER recovery may terminalize a PAUSED/FAILED campaign, or a RECOVERY_REQUIRED campaign stamped specifically by a prior recovery-drill precheck failure, only when its FAILED run has complete zero-activity and zero-local-exposure SQL evidence and read-only reconciliation is the only unavailable evidence; every broader case remains blocked.
 - BACKTEST/PAPER/LIVE alignment: canonical exposure validation is shared by runtime recovery and operational preflight; LIVE/LIVE_PRECHECK remain fully fail-closed.
 - Lifecycle coverage: Startup recovery audits lifecycle execution states and recognized position/order terminal or active states while preserving rows append-only.
 - Execution realism coverage: Provider unavailability is recorded explicitly and never substitutes for zero SQL execution/exposure evidence.
-- Known critical risks: Authenticated reconciliation is still required for any ambiguous or nonzero exposure and for LIVE; sustained PAPER burn-in, PostgreSQL doctor parity, and Demo acceptance remain outstanding.
+- Known critical risks: Authenticated reconciliation is still required for any ambiguous or nonzero exposure, any RECOVERY_REQUIRED state without recovery-drill provenance, and all LIVE operation; sustained PAPER burn-in, PostgreSQL doctor parity, and Demo acceptance remain outstanding.
 - Last audit date: 2026-07-25
 - Live readiness verdict: NOT LIVE READY; migration correctness does not authorize LIVE execution.
 

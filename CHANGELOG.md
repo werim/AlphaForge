@@ -77,6 +77,27 @@
 
 # Changelog
 
+## Phase 9 recovery-required failed-startup repair (2026-07-25)
+
+## Added
+- Two-attempt regression coverage for a PAUSED, zero-activity FAILED PAPER startup first stamped `RECOVERY_REQUIRED` by a failed drill and then safely terminalized.
+- Recovery prechecks now report campaign status, last error, campaign-state eligibility, and the complete terminal fallback decision.
+
+## Changed
+- The narrow provider-only PAPER terminal fallback accepts `RECOVERY_REQUIRED` only with `RECOVERY_DRILL_PRECHECK_FAILED` provenance; every existing worker, activity, exposure, availability, mode, process, kill-switch, and error-set predicate remains mandatory.
+
+## Fixed
+- A pre-PR #304 recovery attempt can no longer strand an otherwise eligible failed-startup campaign merely because that attempt transformed PAUSED into RECOVERY_REQUIRED.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- None; schemas, exports, lifecycle rows, and historical evidence remain unchanged.
+
+## Known Issues
+- Unknown/nonzero exposure, incomplete local evidence, mixed errors, other recovery provenance, and LIVE/LIVE_PRECHECK remain fail-closed.
+
 ## Phase 9 PAUSED failed-startup recovery correction (2026-07-25)
 
 ## Added
