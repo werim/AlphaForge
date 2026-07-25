@@ -77,6 +77,31 @@
 
 # Changelog
 
+## Phase 9 Binance reconciliation symbol validation (2026-07-25)
+
+## Added
+- Exchange-sourced validation for USD-M delivery symbols and safe invalid-symbol reason diagnostics.
+- Explicit endpoint states for not attempted, request failure, payload validation failure, and pass.
+- Regression coverage for delivery characters, malformed input classes, fail-closed exposure, zero-exposure warnings, and request ordering.
+
+## Changed
+- Delivery candidates require exact public `exchangeInfo` membership before normalization and fill fan-out.
+- The diagnostic reports provider endpoint states instead of inferring failures from incomplete coverage.
+
+## Fixed
+- Legitimate listed USD-M delivery positions no longer fail the legacy alphanumeric-only regex.
+- `openOrders` is no longer labeled failed when position validation stopped execution before the request.
+
+## Removed
+- Nothing.
+
+## Breaking Changes
+- Snapshot consumers may observe the new `endpoint_statuses` field; no existing field was removed.
+
+## Known Issues
+- Historical hashed invalid-symbol evidence cannot reveal the original raw value; a credentialed rerun is required for exact identification.
+- Credentialed Binance Demo acceptance remains outstanding; LIVE remains NOT READY.
+
 ## Phase 9 recovery-required failed-startup repair (2026-07-25)
 
 ## Added

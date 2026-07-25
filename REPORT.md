@@ -1,3 +1,54 @@
+# Binance USD-M reconciliation symbol-validation surgery — 2026-07-25
+
+## Why the patch was needed and root cause
+The provider accepted only `[A-Z0-9]{2,20}`. Binance USD-M delivery contracts use
+an underscore plus a six-digit delivery date (for example `BTCUSDT_250627`), so a
+legitimate nonzero position could abort position normalization before global
+`openOrders` was requested. The retained failure evidence safely hashed invalid
+raw symbols, which means the exact historical value cannot be recovered from the
+reported `active_position_invalid_symbol` error alone. A credentialed rerun (or
+the original sanitized raw capture) is required to identify that exact value.
+
+## Files changed and runtime behavior
+- `src/alphaforge/binance_reconciliation_provider.py` recognizes the narrow USD-M
+  delivery candidate grammar only after exact membership validation through public
+  `/fapi/v1/exchangeInfo`. Ordinary symbols retain the conservative grammar.
+  Whitespace, controls, Unicode, overlong values, and unlisted delivery candidates
+  remain fail-closed for nonzero exposure. Diagnostics expose only a reason and a
+  stable SHA-256 identifier for invalid raw data.
+- Endpoint statuses now distinguish `NOT_ATTEMPTED`, `REQUEST_FAILED`,
+  `PAYLOAD_VALIDATION_FAILED`, and `PASS`. Consequently `openOrders` is explicitly
+  not attempted when earlier position validation blocks the snapshot.
+- `src/alphaforge/binance_reconciliation_check.py` passes through the provider's
+  endpoint statuses instead of deriving false failures from coverage booleans.
+- `tests/test_binance_reconciliation_provider.py` covers verified delivery symbols,
+  catalog rejection, overlong/whitespace/control/Unicode inputs, active fail-closed
+  behavior, zero-exposure warnings, endpoint ordering, and endpoint status truth.
+
+## Lifecycle, persistence, export/schema, and compatibility impact
+Lifecycle and trading decisions are unchanged. No persistence table, CSV export,
+or schema changes, and no migration is required. Snapshot JSON gains
+`endpoint_statuses` and invalid-symbol warnings gain a safe `reason`; existing
+coverage and evidence fields remain. Account-wide `positionRisk` and `openOrders`
+requests are preserved, and fill requests remain restricted to the union of
+tracked, active-position, and open-order symbols.
+
+## Tests executed
+- `pytest -q tests/test_binance_reconciliation_provider.py tests/test_binance_reconciliation_check.py`
+- `python -m compileall -q src tests`
+- `git diff --check`
+
+## Risks, limitations, migration concerns, and push recommendation
+Public `exchangeInfo` availability becomes mandatory only when a nonzero delivery
+candidate requires proof; an outage remains fail-closed. Exact-zero malformed rows
+remain nonblocking warnings and never expand fill scope. The original raw incident
+symbol is not present in this repository or prompt evidence, so asserting its exact
+value would be unsafe; a diagnostic rerun will preserve a verified legitimate
+symbol verbatim while malformed values remain hashed. No migration is needed.
+Push is recommended after credentialed Demo acceptance. LIVE remains NOT READY.
+
+---
+
 # RECOVERY_REQUIRED failed-startup recovery surgery — 2026-07-25
 
 ## Why the patch was needed and root cause

@@ -89,6 +89,10 @@ def _provider(positions, orders=(), tracked=(), **config):
     def http(url, headers, timeout):
         calls.append(url)
         if "positionRisk" in url: return positions
+        if "exchangeInfo" in url:
+            return {"symbols": [{"symbol": row["symbol"]} for row in positions
+                                if isinstance(row, dict) and isinstance(row.get("symbol"), str)
+                                and "_" in row["symbol"]]}
         if "openOrders" in url: return list(orders)
         if "userTrades" in url: return []
         return {"serverTime": 1700000000001}
@@ -281,6 +285,53 @@ def test_exact_zero_invalid_symbol_is_preserved_warning_without_fanout(symbol):
     assert snap["position_warnings"][0]["category"] == "zero_exposure_invalid_symbol"
     assert snap["selected_symbols"] == [] and not any("userTrades" in call for call in calls)
     assert symbol not in str(snap)
+
+
+def test_legitimate_usdm_delivery_symbol_is_verified_by_exchange_info_then_reconciled():
+    symbol = "BTCUSDT_250627"
+    provider, calls = _provider([{"symbol": symbol, "positionAmt": "1"}])
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "COMPLETE"
+    assert snap["positions"][0]["symbol"] == symbol and snap["positions"][0]["symbol_valid"]
+    assert snap["selected_symbols"] == [symbol]
+    assert snap["endpoint_statuses"] == {
+        "positionRisk": "PASS", "exchangeInfo": "PASS", "openOrders": "PASS", "userTrades": "PASS"}
+    assert [next(key for key in ("positionRisk", "exchangeInfo", "openOrders", "userTrades") if key in url)
+            for url in calls] == ["positionRisk", "exchangeInfo", "openOrders", "userTrades"]
+
+
+@pytest.mark.parametrize(("symbol", "reason"), [
+    ("A" * 28, "overlong"),
+    (" BTCUSDT", "surrounding_whitespace"),
+    ("BTCUSDT\n", "control_character"),
+    ("ＢＴＣUSDT", "non_ascii"),
+])
+def test_active_malformed_symbol_reasons_are_safe_and_fail_closed(symbol, reason):
+    provider, calls = _provider([{"symbol": symbol, "positionAmt": "1"}])
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "INCOMPLETE"
+    assert f"reason={reason}" in snap["errors"][0]
+    assert symbol not in str(snap)
+    assert snap["endpoint_statuses"]["positionRisk"] == "PAYLOAD_VALIDATION_FAILED"
+    assert snap["endpoint_statuses"]["openOrders"] == "NOT_ATTEMPTED"
+    assert not any("openOrders" in call for call in calls)
+
+
+def test_exchange_info_rejection_of_candidate_symbol_fails_closed():
+    symbol = "BTCUSDT_250627"
+    calls = []
+    def http(url, headers, timeout):
+        calls.append(url)
+        if "positionRisk" in url: return [{"symbol": symbol, "positionAmt": "1"}]
+        if "exchangeInfo" in url: return {"symbols": [{"symbol": "BTCUSDT"}]}
+        raise AssertionError("must stop before openOrders")
+    provider = BinanceReadonlyReconciliationProvider(config=BinanceReadonlyReconciliationConfig(
+        base_url="https://demo-fapi.binance.com", api_key="k", api_secret="s"), http_get_json=http)
+    snap = provider.snapshot()
+    assert snap["evidence_status"] == "INCOMPLETE"
+    assert "reason=not_in_exchange_info" in snap["errors"][0]
+    assert snap["endpoint_statuses"]["exchangeInfo"] == "PASS"
+    assert snap["endpoint_statuses"]["openOrders"] == "NOT_ATTEMPTED"
 
 
 @pytest.mark.parametrize(("amount", "reason"), [("0.000000001", "epsilon_position_invalid_symbol"), ("1", "active_position_invalid_symbol")])
