@@ -26,13 +26,19 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
     base_url = str(getattr(binance, "base_url", "https://fapi.binance.com"))
     quote_asset = str(getattr(binance, "default_quote_asset", "USDT")).upper()
     try:
+        exchange_info = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/exchangeInfo", timeout_sec=timeout_sec)
         tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/24hr", timeout_sec=timeout_sec)
         book_tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/bookTicker", timeout_sec=timeout_sec)
         funding = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/premiumIndex", timeout_sec=timeout_sec)
     except Exception:  # noqa: BLE001
         return []
-    if not isinstance(tickers, list) or not isinstance(book_tickers, list):
+    if (not isinstance(exchange_info, dict) or not isinstance(exchange_info.get("symbols"), list)
+            or not isinstance(tickers, list) or not isinstance(book_tickers, list)):
         return []
+    trading_symbols = {
+        row.get("symbol") for row in exchange_info["symbols"]
+        if isinstance(row, dict) and isinstance(row.get("symbol"), str) and row.get("status") == "TRADING"
+    }
 
     book_map: dict[str, tuple[float, float]] = {}
     for item in book_tickers:
@@ -56,7 +62,7 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         symbol = str(item.get("symbol") or "")
-        if not symbol.endswith(quote_asset):
+        if symbol not in trading_symbols or not symbol.endswith(quote_asset):
             continue
 
         last_price = float(item.get("lastPrice", 0.0) or 0.0)

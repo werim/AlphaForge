@@ -77,6 +77,28 @@
 
 # Changelog
 
+## Phase 9 Binance Unicode symbol catalog validation (2026-07-25)
+
+## Added
+- Regression coverage for four observed Demo Unicode symbols, absent/lookalike and unsafe inputs, encoded signed requests, and pending-status separation.
+
+## Changed
+- Exact `exchangeInfo` membership now authorizes every safe symbol outside the ordinary ASCII grammar, independent of catalog trading status during reconciliation.
+- Binance strategy scanning now requires exact `TRADING` catalog status before creating a candidate.
+
+## Fixed
+- Verified Unicode exposure symbols are preserved exactly and percent-encoded in signed `userTrades` queries.
+- Whitespace, empty, control, and invisible-format input fails before any catalog lookup.
+
+## Removed
+- The delivery-contract-only restriction on exchange-catalog symbol validation.
+
+## Breaking Changes
+- Binance scanning performs an additional public `exchangeInfo` request and fails closed when catalog/status evidence is unavailable.
+
+## Known Issues
+- Credentialed Demo acceptance remains an operational gate; LIVE remains unavailable.
+
 ## Phase 9 Binance reconciliation symbol validation (2026-07-25)
 
 ## Added
