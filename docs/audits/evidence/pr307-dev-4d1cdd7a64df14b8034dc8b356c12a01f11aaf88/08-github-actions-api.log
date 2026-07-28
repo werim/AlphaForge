@@ -1,0 +1,46 @@
+$ python GitHub Actions API query for dev/head_sha
+URL: https://api.github.com/repos/werim/AlphaForge/actions/runs?branch=dev&head_sha=4d1cdd7a64df14b8034dc8b356c12a01f11aaf88&per_page=20
+URLError: <urlopen error Tunnel connection failed: 403 Forbidden>
+Traceback (most recent call last):
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/urllib/request.py", line 1344, in do_open
+    h.request(req.get_method(), req.selector, req.data, headers,
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/http/client.py", line 1358, in request
+    self._send_request(method, url, body, headers, encode_chunked)
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/http/client.py", line 1404, in _send_request
+    self.endheaders(body, encode_chunked=encode_chunked)
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/http/client.py", line 1353, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/http/client.py", line 1113, in _send_output
+    self.send(msg)
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/http/client.py", line 1057, in send
+    self.connect()
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/http/client.py", line 1492, in connect
+    super().connect()
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/http/client.py", line 1033, in connect
+    self._tunnel()
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/http/client.py", line 1001, in _tunnel
+    raise OSError(f"Tunnel connection failed: {code} {message.strip()}")
+OSError: Tunnel connection failed: 403 Forbidden
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<stdin>", line 5, in <module>
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/urllib/request.py", line 515, in open
+    response = self._open(req, data)
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/urllib/request.py", line 532, in _open
+    result = self._call_chain(self.handle_open, protocol, protocol +
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/urllib/request.py", line 1392, in https_open
+    return self.do_open(http.client.HTTPSConnection, req,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/.pyenv/versions/3.12.13/lib/python3.12/urllib/request.py", line 1347, in do_open
+    raise URLError(err)
+urllib.error.URLError: <urlopen error Tunnel connection failed: 403 Forbidden>

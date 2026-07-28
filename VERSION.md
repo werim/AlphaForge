@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PR #307 merged-dev audit (2026-07-28)
+
+- Current version: unchanged Phase 9 Binance USD-M Unicode catalog validation v8
+- Current phase: post-merge verification; no runtime behavior change
+- Runtime maturity: local source suite passed 1072 tests; clean Python 3.11 install and GitHub Actions identity remain unverified because network access failed
+- BACKTEST/PAPER/LIVE alignment: unchanged by this documentation-only audit
+- Lifecycle coverage: unchanged; no lifecycle transition or persistence contract changed
+- Execution realism coverage: unchanged; no new runtime distribution evidence was collected
+- Known critical risks: 3 optional external tests skipped; GitHub Actions run ID unavailable; exact config command requires installation or `PYTHONPATH=src`
+- Last audit date: 2026-07-28
+- Live readiness verdict: NOT LIVE READY
+
 - Current version: Phase 9 Binance USD-M Unicode catalog validation v8
 - Current phase: Phase 9 - fail-closed exchange exposure evidence hardening
 - Runtime maturity: Account-wide Binance position and order reconciliation accepts grammar-exception symbols only by exact public `exchangeInfo` membership; unsafe raw input remains blocking before catalog lookup.

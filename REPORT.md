@@ -794,3 +794,28 @@ The preferred separate-surface design was selected. A known `alembic_version=000
 Added affinity tests for BIGINT/INT/SMALLINT, VARCHAR/CHAR/CLOB, FLOAT/DOUBLE/REAL and NUMERIC; compatible declared-schema validation; trusted/foreign Alembic identities; empty adapter initialization; domain-row fail-closed behavior; v3 evidence and idempotency; and preserved checksum enforcement. Local targeted results: schema doctor 41 passed; SQLite bootstrap 14 passed and 3 Alembic-dependent skips; runtime state 3 passed; Phase 9 ops 70 passed. This environment still lacks the Alembic distribution, so the two unchanged mixed-bootstrap tests cannot execute locally. GitHub Actions has not yet reported for this commit. Push to update PR #302, but do not merge until Actions reports the full suite with zero failures. LIVE remains NOT READY.
 
 ---
+
+---
+## 2026-07-28 — PR #307 merged dev HEAD verification
+
+### Why, root cause, and files changed
+The post-merge audit was required to bind the current dev merge SHA to dependency, import,
+test, compile, configuration, whitespace, and Actions evidence. No product defect was
+identified. The new `docs/audits/PR307_DEV_HEAD_AUDIT.md` and SHA-keyed evidence directory
+preserve the exact outputs; VERSION, REPORT, and CHANGELOG receive documentation-only
+updates.
+
+### Runtime, lifecycle, persistence, export/schema, and compatibility impact
+None. Strategy, sizing, thresholds, scoring, RR, lifecycle, database schema, exports, and
+LIVE controls are untouched. There is no migration concern. Constant RR/score were not
+reopened because the current tests produced no recurrence failure and no new empirical
+distribution was sampled.
+
+### Tests executed and risks
+The preprovisioned Python 3.12.13 environment produced 1072 passed, 0 failed, and 3 skipped;
+Alembic 1.18.5 imported, compileall and diff checks passed. The exact config command failed
+because the package was not installed, while the diagnostic source-path invocation passed.
+The exact Actions Python 3.11 dependency sequence was attempted, but both requirements and
+fallback installs failed on proxy HTTP 403. The same network restriction prevented a
+GitHub run-ID lookup. These limitations are recorded as failures/unverified evidence, not
+hidden. Push is recommended only for the audit record; LIVE remains NOT LIVE READY.
