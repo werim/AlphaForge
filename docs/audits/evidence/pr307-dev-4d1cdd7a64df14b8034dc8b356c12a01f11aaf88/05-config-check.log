@@ -1,0 +1,2 @@
+$ python -m alphaforge.config_check
+/root/.pyenv/versions/3.12.13/bin/python: Error while finding module specification for 'alphaforge.config_check' (ModuleNotFoundError: No module named 'alphaforge')

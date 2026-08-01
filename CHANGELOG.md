@@ -3725,3 +3725,24 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - GitHub Actions for this commit has not yet reported; merge remains gated on a green full suite.
+
+## PR #307 merged-dev audit evidence (2026-07-28)
+
+### Added
+- SHA-keyed immutable logs and a post-merge audit report for dev commit `4d1cdd7a64df14b8034dc8b356c12a01f11aaf88`.
+
+### Changed
+- Documented 1072 passed, 0 failed, and 3 skipped tests plus Alembic, compile, config, and whitespace checks.
+
+### Fixed
+- Nothing; this audit makes no runtime change.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- PyPI and GitHub API access were blocked by proxy HTTP 403; clean Python 3.11 dependency parity and the GitHub Actions run ID remain unverified.
+- The exact config command cannot import the src-layout package without installation; a diagnostic `PYTHONPATH=src` invocation passes.
