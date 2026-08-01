@@ -1,0 +1,6 @@
+$ git rev-parse HEAD
+4d1cdd7a64df14b8034dc8b356c12a01f11aaf88
+$ python --version
+Python 3.12.13
+$ python -c "import alembic; print(alembic.__version__)"
+1.18.5

@@ -1,3 +1,35 @@
+# Phase A shadow agent graph surgery report — 2026-08-01
+
+## PR #310 SQLite contention revision
+
+Production PAPER evidence exposed `database is locked` while authoritative lifecycle and reconciliation writers overlapped. The original Phase A hook amplified risk by creating one task/thread and two write transactions per decision against the canonical database, including repeated DDL bootstrap.
+
+The revision removes agent DDL from canonical `init_db`, makes repository construction read/write-free, and performs one controlled bootstrap only when the feature is enabled. Shadow traces default to `data/runtime/alphaforge_agent_shadow.db`, with WAL/busy timeout applied on its connections, short transactions, and bounded busy retry. One worker drains a bounded queue and serializes all trace writes; no per-decision task or thread is created. Full-queue overload deterministically drops the newest optional trace without affecting legacy behavior. Metrics expose queue depth, dropped/deferred traces, retry count, lock-wait duration, and worker count.
+
+Concurrency tests overlap lifecycle, reject, reconciliation, and heartbeat writes on the canonical runtime database with 60 queued shadow decisions, verify no lock failures or authoritative failure, retain every admitted trace, and prove one worker. Migration is additive only in the separate shadow database; existing canonical databases need no agent schema migration. LIVE remains NOT READY.
+
+Executed checks: the focused config/agent/runtime-heartbeat suite passed 51 tests; the full suite produced 1,090 passed and 6 skipped, with only the 4 Alembic revision-graph tests failing because the environment lacks the installed `alembic` package (`ModuleNotFoundError`/`ImportError`). `compileall` and `git diff --check` passed. This dependency limitation is unrelated to the shadow persistence change.
+
+---
+
+## Why and root cause
+
+Issue #309 requires a shared deterministic boundary before future agents can be evaluated without coupling experimental logic to the authoritative runtime. Previously there was no immutable stage envelope, bounded fixed graph, or isolated SQL trace store.
+
+## Files and behavior
+
+`src/alphaforge/agents/` adds immutable contracts, the fixed shadow orchestrator, and additive SQL repository. The config registry/loader and environment examples add six typed controls. `runtime.py` schedules a copied legacy decision after rejection persistence or an accepted decision, never awaits the graph on the order path, and records only new shadow metrics. `persistence.py` bootstraps isolated trace tables. Agent tests cover determinism, validation, bounds, hard rejects, failure isolation, duplicate-safe SQL, null unavailable values, and disabled defaults. `docs/agent_graph.md` and `docs/KOMUTLAR.md` document design and operation.
+
+## Lifecycle, persistence, schema, compatibility, and migration
+
+Legacy lifecycle, reject gates, reconciliation, authorization, burn-in, order submission, and decision values are unchanged. `agent_runs` and `agent_stage_events` are additive SQLite-compatible tables; no existing table is repurposed or written by the graph. Bootstrap is idempotent and requires no destructive migration. The feature defaults off. Shadow flags intentionally remain outside Phase 8/9 campaign identity because they cannot affect execution decisions; this avoids campaign fragmentation.
+
+## Tests, risks, limitations, and recommendation
+
+Focused contract/orchestrator/persistence tests were added. The full suite is executed before push and its final result is recorded in the PR. Phase A has no business handlers, reflection retry requests, exchange access, or authority. Background scheduling avoids order-path latency, but an abrupt shutdown can lose an unstarted trace. Persistence failure is diagnostic only. LIVE remains NOT READY. Push is recommended only with passing focused and full suites; no auto-merge or LIVE rollout is recommended.
+
+---
+
 # Binance USD-M reconciliation symbol-validation surgery — 2026-07-25
 
 ## Unicode catalog follow-up (v8)
@@ -794,3 +826,28 @@ The preferred separate-surface design was selected. A known `alembic_version=000
 Added affinity tests for BIGINT/INT/SMALLINT, VARCHAR/CHAR/CLOB, FLOAT/DOUBLE/REAL and NUMERIC; compatible declared-schema validation; trusted/foreign Alembic identities; empty adapter initialization; domain-row fail-closed behavior; v3 evidence and idempotency; and preserved checksum enforcement. Local targeted results: schema doctor 41 passed; SQLite bootstrap 14 passed and 3 Alembic-dependent skips; runtime state 3 passed; Phase 9 ops 70 passed. This environment still lacks the Alembic distribution, so the two unchanged mixed-bootstrap tests cannot execute locally. GitHub Actions has not yet reported for this commit. Push to update PR #302, but do not merge until Actions reports the full suite with zero failures. LIVE remains NOT READY.
 
 ---
+
+---
+## 2026-07-28 — PR #307 merged dev HEAD verification
+
+### Why, root cause, and files changed
+The post-merge audit was required to bind the current dev merge SHA to dependency, import,
+test, compile, configuration, whitespace, and Actions evidence. No product defect was
+identified. The new `docs/audits/PR307_DEV_HEAD_AUDIT.md` and SHA-keyed evidence directory
+preserve the exact outputs; VERSION, REPORT, and CHANGELOG receive documentation-only
+updates.
+
+### Runtime, lifecycle, persistence, export/schema, and compatibility impact
+None. Strategy, sizing, thresholds, scoring, RR, lifecycle, database schema, exports, and
+LIVE controls are untouched. There is no migration concern. Constant RR/score were not
+reopened because the current tests produced no recurrence failure and no new empirical
+distribution was sampled.
+
+### Tests executed and risks
+The preprovisioned Python 3.12.13 environment produced 1072 passed, 0 failed, and 3 skipped;
+Alembic 1.18.5 imported, compileall and diff checks passed. The exact config command failed
+because the package was not installed, while the diagnostic source-path invocation passed.
+The exact Actions Python 3.11 dependency sequence was attempted, but both requirements and
+fallback installs failed on proxy HTTP 403. The same network restriction prevented a
+GitHub run-ID lookup. These limitations are recorded as failures/unverified evidence, not
+hidden. Push is recommended only for the audit record; LIVE remains NOT LIVE READY.

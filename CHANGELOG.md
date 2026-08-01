@@ -1,3 +1,27 @@
+# Phase A shadow agent graph — 2026-08-01
+
+### Fixed — PR #310 SQLite contention revision
+- Moved shadow traces to a separate SQLite database, removed per-decision DDL, and serialized writes through one bounded worker queue.
+- Added deterministic overload dropping, bounded busy retry, lock/queue/worker observability, and concurrent canonical-writer stress coverage.
+
+### Added
+- Immutable deterministic agent contracts, fixed bounded shadow orchestrator, typed feature flags, isolated SQL trace tables, tests, and operator documentation.
+
+### Changed
+- Runtime may schedule a non-blocking read-only shadow snapshot only when explicitly enabled; default behavior is unchanged.
+
+### Fixed
+- N/A; this is an additive architectural foundation.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; schema additions are idempotent and the graph defaults disabled.
+
+### Known Issues
+- No business handlers or production cutover exist; abrupt termination may prevent a queued background trace from completing. LIVE remains NOT READY.
+
 
 ## Phase 9 PR 280 Follow-up Hardening
 
@@ -3725,3 +3749,24 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - GitHub Actions for this commit has not yet reported; merge remains gated on a green full suite.
+
+## PR #307 merged-dev audit evidence (2026-07-28)
+
+### Added
+- SHA-keyed immutable logs and a post-merge audit report for dev commit `4d1cdd7a64df14b8034dc8b356c12a01f11aaf88`.
+
+### Changed
+- Documented 1072 passed, 0 failed, and 3 skipped tests plus Alembic, compile, config, and whitespace checks.
+
+### Fixed
+- Nothing; this audit makes no runtime change.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- PyPI and GitHub API access were blocked by proxy HTTP 403; clean Python 3.11 dependency parity and the GitHub Actions run ID remain unverified.
+- The exact config command cannot import the src-layout package without installation; a diagnostic `PYTHONPATH=src` invocation passes.

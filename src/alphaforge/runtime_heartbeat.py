@@ -79,6 +79,12 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> str:
         "persistence_enabled",
         "top_selection_reject_reasons",
         "decision_gate_blockers",
+        "agent_shadow_queue_depth",
+        "agent_shadow_dropped",
+        "agent_shadow_deferred",
+        "agent_shadow_persistence_retries",
+        "agent_shadow_lock_wait_ms",
+        "agent_shadow_worker_count",
     }
     safe = {key: value for key, value in dict(payload or {}).items() if key in permitted}
     return json.dumps(safe, separators=(",", ":"), sort_keys=True)

@@ -1,5 +1,41 @@
 # AlphaForge Version
 
+## PR #310 SQLite contention revision (2026-08-01)
+
+- Current version: Phase A isolated shadow writer revision
+- Current phase: immutable contracts plus bounded, single-worker shadow orchestration
+- Runtime maturity: graph disabled by default; enabled traces use a separate SQLite database and cannot contend with authoritative runtime writers
+- BACKTEST/PAPER/LIVE alignment: authoritative decisions and lifecycle behavior remain unchanged
+- Lifecycle coverage: unchanged; 50+ decision concurrency stress covers simultaneous canonical lifecycle/reject/reconciliation/heartbeat persistence
+- Execution realism coverage: unchanged; no orders or fills are submitted or simulated
+- Known critical risks: overload intentionally drops newest shadow trace and records the count; abrupt termination can still lose in-flight optional evidence
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
+
+## Phase A shadow agent graph (2026-08-01)
+
+- Current version: Phase A agent graph foundation
+- Current phase: immutable contracts and deterministic shadow orchestration; no agent business logic
+- Runtime maturity: legacy runtime remains authoritative; graph disabled by default and isolated from order mutation
+- BACKTEST/PAPER/LIVE alignment: decision and lifecycle behavior unchanged; the optional trace hook observes legacy snapshots only
+- Lifecycle coverage: unchanged; agent traces use separate additive tables
+- Execution realism coverage: unchanged; missing context remains null and no fills/orders are simulated
+- Known critical risks: full business-agent parity and sustained shadow evidence are not implemented; background traces may be absent on abrupt process termination
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
+
+## PR #307 merged-dev audit (2026-07-28)
+
+- Current version: unchanged Phase 9 Binance USD-M Unicode catalog validation v8
+- Current phase: post-merge verification; no runtime behavior change
+- Runtime maturity: local source suite passed 1072 tests; clean Python 3.11 install and GitHub Actions identity remain unverified because network access failed
+- BACKTEST/PAPER/LIVE alignment: unchanged by this documentation-only audit
+- Lifecycle coverage: unchanged; no lifecycle transition or persistence contract changed
+- Execution realism coverage: unchanged; no new runtime distribution evidence was collected
+- Known critical risks: 3 optional external tests skipped; GitHub Actions run ID unavailable; exact config command requires installation or `PYTHONPATH=src`
+- Last audit date: 2026-07-28
+- Live readiness verdict: NOT LIVE READY
+
 - Current version: Phase 9 Binance USD-M Unicode catalog validation v8
 - Current phase: Phase 9 - fail-closed exchange exposure evidence hardening
 - Runtime maturity: Account-wide Binance position and order reconciliation accepts grammar-exception symbols only by exact public `exchangeInfo` membership; unsafe raw input remains blocking before catalog lookup.
