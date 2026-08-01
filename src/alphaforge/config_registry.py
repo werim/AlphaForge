@@ -160,6 +160,8 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_AGENT_GRAPH_MAX_REFLECTION_RETRIES", "agent_graph_max_reflection_retries", "int", 1, "Operations", MODES, "Bound reflection retries.", 0),
     _s("ALPHAFORGE_AGENT_GRAPH_STAGE_TIMEOUT_SECONDS", "agent_graph_stage_timeout_seconds", "float", 5.0, "Operations", MODES, "Per-stage shadow timeout.", 0.001),
     _s("ALPHAFORGE_AGENT_GRAPH_PERSIST_TRACES", "agent_graph_persist_traces", "bool", True, "Persistence", MODES, "Persist additive agent shadow traces."),
+    _s("ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS", "agent_graph_max_pending_runs", "int", 64, "Operations", MODES, "Bound queued shadow decisions; overload drops newest trace.", 1),
+    _s("ALPHAFORGE_AGENT_GRAPH_DATABASE_URL", "agent_graph_database_url", "str", "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db", "Persistence", MODES, "Isolated Phase A shadow trace database.", dashboard_editable=False),
     _s("ALPHAFORGE_ENABLE_CANARY_MODE", "enable_canary_mode", "bool", False, "Mode / Safety", ("LIVE",), "Request canary mode; readiness gates remain authoritative."),
     _s("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", "operator_live_acknowledged", "bool", False, "Mode / Safety", ("LIVE",), "Additional deny-by-default operator acknowledgement."),
     _s("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", "reconciliation_interval_sec", "float", 5.0, "Operations", ("PAPER", "LIVE"), "Runtime reconciliation interval.", 0.1),

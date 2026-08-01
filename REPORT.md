@@ -1,5 +1,17 @@
 # Phase A shadow agent graph surgery report — 2026-08-01
 
+## PR #310 SQLite contention revision
+
+Production PAPER evidence exposed `database is locked` while authoritative lifecycle and reconciliation writers overlapped. The original Phase A hook amplified risk by creating one task/thread and two write transactions per decision against the canonical database, including repeated DDL bootstrap.
+
+The revision removes agent DDL from canonical `init_db`, makes repository construction read/write-free, and performs one controlled bootstrap only when the feature is enabled. Shadow traces default to `data/runtime/alphaforge_agent_shadow.db`, with WAL/busy timeout applied on its connections, short transactions, and bounded busy retry. One worker drains a bounded queue and serializes all trace writes; no per-decision task or thread is created. Full-queue overload deterministically drops the newest optional trace without affecting legacy behavior. Metrics expose queue depth, dropped/deferred traces, retry count, lock-wait duration, and worker count.
+
+Concurrency tests overlap lifecycle, reject, reconciliation, and heartbeat writes on the canonical runtime database with 60 queued shadow decisions, verify no lock failures or authoritative failure, retain every admitted trace, and prove one worker. Migration is additive only in the separate shadow database; existing canonical databases need no agent schema migration. LIVE remains NOT READY.
+
+Executed checks: the focused config/agent/runtime-heartbeat suite passed 51 tests; the full suite produced 1,090 passed and 6 skipped, with only the 4 Alembic revision-graph tests failing because the environment lacks the installed `alembic` package (`ModuleNotFoundError`/`ImportError`). `compileall` and `git diff --check` passed. This dependency limitation is unrelated to the shadow persistence change.
+
+---
+
 ## Why and root cause
 
 Issue #309 requires a shared deterministic boundary before future agents can be evaluated without coupling experimental logic to the authoritative runtime. Previously there was no immutable stage envelope, bounded fixed graph, or isolated SQL trace store.

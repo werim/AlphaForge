@@ -1,5 +1,9 @@
 # Phase A shadow agent graph — 2026-08-01
 
+### Fixed — PR #310 SQLite contention revision
+- Moved shadow traces to a separate SQLite database, removed per-decision DDL, and serialized writes through one bounded worker queue.
+- Added deterministic overload dropping, bounded busy retry, lock/queue/worker observability, and concurrent canonical-writer stress coverage.
+
 ### Added
 - Immutable deterministic agent contracts, fixed bounded shadow orchestrator, typed feature flags, isolated SQL trace tables, tests, and operator documentation.
 

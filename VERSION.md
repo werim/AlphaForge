@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PR #310 SQLite contention revision (2026-08-01)
+
+- Current version: Phase A isolated shadow writer revision
+- Current phase: immutable contracts plus bounded, single-worker shadow orchestration
+- Runtime maturity: graph disabled by default; enabled traces use a separate SQLite database and cannot contend with authoritative runtime writers
+- BACKTEST/PAPER/LIVE alignment: authoritative decisions and lifecycle behavior remain unchanged
+- Lifecycle coverage: unchanged; 50+ decision concurrency stress covers simultaneous canonical lifecycle/reject/reconciliation/heartbeat persistence
+- Execution realism coverage: unchanged; no orders or fills are submitted or simulated
+- Known critical risks: overload intentionally drops newest shadow trace and records the count; abrupt termination can still lose in-flight optional evidence
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
+
 ## Phase A shadow agent graph (2026-08-01)
 
 - Current version: Phase A agent graph foundation

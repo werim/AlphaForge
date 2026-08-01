@@ -1566,6 +1566,8 @@ The graph is disabled by default and never owns an order decision. Replace the d
 # Enable/disable (restart runtime after changing configuration)
 $env:ALPHAFORGE_AGENT_GRAPH_ENABLED = "true"
 $env:ALPHAFORGE_AGENT_GRAPH_SHADOW = "true"
+$env:ALPHAFORGE_AGENT_GRAPH_DATABASE_URL = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
+$env:ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS = "64"
 $env:ALPHAFORGE_AGENT_GRAPH_ENABLED = "false" # disable
 
 $DB = "data/runtime/alphaforge_runtime.db"
@@ -1583,6 +1585,8 @@ pytest -q
 ```bash
 export ALPHAFORGE_AGENT_GRAPH_ENABLED=true
 export ALPHAFORGE_AGENT_GRAPH_SHADOW=true
+export ALPHAFORGE_AGENT_GRAPH_DATABASE_URL=sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db
+export ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS=64
 export ALPHAFORGE_AGENT_GRAPH_ENABLED=false # disable
 
 DB=data/runtime/alphaforge_runtime.db

@@ -1,5 +1,5 @@
 import asyncio
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
 from alphaforge.agents.persistence import AgentTraceRepository, bootstrap_agent_schema
@@ -24,6 +24,15 @@ def test_schema_bootstrap_idempotent_and_trace_duplicate_safe_and_queryable():
         row = conn.execute(text("SELECT skipped_reason FROM agent_stage_events WHERE stage='MARKET'")).one()
         assert conn.execute(text("SELECT symbol FROM agent_runs")).scalar_one_or_none() is None
         assert row.skipped_reason == "STAGE_HANDLER_NOT_REGISTERED"
+
+
+def test_repository_construction_performs_no_sql_or_transaction():
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    statements = []
+    event.listen(engine, "before_cursor_execute", lambda *args: statements.append(args[2]))
+    AgentTraceRepository(engine)
+    assert statements == []
+    assert inspect(engine).get_table_names() == []
 
 
 def test_persistence_failure_is_diagnostic_and_legacy_result_unchanged():

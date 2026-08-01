@@ -388,9 +388,6 @@ def init_db(database_url: str | None = None) -> Engine:
         for statement in ddl:
             conn.execute(text(statement))
         _apply_sqlite_migrations(conn)
-    # Additive shadow-only tables are deliberately isolated from lifecycle/order DDL.
-    from alphaforge.agents.persistence import bootstrap_agent_schema
-    bootstrap_agent_schema(engine)
     if engine.dialect.name == "sqlite" and sqlite_path is not None:
         # Run the central exposure migration only after the bootstrap
         # transaction commits.  This preserves existing rows and prevents

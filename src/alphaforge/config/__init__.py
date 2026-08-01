@@ -112,6 +112,8 @@ class RuntimeSettings:
     agent_graph_max_reflection_retries: int = 1
     agent_graph_stage_timeout_seconds: float = 5.0
     agent_graph_persist_traces: bool = True
+    agent_graph_max_pending_runs: int = 64
+    agent_graph_database_url: str = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
     enable_canary_mode: bool = False
     operator_live_acknowledged: bool = False
     allow_live_orders: bool = False
@@ -364,6 +366,8 @@ def load_config_from_env() -> AlphaForgeConfig:
         agent_graph_max_reflection_retries=val("ALPHAFORGE_AGENT_GRAPH_MAX_REFLECTION_RETRIES"),
         agent_graph_stage_timeout_seconds=val("ALPHAFORGE_AGENT_GRAPH_STAGE_TIMEOUT_SECONDS"),
         agent_graph_persist_traces=val("ALPHAFORGE_AGENT_GRAPH_PERSIST_TRACES"),
+        agent_graph_max_pending_runs=val("ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS"),
+        agent_graph_database_url=val("ALPHAFORGE_AGENT_GRAPH_DATABASE_URL"),
         enable_canary_mode=val("ALPHAFORGE_ENABLE_CANARY_MODE"),
         operator_live_acknowledged=val("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED"),
         allow_live_orders=val("ALPHAFORGE_ALLOW_LIVE_ORDERS"),

@@ -1,13 +1,19 @@
 """SQL-first, additive persistence for shadow graph traces only."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+import time
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
 from .contracts import canonical_json, utc_now_iso
+
+DEFAULT_SHADOW_DATABASE_URL = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
 
 DDL = (
     """CREATE TABLE IF NOT EXISTS agent_runs (
@@ -36,12 +42,56 @@ def bootstrap_agent_schema(engine: Engine) -> None:
             conn.execute(text(statement))
 
 
+def create_agent_shadow_engine(database_url: str = DEFAULT_SHADOW_DATABASE_URL) -> Engine:
+    """Create the isolated Phase A store; never reuse the canonical runtime DB."""
+    if not database_url.startswith("sqlite"):
+        raise ValueError("PHASE_A_SHADOW_DATABASE_MUST_BE_SQLITE")
+    from pathlib import Path
+    from sqlalchemy.engine.url import make_url
+    database = make_url(database_url).database
+    if database and database != ":memory:":
+        Path(database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(database_url, future=True, connect_args={"timeout": 1.0})
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=1000")
+        cursor.close()
+    return engine
+
+
+@dataclass(slots=True)
+class AgentPersistenceStats:
+    retry_count: int = 0
+    lock_wait_ms: float = 0.0
+
+
 class AgentTraceRepository:
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, max_busy_retries: int = 3,
+                 stats: AgentPersistenceStats | None = None) -> None:
         self.engine = engine
-        bootstrap_agent_schema(engine)
+        self.max_busy_retries = max(0, max_busy_retries)
+        self.stats = stats or AgentPersistenceStats()
 
     def persist_result(self, result: Any) -> None:
+        for attempt in range(self.max_busy_retries + 1):
+            try:
+                self._persist_result_once(result)
+                return
+            except OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                if attempt >= self.max_busy_retries:
+                    raise
+                delay = 0.01 * (2 ** attempt)
+                self.stats.retry_count += 1
+                started = time.monotonic()
+                time.sleep(delay)
+                self.stats.lock_wait_ms += (time.monotonic() - started) * 1000
+
+    def _persist_result_once(self, result: Any) -> None:
         first = result.stage_results[0] if result.stage_results else None
         start = datetime.fromisoformat(result.started_at.replace("Z", "+00:00"))
         end = datetime.fromisoformat(result.completed_at.replace("Z", "+00:00"))

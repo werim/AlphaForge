@@ -38,7 +38,8 @@ from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_sta
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
 from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
-from alphaforge.agents.persistence import AgentTraceRepository
+from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
+    bootstrap_agent_schema, create_agent_shadow_engine)
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
@@ -140,6 +141,8 @@ class RuntimeConfig:
     agent_graph_max_reflection_retries: int = 1
     agent_graph_stage_timeout_seconds: float = 5.0
     agent_graph_persist_traces: bool = True
+    agent_graph_max_pending_runs: int = 64
+    agent_graph_database_url: str = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
 
 
 @dataclass(slots=True)
@@ -160,6 +163,12 @@ class RuntimeMetrics:
     agent_shadow_errors: int = 0
     agent_shadow_stage_events: int = 0
     agent_shadow_persistence_errors: int = 0
+    agent_shadow_queue_depth: int = 0
+    agent_shadow_dropped: int = 0
+    agent_shadow_deferred: int = 0
+    agent_shadow_persistence_retries: int = 0
+    agent_shadow_lock_wait_ms: float = 0.0
+    agent_shadow_worker_count: int = 0
     burnin_outcomes: int = 0
     burnin_snapshots: int = 0
     persistence_enabled: bool = False
@@ -183,7 +192,10 @@ class RuntimeOrchestrator:
     control_store: RuntimeControlStore | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
-    _shadow_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
+    _shadow_queue: asyncio.Queue[dict[str, Any]] | None = field(default=None, init=False)
+    _shadow_worker_task: asyncio.Task[Any] | None = field(default=None, init=False)
+    _agent_trace_repository: AgentTraceRepository | None = field(default=None, init=False)
+    _agent_persistence_stats: AgentPersistenceStats = field(default_factory=AgentPersistenceStats, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
     runtime_instance_id: str = field(default_factory=lambda: f"runtime:{uuid.uuid4().hex}", init=False)
@@ -270,31 +282,64 @@ class RuntimeOrchestrator:
         return None
 
     def _schedule_agent_shadow(self, legacy_decision: Mapping[str, Any]) -> None:
-        """Schedule an isolated copy after the legacy decision exists; never await it."""
+        """Enqueue an isolated copy without creating a task or blocking legacy flow."""
         if not (self.config.agent_graph_enabled and self.config.agent_graph_shadow):
             return
         snapshot = json.loads(json.dumps(dict(legacy_decision), default=str))
         signal_id = str(snapshot.get("signal_id") or uuid.uuid4().hex)
-        correlation_id = f"shadow:{signal_id}:{uuid.uuid4().hex}"
-        engine = self._resolve_persistence_engine()
+        item = {"decision_id": signal_id, "correlation_id": f"shadow:{signal_id}:{uuid.uuid4().hex}",
+                "snapshot": snapshot}
+        if self._shadow_queue is None:
+            self.metrics.agent_shadow_dropped += 1
+            return
+        try:
+            if not self._shadow_queue.empty():
+                self.metrics.agent_shadow_deferred += 1
+            self._shadow_queue.put_nowait(item)
+            self.metrics.agent_shadow_queue_depth = self._shadow_queue.qsize()
+        except asyncio.QueueFull:
+            # Deterministic overload policy: retain older evidence, drop newest.
+            self.metrics.agent_shadow_dropped += 1
 
-        async def run_isolated() -> None:
+    def _initialize_agent_shadow(self) -> None:
+        if not (self.config.agent_graph_enabled and self.config.agent_graph_shadow):
+            return
+        try:
+            # max(1) also protects direct RuntimeConfig construction in tests or
+            # embeddings; asyncio.Queue(maxsize=0) would otherwise be unbounded.
+            self._shadow_queue = asyncio.Queue(maxsize=max(1, self.config.agent_graph_max_pending_runs))
+            if self.config.agent_graph_persist_traces:
+                engine = create_agent_shadow_engine(self.config.agent_graph_database_url)
+                bootstrap_agent_schema(engine)
+                self._agent_trace_repository = AgentTraceRepository(engine, stats=self._agent_persistence_stats)
+            self._shadow_worker_task = asyncio.create_task(self._agent_shadow_worker(), name="agent_shadow_worker")
+            self.metrics.agent_shadow_worker_count = 1
+        except Exception:
+            self._shadow_queue = None
+            self._agent_trace_repository = None
+            self.metrics.agent_shadow_persistence_errors += 1
+            logger.exception("agent_shadow_initialization_failed")
+
+    async def _agent_shadow_worker(self) -> None:
+        assert self._shadow_queue is not None
+        while True:
+            item = await self._shadow_queue.get()
+            self.metrics.agent_shadow_queue_depth = self._shadow_queue.qsize()
             try:
-                # Bootstrap, handlers, and SQL writes run off the runtime loop so
-                # shadow work cannot add latency to an authoritative order await.
-                def run_in_worker() -> Any:
-                    repository = AgentTraceRepository(engine) if engine is not None and self.config.agent_graph_persist_traces else None
+                def run_one() -> Any:
                     graph = ShadowAgentOrchestrator(AgentGraphConfig(
                         enabled=True, shadow_mode=True, max_graph_steps=self.config.agent_graph_max_steps,
                         max_reflection_retries=self.config.agent_graph_max_reflection_retries,
                         stage_timeout_seconds=self.config.agent_graph_stage_timeout_seconds,
-                        persist_traces=self.config.agent_graph_persist_traces), persistence=repository)
-                    return asyncio.run(graph.run_shadow(decision_id=signal_id, correlation_id=correlation_id,
-                        execution_mode=self.config.execution_mode.value, symbol=snapshot.get("symbol"),
-                        legacy_decision=snapshot, context=snapshot))
-                result = await asyncio.to_thread(run_in_worker)
+                        persist_traces=self.config.agent_graph_persist_traces), persistence=self._agent_trace_repository)
+                    return asyncio.run(graph.run_shadow(decision_id=item["decision_id"],
+                        correlation_id=item["correlation_id"], execution_mode=self.config.execution_mode.value,
+                        symbol=item["snapshot"].get("symbol"), legacy_decision=item["snapshot"], context=item["snapshot"]))
+                result = await asyncio.to_thread(run_one)
                 self.metrics.agent_shadow_runs += 1
                 self.metrics.agent_shadow_stage_events += len(result.stage_results)
+                self.metrics.agent_shadow_persistence_retries = self._agent_persistence_stats.retry_count
+                self.metrics.agent_shadow_lock_wait_ms = self._agent_persistence_stats.lock_wait_ms
                 if result.persistence_error:
                     self.metrics.agent_shadow_persistence_errors += 1
                 if result.status.value == "ERROR":
@@ -304,10 +349,8 @@ class RuntimeOrchestrator:
             except Exception:
                 self.metrics.agent_shadow_errors += 1
                 logger.exception("agent_shadow_run_failed")
-
-        task = asyncio.create_task(run_isolated(), name=f"agent-shadow:{signal_id}")
-        self._shadow_tasks.add(task)
-        task.add_done_callback(self._shadow_tasks.discard)
+            finally:
+                self._shadow_queue.task_done()
 
     def _persist_runtime_heartbeat(self, *, runtime_state: str = "OPERATING") -> None:
         engine = self._resolve_persistence_engine()
@@ -339,6 +382,12 @@ class RuntimeOrchestrator:
                 "persistence_enabled": self.metrics.persistence_enabled,
                 "top_selection_reject_reasons": dict(sorted(self._last_scan_rejection_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
                 "decision_gate_blockers": self._last_scan_gate_blockers,
+                "agent_shadow_queue_depth": self.metrics.agent_shadow_queue_depth,
+                "agent_shadow_dropped": self.metrics.agent_shadow_dropped,
+                "agent_shadow_deferred": self.metrics.agent_shadow_deferred,
+                "agent_shadow_persistence_retries": self.metrics.agent_shadow_persistence_retries,
+                "agent_shadow_lock_wait_ms": self.metrics.agent_shadow_lock_wait_ms,
+                "agent_shadow_worker_count": self.metrics.agent_shadow_worker_count,
             },
         )
 
@@ -514,6 +563,7 @@ class RuntimeOrchestrator:
         self._runtime_status = "OPERATING"
         self._persist_runtime_state_snapshot("OPERATING")
         self._register_signals()
+        self._initialize_agent_shadow()
         self._tasks = [
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
             asyncio.create_task(self._heartbeat_loop(), name="metrics_heartbeat"),
@@ -1568,12 +1618,16 @@ class RuntimeOrchestrator:
             logger.warning("reconciliation_repair_recommendations=%s", [r.category for r in recommendations])
 
     async def _shutdown_tasks(self) -> None:
-        tasks = [*self._tasks, *self._shadow_tasks]
+        if self._shadow_queue is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._shadow_queue.join(), timeout=self.config.agent_graph_stage_timeout_seconds)
+        tasks = [*self._tasks, *([self._shadow_worker_task] if self._shadow_worker_task else [])]
         for task in tasks:
             task.cancel()
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        self.metrics.agent_shadow_worker_count = 0
 
     def _register_signals(self) -> None:
         loop = asyncio.get_running_loop()
@@ -1627,6 +1681,8 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     config.agent_graph_max_reflection_retries = cfg.runtime.agent_graph_max_reflection_retries
     config.agent_graph_stage_timeout_seconds = cfg.runtime.agent_graph_stage_timeout_seconds
     config.agent_graph_persist_traces = cfg.runtime.agent_graph_persist_traces
+    config.agent_graph_max_pending_runs = cfg.runtime.agent_graph_max_pending_runs
+    config.agent_graph_database_url = cfg.runtime.agent_graph_database_url
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         now_ts = time.time()
