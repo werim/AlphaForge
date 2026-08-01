@@ -3770,3 +3770,24 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - PyPI and GitHub API access were blocked by proxy HTTP 403; clean Python 3.11 dependency parity and the GitHub Actions run ID remain unverified.
 - The exact config command cannot import the src-layout package without installation; a diagnostic `PYTHONPATH=src` invocation passes.
+
+## 2026-08-01 — PAPER Control Center backend
+
+### Added
+- Read-only, source-attributed PAPER campaign, evidence, preflight, event, and bounded/redacted log endpoints.
+- Token-authenticated, locked pause/resume adapters over the canonical burn-in CLI with postcondition verification and sanitized audit records.
+
+### Changed
+- Dashboard application now mounts the `/api` Control Center router without changing frontend behavior.
+
+### Fixed
+- Unknown metrics and zero-denominator rates remain null/unavailable rather than fabricated zero values.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; existing dashboard routes are preserved.
+
+### Known Issues
+- No canonical campaign stop operation exists; live Windows campaign and worker behavior still requires operator validation.

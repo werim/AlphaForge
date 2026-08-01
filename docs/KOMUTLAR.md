@@ -1597,3 +1597,7 @@ sqlite3 "$DB" "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT coun
 pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
 pytest -q
 ```
+
+## PAPER Control Center backend
+
+Canonical environment, PowerShell startup, read-first verification, and guarded pause/resume commands are documented in [`CONTROL_CENTER_RUNTIME_MAPPING.md`](CONTROL_CENTER_RUNTIME_MAPPING.md). The API is PAPER-only. It has no campaign stop endpoint because the burn-in CLI has no canonical stop command or STOPPED campaign state.

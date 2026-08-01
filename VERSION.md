@@ -96,3 +96,15 @@
 - **Critical risks:** non-SQLite schema doctor coverage and ambiguous legacy exposure shapes require manual migration
 - **Last audit:** 2026-07-24
 - **Live readiness:** **NOT READY** — full suite and production database validation remain operator gates
+
+## PAPER Control Center backend (2026-08-01)
+
+- Current version: Phase 9 PAPER Control Center backend adapter
+- Current phase: canonical burn-in observation and guarded operator control
+- Runtime maturity: read-only, schema-aware APIs plus verified canonical CLI pause/resume; real Windows burn-in acceptance remains pending
+- BACKTEST/PAPER/LIVE alignment: PAPER-only guard; trading decision paths are unchanged and LIVE control is rejected
+- Lifecycle coverage: canonical campaign/run pause and continuation transitions are reused and postcondition checked; no STOPPED state is fabricated
+- Execution realism coverage: canonical persisted decisions, positions, rejects, heartbeat and worker process evidence only; unavailable values remain null
+- Known critical risks: no live Windows worker validation; PID command-line identity is not canonical; sustained burn-in evidence is still required
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY

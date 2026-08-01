@@ -21,6 +21,7 @@ from alphaforge.runtime_control import RuntimeControlStore, RuntimeSupervisor
 from alphaforge.release_gates import release_gate_status
 
 from .backtest_control import default_form_values, parse_backtest_form, run_dashboard_backtest
+from .control_center import ControlCenterService, install_error_handler, router as control_center_router
 
 async def _form_dict(request: Request) -> dict[str, str]:
     body = (await request.body()).decode("utf-8")
@@ -104,6 +105,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 os.environ["ALPHAFORGE_EXECUTION_MODE"] = old_alpha
 
     app.state.runtime_supervisor = RuntimeSupervisor(app.state.control_store, _factory)
+    app.state.control_center = ControlCenterService.from_environment(resolved_database_url)
+    install_error_handler(app)
+    # This FastAPI compatibility release exposes include_router's bookkeeping
+    # object in app.routes; append the already-prefixed APIRoutes so existing
+    # dashboard route introspection continues to see only concrete routes.
+    app.router.routes.extend(control_center_router(app.state.control_center).routes)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.on_event("shutdown")
