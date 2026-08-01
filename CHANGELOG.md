@@ -3791,3 +3791,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - No canonical campaign stop operation exists; live Windows campaign and worker behavior still requires operator validation.
+
+## 2026-08-01 — PR #311 Control Center hardening
+
+### Added
+- Canonical per-source freshness, schema-verified ordering fallbacks, recovery evidence metadata, and cross-process atomic campaign leases.
+
+### Changed
+- Reject API now reports canonical rejected observations and exposes pending labels only as a separate unfinished label queue.
+
+### Fixed
+- Removed fabricated response-time freshness, run-name contamination inference, PAUSED recovery bypass, query-stage SQLite leakage, and process-local-only locking.
+
+### Removed
+- Boolean aggregate contamination claims without canonical persisted evidence.
+
+### Breaking Changes
+- None; legacy top-level freshness keys remain but now mirror real evidence and may be null.
+
+### Known Issues
+- Canonical aggregate contamination evidence and live Windows acceptance remain unavailable.

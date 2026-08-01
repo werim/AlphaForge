@@ -108,3 +108,15 @@
 - Known critical risks: no live Windows worker validation; PID command-line identity is not canonical; sustained burn-in evidence is still required
 - Last audit date: 2026-08-01
 - Live readiness verdict: NOT LIVE READY
+
+## PR #311 Control Center hardening (2026-08-01)
+
+- Current version: Phase 9 PAPER Control Center evidence hardening
+- Current phase: canonical freshness, recovery, schema, and operation concurrency correction
+- Runtime maturity: source-timestamped read-only APIs and cross-process guarded canonical CLI controls; Windows acceptance pending
+- BACKTEST/PAPER/LIVE alignment: PAPER-only control unchanged; trading paths untouched; LIVE rejected
+- Lifecycle coverage: PAUSED resume now requires clean active-lineage runtime recovery evidence; canonical transitions remain reused
+- Execution realism coverage: unavailable timestamps, contamination, reason labels, and recovery evidence remain null/fail-closed rather than fabricated
+- Known critical risks: canonical aggregate contamination evidence and live Windows multi-worker validation remain outstanding
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
