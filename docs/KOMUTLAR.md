@@ -1555,3 +1555,41 @@ python -m alphaforge.burnin_ops --db "$DB" --json finalize --campaign-id "$CAMPA
 ```
 
 Credential variables (`BINANCE_API_KEY` and `BINANCE_API_SECRET`) must be supplied through the normal environment/dotenv contract and must never be echoed. Accept reconciliation only when `evidence_status` is `COMPLETE`, `sanitized_errors` is empty, `unknown_unreconciled_symbols` is empty, and all endpoint statuses pass. A local diagnostic recovery is never authenticated exchange evidence. Run `recovery-drill` only after both the database diagnosis and authenticated reconciliation prove zero positions and zero pending orders.
+
+## Phase A shadow agent graph
+
+The graph is disabled by default and never owns an order decision. Replace the database path below with the configured runtime SQLite file.
+
+### PowerShell
+
+```powershell
+# Enable/disable (restart runtime after changing configuration)
+$env:ALPHAFORGE_AGENT_GRAPH_ENABLED = "true"
+$env:ALPHAFORGE_AGENT_GRAPH_SHADOW = "true"
+$env:ALPHAFORGE_AGENT_GRAPH_ENABLED = "false" # disable
+
+$DB = "data/runtime/alphaforge_runtime.db"
+sqlite3 $DB "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
+sqlite3 $DB "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
+# Confirm the shadow tables have no triggers and compare order/lifecycle counts before and after a shadow-only test.
+sqlite3 $DB "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
+sqlite3 $DB "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
+pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
+pytest -q
+```
+
+### Bash (macOS/Linux)
+
+```bash
+export ALPHAFORGE_AGENT_GRAPH_ENABLED=true
+export ALPHAFORGE_AGENT_GRAPH_SHADOW=true
+export ALPHAFORGE_AGENT_GRAPH_ENABLED=false # disable
+
+DB=data/runtime/alphaforge_runtime.db
+sqlite3 "$DB" "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
+sqlite3 "$DB" "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
+sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
+sqlite3 "$DB" "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
+pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
+pytest -q
+```

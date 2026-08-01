@@ -37,6 +37,8 @@ from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign a
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
 from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
+from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
+from alphaforge.agents.persistence import AgentTraceRepository
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
@@ -132,6 +134,12 @@ class RuntimeConfig:
     diagnostic_mode: bool = False
     phase7_burnin_release_id: str = "default"
     phase7_burnin_snapshot_interval_sec: float = 300.0
+    agent_graph_enabled: bool = False
+    agent_graph_shadow: bool = True
+    agent_graph_max_steps: int = 12
+    agent_graph_max_reflection_retries: int = 1
+    agent_graph_stage_timeout_seconds: float = 5.0
+    agent_graph_persist_traces: bool = True
 
 
 @dataclass(slots=True)
@@ -148,6 +156,10 @@ class RuntimeMetrics:
     reconciliation_runs: int = 0
     reconciliation_fail_closed: int = 0
     burnin_observations: int = 0
+    agent_shadow_runs: int = 0
+    agent_shadow_errors: int = 0
+    agent_shadow_stage_events: int = 0
+    agent_shadow_persistence_errors: int = 0
     burnin_outcomes: int = 0
     burnin_snapshots: int = 0
     persistence_enabled: bool = False
@@ -171,6 +183,7 @@ class RuntimeOrchestrator:
     control_store: RuntimeControlStore | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
+    _shadow_tasks: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
     runtime_instance_id: str = field(default_factory=lambda: f"runtime:{uuid.uuid4().hex}", init=False)
@@ -255,6 +268,46 @@ class RuntimeOrchestrator:
         if session is not None:
             return session.get_bind()
         return None
+
+    def _schedule_agent_shadow(self, legacy_decision: Mapping[str, Any]) -> None:
+        """Schedule an isolated copy after the legacy decision exists; never await it."""
+        if not (self.config.agent_graph_enabled and self.config.agent_graph_shadow):
+            return
+        snapshot = json.loads(json.dumps(dict(legacy_decision), default=str))
+        signal_id = str(snapshot.get("signal_id") or uuid.uuid4().hex)
+        correlation_id = f"shadow:{signal_id}:{uuid.uuid4().hex}"
+        engine = self._resolve_persistence_engine()
+
+        async def run_isolated() -> None:
+            try:
+                # Bootstrap, handlers, and SQL writes run off the runtime loop so
+                # shadow work cannot add latency to an authoritative order await.
+                def run_in_worker() -> Any:
+                    repository = AgentTraceRepository(engine) if engine is not None and self.config.agent_graph_persist_traces else None
+                    graph = ShadowAgentOrchestrator(AgentGraphConfig(
+                        enabled=True, shadow_mode=True, max_graph_steps=self.config.agent_graph_max_steps,
+                        max_reflection_retries=self.config.agent_graph_max_reflection_retries,
+                        stage_timeout_seconds=self.config.agent_graph_stage_timeout_seconds,
+                        persist_traces=self.config.agent_graph_persist_traces), persistence=repository)
+                    return asyncio.run(graph.run_shadow(decision_id=signal_id, correlation_id=correlation_id,
+                        execution_mode=self.config.execution_mode.value, symbol=snapshot.get("symbol"),
+                        legacy_decision=snapshot, context=snapshot))
+                result = await asyncio.to_thread(run_in_worker)
+                self.metrics.agent_shadow_runs += 1
+                self.metrics.agent_shadow_stage_events += len(result.stage_results)
+                if result.persistence_error:
+                    self.metrics.agent_shadow_persistence_errors += 1
+                if result.status.value == "ERROR":
+                    self.metrics.agent_shadow_errors += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.metrics.agent_shadow_errors += 1
+                logger.exception("agent_shadow_run_failed")
+
+        task = asyncio.create_task(run_isolated(), name=f"agent-shadow:{signal_id}")
+        self._shadow_tasks.add(task)
+        task.add_done_callback(self._shadow_tasks.discard)
 
     def _persist_runtime_heartbeat(self, *, runtime_state: str = "OPERATING") -> None:
         engine = self._resolve_persistence_engine()
@@ -1132,6 +1185,11 @@ class RuntimeOrchestrator:
             return
 
         self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+        self._schedule_agent_shadow({"signal_id": signal_id, "symbol": selection.symbol,
+            "mode": self.config.execution_mode.value, "decision": "ACCEPTED",
+            "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"),
+            "effective_rr": effective_rr, "confidence": order_plan.confidence,
+            "execution_ctx": execution_ctx})
         await self._execute(symbol=selection.symbol, decision={
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
@@ -1285,6 +1343,7 @@ class RuntimeOrchestrator:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
+        self._schedule_agent_shadow(payload)
 
     async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any] | None = None) -> None:
         previous_state = self._last_lifecycle_state_by_symbol.get(symbol)
@@ -1509,9 +1568,10 @@ class RuntimeOrchestrator:
             logger.warning("reconciliation_repair_recommendations=%s", [r.category for r in recommendations])
 
     async def _shutdown_tasks(self) -> None:
-        for task in self._tasks:
+        tasks = [*self._tasks, *self._shadow_tasks]
+        for task in tasks:
             task.cancel()
-        for task in self._tasks:
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
@@ -1561,6 +1621,12 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
     config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_soft_effective_rr_min=cfg.runtime.stop_too_wide_soft_effective_rr_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day)
+    config.agent_graph_enabled = cfg.runtime.agent_graph_enabled
+    config.agent_graph_shadow = cfg.runtime.agent_graph_shadow
+    config.agent_graph_max_steps = cfg.runtime.agent_graph_max_steps
+    config.agent_graph_max_reflection_retries = cfg.runtime.agent_graph_max_reflection_retries
+    config.agent_graph_stage_timeout_seconds = cfg.runtime.agent_graph_stage_timeout_seconds
+    config.agent_graph_persist_traces = cfg.runtime.agent_graph_persist_traces
 
     async def _safe_market_scanner() -> list[dict[str, Any]]:
         now_ts = time.time()

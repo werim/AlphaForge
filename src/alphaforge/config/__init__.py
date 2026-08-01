@@ -106,6 +106,12 @@ class RuntimeSettings:
     global_kill_switch: bool = False
     require_live_qualification: bool = True
     enable_shadow_mode: bool = False
+    agent_graph_enabled: bool = False
+    agent_graph_shadow: bool = True
+    agent_graph_max_steps: int = 12
+    agent_graph_max_reflection_retries: int = 1
+    agent_graph_stage_timeout_seconds: float = 5.0
+    agent_graph_persist_traces: bool = True
     enable_canary_mode: bool = False
     operator_live_acknowledged: bool = False
     allow_live_orders: bool = False
@@ -352,6 +358,12 @@ def load_config_from_env() -> AlphaForgeConfig:
         global_kill_switch=val("ALPHAFORGE_GLOBAL_KILL_SWITCH"),
         require_live_qualification=val("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION"),
         enable_shadow_mode=val("ALPHAFORGE_ENABLE_SHADOW_MODE"),
+        agent_graph_enabled=val("ALPHAFORGE_AGENT_GRAPH_ENABLED"),
+        agent_graph_shadow=val("ALPHAFORGE_AGENT_GRAPH_SHADOW"),
+        agent_graph_max_steps=val("ALPHAFORGE_AGENT_GRAPH_MAX_STEPS"),
+        agent_graph_max_reflection_retries=val("ALPHAFORGE_AGENT_GRAPH_MAX_REFLECTION_RETRIES"),
+        agent_graph_stage_timeout_seconds=val("ALPHAFORGE_AGENT_GRAPH_STAGE_TIMEOUT_SECONDS"),
+        agent_graph_persist_traces=val("ALPHAFORGE_AGENT_GRAPH_PERSIST_TRACES"),
         enable_canary_mode=val("ALPHAFORGE_ENABLE_CANARY_MODE"),
         operator_live_acknowledged=val("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED"),
         allow_live_orders=val("ALPHAFORGE_ALLOW_LIVE_ORDERS"),

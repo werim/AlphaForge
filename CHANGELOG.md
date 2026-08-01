@@ -1,3 +1,23 @@
+# Phase A shadow agent graph — 2026-08-01
+
+### Added
+- Immutable deterministic agent contracts, fixed bounded shadow orchestrator, typed feature flags, isolated SQL trace tables, tests, and operator documentation.
+
+### Changed
+- Runtime may schedule a non-blocking read-only shadow snapshot only when explicitly enabled; default behavior is unchanged.
+
+### Fixed
+- N/A; this is an additive architectural foundation.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; schema additions are idempotent and the graph defaults disabled.
+
+### Known Issues
+- No business handlers or production cutover exist; abrupt termination may prevent a queued background trace from completing. LIVE remains NOT READY.
+
 
 ## Phase 9 PR 280 Follow-up Hardening
 

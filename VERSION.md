@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Phase A shadow agent graph (2026-08-01)
+
+- Current version: Phase A agent graph foundation
+- Current phase: immutable contracts and deterministic shadow orchestration; no agent business logic
+- Runtime maturity: legacy runtime remains authoritative; graph disabled by default and isolated from order mutation
+- BACKTEST/PAPER/LIVE alignment: decision and lifecycle behavior unchanged; the optional trace hook observes legacy snapshots only
+- Lifecycle coverage: unchanged; agent traces use separate additive tables
+- Execution realism coverage: unchanged; missing context remains null and no fills/orders are simulated
+- Known critical risks: full business-agent parity and sustained shadow evidence are not implemented; background traces may be absent on abrupt process termination
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
+
 ## PR #307 merged-dev audit (2026-07-28)
 
 - Current version: unchanged Phase 9 Binance USD-M Unicode catalog validation v8

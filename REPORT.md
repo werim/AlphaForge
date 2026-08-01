@@ -1,3 +1,23 @@
+# Phase A shadow agent graph surgery report — 2026-08-01
+
+## Why and root cause
+
+Issue #309 requires a shared deterministic boundary before future agents can be evaluated without coupling experimental logic to the authoritative runtime. Previously there was no immutable stage envelope, bounded fixed graph, or isolated SQL trace store.
+
+## Files and behavior
+
+`src/alphaforge/agents/` adds immutable contracts, the fixed shadow orchestrator, and additive SQL repository. The config registry/loader and environment examples add six typed controls. `runtime.py` schedules a copied legacy decision after rejection persistence or an accepted decision, never awaits the graph on the order path, and records only new shadow metrics. `persistence.py` bootstraps isolated trace tables. Agent tests cover determinism, validation, bounds, hard rejects, failure isolation, duplicate-safe SQL, null unavailable values, and disabled defaults. `docs/agent_graph.md` and `docs/KOMUTLAR.md` document design and operation.
+
+## Lifecycle, persistence, schema, compatibility, and migration
+
+Legacy lifecycle, reject gates, reconciliation, authorization, burn-in, order submission, and decision values are unchanged. `agent_runs` and `agent_stage_events` are additive SQLite-compatible tables; no existing table is repurposed or written by the graph. Bootstrap is idempotent and requires no destructive migration. The feature defaults off. Shadow flags intentionally remain outside Phase 8/9 campaign identity because they cannot affect execution decisions; this avoids campaign fragmentation.
+
+## Tests, risks, limitations, and recommendation
+
+Focused contract/orchestrator/persistence tests were added. The full suite is executed before push and its final result is recorded in the PR. Phase A has no business handlers, reflection retry requests, exchange access, or authority. Background scheduling avoids order-path latency, but an abrupt shutdown can lose an unstarted trace. Persistence failure is diagnostic only. LIVE remains NOT READY. Push is recommended only with passing focused and full suites; no auto-merge or LIVE rollout is recommended.
+
+---
+
 # Binance USD-M reconciliation symbol-validation surgery — 2026-07-25
 
 ## Unicode catalog follow-up (v8)
