@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PAPER zero-exposure terminalization follow-up (2026-08-06)
+
+- Current version: Phase 9 PAPER recovery completion hotfix
+- Current phase: explicit zero-exposure operator terminalization and non-blocking contention waits
+- Runtime maturity: resolver and maintenance SQLite waits run off the asyncio event loop; heartbeat and scanning remain schedulable
+- BACKTEST/PAPER/LIVE alignment: PAPER-only recovery operation; decision and qualification behavior unchanged
+- Lifecycle coverage: RECOVERY_REQUIRED continuations can become FAILED only after explicit, complete zero-exposure verification
+- Execution realism coverage: CLEAN reconciliation and available zero runtime/campaign exposure are mandatory
+- Known critical risks: terminalization is intentionally unavailable for any unknown/nonzero exposure or execution lifecycle evidence
+- Last audit date: 2026-08-06
+- Live readiness verdict: NOT LIVE READY
+
 ## PAPER burn-in SQLite contention recovery (2026-08-01)
 
 - Current version: Phase 9 PAPER burn-in contention hotfix

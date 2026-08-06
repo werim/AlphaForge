@@ -1,3 +1,25 @@
+# PAPER recovery completion follow-up — 2026-08-06
+
+## Why and root cause
+
+The contention hotfix correctly moved a dead worker to RECOVERY_REQUIRED, but that status intentionally remained in duplicate-active preflight scope and there was no operator command capable of safely completing the state. A verified zero-exposure campaign could therefore remain blocked forever. Synchronous SQLite busy waits also still ran inside asyncio resolver and maintenance loops.
+
+## Files and behavior
+
+`src/alphaforge/burnin_ops.py` adds the explicit PAPER-only `recover-runtime --terminalize-zero-exposure` path. It requires a dead worker, RECOVERY_REQUIRED campaign/run lineage, complete campaign and runtime query availability, CLEAN unblocked reconciliation, zero positions/orders/orphans/pending rejects, and zero executions/lifecycle executions. It preserves decisions and all source evidence, atomically marks both run tables and the campaign FAILED, and appends `PHASE9_MANUAL_ZERO_EXPOSURE_TERMINALIZED`; event failure rolls the transaction back and replay is idempotent. Without the flag, existing recovery remains fail-closed.
+
+`src/alphaforge/burnin_campaign.py` moves resolver and maintenance ticks to `asyncio.to_thread`; maintenance now uses fresh-connection lock retry. A SQLite busy timeout/retry may occupy its worker thread, but no longer blocks runtime heartbeat or scanner scheduling on the event loop.
+
+## Lifecycle, persistence, export/schema, and compatibility
+
+No schema, export, source hash, observation, decision, lifecycle evidence, trading threshold, qualification gate, or reconciliation gate changes. FAILED is the canonical terminal status for this explicitly abandoned zero-execution continuation. RECOVERY_REQUIRED remains an active blocker until the operator supplies the flag and every gate passes. Existing campaigns require no migration.
+
+## Tests, risks, and recommendation
+
+Tests cover explicit gating, complete/unavailable exposure, atomic rollback when event persistence fails, idempotence, evidence-hash preservation, duplicate-active release, fresh runtime heartbeat during exhausted resolver waits, and multiple locked maintenance cycles. Persistent contention can delay campaign maintenance in worker threads; SQLite remains single-writer. Run repository CI on the pushed PR head and require visible passing checks before merge. LIVE remains NOT READY. The focused burn-in/operations/heartbeat suite passed 120 tests; the full suite passed 1,106 tests with 3 skips; offline CI backtest and output checks, compileall, and diff validation passed. GitHub check visibility could not be queried from this environment because GitHub CLI authentication is unavailable, and flake8 installation was blocked by the environment network proxy; merge still requires the pushed-head Actions checks.
+
+---
+
 # PAPER burn-in SQLite contention surgery — 2026-08-01
 
 ## Why and exact root cause

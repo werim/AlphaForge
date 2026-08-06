@@ -1,3 +1,25 @@
+# PAPER recovery completion follow-up — 2026-08-06
+
+### Added
+- Explicit `recover-runtime --terminalize-zero-exposure` PAPER-only operator action with complete campaign/runtime exposure, reconciliation, and zero-execution gates.
+- Atomic and idempotent campaign/continuation terminalization with append-only audit evidence.
+- Event-loop and repeated-maintenance-lock resilience tests.
+
+### Changed
+- Resolver and maintenance blocking SQLite work now runs in worker threads; maintenance uses the same fresh-connection retry contract.
+
+### Fixed
+- Safely verified RECOVERY_REQUIRED campaigns can now become canonical FAILED records and stop blocking future launch identity.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. The new terminalization behavior is inaccessible without the explicit operator flag.
+
+### Known Issues
+- Unknown or nonzero exposure remains permanently fail-closed pending operator reconciliation. LIVE remains NOT READY.
+
 # PAPER burn-in SQLite contention hotfix — 2026-08-01
 
 ### Added

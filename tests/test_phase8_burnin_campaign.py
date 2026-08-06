@@ -195,6 +195,71 @@ def test_qualification_is_observation_gated_after_initial_snapshot(tmp_path):
         engine.dispose()
 
 
+def test_resolver_lock_wait_runs_off_event_loop_and_runtime_heartbeat_stays_fresh(tmp_path, monkeypatch):
+    from alphaforge.runtime_heartbeat import evaluate_runtime_heartbeat_freshness, save_runtime_heartbeat
+    import time as wall_time
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    engine = _engine(db)
+    runner = BurnInCampaignRunner(engine, cid, lambda *_: [], resolver_interval_seconds=0)
+    ticks = 0
+
+    def exhausted():
+        wall_time.sleep(0.2)
+        return {"status": "LOCK_RETRY_EXHAUSTED"}
+
+    monkeypatch.setattr(runner, "resolver_tick", exhausted)
+
+    async def exercise():
+        nonlocal ticks
+        runner._stop_event = asyncio.Event()
+        resolver = asyncio.create_task(runner._resolver_loop())
+        deadline = asyncio.get_running_loop().time() + 0.12
+        while asyncio.get_running_loop().time() < deadline:
+            save_runtime_heartbeat(engine, runtime_instance_id="runtime", execution_mode="PAPER", scanner_source="test")
+            ticks += 1
+            await asyncio.sleep(0.02)
+        runner._stop_event.set()
+        await resolver
+
+    try:
+        asyncio.run(exercise())
+        assert ticks >= 4
+        assert evaluate_runtime_heartbeat_freshness(engine, required_mode="PAPER", max_age_sec=1).is_fresh
+    finally:
+        engine.dispose()
+
+
+def test_multiple_locked_maintenance_cycles_do_not_stop_or_stale_campaign(tmp_path, monkeypatch):
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    engine = _engine(db)
+    runner = BurnInCampaignRunner(engine, cid, lambda *_: [], maintenance_interval_seconds=0.005)
+    locked = OperationalError("UPDATE", {}, sqlite3.OperationalError("database is locked"))
+    calls = 0
+
+    def locked_tick():
+        nonlocal calls
+        calls += 1
+        raise locked
+
+    monkeypatch.setattr(runner, "_maintenance_tick", locked_tick)
+
+    async def exercise():
+        runner._stop_event = asyncio.Event()
+        task = asyncio.create_task(runner._maintenance_loop())
+        await asyncio.sleep(0.04)
+        assert runner._stop_event.is_set() is False
+        runner._stop_event.set()
+        await task
+
+    try:
+        asyncio.run(exercise())
+        assert calls >= 2
+        with engine.connect() as conn:
+            assert get_campaign(conn, cid)["campaign_status"] == "RUNNING"
+    finally:
+        engine.dispose()
+
+
 def test_missing_reject_geometry_no_fabrication_and_not_counted(tmp_path):
     db=tmp_path/'geom.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relg',duration_days=1,symbols=['BTCUSDT'],intervals=['1h'])

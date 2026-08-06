@@ -575,21 +575,30 @@ class BurnInCampaignRunner:
         assert self._stop_event is not None
         while not self._stop_event.is_set():
             await asyncio.sleep(max(0.0, self.resolver_interval_seconds))
-            result = self.resolver_tick()
+            # SQLite busy waits and bounded retry backoff are synchronous. Keep
+            # them off the runtime event loop so scanner/runtime heartbeats can
+            # continue even while a resolver cycle exhausts its lock budget.
+            result = await asyncio.to_thread(self.resolver_tick)
             if result.get("status") == "PAUSED":
                 self._stop_event.set(); return
+
+    def _maintenance_tick(self) -> tuple[dict[str, Any], str | None]:
+        def persist_maintenance(conn: Any) -> tuple[dict[str, Any], str | None]:
+            bootstrap_campaign_schema(conn)
+            update_campaign_heartbeat(conn, self.campaign_id)
+            completion = check_campaign_completion(conn, self.campaign_id)
+            status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
+            return completion, status
+        completion, status = _with_fresh_lock_retry(self.engine, persist_maintenance)
+        self._qualify_if_due()
+        return completion, status
 
     async def _maintenance_loop(self) -> None:
         assert self._stop_event is not None
         while not self._stop_event.is_set():
             await asyncio.sleep(max(0.0, self.maintenance_interval_seconds))
             try:
-                with self.engine.begin() as conn:
-                    bootstrap_campaign_schema(conn)
-                    heartbeat = update_campaign_heartbeat(conn, self.campaign_id)
-                    completion = check_campaign_completion(conn, self.campaign_id)
-                    status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
-                self._qualify_if_due()
+                completion, status = await asyncio.to_thread(self._maintenance_tick)
             except OperationalError as exc:
                 if not _is_sqlite_lock_error(exc):
                     raise
