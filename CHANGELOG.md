@@ -1,3 +1,26 @@
+# PAPER burn-in SQLite contention hotfix — 2026-08-01
+
+### Added
+- Bounded exponential SQLite lock retry with rollback, invalidation, and a fresh connection for aggregate and qualification writes.
+- Observation/interval/completion-aware qualification scheduling and stderr fallback diagnostics.
+- Dead-worker transition into the supported `RECOVERY_REQUIRED` workflow during official preflight/watch cleanup.
+
+### Changed
+- Resolver lock exhaustion skips one cycle and preserves runtime/scanner tasks instead of pausing or terminating the worker.
+- Canonical SQLAlchemy SQLite engines consistently apply WAL, 30-second busy timeout, `synchronous=NORMAL`, and foreign keys.
+
+### Fixed
+- Secondary `RESOLVER_BATCH_FAILED` persistence errors no longer replace the original resolver error.
+
+### Removed
+- Qualification rebuild on every 30-second resolver tick.
+
+### Breaking Changes
+- None; no schema or threshold migration. Dead stale workers are now visibly fail-closed as `RECOVERY_REQUIRED` rather than left `RUNNING`.
+
+### Known Issues
+- SQLite still permits only one writer; persistent contention defers resolver evidence until a later cycle. LIVE remains NOT READY.
+
 # Phase A shadow agent graph — 2026-08-01
 
 ### Fixed — PR #310 SQLite contention revision

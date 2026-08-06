@@ -1,3 +1,35 @@
+# PAPER burn-in SQLite contention surgery — 2026-08-01
+
+## Why and exact root cause
+
+The resolver committed its batch, then synchronously rebuilt the complete synthetic aggregate on every resolver tick. Aggregate delete/copy work shared SQLite with runtime heartbeat and decision writers. Although WAL and a busy timeout were present in the observed database, the aggregate transaction could still lose the single-writer race. Its `OperationalError` entered a broad resolver handler that opened another write transaction to persist `RESOLVER_BATCH_FAILED`; when that insert encountered the same lock, the secondary exception escaped `_resolver_loop`, and `run_foreground` treated it as a task failure.
+
+## Files and runtime behavior
+
+`src/alphaforge/burnin_campaign.py` adds lock-only bounded exponential retry. Every failed attempt rolls back, invalidates and closes the SQLAlchemy connection, then checks out a new DBAPI connection. Aggregate replacement, qualification evaluation, and snapshot/event linkage remain separate transactions. Lock exhaustion increments resolver failures, emits best-effort SQL evidence plus stderr fallback, skips the cycle, and does not set the worker stop event. Non-lock `OperationalError` continues to escape fail-closed. Qualification now runs for first evidence, campaign target proximity, or after both the minimum interval and 25 new observations, rather than on every resolver tick.
+
+`src/alphaforge/persistence.py` and the burn-in runner apply WAL, 30-second busy timeout, `synchronous=NORMAL`, and `foreign_keys=ON` on every SQLAlchemy SQLite connection. `src/alphaforge/burnin_ops.py` makes official preflight/watch cleanup preserve evidence while moving a dead-PID `RUNNING` continuation and campaign to `RECOVERY_REQUIRED`; normal authenticated recovery gates still apply.
+
+## Lifecycle, persistence, schema, export, and compatibility
+
+No trading decision, reject, RR, lifecycle, execution-cost, reconciliation, evidence, or qualification threshold changed. Aggregate source ordering and canonical hashing are unchanged. There is no schema or CSV migration. Transient lock failure may delay the latest qualification snapshot, explicitly preferring stale-but-valid evidence over partial/fabricated evidence. A stale campaign changes state from `RUNNING` to `RECOVERY_REQUIRED`, with an audit event and preserved rows; it is not automatically resumed or qualified.
+
+## Tests and risks
+
+Tests cover first-lock success-on-retry with distinct connections, exhausted resolver locks, secondary event locks, non-lock schema errors, qualification gating, existing concurrent runtime/resolver behavior, runtime heartbeat persistence, and dead-worker continuation transitions. SQLite remains single-writer, so sustained contention can defer maintenance. A new campaign is not required: the failed campaign evidence can be recovered through the supported drill if integrity and reconciliation pass, but the failed worker incident must not itself be relabeled as successful. Starting a clean continuation after recovery is recommended for additional burn-in duration. LIVE remains NOT READY.
+
+## Tests executed
+
+- Focused burn-in, operations, and heartbeat suite: 115 passed.
+- Full suite: 1,094 passed and 6 skipped; four Alembic revision tests could not run because the environment lacks the installed `alembic` package.
+- Python compileall and Git whitespace validation passed.
+
+## Migration and push recommendation
+
+No migration is required. Push is recommended after the focused and full suites pass; operators should run official preflight/recovery for stale campaign `camp_d53aa4fe41a221c2` and audit campaign `camp_8b3c86cda7056d1d` before resuming.
+
+---
+
 # Phase A shadow agent graph surgery report — 2026-08-01
 
 ## PR #310 SQLite contention revision

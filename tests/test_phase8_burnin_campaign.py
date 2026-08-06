@@ -1,6 +1,8 @@
 import json, sqlite3
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
+import alphaforge.burnin_campaign as campaign_module
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, aggregate_campaign, export_campaign_bundle, build_phase8_campaign_identity
 from alphaforge.burnin import persist_burnin_observation
 
@@ -126,6 +128,71 @@ def test_campaign_worker_runs_resolver_and_triggers_qualification(tmp_path):
     assert conn.execute("select count(*) from burnin_campaign_events where event_type='RESOLVER_BATCH'").fetchone()[0] == 1
     assert conn.execute("select count(*) from burnin_qualification_snapshots").fetchone()[0] >= 1
     conn.close()
+
+
+def test_materialize_lock_retries_with_fresh_connection(tmp_path, monkeypatch):
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    engine = _engine(db)
+    original = campaign_module.materialize_campaign_aggregate
+    seen = []
+
+    def flaky(conn, campaign_id):
+        if not isinstance(conn, campaign_module.Engine):
+            seen.append(id(conn.connection))
+            if len(seen) == 1:
+                raise OperationalError("DELETE", {}, sqlite3.OperationalError("database is locked"))
+        return original(conn, campaign_id)
+
+    monkeypatch.setattr(campaign_module, "materialize_campaign_aggregate", flaky)
+    try:
+        assert flaky(engine, cid).endswith("__aggregate")
+    finally:
+        engine.dispose()
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+
+
+def test_resolver_lock_exhaustion_and_failure_event_lock_do_not_escape(tmp_path, monkeypatch, capsys):
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    engine = _engine(db)
+    runner = BurnInCampaignRunner(engine, cid, lambda *_: [])
+    locked = OperationalError("DELETE", {}, sqlite3.OperationalError("database is locked"))
+    monkeypatch.setattr(runner, "_qualify_if_due", lambda: (_ for _ in ()).throw(locked))
+    monkeypatch.setattr(campaign_module, "_with_fresh_lock_retry", lambda *_args, **_kwargs: (_ for _ in ()).throw(locked))
+    try:
+        result = runner.resolver_tick()
+    finally:
+        engine.dispose()
+    assert result["status"] == "LOCK_RETRY_EXHAUSTED"
+    assert runner.resolver_failure_count == 1
+    assert "original=" in capsys.readouterr().err
+
+
+def test_non_lock_operational_error_remains_fail_closed(tmp_path, monkeypatch):
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    engine = _engine(db)
+    runner = BurnInCampaignRunner(engine, cid, lambda *_: [])
+    schema_error = OperationalError("DELETE", {}, sqlite3.OperationalError("no such table: required_evidence"))
+    monkeypatch.setattr(runner, "_qualify_if_due", lambda: (_ for _ in ()).throw(schema_error))
+    try:
+        with pytest.raises(OperationalError, match="no such table"):
+            runner.resolver_tick()
+    finally:
+        engine.dispose()
+
+
+def test_qualification_is_observation_gated_after_initial_snapshot(tmp_path):
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    engine = _engine(db)
+    runner = BurnInCampaignRunner(engine, cid, lambda *_: [], qualification_interval_seconds=0, qualification_observation_threshold=25)
+    runner._last_qualification_observation_count = 3
+    runner._last_qualification_monotonic = 0
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE burnin_campaigns SET latest_qualification_id='existing', target_decisions=500, target_closed_trades=30, target_reject_forward_outcomes=50 WHERE campaign_id=:cid"), {"cid": cid})
+    try:
+        assert runner._qualification_due() is False
+    finally:
+        engine.dispose()
 
 
 def test_missing_reject_geometry_no_fabrication_and_not_counted(tmp_path):

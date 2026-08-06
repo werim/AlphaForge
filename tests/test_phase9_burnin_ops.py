@@ -59,6 +59,7 @@ def test_database_diagnosis_is_read_only_and_fails_closed_on_unknown_exposure(tm
     conn.execute("UPDATE burnin_campaigns SET worker_pid=NULL,last_heartbeat_at='2020-01-01T00:00:00Z' WHERE campaign_id=?", (camp.campaign_id,))
     conn.commit()
     before = hashlib.sha256(db.read_bytes()).hexdigest()
+    sidecars_before = {suffix: db.with_name(db.name + suffix).exists() for suffix in ("-wal", "-shm")}
     schema_before = conn.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall()
     rows_before = conn.execute("SELECT COUNT(*) FROM burnin_campaigns").fetchone()[0]
     payload = database_diagnosis(str(db), max_heartbeat_age=1)
@@ -72,8 +73,9 @@ def test_database_diagnosis_is_read_only_and_fails_closed_on_unknown_exposure(tm
     assert state["runtime_pending_orders_available"] is False
     assert payload["cleanup_plan"][0]["classification"] == "MANUAL_REVIEW"
     assert payload["cleanup_plan"][0]["convert_unknown_exposure_to_zero"] is False
-    assert not db.with_name(db.name + "-wal").exists()
-    assert not db.with_name(db.name + "-shm").exists()
+    # Diagnosis must not change WAL sidecar presence; canonical runtime setup
+    # may already have created them while another connection remains open.
+    assert {suffix: db.with_name(db.name + suffix).exists() for suffix in ("-wal", "-shm")} == sidecars_before
     assert conn.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall() == schema_before
     assert conn.execute("SELECT COUNT(*) FROM burnin_campaigns").fetchone()[0] == rows_before
     conn.close()
@@ -639,10 +641,10 @@ def test_watch_cleans_dead_worker_and_terminalizes_both_run_tables(monkeypatch, 
     monkeypatch.setattr("alphaforge.burnin_ops._pid_alive", lambda pid: False)
     result = watch_once(conn, camp.campaign_id)
     assert result["cleaned_dead_worker"] is True
-    assert conn.execute("SELECT status,end_time FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()["status"] == "FAILED"
-    assert conn.execute("SELECT status,ended_at FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()["status"] == "FAILED"
+    assert conn.execute("SELECT status,end_time FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()["status"] == "RECOVERY_REQUIRED"
+    assert conn.execute("SELECT status,ended_at FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()["status"] == "RECOVERY_REQUIRED"
     row = conn.execute("SELECT campaign_status,worker_pid,worker_started_at FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()
-    assert row["campaign_status"] == "FAILED" and row["worker_pid"] is None and row["worker_started_at"] is None
+    assert row["campaign_status"] == "RECOVERY_REQUIRED" and row["worker_pid"] is None and row["worker_started_at"] is None
 
 
 def test_pause_is_operator_activity_not_runtime_heartbeat_and_terminalizes_run(tmp_path):

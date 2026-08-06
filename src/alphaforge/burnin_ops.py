@@ -478,6 +478,10 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("source_provenance_present", "UNAVAILABLE", f"{exc.__class__.__name__}:{exc}")
 
     if conn is not None:
+        # Preflight is the supported fail-closed entry point for stale worker
+        # ownership. It preserves all evidence and requires the normal recovery
+        # drill before any continuation can resume.
+        cleanup_dead_worker(conn, cid)
         dup = conn.execute("SELECT COUNT(*) FROM burnin_campaigns WHERE release_id=? AND config_hash=? AND strategy_config_hash=? AND universe_hash=? AND campaign_status IN ('CREATED','STARTING','RUNNING','PAUSED','RECOVERY_REQUIRED')", (release_id, ident["config_hash"], ident["strategy_config_hash"], ident["universe_hash"])).fetchone()[0]
         add("no_duplicate_active_campaign", "PASS" if int(dup) == 0 else "FAIL", {"candidate_campaign_id": cid, "duplicates": dup})
         stale = conn.execute("SELECT COUNT(*) FROM burnin_campaigns WHERE campaign_id=? AND worker_pid IS NOT NULL AND campaign_status IN ('CREATED','STARTING','RUNNING','PAUSED','RECOVERY_REQUIRED')", (cid,)).fetchone()[0]
@@ -785,15 +789,19 @@ def _startup_terminalization_evidence(conn: sqlite3.Connection, campaign_id: str
     }
 
 def cleanup_dead_worker(conn: sqlite3.Connection, campaign_id: str) -> bool:
-    """Fail terminally and clear attachment metadata for a dead active worker."""
+    """Fail closed into the supported recovery workflow for a dead worker."""
     campaign = get_campaign(conn, campaign_id)
     if not campaign or campaign.get("campaign_status") not in {"STARTING", "RUNNING"}:
         return False
     pid = campaign.get("worker_pid")
     if not pid or _pid_alive(pid):
         return False
-    _mark_campaign_failed(conn, campaign_id, "DEAD_WORKER", {"worker_pid": pid})
-    event(conn, campaign_id, "PHASE9_DEAD_WORKER_CLEANED", burnin_run_id=campaign.get("active_run_id"), details={"worker_pid": pid})
+    run_id, now = campaign.get("active_run_id"), utc_now()
+    if run_id:
+        conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status IN ('STARTING','RUNNING')", (now, run_id))
+        conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,?) WHERE campaign_id=? AND burnin_run_id=? AND status IN ('STARTING','RUNNING')", (now, campaign_id, run_id))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='DEAD_WORKER_RECOVERY_REQUIRED', worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (campaign_id,))
+    event(conn, campaign_id, "PHASE9_DEAD_WORKER_RECOVERY_REQUIRED", burnin_run_id=run_id, details={"worker_pid": pid, "last_heartbeat_at": campaign.get("last_heartbeat_at"), "evidence_preserved": True})
     conn.commit()
     return True
 

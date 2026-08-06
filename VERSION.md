@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PAPER burn-in SQLite contention recovery (2026-08-01)
+
+- Current version: Phase 9 PAPER burn-in contention hotfix
+- Current phase: operational burn-in resilience and stale-worker recovery
+- Runtime maturity: resolver/qualification SQLite locks use bounded fresh-connection retries and skip exhausted cycles without stopping scanning or runtime heartbeat
+- BACKTEST/PAPER/LIVE alignment: decision, reject, and qualification thresholds are unchanged; the patch affects PAPER operational scheduling only
+- Lifecycle coverage: evidence and lifecycle rows remain deterministic; stale dead-worker continuations transition to `RECOVERY_REQUIRED`
+- Execution realism coverage: unchanged; no fills, costs, or qualification gates are weakened
+- Known critical risks: SQLite remains a single-writer database; sustained contention can defer qualification and requires operator review
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
+
 ## PR #310 SQLite contention revision (2026-08-01)
 
 - Current version: Phase A isolated shadow writer revision

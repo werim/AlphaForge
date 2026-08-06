@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event as sqlalchemy_event, text
 import logging
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
@@ -143,6 +143,17 @@ def init_db(database_url: str | None = None) -> Engine:
             if compatibility.schema_status == "BLOCKED":
                 raise RuntimeError(f"DATABASE_SCHEMA_BLOCKED:{json.dumps(compatibility.as_dict(), sort_keys=True)}")
     engine = create_engine(resolved_database_url, future=True)
+    if url.get_backend_name().startswith("sqlite"):
+        @sqlalchemy_event.listens_for(engine, "connect")
+        def _sqlite_runtime_pragmas(dbapi_connection: Any, _record: Any) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
     ddl = [
         """
         CREATE TABLE IF NOT EXISTS signals (

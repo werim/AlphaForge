@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import argparse, asyncio, contextlib, csv, hashlib, json, os, sqlite3, subprocess
+import argparse, asyncio, contextlib, csv, hashlib, json, os, sqlite3, subprocess, sys, time
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event as sqlalchemy_event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, canonical_hash, config_hash as make_config_hash, persist_burnin_run, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
@@ -19,6 +20,8 @@ CAMPAIGN_STATUSES = {"CREATED","STARTING","RUNNING","PAUSED","RECOVERY_REQUIRED"
 ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode", "git_commit")
 RUNTIME_ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode")
 CAMPAIGN_RUNTIME_IDENTITY_FIELDS = (*RUNTIME_ATTACHMENT_IDENTITY_FIELDS, "execution_cost_config_hash")
+SQLITE_LOCK_RETRY_ATTEMPTS = 4
+SQLITE_LOCK_RETRY_BASE_SECONDS = 0.05
 
 PHASE8_DDL = [
 """CREATE TABLE IF NOT EXISTS burnin_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL UNIQUE,release_id TEXT NOT NULL,campaign_status TEXT NOT NULL,created_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,expected_duration_seconds REAL,observed_duration_seconds REAL,target_decisions INTEGER,target_closed_trades INTEGER,target_reject_forward_outcomes INTEGER,active_run_id TEXT,config_hash TEXT NOT NULL,strategy_config_hash TEXT NOT NULL,universe_hash TEXT NOT NULL,git_commit TEXT NOT NULL,execution_cost_config_hash TEXT,source_provenance_json TEXT NOT NULL,symbols_json TEXT NOT NULL,intervals_json TEXT NOT NULL,restart_count INTEGER NOT NULL DEFAULT 0,last_heartbeat_at TEXT,last_error TEXT,qualification_status TEXT,latest_qualification_id TEXT,evidence_completeness_status TEXT NOT NULL DEFAULT 'UNKNOWN',schema_version TEXT NOT NULL,UNIQUE(campaign_id, release_id))""",
@@ -31,6 +34,54 @@ PHASE8_DDL = [
 
 def _exec(conn: Any, sql: str, params: Mapping[str, Any] | None = None):
     return conn.execute(sql if isinstance(conn, sqlite3.Connection) else text(sql), params or {})
+
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    message = str(getattr(exc, "orig", exc)).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+def configure_sqlite_engine(engine: Engine) -> Engine:
+    """Apply the runtime SQLite contract to every DBAPI connection in an engine."""
+    if engine.dialect.name != "sqlite" or getattr(engine, "_alphaforge_sqlite_configured", False):
+        return engine
+    @sqlalchemy_event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+    setattr(engine, "_alphaforge_sqlite_configured", True)
+    # Existing pooled handles predate the listener; discard them so the next
+    # checkout is fresh and receives the complete PRAGMA contract.
+    engine.dispose()
+    return engine
+
+def _with_fresh_lock_retry(engine: Engine, operation: Any, *, attempts: int = SQLITE_LOCK_RETRY_ATTEMPTS) -> Any:
+    """Retry only SQLite contention; each failed transaction is rolled back and closed."""
+    configure_sqlite_engine(engine)
+    for attempt in range(max(1, attempts)):
+        conn = engine.connect()
+        transaction = conn.begin()
+        try:
+            result = operation(conn)
+            transaction.commit()
+            return result
+        except OperationalError as exc:
+            transaction.rollback()
+            # Do not return a connection associated with a failed locked
+            # transaction to the pool: the retry must open a new DBAPI handle.
+            conn.invalidate()
+            if not _is_sqlite_lock_error(exc) or attempt + 1 >= attempts:
+                raise
+            time.sleep(SQLITE_LOCK_RETRY_BASE_SECONDS * (2 ** attempt))
+        except BaseException:
+            transaction.rollback()
+            raise
+        finally:
+            conn.close()
 
 def bootstrap_campaign_schema(conn: Any) -> None:
     bootstrap_burnin_schema(conn)
@@ -238,6 +289,8 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
     drawdown, execution, concentration, release gates, operator ack, rollback/runbook/full-test evidence,
     reconciliation, and mutation attempts.
     """
+    if isinstance(conn, Engine):
+        return _with_fresh_lock_retry(conn, lambda fresh: materialize_campaign_aggregate(fresh, campaign_id))
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
@@ -312,18 +365,25 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
 
 def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresholds|None=None) -> dict[str,Any]:
-    with engine.begin() as conn:
+    configure_sqlite_engine(engine)
+    def rebuild(conn: Any) -> tuple[str, dict[str, Any]]:
         bootstrap_campaign_schema(conn)
         aggregate_run_id = materialize_campaign_aggregate(conn, campaign_id)
         agg = aggregate_campaign(conn, campaign_id)
         c = get_campaign(conn, campaign_id)
         if not c or agg.get("status") != "OK":
             raise KeyError("campaign evidence missing")
+        return aggregate_run_id, agg
+    # Aggregate replacement is its own retryable transaction. A lock rollback
+    # therefore cannot leave a partial aggregate or hold the connection used by
+    # qualification/evidence-event persistence.
+    aggregate_run_id, agg = _with_fresh_lock_retry(engine, rebuild)
     snap = BurnInQualificationEngine(engine, thresholds).evaluate(aggregate_run_id)
-    with engine.begin() as conn:
+    def persist_snapshot(conn: Any) -> None:
         _exec(conn,"UPDATE burnin_qualification_snapshots SET campaign_id=:cid, source_run_ids_json=:runs, aggregate_evidence_hash=:eh WHERE qualification_id=:qid",{"cid":campaign_id,"runs":json.dumps(agg["metrics"]["source_run_ids"]),"eh":agg["evidence_hash"],"qid":snap.qualification_id})
         _exec(conn,"UPDATE burnin_campaigns SET qualification_status=:s, latest_qualification_id=:qid, evidence_completeness_status=:ev WHERE campaign_id=:cid",{"cid":campaign_id,"s":snap.status,"qid":snap.qualification_id,"ev":snap.evidence_completeness_status})
         event(conn,campaign_id,"QUALIFICATION_SNAPSHOT",burnin_run_id=aggregate_run_id,details={"qualification_id":snap.qualification_id,"status":snap.status})
+    _with_fresh_lock_retry(engine, persist_snapshot)
     return {"campaign_id":campaign_id,"qualification_id":snap.qualification_id,"verdict":snap.status,"aggregate_evidence_hash":agg["evidence_hash"],"aggregate_run_id":aggregate_run_id}
 
 def export_campaign_bundle(db_path: str|Path, output_dir: str|Path, campaign_id: str) -> dict[str,Any]:
@@ -440,30 +500,70 @@ class BinanceReadOnlyCandleProvider:
 
 class BurnInCampaignRunner:
     """Operational campaign worker loop for resolver/maintenance progress without enabling LIVE."""
-    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, thresholds: BurnInThresholds | None = None) -> None:
-        self.engine = engine; self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.thresholds = thresholds; self.resolver_failure_count = 0; self._stop_event: asyncio.Event | None = None
+    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
+        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0
+
+    def _qualification_due(self) -> bool:
+        with self.engine.connect() as conn:
+            c = get_campaign(conn, self.campaign_id) or {}
+            count = int(_exec(conn, "SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid", {"cid": self.campaign_id}).scalar() or 0)
+            agg = aggregate_campaign(conn, self.campaign_id)
+        metrics = agg.get("metrics", {})
+        first_evidence = not c.get("latest_qualification_id") and any(int(metrics.get(key) or 0) > 0 for key in ("sample_count", "closed_trade_count", "completed_rejected_forward_outcomes"))
+        near_completion = any(
+            c.get(target) is not None and int(metrics.get(metric) or 0) >= int(c[target])
+            for target, metric in (("target_decisions", "sample_count"), ("target_closed_trades", "closed_trade_count"), ("target_reject_forward_outcomes", "completed_rejected_forward_outcomes"))
+        )
+        elapsed = time.monotonic() - self._last_qualification_monotonic
+        enough_new = count - self._last_qualification_observation_count >= self.qualification_observation_threshold
+        return first_evidence or near_completion or (elapsed >= self.qualification_interval_seconds and enough_new)
+
+    def _qualify_if_due(self) -> dict[str, Any] | None:
+        if not self._qualification_due():
+            return None
+        result = qualify_campaign(self.engine, self.campaign_id, self.thresholds)
+        with self.engine.connect() as conn:
+            self._last_qualification_observation_count = int(_exec(conn, "SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid", {"cid": self.campaign_id}).scalar() or 0)
+        self._last_qualification_monotonic = time.monotonic()
+        return result
+
+    def _best_effort_failure_event(self, original: BaseException) -> None:
+        try:
+            _with_fresh_lock_retry(self.engine, lambda conn: (
+                bootstrap_campaign_schema(conn),
+                event(conn, self.campaign_id, "RESOLVER_BATCH_FAILED", details={"error": str(original), "failure_count": self.resolver_failure_count}),
+            ))
+        except Exception as event_exc:
+            print(f"AlphaForge resolver failure event unavailable ({event_exc!r}); original={original!r}", file=sys.stderr, flush=True)
 
     def resolver_tick(self) -> dict[str, Any]:
         from alphaforge.burnin_resolver import resolve_campaign_batch
         try:
-            with self.engine.begin() as conn:
+            with self.engine.connect() as conn:
                 bootstrap_campaign_schema(conn)
                 due = _exec(conn, "SELECT symbol, MIN(decision_timestamp) AS start_ts, MAX(due_at) AS end_ts, COUNT(*) AS count FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at <= :now GROUP BY symbol", {"cid": self.campaign_id, "now": utc_now()}).fetchall()
-                candles: dict[str, Any] = {}
-                for row in due:
-                    r = _row_dict(row); candles[r["symbol"]] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"])
+            candles: dict[str, Any] = {}
+            for row in due:
+                r = _row_dict(row); candles[r["symbol"]] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"])
+            def persist_resolution(conn: Any) -> dict[str, int]:
                 counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=utc_now())
                 event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts})
-            q = qualify_campaign(self.engine, self.campaign_id, self.thresholds)
-            with self.engine.begin() as conn:
-                event(conn, self.campaign_id, "RESOLVER_QUALIFICATION_TRIGGERED", details=q)
+                return counts
+            counts = _with_fresh_lock_retry(self.engine, persist_resolution)
+            q = self._qualify_if_due()
+            if q is not None:
+                _with_fresh_lock_retry(self.engine, lambda conn: event(conn, self.campaign_id, "RESOLVER_QUALIFICATION_TRIGGERED", details=q))
             self.resolver_failure_count = 0
             return {"status": "OK", "resolver_counts": counts, "qualification": q}
         except Exception as exc:
+            if isinstance(exc, OperationalError) and not _is_sqlite_lock_error(exc):
+                raise
             self.resolver_failure_count += 1
+            self._best_effort_failure_event(exc)
+            if _is_sqlite_lock_error(exc):
+                print(f"AlphaForge resolver cycle skipped after SQLite lock retries: {exc}", file=sys.stderr, flush=True)
+                return {"status": "LOCK_RETRY_EXHAUSTED", "error": str(exc), "failure_count": self.resolver_failure_count}
             with self.engine.begin() as conn:
-                bootstrap_campaign_schema(conn)
-                event(conn, self.campaign_id, "RESOLVER_BATCH_FAILED", details={"error": str(exc), "failure_count": self.resolver_failure_count})
                 if self.resolver_failure_count >= self.resolver_failure_threshold:
                     _exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:err WHERE campaign_id=:cid", {"cid": self.campaign_id, "err": "RESOLVER_FAILURE_THRESHOLD"})
                     event(conn, self.campaign_id, "CAMPAIGN_PAUSED", details={"reason": "RESOLVER_FAILURE_THRESHOLD"})
@@ -481,17 +581,20 @@ class BurnInCampaignRunner:
 
     async def _maintenance_loop(self) -> None:
         assert self._stop_event is not None
-        last_qualification = 0.0
         while not self._stop_event.is_set():
             await asyncio.sleep(max(0.0, self.maintenance_interval_seconds))
-            with self.engine.begin() as conn:
-                bootstrap_campaign_schema(conn)
-                heartbeat = update_campaign_heartbeat(conn, self.campaign_id)
-                completion = check_campaign_completion(conn, self.campaign_id)
-                status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
-            now_mono = asyncio.get_running_loop().time()
-            if now_mono - last_qualification >= self.qualification_interval_seconds:
-                qualify_campaign(self.engine, self.campaign_id, self.thresholds); last_qualification = now_mono
+            try:
+                with self.engine.begin() as conn:
+                    bootstrap_campaign_schema(conn)
+                    heartbeat = update_campaign_heartbeat(conn, self.campaign_id)
+                    completion = check_campaign_completion(conn, self.campaign_id)
+                    status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
+                self._qualify_if_due()
+            except OperationalError as exc:
+                if not _is_sqlite_lock_error(exc):
+                    raise
+                print(f"AlphaForge maintenance cycle skipped after SQLite contention: {exc}", file=sys.stderr, flush=True)
+                continue
             if completion.get("complete") or status in {"COMPLETED","FAILED","QUALIFIED","SUSPENDED","PAUSED"}:
                 self._stop_event.set(); return
 
