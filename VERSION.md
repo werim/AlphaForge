@@ -1,5 +1,41 @@
 # AlphaForge Version
 
+## PAPER terminalization TOCTOU hardening (2026-08-06)
+
+- Current version: Phase 9 transactional recovery evidence revision
+- Current phase: final in-transaction validation and evidence-bound terminalization
+- Runtime maturity: local recovery gates are re-read under `BEGIN IMMEDIATE`; all status mutations require exactly one row
+- BACKTEST/PAPER/LIVE alignment: PAPER-only recovery; trading and qualification paths unchanged
+- Lifecycle coverage: execution/lifecycle counts, continuation identity, source hashes, and audit evidence are transaction-bound
+- Execution realism coverage: fresh CLEAN reconciliation is bound to an immutable runtime snapshot identity
+- Known critical risks: PID start identity is not persisted on every legacy campaign; missing dead-worker identity fails closed
+- Last audit date: 2026-08-06
+- Live readiness verdict: NOT LIVE READY
+
+## PAPER zero-exposure terminalization follow-up (2026-08-06)
+
+- Current version: Phase 9 PAPER recovery completion hotfix
+- Current phase: explicit zero-exposure operator terminalization and non-blocking contention waits
+- Runtime maturity: resolver and maintenance SQLite waits run off the asyncio event loop; heartbeat and scanning remain schedulable
+- BACKTEST/PAPER/LIVE alignment: PAPER-only recovery operation; decision and qualification behavior unchanged
+- Lifecycle coverage: RECOVERY_REQUIRED continuations can become FAILED only after explicit, complete zero-exposure verification
+- Execution realism coverage: CLEAN reconciliation and available zero runtime/campaign exposure are mandatory
+- Known critical risks: terminalization is intentionally unavailable for any unknown/nonzero exposure or execution lifecycle evidence
+- Last audit date: 2026-08-06
+- Live readiness verdict: NOT LIVE READY
+
+## PAPER burn-in SQLite contention recovery (2026-08-01)
+
+- Current version: Phase 9 PAPER burn-in contention hotfix
+- Current phase: operational burn-in resilience and stale-worker recovery
+- Runtime maturity: resolver/qualification SQLite locks use bounded fresh-connection retries and skip exhausted cycles without stopping scanning or runtime heartbeat
+- BACKTEST/PAPER/LIVE alignment: decision, reject, and qualification thresholds are unchanged; the patch affects PAPER operational scheduling only
+- Lifecycle coverage: evidence and lifecycle rows remain deterministic; stale dead-worker continuations transition to `RECOVERY_REQUIRED`
+- Execution realism coverage: unchanged; no fills, costs, or qualification gates are weakened
+- Known critical risks: SQLite remains a single-writer database; sustained contention can defer qualification and requires operator review
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
+
 ## PR #310 SQLite contention revision (2026-08-01)
 
 - Current version: Phase A isolated shadow writer revision

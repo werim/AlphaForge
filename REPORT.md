@@ -1,3 +1,73 @@
+# PAPER terminalization TOCTOU surgery — 2026-08-06
+
+## Root cause and transaction ordering
+
+The prior operator path validated campaign/runtime exposure, lineage, worker state, executions, and source hashes before acquiring `BEGIN IMMEDIATE`. A concurrent local writer could therefore invalidate the decision before status updates. The revised order is: capture expected continuation and versioned external runtime evidence; acquire `BEGIN IMMEDIATE`; re-read every final local gate through the transaction owner; compare identities/hashes/linkage; execute three exact conditional updates with `rowcount == 1`; insert the audit event; commit. Any validation, row-count, or event failure rolls back the entire transaction.
+
+## External identity, lifecycle, and persistence
+
+Authoritative evidence is bound to runtime snapshot ID, snapshot timestamp, canonical snapshot hash, instance/startup/campaign/run lineage, PAPER mode, reconciliation status, and a 120-second freshness policy. The locally stored snapshot linkage is re-hashed inside the write transaction. Dead-worker evidence requires an append-only recovery event containing the historical PID; PID absence alone is insufficient. Source rows are never rewritten. Strict replay requires the same campaign/run, FAILED statuses in all three records, matching terminalization audit identity, unchanged source hash, and unchanged runtime evidence hash.
+
+## Files, tests, compatibility, and risks
+
+`src/alphaforge/burnin_ops.py` owns the transactional snapshot helpers, evidence model, exact mutations, audit payload, and replay rules. `tests/test_phase9_burnin_ops.py` adds real SQLite mutations between precheck and `BEGIN IMMEDIATE` for campaign/run/status/exposure/reject/execution/lifecycle/source/worker/runtime linkage, trigger-driven zero-row updates, event rollback, identity recording, replay, and unrelated FAILED rejection. Existing resolver/maintenance offload and lock retry remain unchanged and covered by Phase 8/heartbeat tests. The focused Phase 8/Phase 9/heartbeat suite passed 133 tests. The full suite completed with 1,112 passed and 6 skipped; four Alembic graph tests could not run because the environment lacks the installed Alembic package. Compileall and diff validation passed. No schema/export migration or trading behavior change exists. Legacy evidence without immutable identities fails closed; LIVE remains NOT READY.
+
+---
+
+# PAPER recovery completion follow-up — 2026-08-06
+
+## Why and root cause
+
+The contention hotfix correctly moved a dead worker to RECOVERY_REQUIRED, but that status intentionally remained in duplicate-active preflight scope and there was no operator command capable of safely completing the state. A verified zero-exposure campaign could therefore remain blocked forever. Synchronous SQLite busy waits also still ran inside asyncio resolver and maintenance loops.
+
+## Files and behavior
+
+`src/alphaforge/burnin_ops.py` adds the explicit PAPER-only `recover-runtime --terminalize-zero-exposure` path. It requires a dead worker, RECOVERY_REQUIRED campaign/run lineage, complete campaign and runtime query availability, CLEAN unblocked reconciliation, zero positions/orders/orphans/pending rejects, and zero executions/lifecycle executions. It preserves decisions and all source evidence, atomically marks both run tables and the campaign FAILED, and appends `PHASE9_MANUAL_ZERO_EXPOSURE_TERMINALIZED`; event failure rolls the transaction back and replay is idempotent. Without the flag, existing recovery remains fail-closed.
+
+`src/alphaforge/burnin_campaign.py` moves resolver and maintenance ticks to `asyncio.to_thread`; maintenance now uses fresh-connection lock retry. A SQLite busy timeout/retry may occupy its worker thread, but no longer blocks runtime heartbeat or scanner scheduling on the event loop.
+
+## Lifecycle, persistence, export/schema, and compatibility
+
+No schema, export, source hash, observation, decision, lifecycle evidence, trading threshold, qualification gate, or reconciliation gate changes. FAILED is the canonical terminal status for this explicitly abandoned zero-execution continuation. RECOVERY_REQUIRED remains an active blocker until the operator supplies the flag and every gate passes. Existing campaigns require no migration.
+
+## Tests, risks, and recommendation
+
+Tests cover explicit gating, complete/unavailable exposure, atomic rollback when event persistence fails, idempotence, evidence-hash preservation, duplicate-active release, fresh runtime heartbeat during exhausted resolver waits, and multiple locked maintenance cycles. Persistent contention can delay campaign maintenance in worker threads; SQLite remains single-writer. Run repository CI on the pushed PR head and require visible passing checks before merge. LIVE remains NOT READY. The focused burn-in/operations/heartbeat suite passed 120 tests; the full suite passed 1,106 tests with 3 skips; offline CI backtest and output checks, compileall, and diff validation passed. GitHub check visibility could not be queried from this environment because GitHub CLI authentication is unavailable, and flake8 installation was blocked by the environment network proxy; merge still requires the pushed-head Actions checks.
+
+---
+
+# PAPER burn-in SQLite contention surgery — 2026-08-01
+
+## Why and exact root cause
+
+The resolver committed its batch, then synchronously rebuilt the complete synthetic aggregate on every resolver tick. Aggregate delete/copy work shared SQLite with runtime heartbeat and decision writers. Although WAL and a busy timeout were present in the observed database, the aggregate transaction could still lose the single-writer race. Its `OperationalError` entered a broad resolver handler that opened another write transaction to persist `RESOLVER_BATCH_FAILED`; when that insert encountered the same lock, the secondary exception escaped `_resolver_loop`, and `run_foreground` treated it as a task failure.
+
+## Files and runtime behavior
+
+`src/alphaforge/burnin_campaign.py` adds lock-only bounded exponential retry. Every failed attempt rolls back, invalidates and closes the SQLAlchemy connection, then checks out a new DBAPI connection. Aggregate replacement, qualification evaluation, and snapshot/event linkage remain separate transactions. Lock exhaustion increments resolver failures, emits best-effort SQL evidence plus stderr fallback, skips the cycle, and does not set the worker stop event. Non-lock `OperationalError` continues to escape fail-closed. Qualification now runs for first evidence, campaign target proximity, or after both the minimum interval and 25 new observations, rather than on every resolver tick.
+
+`src/alphaforge/persistence.py` and the burn-in runner apply WAL, 30-second busy timeout, `synchronous=NORMAL`, and `foreign_keys=ON` on every SQLAlchemy SQLite connection. `src/alphaforge/burnin_ops.py` makes official preflight/watch cleanup preserve evidence while moving a dead-PID `RUNNING` continuation and campaign to `RECOVERY_REQUIRED`; normal authenticated recovery gates still apply.
+
+## Lifecycle, persistence, schema, export, and compatibility
+
+No trading decision, reject, RR, lifecycle, execution-cost, reconciliation, evidence, or qualification threshold changed. Aggregate source ordering and canonical hashing are unchanged. There is no schema or CSV migration. Transient lock failure may delay the latest qualification snapshot, explicitly preferring stale-but-valid evidence over partial/fabricated evidence. A stale campaign changes state from `RUNNING` to `RECOVERY_REQUIRED`, with an audit event and preserved rows; it is not automatically resumed or qualified.
+
+## Tests and risks
+
+Tests cover first-lock success-on-retry with distinct connections, exhausted resolver locks, secondary event locks, non-lock schema errors, qualification gating, existing concurrent runtime/resolver behavior, runtime heartbeat persistence, and dead-worker continuation transitions. SQLite remains single-writer, so sustained contention can defer maintenance. A new campaign is not required: the failed campaign evidence can be recovered through the supported drill if integrity and reconciliation pass, but the failed worker incident must not itself be relabeled as successful. Starting a clean continuation after recovery is recommended for additional burn-in duration. LIVE remains NOT READY.
+
+## Tests executed
+
+- Focused burn-in, operations, and heartbeat suite: 115 passed.
+- Full suite: 1,094 passed and 6 skipped; four Alembic revision tests could not run because the environment lacks the installed `alembic` package.
+- Python compileall and Git whitespace validation passed.
+
+## Migration and push recommendation
+
+No migration is required. Push is recommended after the focused and full suites pass; operators should run official preflight/recovery for stale campaign `camp_d53aa4fe41a221c2` and audit campaign `camp_8b3c86cda7056d1d` before resuming.
+
+---
+
 # Phase A shadow agent graph surgery report — 2026-08-01
 
 ## PR #310 SQLite contention revision

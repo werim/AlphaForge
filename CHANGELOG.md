@@ -1,3 +1,69 @@
+# PAPER terminalization TOCTOU hardening — 2026-08-06
+
+### Added
+- Final local recovery validation under `BEGIN IMMEDIATE`, immutable runtime-snapshot evidence identity, freshness/lineage gates, and exact row-count enforcement.
+- Deterministic race, conditional-update, strict replay, worker/evidence identity, exposure, execution, lifecycle, and source mutation tests.
+
+### Changed
+- Manual zero-exposure audit events now carry prior/result statuses, local counts, reconciliation snapshot identity/time/hash, source/identity hashes, worker evidence, and replay identity.
+
+### Fixed
+- Closed the validation-to-terminalization TOCTOU window and rejected unrelated FAILED campaigns as successful replays.
+
+### Removed
+- PID absence as sufficient worker-death evidence when no persisted dead-worker identity exists.
+
+### Breaking Changes
+- Legacy RECOVERY_REQUIRED campaigns without fresh lineage-bound runtime evidence and persisted dead-worker identity remain fail-closed.
+
+### Known Issues
+- SQLite remains single-writer; LIVE remains NOT READY.
+
+# PAPER recovery completion follow-up — 2026-08-06
+
+### Added
+- Explicit `recover-runtime --terminalize-zero-exposure` PAPER-only operator action with complete campaign/runtime exposure, reconciliation, and zero-execution gates.
+- Atomic and idempotent campaign/continuation terminalization with append-only audit evidence.
+- Event-loop and repeated-maintenance-lock resilience tests.
+
+### Changed
+- Resolver and maintenance blocking SQLite work now runs in worker threads; maintenance uses the same fresh-connection retry contract.
+
+### Fixed
+- Safely verified RECOVERY_REQUIRED campaigns can now become canonical FAILED records and stop blocking future launch identity.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None. The new terminalization behavior is inaccessible without the explicit operator flag.
+
+### Known Issues
+- Unknown or nonzero exposure remains permanently fail-closed pending operator reconciliation. LIVE remains NOT READY.
+
+# PAPER burn-in SQLite contention hotfix — 2026-08-01
+
+### Added
+- Bounded exponential SQLite lock retry with rollback, invalidation, and a fresh connection for aggregate and qualification writes.
+- Observation/interval/completion-aware qualification scheduling and stderr fallback diagnostics.
+- Dead-worker transition into the supported `RECOVERY_REQUIRED` workflow during official preflight/watch cleanup.
+
+### Changed
+- Resolver lock exhaustion skips one cycle and preserves runtime/scanner tasks instead of pausing or terminating the worker.
+- Canonical SQLAlchemy SQLite engines consistently apply WAL, 30-second busy timeout, `synchronous=NORMAL`, and foreign keys.
+
+### Fixed
+- Secondary `RESOLVER_BATCH_FAILED` persistence errors no longer replace the original resolver error.
+
+### Removed
+- Qualification rebuild on every 30-second resolver tick.
+
+### Breaking Changes
+- None; no schema or threshold migration. Dead stale workers are now visibly fail-closed as `RECOVERY_REQUIRED` rather than left `RUNNING`.
+
+### Known Issues
+- SQLite still permits only one writer; persistent contention defers resolver evidence until a later cycle. LIVE remains NOT READY.
+
 # Phase A shadow agent graph — 2026-08-01
 
 ### Fixed — PR #310 SQLite contention revision
