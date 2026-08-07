@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PAPER terminalization TOCTOU hardening (2026-08-06)
+
+- Current version: Phase 9 transactional recovery evidence revision
+- Current phase: final in-transaction validation and evidence-bound terminalization
+- Runtime maturity: local recovery gates are re-read under `BEGIN IMMEDIATE`; all status mutations require exactly one row
+- BACKTEST/PAPER/LIVE alignment: PAPER-only recovery; trading and qualification paths unchanged
+- Lifecycle coverage: execution/lifecycle counts, continuation identity, source hashes, and audit evidence are transaction-bound
+- Execution realism coverage: fresh CLEAN reconciliation is bound to an immutable runtime snapshot identity
+- Known critical risks: PID start identity is not persisted on every legacy campaign; missing dead-worker identity fails closed
+- Last audit date: 2026-08-06
+- Live readiness verdict: NOT LIVE READY
+
 ## PAPER zero-exposure terminalization follow-up (2026-08-06)
 
 - Current version: Phase 9 PAPER recovery completion hotfix

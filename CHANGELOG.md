@@ -1,3 +1,24 @@
+# PAPER terminalization TOCTOU hardening — 2026-08-06
+
+### Added
+- Final local recovery validation under `BEGIN IMMEDIATE`, immutable runtime-snapshot evidence identity, freshness/lineage gates, and exact row-count enforcement.
+- Deterministic race, conditional-update, strict replay, worker/evidence identity, exposure, execution, lifecycle, and source mutation tests.
+
+### Changed
+- Manual zero-exposure audit events now carry prior/result statuses, local counts, reconciliation snapshot identity/time/hash, source/identity hashes, worker evidence, and replay identity.
+
+### Fixed
+- Closed the validation-to-terminalization TOCTOU window and rejected unrelated FAILED campaigns as successful replays.
+
+### Removed
+- PID absence as sufficient worker-death evidence when no persisted dead-worker identity exists.
+
+### Breaking Changes
+- Legacy RECOVERY_REQUIRED campaigns without fresh lineage-bound runtime evidence and persisted dead-worker identity remain fail-closed.
+
+### Known Issues
+- SQLite remains single-writer; LIVE remains NOT READY.
+
 # PAPER recovery completion follow-up — 2026-08-06
 
 ### Added

@@ -1,3 +1,19 @@
+# PAPER terminalization TOCTOU surgery — 2026-08-06
+
+## Root cause and transaction ordering
+
+The prior operator path validated campaign/runtime exposure, lineage, worker state, executions, and source hashes before acquiring `BEGIN IMMEDIATE`. A concurrent local writer could therefore invalidate the decision before status updates. The revised order is: capture expected continuation and versioned external runtime evidence; acquire `BEGIN IMMEDIATE`; re-read every final local gate through the transaction owner; compare identities/hashes/linkage; execute three exact conditional updates with `rowcount == 1`; insert the audit event; commit. Any validation, row-count, or event failure rolls back the entire transaction.
+
+## External identity, lifecycle, and persistence
+
+Authoritative evidence is bound to runtime snapshot ID, snapshot timestamp, canonical snapshot hash, instance/startup/campaign/run lineage, PAPER mode, reconciliation status, and a 120-second freshness policy. The locally stored snapshot linkage is re-hashed inside the write transaction. Dead-worker evidence requires an append-only recovery event containing the historical PID; PID absence alone is insufficient. Source rows are never rewritten. Strict replay requires the same campaign/run, FAILED statuses in all three records, matching terminalization audit identity, unchanged source hash, and unchanged runtime evidence hash.
+
+## Files, tests, compatibility, and risks
+
+`src/alphaforge/burnin_ops.py` owns the transactional snapshot helpers, evidence model, exact mutations, audit payload, and replay rules. `tests/test_phase9_burnin_ops.py` adds real SQLite mutations between precheck and `BEGIN IMMEDIATE` for campaign/run/status/exposure/reject/execution/lifecycle/source/worker/runtime linkage, trigger-driven zero-row updates, event rollback, identity recording, replay, and unrelated FAILED rejection. Existing resolver/maintenance offload and lock retry remain unchanged and covered by Phase 8/heartbeat tests. The focused Phase 8/Phase 9/heartbeat suite passed 133 tests. The full suite completed with 1,112 passed and 6 skipped; four Alembic graph tests could not run because the environment lacks the installed Alembic package. Compileall and diff validation passed. No schema/export migration or trading behavior change exists. Legacy evidence without immutable identities fails closed; LIVE remains NOT READY.
+
+---
+
 # PAPER recovery completion follow-up — 2026-08-06
 
 ## Why and root cause

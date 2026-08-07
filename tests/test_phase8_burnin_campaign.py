@@ -138,7 +138,7 @@ def test_materialize_lock_retries_with_fresh_connection(tmp_path, monkeypatch):
 
     def flaky(conn, campaign_id):
         if not isinstance(conn, campaign_module.Engine):
-            seen.append(id(conn.connection))
+            seen.append(conn.connection.driver_connection)
             if len(seen) == 1:
                 raise OperationalError("DELETE", {}, sqlite3.OperationalError("database is locked"))
         return original(conn, campaign_id)
@@ -149,7 +149,7 @@ def test_materialize_lock_retries_with_fresh_connection(tmp_path, monkeypatch):
     finally:
         engine.dispose()
     assert len(seen) == 2
-    assert seen[0] != seen[1]
+    assert seen[0] is not seen[1]
 
 
 def test_resolver_lock_exhaustion_and_failure_event_lock_do_not_escape(tmp_path, monkeypatch, capsys):

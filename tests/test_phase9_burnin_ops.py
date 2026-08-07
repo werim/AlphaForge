@@ -647,10 +647,20 @@ def test_watch_cleans_dead_worker_and_terminalizes_both_run_tables(monkeypatch, 
     assert row["campaign_status"] == "RECOVERY_REQUIRED" and row["worker_pid"] is None and row["worker_started_at"] is None
 
 
-def _clean_runtime_recovery():
+def _prepare_terminalization_evidence(conn, camp, run):
+    _runtime_table(conn, camp, run)
+    for definition in ("instance_id TEXT", "startup_id TEXT", "process_id INTEGER", "mode TEXT"):
+        try: conn.execute(f"ALTER TABLE runtime_state_snapshots ADD COLUMN {definition}")
+        except sqlite3.OperationalError: pass
+    conn.execute("UPDATE runtime_state_snapshots SET instance_id='runtime',startup_id='startup',process_id=999999,mode='PAPER',timestamp=?", (utc_now(),))
+    event(conn, camp.campaign_id, "PHASE9_DEAD_WORKER_RECOVERY_REQUIRED", burnin_run_id=run, details={"worker_pid": 999999, "evidence_preserved": True})
+    conn.commit()
+
+
+def _clean_runtime_recovery(conn):
+    latest = dict(conn.execute("SELECT * FROM runtime_state_snapshots ORDER BY id DESC LIMIT 1").fetchone())
     return {
-        "blocked": False, "query_errors": [], "kill_switch_active": False, "reconciliation_status": "CLEAN",
-        "latest": {"mode": "PAPER"},
+        "blocked": False, "query_errors": [], "kill_switch_active": False, "reconciliation_status": "CLEAN", "latest": latest,
         "current_exposure_check": {name: 0 for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")},
         "availability": {"active_positions_available": True, "pending_orders_available": True, "orphan_evidence_available": True, "kill_switch_available": True},
     }
@@ -663,8 +673,9 @@ def test_explicit_zero_exposure_terminalization_is_atomic_idempotent_and_unblock
     conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
     conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED' WHERE campaign_id=? AND burnin_run_id=?", (camp.campaign_id, run))
     conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,)); conn.commit()
+    _prepare_terminalization_evidence(conn, camp, run)
     before = ops._campaign_source_evidence_hash(conn, camp.campaign_id)
-    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery())
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery(conn))
 
     result = ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
     assert result["status"] == "PASS" and result["idempotent_replay"] is False
@@ -687,10 +698,11 @@ def test_recovery_required_terminalization_requires_explicit_flag_and_complete_e
     monkeypatch.setattr(ops, "recovery_drill", lambda *_: {"status": "FAIL", "failure": "STALE_OR_INVALID_CONTINUATION_REQUIRES_MANUAL_RECOVERY"})
     assert ops.main(["--db", str(db), "recover-runtime", "--campaign-id", camp.campaign_id]) == 1
     assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RECOVERY_REQUIRED"
-    unavailable = _clean_runtime_recovery(); unavailable["availability"]["orphan_evidence_available"] = False
+    _prepare_terminalization_evidence(conn, camp, run)
+    unavailable = _clean_runtime_recovery(conn); unavailable["availability"]["orphan_evidence_available"] = False
     monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: unavailable)
     result = ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
-    assert result["status"] == "FAIL_CLOSED" and "runtime_exposure_available" in result["failure_reasons"]
+    assert result["status"] == "FAIL_CLOSED" and "RUNTIME_EXPOSURE_UNAVAILABLE" in result["failure_reasons"]
     assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RECOVERY_REQUIRED"
 
 
@@ -701,12 +713,80 @@ def test_manual_terminalization_event_failure_rolls_back_all_statuses(monkeypatc
     conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
     conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
     conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,)); conn.commit()
-    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery())
+    _prepare_terminalization_evidence(conn, camp, run)
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery(conn))
     monkeypatch.setattr(ops, "event", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("event failed")))
     with pytest.raises(sqlite3.OperationalError, match="event failed"):
         ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
     assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RECOVERY_REQUIRED"
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+
+
+@pytest.mark.parametrize(("mutation", "reason"), [
+    ("campaign_status", "CAMPAIGN_STATUS_CHANGED"),
+    ("active_run", "ACTIVE_RUN_CHANGED"),
+    ("continuation_status", "CONTINUATION_STATUS_CHANGED"),
+    ("open_position", "OPEN_POSITIONS_NONZERO"),
+    ("pending_reject", "PENDING_REJECTS_NONZERO"),
+    ("execution", "EXECUTIONS_NONZERO_OR_UNAVAILABLE"),
+    ("lifecycle", "LIFECYCLE_EXECUTIONS_NONZERO"),
+    ("source", "SOURCE_HASH_CHANGED"),
+    ("worker_identity", "WORKER_IDENTITY_CHANGED"),
+    ("external_linkage", "EXTERNAL_EVIDENCE_LINKAGE_CHANGED"),
+])
+def test_terminalization_revalidates_local_state_inside_immediate_transaction(monkeypatch, tmp_path, mutation, reason):
+    import alphaforge.burnin_ops as ops
+    from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,)); conn.commit()
+    _prepare_terminalization_evidence(conn, camp, run)
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery(conn))
+
+    def mutate():
+        other = sqlite3.connect(db); other.row_factory = sqlite3.Row
+        if mutation == "campaign_status": other.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED' WHERE campaign_id=?", (camp.campaign_id,))
+        elif mutation == "active_run": other.execute("UPDATE burnin_campaigns SET active_run_id='changed' WHERE campaign_id=?", (camp.campaign_id,))
+        elif mutation == "continuation_status": other.execute("UPDATE burnin_campaign_runs SET status='FAILED' WHERE campaign_id=? AND burnin_run_id=?", (camp.campaign_id, run))
+        elif mutation == "open_position": persist_pending_position(other, trade_id="race", campaign_id=camp.campaign_id, burnin_run_id=run, signal_id="s", symbol="BTCUSDT", side="LONG", entry_time=utc_now(), planned_entry=1, simulated_fill=1, stop=.9, target=1.2, quantity=1, notional=1, entry_spread=0, entry_slippage=0, entry_fee=0, regime="TREND", source_provenance={})
+        elif mutation == "pending_reject": persist_pending_reject_label(other, campaign_id=camp.campaign_id, burnin_run_id=run, reject_decision_id="race", signal_id="s", symbol="BTCUSDT", side="LONG", decision_timestamp=utc_now(), entry=1, stop=.9, target=1.2, horizon_seconds=60, execution_cost_assumptions={}, regime="TREND", reject_reason="LOW_CONFIDENCE", source_provenance={})
+        elif mutation == "execution": persist_burnin_trade_outcome(other, outcome_id="race", burnin_run_id=run, release_id=camp.release_id, trade_id="race", symbol="BTCUSDT", regime="TREND", gross_r=0, gross_pnl=0, costs={}, net_r=0, net_pnl=0, exit_reason="CANCELLED")
+        elif mutation in {"lifecycle", "source"}: persist_burnin_observation(other, observation_id="race", burnin_run_id=run, release_id=camp.release_id, execution_mode="PAPER", decision="REJECTED", lifecycle_state="ENTRY_TRIGGERED" if mutation == "lifecycle" else "SIGNAL_REJECTED", source_provenance={})
+        elif mutation == "worker_identity": other.execute("UPDATE burnin_campaign_events SET details_json=? WHERE campaign_id=? AND event_type='PHASE9_DEAD_WORKER_RECOVERY_REQUIRED'", (json.dumps({"worker_pid": 888888}), camp.campaign_id))
+        elif mutation == "external_linkage": other.execute("UPDATE runtime_state_snapshots SET startup_id='changed' WHERE id=1")
+        other.commit(); other.close()
+    monkeypatch.setattr(ops, "_terminalization_pre_begin_hook", mutate)
+    result = ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
+    assert result["status"] == "FAIL_CLOSED" and reason in result["failure_reasons"]
+    assert conn.execute("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] != "FAILED"
+
+
+@pytest.mark.parametrize("target", ["run", "campaign"])
+def test_terminalization_requires_exactly_one_conditional_update(monkeypatch, tmp_path, target):
+    import alphaforge.burnin_ops as ops
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,)); conn.commit()
+    _prepare_terminalization_evidence(conn, camp, run)
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery(conn))
+    table = "burnin_runs" if target == "run" else "burnin_campaigns"
+    column = "status" if target == "run" else "campaign_status"
+    conn.execute(f"CREATE TRIGGER ignore_terminal_{target} BEFORE UPDATE OF {column} ON {table} BEGIN SELECT RAISE(IGNORE); END"); conn.commit()
+    result = ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
+    assert result["status"] == "FAIL_CLOSED" and result["failure_reasons"] == ["CONDITIONAL_UPDATE_ROWCOUNT_MISMATCH"]
+    assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RECOVERY_REQUIRED"
+
+
+def test_unrelated_failed_campaign_is_not_terminalization_replay(tmp_path):
+    import alphaforge.burnin_ops as ops
+    _, conn = _conn(tmp_path); camp, _ = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED' WHERE campaign_id=?", (camp.campaign_id,)); conn.commit()
+    with pytest.raises(RuntimeError, match="NO_MATCHING_TERMINALIZATION_AUDIT"):
+        ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
 
 
 def test_pause_is_operator_activity_not_runtime_heartbeat_and_terminalizes_run(tmp_path):
