@@ -12,6 +12,18 @@
 - Last audit date: 2026-08-01
 - Live readiness verdict: NOT LIVE READY
 
+## PR #311 Control Center correctness revision (2026-08-01)
+
+- Current version: Phase 9 PAPER Control Center pre-limit reject and worker-postcondition revision
+- Current phase: merge-blocker correctness and process-safe operation ownership
+- Runtime maturity: campaign-wide canonical reject semantics and bounded pause worker verification are fixture-tested; Windows acceptance remains pending
+- BACKTEST/PAPER/LIVE alignment: PAPER-only control remains enforced; trading paths are unchanged
+- Lifecycle coverage: PAUSED campaign and stopped/detached worker are independently verified; ambiguous evidence is partial failure
+- Execution realism coverage: no synthetic evidence; missing identity/reason/process evidence remains explicit
+- Known critical risks: PID command-line/start identity is not canonical and live Windows lease/polling behavior is unverified
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
+
 ## Phase A shadow agent graph (2026-08-01)
 
 - Current version: Phase A agent graph foundation
@@ -96,3 +108,27 @@
 - **Critical risks:** non-SQLite schema doctor coverage and ambiguous legacy exposure shapes require manual migration
 - **Last audit:** 2026-07-24
 - **Live readiness:** **NOT READY** — full suite and production database validation remain operator gates
+
+## PAPER Control Center backend (2026-08-01)
+
+- Current version: Phase 9 PAPER Control Center backend adapter
+- Current phase: canonical burn-in observation and guarded operator control
+- Runtime maturity: read-only, schema-aware APIs plus verified canonical CLI pause/resume; real Windows burn-in acceptance remains pending
+- BACKTEST/PAPER/LIVE alignment: PAPER-only guard; trading decision paths are unchanged and LIVE control is rejected
+- Lifecycle coverage: canonical campaign/run pause and continuation transitions are reused and postcondition checked; no STOPPED state is fabricated
+- Execution realism coverage: canonical persisted decisions, positions, rejects, heartbeat and worker process evidence only; unavailable values remain null
+- Known critical risks: no live Windows worker validation; PID command-line identity is not canonical; sustained burn-in evidence is still required
+- Last audit date: 2026-08-01
+- Live readiness verdict: NOT LIVE READY
+
+## PR #311 deployment compatibility revision (2026-08-06)
+
+- Current version: Phase 9 PAPER Control Center deployment adapter
+- Current phase: route/CORS/entry-point and health-contract compatibility
+- Runtime maturity: backend aliases, diagnostics, exact-origin CORS, and local executable are testable; external SPA acceptance remains pending
+- BACKTEST/PAPER/LIVE alignment: reads report typed configured mode; control actions remain PAPER-only
+- Lifecycle coverage: unchanged; canonical pause/resume postconditions and audit remain enforced
+- Execution realism coverage: database, runtime, campaign, and worker health are reported separately without fabricated evidence
+- Known critical risks: hosted-browser local-network policy and external frontend contract remain deployment acceptance gates
+- Last audit date: 2026-08-06
+- Live readiness verdict: NOT LIVE READY

@@ -3770,3 +3770,65 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - PyPI and GitHub API access were blocked by proxy HTTP 403; clean Python 3.11 dependency parity and the GitHub Actions run ID remain unverified.
 - The exact config command cannot import the src-layout package without installation; a diagnostic `PYTHONPATH=src` invocation passes.
+
+## 2026-08-01 — PAPER Control Center backend
+
+### Added
+- Read-only, source-attributed PAPER campaign, evidence, preflight, event, and bounded/redacted log endpoints.
+- Token-authenticated, locked pause/resume adapters over the canonical burn-in CLI with postcondition verification and sanitized audit records.
+
+### Changed
+- Dashboard application now mounts the `/api` Control Center router without changing frontend behavior.
+
+### Fixed
+- Unknown metrics and zero-denominator rates remain null/unavailable rather than fabricated zero values.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; existing dashboard routes are preserved.
+
+### Known Issues
+- No canonical campaign stop operation exists; live Windows campaign and worker behavior still requires operator validation.
+
+## 2026-08-01 — PR #311 merge-blocker corrections
+
+### Added
+- Campaign-wide, pre-limit rejected-observation deduplication/count and reason-distribution metadata.
+- Bounded pause worker postcondition polling and owner-token filesystem operation leases.
+
+### Changed
+- Pause succeeds only when both canonical PAUSED state and worker stop/detach evidence are verified.
+
+### Fixed
+- Reject totals no longer describe the limited response page, and stale owners cannot remove replacement leases.
+
+### Removed
+- Pending reject-label queue rows from the reject-history endpoint.
+
+### Breaking Changes
+- None; existing endpoint paths and `reject_total` name are retained.
+
+### Known Issues
+- Live Windows worker polling and stale lease takeover acceptance remain outstanding.
+
+## 2026-08-06 — PR #311 deployment compatibility
+
+### Added
+- Frontend-compatible route aliases, configurable exact-origin CORS, operator diagnostics, and the `python -m alphaforge.control_center` entry point.
+
+### Changed
+- Health now separates backend, database, runtime, campaign, worker, and control-action status; runtime mode comes from validated configuration.
+
+### Fixed
+- A successful database probe no longer implies that the PAPER runtime or worker is healthy.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; canonical routes and response envelopes remain available.
+
+### Known Issues
+- No separate Control Center SPA source exists in this repository for end-to-end contract verification; hosted HTTPS-to-local-HTTP access remains subject to browser policy.

@@ -1597,3 +1597,24 @@ sqlite3 "$DB" "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT coun
 pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
 pytest -q
 ```
+
+## PAPER Control Center backend
+
+Canonical environment, PowerShell startup, read-first verification, and guarded pause/resume commands are documented in [`CONTROL_CENTER_RUNTIME_MAPPING.md`](CONTROL_CENTER_RUNTIME_MAPPING.md). The API is PAPER-only. It has no campaign stop endpoint because the burn-in CLI has no canonical stop command or STOPPED campaign state.
+
+### Windows PowerShell: Control Center backend entry point
+
+```powershell
+$env:ALPHAFORGE_DB_PATH = "<real DB path>"
+$env:ALPHAFORGE_PROJECT_ROOT = "E:\Projeler\AlphaForge"
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+
+python -m alphaforge.control_center `
+  --host 127.0.0.1 `
+  --port 8000
+
+Invoke-RestMethod http://127.0.0.1:8000/api/health
+Invoke-RestMethod http://127.0.0.1:8000/api/runtime/status
+```
+
+Use repeatable `--cors-origin <origin>` options, or `ALPHAFORGE_CONTROL_CORS_ORIGINS` as a comma-separated exact-origin allowlist, when the frontend does not use a default localhost development origin.
