@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import os
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -21,6 +22,7 @@ from alphaforge.runtime_control import RuntimeControlStore, RuntimeSupervisor
 from alphaforge.release_gates import release_gate_status
 
 from .backtest_control import default_form_values, parse_backtest_form, run_dashboard_backtest
+from .control_center import ControlCenterService, install_error_handler, router as control_center_router
 
 async def _form_dict(request: Request) -> dict[str, str]:
     body = (await request.body()).decode("utf-8")
@@ -39,6 +41,19 @@ from .queries import (
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+def control_cors_origins() -> list[str]:
+    values = os.getenv("ALPHAFORGE_CONTROL_CORS_ORIGINS", "").split(",")
+    origins: list[str] = []
+    for raw in values:
+        origin = raw.strip()
+        if not origin:
+            continue
+        parsed = urlsplit(origin)
+        if (origin == "*" or parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username
+                or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+            raise ValueError(f"invalid ALPHAFORGE_CONTROL_CORS_ORIGINS entry:{origin}")
+        origins.append(origin.rstrip("/"))
+    return list(dict.fromkeys(origins))
 
 
 def _create_dashboard_engine(database_url: str) -> Engine:
@@ -81,6 +96,13 @@ def _status_payload(engine: Engine, control_store: RuntimeControlStore | None = 
 
 def create_app(database_url: str | None = None) -> FastAPI:
     app = FastAPI(title="AlphaForge Dashboard", version="0.1.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=control_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "X-AlphaForge-Control-Token"],
+    )
     resolved_database_url = database_url or load_config_from_env().persistence.database_url
     app.state.engine = _create_dashboard_engine(resolved_database_url)
     app.state.control_engine = create_engine(resolved_database_url, future=True)
@@ -104,6 +126,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 os.environ["ALPHAFORGE_EXECUTION_MODE"] = old_alpha
 
     app.state.runtime_supervisor = RuntimeSupervisor(app.state.control_store, _factory)
+    app.state.control_center = ControlCenterService.from_environment(resolved_database_url)
+    install_error_handler(app)
+    # This FastAPI compatibility release exposes include_router's bookkeeping
+    # object in app.routes; append the already-prefixed APIRoutes so existing
+    # dashboard route introspection continues to see only concrete routes.
+    app.router.routes.extend(control_center_router(app.state.control_center).routes)
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
     @app.on_event("shutdown")

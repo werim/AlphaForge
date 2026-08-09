@@ -48,6 +48,30 @@
 - Last audit date: 2026-08-01
 - Live readiness verdict: NOT LIVE READY
 
+## PR #313 explicit-CORS and composite-freshness revision (2026-08-09)
+
+- Current version: Phase 9 PAPER Control Center finishing safety pass
+- Current phase: explicit browser trust and honest multi-source freshness
+- Runtime maturity: no implicit CORS origins; composite responses preserve per-source evidence without aggregate timestamp fabrication
+- BACKTEST/PAPER/LIVE alignment: unchanged; controls remain PAPER-only
+- Lifecycle coverage: unchanged; canonical pause/resume postconditions remain enforced
+- Execution realism coverage: process presence is distinct from canonical worker health
+- Known critical risks: new GitHub Actions head and real Windows/browser acceptance remain required
+- Last audit date: 2026-08-09
+- Live readiness verdict: NOT LIVE READY
+
+## PR #313 canonical Control Center revision (2026-08-08)
+
+- Current version: Phase 9 PAPER Control Center canonical safety correction
+- Current phase: Python 3.11 CI, persisted freshness, attachment identity, and recovery-boundary verification
+- Runtime maturity: focused Control Center tests pass locally; full suite and current GitHub Actions remain release gates
+- BACKTEST/PAPER/LIVE alignment: observer reads are shared canonical evidence; controls remain PAPER-only and recovery mutation stays in burn-in ops
+- Lifecycle coverage: no new transitions; guarded CLI postconditions observe canonical campaign/run state
+- Execution realism coverage: missing/future/stale timestamps and ambiguous process attachment are explicit, never fabricated healthy/fresh
+- Known critical risks: real Windows PID/lease behavior and sustained PAPER operation remain unverified
+- Last audit date: 2026-08-08
+- Live readiness verdict: NOT LIVE READY
+
 ## Phase A shadow agent graph (2026-08-01)
 
 - Current version: Phase A agent graph foundation

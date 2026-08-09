@@ -3836,3 +3836,64 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - PyPI and GitHub API access were blocked by proxy HTTP 403; clean Python 3.11 dependency parity and the GitHub Actions run ID remain unverified.
 - The exact config command cannot import the src-layout package without installation; a diagnostic `PYTHONPATH=src` invocation passes.
+
+## PR #313 Control Center backend baseline
+
+### Added
+- Read-only, source-attributed PAPER campaign, evidence, preflight, event, and bounded/redacted log endpoints.
+- Token-authenticated, locked pause/resume adapters over the canonical burn-in CLI with postcondition verification and sanitized audit records.
+
+### Changed
+- Dashboard application now mounts the `/api` Control Center router without changing frontend behavior.
+
+### Fixed
+- Unknown metrics and zero-denominator rates remain null/unavailable rather than fabricated zero values.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; existing dashboard routes are preserved.
+
+### Known Issues
+- No canonical campaign stop operation exists; live Windows campaign and worker behavior still requires operator validation.
+
+## 2026-08-08 — PR #313 canonical safety correction
+
+### Added
+- Canonical per-source freshness states and attachment-identity worker verification tests.
+
+### Changed
+- Resume now fails closed on recovery markers, inconsistent continuation identity, or unverified predecessor-worker stop evidence.
+
+### Fixed
+- Removed Python 3.11-invalid nested f-string SQL and fabricated response freshness.
+
+### Removed
+- Run-name aggregate-contamination inference.
+
+### Breaking Changes
+- None; unavailable freshness/contamination fields now honestly return null metadata.
+
+### Known Issues
+- Local Python 3.11 lacks installed project dependencies; its grammar compile passes but full 3.11 import requires the CI dependency environment.
+
+## 2026-08-09 — PR #313 finishing safety pass
+
+### Added
+- Explicit `MULTI_SOURCE` freshness for composite API responses.
+
+### Changed
+- CORS is opt-in only; process presence is no longer labeled active worker health.
+
+### Fixed
+- Composite evidence is no longer mislabeled `DATA_UNAVAILABLE` solely because it has no single timestamp.
+
+### Removed
+- Implicit localhost development origins from the CORS allowlist.
+
+### Breaking Changes
+- Cross-origin clients must explicitly configure `ALPHAFORGE_CONTROL_CORS_ORIGINS`.
+
+### Known Issues
+- Browser mixed-content/PNA policy and real Windows acceptance remain external gates.
