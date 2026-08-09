@@ -122,16 +122,34 @@ def ensure_runtime_state_schema(engine: Engine) -> None:
         # Existing production databases predate lineage columns.  Additive migration
         # preserves the append-only snapshot history and is safe on SQLite.
         columns = {row[1] for row in conn.execute(text("PRAGMA table_info(runtime_state_snapshots)"))}
-        for name in ("campaign_id", "burnin_run_id", "release_id"):
+        # Some early ops databases created a reduced snapshot table.  Keep the
+        # canonical writer append-only by additively completing that schema.
+        canonical_columns = {
+            "timestamp": "TEXT", "instance_id": "TEXT", "startup_id": "TEXT",
+            "campaign_id": "TEXT", "burnin_run_id": "TEXT", "release_id": "TEXT",
+            "process_id": "INTEGER", "mode": "TEXT", "requested_mode": "TEXT", "actual_mode": "TEXT",
+            "runtime_status": "TEXT", "heartbeat_age_sec": "REAL", "last_start_time": "TEXT",
+            "last_shutdown_time": "TEXT", "last_error": "TEXT", "kill_switch_active": "INTEGER",
+            "kill_switch_reason": "TEXT", "active_symbols": "TEXT", "active_position_count": "INTEGER",
+            "active_positions": "TEXT", "pending_order_count": "INTEGER", "pending_orders": "TEXT",
+            "cooldown_symbols": "TEXT", "stale_market_data_symbols": "TEXT", "unreconciled_symbols": "TEXT",
+            "orphan_order_count": "INTEGER", "orphan_orders": "TEXT", "orphan_position_count": "INTEGER",
+            "orphan_positions": "TEXT", "unknown_exchange_state": "INTEGER", "exchange_connectivity_status": "TEXT",
+            "exchange_read_only_status": "TEXT", "reconciliation_status": "TEXT", "reconciliation_mismatch_count": "INTEGER",
+            "recovery_action_required": "INTEGER", "fail_closed_reason": "TEXT", "runtime_flags": "TEXT",
+            "diagnostics_json": "TEXT", "created_at": "TEXT",
+        }
+        for name, sql_type in canonical_columns.items():
             if name not in columns:
-                conn.execute(text(f"ALTER TABLE runtime_state_snapshots ADD COLUMN {name} TEXT"))
+                conn.execute(text(f"ALTER TABLE runtime_state_snapshots ADD COLUMN {name} {sql_type}"))
 
-def save_runtime_state_snapshot(engine: Engine, snapshot: RuntimeStateSnapshot) -> None:
+def save_runtime_state_snapshot(engine: Engine, snapshot: RuntimeStateSnapshot) -> int:
     ensure_runtime_state_schema(engine)
     rec = snapshot.to_record(); rec["created_at"] = canonical_utc_timestamp()
     cols = ",".join(rec.keys()); vals = ",".join(f":{k}" for k in rec)
     with engine.begin() as conn:
-        conn.execute(text(f"INSERT INTO runtime_state_snapshots ({cols}) VALUES ({vals})"), rec)
+        result = conn.execute(text(f"INSERT INTO runtime_state_snapshots ({cols}) VALUES ({vals})"), rec)
+        return int(result.lastrowid)
 
 def latest_runtime_state_snapshot(engine: Engine) -> dict[str, Any] | None:
     if not inspect(engine).has_table("runtime_state_snapshots"):
@@ -263,7 +281,7 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     elif prior_unclean: scope = "UNRELATED_HISTORICAL_RUNTIME"
     else: scope = "UNRELATED_HISTORICAL_RUNTIME"
     strict_live = str(mode).upper() in {"LIVE", "LIVE_PRECHECK"}
-    blocked = bool(query_errors) or global_risk or (strict_live and prior_unclean) or (same_campaign and prior_unclean) or process_alive
+    blocked = bool(query_errors) or global_risk or (strict_live and prior_unclean) or (same_campaign and prior_unclean and not probe_clean) or process_alive
     reason = "RECOVERY_EVIDENCE_UNAVAILABLE" if query_errors else ("UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED" if blocked and prior_unclean else ("RUNTIME_RECOVERY_REQUIRED" if blocked else None))
     return {"blocked": blocked, "reason": reason, "scope": scope, "latest": latest, "current_exposure_check": exposure,
             "kill_switch_active": kill_switch, "reconciliation_status": reconciliation_status,
@@ -333,3 +351,37 @@ def persist_verified_paper_recovery(engine: Engine, *, probe: Mapping[str, Any],
         recovery_action_required=False,
         diagnostics_json={"recovery_action": "VERIFIED_ZERO_EXPOSURE", "prior_snapshot_id": (prior_snapshot or {}).get("id")},
     ))
+
+
+def persist_campaign_linked_zero_exposure_reconciliation_evidence(
+    engine: Engine, *, probe: Mapping[str, Any], prior_snapshot: Mapping[str, Any] | None,
+    campaign_id: str, burnin_run_id: str, release_id: str,
+) -> dict[str, Any]:
+    """Append the exact fresh PAPER reconciliation used by manual terminalization."""
+    if (str(probe.get("evidence_status") or "").upper() != "COMPLETE" or probe.get("errors")
+            or probe.get("orders") or probe.get("positions")):
+        raise RuntimeError("campaign_linked_evidence_requires_complete_zero_exposure_probe")
+    instance_id = f"terminalization:{uuid.uuid4().hex}"
+    startup_id = f"terminalization:{uuid.uuid4().hex}"
+    diagnostics = {
+        "probe": dict(probe), "prior_snapshot_id": (prior_snapshot or {}).get("id"),
+        "recovery_action": "CAMPAIGN_LINKED_ZERO_EXPOSURE_TERMINALIZATION",
+        "campaign_id": campaign_id, "burnin_run_id": burnin_run_id, "release_id": release_id,
+    }
+    snapshot = RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECONCILED",
+        instance_id=instance_id, startup_id=startup_id, process_id=0,
+        campaign_id=campaign_id, burnin_run_id=burnin_run_id, release_id=release_id,
+        unknown_exchange_state=False, exchange_read_only_status="AVAILABLE", reconciliation_status="CLEAN",
+        recovery_action_required=False, diagnostics_json=diagnostics,
+    )
+    ensure_runtime_state_schema(engine)
+    rec = snapshot.to_record(); rec["created_at"] = canonical_utc_timestamp()
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO exchange_reconciliation_events(event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json) VALUES (:ts,:i,:s,'PAPER','CLEAN',0,0,0,'AVAILABLE',:d)"),
+                     {"ts": canonical_utc_timestamp(), "i": instance_id, "s": startup_id, "d": json.dumps(diagnostics, sort_keys=True, default=str)})
+        cols = ",".join(rec); vals = ",".join(f":{key}" for key in rec)
+        result = conn.execute(text(f"INSERT INTO runtime_state_snapshots ({cols}) VALUES ({vals})"), rec)
+        snapshot_id = int(result.lastrowid)
+        row = conn.execute(text("SELECT * FROM runtime_state_snapshots WHERE id=:id"), {"id": snapshot_id}).mappings().one()
+    return dict(row)

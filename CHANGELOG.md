@@ -1,3 +1,23 @@
+# Historical PAPER campaign-linked recovery evidence — 2026-08-09
+
+### Added
+- An append-only, campaign/run/release-linked runtime snapshot from the explicit terminalization command's fresh authenticated reconciliation probe.
+
+### Changed
+- A complete probe can supersede stale same-campaign runtime state for PAPER recovery only; the exact new snapshot remains subject to the existing 120-second transaction gate.
+
+### Fixed
+- Dead historical PAPER continuations no longer depend on unrelated stale runtime evidence when authoritative zero-exposure reconciliation succeeds.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; reduced legacy runtime snapshot schemas receive additive canonical columns when evidence is appended.
+
+### Known Issues
+- Missing/ambiguous provider, exposure, reconciliation, lineage, or worker-death evidence remains fail-closed. LIVE remains NOT READY.
+
 # PAPER terminalization TOCTOU hardening — 2026-08-06
 
 ### Added

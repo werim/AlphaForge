@@ -22,7 +22,7 @@ from alphaforge.burnin_campaign import (
 from alphaforge.config import load_config_from_env, load_reconciliation_settings
 from alphaforge.config_audit import audit_config
 from alphaforge.env_contract import dotenv_status
-from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider
+from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider, persist_campaign_linked_zero_exposure_reconciliation_evidence
 from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
 from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
@@ -1084,8 +1084,48 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         raise RuntimeError("MANUAL_TERMINALIZATION_REQUIRES_RECOVERY_REQUIRED")
 
     precheck = _local_terminalization_snapshot(conn, campaign_id, expected_run_id)
+    preliminary_failures: list[str] = []
+    preliminary_run = precheck.get("run") or {}
+    preliminary_local = precheck.get("local") or {}
+    worker_pid = (precheck.get("worker_details") or {}).get("worker_pid")
+    if not expected_run_id or precheck.get("mapping") is None or not preliminary_run:
+        preliminary_failures.append("CONTINUATION_MISSING")
+    if str(preliminary_run.get("execution_mode") or "").upper() != "PAPER":
+        preliminary_failures.append("PAPER_MODE_REQUIRED")
+    if precheck.get("worker_evidence") is None or worker_pid is None:
+        preliminary_failures.append("WORKER_DEATH_IDENTITY_UNAVAILABLE")
+    elif _pid_alive(worker_pid) or bool(initial_campaign.get("worker_pid") and _pid_alive(initial_campaign.get("worker_pid"))):
+        preliminary_failures.append("WORKER_BECAME_ALIVE")
+    if not all(bool(v) for v in (preliminary_local.get("availability") or {}).values()) or preliminary_local.get("query_errors"):
+        preliminary_failures.append("LOCAL_EXPOSURE_UNAVAILABLE")
+    if preliminary_local.get("open_positions") != 0 or preliminary_local.get("pending_reject_labels") != 0:
+        preliminary_failures.append("LOCAL_EXPOSURE_NONZERO")
+    if preliminary_failures:
+        return {"status": "FAIL_CLOSED", "campaign_id": campaign_id, "burnin_run_id": expected_run_id, "failure_reasons": preliminary_failures}
     runtime = _authoritative_recovery_exposure(db, campaign_id)
     runtime_identity = _runtime_evidence_identity(runtime, campaign_id, expected_run_id)
+    if not all(runtime_identity["checks"].values()):
+        availability = dict(runtime.get("availability") or {})
+        counts = dict(runtime.get("current_exposure_check") or {})
+        probe = runtime.get("reconciliation_probe")
+        bridge_safe = (
+            isinstance(probe, Mapping) and runtime.get("reconciliation_probe_clean") is True
+            and not runtime.get("blocked") and not runtime.get("query_errors")
+            and runtime.get("kill_switch_active") is False
+            and all(bool(availability.get(key)) for key in ("active_positions_available", "pending_orders_available", "orphan_evidence_available", "kill_switch_available"))
+            and all(counts.get(key) == 0 for key in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions"))
+        )
+        if bridge_safe:
+            engine = init_db(f"sqlite+pysqlite:///{db}")
+            try:
+                persisted = persist_campaign_linked_zero_exposure_reconciliation_evidence(
+                    engine, probe=probe, prior_snapshot=runtime.get("latest"), campaign_id=campaign_id,
+                    burnin_run_id=expected_run_id, release_id=str(initial_campaign.get("release_id") or ""),
+                )
+            finally:
+                engine.dispose()
+            runtime = {**runtime, "latest": persisted, "reconciliation_status": "CLEAN", "blocked": False}
+            runtime_identity = _runtime_evidence_identity(runtime, campaign_id, expected_run_id)
     _terminalization_pre_begin_hook()
 
     try:

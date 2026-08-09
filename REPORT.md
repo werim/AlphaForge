@@ -1,3 +1,36 @@
+# Historical PAPER evidence-bridge surgery — 2026-08-09
+
+## Need and root cause
+
+The explicit terminalizer correctly rejected stale or unlinked runtime snapshots, but a dead historical worker could not create the fresh campaign/run-linked snapshot the terminalizer required. `recovery-drill` evaluated current state for continuation recovery and was intentionally not a terminalization evidence writer.
+
+## Behavior, lifecycle, and persistence
+
+`burnin_ops` now performs strict PAPER, RECOVERY_REQUIRED, continuation, local exposure, and canonical dead-worker checks before requesting authoritative recovery state. Only a complete authenticated probe with available local/runtime sources, no query errors or recovery block, a clean kill-switch state, and zero positions/orders/orphans is appended as a new `RECONCILED` runtime snapshot. The row has a database ID, concrete canonical timestamp, unique instance/startup IDs, and exact campaign, burn-in run, release, and PAPER linkage; its diagnostics retain the probe and prior snapshot ID. No historical row is rewritten.
+
+Terminalization remains separate. The existing `BEGIN IMMEDIATE` phase re-reads campaign/run/mapping/worker/exposure/execution/lifecycle/source and exact latest runtime linkage, applies the unchanged 120-second freshness bound, requires three one-row conditional updates, writes the audit event, and commits atomically. Failure rolls back terminal mutation. Success remains FAILED with `MANUAL_ZERO_EXPOSURE_TERMINALIZED`; normal recovery and `recovery-drill` remain non-destructive.
+
+## Files, compatibility, tests, and risks
+
+`src/alphaforge/runtime_state.py` owns append-only canonical evidence persistence and additive completion of reduced historical snapshot schemas. `src/alphaforge/burnin_ops.py` owns the guarded bridge and unchanged terminal transaction authority. `tests/test_phase9_burnin_ops.py` covers zero/nonzero decision histories, exact audit identity, provider failure, no fake snapshot, and existing race/replay gates. `docs/KOMUTLAR.md` documents operator results. There are no export changes, Control Center writes, LIVE changes, freshness widening, or `ACTIVE_CAMPAIGN_STATUSES` changes. Migration is additive only for legacy reduced runtime snapshot tables. Provider ambiguity and any exposure remain fail-closed. LIVE remains NOT READY; merge recommendation depends on the full suite passing.
+
+## Example results
+
+Success returns `status: PASS`, `terminal_status: FAILED`, and the exact `runtime_evidence` snapshot ID/time/hash. Provider or reconciliation failure returns `status: FAIL_CLOSED` with existing-compatible evidence/runtime reasons, leaves RECOVERY_REQUIRED unchanged, and appends no fabricated snapshot.
+
+## Tests executed
+
+- `python -m compileall src`: passed.
+- `pytest -q tests/test_phase9_burnin_ops.py`: 98 passed.
+- `pytest -q tests/test_phase8_burnin_campaign.py`: 33 passed.
+- `pytest -q tests/test_control_center_api.py`: 52 passed (39 dependency deprecation warnings).
+- `pytest -q`: 1,167 passed, 6 skipped, and 4 failed solely because the environment does not have the declared Alembic dependency installed. An attempted `pip install 'alembic>=1.13,<2.0'` was blocked by the environment's package-index proxy (HTTP 403).
+- `git diff --check`: passed.
+
+Because the requested full suite is red in this environment, this report does **not** recommend merge. Run the full suite on the PR head in an environment with repository dependencies installed and require green results before merge.
+
+---
+
 # PAPER terminalization TOCTOU surgery — 2026-08-06
 
 ## Root cause and transaction ordering

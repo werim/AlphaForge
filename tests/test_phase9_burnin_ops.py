@@ -688,6 +688,61 @@ def test_explicit_zero_exposure_terminalization_is_atomic_idempotent_and_unblock
     assert ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)["idempotent_replay"] is True
 
 
+@pytest.mark.parametrize("decision_count", [0, 3])
+def test_historical_terminalization_persists_fresh_campaign_linked_probe(monkeypatch, tmp_path, decision_count):
+    import alphaforge.burnin_ops as ops
+    db, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,))
+    _prepare_terminalization_evidence(conn, camp, run)
+    conn.execute("UPDATE runtime_state_snapshots SET campaign_id=NULL,burnin_run_id=NULL,timestamp='2020-01-01T00:00:00Z'")
+    for index in range(decision_count):
+        persist_burnin_observation(conn, observation_id=f"decision-{index}", burnin_run_id=run, release_id=camp.release_id,
+                                   execution_mode="PAPER", decision="REJECTED", lifecycle_state="SIGNAL_REJECTED", source_provenance={})
+    conn.commit()
+    old_id = conn.execute("SELECT MAX(id) FROM runtime_state_snapshots").fetchone()[0]
+    recovery = _clean_runtime_recovery(conn)
+    recovery.update({
+        "blocked": False, "reconciliation_probe_clean": True,
+        "reconciliation_probe": {"provider": "authenticated-test", "retrieved_at": utc_now(), "evidence_status": "COMPLETE", "orders": [], "positions": [], "errors": []},
+    })
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: recovery)
+
+    result = ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
+
+    assert result["status"] == "PASS" and result["terminal_status"] == "FAILED"
+    evidence = conn.execute("SELECT * FROM runtime_state_snapshots ORDER BY id DESC LIMIT 1").fetchone()
+    assert evidence["id"] > old_id
+    assert (evidence["campaign_id"], evidence["burnin_run_id"], evidence["release_id"], evidence["mode"]) == (camp.campaign_id, run, camp.release_id, "PAPER")
+    assert evidence["reconciliation_status"] == "CLEAN" and evidence["unknown_exchange_state"] == 0
+    details = json.loads(conn.execute("SELECT details_json FROM burnin_campaign_events WHERE event_type='PHASE9_MANUAL_ZERO_EXPOSURE_TERMINALIZED' ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert details["runtime_evidence"]["snapshot_id"] == evidence["id"]
+    assert details["runtime_evidence"]["snapshot_hash"] == result["runtime_evidence"]["snapshot_hash"]
+
+
+def test_historical_terminalization_provider_unavailable_persists_no_snapshot(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,))
+    _prepare_terminalization_evidence(conn, camp, run)
+    conn.execute("UPDATE runtime_state_snapshots SET campaign_id=NULL,burnin_run_id=NULL,timestamp='2020-01-01T00:00:00Z'"); conn.commit()
+    before = conn.execute("SELECT COUNT(*) FROM runtime_state_snapshots").fetchone()[0]
+    recovery = _clean_runtime_recovery(conn)
+    recovery.update({"blocked": True, "query_errors": ["reconciliation_probe:provider_unavailable"], "reconciliation_probe_clean": False, "reconciliation_probe": None})
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: recovery)
+
+    result = ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
+
+    assert result["status"] == "FAIL_CLOSED"
+    assert conn.execute("SELECT COUNT(*) FROM runtime_state_snapshots").fetchone()[0] == before
+    assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RECOVERY_REQUIRED"
+
+
 def test_recovery_required_terminalization_requires_explicit_flag_and_complete_evidence(monkeypatch, tmp_path):
     import alphaforge.burnin_ops as ops
     db, conn = _conn(tmp_path)

@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Historical PAPER evidence bridge (2026-08-09)
+
+- Current version: Phase 9 campaign-linked terminalization evidence revision
+- Current phase: explicit dead-continuation recovery terminalization
+- Runtime maturity: fresh authenticated reconciliation is appended and transaction-bound before terminal mutation
+- BACKTEST/PAPER/LIVE alignment: PAPER-only operator recovery; BACKTEST and LIVE behavior unchanged
+- Lifecycle coverage: RECOVERY_REQUIRED becomes FAILED only under the existing atomic terminalization contract
+- Execution realism coverage: complete CLEAN zero-position/order/orphan exchange evidence remains mandatory and expires after 120 seconds
+- Known critical risks: provider or worker-death ambiguity remains fail-closed; historical reduced snapshot schemas are additively completed
+- Last audit date: 2026-08-09
+- Live readiness verdict: NOT LIVE READY
+
 ## PAPER terminalization TOCTOU hardening (2026-08-06)
 
 - Current version: Phase 9 transactional recovery evidence revision
