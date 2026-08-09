@@ -462,7 +462,7 @@ class ControlCenterService:
         run_state = active_run.get("status") if active_run else None
         source = "burnin_campaigns.worker_pid+process_existence+burnin_campaign_runs.active_run"
         if pid and alive:
-            state = "ACTIVE"
+            state = "PROCESS_PRESENT"
         elif run_state == "PAUSED" and (not pid or alive is False):
             state = "STOPPED"
         else:
@@ -558,13 +558,17 @@ class ControlCenterService:
 
 def router(service: ControlCenterService) -> APIRouter:
     api = APIRouter(prefix="/api")
-    def envelope(data: Any, source: str = "canonical_sqlite", *, observed_at: str | None = None) -> dict[str, Any]:
+    def envelope(data: Any, source: str = "canonical_sqlite", *, observed_at: str | None = None,
+                 multi_source: bool = False) -> dict[str, Any]:
+        if multi_source:
+            return {"data": data, "source": source, "generated_at": _now(), "observed_at": None,
+                    "age_seconds": None, "is_stale": None, "freshness_state": "MULTI_SOURCE", "availability": "AVAILABLE"}
         freshness = _freshness(observed_at, threshold_seconds=service.freshness_seconds)
         return {"data": data, "source": source, "generated_at": _now(), **freshness,
                 "availability": "AVAILABLE" if freshness["freshness_state"] in {"FRESH", "STALE"} else freshness["freshness_state"]}
     @api.get("/health")
     def health():
-        return envelope(service.health(), "control_center_health")
+        return envelope(service.health(), "control_center_health", multi_source=True)
     @api.get("/runtime/status")
     @api.get("/runtime")
     def runtime():
@@ -572,7 +576,7 @@ def router(service: ControlCenterService) -> APIRouter:
         except ControlError as exc:
             if exc.code != "NO_ACTIVE_CAMPAIGN": raise
             active, status = None, None
-        return envelope({"database_accessible": True, "execution_mode": service.execution_mode(), "active_campaign": active, "campaign_status": status})
+        return envelope({"database_accessible": True, "execution_mode": service.execution_mode(), "active_campaign": active, "campaign_status": status}, multi_source=True)
     @api.get("/campaigns")
     def campaigns(): return envelope(service.campaigns())
     @api.get("/campaigns/current")
@@ -580,7 +584,7 @@ def router(service: ControlCenterService) -> APIRouter:
     def active(): return envelope(service.active())
     @api.get("/campaigns/{campaign_id}")
     @api.get("/campaigns/{campaign_id}/status")
-    def status(campaign_id: str): return envelope(service.status(campaign_id))
+    def status(campaign_id: str): return envelope(service.status(campaign_id), multi_source=True)
     @api.get("/campaigns/{campaign_id}/rejects")
     def rejects(campaign_id: str, limit: int = Query(200, ge=1, le=500)):
         data = service.rejects(campaign_id, limit); return envelope(data, observed_at=data.get("source_observed_at"))
@@ -597,9 +601,9 @@ def router(service: ControlCenterService) -> APIRouter:
     def preflight():
         data = service.preflight(); report = data.get("report") or {}; return envelope(data, observed_at=report.get("generated_at"))
     @api.post("/campaigns/{campaign_id}/pause")
-    def pause(campaign_id: str, x_alphaforge_control_token: str | None = Header(None)): return envelope(service.control(campaign_id, "pause", x_alphaforge_control_token), "canonical_burnin_cli")
+    def pause(campaign_id: str, x_alphaforge_control_token: str | None = Header(None)): return envelope(service.control(campaign_id, "pause", x_alphaforge_control_token), "canonical_burnin_cli", multi_source=True)
     @api.post("/campaigns/{campaign_id}/resume")
-    def resume(campaign_id: str, x_alphaforge_control_token: str | None = Header(None)): return envelope(service.control(campaign_id, "resume", x_alphaforge_control_token), "canonical_burnin_cli")
+    def resume(campaign_id: str, x_alphaforge_control_token: str | None = Header(None)): return envelope(service.control(campaign_id, "resume", x_alphaforge_control_token), "canonical_burnin_cli", multi_source=True)
     return api
 
 

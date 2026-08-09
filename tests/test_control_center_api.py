@@ -90,6 +90,19 @@ def test_configured_cors_origin_is_allowed_and_unknown_preflight_is_rejected(tmp
     assert denied.status_code == 400 and "access-control-allow-origin" not in denied.headers
 
 
+@pytest.mark.parametrize("configured", [None, ""])
+def test_cors_is_explicit_opt_in_and_same_origin_still_works(tmp_path, monkeypatch, configured):
+    db, _ = seeded(tmp_path, monkeypatch)
+    if configured is None:
+        monkeypatch.delenv("ALPHAFORGE_CONTROL_CORS_ORIGINS", raising=False)
+    else:
+        monkeypatch.setenv("ALPHAFORGE_CONTROL_CORS_ORIGINS", configured)
+    client = TestClient(create_app(f"sqlite+pysqlite:///{db}"))
+    preflight = client.options("/api/health", headers={"Origin": "http://127.0.0.1:5173", "Access-Control-Request-Method": "GET"})
+    assert preflight.status_code == 400 and "access-control-allow-origin" not in preflight.headers
+    assert client.get("/api/health").status_code == 200
+
+
 @pytest.mark.parametrize("origin", ["*", "javascript:alert(1)", "https://user:pass@example.com", "https://example.com/path"])
 def test_invalid_cors_origin_fails_configuration(tmp_path, monkeypatch, origin):
     db, _ = seeded(tmp_path, monkeypatch); monkeypatch.setenv("ALPHAFORGE_CONTROL_CORS_ORIGINS", origin)
@@ -135,6 +148,15 @@ def test_freshness_uses_canonical_timestamp_not_response_time(tmp_path, monkeypa
     payload = TestClient(create_app(f"sqlite+pysqlite:///{db}")).get(f"/api/campaigns/{cid}/rejects").json()
     assert payload["observed_at"] == "2026-01-01T00:00:00Z"
     assert payload["generated_at"] != payload["observed_at"] and payload["age_seconds"] > 0 and payload["is_stale"] is True
+
+
+def test_composite_endpoints_report_multi_source_without_aggregate_timestamp(tmp_path, monkeypatch):
+    db, cid = seeded(tmp_path, monkeypatch); client = TestClient(create_app(f"sqlite+pysqlite:///{db}"))
+    for path in ("/api/health", "/api/runtime", "/api/runtime/status", f"/api/campaigns/{cid}", f"/api/campaigns/{cid}/status"):
+        payload = client.get(path).json()
+        assert payload["freshness_state"] == "MULTI_SOURCE" and payload["availability"] == "AVAILABLE"
+        assert payload["observed_at"] is None and payload["age_seconds"] is None and payload["is_stale"] is None
+    assert client.get(f"/api/campaigns/{cid}/status").json()["data"]["source_freshness"]
 
 
 def test_missing_and_future_evidence_timestamps_are_never_fresh():
@@ -268,6 +290,18 @@ def test_pause_uses_canonical_cli_list_without_shell_and_rechecks(monkeypatch, t
     assert kwargs["shell"] is False and out["status"]["campaign"]["campaign_status"] == "PAUSED"
 
 
+def test_control_response_uses_multi_source_freshness(monkeypatch, tmp_path):
+    db, cid = seeded(tmp_path, monkeypatch)
+    def run(*_args, **_kwargs):
+        conn = sqlite3.connect(db); conn.row_factory = sqlite3.Row; pause_campaign(conn, cid); conn.commit(); conn.close()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr("alphaforge.dashboard.control_center.subprocess.run", run)
+    payload = TestClient(create_app(f"sqlite+pysqlite:///{db}")).post(
+        f"/api/campaigns/{cid}/pause", headers={"X-AlphaForge-Control-Token": "correct-token"}).json()
+    assert payload["freshness_state"] == "MULTI_SOURCE" and payload["availability"] == "AVAILABLE"
+    assert payload["observed_at"] is None and payload["is_stale"] is None
+
+
 def test_pause_active_worker_is_partial_failure_and_audit_has_separate_postconditions(monkeypatch, tmp_path):
     db, cid = seeded(tmp_path, monkeypatch)
     conn = sqlite3.connect(db); conn.execute("UPDATE burnin_campaigns SET worker_pid=4242 WHERE campaign_id=?", (cid,)); conn.commit(); conn.close()
@@ -281,7 +315,7 @@ def test_pause_active_worker_is_partial_failure_and_audit_has_separate_postcondi
     assert failure.value.code == "PARTIAL_FAILURE"
     audit = json.loads(service.audit_path.read_text().splitlines()[-1])
     assert audit["previous_campaign_status"] == "RUNNING" and audit["verified_campaign_status"] == "PAUSED"
-    assert audit["previous_worker_status"] == audit["verified_worker_status"] == "ACTIVE"
+    assert audit["previous_worker_status"] == audit["verified_worker_status"] == "PROCESS_PRESENT"
 
 
 def test_pause_worker_closes_during_bounded_polling(monkeypatch, tmp_path):

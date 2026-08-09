@@ -3811,3 +3811,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Local Python 3.11 lacks installed project dependencies; its grammar compile passes but full 3.11 import requires the CI dependency environment.
+
+## 2026-08-09 — PR #313 finishing safety pass
+
+### Added
+- Explicit `MULTI_SOURCE` freshness for composite API responses.
+
+### Changed
+- CORS is opt-in only; process presence is no longer labeled active worker health.
+
+### Fixed
+- Composite evidence is no longer mislabeled `DATA_UNAVAILABLE` solely because it has no single timestamp.
+
+### Removed
+- Implicit localhost development origins from the CORS allowlist.
+
+### Breaking Changes
+- Cross-origin clients must explicitly configure `ALPHAFORGE_CONTROL_CORS_ORIGINS`.
+
+### Known Issues
+- Browser mixed-content/PNA policy and real Windows acceptance remain external gates.

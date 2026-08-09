@@ -12,6 +12,18 @@
 - Last audit date: 2026-08-01
 - Live readiness verdict: NOT LIVE READY
 
+## PR #313 explicit-CORS and composite-freshness revision (2026-08-09)
+
+- Current version: Phase 9 PAPER Control Center finishing safety pass
+- Current phase: explicit browser trust and honest multi-source freshness
+- Runtime maturity: no implicit CORS origins; composite responses preserve per-source evidence without aggregate timestamp fabrication
+- BACKTEST/PAPER/LIVE alignment: unchanged; controls remain PAPER-only
+- Lifecycle coverage: unchanged; canonical pause/resume postconditions remain enforced
+- Execution realism coverage: process presence is distinct from canonical worker health
+- Known critical risks: new GitHub Actions head and real Windows/browser acceptance remain required
+- Last audit date: 2026-08-09
+- Live readiness verdict: NOT LIVE READY
+
 ## PR #313 canonical Control Center revision (2026-08-08)
 
 - Current version: Phase 9 PAPER Control Center canonical safety correction

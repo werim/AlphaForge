@@ -1502,6 +1502,7 @@ for name in ("BINANCE_API_KEY", "BINANCE_BASE_URL"):
 
 ```powershell
 $env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_CONTROL_CORS_ORIGINS = "http://127.0.0.1:5173" # optional explicit cross-origin opt-in
 $env:EXECUTION_MODE = "PAPER"
 $env:ALPHAFORGE_ENABLE_LIVE_EXECUTION = "false"
 $DB = "artifacts/burnin/phase9.db"
@@ -1608,6 +1609,7 @@ Canonical environment, PowerShell startup, read-first verification, and guarded 
 $env:ALPHAFORGE_DB_PATH = "<real DB path>"
 $env:ALPHAFORGE_PROJECT_ROOT = "E:\Projeler\AlphaForge"
 $env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_CONTROL_CORS_ORIGINS = "http://127.0.0.1:5173" # optional explicit cross-origin opt-in
 
 python -m alphaforge.control_center `
   --host 127.0.0.1 `

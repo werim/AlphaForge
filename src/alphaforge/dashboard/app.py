@@ -41,15 +41,8 @@ from .queries import (
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-DEFAULT_CONTROL_CORS_ORIGINS = (
-    "http://127.0.0.1:3000", "http://localhost:3000",
-    "http://127.0.0.1:5173", "http://localhost:5173",
-)
-
-
 def control_cors_origins() -> list[str]:
-    configured = os.getenv("ALPHAFORGE_CONTROL_CORS_ORIGINS")
-    values = configured.split(",") if configured is not None else DEFAULT_CONTROL_CORS_ORIGINS
+    values = os.getenv("ALPHAFORGE_CONTROL_CORS_ORIGINS", "").split(",")
     origins: list[str] = []
     for raw in values:
         origin = raw.strip()
