@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import os
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,7 +50,17 @@ DEFAULT_CONTROL_CORS_ORIGINS = (
 def control_cors_origins() -> list[str]:
     configured = os.getenv("ALPHAFORGE_CONTROL_CORS_ORIGINS")
     values = configured.split(",") if configured is not None else DEFAULT_CONTROL_CORS_ORIGINS
-    return list(dict.fromkeys(origin.strip() for origin in values if origin.strip() and origin.strip() != "*"))
+    origins: list[str] = []
+    for raw in values:
+        origin = raw.strip()
+        if not origin:
+            continue
+        parsed = urlsplit(origin)
+        if (origin == "*" or parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username
+                or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+            raise ValueError(f"invalid ALPHAFORGE_CONTROL_CORS_ORIGINS entry:{origin}")
+        origins.append(origin.rstrip("/"))
+    return list(dict.fromkeys(origins))
 
 
 def _create_dashboard_engine(database_url: str) -> Engine:

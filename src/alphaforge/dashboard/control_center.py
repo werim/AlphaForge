@@ -28,6 +28,7 @@ from alphaforge.config import load_config_from_env
 
 CAMPAIGN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 SECRET = re.compile(r"(?i)(authorization|api[_-]?key|secret|token|password)(\s*[:=]\s*|\s+)([^\s,;]+)")
+AUTHORIZATION_LINE = re.compile(r"(?im)^(\s*authorization\s*:)[^\r\n]*")
 REQUIRED = {
     "burnin_campaigns": {"campaign_id", "campaign_status", "release_id", "active_run_id"},
     "burnin_campaign_runs": {"campaign_id", "burnin_run_id", "continuation_sequence", "status"},
@@ -35,6 +36,7 @@ REQUIRED = {
 PAUSE_WORKER_TIMEOUT_SECONDS_DEFAULT = 2.0
 PAUSE_WORKER_POLL_INTERVAL_SECONDS_DEFAULT = 0.1
 OPERATION_LEASE_STALE_SECONDS_DEFAULT = 120.0
+FRESHNESS_SECONDS_DEFAULT = 120.0
 
 
 class ControlError(Exception):
@@ -48,7 +50,24 @@ def _now() -> str:
 
 
 def _sanitize(value: str | None, limit: int = 16_384) -> str:
-    return SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", value or "")[-limit:]
+    without_authorization = AUTHORIZATION_LINE.sub(r"\1 [REDACTED]", value or "")
+    return SECRET.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", without_authorization)[-limit:]
+
+
+def _freshness(observed_at: str | None, *, threshold_seconds: float) -> dict[str, Any]:
+    if not observed_at:
+        return {"observed_at": None, "age_seconds": None, "is_stale": None, "freshness_state": "DATA_UNAVAILABLE"}
+    try:
+        parsed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return {"observed_at": observed_at, "age_seconds": None, "is_stale": None, "freshness_state": "INVALID_TIMESTAMP"}
+    if age < 0:
+        return {"observed_at": observed_at, "age_seconds": age, "is_stale": None, "freshness_state": "CLOCK_SKEW"}
+    return {"observed_at": observed_at, "age_seconds": age, "is_stale": age > threshold_seconds,
+            "freshness_state": "STALE" if age > threshold_seconds else "FRESH"}
 
 
 class ControlCenterService:
@@ -60,11 +79,13 @@ class ControlCenterService:
     def __init__(self, db_path: Path, project_root: Path, python: Path, token: str | None, *, timeout: float = 30.0,
                  pause_worker_timeout: float = PAUSE_WORKER_TIMEOUT_SECONDS_DEFAULT,
                  pause_worker_poll_interval: float = PAUSE_WORKER_POLL_INTERVAL_SECONDS_DEFAULT,
-                 lease_stale_seconds: float = OPERATION_LEASE_STALE_SECONDS_DEFAULT):
+                 lease_stale_seconds: float = OPERATION_LEASE_STALE_SECONDS_DEFAULT,
+                 freshness_seconds: float = FRESHNESS_SECONDS_DEFAULT):
         self.db_path, self.project_root, self.python, self.token, self.timeout = db_path, project_root, python, token, timeout
         self.pause_worker_timeout = max(0.0, pause_worker_timeout)
         self.pause_worker_poll_interval = max(0.01, pause_worker_poll_interval)
         self.lease_stale_seconds = max(1.0, lease_stale_seconds)
+        self.freshness_seconds = max(1.0, freshness_seconds)
         self.audit_path = project_root / "artifacts" / "burnin" / "control_center_operations.jsonl"
         self.lease_root = project_root / "artifacts" / "burnin" / ".control-center-leases"
 
@@ -79,7 +100,8 @@ class ControlCenterService:
                    os.getenv("ALPHAFORGE_CONTROL_TOKEN"),
                    pause_worker_timeout=float(os.getenv("ALPHAFORGE_CONTROL_PAUSE_WORKER_TIMEOUT_SECONDS", PAUSE_WORKER_TIMEOUT_SECONDS_DEFAULT)),
                    pause_worker_poll_interval=float(os.getenv("ALPHAFORGE_CONTROL_PAUSE_WORKER_POLL_INTERVAL_SECONDS", PAUSE_WORKER_POLL_INTERVAL_SECONDS_DEFAULT)),
-                   lease_stale_seconds=float(os.getenv("ALPHAFORGE_CONTROL_LEASE_STALE_SECONDS", OPERATION_LEASE_STALE_SECONDS_DEFAULT)))
+                   lease_stale_seconds=float(os.getenv("ALPHAFORGE_CONTROL_LEASE_STALE_SECONDS", OPERATION_LEASE_STALE_SECONDS_DEFAULT)),
+                   freshness_seconds=float(os.getenv("ALPHAFORGE_CONTROL_FRESHNESS_SECONDS", FRESHNESS_SECONDS_DEFAULT)))
 
     def validate(self, *, controls: bool = False) -> None:
         if controls and self.execution_mode() != "PAPER":
@@ -123,7 +145,10 @@ class ControlCenterService:
                                    "runtime_status": "RUNTIME_NOT_RUNNING", "active_campaign_status": "NO_ACTIVE_CAMPAIGN",
                                    "worker_status": "WORKER_UNHEALTHY",
                                    "control_actions_status": "CONTROL_AVAILABLE" if mode == "PAPER" and self.token else "READ_ONLY",
-                                   "execution_mode": mode, "diagnostics": self.diagnostics()}
+                                   "execution_mode": mode, "diagnostics": self.diagnostics(),
+                                   "source_freshness": {"database_file": _freshness(
+                                       datetime.fromtimestamp(self.db_path.stat().st_mtime, timezone.utc).isoformat() if self.db_path.is_file() else None,
+                                       threshold_seconds=self.freshness_seconds)}}
         try:
             with self.connect() as conn:
                 self._schema(conn); conn.execute("SELECT 1").fetchone()
@@ -135,10 +160,11 @@ class ControlCenterService:
                 return payload
             payload["active_campaign_status"] = campaign["campaign_status"]
             worker = self._worker_verification(status)
-            payload["worker_status"] = "AVAILABLE" if status["worker"]["health"] == "HEALTHY" else "WORKER_UNHEALTHY"
+            payload["worker_status"] = status["worker"]["health"]
             if campaign["campaign_status"] == "RUNNING" and status["worker"]["health"] == "HEALTHY":
                 payload["runtime_status"] = "AVAILABLE"
             payload["worker_verification"] = worker
+            payload["source_freshness"].update(status.get("source_freshness", {}))
         except ControlError:
             pass
         return payload
@@ -181,14 +207,16 @@ class ControlCenterService:
 
     def campaigns(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            self._schema(conn)
-            return [dict(r) for r in conn.execute("SELECT * FROM burnin_campaigns ORDER BY created_at DESC, id DESC")]
+            schema = self._schema(conn); columns = schema["burnin_campaigns"]
+            order = "created_at DESC,id DESC" if {"created_at", "id"} <= columns else ("id DESC" if "id" in columns else "campaign_id")
+            return [dict(r) for r in conn.execute(f"SELECT * FROM burnin_campaigns ORDER BY {order}")]
 
     def active(self) -> dict[str, Any]:
         with self.connect() as conn:
-            self._schema(conn)
+            schema = self._schema(conn); columns = schema["burnin_campaigns"]
             marks = ",".join("?" for _ in ACTIVE_CAMPAIGN_STATUSES)
-            rows = conn.execute(f"SELECT * FROM burnin_campaigns WHERE campaign_status IN ({marks}) ORDER BY created_at DESC", tuple(sorted(ACTIVE_CAMPAIGN_STATUSES))).fetchall()
+            order = "created_at DESC" if "created_at" in columns else ("id DESC" if "id" in columns else "campaign_id")
+            rows = conn.execute(f"SELECT * FROM burnin_campaigns WHERE campaign_status IN ({marks}) ORDER BY {order}", tuple(sorted(ACTIVE_CAMPAIGN_STATUSES))).fetchall()
             if not rows:
                 raise ControlError("NO_ACTIVE_CAMPAIGN", "No active PAPER burn-in campaign", 404)
             if len(rows) != 1:
@@ -200,6 +228,7 @@ class ControlCenterService:
             schema = self._schema(conn); campaign = self._campaign(conn, campaign_id)
             runs = [dict(r) for r in conn.execute("SELECT * FROM burnin_campaign_runs WHERE campaign_id=? ORDER BY continuation_sequence", (campaign_id,))]
             run_ids = [r["burnin_run_id"] for r in runs]
+            active_run = next((r for r in runs if r.get("burnin_run_id") == campaign.get("active_run_id")), None)
             counts = None
             if "burnin_observations" in schema and {"burnin_run_id", "decision"} <= schema["burnin_observations"] and run_ids:
                 marks = ",".join("?" for _ in run_ids)
@@ -210,15 +239,44 @@ class ControlCenterService:
                 counts.update(reject_rate=(counts["rejected_decisions"] / total if total else None), acceptance_rate=(counts["accepted_decisions"] / total if total else None))
             pid, heartbeat = campaign.get("worker_pid"), campaign.get("last_heartbeat_at")
             hb_age = _age(heartbeat); alive = _pid_alive(pid) if pid else False
-            healthy = bool(campaign.get("campaign_status") == "RUNNING" and pid and alive and hb_age is not None and hb_age <= 120)
+            attachment: dict[str, Any] | None = None
+            event_columns = schema.get("burnin_campaign_events", set())
+            if {"id", "campaign_id", "burnin_run_id", "event_type", "event_time", "details_json"} <= event_columns and campaign.get("active_run_id"):
+                rows = conn.execute("""SELECT event_time,details_json,burnin_run_id FROM burnin_campaign_events
+                                       WHERE campaign_id=? AND event_type='PHASE8_CAMPAIGN_ATTACHED'
+                                         AND (? IS NULL OR event_time>=?) ORDER BY id DESC""",
+                                    (campaign_id, campaign.get("worker_started_at"), campaign.get("worker_started_at"))).fetchall()
+                for row in rows:
+                    try: details = json.loads(row["details_json"] or "{}")
+                    except (TypeError, json.JSONDecodeError): details = None
+                    if isinstance(details, dict) and details.get("active_run_id") == campaign.get("active_run_id"):
+                        attachment = {"event_time": row["event_time"], "burnin_run_id": row["burnin_run_id"], "details": details,
+                                      "available": True}
+                        break
+            attachment_verified = bool(
+                attachment and attachment["available"] and attachment["details"].get("active_run_id") == campaign.get("active_run_id")
+                and attachment["details"].get("runtime_instance_id") and campaign.get("worker_started_at")
+                and attachment["event_time"] >= campaign.get("worker_started_at")
+                and _freshness(attachment["event_time"], threshold_seconds=self.freshness_seconds)["freshness_state"] in {"FRESH", "STALE"}
+            )
+            healthy = bool(campaign.get("campaign_status") == "RUNNING" and active_run and active_run.get("status") == "RUNNING"
+                           and pid and alive and hb_age is not None and 0 <= hb_age <= self.freshness_seconds and attachment_verified)
+            unhealthy = bool(campaign.get("campaign_status") == "RUNNING" and ((pid and not alive)
+                             or (hb_age is not None and hb_age > self.freshness_seconds)))
+            worker_health = "HEALTHY" if healthy else ("WORKER_UNHEALTHY" if unhealthy else "UNKNOWN")
             return {"campaign": campaign, "runs": runs, "continuation_count": len(runs), "metrics": counts,
                     "metrics_availability": "AVAILABLE" if counts is not None else "UNAVAILABLE_IN_SCHEMA",
                     "worker": {"pid": pid, "process_exists": alive, "started_at": campaign.get("worker_started_at"), "last_heartbeat_at": heartbeat,
-                               "heartbeat_age_seconds": hb_age, "health": "HEALTHY" if healthy else "UNKNOWN"},
+                               "heartbeat_age_seconds": hb_age, "health": worker_health,
+                               "attachment": attachment, "attachment_verified": attachment_verified},
                     "config_drift": campaign.get("last_error") in CONFIG_DRIFT_REASONS,
                     "recovery_required": campaign.get("campaign_status") == "RECOVERY_REQUIRED",
                     "duplicate_continuation_sequence": len({r["continuation_sequence"] for r in runs}) != len(runs),
-                    "aggregate_contamination": any("aggregate" in r["burnin_run_id"].lower() for r in runs)}
+                    "aggregate_contamination": None, "aggregate_contamination_availability": "DATA_UNAVAILABLE",
+                    "source_freshness": {
+                        "worker_heartbeat": _freshness(heartbeat, threshold_seconds=self.freshness_seconds),
+                        "worker_attachment": _freshness(attachment.get("event_time") if attachment else None, threshold_seconds=self.freshness_seconds),
+                    }}
 
     def rejects(self, campaign_id: str, limit: int = 200) -> dict[str, Any]:
         """Return canonical rejected observations; never merge pending labels."""
@@ -257,7 +315,8 @@ class ControlCenterService:
                                      "rate": (int(row[2]) / total if total else None)})
             select_columns = sorted(columns)
             time_order = '"observed_at" DESC,' if "observed_at" in columns else ""
-            page_sql = cte + f' SELECT {",".join(f"\"{c}\"" for c in select_columns)} FROM rejected ORDER BY {time_order}"{identity}" DESC LIMIT ?'
+            selected_columns_sql = ",".join('"' + column + '"' for column in select_columns)
+            page_sql = cte + f' SELECT {selected_columns_sql} FROM rejected ORDER BY {time_order}"{identity}" DESC LIMIT ?'
             items = [dict(r) for r in conn.execute(page_sql, (*params, min(max(limit, 1), 500)))]
             for item in items:
                 try: metrics = json.loads(item.get("metrics_json") or "{}")
@@ -269,25 +328,32 @@ class ControlCenterService:
                     "deduplication": {"applied": has_id, "key": "observation_id" if has_id else None,
                                         "semantics": "DISTINCT_CANONICAL_OBSERVATIONS" if has_id else "RAW_OBSERVATION_ROWS_NO_RELIABLE_UNIQUE_KEY"},
                     "reason_distribution_scope": "campaign_distribution", "reason_distribution": distribution,
-                    "pagination": {"has_more": total > len(items)}}
+                    "pagination": {"has_more": total > len(items)},
+                    "source_observed_at": items[0].get("observed_at") if items and "observed_at" in columns else None}
 
     def rows(self, campaign_id: str, kind: str, limit: int = 200) -> dict[str, Any]:
         specs = {
-            "positions": ("burnin_pending_position_outcomes", "created_at"),
-            "events": ("burnin_campaign_events", "event_time"),
+            "positions": ("burnin_pending_position_outcomes", ("created_at", "entry_time", "resolved_at")),
+            "events": ("burnin_campaign_events", ("event_time",)),
         }
-        table, order = specs[kind]
+        table, timestamp_candidates = specs[kind]
         with self.connect() as conn:
             schema = self._schema(conn); self._campaign(conn, campaign_id)
             if table not in schema or "campaign_id" not in schema[table]:
                 return {"availability": "UNAVAILABLE_IN_SCHEMA", "items": None}
-            items = [dict(r) for r in conn.execute(f'SELECT * FROM "{table}" WHERE campaign_id=? ORDER BY "{order}" DESC LIMIT ?', (campaign_id, min(max(limit, 1), 500)))]
-            return {"availability": "AVAILABLE", "items": items}
+            columns = schema[table]
+            timestamp = next((candidate for candidate in timestamp_candidates if candidate in columns), None)
+            order = f'"{timestamp}" DESC' if timestamp else ('"id" DESC' if "id" in columns else None)
+            if order is None:
+                return {"availability": "UNAVAILABLE_IN_SCHEMA", "items": None, "source_observed_at": None}
+            items = [dict(r) for r in conn.execute(f'SELECT * FROM "{table}" WHERE campaign_id=? ORDER BY {order} LIMIT ?', (campaign_id, min(max(limit, 1), 500)))]
+            return {"availability": "AVAILABLE", "items": items,
+                    "source_observed_at": items[0].get(timestamp) if items and timestamp else None}
 
     def preflight(self) -> dict[str, Any]:
         with self.connect() as conn:
             schema = self._schema(conn)
-            if "burnin_preflight_reports" not in schema:
+            if "burnin_preflight_reports" not in schema or not {"id", "generated_at"} <= schema["burnin_preflight_reports"]:
                 return {"availability": "UNAVAILABLE_IN_SCHEMA", "report": None}
             row = conn.execute("SELECT * FROM burnin_preflight_reports ORDER BY generated_at DESC,id DESC LIMIT 1").fetchone()
             if not row: return {"availability": "DATA_UNAVAILABLE", "report": None}
@@ -306,7 +372,9 @@ class ControlCenterService:
         result = {}
         for path in allowed:
             result[path.name] = _sanitize("\n".join(path.read_text(errors="replace").splitlines()[-min(max(lines, 1), 500):])) if path.is_file() else None
-        return {"logs": result, "availability": "AVAILABLE" if any(v is not None for v in result.values()) else "DATA_UNAVAILABLE"}
+        modified = max((path.stat().st_mtime for path in allowed if path.is_file()), default=None)
+        return {"logs": result, "availability": "AVAILABLE" if any(v is not None for v in result.values()) else "DATA_UNAVAILABLE",
+                "source_observed_at": datetime.fromtimestamp(modified, timezone.utc).isoformat() if modified is not None else None}
 
     def _lease_path(self, campaign_id: str) -> Path:
         self._valid_id(campaign_id)
@@ -417,25 +485,39 @@ class ControlCenterService:
         self.validate(controls=True); self._valid_id(campaign_id)
         if not supplied_token or not hmac.compare_digest(supplied_token, self.token or ""):
             raise ControlError("BACKEND_UNREACHABLE", "Invalid control token", 401)
-        active = self.active()
-        if active["campaign_id"] != campaign_id:
-            raise ControlError("CAMPAIGN_ID_MISMATCH", "Requested campaign is not the active campaign", 409)
-        before = self.status(campaign_id); state = before["campaign"]["campaign_status"]
-        expected = "PAUSED" if operation == "pause" else "RUNNING"
-        if operation == "pause" and state != "RUNNING": raise ControlError("INVALID_STATE_TRANSITION", "Pause requires RUNNING", 409)
-        if operation == "resume" and state != "PAUSED": raise ControlError("INVALID_STATE_TRANSITION", "Resume requires PAUSED", 409)
-        if operation == "resume" and (before["recovery_required"] or before["config_drift"]): raise ControlError("RECOVERY_REQUIRED", "Resume is blocked by recovery/config drift", 409)
         with self._locks_guard: lock = self._locks.setdefault(campaign_id, threading.Lock())
         if not lock.acquire(blocking=False): raise ControlError("INVALID_STATE_TRANSITION", "Another campaign operation is in progress", 409)
         operation_id = str(uuid.uuid4()); lease_path: Path | None = None
-        previous_worker = self._worker_verification(before)
         record = {"operation_id": operation_id, "operation": operation, "campaign_id": campaign_id, "requested_at": _now(), "started_at": _now(),
-                  "previous_status": state, "previous_campaign_status": state, "expected_status": expected,
-                  "previous_worker_status": previous_worker["status"], "worker_verification_source": previous_worker["source"],
+                  "previous_status": "UNKNOWN", "previous_campaign_status": "UNKNOWN",
+                  "expected_status": "PAUSED" if operation == "pause" else "RUNNING",
+                  "previous_worker_status": "UNKNOWN", "worker_verification_source": "DATA_UNAVAILABLE",
                   "worker_verification_timeout": self.pause_worker_timeout if operation == "pause" else 0.0,
                   "verified_campaign_status": "UNKNOWN", "verified_worker_status": "UNKNOWN", "result": "COMMAND_FAILED"}
         try:
             lease_path = self._acquire_lease(campaign_id, operation_id)
+            active = self.active()
+            if active["campaign_id"] != campaign_id:
+                raise ControlError("CAMPAIGN_ID_MISMATCH", "Requested campaign is not the active campaign", 409)
+            before = self.status(campaign_id); state = before["campaign"]["campaign_status"]
+            expected = record["expected_status"]; previous_worker = self._worker_verification(before)
+            record.update(previous_status=state, previous_campaign_status=state,
+                          previous_worker_status=previous_worker["status"], worker_verification_source=previous_worker["source"])
+            if operation == "pause" and state != "RUNNING":
+                raise ControlError("INVALID_STATE_TRANSITION", "Pause requires RUNNING", 409)
+            if operation == "resume":
+                last_error = str(before["campaign"].get("last_error") or "")
+                if before["recovery_required"] or "RECOVERY" in last_error:
+                    raise ControlError("RECOVERY_REQUIRED", "Resume is blocked by canonical recovery state", 409)
+                if before["config_drift"]:
+                    raise ControlError("INVALID_STATE_TRANSITION", "Resume is blocked by config drift", 409)
+                if state != "PAUSED":
+                    raise ControlError("INVALID_STATE_TRANSITION", "Resume requires PAUSED", 409)
+                active_mappings = [r for r in before["runs"] if r.get("burnin_run_id") == before["campaign"].get("active_run_id")]
+                if len(active_mappings) != 1 or active_mappings[0].get("status") != "PAUSED" or before["duplicate_continuation_sequence"]:
+                    raise ControlError("RECOVERY_REQUIRED", "Active continuation identity is inconsistent", 409)
+                if previous_worker["status"] != "STOPPED":
+                    raise ControlError("RECOVERY_REQUIRED", "Worker stop identity is not verified", 409)
             cmd = [str(self.python), "-m", "alphaforge.burnin_cli", "--db", str(self.db_path), "--json", operation, "--campaign-id", campaign_id]
             if operation == "resume": cmd.append("--detach")
             try: completed = subprocess.run(cmd, cwd=self.project_root, capture_output=True, text=True, timeout=self.timeout, shell=False, check=False)
@@ -476,9 +558,10 @@ class ControlCenterService:
 
 def router(service: ControlCenterService) -> APIRouter:
     api = APIRouter(prefix="/api")
-    def envelope(data: Any, source: str = "canonical_sqlite") -> dict[str, Any]:
-        generated = _now(); observed = generated
-        return {"data": data, "source": source, "observed_at": observed, "generated_at": generated, "age_seconds": 0.0, "is_stale": False}
+    def envelope(data: Any, source: str = "canonical_sqlite", *, observed_at: str | None = None) -> dict[str, Any]:
+        freshness = _freshness(observed_at, threshold_seconds=service.freshness_seconds)
+        return {"data": data, "source": source, "generated_at": _now(), **freshness,
+                "availability": "AVAILABLE" if freshness["freshness_state"] in {"FRESH", "STALE"} else freshness["freshness_state"]}
     @api.get("/health")
     def health():
         return envelope(service.health(), "control_center_health")
@@ -499,15 +582,20 @@ def router(service: ControlCenterService) -> APIRouter:
     @api.get("/campaigns/{campaign_id}/status")
     def status(campaign_id: str): return envelope(service.status(campaign_id))
     @api.get("/campaigns/{campaign_id}/rejects")
-    def rejects(campaign_id: str, limit: int = Query(200, ge=1, le=500)): return envelope(service.rejects(campaign_id, limit))
+    def rejects(campaign_id: str, limit: int = Query(200, ge=1, le=500)):
+        data = service.rejects(campaign_id, limit); return envelope(data, observed_at=data.get("source_observed_at"))
     @api.get("/campaigns/{campaign_id}/positions")
-    def positions(campaign_id: str, limit: int = Query(200, ge=1, le=500)): return envelope(service.rows(campaign_id, "positions", limit))
+    def positions(campaign_id: str, limit: int = Query(200, ge=1, le=500)):
+        data = service.rows(campaign_id, "positions", limit); return envelope(data, observed_at=data.get("source_observed_at"))
     @api.get("/campaigns/{campaign_id}/events")
-    def events(campaign_id: str, limit: int = Query(200, ge=1, le=500)): return envelope(service.rows(campaign_id, "events", limit))
+    def events(campaign_id: str, limit: int = Query(200, ge=1, le=500)):
+        data = service.rows(campaign_id, "events", limit); return envelope(data, observed_at=data.get("source_observed_at"))
     @api.get("/campaigns/{campaign_id}/logs")
-    def logs(campaign_id: str, lines: int = Query(100, ge=1, le=500)): return envelope(service.logs(campaign_id, lines), "bounded_runtime_logs")
+    def logs(campaign_id: str, lines: int = Query(100, ge=1, le=500)):
+        data = service.logs(campaign_id, lines); return envelope(data, "bounded_runtime_logs", observed_at=data.get("source_observed_at"))
     @api.get("/preflight/latest")
-    def preflight(): return envelope(service.preflight())
+    def preflight():
+        data = service.preflight(); report = data.get("report") or {}; return envelope(data, observed_at=report.get("generated_at"))
     @api.post("/campaigns/{campaign_id}/pause")
     def pause(campaign_id: str, x_alphaforge_control_token: str | None = Header(None)): return envelope(service.control(campaign_id, "pause", x_alphaforge_control_token), "canonical_burnin_cli")
     @api.post("/campaigns/{campaign_id}/resume")

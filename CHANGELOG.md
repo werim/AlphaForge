@@ -3771,7 +3771,7 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - PyPI and GitHub API access were blocked by proxy HTTP 403; clean Python 3.11 dependency parity and the GitHub Actions run ID remain unverified.
 - The exact config command cannot import the src-layout package without installation; a diagnostic `PYTHONPATH=src` invocation passes.
 
-## 2026-08-01 — PAPER Control Center backend
+## PR #313 Control Center backend baseline
 
 ### Added
 - Read-only, source-attributed PAPER campaign, evidence, preflight, event, and bounded/redacted log endpoints.
@@ -3792,43 +3792,22 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - No canonical campaign stop operation exists; live Windows campaign and worker behavior still requires operator validation.
 
-## 2026-08-01 — PR #311 merge-blocker corrections
+## 2026-08-08 — PR #313 canonical safety correction
 
 ### Added
-- Campaign-wide, pre-limit rejected-observation deduplication/count and reason-distribution metadata.
-- Bounded pause worker postcondition polling and owner-token filesystem operation leases.
+- Canonical per-source freshness states and attachment-identity worker verification tests.
 
 ### Changed
-- Pause succeeds only when both canonical PAUSED state and worker stop/detach evidence are verified.
+- Resume now fails closed on recovery markers, inconsistent continuation identity, or unverified predecessor-worker stop evidence.
 
 ### Fixed
-- Reject totals no longer describe the limited response page, and stale owners cannot remove replacement leases.
+- Removed Python 3.11-invalid nested f-string SQL and fabricated response freshness.
 
 ### Removed
-- Pending reject-label queue rows from the reject-history endpoint.
+- Run-name aggregate-contamination inference.
 
 ### Breaking Changes
-- None; existing endpoint paths and `reject_total` name are retained.
+- None; unavailable freshness/contamination fields now honestly return null metadata.
 
 ### Known Issues
-- Live Windows worker polling and stale lease takeover acceptance remain outstanding.
-
-## 2026-08-06 — PR #311 deployment compatibility
-
-### Added
-- Frontend-compatible route aliases, configurable exact-origin CORS, operator diagnostics, and the `python -m alphaforge.control_center` entry point.
-
-### Changed
-- Health now separates backend, database, runtime, campaign, worker, and control-action status; runtime mode comes from validated configuration.
-
-### Fixed
-- A successful database probe no longer implies that the PAPER runtime or worker is healthy.
-
-### Removed
-- None.
-
-### Breaking Changes
-- None; canonical routes and response envelopes remain available.
-
-### Known Issues
-- No separate Control Center SPA source exists in this repository for end-to-end contract verification; hosted HTTPS-to-local-HTTP access remains subject to browser policy.
+- Local Python 3.11 lacks installed project dependencies; its grammar compile passes but full 3.11 import requires the CI dependency environment.
