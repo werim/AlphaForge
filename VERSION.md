@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PR #314 provenance and recovery-scope correction (2026-08-09)
+
+- Current version: Phase 9 authenticated terminalization evidence revision
+- Current phase: explicit PAPER-only historical continuation terminalization
+- Runtime maturity: shared recovery remains conservatively blocked for same-campaign unclean state; only the explicit terminalizer owns the evidence bridge
+- BACKTEST/PAPER/LIVE alignment: normal PAPER and all LIVE recovery semantics unchanged
+- Lifecycle coverage: existing transactional FAILED terminalization contract unchanged
+- Execution realism coverage: bridge requires machine-verifiable authenticated exchange provenance plus complete zero exposure
+- Known critical risks: missing or unauthenticated provenance fails closed without evidence persistence
+- Last audit date: 2026-08-09
+- Live readiness verdict: NOT LIVE READY
+
 ## Historical PAPER evidence bridge (2026-08-09)
 
 - Current version: Phase 9 campaign-linked terminalization evidence revision

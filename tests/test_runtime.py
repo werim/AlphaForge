@@ -681,6 +681,27 @@ def test_verified_zero_exposure_paper_recovery_supersedes_unscoped_history(tmp_p
     assert latest["blocked"] is False and latest["latest"]["runtime_status"] == "RECONCILED"
 
 
+def test_same_campaign_unclean_paper_recovery_remains_blocked_with_clean_probe(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'same-campaign-clean-probe.sqlite3'}")
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED",
+        instance_id="old", startup_id="old", process_id=0, campaign_id="campaign",
+        recovery_action_required=True,
+    ))
+    provider = type("Provider", (), {"snapshot": lambda self: {
+        "evidence_status": "COMPLETE", "authenticated": True,
+        "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT", "orders": [], "positions": [], "errors": [],
+    }})()
+
+    decision = evaluate_runtime_recovery(
+        engine, mode="PAPER", campaign_id="campaign",
+        reconciliation_probe=build_readonly_reconciliation_probe(provider),
+    )
+
+    assert decision["reconciliation_probe_clean"] is True
+    assert decision["blocked"] is True
+
+
 def test_unavailable_reconciliation_provider_remains_fail_closed(tmp_path: Path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'missing-provider.sqlite3'}")
     save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="RECOVERY_REQUIRED", instance_id="old", startup_id="old"))

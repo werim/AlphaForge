@@ -1,3 +1,24 @@
+# PR #314 recovery-scope and provenance correction — 2026-08-09
+
+### Added
+- Explicit `authenticated=true` and `input_source=AUTHENTICATED_EXCHANGE_SNAPSHOT` provenance to canonical Binance reconciliation snapshots and normalized probes.
+- Fail-closed tests for false, missing, and provider-name-only provenance.
+
+### Changed
+- The campaign-linked bridge accepts same-campaign unclean state only within explicit manual terminalization and only after all independent authoritative gates pass.
+
+### Fixed
+- Restored conservative shared recovery behavior: a clean probe does not make same-campaign unclean PAPER recovery generally non-blocking.
+
+### Removed
+- Provider-name strings as any possible basis for terminalization evidence authority.
+
+### Breaking Changes
+- Synthetic complete/empty probes without canonical authenticated provenance can no longer create terminalization evidence.
+
+### Known Issues
+- LIVE remains NOT READY; missing provenance and any ambiguity remain fail-closed.
+
 # Historical PAPER campaign-linked recovery evidence — 2026-08-09
 
 ### Added

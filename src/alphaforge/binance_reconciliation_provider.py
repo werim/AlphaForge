@@ -228,6 +228,7 @@ class BinanceReadonlyReconciliationProvider:
                        sources: dict[str, list[str]], position_warnings: list[dict[str, Any]],
                        endpoint_statuses: dict[str, str]) -> dict[str, Any]:
         return {"exchange": "binance", "market_type": "USDT_M", "retrieved_at": at, "captured_at": at,
+                "authenticated": True, "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT",
                 "orders": orders, "positions": positions, "fills": fills, "coverage": coverage,
                 "selected_count": len(selected), "configured_max": self._cfg.max_fill_symbols,
                 "selected_symbols": selected, "symbol_sources": sources,

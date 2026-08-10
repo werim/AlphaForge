@@ -31,6 +31,8 @@ def build_readonly_reconciliation_probe(provider: Any | None) -> Any:
             "provider": raw.get("exchange") or provider.__class__.__name__,
             "retrieved_at": raw.get("retrieved_at") or raw.get("captured_at") or canonical_utc_timestamp(),
             "evidence_status": str(raw.get("evidence_status") or "INCOMPLETE").upper(),
+            "authenticated": raw.get("authenticated") is True,
+            "input_source": str(raw.get("input_source") or "UNKNOWN").upper(),
             "orders": list(raw.get("orders") or []),
             "positions": list(raw.get("positions") or []),
             "errors": list(raw.get("errors") or []),
@@ -281,7 +283,7 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     elif prior_unclean: scope = "UNRELATED_HISTORICAL_RUNTIME"
     else: scope = "UNRELATED_HISTORICAL_RUNTIME"
     strict_live = str(mode).upper() in {"LIVE", "LIVE_PRECHECK"}
-    blocked = bool(query_errors) or global_risk or (strict_live and prior_unclean) or (same_campaign and prior_unclean and not probe_clean) or process_alive
+    blocked = bool(query_errors) or global_risk or (strict_live and prior_unclean) or (same_campaign and prior_unclean) or process_alive
     reason = "RECOVERY_EVIDENCE_UNAVAILABLE" if query_errors else ("UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED" if blocked and prior_unclean else ("RUNTIME_RECOVERY_REQUIRED" if blocked else None))
     return {"blocked": blocked, "reason": reason, "scope": scope, "latest": latest, "current_exposure_check": exposure,
             "kill_switch_active": kill_switch, "reconciliation_status": reconciliation_status,
@@ -358,9 +360,11 @@ def persist_campaign_linked_zero_exposure_reconciliation_evidence(
     campaign_id: str, burnin_run_id: str, release_id: str,
 ) -> dict[str, Any]:
     """Append the exact fresh PAPER reconciliation used by manual terminalization."""
-    if (str(probe.get("evidence_status") or "").upper() != "COMPLETE" or probe.get("errors")
+    if (probe.get("authenticated") is not True
+            or str(probe.get("input_source") or "").upper() != "AUTHENTICATED_EXCHANGE_SNAPSHOT"
+            or str(probe.get("evidence_status") or "").upper() != "COMPLETE" or probe.get("errors")
             or probe.get("orders") or probe.get("positions")):
-        raise RuntimeError("campaign_linked_evidence_requires_complete_zero_exposure_probe")
+        raise RuntimeError("campaign_linked_evidence_requires_authenticated_complete_zero_exposure_probe")
     instance_id = f"terminalization:{uuid.uuid4().hex}"
     startup_id = f"terminalization:{uuid.uuid4().hex}"
     diagnostics = {

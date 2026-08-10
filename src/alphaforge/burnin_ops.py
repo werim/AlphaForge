@@ -1110,7 +1110,13 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         probe = runtime.get("reconciliation_probe")
         bridge_safe = (
             isinstance(probe, Mapping) and runtime.get("reconciliation_probe_clean") is True
-            and not runtime.get("blocked") and not runtime.get("query_errors")
+            and probe.get("authenticated") is True
+            and str(probe.get("input_source") or "").upper() == "AUTHENTICATED_EXCHANGE_SNAPSHOT"
+            and (not runtime.get("blocked") or (
+                runtime.get("scope") == "SAME_CAMPAIGN" and runtime.get("prior_unclean") is True
+                and runtime.get("previous_process_alive") is False
+            ))
+            and not runtime.get("query_errors")
             and runtime.get("kill_switch_active") is False
             and all(bool(availability.get(key)) for key in ("active_positions_available", "pending_orders_available", "orphan_evidence_available", "kill_switch_available"))
             and all(counts.get(key) == 0 for key in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions"))

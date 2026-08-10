@@ -1,3 +1,34 @@
+# PR #314 production-safety blocker correction — 2026-08-09
+
+## Scope and root cause
+
+The initial bridge incorrectly relaxed `evaluate_runtime_recovery` globally for a same-campaign unclean PAPER snapshot, and treated a complete empty probe as authoritative without cryptographic-request provenance expressed in the normalized contract. This correction restores the shared conservative predicate exactly and confines the exception to explicit `--terminalize-zero-exposure` handling.
+
+## Provenance and terminalization behavior
+
+The canonical credential-gated Binance read-only provider now emits `authenticated=true` and `input_source=AUTHENTICATED_EXCHANGE_SNAPSHOT`; normalization preserves these as typed values. Both the explicit terminalizer predicate and the persistence helper require the exact boolean/source contract. Provider class/name strings are retained only for diagnostics and never establish authority. False, absent, or fake-name-only provenance cannot append a snapshot or mutate a campaign.
+
+Normal recovery, recovery-drill, startup, and LIVE continue treating same-campaign prior-unclean state as blocked even when a clean probe exists. The explicit terminalizer may consume that one known block only when the state is same-campaign/prior-unclean, the prior process is dead, canonical worker-death and local gates passed, the authenticated probe is complete, and every runtime exposure/source gate is available and zero. It then appends exact campaign/run/release evidence before the unchanged transaction.
+
+## Safety and compatibility
+
+The 120-second freshness policy, `BEGIN IMMEDIATE`, final re-reads, source/runtime hashes, execution/lifecycle counts, exact conditional row counts, rollback, FAILED status, audit event, idempotency, and append-only persistence are unchanged. `ACTIVE_CAMPAIGN_STATUSES`, Control Center, LIVE, dashboards, exports, and schemas are not changed by this correction.
+
+## Tests executed
+
+- `python -m compileall src`: passed.
+- `pytest -q tests/test_phase9_burnin_ops.py`: 101 passed.
+- `pytest -q tests/test_runtime.py`: 42 passed.
+- `pytest -q tests/test_phase8_burnin_campaign.py`: 33 passed.
+- `pytest -q tests/test_control_center_api.py`: 52 passed with dependency deprecation warnings.
+- `pytest -q tests/test_binance_reconciliation_provider.py` (combined focused run): passed; the combined runtime/Phase 9/provider run completed 198 tests.
+- `pytest -q`: 1,178 passed, 3 skipped, 282 warnings.
+- `git diff --check`: passed.
+
+The local full suite is green. GitHub Actions on the final pushed PR head remains the merge gate.
+
+---
+
 # Historical PAPER evidence-bridge surgery — 2026-08-09
 
 ## Need and root cause

@@ -706,7 +706,7 @@ def test_historical_terminalization_persists_fresh_campaign_linked_probe(monkeyp
     recovery = _clean_runtime_recovery(conn)
     recovery.update({
         "blocked": False, "reconciliation_probe_clean": True,
-        "reconciliation_probe": {"provider": "authenticated-test", "retrieved_at": utc_now(), "evidence_status": "COMPLETE", "orders": [], "positions": [], "errors": []},
+        "reconciliation_probe": {"provider": "test-fixture", "authenticated": True, "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT", "retrieved_at": utc_now(), "evidence_status": "COMPLETE", "orders": [], "positions": [], "errors": []},
     })
     monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: recovery)
 
@@ -734,6 +734,33 @@ def test_historical_terminalization_provider_unavailable_persists_no_snapshot(mo
     before = conn.execute("SELECT COUNT(*) FROM runtime_state_snapshots").fetchone()[0]
     recovery = _clean_runtime_recovery(conn)
     recovery.update({"blocked": True, "query_errors": ["reconciliation_probe:provider_unavailable"], "reconciliation_probe_clean": False, "reconciliation_probe": None})
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: recovery)
+
+    result = ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
+
+    assert result["status"] == "FAIL_CLOSED"
+    assert conn.execute("SELECT COUNT(*) FROM runtime_state_snapshots").fetchone()[0] == before
+    assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RECOVERY_REQUIRED"
+
+
+@pytest.mark.parametrize("provenance", [
+    {"authenticated": False, "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT"},
+    {},
+    {"provider": "authenticated-test"},
+])
+def test_historical_terminalization_rejects_non_authoritative_provenance(monkeypatch, tmp_path, provenance):
+    import alphaforge.burnin_ops as ops
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,))
+    _prepare_terminalization_evidence(conn, camp, run)
+    conn.execute("UPDATE runtime_state_snapshots SET campaign_id=NULL,burnin_run_id=NULL,timestamp='2020-01-01T00:00:00Z'"); conn.commit()
+    before = conn.execute("SELECT COUNT(*) FROM runtime_state_snapshots").fetchone()[0]
+    probe = {"evidence_status": "COMPLETE", "orders": [], "positions": [], "errors": [], **provenance}
+    recovery = _clean_runtime_recovery(conn)
+    recovery.update({"blocked": False, "reconciliation_probe_clean": True, "reconciliation_probe": probe})
     monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: recovery)
 
     result = ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
