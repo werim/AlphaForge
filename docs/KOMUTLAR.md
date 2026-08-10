@@ -1583,6 +1583,18 @@ Credential variables (`BINANCE_API_KEY` and `BINANCE_API_SECRET`) must be suppli
 
 ## Phase A shadow agent graph
 
+Phase B keeps the same disabled-by-default, shadow-only controls. Inspect the
+normalized Market/Signal/Quality and parity evidence from PowerShell without
+changing runtime state:
+
+```powershell
+sqlite3 data/runtime/alphaforge_agent_shadow.db "SELECT symbol,regime,score,raw_rr,quality_status,primary_reject_reason,parity_status FROM agent_phase_b_evidence ORDER BY created_at DESC LIMIT 50;"
+sqlite3 data/runtime/alphaforge_agent_shadow.db "SELECT primary_reject_reason,COUNT(*) FROM agent_phase_b_evidence GROUP BY primary_reject_reason ORDER BY COUNT(*) DESC;"
+```
+
+SQL `NULL` and JSON `null` mean unavailable; they must not be interpreted as
+zero. The legacy decision remains authoritative and no cutover has occurred.
+
 The graph is disabled by default and never owns an order decision. Replace the database path below with the configured runtime SQLite file.
 
 ### PowerShell

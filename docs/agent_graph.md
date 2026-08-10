@@ -1,8 +1,32 @@
-# Shadow Agent Graph — Phase A
+# Shadow Agent Graph — Phase A + Phase B
+
+## Phase B: Market → Signal → Quality
+
+When the opt-in graph is enabled, the runtime now registers deterministic,
+read-only Market, Signal, and Quality adapters. Market normalizes only supported
+regimes and records freshness plus per-field availability. Signal derives its
+score from the available named components and derives raw RR exclusively from
+entry/stop/target geometry. Quality reuses `evaluate_trade_quality`, preserves
+legacy hard rejects in its reason evidence, and records conservative parity.
+Missing execution evidence is `NULL`/unavailable, never a fake zero.
+
+The isolated database adds `agent_phase_b_evidence`; important fields are
+columns while secondary diagnostics remain JSON. For example:
+
+```sql
+SELECT symbol, regime, score, raw_rr, quality_status,
+       primary_reject_reason, parity_status
+FROM agent_phase_b_evidence ORDER BY created_at DESC LIMIT 50;
+```
+
+`RISK` and later stages remain Phase-A skipped/diagnostic stages. No BACKTEST,
+PAPER, or LIVE cutover has occurred: the legacy runtime is still authoritative,
+and Phase B cannot place/cancel orders or modify positions, risk, recovery,
+reconciliation, campaigns, thresholds, or legacy lifecycle rows.
 
 ## Purpose and scope
 
-Phase A adds typed, deterministic software-agent contracts—not chat personas—and a non-authoritative trace graph. The legacy runtime remains the sole source of PAPER/LIVE/BACKTEST decisions and execution. No market, signal, quality, risk, execution, verification, reflection, or portfolio business logic is implemented here; absent handlers produce explicit `SKIPPED / STAGE_HANDLER_NOT_REGISTERED` evidence.
+Phase A adds typed, deterministic software-agent contracts—not chat personas—and a non-authoritative trace graph. The legacy runtime remains the sole source of PAPER/LIVE/BACKTEST decisions and execution. Phase B implements only the first three observational handlers; absent later handlers produce explicit `SKIPPED / STAGE_HANDLER_NOT_REGISTERED` evidence.
 
 The fixed order is `MARKET → SIGNAL → QUALITY → RISK → EXECUTION → VERIFICATION → REFLECTION → PORTFOLIO`. Registration is explicit. Graph generation, recursion, LLM calls, self-prompting, threshold changes, exchange calls, order planning/submission/cancellation/simulation, and production cutover are prohibited.
 

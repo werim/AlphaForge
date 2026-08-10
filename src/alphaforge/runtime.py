@@ -38,6 +38,7 @@ from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_sta
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
 from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
+from alphaforge.agents.phase_b import register_phase_b_handlers
 from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
     bootstrap_agent_schema, create_agent_shadow_engine)
 from sqlalchemy import text
@@ -169,6 +170,15 @@ class RuntimeMetrics:
     agent_shadow_persistence_retries: int = 0
     agent_shadow_lock_wait_ms: float = 0.0
     agent_shadow_worker_count: int = 0
+    market_agent_pass: int = 0
+    market_agent_reject: int = 0
+    market_agent_defer: int = 0
+    signal_candidates_generated: int = 0
+    signal_no_candidate: int = 0
+    quality_pass: int = 0
+    quality_reject: int = 0
+    quality_defer: int = 0
+    phase_b_errors: int = 0
     burnin_outcomes: int = 0
     burnin_snapshots: int = 0
     persistence_enabled: bool = False
@@ -332,12 +342,28 @@ class RuntimeOrchestrator:
                         max_reflection_retries=self.config.agent_graph_max_reflection_retries,
                         stage_timeout_seconds=self.config.agent_graph_stage_timeout_seconds,
                         persist_traces=self.config.agent_graph_persist_traces), persistence=self._agent_trace_repository)
+                    register_phase_b_handlers(graph)
                     return asyncio.run(graph.run_shadow(decision_id=item["decision_id"],
                         correlation_id=item["correlation_id"], execution_mode=self.config.execution_mode.value,
                         symbol=item["snapshot"].get("symbol"), legacy_decision=item["snapshot"], context=item["snapshot"]))
                 result = await asyncio.to_thread(run_one)
                 self.metrics.agent_shadow_runs += 1
                 self.metrics.agent_shadow_stage_events += len(result.stage_results)
+                phase_b = {event.stage.value: event for event in result.stage_results[:3]}
+                market_status = phase_b["MARKET"].status.value.lower()
+                if market_status in {"pass", "reject", "defer"}:
+                    setattr(self.metrics, f"market_agent_{market_status}",
+                            getattr(self.metrics, f"market_agent_{market_status}") + 1)
+                signal_event = phase_b["SIGNAL"]
+                if signal_event.status.value == "PASS":
+                    self.metrics.signal_candidates_generated += 1
+                else:
+                    self.metrics.signal_no_candidate += 1
+                quality_status = phase_b["QUALITY"].status.value.lower()
+                if quality_status in {"pass", "reject", "defer"}:
+                    setattr(self.metrics, f"quality_{quality_status}",
+                            getattr(self.metrics, f"quality_{quality_status}") + 1)
+                self.metrics.phase_b_errors += sum(event.status.value == "ERROR" for event in phase_b.values())
                 self.metrics.agent_shadow_persistence_retries = self._agent_persistence_stats.retry_count
                 self.metrics.agent_shadow_lock_wait_ms = self._agent_persistence_stats.lock_wait_ms
                 if result.persistence_error:
@@ -388,6 +414,15 @@ class RuntimeOrchestrator:
                 "agent_shadow_persistence_retries": self.metrics.agent_shadow_persistence_retries,
                 "agent_shadow_lock_wait_ms": self.metrics.agent_shadow_lock_wait_ms,
                 "agent_shadow_worker_count": self.metrics.agent_shadow_worker_count,
+                "market_agent_pass": self.metrics.market_agent_pass,
+                "market_agent_reject": self.metrics.market_agent_reject,
+                "market_agent_defer": self.metrics.market_agent_defer,
+                "signal_candidates_generated": self.metrics.signal_candidates_generated,
+                "signal_no_candidate": self.metrics.signal_no_candidate,
+                "quality_pass": self.metrics.quality_pass,
+                "quality_reject": self.metrics.quality_reject,
+                "quality_defer": self.metrics.quality_defer,
+                "phase_b_errors": self.metrics.phase_b_errors,
             },
         )
 

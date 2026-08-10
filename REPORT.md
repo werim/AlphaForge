@@ -999,3 +999,63 @@ Final verification evidence: `pytest -q tests/test_control_center_api.py` passed
 The remaining production-safety gaps were implicit localhost CORS trust and composite responses being labeled unavailable when they intentionally had no single evidence timestamp. CORS now accepts only explicitly configured exact origins, with unset/empty configuration producing an empty allowlist without breaking same-origin use. Composite health/runtime/campaign/control envelopes now use `MULTI_SOURCE` with null aggregate time fields while preserving component freshness. Confirmed process existence is labeled `PROCESS_PRESENT`, not `ACTIVE`; the stronger attachment-based `HEALTHY` contract is unchanged. No recovery, persistence, runtime mutation, trading, lifecycle, reject, lease, CLI, or audit authority changed.
 
 Verification: `pytest -q tests/test_control_center_api.py` passed 52; dashboard/settings passed 50; Phase 8/9/heartbeat regressions passed 111; full `pytest -q` passed 1149 with 3 pre-existing skips and 0 failures. `python -m compileall -q src tests`, `PYTHONPATH=src python -m alphaforge.control_center --help`, and `git diff --check` passed. The exact module command without `PYTHONPATH` was executed but failed because this checkout uses an uninstalled src-layout package; the tested entry point itself passes with the source path, while an installed CI environment remains authoritative. No Git remote is configured in this container, so the new head could not be pushed and its GitHub Actions status could not be queried; merge remains blocked pending green required CI on the pushed head.
+# Issue #309 Phase B technical surgery — 2026-08-10
+
+## Need and root cause
+
+Phase A intentionally registered no stage handlers, so every Market, Signal,
+and Quality row was a generic skip. The runtime snapshot was persisted safely
+but could not explain regime, score construction, geometric RR, quality gates,
+or divergence from the legacy reject. Source investigation found no production
+shadow/BACKTEST assignment of `score = 0.8` or `rr = 2.0`; the exact fixed RR
+locations found are test fixtures, rollback evidence (`rollback_evidence.py`),
+and deterministic qualification-probe samples (`runtime.py`). The Phase-B path
+does not consume any of them and never substitutes those values.
+
+## Files and behavior
+
+`agents/phase_b.py` adds immutable-snapshot adapters. Market records justified
+canonical regimes, freshness, observed execution context, and availability.
+Signal aggregates only present named deterministic components and computes RR
+from side-aware entry/SL/TP geometry. Quality reuses `evaluate_trade_quality`,
+retains all failed gates plus the legacy hard reason, and classifies parity as
+MATCH/PARTIAL_MATCH/MISMATCH/UNAVAILABLE. `runtime.py` registers these adapters
+only in the existing opt-in shadow worker and publishes bounded counters.
+`agents/persistence.py` adds duplicate-safe `agent_phase_b_evidence` normalized
+columns with JSON only for component/availability/reason detail.
+
+## Safety, lifecycle, compatibility, and migration
+
+The graph remains disabled by default and shadow-only. It has no exchange,
+order, position, risk-budget, threshold, pause/resume, recovery,
+reconciliation, or campaign dependency. Exceptions and persistence failures
+remain diagnostic. Legacy decisions and lifecycle rows are unchanged; the
+isolated store alone gets an idempotently-created additive table. Phase-B
+evidence carries SIGNAL_CREATED/SIGNAL_REJECTED semantics without writing the
+canonical lifecycle. No CSV schema changes exist.
+
+## PAPER explainability and remaining risk
+
+Operators can now distinguish incomplete/no candidate, low component score,
+invalid/low geometric RR, regime/quality rejection, missing execution context,
+expectancy failure, and legacy/graph parity. Thus a 100% PAPER reject run is
+query-explainable for new traces; incomplete historical snapshots remain
+explicitly UNAVAILABLE rather than retrospectively reconstructed. Phase C+
+Risk/Execution/Verification/Reflection/Portfolio behavior and every cutover
+remain unimplemented. This is not LIVE readiness.
+
+## Tests
+
+Focused Phase-B tests cover determinism, freshness, null preservation, regime
+mapping, score aggregation/variability, RR geometry/variability, invalid/no
+candidate, quality/legacy reject preservation, parity, and duplicate-safe SQL.
+Requested regressions and the full suite are executed before push; merge is
+recommended only if those results and CI are green.
+
+Execution result: the requested Phase-B/contract/orchestrator/persistence/runtime/
+Phase-8/Phase-9 selection completed with 197 passes and one timing-sensitive
+heartbeat freshness failure (measured age 1.080632s against a 1s assertion);
+the exact failing test passed immediately in isolation. The full suite completed
+with 1,179 passed, 6 skipped, and four failures because the environment lacks
+the declared Alembic package (`ModuleNotFoundError: alembic.config` / missing
+`alembic.command`), an already documented repository environment limitation.

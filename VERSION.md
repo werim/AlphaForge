@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Issue #309 Phase B shadow evidence (2026-08-10)
+
+- Current version: Phase B Market/Signal/Quality shadow adapters
+- Current phase: observational parity burn-in; no cutover
+- Runtime maturity: graph remains disabled by default and legacy-authoritative
+- BACKTEST/PAPER/LIVE alignment: identical shadow adapters; no authoritative behavior change
+- Lifecycle coverage: additive shadow SIGNAL_CREATED/SIGNAL_REJECTED evidence only
+- Execution realism coverage: observed spread/slippage/liquidity/funding are nullable; raw RR is geometric
+- Known critical risks: incomplete legacy snapshots defer candidate/quality analysis; Phase C+ remains unimplemented
+- Last audit date: 2026-08-10
+- Live readiness verdict: NOT LIVE READY
+
 ## PR #314 provenance and recovery-scope correction (2026-08-09)
 
 - Current version: Phase 9 authenticated terminalization evidence revision
