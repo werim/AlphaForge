@@ -1320,6 +1320,30 @@ python -m alphaforge.burnin_ops --db "$DB" audit --campaign-id "$CAMPAIGN_ID"
 
 `UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED` görülürse bunu status alanını elle değiştirerek gizleme. Recovery kanıtını tamamla veya fail-closed yeni kampanya başlat.
 
+Tarihsel, ölü worker'a sahip `RECOVERY_REQUIRED` PAPER kampanyasını yalnızca açık operatör kararıyla sonlandırmak için:
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" recover-runtime --campaign-id "$CAMPAIGN_ID" --terminalize-zero-exposure
+```
+
+Komut önce mevcut salt-okunur reconciliation sağlayıcısından yeni ve eksiksiz kanıt alır. Pozisyon, bekleyen emir, orphan, unknown exchange state, recovery block, eksik kaynak veya worker kimliği belirsizliği varsa `FAIL_CLOSED` döner; kampanyayı değiştirmez ve sahte snapshot yazmaz. Başarılı probe yeni bir runtime satırı olarak exact `campaign_id`, active `burnin_run_id`, `release_id`, PAPER mode, gerçek kayıt zamanı ve versioned snapshot ID ile eklenir. Aynı kimlik 120 saniyelik freshness sınırı altında `BEGIN IMMEDIATE` içindeki son kontrolde ve terminalization audit eventinde doğrulanır.
+
+Başarı örneği:
+
+```text
+status = PASS
+terminal_status = FAILED
+```
+
+Fail-closed örneği:
+
+```text
+status = FAIL_CLOSED
+failure_reasons = ["EXTERNAL_EVIDENCE_INVALID_OR_STALE"]
+```
+
+Bayrak olmadan `recover-runtime` mevcut konservatif `recovery-drill` davranışını sürdürür. Control Center bu işlemi yazamaz; terminalization yetkisi yalnızca `alphaforge.burnin_ops` içindedir.
+
 ---
 
 # Standart Operasyon Akışı

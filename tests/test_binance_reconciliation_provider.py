@@ -54,6 +54,8 @@ def test_provider_success_normalization_hedge_mode() -> None:
     )
     snap = provider.snapshot()
     assert snap["evidence_status"] == "COMPLETE"
+    assert snap["authenticated"] is True
+    assert snap["input_source"] == "AUTHENTICATED_EXCHANGE_SNAPSHOT"
     assert len(snap["positions"]) == 2
     assert {p["position_side"] for p in snap["positions"]} == {"LONG", "SHORT"}
 

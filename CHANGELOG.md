@@ -1,3 +1,44 @@
+# PR #314 recovery-scope and provenance correction — 2026-08-09
+
+### Added
+- Explicit `authenticated=true` and `input_source=AUTHENTICATED_EXCHANGE_SNAPSHOT` provenance to canonical Binance reconciliation snapshots and normalized probes.
+- Fail-closed tests for false, missing, and provider-name-only provenance.
+
+### Changed
+- The campaign-linked bridge accepts same-campaign unclean state only within explicit manual terminalization and only after all independent authoritative gates pass.
+
+### Fixed
+- Restored conservative shared recovery behavior: a clean probe does not make same-campaign unclean PAPER recovery generally non-blocking.
+
+### Removed
+- Provider-name strings as any possible basis for terminalization evidence authority.
+
+### Breaking Changes
+- Synthetic complete/empty probes without canonical authenticated provenance can no longer create terminalization evidence.
+
+### Known Issues
+- LIVE remains NOT READY; missing provenance and any ambiguity remain fail-closed.
+
+# Historical PAPER campaign-linked recovery evidence — 2026-08-09
+
+### Added
+- An append-only, campaign/run/release-linked runtime snapshot from the explicit terminalization command's fresh authenticated reconciliation probe.
+
+### Changed
+- A complete probe can supersede stale same-campaign runtime state for PAPER recovery only; the exact new snapshot remains subject to the existing 120-second transaction gate.
+
+### Fixed
+- Dead historical PAPER continuations no longer depend on unrelated stale runtime evidence when authoritative zero-exposure reconciliation succeeds.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; reduced legacy runtime snapshot schemas receive additive canonical columns when evidence is appended.
+
+### Known Issues
+- Missing/ambiguous provider, exposure, reconciliation, lineage, or worker-death evidence remains fail-closed. LIVE remains NOT READY.
+
 # PAPER terminalization TOCTOU hardening — 2026-08-06
 
 ### Added
