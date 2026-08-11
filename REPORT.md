@@ -6,7 +6,9 @@ Detached startup demoted the campaign and both continuation rows to `STARTING`, 
 
 ## Minimal behavior and state transition
 
-`RuntimeOrchestrator.start` now persists all three linked rows as `RUNNING` immediately after runtime recovery, attachment, reconciliation, and the `OPERATING` snapshot succeed. Conditional row counts and campaign/run lineage prevent partial or wrong-continuation promotion. For historical dead `STARTING` PAPER scanners, recovery dispatches to the existing explicit transactional zero-exposure terminalizer. The chosen terminal state is `FAILED`: the worker is gone, the continuation cannot truthfully resume, and `RECOVERY_REQUIRED` is the guarded intermediate/operator state rather than a completed outcome. Decisions remain evidence and are not treated as executions.
+`RuntimeOrchestrator.start` now persists all three linked rows as `RUNNING` immediately after runtime recovery, attachment, and reconciliation succeed, before the `OPERATING` snapshot. Conditional row counts and campaign/run lineage prevent partial or wrong-continuation promotion. For historical dead `STARTING` PAPER scanners, recovery dispatches to the existing explicit transactional zero-exposure terminalizer. The chosen terminal state is `FAILED`: the worker is gone, the continuation cannot truthfully resume, and `RECOVERY_REQUIRED` is the guarded intermediate/operator state rather than a completed outcome. Decisions remain evidence and are not treated as executions.
+
+Follow-up lifecycle hardening moves promotion before setting or persisting runtime `OPERATING`. A promotion failure therefore leaves the runtime at `STARTING`, writes no authoritative `OPERATING` snapshot, and starts no scanner/heartbeat/reconciliation tasks. An already-`RUNNING` campaign is idempotent only after the exact active run and campaign-run mapping are re-read and both prove lineage-matched `RUNNING`; partial three-row state raises an explicit transition inconsistency.
 
 The terminalizer accepts `STARTING` only with a persisted dead PID identity and retains its existing fresh external-evidence bridge, 120-second identity, `BEGIN IMMEDIATE`, final campaign/run/mapping/source/exposure/execution/lifecycle re-reads, exact one-row conditional updates, and rollback-on-drift contract. Any execution or execution lifecycle state, pending reject, local/runtime position/order/orphan, missing evidence, live worker, lineage mismatch, stale snapshot, source change, or unavailable query blocks mutation. LIVE paths are unchanged.
 
@@ -16,12 +18,12 @@ An authenticated `COMPLETE` `AUTHENTICATED_EXCHANGE_SNAPSHOT` with empty positio
 
 ## Files and tests
 
-`burnin_campaign.py` owns operational promotion, `runtime.py` invokes it at the operational boundary, `burnin_ops.py` owns stale-scanner dispatch and atomic FAILED terminalization, and `runtime_state.py` resolves the effective clean probe status. Phase 9 regressions cover 9,990 preserved decisions and all-three-row operational promotion; the existing terminalization matrix continues to cover live worker, execution/lifecycle evidence, missing/unknown exposure, pending rejects, source/evidence drift, row-count mismatch, and rollback.
+`burnin_campaign.py` owns operational promotion, `runtime.py` invokes it before the authoritative operational boundary, `burnin_ops.py` owns stale-scanner dispatch and atomic FAILED terminalization, and `runtime_state.py` resolves the effective clean probe status. Regressions cover 9,990 preserved decisions, all-three-row operational promotion, partial-`RUNNING` rejection, and absence of an `OPERATING` snapshot/task startup after promotion failure; the existing terminalization matrix continues to cover live worker, execution/lifecycle evidence, missing/unknown exposure, pending rejects, source/evidence drift, row-count mismatch, and rollback.
 
 ## Tests executed
 
 - Focused stale-scanner, operational-transition, terminalization, runtime recovery, and reconciliation suites passed.
-- Full repository suite passed: 1,190 passed, 3 skipped, 282 warnings.
+- Full repository suite passed after lifecycle hardening: 1,192 passed, 3 skipped, 282 warnings.
 - Compile and diff checks passed.
 
 ## Migration concerns and push recommendation

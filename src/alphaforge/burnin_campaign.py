@@ -215,6 +215,18 @@ def mark_attached_campaign_operational(conn: Any, campaign_id: str, run_id: str,
     if not campaign or campaign.get("active_run_id") != run_id:
         raise RuntimeError("PHASE8_CAMPAIGN_OPERATIONAL_LINEAGE_MISMATCH")
     if campaign.get("campaign_status") == "RUNNING":
+        run_row = _exec(conn, "SELECT burnin_run_id,status FROM burnin_runs WHERE burnin_run_id=:bid", {"bid": run_id}).fetchone()
+        mapping_row = _exec(conn, "SELECT campaign_id,burnin_run_id,status FROM burnin_campaign_runs WHERE campaign_id=:cid AND burnin_run_id=:bid", {"cid": campaign_id, "bid": run_id}).fetchone()
+        run = _row_dict(run_row) if run_row is not None else None
+        mapping = _row_dict(mapping_row) if mapping_row is not None else None
+        consistent = (
+            run is not None and mapping is not None
+            and run.get("burnin_run_id") == run_id and run.get("status") == "RUNNING"
+            and mapping.get("campaign_id") == campaign_id
+            and mapping.get("burnin_run_id") == run_id and mapping.get("status") == "RUNNING"
+        )
+        if not consistent:
+            raise RuntimeError("PHASE8_CAMPAIGN_OPERATIONAL_TRANSITION_INCONSISTENT")
         return
     if campaign.get("campaign_status") != "STARTING":
         raise RuntimeError("PHASE8_CAMPAIGN_NOT_STARTING")

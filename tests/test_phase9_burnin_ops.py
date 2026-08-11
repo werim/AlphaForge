@@ -703,6 +703,20 @@ def test_operational_worker_promotes_all_starting_statuses_atomically(tmp_path):
     assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
 
 
+def test_operational_promotion_rejects_partially_running_linkage(tmp_path):
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_OPERATIONAL_TRANSITION_INCONSISTENT"):
+        mark_attached_campaign_operational(conn, camp.campaign_id, run, runtime_instance_id="runtime:test")
+
+    assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RUNNING"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "STARTING"
+
+
 def test_explicit_zero_exposure_terminalization_is_atomic_idempotent_and_unblocks(monkeypatch, tmp_path):
     import alphaforge.burnin_ops as ops
     _, conn = _conn(tmp_path)

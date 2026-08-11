@@ -595,8 +595,6 @@ class RuntimeOrchestrator:
             self._unknown_exchange_state = False
             self._exchange_read_only_status = "NOT_REQUIRED_BACKTEST"
             self._reconciliation_status = "NOT_REQUIRED_BACKTEST"
-        self._runtime_status = "OPERATING"
-        self._persist_runtime_state_snapshot("OPERATING")
         campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
         if campaign_id and self._burnin_run_id and self.config.execution_mode == ExecutionMode.PAPER:
             from alphaforge.burnin_campaign import mark_attached_campaign_operational
@@ -606,6 +604,8 @@ class RuntimeOrchestrator:
             with engine.begin() as conn:
                 mark_attached_campaign_operational(conn, campaign_id, self._burnin_run_id,
                                                    runtime_instance_id=self.runtime_instance_id)
+        self._runtime_status = "OPERATING"
+        self._persist_runtime_state_snapshot("OPERATING")
         self._register_signals()
         self._initialize_agent_shadow()
         self._tasks = [
