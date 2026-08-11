@@ -80,6 +80,9 @@ class MarketAgent:
         raw_regime = str(data.get("regime", "") or "").upper()
         aliases = {"TREND": "TRENDING", "RANGE": "MEAN_REVERTING", "CHOP": "CHOPPY"}
         regime = aliases.get(raw_regime, raw_regime if raw_regime in _REGIMES else None)
+        unsupported_regime = None
+        if raw_regime and regime is None:
+            unsupported_regime = raw_regime
         metrics = {
             "volatility": volatility, "trend_strength": trend_strength,
             "spread": _number(data.get("spread_pct")),
@@ -95,7 +98,13 @@ class MarketAgent:
                     "timestamp": timestamp, "freshness_seconds": age, "trend_direction": data.get("trend_direction"),
                     "volatility_regime": data.get("volatility_regime"), "regime": regime,
                     **metrics, "availability": availability,
-                    "unsupported_regime": raw_regime or None if regime is None else None,
+                    # AlphaForge has deterministic volatility/trend feature builders,
+                    # but no pure canonical classifier for the issue-309 vocabulary.
+                    # Therefore this stage observes/normalizes supplied provenance;
+                    # it does not infer a regime from thresholds of its own.
+                    "regime_source": "OBSERVED_NORMALIZED" if regime else "UNAVAILABLE",
+                    "regime_classification_supported": False,
+                    "unsupported_regime": unsupported_regime,
                     "proxy_fields": list(data.get("proxy_fields", [])) if value.execution_mode == "BACKTEST" else []}
         if timestamp is not None and age is None:
             return _envelope(value, DecisionStatus.REJECT, "INVALID_MARKET_TIMESTAMP", evidence)
@@ -108,22 +117,20 @@ class MarketAgent:
 
 
 class SignalAgent:
-    # Same observable concepts used by AIBrain; absent components are excluded,
-    # rather than silently receiving AIBrain's neutral defaults.
-    WEIGHTS = {"setup_quality": .18, "regime_alignment": .14, "expectancy_edge": .20,
-               "momentum_confirmation": .12, "liquidity_quality": .10,
-               "volatility_fit": .10, "risk_reward_quality": .16}
-
     def run(self, value: StageInput) -> DecisionEnvelope:
         data = _flat(value.payload)
         entry = _number(data.get("entry", data.get("entry_price")))
         sl = _number(data.get("sl", data.get("stop_loss")))
         tp = _number(data.get("tp", data.get("take_profit")))
         side = str(data.get("side", "") or "").upper() or None
-        components = {name: max(0.0, min(1.0, number)) for name in self.WEIGHTS
-                      if (number := _number(data.get(name))) is not None}
-        weight = sum(self.WEIGHTS[name] for name in components)
-        score = round(sum(components[name] * self.WEIGHTS[name] for name in components) / weight, 10) if weight else None
+        canonical_components = data.get("score_components", data.get("components"))
+        components = ({str(name): float(number) for name, number in canonical_components.items()
+                       if _number(number) is not None}
+                      if isinstance(canonical_components, Mapping) else {})
+        # The immutable runtime snapshot contains the score already calculated
+        # by AIBrain. Recomputing it here would create a second scoring model.
+        score = _number(data.get("score", data.get("total_score")))
+        score_source = "CANONICAL_SNAPSHOT" if score is not None else "UNAVAILABLE"
         raw_rr = None
         geometry_reason = None
         if None not in (entry, sl, tp) and entry and side in {"LONG", "SHORT"}:
@@ -137,8 +144,9 @@ class SignalAgent:
             geometry_reason = "INCOMPLETE_SIGNAL_GEOMETRY"
         evidence = {"lifecycle_state": "SIGNAL_CREATED" if side and not geometry_reason else "SIGNAL_REJECTED",
                     "signal_side": side, "setup_type": data.get("setup_type", data.get("setup")),
-                    "score": score, "score_components": components, "score_component_weights": self.WEIGHTS,
-                    "score_coverage": round(weight, 10), "raw_rr": raw_rr, "entry": entry, "sl": sl, "tp": tp,
+                    "score": score, "score_components": components, "score_source": score_source,
+                    "score_components_available": bool(components), "raw_rr": raw_rr,
+                    "entry": entry, "sl": sl, "tp": tp,
                     "regime_compatibility_claim": data.get("regime_compatible"),
                     "no_signal_reason": geometry_reason, "source": "deterministic_observed_components"}
         if geometry_reason:
@@ -146,7 +154,7 @@ class SignalAgent:
         if not side or entry is None or sl is None or tp is None:
             evidence["no_signal_reason"] = "NO_COMPLETE_SIGNAL_CANDIDATE"
             return _envelope(value, DecisionStatus.DEFER, "NO_COMPLETE_SIGNAL_CANDIDATE", evidence)
-        if score is None:
+        if score is None or not components:
             return _envelope(value, DecisionStatus.DEFER, "SIGNAL_SCORE_COMPONENTS_UNAVAILABLE", evidence)
         return _envelope(value, DecisionStatus.PASS, "SIGNAL_CANDIDATE_GENERATED", evidence)
 
@@ -173,7 +181,9 @@ class QualityAgent:
                 str(signal.get("signal_side")), str(signal.get("setup_type") or "GENERIC"), "SHADOW_OBSERVATION",
                 str(data.get("regime") or "UNKNOWN"), score, rr, _number(data.get("expectancy")),
                 float(signal["entry"]), float(signal["sl"]), float(signal["tp"]), "SHADOW_ONLY")
-            market = dict(data); market["effective_rr"] = _number(data.get("effective_rr")) or rr
+            market = dict(data)
+            effective_rr = _number(data.get("effective_rr"))
+            market["effective_rr"] = rr if effective_rr is None else effective_rr
             decision = evaluate_trade_quality(candidate, market, data.get("recent_stats", {}) if isinstance(data.get("recent_stats"), Mapping) else {},
                                               {"MODE": value.execution_mode})
             quality_score, diagnostics = decision.quality_score, decision.diagnostics
@@ -183,6 +193,16 @@ class QualityAgent:
         if legacy_decision in {"REJECT", "REJECTED"} and legacy_reason and legacy_reason not in reasons:
             reasons.append(legacy_reason)
         reasons = list(dict.fromkeys(reasons))
+        executed_checks = []
+        if score is not None: executed_checks.append("score_integrity")
+        if all(_number(signal.get(key)) is not None for key in ("entry", "sl", "tp")):
+            executed_checks.append("geometry")
+        if rr is not None: executed_checks.append("raw_rr")
+        if _number(data.get("spread_pct")) is not None: executed_checks.append("spread")
+        if _number(data.get("expected_slippage_pct")) is not None: executed_checks.append("slippage")
+        if _number(data.get("liquidity_score")) is not None: executed_checks.append("liquidity_availability")
+        execution_missing = any(field in unavailable for field in
+                                ("spread_pct", "expected_slippage_pct", "liquidity_score"))
         graph_status = "REJECT" if reasons else ("DEFER" if unavailable else "PASS")
         if not legacy_decision or graph_status == "DEFER": parity = "UNAVAILABLE"
         elif (legacy_decision in {"REJECT", "REJECTED"}) == (graph_status == "REJECT"):
@@ -192,6 +212,9 @@ class QualityAgent:
         evidence = {"quality_score": quality_score, "expectancy_bucket": data.get("expectancy_bucket"),
                     "primary_reject_reason": reasons[0] if reasons else None, "all_reject_reasons": reasons,
                     "unavailable_checks": unavailable, "quality_diagnostics": diagnostics,
+                    "checks_executed": executed_checks,
+                    "execution_context_complete": not execution_missing,
+                    "execution_quality_status": "UNAVAILABLE" if execution_missing else "EVALUATED",
                     "legacy_decision": legacy_decision or None, "legacy_primary_reject_reason": legacy_reason,
                     "graph_quality_status": graph_status, "reason_code_overlap": bool(legacy_reason and legacy_reason in reasons),
                     "score_difference": (round(score - float(data["score"]), 10) if score is not None and _number(data.get("score")) is not None else None),

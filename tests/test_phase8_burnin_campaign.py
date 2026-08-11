@@ -224,7 +224,11 @@ def test_resolver_lock_wait_runs_off_event_loop_and_runtime_heartbeat_stays_fres
     try:
         asyncio.run(exercise())
         assert ticks >= 4
-        assert evaluate_runtime_heartbeat_freshness(engine, required_mode="PAPER", max_age_sec=1).is_fresh
+        # Heartbeats are persisted at whole-second precision. Allow one second
+        # of quantization in addition to the one-second freshness assertion so
+        # a boundary crossing cannot misclassify a heartbeat written by this
+        # exercise; production freshness policy is unchanged.
+        assert evaluate_runtime_heartbeat_freshness(engine, required_mode="PAPER", max_age_sec=2).is_fresh
     finally:
         engine.dispose()
 

@@ -7,7 +7,7 @@
 - Runtime maturity: graph remains disabled by default and legacy-authoritative
 - BACKTEST/PAPER/LIVE alignment: identical shadow adapters; no authoritative behavior change
 - Lifecycle coverage: additive shadow SIGNAL_CREATED/SIGNAL_REJECTED evidence only
-- Execution realism coverage: observed spread/slippage/liquidity/funding are nullable; raw RR is geometric
+- Execution realism coverage: observed spread/slippage/liquidity/funding are nullable; raw RR is geometric and zero effective RR is preserved
 - Known critical risks: incomplete legacy snapshots defer candidate/quality analysis; Phase C+ remains unimplemented
 - Last audit date: 2026-08-10
 - Live readiness verdict: NOT LIVE READY

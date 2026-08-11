@@ -4,11 +4,13 @@
 
 When the opt-in graph is enabled, the runtime now registers deterministic,
 read-only Market, Signal, and Quality adapters. Market normalizes only supported
-regimes and records freshness plus per-field availability. Signal derives its
-score from the available named components and derives raw RR exclusively from
-entry/stop/target geometry. Quality reuses `evaluate_trade_quality`, preserves
+regimes and records freshness plus per-field availability. Signal consumes the
+canonical AIBrain score/components captured in the immutable snapshot and
+derives raw RR exclusively from entry/stop/target geometry; it defers when the
+canonical scoring evidence is incomplete. Quality reuses `evaluate_trade_quality`, preserves
 legacy hard rejects in its reason evidence, and records conservative parity.
-Missing execution evidence is `NULL`/unavailable, never a fake zero.
+Missing execution evidence is `NULL`/unavailable, never a fake zero, and cannot
+be reported as completed execution-quality validation.
 
 The isolated database adds `agent_phase_b_evidence`; important fields are
 columns while secondary diagnostics remain JSON. For example:

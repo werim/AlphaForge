@@ -2,7 +2,9 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 
+from alphaforge.ai_brain import AIBrain
 from alphaforge.agents.contracts import AgentStage, DecisionStatus, StageInput
 from alphaforge.agents.orchestrator import ShadowAgentOrchestrator
 from alphaforge.agents.persistence import AgentTraceRepository, bootstrap_agent_schema
@@ -18,9 +20,8 @@ def fixture(**overrides):
             "regime": "TREND", "atr_pct": 1.2, "trend_strength": .8,
             "spread_pct": .001, "expected_slippage_pct": .001, "liquidity_score": .9,
             "side": "LONG", "setup_type": "TREND_CONTINUATION", "entry": 100, "sl": 98,
-            "tp": 105, "setup_quality": .8, "regime_alignment": .9, "expectancy_edge": .7,
-            "momentum_confirmation": .8, "liquidity_quality": .9, "volatility_fit": .7,
-            "risk_reward_quality": .8, "expectancy": .2, "decision": "REJECTED",
+            "tp": 105, "score": .73, "score_components": {"setup_quality": .8},
+            "expectancy": .2, "decision": "REJECTED",
             "reject_reason": "DAILY_GLOBAL_TRADE_LIMIT"}
     return {**base, **overrides}
 
@@ -40,17 +41,26 @@ def test_market_stale_defers_and_supported_regimes_differ():
     assert MarketAgent().run(stage(AgentStage.MARKET, fixture(regime="RANGE"))).evidence["regime"] == "MEAN_REVERTING"
 
 
-def test_signal_real_component_aggregation_varies_and_rr_uses_geometry():
+def test_signal_consumes_canonical_score_and_rr_uses_geometry():
     agent = SignalAgent()
     high = agent.run(stage(AgentStage.SIGNAL, fixture()))
-    low = agent.run(stage(AgentStage.SIGNAL, fixture(setup_quality=.1, momentum_confirmation=.1)))
-    weighted = sum(high.evidence["score_components"][k] * agent.WEIGHTS[k]
-                   for k in high.evidence["score_components"])
-    assert high.evidence["score"] == round(weighted / high.evidence["score_coverage"], 10)
-    assert high.evidence["score"] != low.evidence["score"]
-    assert high.evidence["score"] != .8
+    assert high.evidence["score"] == .73
+    assert high.evidence["score_source"] == "CANONICAL_SNAPSHOT"
     assert high.evidence["raw_rr"] == 2.5
     assert agent.run(stage(AgentStage.SIGNAL, fixture(tp=106))).evidence["raw_rr"] == 3.0
+
+
+def test_signal_score_matches_canonical_ai_brain_result():
+    with Session(create_engine("sqlite+pysqlite:///:memory:")) as session:
+        brain = AIBrain(session)
+        signal_input = {"risk_reward": 2.5, "setup_quality": .8}
+        market = {"momentum_confirmation": .7, "liquidity_quality": .9, "volatility_fit": .8}
+        regime = {"alignment": .85}
+        canonical = brain.score_signal(signal_input, market, regime, {})
+    payload = fixture(score=canonical.total_score, score_components=canonical.components)
+    shadow = SignalAgent().run(stage(AgentStage.SIGNAL, payload))
+    assert shadow.evidence["score"] == canonical.total_score
+    assert dict(shadow.evidence["score_components"]) == canonical.components
 
 
 def test_signal_invalid_and_no_candidate_are_explicit():
@@ -72,7 +82,7 @@ def test_quality_preserves_legacy_hard_reject_and_parity():
 
 
 def test_quality_low_score_and_unavailable_checks_are_concrete():
-    payload = fixture(**{key: .1 for key in SignalAgent.WEIGHTS}, decision="ACCEPTED", reject_reason="")
+    payload = fixture(score=.1, decision="ACCEPTED", reject_reason="")
     signal = SignalAgent().run(stage(AgentStage.SIGNAL, payload))
     quality = QualityAgent().run(stage(AgentStage.QUALITY, payload, (signal,)))
     assert quality.status is DecisionStatus.REJECT
@@ -81,6 +91,16 @@ def test_quality_low_score_and_unavailable_checks_are_concrete():
     deferred = QualityAgent().run(stage(AgentStage.QUALITY, {}, (empty_signal,)))
     assert deferred.status is DecisionStatus.DEFER
     assert "spread_pct" in deferred.evidence["unavailable_checks"]
+    assert deferred.evidence["execution_quality_status"] == "UNAVAILABLE"
+
+
+def test_quality_preserves_zero_effective_rr():
+    payload = fixture(score=.9, effective_rr=0.0, decision="ACCEPTED", reject_reason="")
+    signal = SignalAgent().run(stage(AgentStage.SIGNAL, payload))
+    quality = QualityAgent().run(stage(AgentStage.QUALITY, payload, (signal,)))
+    assert quality.status is DecisionStatus.REJECT
+    assert quality.evidence["quality_diagnostics"]["effective_rr"] == 0.0
+    assert "RR_TOO_LOW" in quality.evidence["all_reject_reasons"]
 
 
 def test_phase_b_persistence_is_queryable_null_safe_and_duplicate_safe():

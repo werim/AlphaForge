@@ -1006,18 +1006,21 @@ Verification: `pytest -q tests/test_control_center_api.py` passed 52; dashboard/
 Phase A intentionally registered no stage handlers, so every Market, Signal,
 and Quality row was a generic skip. The runtime snapshot was persisted safely
 but could not explain regime, score construction, geometric RR, quality gates,
-or divergence from the legacy reject. Source investigation found no production
-shadow/BACKTEST assignment of `score = 0.8` or `rr = 2.0`; the exact fixed RR
-locations found are test fixtures, rollback evidence (`rollback_evidence.py`),
-and deterministic qualification-probe samples (`runtime.py`). The Phase-B path
-does not consume any of them and never substitutes those values.
+or divergence from the legacy reject. Follow-up source investigation identified
+the exact production placeholder in `RuntimeOrchestrator._build_signal`
+(`float(market_ctx.get("rr", 2.0) or 2.0)`). Phase B does not consume that RR:
+it requires entry/SL/TP geometry and returns explicit incomplete/no-candidate
+evidence when geometry is unavailable. Fixed RR values also exist in tests,
+rollback evidence, and deterministic qualification-probe samples. No production
+Phase-B `score = 0.8` assignment exists.
 
 ## Files and behavior
 
 `agents/phase_b.py` adds immutable-snapshot adapters. Market records justified
 canonical regimes, freshness, observed execution context, and availability.
-Signal aggregates only present named deterministic components and computes RR
-from side-aware entry/SL/TP geometry. Quality reuses `evaluate_trade_quality`,
+Signal consumes the canonical AIBrain score and component evidence from the
+immutable snapshot (and defers when it is absent) and computes RR from
+side-aware entry/SL/TP geometry. Quality reuses `evaluate_trade_quality`,
 retains all failed gates plus the legacy hard reason, and classifies parity as
 MATCH/PARTIAL_MATCH/MISMATCH/UNAVAILABLE. `runtime.py` registers these adapters
 only in the existing opt-in shadow worker and publishes bounded counters.
@@ -1047,10 +1050,27 @@ remain unimplemented. This is not LIVE readiness.
 ## Tests
 
 Focused Phase-B tests cover determinism, freshness, null preservation, regime
-mapping, score aggregation/variability, RR geometry/variability, invalid/no
+mapping, canonical AIBrain score parity, RR geometry/variability, invalid/no
 candidate, quality/legacy reject preservation, parity, and duplicate-safe SQL.
 Requested regressions and the full suite are executed before push; merge is
 recommended only if those results and CI are green.
+
+Follow-up review removed the independent Phase-B weighting formula, preserves
+an observed `effective_rr=0.0` instead of falling back to raw RR, labels which
+quality checks executed, and prevents incomplete execution context from being
+presented as validated. Repository inspection found volatility/trend feature
+builders but no pure canonical classifier for the issue-309 regime vocabulary;
+MarketAgent therefore explicitly reports observed normalization provenance and
+does not claim to have classified the regime.
+
+Follow-up verification passed 10 Phase-B tests, 14 contract/orchestrator/
+persistence tests, 45 runtime/concurrency tests, and 134 Phase-8/Phase-9 tests.
+The heartbeat selection is now clean after accounting for whole-second storage
+quantization in the test only; runtime freshness policy is unchanged. The full
+suite completed with 1,181 passed and 6 skipped; its only four failures are
+Alembic imports. Installing the declared `alembic>=1.13,<2.0` dependency was
+attempted but the environment package-index tunnel returned HTTP 403, so this
+is separately recorded as environment-unavailable rather than a code pass.
 
 Execution result: the requested Phase-B/contract/orchestrator/persistence/runtime/
 Phase-8/Phase-9 selection completed with 197 passes and one timing-sensitive
