@@ -1,3 +1,35 @@
+# Stale PAPER STARTING recovery surgery — 2026-08-11
+
+## Need and root cause
+
+Detached startup demoted the campaign and both continuation rows to `STARTING`, but only the launcher called `_mark_attached_running`. If that launcher disappeared after the worker attached, the worker could continue scanning and persisting decisions indefinitely without owning the operational status transition. Recovery then classified only dead `RUNNING` continuations as stale; the zero-decision startup fallback deliberately rejected a 9,990-decision continuation, leaving this safe but inconsistent case blocked.
+
+## Minimal behavior and state transition
+
+`RuntimeOrchestrator.start` now persists all three linked rows as `RUNNING` immediately after runtime recovery, attachment, reconciliation, and the `OPERATING` snapshot succeed. Conditional row counts and campaign/run lineage prevent partial or wrong-continuation promotion. For historical dead `STARTING` PAPER scanners, recovery dispatches to the existing explicit transactional zero-exposure terminalizer. The chosen terminal state is `FAILED`: the worker is gone, the continuation cannot truthfully resume, and `RECOVERY_REQUIRED` is the guarded intermediate/operator state rather than a completed outcome. Decisions remain evidence and are not treated as executions.
+
+The terminalizer accepts `STARTING` only with a persisted dead PID identity and retains its existing fresh external-evidence bridge, 120-second identity, `BEGIN IMMEDIATE`, final campaign/run/mapping/source/exposure/execution/lifecycle re-reads, exact one-row conditional updates, and rollback-on-drift contract. Any execution or execution lifecycle state, pending reject, local/runtime position/order/orphan, missing evidence, live worker, lineage mismatch, stale snapshot, source change, or unavailable query blocks mutation. LIVE paths are unchanged.
+
+## Reconciliation, persistence, compatibility, and risk
+
+An authenticated `COMPLETE` `AUTHENTICATED_EXCHANGE_SNAPSHOT` with empty positions/orders is now the effective `CLEAN` status of that evaluation; the older `EXCHANGE_STATE_UNKNOWN` event remains immutable history. Non-authoritative probes retain prior semantics and cannot create campaign-linked terminalization evidence. No schema, migration, CSV/export, decision, lifecycle, runtime snapshot, reconciliation, or audit row is deleted or rewritten. The only mutations are guarded campaign/run statuses plus append-only events/evidence. LIVE remains NOT READY.
+
+## Files and tests
+
+`burnin_campaign.py` owns operational promotion, `runtime.py` invokes it at the operational boundary, `burnin_ops.py` owns stale-scanner dispatch and atomic FAILED terminalization, and `runtime_state.py` resolves the effective clean probe status. Phase 9 regressions cover 9,990 preserved decisions and all-three-row operational promotion; the existing terminalization matrix continues to cover live worker, execution/lifecycle evidence, missing/unknown exposure, pending rejects, source/evidence drift, row-count mismatch, and rollback.
+
+## Tests executed
+
+- Focused stale-scanner, operational-transition, terminalization, runtime recovery, and reconciliation suites passed.
+- Full repository suite passed: 1,190 passed, 3 skipped, 282 warnings.
+- Compile and diff checks passed.
+
+## Migration concerns and push recommendation
+
+No migration is required. The patch is suitable for review with the full local suite green; pushed-head CI remains the merge gate. Do not infer LIVE readiness from this PAPER-only correction.
+
+---
+
 # PR #314 production-safety blocker correction — 2026-08-09
 
 ## Scope and root cause

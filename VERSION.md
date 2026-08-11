@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Stale PAPER STARTING recovery (2026-08-11)
+
+- Current version: Phase 9 stale-scanner recovery correction
+- Current phase: transactional PAPER campaign lifecycle recovery
+- Runtime maturity: an operational attached worker owns `STARTING -> RUNNING`; a dead stale scanner may become `FAILED` only through authenticated zero-exposure terminalization
+- BACKTEST/PAPER/LIVE alignment: PAPER campaign metadata corrected; LIVE recovery remains unchanged and fail-closed
+- Lifecycle coverage: decisions remain preserved; zero executions and zero execution lifecycle states are mandatory for the fallback
+- Execution realism coverage: fresh authenticated complete exchange positions/orders and available zero local/runtime exposure are mandatory
+- Known critical risks: missing worker identity, evidence, lineage, or any exposure blocks recovery
+- Last audit date: 2026-08-11
+- Live readiness verdict: NOT LIVE READY
+
 ## Issue #309 Phase B shadow evidence (2026-08-10)
 
 - Current version: Phase B Market/Signal/Quality shadow adapters

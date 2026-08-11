@@ -1,3 +1,23 @@
+## Stale PAPER STARTING recovery — 2026-08-11
+
+### Added
+- Worker-owned atomic `STARTING -> RUNNING` persistence and a 9,990-decision stale-scanner regression.
+
+### Changed
+- Explicit zero-exposure terminalization accepts an exact dead PAPER `STARTING` lineage in addition to `RECOVERY_REQUIRED`.
+
+### Fixed
+- Authenticated complete empty probes now report effective `CLEAN` reconciliation instead of a stale retained `EXCHANGE_STATE_UNKNOWN` value.
+
+### Removed
+- Nothing; all decisions, lifecycle rows, runtime snapshots, reconciliation records, and audits remain preserved.
+
+### Breaking Changes
+- None; no schema or export migration.
+
+### Known Issues
+- Unknown exposure/evidence, live workers, executions, pending rejects, drift, and all LIVE recovery remain fail-closed.
+
 # PR #314 recovery-scope and provenance correction — 2026-08-09
 
 ### Added

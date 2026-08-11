@@ -209,6 +209,25 @@ def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|No
     eid="evt_"+canonical_hash({"campaign_id":campaign_id,"type":event_type,"run":burnin_run_id,"at":utc_now(),"details":details or {}})[:24]
     _exec(conn,"INSERT OR IGNORE INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES (:eid,:cid,:bid,:typ,:ts,:det,:sv)",{"eid":eid,"cid":campaign_id,"bid":burnin_run_id,"typ":event_type,"ts":utc_now(),"det":json.dumps(dict(details or {}),sort_keys=True,default=str),"sv":CAMPAIGN_SCHEMA_VERSION})
 
+def mark_attached_campaign_operational(conn: Any, campaign_id: str, run_id: str, *, runtime_instance_id: str) -> None:
+    """Let the operational worker own STARTING -> RUNNING persistence."""
+    campaign = get_campaign(conn, campaign_id)
+    if not campaign or campaign.get("active_run_id") != run_id:
+        raise RuntimeError("PHASE8_CAMPAIGN_OPERATIONAL_LINEAGE_MISMATCH")
+    if campaign.get("campaign_status") == "RUNNING":
+        return
+    if campaign.get("campaign_status") != "STARTING":
+        raise RuntimeError("PHASE8_CAMPAIGN_NOT_STARTING")
+    updates = [
+        _exec(conn, "UPDATE burnin_runs SET status='RUNNING' WHERE burnin_run_id=:bid AND status='STARTING'", {"bid": run_id}),
+        _exec(conn, "UPDATE burnin_campaign_runs SET status='RUNNING' WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='STARTING'", {"cid": campaign_id, "bid": run_id}),
+        _exec(conn, "UPDATE burnin_campaigns SET campaign_status='RUNNING', last_error=NULL WHERE campaign_id=:cid AND active_run_id=:bid AND campaign_status='STARTING'", {"cid": campaign_id, "bid": run_id}),
+    ]
+    if any(result.rowcount != 1 for result in updates):
+        raise RuntimeError("PHASE8_CAMPAIGN_OPERATIONAL_TRANSITION_DRIFT")
+    event(conn, campaign_id, "PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL", burnin_run_id=run_id,
+          details={"runtime_instance_id": runtime_instance_id, "transition": "STARTING->RUNNING"})
+
 def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False, config_hash: str|None=None, strategy_config_hash: str|None=None, universe_hash: str|None=None) -> dict[str,Any]:
     bootstrap_campaign_schema(conn); c=get_campaign(conn,campaign_id)
     if not c: raise KeyError("campaign not found")

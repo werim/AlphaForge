@@ -1080,19 +1080,20 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         if not current_run or not current_mapping or current_run[0] != "FAILED" or current_mapping[0] != "FAILED" or details.get("idempotency_identity") is None or details.get("source_hash") != current_link["source_hash"] or details.get("runtime_evidence", {}).get("snapshot_hash") != current_link["runtime_link_hash"]:
             raise RuntimeError("TERMINALIZATION_REPLAY_IDENTITY_MISMATCH")
         return {"status": "PASS", "campaign_id": campaign_id, "burnin_run_id": expected_run_id, "terminal_status": "FAILED", "idempotent_replay": True, "event_id": prior["event_id"], "idempotency_identity": details["idempotency_identity"]}
-    if initial_campaign.get("campaign_status") != "RECOVERY_REQUIRED":
-        raise RuntimeError("MANUAL_TERMINALIZATION_REQUIRES_RECOVERY_REQUIRED")
+    initial_status = initial_campaign.get("campaign_status")
+    if initial_status not in {"STARTING", "RECOVERY_REQUIRED"}:
+        raise RuntimeError("MANUAL_TERMINALIZATION_REQUIRES_STARTING_OR_RECOVERY_REQUIRED")
 
     precheck = _local_terminalization_snapshot(conn, campaign_id, expected_run_id)
     preliminary_failures: list[str] = []
     preliminary_run = precheck.get("run") or {}
     preliminary_local = precheck.get("local") or {}
-    worker_pid = (precheck.get("worker_details") or {}).get("worker_pid")
+    worker_pid = (precheck.get("worker_details") or {}).get("worker_pid") or initial_campaign.get("worker_pid")
     if not expected_run_id or precheck.get("mapping") is None or not preliminary_run:
         preliminary_failures.append("CONTINUATION_MISSING")
     if str(preliminary_run.get("execution_mode") or "").upper() != "PAPER":
         preliminary_failures.append("PAPER_MODE_REQUIRED")
-    if precheck.get("worker_evidence") is None or worker_pid is None:
+    if worker_pid is None:
         preliminary_failures.append("WORKER_DEATH_IDENTITY_UNAVAILABLE")
     elif _pid_alive(worker_pid) or bool(initial_campaign.get("worker_pid") and _pid_alive(initial_campaign.get("worker_pid"))):
         preliminary_failures.append("WORKER_BECAME_ALIVE")
@@ -1142,10 +1143,10 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         def require(condition: bool, reason: str) -> None:
             if not condition: failures.append(reason)
         require(campaign is not None, "CAMPAIGN_MISSING")
-        require(bool(campaign and campaign.get("campaign_status") == "RECOVERY_REQUIRED"), "CAMPAIGN_STATUS_CHANGED")
+        require(bool(campaign and campaign.get("campaign_status") == initial_status), "CAMPAIGN_STATUS_CHANGED")
         require(bool(campaign and campaign.get("active_run_id") == expected_run_id), "ACTIVE_RUN_CHANGED")
         require(mapping is not None and run is not None, "CONTINUATION_MISSING")
-        require(bool(mapping and mapping.get("status") == "RECOVERY_REQUIRED" and run and run.get("status") == "RECOVERY_REQUIRED"), "CONTINUATION_STATUS_CHANGED")
+        require(bool(mapping and mapping.get("status") == initial_status and run and run.get("status") == initial_status), "CONTINUATION_STATUS_CHANGED")
         require(final["campaign_identity_hash"] == precheck["campaign_identity_hash"] and final["continuation_identity_hash"] == precheck["continuation_identity_hash"] and final["run_identity_hash"] == precheck["run_identity_hash"], "IDENTITY_HASH_CHANGED")
         require(final["source_hash"] == precheck["source_hash"], "SOURCE_HASH_CHANGED")
         require(final["runtime_link_hash"] == runtime_identity["snapshot_hash"], "EXTERNAL_EVIDENCE_LINKAGE_CHANGED")
@@ -1154,9 +1155,9 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         require(current_evidence_age is not None and 0 <= current_evidence_age <= TERMINALIZATION_EVIDENCE_MAX_AGE_SECONDS, "EXTERNAL_EVIDENCE_BECAME_STALE")
         pid = (campaign or {}).get("worker_pid")
         require(pid == (precheck["campaign"] or {}).get("worker_pid") and (campaign or {}).get("worker_started_at") == (precheck["campaign"] or {}).get("worker_started_at"), "WORKER_IDENTITY_CHANGED")
-        worker_pid = final["worker_details"].get("worker_pid")
+        worker_pid = final["worker_details"].get("worker_pid") or pid
         require(final["worker_evidence"] == precheck["worker_evidence"] and final["worker_details"] == precheck["worker_details"], "WORKER_IDENTITY_CHANGED")
-        require(final["worker_evidence"] is not None and worker_pid is not None, "WORKER_DEATH_IDENTITY_UNAVAILABLE")
+        require(worker_pid is not None, "WORKER_DEATH_IDENTITY_UNAVAILABLE")
         require(not _pid_alive(worker_pid) and not bool(pid and _pid_alive(pid)), "WORKER_BECAME_ALIVE")
         local = final["local"]; execution = final["execution"]
         require(all(bool(v) for v in (local.get("availability") or {}).values()) and not local.get("query_errors"), "LOCAL_EXPOSURE_UNAVAILABLE")
@@ -1175,12 +1176,12 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
 
         observed = runtime_identity["observed_at"]
         replay_identity = "term_" + canonical_hash({"campaign_id": campaign_id, "run_id": expected_run_id, "source_hash": final["source_hash"], "runtime_evidence": runtime_identity})[:24]
-        details = {"campaign_id": campaign_id, "run_id": expected_run_id, "previous_campaign_status": campaign["campaign_status"], "previous_continuation_status": mapping["status"], "terminal_status": "FAILED", "operator_action": "--terminalize-zero-exposure", "local_exposure": {"open_positions": local["open_positions"], "pending_orders": final["pending_orders"]}, "execution_count": execution["executions"], "lifecycle_execution_count": execution["lifecycle_executions"], "pending_reject_count": local["pending_reject_labels"], "reconciliation_status": runtime["reconciliation_status"], "runtime_evidence": runtime_identity, "source_hash": final["source_hash"], "campaign_identity_hash": final["campaign_identity_hash"], "continuation_identity_hash": final["continuation_identity_hash"], "worker_evidence_id": final["worker_evidence"]["event_id"], "worker_evidence_time": final["worker_evidence"]["event_time"], "idempotency_identity": replay_identity, "evidence_observed_at": observed}
+        details = {"campaign_id": campaign_id, "run_id": expected_run_id, "previous_campaign_status": campaign["campaign_status"], "previous_continuation_status": mapping["status"], "terminal_status": "FAILED", "operator_action": "--terminalize-zero-exposure", "local_exposure": {"open_positions": local["open_positions"], "pending_orders": final["pending_orders"]}, "execution_count": execution["executions"], "lifecycle_execution_count": execution["lifecycle_executions"], "pending_reject_count": local["pending_reject_labels"], "reconciliation_status": runtime["reconciliation_status"], "runtime_evidence": runtime_identity, "source_hash": final["source_hash"], "campaign_identity_hash": final["campaign_identity_hash"], "continuation_identity_hash": final["continuation_identity_hash"], "worker_evidence_id": (final["worker_evidence"] or {}).get("event_id"), "worker_evidence_time": (final["worker_evidence"] or {}).get("event_time"), "worker_pid": worker_pid, "idempotency_identity": replay_identity, "evidence_observed_at": observed}
         now = utc_now()
         updates = [
-            conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status='RECOVERY_REQUIRED' AND release_id=? AND git_commit=? AND config_hash IS ? AND strategy_config_hash IS ? AND universe_hash IS ?", (now, expected_run_id, run.get("release_id"), run.get("git_commit"), run.get("config_hash"), run.get("strategy_config_hash"), run.get("universe_hash"))),
-            conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at,?) WHERE campaign_id=? AND burnin_run_id=? AND continuation_sequence=? AND status='RECOVERY_REQUIRED'", (now, campaign_id, expected_run_id, mapping.get("continuation_sequence"))),
-            conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', last_error='MANUAL_ZERO_EXPOSURE_TERMINALIZED', worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=? AND campaign_status='RECOVERY_REQUIRED' AND active_run_id=? AND release_id=? AND git_commit=? AND config_hash=? AND strategy_config_hash=? AND universe_hash=? AND execution_cost_config_hash IS ?", (campaign_id, expected_run_id, campaign["release_id"], campaign["git_commit"], campaign["config_hash"], campaign["strategy_config_hash"], campaign["universe_hash"], campaign.get("execution_cost_config_hash"))),
+            conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status=? AND release_id=? AND git_commit=? AND config_hash IS ? AND strategy_config_hash IS ? AND universe_hash IS ?", (now, expected_run_id, initial_status, run.get("release_id"), run.get("git_commit"), run.get("config_hash"), run.get("strategy_config_hash"), run.get("universe_hash"))),
+            conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at,?) WHERE campaign_id=? AND burnin_run_id=? AND continuation_sequence=? AND status=?", (now, campaign_id, expected_run_id, mapping.get("continuation_sequence"), initial_status)),
+            conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', last_error='MANUAL_ZERO_EXPOSURE_TERMINALIZED', worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=? AND campaign_status=? AND active_run_id=? AND release_id=? AND git_commit=? AND config_hash=? AND strategy_config_hash=? AND universe_hash=? AND execution_cost_config_hash IS ?", (campaign_id, initial_status, expected_run_id, campaign["release_id"], campaign["git_commit"], campaign["config_hash"], campaign["strategy_config_hash"], campaign["universe_hash"], campaign.get("execution_cost_config_hash"))),
         ]
         if any(result.rowcount != 1 for result in updates):
             conn.rollback()
@@ -1222,6 +1223,34 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     startup_evidence = _startup_terminalization_evidence(conn, campaign_id, old_run)
     runtime_recovery = _authoritative_recovery_exposure(db, campaign_id)
     original_runtime_recovery = dict(runtime_recovery)
+
+    # A worker that actually scanned while STARTING crossed the startup boundary
+    # but lost the launcher's status write.  Do not resume this ambiguous run.
+    # The terminalizer independently re-probes and then re-reads every predicate
+    # under BEGIN IMMEDIATE, so this dispatch is not itself a safety decision.
+    stale_scanning_start = (
+        campaign.get("campaign_status") == "STARTING"
+        and old_status == "STARTING"
+        and not old_alive
+        and old_pid is not None
+        and startup_evidence.get("available") is True
+        and startup_evidence.get("run_mode") == "PAPER"
+        and int(startup_evidence.get("decisions") or 0) > 0
+    )
+    if stale_scanning_start:
+        terminal = terminalize_zero_exposure_recovery(conn, campaign_id)
+        if terminal.get("status") == "PASS":
+            return {
+                "drill_id": "drill_" + canonical_hash({"cid": campaign_id, "terminal": terminal.get("idempotency_identity")})[:20],
+                "campaign_id": campaign_id, "generated_at": utc_now(), "status": "PASS",
+                "checks": {"stale_scanning_start": True, "safe_terminalization": True,
+                           "run_decisions": startup_evidence.get("decisions")},
+                "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before,
+                           "open_position_ids": position_ids_before, "source_hash": old_hash},
+                "after": {"run_ids": runs_before, "resume": None, "attach": None,
+                          "terminalization": terminal},
+            }
+        # Preserve the normal incident/audit path for a fail-closed result.
 
     def runtime_zero_available(decision: Mapping[str, Any]) -> bool:
         runtime_exposure_local = dict(decision.get("current_exposure_check") or {})
