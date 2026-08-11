@@ -3938,3 +3938,24 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Browser mixed-content/PNA policy and real Windows acceptance remain external gates.
+# Issue #309 Phase B shadow agents — 2026-08-10
+
+### Added
+- Deterministic Market, Signal, and Quality shadow adapters, normalized Phase-B evidence, conservative legacy parity, and bounded counters.
+
+### Changed
+- Enabled graph runs now observe the first three stages; later stages remain Phase-A skipped diagnostics and legacy execution remains authoritative.
+- Signal evidence consumes canonical AIBrain score/components instead of maintaining a Phase-B weighting formula; incomplete canonical or execution evidence defers explicitly.
+
+### Fixed
+- Replaced generic first-stage skips with explicit unavailable/null, component-score, geometric-RR, and concrete reject evidence.
+- Preserved a legitimate zero effective RR and made regime-normalization and executed-quality-check provenance explicit.
+
+### Removed
+- Nothing; no authoritative filter or lifecycle behavior was removed.
+
+### Breaking Changes
+- None. The isolated shadow database receives one additive table.
+
+### Known Issues
+- Legacy snapshots without geometry/components produce explicit DEFER evidence; the authoritative `_build_signal` fallback RR remains a documented Phase-C+ gap and is never used as Phase-B geometric RR. Phase C/D/E and all cutovers remain out of scope. LIVE is NOT READY.
