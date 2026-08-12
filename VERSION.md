@@ -9,7 +9,7 @@
 - Lifecycle coverage: decisions remain preserved; zero executions and zero execution lifecycle states are mandatory for the fallback
 - Execution realism coverage: fresh authenticated complete exchange positions/orders and available zero local/runtime exposure are mandatory
 - Known critical risks: missing worker identity, evidence, lineage, partial status promotion, or any exposure blocks recovery
-- Last audit date: 2026-08-11
+- Last audit date: 2026-08-12
 - Live readiness verdict: NOT LIVE READY
 
 ## Issue #309 Phase B shadow evidence (2026-08-10)

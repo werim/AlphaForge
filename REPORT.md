@@ -10,6 +10,8 @@ Detached startup demoted the campaign and both continuation rows to `STARTING`, 
 
 Follow-up lifecycle hardening moves promotion before setting or persisting runtime `OPERATING`. A promotion failure therefore leaves the runtime at `STARTING`, writes no authoritative `OPERATING` snapshot, and starts no scanner/heartbeat/reconciliation tasks. An already-`RUNNING` campaign is idempotent only after the exact active run and campaign-run mapping are re-read and both prove lineage-matched `RUNNING`; partial three-row state raises an explicit transition inconsistency.
 
+The CI portability follow-up does not require a `STARTUP` snapshot because its persistence is conditional on runtime persistence configuration. The regression instead verifies the production contract directly: the promotion exception propagates, no `OPERATING` snapshot exists, runtime status is not `OPERATING`, and no worker tasks start.
+
 The terminalizer accepts `STARTING` only with a persisted dead PID identity and retains its existing fresh external-evidence bridge, 120-second identity, `BEGIN IMMEDIATE`, final campaign/run/mapping/source/exposure/execution/lifecycle re-reads, exact one-row conditional updates, and rollback-on-drift contract. Any execution or execution lifecycle state, pending reject, local/runtime position/order/orphan, missing evidence, live worker, lineage mismatch, stale snapshot, source change, or unavailable query blocks mutation. LIVE paths are unchanged.
 
 ## Reconciliation, persistence, compatibility, and risk
@@ -23,7 +25,8 @@ An authenticated `COMPLETE` `AUTHENTICATED_EXCHANGE_SNAPSHOT` with empty positio
 ## Tests executed
 
 - Focused stale-scanner, operational-transition, terminalization, runtime recovery, and reconciliation suites passed.
-- Full repository suite passed after lifecycle hardening: 1,192 passed, 3 skipped, 282 warnings.
+- Focused runtime/recovery suite passed: 199 passed.
+- Full repository suite completed with 1,185 passed and 6 skipped; 4 Alembic graph tests could not run because this environment lacks the installed Alembic package.
 - Compile and diff checks passed.
 
 ## Migration concerns and push recommendation

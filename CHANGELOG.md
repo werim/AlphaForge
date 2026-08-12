@@ -10,6 +10,7 @@
 ### Fixed
 - Authenticated complete empty probes now report effective `CLEAN` reconciliation instead of a stale retained `EXCHANGE_STATE_UNKNOWN` value.
 - Prevented partial `RUNNING` metadata and failed promotion from being represented as a successfully operating runtime.
+- Corrected the promotion-failure regression to assert the operational safety invariant without assuming optional `STARTUP` snapshot persistence.
 
 ### Removed
 - Nothing; all decisions, lifecycle rows, runtime snapshots, reconciliation records, and audits remain preserved.
