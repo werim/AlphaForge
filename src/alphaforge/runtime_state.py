@@ -261,7 +261,15 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     if reconciliation_probe is not None and prior_unclean:
         try:
             probe = dict(reconciliation_probe() or {})
-            probe_clean = str(probe.get("evidence_status") or "").upper() == "COMPLETE" and not probe.get("errors") and not probe.get("orders") and not probe.get("positions")
+            probe_clean = (str(probe.get("evidence_status") or "").upper() == "COMPLETE"
+                           and not probe.get("errors") and not probe.get("orders") and not probe.get("positions"))
+            authoritative_probe_clean = (probe_clean and probe.get("authenticated") is True
+                                          and str(probe.get("input_source") or "").upper() == "AUTHENTICATED_EXCHANGE_SNAPSHOT")
+            if authoritative_probe_clean:
+                # This is the authoritative current observation.  The retained
+                # event remains immutable history, but must not be reported as
+                # the effective reconciliation result of this evaluation.
+                reconciliation_status = "CLEAN"
             if not probe_clean and (str(probe.get("evidence_status") or "").upper() != "COMPLETE" or probe.get("errors")):
                 query_errors.append("reconciliation_probe:incomplete_or_error")
         except Exception as exc:

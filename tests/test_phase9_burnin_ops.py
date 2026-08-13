@@ -8,7 +8,7 @@ import pytest
 import hashlib
 
 from alphaforge.burnin import config_hash, persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_trade_outcome, utc_now
-from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign, fail_active_campaign_run
+from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign, fail_active_campaign_run, mark_attached_campaign_operational
 from alphaforge.burnin_ops import (
     audit_payload,
     bootstrap_ops_schema,
@@ -664,6 +664,57 @@ def _clean_runtime_recovery(conn):
         "current_exposure_check": {name: 0 for name in ("active_positions", "pending_orders", "orphan_orders", "orphan_positions")},
         "availability": {"active_positions_available": True, "pending_orders_available": True, "orphan_evidence_available": True, "kill_switch_available": True},
     }
+
+
+def test_stale_starting_scanner_with_9990_decisions_terminalizes_only_with_clean_zero_exposure(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='STARTING',worker_pid=999999 WHERE campaign_id=?", (camp.campaign_id,))
+    conn.execute("UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.execute("""WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<9990)
+        INSERT INTO burnin_observations(observation_id,burnin_run_id,release_id,observed_at,execution_mode,decision,lifecycle_state,evidence_complete,missing_fields_json,metrics_json,source_provenance_json,schema_version)
+        SELECT 'stale-'||x,?,?,?,'PAPER','REJECTED','SIGNAL_REJECTED',1,'[]','{}','{}','test' FROM n""",
+                 (run, camp.release_id, utc_now()))
+    conn.commit()
+    _prepare_terminalization_evidence(conn, camp, run)
+    monkeypatch.setattr(ops, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery(conn))
+
+    result = recovery_drill(conn, camp.campaign_id)
+
+    assert result["status"] == "PASS" and result["checks"]["run_decisions"] == 9990
+    assert tuple(conn.execute("SELECT campaign_status,worker_pid FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()) == ("FAILED", None)
+    assert conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (run,)).fetchone()[0] == 9990
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "FAILED"
+
+
+def test_operational_worker_promotes_all_starting_statuses_atomically(tmp_path):
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='STARTING' WHERE campaign_id=?", (camp.campaign_id,))
+    conn.execute("UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    mark_attached_campaign_operational(conn, camp.campaign_id, run, runtime_instance_id="runtime:test")
+    conn.commit()
+    assert conn.execute("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == "RUNNING"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
+
+
+def test_operational_promotion_rejects_partially_running_linkage(tmp_path):
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    conn.execute("UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_OPERATIONAL_TRANSITION_INCONSISTENT"):
+        mark_attached_campaign_operational(conn, camp.campaign_id, run, runtime_instance_id="runtime:test")
+
+    assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RUNNING"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "STARTING"
 
 
 def test_explicit_zero_exposure_terminalization_is_atomic_idempotent_and_unblocks(monkeypatch, tmp_path):

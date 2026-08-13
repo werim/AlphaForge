@@ -160,6 +160,44 @@ def test_shutdown_cancels_background_tasks() -> None:
     assert all(t.done() for t in orchestrator._tasks)
 
 
+def test_campaign_promotion_failure_never_persists_operating_snapshot(monkeypatch, tmp_path: Path) -> None:
+    import alphaforge.burnin_campaign as campaign_module
+
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'promotion-failure.sqlite3'}")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+    )
+    orchestrator.persistence_engine = engine
+    orchestrator._burnin_run_id = "campaign_run"
+    monkeypatch.setenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", "campaign")
+    monkeypatch.setattr(RuntimeOrchestrator, "_load_recovery_state", lambda self: None)
+    monkeypatch.setattr(RuntimeOrchestrator, "_attach_phase8_campaign", lambda self, *_: None)
+    monkeypatch.setattr(RuntimeOrchestrator, "_start_or_resume_burnin_run", lambda self: None)
+
+    async def reconciled() -> None:
+        return None
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_run_reconciliation_once", lambda self: reconciled())
+    monkeypatch.setattr(
+        campaign_module, "mark_attached_campaign_operational",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("PHASE8_CAMPAIGN_OPERATIONAL_TRANSITION_DRIFT")),
+    )
+
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_OPERATIONAL_TRANSITION_DRIFT"):
+        asyncio.run(orchestrator.start())
+
+    with engine.connect() as conn:
+        statuses = list(conn.execute(text("SELECT runtime_status FROM runtime_state_snapshots ORDER BY id")).scalars())
+    # STARTUP persistence is conditional on the runtime persistence contract;
+    # the safety boundary requires only that failed campaign promotion never
+    # claims that the worker became operational.
+    assert "OPERATING" not in statuses
+    assert orchestrator._runtime_status != "OPERATING"
+    assert orchestrator._tasks == []
+
+
 def test_invalid_lifecycle_transition_explicitly_marked_error() -> None:
     events: list[dict] = []
     orchestrator = RuntimeOrchestrator(
