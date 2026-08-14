@@ -36,6 +36,10 @@ def resolve_campaign_batch(conn: Any, campaign_id: str, candles_by_symbol: Mappi
             counts['failed'] += 1
             continue
         label='TIMEOUT'; ambiguous=False; gross=0.0
+        entry=float(r['entry']); side_sign=-1.0 if _side(r['side']) == 'SHORT' else 1.0
+        favorable=[((float(c['high'])-entry)/entry if side_sign > 0 else (entry-float(c['low']))/entry) * 100.0 for c in usable]
+        adverse=[((entry-float(c['low']))/entry if side_sign > 0 else (float(c['high'])-entry)/entry) * 100.0 for c in usable]
+        mfe=max(favorable, default=0.0); mae=max(adverse, default=0.0)
         for c in usable:
             sl,tp=_hit(r['side'], float(c['high']), float(c['low']), r['stop'], r['target'])
             if sl and tp: label='AMBIGUOUS'; ambiguous=True; gross=None; break
@@ -44,7 +48,20 @@ def resolve_campaign_batch(conn: Any, campaign_id: str, candles_by_symbol: Mappi
         costs=json.loads(r.get('execution_cost_assumptions_json') or '{}'); missing=[f for f in CRITICAL_COST_FIELDS if costs.get(f) is None]
         total=None if missing or gross is None else sum(float(costs.get(f) or 0) for f in CRITICAL_COST_FIELDS)
         net=None if total is None or gross is None else gross-total
-        persist_burnin_reject_outcome(conn,reject_outcome_id='rout_'+r['reject_decision_id'],burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),reject_reason=r.get('reject_reason') or 'UNKNOWN',symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',decision_time=r['decision_timestamp'],hypothetical_entry=r['entry'],hypothetical_stop=r['stop'],hypothetical_target=r['target'],forward_label=label,would_tp=label=='TP_BEFORE_SL',would_sl=label=='SL_BEFORE_TP',timeout=label=='TIMEOUT',ambiguous=ambiguous,hypothetical_gross_r=gross,hypothetical_net_r_after_costs=net,avoided_loss=max(0.0,-net) if net is not None else None,missed_profit=max(0.0,net) if net is not None else None,execution_invalidated=bool(missing),evidence_horizon=r['due_at'],payload={'pending_label_id':r['pending_label_id'],'missing_cost_fields':missing,'market_data_provenance': next((c.get('source_provenance') for c in usable if isinstance(c, Mapping) and c.get('source_provenance')), None)})
+        execution_invalidated=bool(missing)
+        reject_correct=None if ambiguous else bool(execution_invalidated or net is None or net <= 0)
+        provenance=json.loads(r.get('source_provenance_json') or '{}')
+        persist_burnin_reject_outcome(conn,reject_outcome_id='rout_'+r['reject_decision_id'],burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),reject_reason=r.get('reject_reason') or 'UNKNOWN',symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',decision_time=r['decision_timestamp'],hypothetical_entry=r['entry'],hypothetical_stop=r['stop'],hypothetical_target=r['target'],forward_label=label,would_tp=label=='TP_BEFORE_SL',would_sl=label=='SL_BEFORE_TP',timeout=label=='TIMEOUT',ambiguous=ambiguous,hypothetical_gross_r=gross,hypothetical_net_r_after_costs=net,avoided_loss=max(0.0,-net) if net is not None else None,missed_profit=max(0.0,net) if net is not None else None,execution_invalidated=execution_invalidated,evidence_horizon=r['due_at'],payload={'pending_label_id':r['pending_label_id'],'missing_cost_fields':missing,'mfe_pct':mfe,'mae_pct':mae,'reject_correct':reject_correct,'execution_cost_assumptions':costs,'market_data_provenance': next((c.get('source_provenance') for c in usable if isinstance(c, Mapping) and c.get('source_provenance')), None)})
+        # The adaptive review is the operator-facing feedback table.  Only fill
+        # its previously-null label fields, preserving finalized evidence.
+        bar_seconds=float(provenance.get('bar_seconds') or 60.0)
+        try:
+            _exec(conn,"""UPDATE rejected_signal_reviews SET forward_window_bars=:bars,would_have_hit_tp=:tp,would_have_hit_sl=:sl,max_favorable_excursion_pct=:mfe,max_adverse_excursion_pct=:mae,reject_correct=:correct WHERE signal_id=:sid AND forward_window_bars IS NULL""",{"bars":int(round(float(r['horizon_seconds'])/bar_seconds)),"tp":1 if label=='TP_BEFORE_SL' else 0,"sl":1 if label=='SL_BEFORE_TP' else 0,"mfe":mfe,"mae":mae,"correct":None if reject_correct is None else int(reject_correct),"sid":r.get('signal_id')})
+        except Exception as exc:
+            # Campaign-only databases predate the adaptive review table.  The
+            # canonical burn-in outcome remains complete in that deployment.
+            if 'no such table' not in str(exc).lower():
+                raise
         status='AMBIGUOUS' if ambiguous else ('RESOLVED' if not missing else 'FAILED')
         _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=:ts,last_error=:err WHERE pending_label_id=:pid",{"s":status,"ec":1 if not missing else 0,"ts":utc_now(),"err":None if not missing else 'MISSING_COSTS',"pid":r['pending_label_id']})
         counts['ambiguous' if ambiguous else ('resolved' if not missing else 'failed')]+=1

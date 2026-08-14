@@ -1,3 +1,23 @@
+## Reject forward-label feedback restoration — 2026-08-13
+
+### Added
+- Restart-safe PAPER reject enqueueing, a standalone runtime resolver loop, MFE/MAE capture, and adaptive-review label synchronization.
+
+### Changed
+- Signal construction and reject evidence now propagate available setup, regime, volatility, trade geometry, and execution context.
+
+### Fixed
+- PAPER rejects no longer stop at `rejected_signal_reviews`; eligible rows progress through pending labels into idempotent burn-in outcomes.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; existing tables and exports remain compatible.
+
+### Known Issues
+- Rejects without entry/stop/target or complete critical execution costs remain explicitly incomplete; LIVE readiness is unchanged.
+
 ## Stale PAPER STARTING recovery — 2026-08-11
 
 ### Added

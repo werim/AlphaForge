@@ -33,6 +33,7 @@ from alphaforge.persistence import init_db
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
+from alphaforge.burnin_resolver import persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
@@ -136,6 +137,9 @@ class RuntimeConfig:
     diagnostic_mode: bool = False
     phase7_burnin_release_id: str = "default"
     phase7_burnin_snapshot_interval_sec: float = 300.0
+    reject_forward_horizon_bars: int = 240
+    reject_forward_bar_seconds: float = 60.0
+    reject_resolver_interval_sec: float = 60.0
     agent_graph_enabled: bool = False
     agent_graph_shadow: bool = True
     agent_graph_max_steps: int = 12
@@ -195,6 +199,7 @@ class RuntimeOrchestrator:
     exchange_snapshot_provider: ExchangeSnapshotProvider | None = None
     observability_probe: ObservabilityProbe | None = None
     rollback_readiness_probe: RollbackReadinessProbe | None = None
+    reject_candle_provider: Callable[[str, str, str], Any] | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     paper_slippage_bps: float = 2.0
@@ -612,6 +617,7 @@ class RuntimeOrchestrator:
             asyncio.create_task(self._market_scan_loop(), name="market_scan_loop"),
             asyncio.create_task(self._heartbeat_loop(), name="metrics_heartbeat"),
             asyncio.create_task(self._reconciliation_loop(), name="reconciliation_loop"),
+            asyncio.create_task(self._reject_forward_outcome_loop(), name="reject_forward_outcome_loop"),
         ]
         for task in self._tasks:
             task.add_done_callback(self._on_task_done)
@@ -1447,11 +1453,78 @@ class RuntimeOrchestrator:
         self._reject_log.append(payload)
         self.metrics.rejects_persisted += 1
         self._persist_burnin_decision({**payload, "decision": "REJECTED"}, lifecycle_state=LifecycleState.SIGNAL_REJECTED.value)
+        self._persist_pending_reject(payload)
         if self.on_reject_persist is not None:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
         self._schedule_agent_shadow(payload)
+
+    def _reject_campaign_id(self) -> str | None:
+        if not self._burnin_run_id:
+            return None
+        return os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or f"standalone:{self._burnin_run_id}"
+
+    def _persist_pending_reject(self, payload: Mapping[str, Any]) -> None:
+        """Durably enqueue eligible PAPER rejects; incomplete geometry remains auditable."""
+        if self.config.execution_mode != ExecutionMode.PAPER or not self._burnin_run_id:
+            return
+        engine, campaign_id = self._resolve_persistence_engine(), self._reject_campaign_id()
+        if engine is None or campaign_id is None:
+            return
+        execution_ctx = dict(payload.get("execution_ctx") or {})
+        costs = self._phase7_costs_from_execution_ctx(execution_ctx)
+        signal_id = str(payload.get("signal_id") or "")
+        try:
+            with engine.begin() as conn:
+                persist_pending_reject_label(
+                    conn, campaign_id=campaign_id, burnin_run_id=self._burnin_run_id,
+                    reject_decision_id=f"runtime-reject:{signal_id}", signal_id=signal_id or None,
+                    symbol=payload.get("symbol"), side=payload.get("side"),
+                    decision_timestamp=payload.get("decision_timestamp") or canonical_utc_timestamp(),
+                    entry=payload.get("entry"), stop=payload.get("sl"), target=payload.get("tp"),
+                    horizon_seconds=self.config.reject_forward_horizon_bars * self.config.reject_forward_bar_seconds,
+                    execution_cost_assumptions=costs, regime=payload.get("regime") or payload.get("volatility_regime"),
+                    reject_reason=payload.get("reason") or payload.get("reject_reason"),
+                    source_provenance={"provider": self.scanner_source or "UNKNOWN", "bar_seconds": self.config.reject_forward_bar_seconds,
+                                       "setup_type": payload.get("setup_type"), "volatility_regime": payload.get("volatility_regime"),
+                                       "liquidity_score": execution_ctx.get("liquidity_score")},
+                )
+        except Exception as exc:
+            self._burnin_evidence_incomplete = True
+            logger.exception("pending_reject_label_persistence_failed", exc_info=exc)
+
+    async def _reject_forward_outcome_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await self._resolve_reject_forward_outcomes_once()
+            except Exception as exc:
+                logger.warning("reject_forward_outcome_cycle_failed: %s", exc)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=max(1.0, self.config.reject_resolver_interval_sec))
+            except asyncio.TimeoutError:
+                pass
+
+    async def _resolve_reject_forward_outcomes_once(self) -> dict[str, int]:
+        # Attached campaigns already have the BurnInCampaignRunner resolver;
+        # keeping standalone ownership exclusive avoids competing evaluators.
+        if os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID"):
+            return {"resolved": 0, "pending": 0, "ambiguous": 0, "failed": 0}
+        engine, campaign_id = self._resolve_persistence_engine(), self._reject_campaign_id()
+        if engine is None or campaign_id is None:
+            return {"resolved": 0, "pending": 0, "ambiguous": 0, "failed": 0}
+        provider = self.reject_candle_provider
+        if provider is None:
+            from alphaforge.burnin_campaign import BinanceReadOnlyCandleProvider
+            provider = BinanceReadOnlyCandleProvider(interval="1m")
+        now = canonical_utc_timestamp()
+        with engine.connect() as conn:
+            due = conn.execute(text("SELECT symbol, MIN(decision_timestamp), MAX(due_at) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at<=:now GROUP BY symbol"), {"cid": campaign_id, "now": now}).fetchall()
+        candles = {}
+        for symbol, start, end in due:
+            candles[symbol] = await asyncio.to_thread(provider, symbol, start, end)
+        with engine.begin() as conn:
+            return resolve_campaign_batch(conn, campaign_id, candles, now=now)
 
     async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any] | None = None) -> None:
         previous_state = self._last_lifecycle_state_by_symbol.get(symbol)
@@ -1704,6 +1777,10 @@ class RuntimeOrchestrator:
             "side": market_ctx.get("side", "LONG"),
             "timeframe": market_ctx.get("timeframe", "1m"),
             "entry_price": float(market_ctx.get("entry", 0.0) or 0.0),
+            "stop_loss": market_ctx.get("sl", market_ctx.get("stop")),
+            "take_profit": market_ctx.get("tp", market_ctx.get("target")),
+            "setup": market_ctx.get("setup", market_ctx.get("setup_type")),
+            "regime": market_ctx.get("regime", getattr(selection, "regime_hint", None)),
             "risk_reward": rr,
             "max_spread_bps": 12.0,
             "max_funding_rate": 0.0008,

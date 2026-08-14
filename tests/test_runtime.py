@@ -294,6 +294,25 @@ def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_p
     assert any((str(row.phase).startswith("ai_internal_")) for row in runtime_rows)
 
 
+def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'pending.db'}")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, reject_forward_horizon_bars=2),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    orchestrator._burnin_run_id = "paper-restart-safe-run"
+    payload = {"signal_id":"eligible-1","symbol":"BTCUSDT","side":"LONG","entry":100.0,"sl":90.0,"tp":120.0,
+               "reason":"LOW_CONFIDENCE","regime":"TRENDING","setup_type":"BREAKOUT","volatility_regime":"NORMAL",
+               "decision_timestamp":"2026-01-01T00:00:00Z","execution_ctx":{"spread_pct":.001,"expected_slippage_pct":.001,
+               "fee_pct":.001,"funding_rate_pct":0.0,"market_data_latency_ms":10,"liquidity_score":.9}}
+    orchestrator._persist_pending_reject(payload)
+    orchestrator._persist_pending_reject(payload)
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT signal_id,regime,status,source_provenance_json FROM burnin_pending_reject_labels")).one()
+    assert row.signal_id == "eligible-1" and row.regime == "TRENDING" and row.status == "PENDING"
+    assert 'BREAKOUT' in row.source_provenance_json and 'NORMAL' in row.source_provenance_json
+
+
 def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> None:
     monkeypatch.setenv("ALPHAFORGE_ALLOW_LIVE_ORDERS", "true")
     events: list[dict] = []

@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PAPER reject forward-label feedback restoration (2026-08-13)
+
+- Current version: Phase 9 reject feedback-loop restoration
+- Current phase: execution-aware PAPER reject outcome observation
+- Runtime maturity: eligible rejects are durably queued and resolved by the runtime or attached campaign worker
+- BACKTEST/PAPER/LIVE alignment: PAPER gains observational labeling; thresholds and execution decisions are unchanged
+- Lifecycle coverage: `SIGNAL_REJECTED` now retains pending and finalized forward evidence without creating trades
+- Execution realism coverage: net hypothetical R includes available spread, slippage, fees, funding, and latency; incomplete critical costs invalidate evidence
+- Known critical risks: incomplete trade geometry is audited but cannot be labeled; public candle-provider outages leave evidence pending
+- Last audit date: 2026-08-13
+- Live readiness verdict: NOT LIVE READY
+
 ## Stale PAPER STARTING recovery (2026-08-11)
 
 - Current version: Phase 9 stale-scanner recovery correction

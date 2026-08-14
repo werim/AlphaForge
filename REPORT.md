@@ -1,3 +1,29 @@
+# PAPER reject forward-outcome feedback surgery — 2026-08-13
+
+## Need and root cause
+
+`AIBrain._persist_decision` created `rejected_signal_reviews` with intentionally null future fields, but the runtime's final reject boundary only wrote a burn-in observation. `persist_pending_reject_label` was called by campaign-specific flows, and `resolve_campaign_batch` was scheduled only by `BurnInCampaignRunner`; standalone PAPER runtime therefore had neither enqueueing nor evaluation. In addition, `_build_signal` discarded available stop, target, setup, and regime inputs, which explains both ineligible geometry and `unknown` metadata. The evaluator requires campaign identity, due market candles, complete geometry, and execution costs; ordinary PAPER supplied none of that linkage.
+
+## Minimal runtime, lifecycle, and persistence change
+
+The authoritative final PAPER reject boundary now queues one deterministic pending label per runtime signal after persisting `SIGNAL_REJECTED`. Attached runs use their campaign ID; standalone runs use a stable run-scoped namespace without creating a duplicate trading runtime. `INSERT OR IGNORE` and the unique reject-decision key prevent duplicate pending work. Pending rows remain durable across restart. A runtime background loop fetches only due windows with the canonical read-only candle provider and calls the existing campaign resolver; attached campaign workers remain compatible.
+
+Resolution preserves first-touch TP/SL/timeout/ambiguous semantics, calculates percentage MFE and MAE, persists execution cost assumptions and market-data provenance in the auditable outcome payload, and fills only still-null adaptive review labels. A resolved pending row is excluded from later scans, so finalized labels are not overwritten. The outcome unique key prevents duplicate outcomes. No reject threshold was changed and no rejected signal becomes an order or trade.
+
+## Execution awareness and metadata
+
+Hypothetical net R continues to subtract critical spread, entry/exit slippage, fees, funding, and latency costs. Missing critical costs set `execution_invalidated` and prevent a theoretical TP from becoming a false-negative reject; complete non-positive net outcomes count as correct rejects. MFE/MAE remain market movement observations, not executable PnL. Liquidity, volatility, setup, and source context are retained in pending provenance/outcome payloads when observed. Setup/regime/volatility are propagated from scanner inputs rather than replaced with fabricated defaults; genuinely unavailable values remain null/unknown.
+
+## Files, tests, compatibility, and remaining risks
+
+`runtime.py` owns enqueueing, standalone scheduling, geometry/metadata propagation, and due-window candle acquisition. `burnin_resolver.py` owns MFE/MAE, execution-adjusted correctness, and immutable adaptive-review synchronization. Resolver and runtime regressions cover enqueue, TP, SL, timeout, horizon maturity, excursions, correctness, restart recovery, duplicate prevention, and metadata. No schema or CSV migration is required. Historical unlabeled reviews cannot be reconstructed unless their missing geometry/timestamps can be sourced; provider outages leave pending rows untouched for retry. Ambiguous same-bar TP/SL remains auditable and unlabeled for correctness. LIVE remains NOT READY.
+
+## Push recommendation
+
+Recommend review after focused and full-suite tests pass. This restores evidence collection only and must not be used to loosen `LOW_CONFIDENCE` or other gates until sufficient complete forward evidence accumulates.
+
+---
+
 # Stale PAPER STARTING recovery surgery — 2026-08-11
 
 ## Need and root cause
