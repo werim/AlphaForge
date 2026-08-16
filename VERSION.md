@@ -1,5 +1,29 @@
 # AlphaForge Version
 
+## Phase C0 reject-gate production evidence correction (2026-08-16)
+
+- Current version: Phase C0 complete-denominator gate, production evidence revision
+- Current phase: final pre-Phase C evidence validation; no Phase C agents or cutover
+- Runtime maturity: authoritative PAPER reject observations now carry canonical decision, signal, and available campaign/runtime identity
+- BACKTEST/PAPER/LIVE alignment: observational persistence and validation only; decisions, thresholds, resolver math, orders, and LIVE authority are unchanged
+- Lifecycle coverage: all immature labels block PASS and pending/outcome state contradictions fail closed
+- Execution realism coverage: mature coverage must be 1.0; failed, ambiguous, invalidated, geometry, and cost gaps remain explicit
+- Known critical risks: legacy unattributed observations prevent exact historical coverage and block Phase C as INCOMPLETE
+- Last audit date: 2026-08-16
+- Live readiness verdict: NOT LIVE READY
+
+## Complete PAPER reject-coverage gate (2026-08-16)
+
+- Current version: Phase C0 complete reject-denominator validation
+- Current phase: final pre-Phase C evidence gate; Phase C agents and cutover are not implemented
+- Runtime maturity: read-only campaign/standalone reconciliation covers PAPER reject observations, reviews, pending labels, and canonical outcomes
+- BACKTEST/PAPER/LIVE alignment: observability only; runtime decisions, agent graph, orders, and LIVE authority are unchanged
+- Lifecycle coverage: eligible rejects require exactly one pending identity and resolved labels require exactly one canonical outcome
+- Execution realism coverage: incomplete geometry, unavailable execution costs, failed/ambiguous labels, and execution-invalidated evidence are explicit non-PASS populations
+- Known critical risks: historical evidence without stable run/decision identity remains unusable; provider and maturity gaps remain fail-closed as INCOMPLETE
+- Last audit date: 2026-08-16
+- Live readiness verdict: NOT LIVE READY
+
 ## PAPER reject-label integrity gate (2026-08-16)
 
 - Current version: Phase 9 SQL-first reject-label validation

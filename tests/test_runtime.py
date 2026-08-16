@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 import inspect
@@ -312,9 +313,17 @@ def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path)
     with engine.connect() as conn:
         row = conn.execute(text("SELECT signal_id,regime,status,source_provenance_json FROM burnin_pending_reject_labels")).one()
         reviews = conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id='reject:eligible-1'")).scalar_one()
+        observations = conn.execute(text("SELECT metrics_json,source_provenance_json FROM burnin_observations WHERE decision='REJECTED'")).all()
     assert row.signal_id == "eligible-1" and row.regime == "TRENDING" and row.status == "PENDING"
     assert 'BREAKOUT' in row.source_provenance_json and 'NORMAL' in row.source_provenance_json
     assert reviews == 1
+    assert observations
+    for metrics_json, provenance_json in observations:
+        metrics = json.loads(metrics_json); provenance = json.loads(provenance_json)
+        assert metrics["reject_decision_id"] == "reject:eligible-1"
+        assert metrics["signal_id"] == "eligible-1"
+        assert metrics["runtime_identity"] == "standalone:paper-restart-safe-run"
+        assert provenance["runtime_identity"] == "standalone:paper-restart-safe-run"
 
 
 def test_standalone_resolver_fetches_each_pending_timeframe(tmp_path: Path) -> None:
