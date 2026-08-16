@@ -4067,3 +4067,24 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Rejects without stable scoped run/decision identity cannot safely be attributed and are intentionally excluded rather than guessed. LIVE remains NOT READY.
+## Phase C0 production evidence correction — 2026-08-16
+
+### Added
+- Canonical reject/signal and available campaign/runtime identity in authoritative PAPER burn-in observations.
+- Immature-label and pending/outcome state-consistency diagnostics, plus a separate legacy-unattributed observation count.
+
+### Changed
+- PASS requires 100% mature coverage; legacy unattributed rows are INCOMPLETE and are not fabricated into the identified reject total.
+
+### Fixed
+- Normal PAPER rejects no longer become unidentified solely because their observation omitted production identities.
+- Pending labels with outcomes, invalid terminal outcome combinations, and unknown label statuses now fail closed.
+
+### Removed
+- Unattributed observation rows from the exact identified-reject count.
+
+### Breaking Changes
+- None to schemas, exports, trading behavior, or resolver calculations.
+
+### Known Issues
+- Historical observations without stable identity cannot be safely deduplicated and continue to block Phase C.

@@ -62,7 +62,7 @@ def test_early_immature_and_zero_outcomes_are_incomplete(tmp_path):
     _, conn, cid = database(tmp_path, resolve=False)
     result = reject_label_status(conn, cid, now="2026-01-01T00:00:30Z")
     assert result["status"] == "INCOMPLETE"
-    assert {"NO_FORWARD_OUTCOMES_YET", "INSUFFICIENT_MATURE_EVIDENCE"} <= set(result["reason_codes"])
+    assert {"NO_FORWARD_OUTCOMES_YET", "INSUFFICIENT_MATURE_EVIDENCE", "IMMATURE_LABELS_PRESENT"} <= set(result["reason_codes"])
     assert result["resolver_state"]["PENDING"] == 1 and result["resolver_state"]["overdue_pending_labels"] == 0
 
 
@@ -243,17 +243,82 @@ def test_eligible_reject_without_pending_label_fails(tmp_path):
 
 def test_failed_ambiguous_and_execution_invalidated_populations_are_blocking(tmp_path):
     _, conn, cid = database(tmp_path)
-    conn.execute("UPDATE burnin_pending_reject_labels SET status='FAILED'")
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='FAILED',evidence_complete=0")
+    conn.execute("UPDATE burnin_reject_outcomes SET evidence_complete=0,execution_invalidated=1")
+    conn.execute("UPDATE rejected_signal_reviews SET reject_correct=NULL,evidence_complete=0,execution_invalidated=1")
     failed = report(conn, cid)
     assert failed["status"] == "INCOMPLETE" and "FAILED_LABELS_PRESENT" in failed["reason_codes"]
     conn.execute("UPDATE burnin_pending_reject_labels SET status='AMBIGUOUS'")
+    conn.execute("UPDATE burnin_reject_outcomes SET execution_invalidated=0,ambiguous=1")
+    conn.execute("UPDATE rejected_signal_reviews SET execution_invalidated=0,outcome_ambiguous=1")
     ambiguous = report(conn, cid)
     assert ambiguous["status"] == "INCOMPLETE" and "AMBIGUOUS_LABELS_PRESENT" in ambiguous["reason_codes"]
-    conn.execute("UPDATE burnin_pending_reject_labels SET status='RESOLVED'")
-    conn.execute("UPDATE rejected_signal_reviews SET reject_correct=NULL,evidence_complete=0,execution_invalidated=1")
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='FAILED'")
+    conn.execute("UPDATE burnin_reject_outcomes SET ambiguous=0,execution_invalidated=1")
+    conn.execute("UPDATE rejected_signal_reviews SET outcome_ambiguous=0,execution_invalidated=1")
     invalidated = report(conn, cid)
     assert invalidated["status"] != "PASS"
     assert "EXECUTION_INVALIDATED_LABELS_PRESENT" in invalidated["reason_codes"]
+
+
+def test_legacy_unattributed_observation_is_separate_and_incomplete(tmp_path):
+    _, conn, cid = database(tmp_path)
+    run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
+    conn.execute("""INSERT INTO burnin_observations(
+        observation_id,burnin_run_id,release_id,observed_at,execution_mode,decision,
+        evidence_complete,missing_fields_json,metrics_json,source_provenance_json,schema_version)
+        VALUES('legacy-unattributed',?,?,?,'PAPER','REJECTED',1,'[]','{}','{}','legacy')""",
+        (run, "rel", "2025-01-01T00:00:00Z"))
+    result = report(conn, cid)
+    assert result["status"] == "INCOMPLETE"
+    assert result["coverage"]["total_rejected_decisions"] == 1
+    assert result["coverage"]["legacy_unattributed_observations"] == 1
+    assert "LEGACY_UNATTRIBUTED_REJECT_EVIDENCE" in result["reason_codes"]
+
+
+def test_one_resolved_plus_future_pending_population_cannot_pass(tmp_path):
+    _, conn, cid = database(tmp_path)
+    run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
+    for index in range(3):
+        rid = f"future:{index}"
+        add_reject_observation(conn, run, rid)
+        conn.execute("""INSERT INTO rejected_signal_reviews(
+            reject_decision_id,signal_id,reject_reason,created_at,payload_json)
+            VALUES(?,?,?,?,?)""", (rid, rid, "LOW_CONFIDENCE", "2026-01-01T00:02:30Z",
+            json.dumps({"campaign_id": cid})))
+        persist_pending_reject_label(conn, campaign_id=cid, burnin_run_id=run,
+            reject_decision_id=rid, signal_id=rid, symbol="BTCUSDT", side="LONG",
+            decision_timestamp="2026-01-01T00:02:30Z", timeframe="1m", horizon_bars=10,
+            entry=100, stop=90, target=120, execution_cost_assumptions=COSTS,
+            regime="TRENDING", reject_reason="LOW_CONFIDENCE", source_provenance={"provider": "PAPER"})
+    result = report(conn, cid)
+    assert result["status"] == "INCOMPLETE"
+    assert result["resolver_state"]["PENDING"] == 3
+    assert result["coverage"]["mature_coverage_ratio"] == .25
+    assert {"IMMATURE_LABELS_PRESENT", "INCOMPLETE_MATURE_COVERAGE"} <= set(result["reason_codes"])
+
+
+def test_pending_outcome_state_contradictions_and_unknown_status_fail(tmp_path):
+    _, conn, cid = database(tmp_path)
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='PENDING'")
+    pending = report(conn, cid)
+    assert pending["status"] == "FAIL"
+    assert "PENDING_OUTCOME_STATE_INCONSISTENCY" in pending["reason_codes"]
+
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='RESOLVED'")
+    conn.execute("UPDATE burnin_reject_outcomes SET evidence_complete=0")
+    assert report(conn, cid)["status"] == "FAIL"
+
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='AMBIGUOUS'")
+    conn.execute("UPDATE burnin_reject_outcomes SET evidence_complete=0,ambiguous=0")
+    assert report(conn, cid)["status"] == "FAIL"
+
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='FAILED'")
+    conn.execute("UPDATE burnin_reject_outcomes SET evidence_complete=1")
+    assert report(conn, cid)["status"] == "FAIL"
+
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='UNKNOWN_STATE'")
+    assert report(conn, cid)["status"] == "FAIL"
 
 
 def test_campaign_standalone_and_unrelated_history_are_isolated(tmp_path):

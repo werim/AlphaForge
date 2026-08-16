@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Phase C0 reject-gate production evidence correction (2026-08-16)
+
+- Current version: Phase C0 complete-denominator gate, production evidence revision
+- Current phase: final pre-Phase C evidence validation; no Phase C agents or cutover
+- Runtime maturity: authoritative PAPER reject observations now carry canonical decision, signal, and available campaign/runtime identity
+- BACKTEST/PAPER/LIVE alignment: observational persistence and validation only; decisions, thresholds, resolver math, orders, and LIVE authority are unchanged
+- Lifecycle coverage: all immature labels block PASS and pending/outcome state contradictions fail closed
+- Execution realism coverage: mature coverage must be 1.0; failed, ambiguous, invalidated, geometry, and cost gaps remain explicit
+- Known critical risks: legacy unattributed observations prevent exact historical coverage and block Phase C as INCOMPLETE
+- Last audit date: 2026-08-16
+- Live readiness verdict: NOT LIVE READY
+
 ## Complete PAPER reject-coverage gate (2026-08-16)
 
 - Current version: Phase C0 complete reject-denominator validation

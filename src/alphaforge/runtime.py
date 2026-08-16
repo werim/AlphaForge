@@ -808,7 +808,14 @@ class RuntimeOrchestrator:
             execution_ctx = dict(payload.get("execution_ctx") or {})
             missing = [name for name in ("signal_id", "symbol", "decision") if not payload.get(name)]
             with engine.begin() as conn:
-                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics={k: payload.get(k) for k in ("score","rr","effective_rr","confidence","spread_pct","expected_slippage_pct","latency_ms","funding_rate_pct")}, source_provenance={"provider": self.scanner_source or "UNKNOWN"}, missing_fields=missing)
+                campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+                runtime_identity = campaign_id or f"standalone:{self._burnin_run_id}"
+                metrics = {k: payload.get(k) for k in ("score", "rr", "effective_rr", "confidence",
+                    "spread_pct", "expected_slippage_pct", "latency_ms", "funding_rate_pct")}
+                metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
+                                "signal_id": payload.get("signal_id"),
+                                "campaign_id": campaign_id, "runtime_identity": runtime_identity})
+                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
             self.metrics.burnin_observations += 1
             with engine.begin() as conn:
                 update_burnin_run_counters(conn, self._burnin_run_id)
@@ -1469,6 +1476,8 @@ class RuntimeOrchestrator:
 
     def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")
+        campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
+        runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         result.update({
             "reject_decision_id":str(result.get("reject_decision_id") or f"reject:{signal_id}"), "decision":"REJECTED",
             "decision_timestamp":result.get("decision_timestamp") or canonical_utc_timestamp(),
@@ -1479,6 +1488,8 @@ class RuntimeOrchestrator:
             "spread_pct":result.get("spread_pct",execution.get("spread_pct")), "expected_slippage_pct":result.get("expected_slippage_pct",execution.get("expected_slippage_pct")),
             "funding_rate_pct":result.get("funding_rate_pct",execution.get("funding_rate_pct")), "liquidity_score":result.get("liquidity_score",execution.get("liquidity_score")),
             "volatility_regime":result.get("volatility_regime",execution.get("volatility_regime")),
+            "campaign_id": result.get("campaign_id") or campaign_id,
+            "runtime_identity": result.get("runtime_identity") or runtime_identity,
         })
         return result
 

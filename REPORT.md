@@ -1228,3 +1228,14 @@ The validator performs SELECT/PRAGMA operations only. There are no schema/export
 Compatibility risk is limited to intentionally stricter gate results: evidence sets that previously passed with partial coverage can now be INCOMPLETE or FAIL. No data migration is required. Push recommendation: merge as the final Phase C0 evidence gate only after CI confirms the full suite; do not infer Phase C or LIVE readiness.
 
 ---
+# Phase C0 production evidence and state-consistency correction — 2026-08-16
+
+The first complete-denominator patch assumed production observations already contained `metrics_json.reject_decision_id`; the authoritative runtime persistence call did not supply it. Consequently, a valid normal PAPER reject could be counted as an additional unidentified row and forced to FAIL. The validator also lacked a general maturity blocker when future-due work coexisted with one mature result, and did not validate all pending/outcome status combinations.
+
+`runtime.py` now adds canonical reject-decision ID, signal ID, and available campaign/standalone runtime identity to the existing PAPER burn-in observation metrics and provenance. The burn-in run remains authoritative in its existing column. This changes evidence shape only: decisions, thresholds, lifecycle authority, resolver calculations, orders, adapters, BACKTEST, and LIVE behavior are untouched.
+
+`reject_label_status.py` deduplicates identified rejects strictly by canonical reject-decision ID. Legacy unattributed observations are reported separately, excluded from the exact identified total, and block Phase C as INCOMPLETE rather than becoming invented distinct rejects or structural FAILs. Every eligible PENDING, READY, or RESOLVING label now emits `IMMATURE_LABELS_PRESENT`; PASS requires mature coverage of 1.0. State validation fails on unknown statuses, unresolved labels with outcomes, invalid RESOLVED outcomes, AMBIGUOUS without matching ambiguity, FAILED with complete outcomes, and pending-row completeness contradictions.
+
+Regression coverage exercises the real `RuntimeOrchestrator._persist_reject` path, legacy unattributed evidence, one mature result beside future-due labels, and terminal state contradictions. No schema/export migration or evidence backfill is required. Existing legacy evidence remains immutable and explicitly incomplete. Push recommendation: update PR #320 only after all local checks and GitHub Actions are green; do not merge or infer LIVE readiness before then.
+
+---

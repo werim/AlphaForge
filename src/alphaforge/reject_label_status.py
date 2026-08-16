@@ -69,7 +69,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             return fallback
 
     observation_ids = []
-    unidentified_observations = 0
+    legacy_unattributed_observations = 0
     incomplete_observation_ids: set[str] = set()
     for row in observations:
         metrics = decoded(row.get("metrics_json"), {})
@@ -81,7 +81,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
                     row.get("evidence_complete") != 1 or bool(missing_fields)):
                 incomplete_observation_ids.add(str(reject_id))
         else:
-            unidentified_observations += 1
+            legacy_unattributed_observations += 1
 
     decision_ids = sorted(set(observation_ids) | {r["reject_decision_id"] for r in p})
     signal_ids = sorted({r["signal_id"] for r in p if r.get("signal_id") is not None})
@@ -125,7 +125,10 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     matched_review_rows = {int(review["id"]) for review in review_by_pending.values()}
     expected_outcome = {"rout_" + r["reject_decision_id"]: r for r in p}
     canonical = [o for o in outcomes if o["reject_outcome_id"] in expected_outcome]
-    outcome_by_decision = {o["reject_outcome_id"].removeprefix("rout_"): o for o in canonical}
+    outcomes_by_decision: dict[str, list[dict[str, Any]]] = {}
+    for outcome in canonical:
+        outcomes_by_decision.setdefault(outcome["reject_outcome_id"].removeprefix("rout_"), []).append(outcome)
+    outcome_by_decision = {rid: rows[0] for rid, rows in outcomes_by_decision.items() if len(rows) == 1}
 
     review_ids = [r["reject_decision_id"] for r in reviews if r["reject_decision_id"] is not None]
     duplicate_review_ids = sum(n - 1 for n in {x: review_ids.count(x) for x in set(review_ids)}.values() if n > 1)
@@ -143,6 +146,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     stale = [r for r in p if str(r["status"]).upper() == "RESOLVING" and
              (_iso(r["claimed_at"]) is None or (generated - _iso(r["claimed_at"])).total_seconds() > stale_claim_seconds)]
     unresolved = [r for r in p if str(r["status"]).upper() not in {"RESOLVED", "AMBIGUOUS", "FAILED"}]
+    immature = [r for r in p if str(r["status"]).upper() in {"PENDING", "READY", "RESOLVING"}]
     overdue = [r for r in unresolved if _iso(r["due_at"]) and _iso(r["due_at"]) < generated]
     ages = [(generated - dt).total_seconds() for r in unresolved if (dt := _iso(r.get("created_at") or r.get("decision_timestamp")))]
     resolved_times = [_iso(r.get("resolved_at")) for r in p if str(r["status"]).upper() == "RESOLVED"]
@@ -153,8 +157,29 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     immutable = []
     geometry = []
     missing_cost_ids: set[str] = set()
+    state_inconsistencies: list[str] = []
     for row in p:
         rid = row["reject_decision_id"]; review = review_by_pending.get(rid); outcome = outcome_by_decision.get(rid)
+        outcome_rows = outcomes_by_decision.get(rid, [])
+        pending_status = str(row.get("status") or "").upper()
+        if pending_status not in STATUSES:
+            state_inconsistencies.append(rid + ":UNKNOWN_STATUS")
+        elif pending_status == "RESOLVED" and row.get("evidence_complete") != 1:
+            state_inconsistencies.append(rid + ":RESOLVED_PENDING_INCOMPLETE")
+        elif pending_status != "RESOLVED" and row.get("evidence_complete") == 1:
+            state_inconsistencies.append(rid + ":NON_RESOLVED_PENDING_COMPLETE")
+        elif pending_status in {"PENDING", "READY", "RESOLVING"} and outcome_rows:
+            state_inconsistencies.append(rid + ":UNRESOLVED_WITH_OUTCOME")
+        elif pending_status == "RESOLVED" and (len(outcome_rows) != 1 or
+                outcome_rows[0].get("evidence_complete") != 1 or
+                outcome_rows[0].get("ambiguous") == 1 or
+                outcome_rows[0].get("execution_invalidated") == 1):
+            state_inconsistencies.append(rid + ":INVALID_RESOLVED_OUTCOME")
+        elif pending_status == "AMBIGUOUS" and (len(outcome_rows) != 1 or
+                outcome_rows[0].get("ambiguous") != 1):
+            state_inconsistencies.append(rid + ":INVALID_AMBIGUOUS_OUTCOME")
+        elif pending_status == "FAILED" and any(o.get("evidence_complete") == 1 for o in outcome_rows):
+            state_inconsistencies.append(rid + ":FAILED_WITH_COMPLETE_OUTCOME")
         if review and review["reject_correct"] is not None and (review["evidence_complete"] != 1 or review["execution_invalidated"] == 1 or review["outcome_ambiguous"] == 1): invalid_correct.append(rid)
         if review and review["evidence_complete"] == 1 and (review["max_favorable_excursion_pct"] is None or review["max_adverse_excursion_pct"] is None): missing_excursions.append(rid)
         if str(row["status"]).upper() == "RESOLVED" and not outcome: resolved_without.append(rid)
@@ -191,7 +216,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
         review["evidence_complete"] == 1 and review["execution_invalidated"] != 1 and
         review["outcome_ambiguous"] != 1 and review["reject_correct"] is not None
         for review in review_by_pending.values())
-    total_rejected = len(denominator_ids) + unidentified_observations
+    total_rejected = len(denominator_ids)
     coverage = {
         "total_rejected_decisions": total_rejected,
         "reviews_count": len(reviews),
@@ -209,11 +234,12 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
                                  len(label_eligible_ids)) if label_eligible_ids else None,
         "mature_coverage_ratio": (accuracy_eligible_count / len(label_eligible_ids))
                                  if label_eligible_ids else None,
+        "legacy_unattributed_observations": legacy_unattributed_observations,
     }
 
     reasons: set[str] = set()
     if duplicate_review_ids or duplicate_outcomes or ambiguous_review_links: reasons.add("DUPLICATE_REJECT_IDENTITY")
-    if unidentified_observations: reasons.add("MISSING_REJECT_DECISION_ID")
+    if legacy_unattributed_observations: reasons.add("LEGACY_UNATTRIBUTED_REJECT_EVIDENCE")
     if ambiguous_review_links: reasons.add("AMBIGUOUS_REVIEW_LINKAGE")
     if orphan_reviews: reasons.add("ORPHAN_REJECT_REVIEW")
     if orphan_pending: reasons.add("ORPHAN_PENDING_LABEL")
@@ -223,6 +249,8 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     if stale: reasons.add("STALE_RESOLVER_CLAIM")
     if overdue: reasons.add("OVERDUE_PENDING_LABELS")
     if resolved_without: reasons.add("RESOLVED_WITHOUT_OUTCOME")
+    if state_inconsistencies: reasons.add("PENDING_OUTCOME_STATE_INCONSISTENCY")
+    if immature: reasons.add("IMMATURE_LABELS_PRESENT")
     if unlabeled_ids: reasons.add("MISSING_ELIGIBLE_PENDING_LABEL")
     if duplicate_pending_ids: reasons.add("DUPLICATE_PENDING_LABEL_OWNERSHIP")
     if incomplete_observation_ids: reasons.add("INCOMPLETE_REJECT_GEOMETRY")
@@ -233,7 +261,9 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     if not canonical: reasons.add("NO_FORWARD_OUTCOMES_YET")
     eligible = [r for r in review_by_pending.values() if r["evidence_complete"] == 1 and r["execution_invalidated"] != 1 and r["outcome_ambiguous"] != 1 and r["reject_correct"] is not None]
     if not eligible: reasons.add("INSUFFICIENT_MATURE_EVIDENCE")
-    failures = {"DUPLICATE_REJECT_IDENTITY", "MISSING_REJECT_DECISION_ID", "AMBIGUOUS_REVIEW_LINKAGE", "ORPHAN_REJECT_REVIEW", "ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_OUTCOME", "INVALID_REJECT_CORRECT_LABEL", "INVALID_FINALIZED_EVIDENCE", "RESOLVED_WITHOUT_OUTCOME", "MISSING_ELIGIBLE_PENDING_LABEL", "DUPLICATE_PENDING_LABEL_OWNERSHIP"}
+    if coverage["mature_coverage_ratio"] is not None and coverage["mature_coverage_ratio"] < 1.0:
+        reasons.add("INCOMPLETE_MATURE_COVERAGE")
+    failures = {"DUPLICATE_REJECT_IDENTITY", "AMBIGUOUS_REVIEW_LINKAGE", "ORPHAN_REJECT_REVIEW", "ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_OUTCOME", "INVALID_REJECT_CORRECT_LABEL", "INVALID_FINALIZED_EVIDENCE", "RESOLVED_WITHOUT_OUTCOME", "MISSING_ELIGIBLE_PENDING_LABEL", "DUPLICATE_PENDING_LABEL_OWNERSHIP", "PENDING_OUTCOME_STATE_INCONSISTENCY"}
     status = "FAIL" if reasons & failures else "INCOMPLETE" if reasons else "PASS"
 
     quality = []
@@ -261,7 +291,8 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
         "integrity": {"rejected_reviews": len(reviews), "distinct_reject_decision_ids": len(set(r["reject_decision_id"] for r in reviews if r["reject_decision_id"] is not None)), "duplicate_reject_decision_ids": duplicate_review_ids,
             "pending_labels": len(p), "reject_outcomes": len(canonical), "reviews_without_eligible_pending_labels": orphan_reviews,
             "pending_labels_without_reviews": orphan_pending, "ambiguous_review_linkages": len(ambiguous_review_links),
-            "outcomes_without_pending_labels": orphan_outcomes, "duplicate_canonical_outcomes": duplicate_outcomes},
+            "outcomes_without_pending_labels": orphan_outcomes, "duplicate_canonical_outcomes": duplicate_outcomes,
+            "pending_outcome_state_inconsistencies": len(state_inconsistencies)},
         "resolver_state": {**states, "stale_resolving_claims": len(stale), "overdue_pending_labels": len(overdue),
             "oldest_unresolved_label_age_seconds": max(ages) if ages else None,
             "latest_successful_resolution_timestamp": max((x for x in resolved_times if x), default=None)},
