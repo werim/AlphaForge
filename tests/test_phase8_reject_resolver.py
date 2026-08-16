@@ -129,3 +129,25 @@ def test_timeframe_aware_due_at_and_invalid_geometry_audit(tmp_path):
     assert persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='zero',signal_id='zero',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=1,entry=100,stop=100,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'}) is None
     assert conn.execute("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE reject_decision_id='zero'").fetchone()[0]==0
     assert 'zero_risk' in conn.execute("SELECT missing_fields_json FROM burnin_observations WHERE metrics_json LIKE '%zero%'").fetchone()[0]
+
+
+def test_partial_and_gapped_windows_retry_before_immutable_finalization(tmp_path):
+    db=tmp_path/'retry-window.db'; init_db(f'sqlite+pysqlite:///{db}').dispose(); conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='retry',duration_days=1,symbols=['BTCUSDT'],intervals=['1m']); run=start_or_resume_campaign(conn,camp.campaign_id)['burnin_run_id']
+    conn.execute("INSERT INTO rejected_signal_reviews(reject_decision_id,signal_id,reject_reason,forward_window_bars,created_at,payload_json) VALUES('retry','s','LOW_CONFIDENCE',2,'2026-01-01T00:00:00Z','{}')")
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run,reject_decision_id='retry',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=2,entry=100,stop=90,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
+    partial=[{'timestamp':'2026-01-01T00:02:00Z','high':105,'low':95}]
+    assert resolve_pending_rejects(conn,{'BTCUSDT':partial},now='2026-01-01T00:03:00Z')['pending']==1
+    pending=conn.execute("SELECT status,last_error FROM burnin_pending_reject_labels").fetchone()
+    assert pending['status']=='PENDING' and 'INCOMPLETE_MARKET_WINDOW' in pending['last_error']
+    assert conn.execute("SELECT COUNT(*) FROM burnin_reject_outcomes").fetchone()[0]==0
+    full=[{'timestamp':'2026-01-01T00:01:00Z','high':105,'low':95},{'timestamp':'2026-01-01T00:02:00Z','high':121,'low':99}]
+    assert resolve_pending_rejects(conn,{'BTCUSDT':full},now='2026-01-01T00:03:00Z')['resolved']==1
+    assert conn.execute("SELECT forward_label FROM burnin_reject_outcomes").fetchone()[0]=='TP_BEFORE_SL'
+    review=conn.execute("SELECT would_have_hit_tp,max_favorable_excursion_pct,evidence_complete FROM rejected_signal_reviews").fetchone()
+    assert tuple(review)==(1,21.0,1)
+    first=tuple(conn.execute("SELECT forward_label,payload_json FROM burnin_reject_outcomes").fetchone())
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='READY',claim_token=NULL,claimed_at=NULL")
+    resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:01:00Z','high':101,'low':89}]},now='2026-01-01T00:03:00Z')
+    assert tuple(conn.execute("SELECT forward_label,payload_json FROM burnin_reject_outcomes").fetchone())==first
+    assert conn.execute("SELECT COUNT(*) FROM burnin_reject_outcomes").fetchone()[0]==1

@@ -4,11 +4,11 @@
 
 - Current version: Phase 9 reject feedback-loop restoration
 - Current phase: execution-aware PAPER reject outcome observation
-- Runtime maturity: eligible rejects are uniquely queued, atomically claimed, and finalized once by the runtime or attached campaign worker
+- Runtime maturity: eligible reviews and pending labels commit atomically; partial market windows remain retryable until one complete outcome is finalized
 - BACKTEST/PAPER/LIVE alignment: PAPER gains observational labeling; thresholds and execution decisions are unchanged
 - Lifecycle coverage: every authoritative final PAPER gate uses one reject-decision identity across review, pending label, and outcome without creating trades
 - Execution realism coverage: only complete, contiguous, execution-valid windows may set `reject_correct`; raw incomplete observations remain auditable
-- Known critical risks: legacy pending rows without timeframe use their stored seconds; public candle-provider outages leave evidence pending
+- Known critical risks: legacy pending rows without timeframe use their stored seconds; persistent provider gaps intentionally leave evidence pending
 - Last audit date: 2026-08-16
 - Live readiness verdict: NOT LIVE READY
 

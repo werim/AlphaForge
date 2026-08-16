@@ -1,5 +1,17 @@
 # PAPER reject forward-outcome feedback surgery — 2026-08-13
 
+## PR #317 transient-window and atomic-boundary correction — 2026-08-16
+
+Two merge blockers remained. First, a partial or gapped candle response was written as an immutable incomplete outcome and the pending row became `FAILED`, so later complete market evidence could not repair it. The resolver now releases its claim back to `PENDING`, records `INCOMPLETE_MARKET_WINDOW` diagnostics, and creates no outcome until the explicit window-completeness check passes. Missing immutable execution-cost assumptions remain separately finalizable as execution-invalidated evidence. Second, runtime committed the operator review before opening a separate pending-label transaction. The authoritative PAPER boundary now upserts the review and idempotently enqueues the pending label through one `engine.begin()` transaction; any enqueue exception rolls both back, while retrying a pre-existing orphan review deterministically self-heals through the same reject identity.
+
+`_sync_review` no longer treats `forward_window_bars` as a finalization marker. It synchronizes the exact reject decision while `evidence_complete` is not true, allowing interrupted legacy rows with a populated horizon but missing outcome fields to finish. Once complete, the row remains immutable. New regressions cover a gapped/partial first pass, complete second pass, single canonical TP result, exact review completion, conflicting post-final retry, and orphan-review restart recovery with one review and one pending label.
+
+Changed files in this follow-up are `src/alphaforge/burnin_resolver.py`, `src/alphaforge/runtime.py`, `tests/test_phase8_reject_resolver.py`, `tests/test_runtime.py`, and the three operational documents. No schema, export, threshold, LIVE, identity, claim-token, MFE/MAE, or timeframe contract changed. Full verification results are recorded after execution below.
+
+Verification on this follow-up: the required focused suite passed 63 tests and `python -m compileall src` passed. The complete suite reached 1,197 passed and 6 skipped; its only four failures were environment import failures in `tests/test_alembic_revision_graph.py` because the current container does not have the Alembic package installed (`alembic.config` and `alembic.command` unavailable). No behavioral test failed. This environment limitation remains a merge-gate requirement: run the full suite with declared dependencies installed before merging PR #317.
+
+---
+
 ## PR #317 idempotency and evidence-integrity correction — 2026-08-16
 
 The initial restoration incorrectly treated missing execution costs as a correct reject, used replace semantics for finalized outcomes, assumed one-minute bars, synchronized reviews by signal ID, and allowed incomplete candle windows to appear complete. This follow-up introduces a stable `reject_decision_id`, one operator review per final decision, insert-once outcomes, compare-and-set `RESOLVING` claims with stale-claim recovery, and canonical-outcome synchronization for retries. Missing costs, ambiguous outcomes, non-calculable net R, gaps, and incomplete windows retain raw TP/SL and excursion observations but keep `reject_correct` null and evidence incomplete.

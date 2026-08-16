@@ -97,7 +97,7 @@ def _sync_review(conn,r,outcome):
     try:
         payload=json.loads(outcome.get("payload_json") or "{}")
         correct=payload.get("reject_correct") if outcome.get("evidence_complete") and not outcome.get("execution_invalidated") and not outcome.get("ambiguous") else None
-        _exec(conn,"""UPDATE rejected_signal_reviews SET forward_window_bars=:bars,would_have_hit_tp=:tp,would_have_hit_sl=:sl,max_favorable_excursion_pct=:mfe,max_adverse_excursion_pct=:mae,reject_correct=:correct,execution_invalidated=:invalid,outcome_ambiguous=:amb,evidence_complete=:complete WHERE id=(SELECT id FROM rejected_signal_reviews WHERE (reject_decision_id=:rid OR (reject_decision_id IS NULL AND signal_id=:sid)) AND forward_window_bars IS NULL ORDER BY reject_decision_id IS NULL,id LIMIT 1)""",{"bars":r.get("horizon_bars") or payload.get("forward_window_bars") or (round(float(r.get("horizon_seconds") or 0)/60) or None),"tp":outcome.get("would_tp"),"sl":outcome.get("would_sl"),"mfe":payload.get("mfe_pct"),"mae":payload.get("mae_pct"),"correct":correct,"invalid":outcome.get("execution_invalidated"),"amb":outcome.get("ambiguous"),"complete":outcome.get("evidence_complete"),"rid":r["reject_decision_id"],"sid":r.get("signal_id")})
+        _exec(conn,"""UPDATE rejected_signal_reviews SET forward_window_bars=:bars,would_have_hit_tp=:tp,would_have_hit_sl=:sl,max_favorable_excursion_pct=:mfe,max_adverse_excursion_pct=:mae,reject_correct=:correct,execution_invalidated=:invalid,outcome_ambiguous=:amb,evidence_complete=:complete WHERE id=(SELECT id FROM rejected_signal_reviews WHERE (reject_decision_id=:rid OR (reject_decision_id IS NULL AND signal_id=:sid)) AND COALESCE(evidence_complete,0) != 1 ORDER BY reject_decision_id IS NULL,id LIMIT 1)""",{"bars":r.get("horizon_bars") or payload.get("forward_window_bars") or (round(float(r.get("horizon_seconds") or 0)/60) or None),"tp":outcome.get("would_tp"),"sl":outcome.get("would_sl"),"mfe":payload.get("mfe_pct"),"mae":payload.get("mae_pct"),"correct":correct,"invalid":outcome.get("execution_invalidated"),"amb":outcome.get("ambiguous"),"complete":outcome.get("evidence_complete"),"rid":r["reject_decision_id"],"sid":r.get("signal_id")})
     except Exception as exc:
         if "no such table" not in str(exc).lower() and "no such column" not in str(exc).lower(): raise
 
@@ -128,6 +128,9 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
         favorable=[((float(c["high"])-entry)/entry if sign>0 else (entry-float(c["low"]))/entry)*100 for c in observed]
         adverse=[((entry-float(c["low"]))/entry if sign>0 else (float(c["high"])-entry)/entry)*100 for c in observed]
         mfe=max(favorable,default=0.0); mae=max(adverse,default=0.0); complete,gaps=_window_complete(candles,r,terminal)
+        if not complete:
+            diagnostic=json.dumps({"market_gaps":gaps,"observed_bars":len(observed),"required_bars":r.get("horizon_bars")},sort_keys=True)
+            _exec(conn,"UPDATE burnin_pending_reject_labels SET status='PENDING',claim_token=NULL,claimed_at=NULL,evidence_complete=0,last_error=:err WHERE pending_label_id=:pid AND claim_token=:token",{"err":"INCOMPLETE_MARKET_WINDOW:"+diagnostic,"pid":r["pending_label_id"],"token":token}); counts["pending"]+=1; continue
         costs=json.loads(r.get("execution_cost_assumptions_json") or "{}"); missing=[f for f in CRITICAL_COST_FIELDS if costs.get(f) is None]
         invalid=bool(missing); total=None if invalid or gross is None else sum(float(costs[f]) for f in CRITICAL_COST_FIELDS); net=None if total is None else gross-total
         reject_correct=None if invalid or ambiguous or net is None or not complete else bool(net<=0)

@@ -12,6 +12,7 @@
 - PAPER rejects no longer stop at `rejected_signal_reviews`; eligible rows progress through pending labels into idempotent burn-in outcomes.
 - Final outcomes are insert-once and immutable; retries synchronize from the first canonical outcome instead of replacing it.
 - Missing costs, ambiguous touches, non-calculable net R, gaps, and incomplete windows leave `reject_correct` null.
+- Partial or gapped candle windows now remain retryable without creating an immutable outcome; authoritative review and pending-label writes share one transaction.
 
 ### Removed
 - Nothing.

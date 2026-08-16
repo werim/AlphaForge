@@ -1454,13 +1454,13 @@ class RuntimeOrchestrator:
         payload = self._canonical_reject_payload(payload)
         self._reject_log.append(payload)
         self.metrics.rejects_persisted += 1
-        self._persist_burnin_decision({**payload, "decision": "REJECTED"}, lifecycle_state=LifecycleState.SIGNAL_REJECTED.value)
         engine = self._resolve_persistence_engine()
         if engine is not None:
-            with sessionmaker(bind=engine, future=True)() as session:
-                record_rejected_signal_review(session, reject_decision_id=payload["reject_decision_id"], signal_id=payload["signal_id"], symbol=payload.get("symbol"), setup_type=payload.get("setup_type"), regime=payload.get("regime"), side=payload.get("side"), reject_reason=payload.get("reason"), score=payload.get("score"), raw_rr=payload.get("rr"), effective_rr=payload.get("effective_rr"), volume_24h_usdt=payload.get("volume_24h_usdt"), spread_pct=payload.get("spread_pct"), expected_slippage_pct=payload.get("expected_slippage_pct"), funding_rate_pct=payload.get("funding_rate_pct"), liquidity_score=payload.get("liquidity_score"), volatility_regime=payload.get("volatility_regime"), payload_json=payload)
-                session.commit()
-        self._persist_pending_reject(payload)
+            with engine.begin() as conn:
+                if not record_rejected_signal_review(conn, reject_decision_id=payload["reject_decision_id"], signal_id=payload["signal_id"], symbol=payload.get("symbol"), setup_type=payload.get("setup_type"), regime=payload.get("regime"), side=payload.get("side"), reject_reason=payload.get("reason"), score=payload.get("score"), raw_rr=payload.get("rr"), effective_rr=payload.get("effective_rr"), volume_24h_usdt=payload.get("volume_24h_usdt"), spread_pct=payload.get("spread_pct"), expected_slippage_pct=payload.get("expected_slippage_pct"), funding_rate_pct=payload.get("funding_rate_pct"), liquidity_score=payload.get("liquidity_score"), volatility_regime=payload.get("volatility_regime"), payload_json=payload):
+                    raise RuntimeError("rejected_signal_review_persistence_failed")
+                self._persist_pending_reject(payload, conn=conn)
+        self._persist_burnin_decision({**payload, "decision": "REJECTED"}, lifecycle_state=LifecycleState.SIGNAL_REJECTED.value)
         if self.on_reject_persist is not None:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
@@ -1487,20 +1487,20 @@ class RuntimeOrchestrator:
             return None
         return os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or f"standalone:{self._burnin_run_id}"
 
-    def _persist_pending_reject(self, payload: Mapping[str, Any]) -> None:
+    def _persist_pending_reject(self, payload: Mapping[str, Any], *, conn: Any | None = None) -> str | None:
         """Durably enqueue eligible PAPER rejects; incomplete geometry remains auditable."""
         if self.config.execution_mode != ExecutionMode.PAPER or not self._burnin_run_id:
-            return
+            return None
         engine, campaign_id = self._resolve_persistence_engine(), self._reject_campaign_id()
         if engine is None or campaign_id is None:
-            return
+            return None
         execution_ctx = dict(payload.get("execution_ctx") or {})
         costs = self._phase7_costs_from_execution_ctx(execution_ctx)
         signal_id = str(payload.get("signal_id") or "")
         try:
-            with engine.begin() as conn:
-                persist_pending_reject_label(
-                    conn, campaign_id=campaign_id, burnin_run_id=self._burnin_run_id,
+            def persist(target: Any) -> str | None:
+                return persist_pending_reject_label(
+                    target, campaign_id=campaign_id, burnin_run_id=self._burnin_run_id,
                     reject_decision_id=str(payload.get("reject_decision_id") or f"reject:{signal_id}"), signal_id=signal_id or None,
                     symbol=payload.get("symbol"), side=payload.get("side"),
                     decision_timestamp=payload.get("decision_timestamp") or canonical_utc_timestamp(), timeframe=payload.get("timeframe"),
@@ -1512,9 +1512,16 @@ class RuntimeOrchestrator:
                                        "setup_type": payload.get("setup_type"), "volatility_regime": payload.get("volatility_regime"),
                                        "liquidity_score": execution_ctx.get("liquidity_score")},
                 )
+            if conn is not None:
+                return persist(conn)
+            with engine.begin() as owned_conn:
+                return persist(owned_conn)
         except Exception as exc:
             self._burnin_evidence_incomplete = True
             logger.exception("pending_reject_label_persistence_failed", exc_info=exc)
+            if conn is not None:
+                raise
+            return None
 
     async def _reject_forward_outcome_loop(self) -> None:
         while not self._stop_event.is_set():
