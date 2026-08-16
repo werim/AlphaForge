@@ -1215,3 +1215,16 @@ Push recommendation: merge only after all required focused and full CI checks ar
 Verification in this environment is recorded in the merge-blocker recheck above. CI with declared dependencies must be green before merge.
 
 ---
+# Phase C0 complete PAPER reject-denominator surgery — 2026-08-16
+
+PR #319 began from pending labels, allowing one mature label to produce PASS while other persisted rejects had never become labelable. The root cause was a pending-first query boundary rather than reconciliation of the requested campaign lineage or standalone run.
+
+`src/alphaforge/reject_label_status.py` now derives authoritative run membership, scopes PAPER rejected burn-in observations by that membership, and reconciles their stable reject-decision identities with reviews, pending labels, incomplete-geometry audit observations, and canonical outcomes. It reports all requested denominator, coverage, status, execution-invalidated, and accuracy-eligible counters. Missing eligible pending ownership and duplicate ownership are FAIL conditions. Incomplete geometry/cost evidence and FAILED, AMBIGUOUS, or execution-invalidated populations explicitly block PASS as INCOMPLETE; structural contradictions remain FAIL. Campaign continuation membership and standalone run membership are isolated, and unrelated history is not inferred from timestamps or signal coincidence.
+
+The validator performs SELECT/PRAGMA operations only. There are no schema/export changes, migrations, backfills, threshold changes, resolver mutations, lifecycle writes, production/order-path changes, agent handlers, BACKTEST cutover, or LIVE authorization changes. Pre-#317 databases remain supported through the existing additive bootstrap; unavailable source evidence remains null rather than fabricated.
+
+`tests/test_reject_label_status.py` adds production-shaped coverage for one good label beside incomplete rejects, eligible missing-label failure, explicit failed/ambiguous/execution-invalidated blocking, complete denominator counts, campaign/standalone isolation, unrelated-history exclusion, idempotent zero-write validation, and a fully mature PASS fixture. Required focused, compatibility, full-suite, compile, and diff checks are recorded in the delivery response.
+
+Compatibility risk is limited to intentionally stricter gate results: evidence sets that previously passed with partial coverage can now be INCOMPLETE or FAIL. No data migration is required. Push recommendation: merge as the final Phase C0 evidence gate only after CI confirms the full suite; do not infer Phase C or LIVE readiness.
+
+---

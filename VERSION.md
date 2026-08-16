@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Complete PAPER reject-coverage gate (2026-08-16)
+
+- Current version: Phase C0 complete reject-denominator validation
+- Current phase: final pre-Phase C evidence gate; Phase C agents and cutover are not implemented
+- Runtime maturity: read-only campaign/standalone reconciliation covers PAPER reject observations, reviews, pending labels, and canonical outcomes
+- BACKTEST/PAPER/LIVE alignment: observability only; runtime decisions, agent graph, orders, and LIVE authority are unchanged
+- Lifecycle coverage: eligible rejects require exactly one pending identity and resolved labels require exactly one canonical outcome
+- Execution realism coverage: incomplete geometry, unavailable execution costs, failed/ambiguous labels, and execution-invalidated evidence are explicit non-PASS populations
+- Known critical risks: historical evidence without stable run/decision identity remains unusable; provider and maturity gaps remain fail-closed as INCOMPLETE
+- Last audit date: 2026-08-16
+- Live readiness verdict: NOT LIVE READY
+
 ## PAPER reject-label integrity gate (2026-08-16)
 
 - Current version: Phase 9 SQL-first reject-label validation

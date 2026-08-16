@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 REQUIRED = {
+    "burnin_observations": {"observation_id", "burnin_run_id", "execution_mode", "decision", "evidence_complete", "missing_fields_json", "metrics_json"},
     "rejected_signal_reviews": {"reject_decision_id", "signal_id", "reject_reason", "raw_rr", "effective_rr", "reject_correct", "execution_invalidated", "outcome_ambiguous", "evidence_complete", "max_favorable_excursion_pct", "max_adverse_excursion_pct"},
-    "burnin_pending_reject_labels": {"pending_label_id", "campaign_id", "burnin_run_id", "reject_decision_id", "signal_id", "status", "due_at", "claimed_at", "timeframe", "horizon_bars", "horizon_seconds", "entry", "stop", "target"},
+    "burnin_pending_reject_labels": {"pending_label_id", "campaign_id", "burnin_run_id", "reject_decision_id", "signal_id", "status", "due_at", "claimed_at", "timeframe", "horizon_bars", "horizon_seconds", "entry", "stop", "target", "execution_cost_assumptions_json"},
     "burnin_reject_outcomes": {"reject_outcome_id", "burnin_run_id", "reject_reason", "evidence_complete", "execution_invalidated", "ambiguous", "hypothetical_net_r_after_costs", "missed_profit", "avoided_loss", "payload_json"},
 }
 STATUSES = ("PENDING", "READY", "RESOLVING", "RESOLVED", "AMBIGUOUS", "FAILED")
@@ -42,8 +43,47 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
                 "integrity": None, "resolver_state": None, "evidence_correctness": None,
                 "reject_quality": []}
 
-    p = [dict(r) for r in conn.execute("SELECT * FROM burnin_pending_reject_labels WHERE campaign_id=?", (identity,))]
-    decision_ids = [r["reject_decision_id"] for r in p]
+    # Run membership is the authoritative scope.  Campaigns include only their
+    # explicit continuation lineage; standalone validation includes one run.
+    if identity.startswith("standalone:"):
+        run_ids = [identity.removeprefix("standalone:")]
+    elif "burnin_campaign_runs" in tables:
+        run_ids = [r[0] for r in conn.execute(
+            "SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (identity,))]
+    else:
+        run_ids = []
+    run_ph = ",".join("?" for _ in run_ids) or "NULL"
+    p = [dict(r) for r in conn.execute(
+        f"SELECT * FROM burnin_pending_reject_labels WHERE burnin_run_id IN ({run_ph}) AND campaign_id=?",
+        [*run_ids, identity])]
+    observations = [dict(r) for r in conn.execute(
+        f"""SELECT * FROM burnin_observations WHERE burnin_run_id IN ({run_ph})
+        AND UPPER(COALESCE(execution_mode,''))='PAPER'
+        AND UPPER(COALESCE(decision,''))='REJECTED'""", run_ids)]
+
+    def decoded(value: Any, fallback: Any) -> Any:
+        try:
+            result = json.loads(value or "")
+            return result
+        except (TypeError, ValueError):
+            return fallback
+
+    observation_ids = []
+    unidentified_observations = 0
+    incomplete_observation_ids: set[str] = set()
+    for row in observations:
+        metrics = decoded(row.get("metrics_json"), {})
+        reject_id = metrics.get("reject_decision_id") if isinstance(metrics, dict) else None
+        if reject_id:
+            observation_ids.append(str(reject_id))
+            missing_fields = decoded(row.get("missing_fields_json"), [])
+            if (str(row.get("observation_id") or "").startswith("incomplete_reject_geometry_") or
+                    row.get("evidence_complete") != 1 or bool(missing_fields)):
+                incomplete_observation_ids.add(str(reject_id))
+        else:
+            unidentified_observations += 1
+
+    decision_ids = sorted(set(observation_ids) | {r["reject_decision_id"] for r in p})
     signal_ids = sorted({r["signal_id"] for r in p if r.get("signal_id") is not None})
     placeholders = ",".join("?" for _ in decision_ids) or "NULL"
     signal_placeholders = ",".join("?" for _ in signal_ids) or "NULL"
@@ -54,8 +94,6 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
            OR (json_valid(payload_json) AND (json_extract(payload_json,'$.campaign_id')=?
                OR json_extract(payload_json,'$.runtime_identity')=?))""",
         [*decision_ids, *signal_ids, identity, identity])]
-    run_ids = sorted({r["burnin_run_id"] for r in p})
-    run_ph = ",".join("?" for _ in run_ids) or "NULL"
     outcomes = [dict(r) for r in conn.execute(
         f"SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id IN ({run_ph})", run_ids)]
     # Mirror burnin_resolver._sync_review exactly: explicit decision identity
@@ -96,7 +134,8 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
         try: payload_pending.append(json.loads(outcome.get("payload_json") or "{}").get("pending_label_id"))
         except (TypeError, ValueError): payload_pending.append(None)
     duplicate_outcomes = sum(n - 1 for n in {x: payload_pending.count(x) for x in set(payload_pending) if x}.values() if n > 1)
-    orphan_reviews = sum(1 for r in reviews if int(r["id"]) not in matched_review_rows)
+    orphan_reviews = sum(1 for r in reviews if int(r["id"]) not in matched_review_rows and
+                         str(r.get("reject_decision_id") or "") not in incomplete_observation_ids)
     orphan_pending = sum(1 for r in p if r["reject_decision_id"] not in review_by_pending and
                          r["reject_decision_id"] not in ambiguous_review_links)
     orphan_outcomes = sum(1 for o in outcomes if o["reject_outcome_id"] not in expected_outcome)
@@ -113,6 +152,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     resolved_without = []
     immutable = []
     geometry = []
+    missing_cost_ids: set[str] = set()
     for row in p:
         rid = row["reject_decision_id"]; review = review_by_pending.get(rid); outcome = outcome_by_decision.get(rid)
         if review and review["reject_correct"] is not None and (review["evidence_complete"] != 1 or review["execution_invalidated"] == 1 or review["outcome_ambiguous"] == 1): invalid_correct.append(rid)
@@ -127,9 +167,53 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             side = str(row.get("side") or "").upper()
             if e <= 0 or e == s or (side == "LONG" and not s < e < t) or (side == "SHORT" and not t < e < s) or side not in {"LONG", "SHORT"}: geometry.append(rid)
         except (TypeError, ValueError): geometry.append(rid)
+        costs = decoded(row.get("execution_cost_assumptions_json"), {})
+        required_costs = ("spread_cost", "entry_slippage_cost", "exit_slippage_cost",
+                          "fee_cost", "funding_cost", "latency_cost")
+        if not isinstance(costs, dict) or any(costs.get(key) is None for key in required_costs):
+            missing_cost_ids.add(rid)
+
+    review_decision_ids = {str(r["reject_decision_id"]) for r in reviews if r.get("reject_decision_id")}
+    denominator_ids = set(decision_ids) | review_decision_ids
+    pending_counts = {rid: sum(row["reject_decision_id"] == rid for row in p) for rid in denominator_ids}
+    # An incomplete-geometry audit row is intentionally part of the reject
+    # population, but cannot be label eligible.  All other scoped rejects are
+    # expected to own one pending identity; absence is a structural failure.
+    label_eligible_ids = denominator_ids - incomplete_observation_ids - missing_cost_ids
+    unlabeled_ids = {rid for rid in label_eligible_ids if pending_counts.get(rid, 0) == 0}
+    duplicate_pending_ids = {rid for rid, count in pending_counts.items() if count > 1}
+    resolved_count = sum(str(row["status"]).upper() == "RESOLVED" for row in p)
+    failed_count = sum(str(row["status"]).upper() == "FAILED" for row in p)
+    ambiguous_count = sum(str(row["status"]).upper() == "AMBIGUOUS" for row in p)
+    execution_invalidated_count = sum(
+        review.get("execution_invalidated") == 1 for review in review_by_pending.values())
+    accuracy_eligible_count = sum(
+        review["evidence_complete"] == 1 and review["execution_invalidated"] != 1 and
+        review["outcome_ambiguous"] != 1 and review["reject_correct"] is not None
+        for review in review_by_pending.values())
+    total_rejected = len(denominator_ids) + unidentified_observations
+    coverage = {
+        "total_rejected_decisions": total_rejected,
+        "reviews_count": len(reviews),
+        "label_eligible_rejects": len(label_eligible_ids),
+        "pending_labels": len(p),
+        "unlabeled_rejects": len(unlabeled_ids),
+        "incomplete_geometry_rejects": len(incomplete_observation_ids),
+        "missing_execution_cost_rejects": len(missing_cost_ids),
+        "resolved_labels": resolved_count,
+        "failed_labels": failed_count,
+        "ambiguous_labels": ambiguous_count,
+        "execution_invalidated_labels": execution_invalidated_count,
+        "accuracy_eligible_labels": accuracy_eligible_count,
+        "label_coverage_ratio": (sum(pending_counts.get(rid, 0) == 1 for rid in label_eligible_ids) /
+                                 len(label_eligible_ids)) if label_eligible_ids else None,
+        "mature_coverage_ratio": (accuracy_eligible_count / len(label_eligible_ids))
+                                 if label_eligible_ids else None,
+    }
 
     reasons: set[str] = set()
     if duplicate_review_ids or duplicate_outcomes or ambiguous_review_links: reasons.add("DUPLICATE_REJECT_IDENTITY")
+    if unidentified_observations: reasons.add("MISSING_REJECT_DECISION_ID")
     if ambiguous_review_links: reasons.add("AMBIGUOUS_REVIEW_LINKAGE")
     if orphan_reviews: reasons.add("ORPHAN_REJECT_REVIEW")
     if orphan_pending: reasons.add("ORPHAN_PENDING_LABEL")
@@ -139,10 +223,17 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     if stale: reasons.add("STALE_RESOLVER_CLAIM")
     if overdue: reasons.add("OVERDUE_PENDING_LABELS")
     if resolved_without: reasons.add("RESOLVED_WITHOUT_OUTCOME")
+    if unlabeled_ids: reasons.add("MISSING_ELIGIBLE_PENDING_LABEL")
+    if duplicate_pending_ids: reasons.add("DUPLICATE_PENDING_LABEL_OWNERSHIP")
+    if incomplete_observation_ids: reasons.add("INCOMPLETE_REJECT_GEOMETRY")
+    if missing_cost_ids: reasons.add("MISSING_EXECUTION_COST_EVIDENCE")
+    if failed_count: reasons.add("FAILED_LABELS_PRESENT")
+    if ambiguous_count: reasons.add("AMBIGUOUS_LABELS_PRESENT")
+    if execution_invalidated_count: reasons.add("EXECUTION_INVALIDATED_LABELS_PRESENT")
     if not canonical: reasons.add("NO_FORWARD_OUTCOMES_YET")
     eligible = [r for r in review_by_pending.values() if r["evidence_complete"] == 1 and r["execution_invalidated"] != 1 and r["outcome_ambiguous"] != 1 and r["reject_correct"] is not None]
     if not eligible: reasons.add("INSUFFICIENT_MATURE_EVIDENCE")
-    failures = {"DUPLICATE_REJECT_IDENTITY", "AMBIGUOUS_REVIEW_LINKAGE", "ORPHAN_REJECT_REVIEW", "ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_OUTCOME", "INVALID_REJECT_CORRECT_LABEL", "INVALID_FINALIZED_EVIDENCE", "RESOLVED_WITHOUT_OUTCOME"}
+    failures = {"DUPLICATE_REJECT_IDENTITY", "MISSING_REJECT_DECISION_ID", "AMBIGUOUS_REVIEW_LINKAGE", "ORPHAN_REJECT_REVIEW", "ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_OUTCOME", "INVALID_REJECT_CORRECT_LABEL", "INVALID_FINALIZED_EVIDENCE", "RESOLVED_WITHOUT_OUTCOME", "MISSING_ELIGIBLE_PENDING_LABEL", "DUPLICATE_PENDING_LABEL_OWNERSHIP"}
     status = "FAIL" if reasons & failures else "INCOMPLETE" if reasons else "PASS"
 
     quality = []
@@ -166,6 +257,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             "avoided_losing_trades": sum((o.get("avoided_loss") or 0) > 0 for o in os if o["evidence_complete"] == 1 and o["execution_invalidated"] != 1 and o["ambiguous"] != 1)})
 
     return {**base, "status": status, "reason_codes": sorted(reasons), "schema_limitations": [],
+        "coverage": coverage,
         "integrity": {"rejected_reviews": len(reviews), "distinct_reject_decision_ids": len(set(r["reject_decision_id"] for r in reviews if r["reject_decision_id"] is not None)), "duplicate_reject_decision_ids": duplicate_review_ids,
             "pending_labels": len(p), "reject_outcomes": len(canonical), "reviews_without_eligible_pending_labels": orphan_reviews,
             "pending_labels_without_reviews": orphan_pending, "ambiguous_review_linkages": len(ambiguous_review_links),

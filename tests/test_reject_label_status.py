@@ -35,6 +35,19 @@ def report(conn, identity):
     return reject_label_status(conn, identity, now=NOW)
 
 
+def add_reject_observation(conn, run, reject_id, *, incomplete=False):
+    conn.execute("""INSERT INTO burnin_observations(
+        observation_id,burnin_run_id,release_id,observed_at,execution_mode,decision,
+        lifecycle_state,evidence_complete,missing_fields_json,metrics_json,
+        source_provenance_json,schema_version)
+        VALUES(?,?,?,?,?,'REJECTED','SIGNAL_REJECTED',?,?,?,?,?)""", (
+        ("incomplete_reject_geometry_" if incomplete else "reject_") + reject_id,
+        run, "rel", "2026-01-01T00:00:00Z", "PAPER", 0 if incomplete else 1,
+        json.dumps(["entry"] if incomplete else []),
+        json.dumps({"reject_decision_id": reject_id, "reject_reason": "LOW_CONFIDENCE"}),
+        json.dumps({"provider": "PAPER"}), "test"))
+
+
 def test_healthy_complete_pipeline_passes_and_correctness_is_valid(tmp_path):
     _, conn, cid = database(tmp_path)
     result = report(conn, cid)
@@ -195,3 +208,63 @@ def test_repeated_validation_is_read_only_and_idempotent(tmp_path):
     before = path.read_bytes()
     first = report(conn, cid); second = report(conn, cid)
     assert first == second and path.read_bytes() == before
+
+
+def test_complete_denominator_prevents_one_good_label_hiding_unlabelable_rejects(tmp_path):
+    _, conn, cid = database(tmp_path)
+    run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
+    for index in range(5):
+        reject_id = f"bad:{index}"
+        add_reject_observation(conn, run, reject_id, incomplete=True)
+        conn.execute("""INSERT INTO rejected_signal_reviews(
+            reject_decision_id,signal_id,reject_reason,created_at,payload_json)
+            VALUES(?,?,?,?,?)""", (reject_id, reject_id, "LOW_CONFIDENCE",
+            "2026-01-01T00:00:00Z", json.dumps({"campaign_id": cid})))
+    result = report(conn, cid)
+    assert result["status"] == "INCOMPLETE"
+    assert result["coverage"]["total_rejected_decisions"] == 6
+    assert result["coverage"]["incomplete_geometry_rejects"] == 5
+    assert "INCOMPLETE_REJECT_GEOMETRY" in result["reason_codes"]
+
+
+def test_eligible_reject_without_pending_label_fails(tmp_path):
+    _, conn, cid = database(tmp_path)
+    run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
+    add_reject_observation(conn, run, "eligible:missing")
+    conn.execute("""INSERT INTO rejected_signal_reviews(
+        reject_decision_id,signal_id,reject_reason,created_at,payload_json)
+        VALUES('eligible:missing','missing','LOW_CONFIDENCE','2026-01-01T00:00:00Z',?)""",
+        (json.dumps({"campaign_id": cid}),))
+    result = report(conn, cid)
+    assert result["status"] == "FAIL"
+    assert result["coverage"]["unlabeled_rejects"] == 1
+    assert "MISSING_ELIGIBLE_PENDING_LABEL" in result["reason_codes"]
+
+
+def test_failed_ambiguous_and_execution_invalidated_populations_are_blocking(tmp_path):
+    _, conn, cid = database(tmp_path)
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='FAILED'")
+    failed = report(conn, cid)
+    assert failed["status"] == "INCOMPLETE" and "FAILED_LABELS_PRESENT" in failed["reason_codes"]
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='AMBIGUOUS'")
+    ambiguous = report(conn, cid)
+    assert ambiguous["status"] == "INCOMPLETE" and "AMBIGUOUS_LABELS_PRESENT" in ambiguous["reason_codes"]
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='RESOLVED'")
+    conn.execute("UPDATE rejected_signal_reviews SET reject_correct=NULL,evidence_complete=0,execution_invalidated=1")
+    invalidated = report(conn, cid)
+    assert invalidated["status"] != "PASS"
+    assert "EXECUTION_INVALIDATED_LABELS_PRESENT" in invalidated["reason_codes"]
+
+
+def test_campaign_standalone_and_unrelated_history_are_isolated(tmp_path):
+    _, conn, cid = database(tmp_path)
+    campaign_result = report(conn, cid)
+    run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
+    add_reject_observation(conn, "unrelated-run", "unrelated")
+    conn.execute("""INSERT INTO rejected_signal_reviews(
+        reject_decision_id,signal_id,reject_reason,created_at,payload_json)
+        VALUES('unrelated','unrelated','LOW_CONFIDENCE','2020-01-01T00:00:00Z','{}')""")
+    assert report(conn, cid) == campaign_result
+    standalone = report(conn, "standalone:unrelated-run")
+    assert standalone["coverage"]["total_rejected_decisions"] == 1
+    assert standalone["coverage"]["unlabeled_rejects"] == 1

@@ -4048,3 +4048,22 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Historical null timeframe/horizon-bar values cannot be reconstructed and remain explicit evidence limitations. LIVE remains NOT READY.
+## Complete PAPER reject-coverage gate — 2026-08-16
+
+### Added
+- Queryable complete-denominator, label-coverage, maturity, failure, ambiguity, execution-invalidation, geometry, and cost counters.
+
+### Changed
+- PASS now requires complete eligible-label ownership across the explicitly requested campaign lineage or standalone run.
+
+### Fixed
+- A mature valid row can no longer hide unlabelable, unlabeled, failed, ambiguous, or execution-invalidated PAPER rejects.
+
+### Removed
+- Nothing; validation remains strictly read-only.
+
+### Breaking Changes
+- None in persistence or runtime; incomplete historical coverage may now change a validator result from PASS to INCOMPLETE or FAIL.
+
+### Known Issues
+- Rejects without stable scoped run/decision identity cannot safely be attributed and are intentionally excluded rather than guessed. LIVE remains NOT READY.
