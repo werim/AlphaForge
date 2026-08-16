@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from alphaforge.ai_brain import AIBrain
+from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.persistence import init_db
 from alphaforge import persistence as persistence_module
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
@@ -292,6 +293,57 @@ def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_p
     assert any(row.phase == "final" and row.score is not None and row.rr is not None for row in runtime_rows)
     assert final_count == 1
     assert any((str(row.phase).startswith("ai_internal_")) for row in runtime_rows)
+
+
+def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'pending.db'}")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, reject_forward_horizon_bars=2),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    orchestrator._burnin_run_id = "paper-restart-safe-run"
+    payload = {"signal_id":"eligible-1","symbol":"BTCUSDT","side":"LONG","timeframe":"1m","entry":100.0,"sl":90.0,"tp":120.0,
+               "reason":"LOW_CONFIDENCE","regime":"TRENDING","setup_type":"BREAKOUT","volatility_regime":"NORMAL",
+               "decision_timestamp":"2026-01-01T00:00:00Z","execution_ctx":{"spread_pct":.001,"expected_slippage_pct":.001,
+               "fee_pct":.001,"funding_rate_pct":0.0,"market_data_latency_ms":10,"liquidity_score":.9}}
+    asyncio.run(orchestrator._persist_reject(payload))
+    asyncio.run(orchestrator._persist_reject(payload))
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT signal_id,regime,status,source_provenance_json FROM burnin_pending_reject_labels")).one()
+        reviews = conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id='reject:eligible-1'")).scalar_one()
+    assert row.signal_id == "eligible-1" and row.regime == "TRENDING" and row.status == "PENDING"
+    assert 'BREAKOUT' in row.source_provenance_json and 'NORMAL' in row.source_provenance_json
+    assert reviews == 1
+
+
+def test_standalone_resolver_fetches_each_pending_timeframe(tmp_path: Path) -> None:
+    engine=init_db(f"sqlite+pysqlite:///{tmp_path/'intervals.db'}"); seen=[]
+    def provider(symbol,start,end,timeframe):
+        seen.append(timeframe)
+        seconds={'1m':60,'5m':300,'1h':3600}[timeframe]
+        from datetime import datetime,timezone
+        ts=datetime.fromtimestamp(datetime.fromisoformat(start.replace('Z','+00:00')).timestamp()+seconds,timezone.utc).isoformat()
+        return [{'timestamp':ts,'high':121,'low':99}]
+    orchestrator=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER,reject_forward_horizon_bars=1),ai_brain=_brain(),market_scanner=lambda:None,persistence_engine=engine,reject_candle_provider=provider)
+    orchestrator._burnin_run_id='interval-run'
+    for tf in ('1m','5m','1h'):
+        orchestrator._persist_pending_reject(orchestrator._canonical_reject_payload({'signal_id':tf,'symbol':'BTCUSDT','side':'LONG','timeframe':tf,'entry':100,'sl':90,'tp':120,'reason':'LOW_CONFIDENCE','decision_timestamp':'2026-01-01T00:00:00Z','execution_ctx':{'spread_pct':.001,'expected_slippage_pct':.001,'fee_pct':.001,'funding_rate_pct':0,'market_data_latency_ms':1}}))
+    asyncio.run(orchestrator._resolve_reject_forward_outcomes_once())
+    assert set(seen)=={'1m','5m','1h'}
+
+
+def test_reject_review_orphan_self_heals_to_one_pending_label_on_retry(tmp_path: Path) -> None:
+    engine=init_db(f"sqlite+pysqlite:///{tmp_path/'recover.db'}")
+    orchestrator=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER,reject_forward_horizon_bars=1),ai_brain=_brain(),market_scanner=lambda:None,persistence_engine=engine)
+    orchestrator._burnin_run_id='recover-run'
+    payload=orchestrator._canonical_reject_payload({'signal_id':'recover','symbol':'BTCUSDT','side':'LONG','timeframe':'1m','entry':100,'sl':90,'tp':120,'reason':'LOW_CONFIDENCE','decision_timestamp':'2026-01-01T00:00:00Z','execution_ctx':{'spread_pct':.001,'expected_slippage_pct':.001,'fee_pct':.001,'funding_rate_pct':0,'market_data_latency_ms':1}})
+    with engine.begin() as conn:
+        assert record_rejected_signal_review(conn,reject_decision_id=payload['reject_decision_id'],signal_id='recover',symbol='BTCUSDT',side='LONG',reject_reason='LOW_CONFIDENCE',payload_json=payload)
+    asyncio.run(orchestrator._persist_reject(payload))
+    asyncio.run(orchestrator._persist_reject(payload))
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id='reject:recover'")).scalar_one()==1
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE reject_decision_id='reject:recover'")).scalar_one()==1
 
 
 def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> None:

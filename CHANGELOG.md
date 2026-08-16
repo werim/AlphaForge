@@ -1,3 +1,28 @@
+## Reject forward-label feedback restoration — 2026-08-13
+
+### Added
+- Restart-safe PAPER reject enqueueing, a standalone runtime resolver loop, MFE/MAE capture, and adaptive-review label synchronization.
+- Stable reject-decision identity, timeframe-aware pending labels, compare-and-set resolver claims, and additive revision `0006_reject_label_identity_timeframe`.
+
+### Changed
+- Signal construction and reject evidence now propagate available setup, regime, volatility, trade geometry, and execution context.
+- Forward maturity uses the signal timeframe; adaptive accuracy includes only complete, unambiguous, execution-valid evidence.
+
+### Fixed
+- PAPER rejects no longer stop at `rejected_signal_reviews`; eligible rows progress through pending labels into idempotent burn-in outcomes.
+- Final outcomes are insert-once and immutable; retries synchronize from the first canonical outcome instead of replacing it.
+- Missing costs, ambiguous touches, non-calculable net R, gaps, and incomplete windows leave `reject_correct` null.
+- Partial or gapped candle windows now remain retryable without creating an immutable outcome; authoritative review and pending-label writes share one transaction.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; SQLite bootstrap and Alembic add nullable columns and a partial unique index without rewriting historical evidence.
+
+### Known Issues
+- Legacy pending rows without timeframe retain legacy horizon semantics; they cannot be retroactively assigned a timeframe without source evidence. LIVE readiness is unchanged.
+
 ## Stale PAPER STARTING recovery — 2026-08-11
 
 ### Added

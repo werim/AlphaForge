@@ -1,3 +1,55 @@
+# PAPER reject forward-outcome feedback surgery — 2026-08-13
+
+## PR #317 transient-window and atomic-boundary correction — 2026-08-16
+
+Two merge blockers remained. First, a partial or gapped candle response was written as an immutable incomplete outcome and the pending row became `FAILED`, so later complete market evidence could not repair it. The resolver now releases its claim back to `PENDING`, records `INCOMPLETE_MARKET_WINDOW` diagnostics, and creates no outcome until the explicit window-completeness check passes. Missing immutable execution-cost assumptions remain separately finalizable as execution-invalidated evidence. Second, runtime committed the operator review before opening a separate pending-label transaction. The authoritative PAPER boundary now upserts the review and idempotently enqueues the pending label through one `engine.begin()` transaction; any enqueue exception rolls both back, while retrying a pre-existing orphan review deterministically self-heals through the same reject identity.
+
+`_sync_review` no longer treats `forward_window_bars` as a finalization marker. It synchronizes the exact reject decision while `evidence_complete` is not true, allowing interrupted legacy rows with a populated horizon but missing outcome fields to finish. Once complete, the row remains immutable. New regressions cover a gapped/partial first pass, complete second pass, single canonical TP result, exact review completion, conflicting post-final retry, and orphan-review restart recovery with one review and one pending label.
+
+Changed files in this follow-up are `src/alphaforge/burnin_resolver.py`, `src/alphaforge/runtime.py`, `tests/test_phase8_reject_resolver.py`, `tests/test_runtime.py`, and the three operational documents. No schema, export, threshold, LIVE, identity, claim-token, MFE/MAE, or timeframe contract changed. Full verification results are recorded after execution below.
+
+Verification on this follow-up: the required focused suite passed 63 tests and `python -m compileall src` passed. The complete suite reached 1,197 passed and 6 skipped; its only four failures were environment import failures in `tests/test_alembic_revision_graph.py` because the current container does not have the Alembic package installed (`alembic.config` and `alembic.command` unavailable). No behavioral test failed. This environment limitation remains a merge-gate requirement: run the full suite with declared dependencies installed before merging PR #317.
+
+---
+
+## PR #317 idempotency and evidence-integrity correction — 2026-08-16
+
+The initial restoration incorrectly treated missing execution costs as a correct reject, used replace semantics for finalized outcomes, assumed one-minute bars, synchronized reviews by signal ID, and allowed incomplete candle windows to appear complete. This follow-up introduces a stable `reject_decision_id`, one operator review per final decision, insert-once outcomes, compare-and-set `RESOLVING` claims with stale-claim recovery, and canonical-outcome synchronization for retries. Missing costs, ambiguous outcomes, non-calculable net R, gaps, and incomplete windows retain raw TP/SL and excursion observations but keep `reject_correct` null and evidence incomplete.
+
+Pending labels now persist nullable `timeframe`, `horizon_bars`, `claim_token`, and `claimed_at`. New rows derive `due_at` from configured horizon bars and the actual signal timeframe; standalone runtime fetches each symbol/timeframe group with the matching provider interval. Legacy rows retain their stored `horizon_seconds` and pre-timeframe evaluation fallback because fabricating an interval would corrupt evidence. Revision `0006_reject_label_identity_timeframe` and SQLite bootstrap add the same nullable columns, review validity fields, and partial unique decision index without rewriting historical rows or exports.
+
+Geometry validation requires finite values, positive entry, nonzero risk, and directionally valid LONG/SHORT stop/target ordering. Candles are timestamp-sorted and deduplicated; MFE/MAE stop at the first terminal candle, while timeout uses the full horizon. Explicit bar-count, boundary, and gap checks prevent incomplete market windows from qualifying. Adaptive aggregation excludes invalidated, ambiguous, and incomplete rows. Trading thresholds, PAPER/LIVE_PRECHECK no-order guarantees, and LIVE execution authorization are unchanged; LIVE remains NOT READY.
+
+Changed implementation files are `runtime.py`, `ai_brain.py`, `adaptive_learning.py`, `burnin.py`, `burnin_campaign.py`, `burnin_resolver.py`, `persistence.py`, `schema_doctor.py`, configuration registry/loading, `.env.example`, and Alembic revision 0006. Focused tests cover costs, adaptive exclusion, immutable retry, duplicate identity, overlapping claims, 1m/5m/1h maturity/provider selection, invalid geometry, legacy campaign-only operation, and runtime persistence. Full-suite results are recorded after final execution below.
+
+Final verification: the focused reject-resolver/runtime/adaptive suite passed 61 tests; configuration, migration, and wider focused checks passed; `python -m compileall -q src` passed; and the complete repository suite passed 1,202 tests with 3 skips. The first full run exposed one timing-sensitive heartbeat assertion that passed immediately in isolation and two schema-doctor head-recognition failures; recognizing additive revision 0006 fixed the schema failures, and the final complete run was green. Push recommendation: update PR #317 for review, do not merge automatically, and do not infer LIVE readiness.
+
+---
+
+## Need and root cause
+
+`AIBrain._persist_decision` created `rejected_signal_reviews` with intentionally null future fields, but the runtime's final reject boundary only wrote a burn-in observation. `persist_pending_reject_label` was called by campaign-specific flows, and `resolve_campaign_batch` was scheduled only by `BurnInCampaignRunner`; standalone PAPER runtime therefore had neither enqueueing nor evaluation. In addition, `_build_signal` discarded available stop, target, setup, and regime inputs, which explains both ineligible geometry and `unknown` metadata. The evaluator requires campaign identity, due market candles, complete geometry, and execution costs; ordinary PAPER supplied none of that linkage.
+
+## Minimal runtime, lifecycle, and persistence change
+
+The authoritative final PAPER reject boundary now queues one deterministic pending label per runtime signal after persisting `SIGNAL_REJECTED`. Attached runs use their campaign ID; standalone runs use a stable run-scoped namespace without creating a duplicate trading runtime. `INSERT OR IGNORE` and the unique reject-decision key prevent duplicate pending work. Pending rows remain durable across restart. A runtime background loop fetches only due windows with the canonical read-only candle provider and calls the existing campaign resolver; attached campaign workers remain compatible.
+
+Resolution preserves first-touch TP/SL/timeout/ambiguous semantics, calculates percentage MFE and MAE, persists execution cost assumptions and market-data provenance in the auditable outcome payload, and fills only still-null adaptive review labels. A resolved pending row is excluded from later scans, so finalized labels are not overwritten. The outcome unique key prevents duplicate outcomes. No reject threshold was changed and no rejected signal becomes an order or trade.
+
+## Execution awareness and metadata
+
+Hypothetical net R continues to subtract critical spread, entry/exit slippage, fees, funding, and latency costs. Missing critical costs set `execution_invalidated` and prevent a theoretical TP from becoming a false-negative reject; complete non-positive net outcomes count as correct rejects. MFE/MAE remain market movement observations, not executable PnL. Liquidity, volatility, setup, and source context are retained in pending provenance/outcome payloads when observed. Setup/regime/volatility are propagated from scanner inputs rather than replaced with fabricated defaults; genuinely unavailable values remain null/unknown.
+
+## Files, tests, compatibility, and remaining risks
+
+`runtime.py` owns enqueueing, standalone scheduling, geometry/metadata propagation, and due-window candle acquisition. `burnin_resolver.py` owns MFE/MAE, execution-adjusted correctness, and immutable adaptive-review synchronization. Resolver and runtime regressions cover enqueue, TP, SL, timeout, horizon maturity, excursions, correctness, restart recovery, duplicate prevention, and metadata. No schema or CSV migration is required. Historical unlabeled reviews cannot be reconstructed unless their missing geometry/timestamps can be sourced; provider outages leave pending rows untouched for retry. Ambiguous same-bar TP/SL remains auditable and unlabeled for correctness. LIVE remains NOT READY.
+
+## Push recommendation
+
+Recommend review after focused and full-suite tests pass. This restores evidence collection only and must not be used to loosen `LOW_CONFIDENCE` or other gates until sufficient complete forward evidence accumulates.
+
+---
+
 # Stale PAPER STARTING recovery surgery — 2026-08-11
 
 ## Need and root cause
