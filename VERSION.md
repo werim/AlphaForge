@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Existing SQLite reject-label compatibility hotfix (2026-08-16)
+
+- Current version: Phase 9 reject-label SQLite compatibility hotfix
+- Current phase: additive existing-PAPER-database repair
+- Runtime maturity: canonical startup and schema doctor now require and idempotently add all resolver-consumed PR #317 pending-label columns
+- BACKTEST/PAPER/LIVE alignment: persistence schema alignment only; decision and execution behavior are unchanged
+- Lifecycle coverage: legacy pending reject evidence is preserved and remains resolvable after restart
+- Execution realism coverage: legacy rows retain stored `horizon_seconds`; no timeframe or horizon is fabricated
+- Known critical risks: legacy rows still lack timeframe-aware completeness checks unless original source evidence supplies those fields
+- Last audit date: 2026-08-16
+- Live readiness verdict: NOT LIVE READY
+
 ## PAPER reject forward-label feedback restoration (2026-08-13)
 
 - Current version: Phase 9 reject feedback-loop restoration

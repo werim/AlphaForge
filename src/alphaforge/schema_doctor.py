@@ -44,6 +44,18 @@ RUNTIME_SCHEMA: dict[str, dict[str, str]] = {
     "orders": {"id": "INTEGER", "order_id": "TEXT", "symbol": "TEXT", "status": "TEXT", "created_at": "TEXT"},
 }
 
+# Tables in this map are optional, but once present their runtime-consumed
+# columns are mandatory.  This lets the central doctor verify additive feature
+# schemas without requiring those features in every supported database family.
+CONDITIONAL_RUNTIME_SCHEMA: dict[str, dict[str, str]] = {
+    "burnin_pending_reject_labels": {
+        "timeframe": "TEXT",
+        "horizon_bars": "INTEGER",
+        "claim_token": "TEXT",
+        "claimed_at": "TEXT",
+    },
+}
+
 
 @dataclass
 class SchemaReport:
@@ -201,6 +213,16 @@ def inspect_database_schema(target: Any) -> SchemaReport:
                         report.reasons.append("IDENTIFIER_COLUMN_MISSING")
                 elif not _affinity_compatible(expected_type, columns[column]["type"]):
                     report.type_mismatches.append({"table": table, "column": column, "expected": expected_type, "actual": columns[column]["type"]})
+        for table, required in CONDITIONAL_RUNTIME_SCHEMA.items():
+            if table not in names:
+                continue
+            columns = report.tables[table]
+            for column, expected_type in required.items():
+                if column not in columns:
+                    report.missing_columns.append({"table": table, "column": column})
+                    report.reasons.append("RUNTIME_REQUIRED_COLUMN_MISSING")
+                elif not _affinity_compatible(expected_type, columns[column]["type"]):
+                    report.type_mismatches.append({"table": table, "column": column, "expected": expected_type, "actual": columns[column]["type"]})
         if report.missing_tables:
             report.reasons.append("EXPOSURE_TABLES_MISSING")
         ptable = report.exposure_tables["positions"]
@@ -312,6 +334,14 @@ def ensure_database_schema(target: Any, *, allow_fresh_bootstrap: bool = False) 
             conn.execute("CREATE TABLE IF NOT EXISTS runtime_positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
             conn.execute("CREATE TABLE IF NOT EXISTS runtime_orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT,created_at TEXT)")
             details["columns_added"] = ["runtime_positions.*", "runtime_orders.*"]
+        for table, required in CONDITIONAL_RUNTIME_SCHEMA.items():
+            if table not in before.tables:
+                continue
+            columns = before.tables[table]
+            for column, ddl in required.items():
+                if column not in columns:
+                    conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {ddl}')
+                    details["columns_added"].append(f"{table}.{column}")
         exposure_tables = before.exposure_tables
         for table in exposure_tables.values():
             details["row_counts_before"][table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
