@@ -1567,3 +1567,95 @@ python -m alphaforge.burnin_ops --db "$DB" --json finalize --campaign-id "$CAMPA
 ```
 
 Credential variables (`BINANCE_API_KEY` and `BINANCE_API_SECRET`) must be supplied through the normal environment/dotenv contract and must never be echoed. Accept reconciliation only when `evidence_status` is `COMPLETE`, `sanitized_errors` is empty, `unknown_unreconciled_symbols` is empty, and all endpoint statuses pass. A local diagnostic recovery is never authenticated exchange evidence. Run `recovery-drill` only after both the database diagnosis and authenticated reconciliation prove zero positions and zero pending orders.
+
+## Phase A shadow agent graph
+
+Phase B keeps the same disabled-by-default, shadow-only controls. Inspect the
+normalized Market/Signal/Quality and parity evidence from PowerShell without
+changing runtime state:
+
+```powershell
+sqlite3 data/runtime/alphaforge_agent_shadow.db "SELECT symbol,regime,score,raw_rr,quality_status,primary_reject_reason,parity_status FROM agent_phase_b_evidence ORDER BY created_at DESC LIMIT 50;"
+sqlite3 data/runtime/alphaforge_agent_shadow.db "SELECT primary_reject_reason,COUNT(*) FROM agent_phase_b_evidence GROUP BY primary_reject_reason ORDER BY COUNT(*) DESC;"
+```
+
+SQL `NULL` and JSON `null` mean unavailable; they must not be interpreted as
+zero. The legacy decision remains authoritative and no cutover has occurred.
+
+The graph is disabled by default and never owns an order decision. Replace the database path below with the configured runtime SQLite file.
+
+### PowerShell
+
+```powershell
+# Enable/disable (restart runtime after changing configuration)
+$env:ALPHAFORGE_AGENT_GRAPH_ENABLED = "true"
+$env:ALPHAFORGE_AGENT_GRAPH_SHADOW = "true"
+$env:ALPHAFORGE_AGENT_GRAPH_DATABASE_URL = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
+$env:ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS = "64"
+$env:ALPHAFORGE_AGENT_GRAPH_ENABLED = "false" # disable
+
+$DB = "data/runtime/alphaforge_runtime.db"
+sqlite3 $DB "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
+sqlite3 $DB "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
+# Confirm the shadow tables have no triggers and compare order/lifecycle counts before and after a shadow-only test.
+sqlite3 $DB "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
+sqlite3 $DB "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
+pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
+pytest -q
+```
+
+### Bash (macOS/Linux)
+
+```bash
+export ALPHAFORGE_AGENT_GRAPH_ENABLED=true
+export ALPHAFORGE_AGENT_GRAPH_SHADOW=true
+export ALPHAFORGE_AGENT_GRAPH_DATABASE_URL=sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db
+export ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS=64
+export ALPHAFORGE_AGENT_GRAPH_ENABLED=false # disable
+
+DB=data/runtime/alphaforge_runtime.db
+sqlite3 "$DB" "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
+sqlite3 "$DB" "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
+sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
+sqlite3 "$DB" "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
+pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
+pytest -q
+```
+
+## PAPER Control Center backend
+
+Canonical environment, PowerShell startup, read-first verification, and guarded pause/resume commands are documented in [`CONTROL_CENTER_RUNTIME_MAPPING.md`](CONTROL_CENTER_RUNTIME_MAPPING.md). The API is PAPER-only. It has no campaign stop endpoint because the burn-in CLI has no canonical stop command or STOPPED campaign state.
+
+### Windows PowerShell: Control Center backend entry point
+
+```powershell
+$env:ALPHAFORGE_DB_PATH = "<real DB path>"
+$env:ALPHAFORGE_PROJECT_ROOT = "E:\Projeler\AlphaForge"
+$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
+$env:ALPHAFORGE_CONTROL_CORS_ORIGINS = "http://127.0.0.1:5173" # optional explicit cross-origin opt-in
+
+python -m alphaforge.control_center `
+  --host 127.0.0.1 `
+  --port 8000
+
+Invoke-RestMethod http://127.0.0.1:8000/api/health
+Invoke-RestMethod http://127.0.0.1:8000/api/runtime/status
+```
+
+Use repeatable `--cors-origin <origin>` options, or `ALPHAFORGE_CONTROL_CORS_ORIGINS` as a comma-separated exact-origin allowlist, when the frontend does not use a default localhost development origin.
+## PAPER reject forward-outcome integrity gate
+
+Run the schema upgrade/doctor once after deploying new code, then use the canonical read-only gate repeatedly. Campaign PAPER:
+
+```powershell
+python -m alphaforge.burnin_ops --db "$DB" db-doctor --apply
+python -m alphaforge.burnin_ops --db "$DB" --json reject-label-status --campaign-id $CAMPAIGN_ID
+```
+
+Standalone PAPER uses its persisted runtime identity; do not create a campaign:
+
+```powershell
+python -m alphaforge.burnin_ops --db "$DB" --json reject-label-status --runtime-identity "standalone:$BURNIN_RUN_ID"
+```
+
+`PASS` means identities, canonical outcomes, finalized evidence, resolver state, and at least one mature accuracy-eligible label are consistent. `INCOMPLETE` means the database is not corrupt but needs maturity or recoverable evidence (no outcomes yet, immature/overdue labels, provider gaps, stale claims, or insufficient mature labels). `FAIL` means a fail-closed integrity violation: duplicate identity/outcome, ambiguous legacy review linkage, orphan review/pending/outcome, impossible correctness label, invalid finalized evidence/geometry, or a resolved label without its canonical outcome. All `FAIL` results block a new burn-in. `INCOMPLETE` blocks the Phase C evidence gate but normally calls for waiting or restoring the market-data/resolver service, not editing evidence. The validator never repairs, deletes, or updates rows; unavailable averages and legacy timeframe/horizon-bar fields remain JSON `null`, not zero. Legacy reviews with a null decision identity use the resolver's signal-ID fallback only when no exact decision-ID review exists; explicit conflicting decision IDs are never merged.
