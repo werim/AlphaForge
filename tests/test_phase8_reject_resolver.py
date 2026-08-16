@@ -51,12 +51,12 @@ def test_provider_outage_does_not_expire_pending_label(tmp_path):
     assert conn.execute('select status from burnin_pending_reject_labels where reject_decision_id=\'outage\'').fetchone()[0] == 'PENDING'
 
 
-def test_empty_completed_horizon_becomes_expired_not_completed(tmp_path):
+def test_empty_completed_horizon_remains_pending_for_market_data_recovery(tmp_path):
     conn,camp,run=setup(tmp_path)
     persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='empty',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
     counts=resolve_pending_rejects(conn, {'BTCUSDT': []}, now='2026-01-01T00:03:00Z')
     row=conn.execute('select status,evidence_complete,last_error from burnin_pending_reject_labels where reject_decision_id=\'empty\'').fetchone()
-    assert tuple(row) == ('EXPIRED',0,'NO_CANDLES_IN_MARKET_WINDOW') and counts['failed'] == 1
+    assert tuple(row) == ('PENDING',0,'NO_CANDLES_IN_MARKET_WINDOW') and counts['pending'] == 1
 
 
 def test_reject_feedback_labels_reviews_and_is_restart_idempotent(tmp_path):
@@ -91,3 +91,41 @@ def test_reject_feedback_labels_reviews_and_is_restart_idempotent(tmp_path):
         assert resolve_pending_rejects(conn, {"BTCUSDT": []}, now="2026-01-01T00:04:00Z")["resolved"] == 0
         assert conn.execute("SELECT COUNT(*) FROM burnin_reject_outcomes").fetchone()[0] == 1
         conn.close()
+
+
+def test_missing_costs_are_incomplete_and_never_counted_correct(tmp_path):
+    db=tmp_path/'invalid-cost.db'; init_db(f'sqlite+pysqlite:///{db}').dispose(); conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='invalid',duration_days=1,symbols=['BTCUSDT'],intervals=['1m']); run=start_or_resume_campaign(conn,camp.campaign_id)['burnin_run_id']
+    conn.execute("INSERT INTO rejected_signal_reviews(reject_decision_id,signal_id,reject_reason,created_at,payload_json) VALUES('reject:invalid','invalid','LOW_CONFIDENCE','2026-01-01T00:00:00Z','{}')")
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run,reject_decision_id='reject:invalid',signal_id='invalid',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=1,entry=100,stop=90,target=120,execution_cost_assumptions={},regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
+    resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:01:00Z','high':121,'low':99}]},now='2026-01-01T00:02:00Z')
+    outcome=conn.execute("SELECT execution_invalidated,evidence_complete FROM burnin_reject_outcomes").fetchone(); review=conn.execute("SELECT reject_correct,execution_invalidated,evidence_complete FROM rejected_signal_reviews").fetchone()
+    assert tuple(outcome)==(1,0) and tuple(review)==(None,1,0)
+
+
+def test_first_finalized_outcome_is_immutable_across_retry(tmp_path):
+    conn,camp,run=setup(tmp_path); rid='immutable'
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id=rid,signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=1,entry=100,stop=90,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
+    resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:01:00Z','high':121,'low':99}]},now='2026-01-01T00:02:00Z'); first=tuple(conn.execute("SELECT forward_label,payload_json FROM burnin_reject_outcomes").fetchone())
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='READY',claim_token=NULL,claimed_at=NULL")
+    resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:01:00Z','high':101,'low':89}]},now='2026-01-01T00:02:00Z')
+    assert tuple(conn.execute("SELECT forward_label,payload_json FROM burnin_reject_outcomes").fetchone())==first
+    assert conn.execute("SELECT COUNT(*) FROM burnin_reject_outcomes").fetchone()[0]==1
+
+
+def test_fresh_overlapping_claim_cannot_finalize(tmp_path):
+    conn,camp,run=setup(tmp_path)
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='claimed',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=1,entry=100,stop=90,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
+    conn.execute("UPDATE burnin_pending_reject_labels SET status='RESOLVING',claim_token='worker-a',claimed_at='2026-01-01T00:01:30Z'")
+    counts=resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:01:00Z','high':121,'low':99}]},now='2026-01-01T00:02:00Z')
+    assert counts['resolved']==0 and conn.execute("SELECT COUNT(*) FROM burnin_reject_outcomes").fetchone()[0]==0
+
+
+def test_timeframe_aware_due_at_and_invalid_geometry_audit(tmp_path):
+    conn,camp,run=setup(tmp_path)
+    for tf,seconds in [('1m',60),('5m',300),('1h',3600)]:
+        persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id=tf,signal_id=tf,symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe=tf,horizon_bars=240,entry=100,stop=90,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
+        row=conn.execute("SELECT horizon_seconds,timeframe FROM burnin_pending_reject_labels WHERE reject_decision_id=?",(tf,)).fetchone(); assert tuple(row)==(240*seconds,tf)
+    assert persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='zero',signal_id='zero',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=1,entry=100,stop=100,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'}) is None
+    assert conn.execute("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE reject_decision_id='zero'").fetchone()[0]==0
+    assert 'zero_risk' in conn.execute("SELECT missing_fields_json FROM burnin_observations WHERE metrics_json LIKE '%zero%'").fetchone()[0]

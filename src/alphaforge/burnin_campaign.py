@@ -27,7 +27,7 @@ PHASE8_DDL = [
 """CREATE TABLE IF NOT EXISTS burnin_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL UNIQUE,release_id TEXT NOT NULL,campaign_status TEXT NOT NULL,created_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,expected_duration_seconds REAL,observed_duration_seconds REAL,target_decisions INTEGER,target_closed_trades INTEGER,target_reject_forward_outcomes INTEGER,active_run_id TEXT,config_hash TEXT NOT NULL,strategy_config_hash TEXT NOT NULL,universe_hash TEXT NOT NULL,git_commit TEXT NOT NULL,execution_cost_config_hash TEXT,source_provenance_json TEXT NOT NULL,symbols_json TEXT NOT NULL,intervals_json TEXT NOT NULL,restart_count INTEGER NOT NULL DEFAULT 0,last_heartbeat_at TEXT,last_error TEXT,qualification_status TEXT,latest_qualification_id TEXT,evidence_completeness_status TEXT NOT NULL DEFAULT 'UNKNOWN',schema_version TEXT NOT NULL,UNIQUE(campaign_id, release_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,continuation_sequence INTEGER NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,created_at TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(campaign_id,burnin_run_id),UNIQUE(campaign_id,continuation_sequence))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_events (id INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT,event_type TEXT NOT NULL,event_time TEXT NOT NULL,details_json TEXT NOT NULL,schema_version TEXT NOT NULL)""",
-"""CREATE TABLE IF NOT EXISTS burnin_pending_reject_labels (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_label_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,reject_decision_id TEXT NOT NULL,signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,decision_timestamp TEXT NOT NULL,entry REAL,stop REAL,target REAL,horizon_seconds REAL,execution_cost_assumptions_json TEXT NOT NULL,regime TEXT,reject_reason TEXT,source_provenance_json TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,evidence_complete INTEGER NOT NULL DEFAULT 0,last_error TEXT,created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(reject_decision_id))""",
+"""CREATE TABLE IF NOT EXISTS burnin_pending_reject_labels (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_label_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,reject_decision_id TEXT NOT NULL,signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,decision_timestamp TEXT NOT NULL,timeframe TEXT,horizon_bars INTEGER,entry REAL,stop REAL,target REAL,horizon_seconds REAL,execution_cost_assumptions_json TEXT NOT NULL,regime TEXT,reject_reason TEXT,source_provenance_json TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,evidence_complete INTEGER NOT NULL DEFAULT 0,last_error TEXT,claim_token TEXT,claimed_at TEXT,created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(reject_decision_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_position_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_position_id TEXT NOT NULL UNIQUE,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,entry_time TEXT NOT NULL,planned_entry REAL,simulated_fill REAL,stop REAL,target REAL,quantity REAL,notional REAL,entry_spread REAL,entry_slippage REAL,entry_fee REAL,regime TEXT,source_provenance_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'OPEN',exit_time TEXT,exit_price REAL,exit_reason TEXT,gross_pnl REAL,gross_r REAL,exit_spread REAL,exit_slippage REAL,exit_fee REAL,funding REAL,latency_impact_penalty REAL,total_execution_cost REAL,net_pnl REAL,net_r REAL,hold_duration_seconds REAL,mfe REAL,mae REAL,evidence_complete INTEGER NOT NULL DEFAULT 0,missing_fields_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(trade_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_exports (id INTEGER PRIMARY KEY AUTOINCREMENT,export_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,output_dir TEXT NOT NULL,manifest_path TEXT NOT NULL,generated_at TEXT NOT NULL,evidence_hash TEXT NOT NULL,checksums_json TEXT NOT NULL,status TEXT NOT NULL,schema_version TEXT NOT NULL)""",
 ]
@@ -86,6 +86,9 @@ def _with_fresh_lock_retry(engine: Engine, operation: Any, *, attempts: int = SQ
 def bootstrap_campaign_schema(conn: Any) -> None:
     bootstrap_burnin_schema(conn)
     for stmt in PHASE8_DDL: _exec(conn, stmt)
+    for stmt in ["ALTER TABLE burnin_pending_reject_labels ADD COLUMN timeframe TEXT", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN horizon_bars INTEGER", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN claim_token TEXT", "ALTER TABLE burnin_pending_reject_labels ADD COLUMN claimed_at TEXT"]:
+        try: _exec(conn, stmt)
+        except Exception: pass
     # additive qualification columns; ignore on older SQLite if duplicate
     for stmt in ["ALTER TABLE burnin_qualification_snapshots ADD COLUMN campaign_id TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN source_run_ids_json TEXT", "ALTER TABLE burnin_qualification_snapshots ADD COLUMN aggregate_evidence_hash TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN worker_pid INTEGER", "ALTER TABLE burnin_campaigns ADD COLUMN worker_started_at TEXT", "ALTER TABLE burnin_campaigns ADD COLUMN last_operator_activity_at TEXT"]:
         try: _exec(conn, stmt)
@@ -506,7 +509,7 @@ class BinanceReadOnlyCandleProvider:
         self.interval = interval; self.max_staleness_seconds = max_staleness_seconds; self.fetcher = fetcher
         self.source_provenance = {"provider": "BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE", "market_type": "USD_M_FUTURES", "interval": interval, "order_submission": "DISABLED"}
 
-    def __call__(self, symbol: str, start: str, end: str) -> list[dict[str, Any]]:
+    def __call__(self, symbol: str, start: str, end: str, interval: str | None = None) -> list[dict[str, Any]]:
         from alphaforge.historical_market_data import fetch_binance_klines_paginated, HistoricalDataError
         start_dt = _parse_utc(start); end_dt = _parse_utc(end)
         if start_dt is None or end_dt is None or end_dt <= start_dt:
@@ -514,7 +517,8 @@ class BinanceReadOnlyCandleProvider:
         start_ms = int(start_dt.timestamp() * 1000) + 1
         end_ms = int(end_dt.timestamp() * 1000)
         try:
-            candles = fetch_binance_klines_paginated(symbol, self.interval, start_ms, end_ms, fetcher=self.fetcher)
+            resolved_interval=interval or self.interval
+            candles = fetch_binance_klines_paginated(symbol, resolved_interval, start_ms, end_ms, fetcher=self.fetcher)
         except HistoricalDataError as exc:
             msg = str(exc)
             if "No candles" in msg or "shorter than one complete candle" in msg:
@@ -526,7 +530,8 @@ class BinanceReadOnlyCandleProvider:
             newest = max(c.timestamp for c in candles) / 1000.0
             if (end_dt.timestamp() - newest) > self.max_staleness_seconds:
                 raise MarketDataStale("MARKET_DATA_STALE")
-        return [{"timestamp": datetime.fromtimestamp(c.timestamp/1000, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"), "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume, "source_provenance": self.source_provenance} for c in candles]
+        provenance={**self.source_provenance,"interval":resolved_interval}
+        return [{"timestamp": datetime.fromtimestamp(c.timestamp/1000, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"), "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume, "source_provenance": provenance} for c in candles]
 
 
 class BurnInCampaignRunner:
@@ -572,10 +577,12 @@ class BurnInCampaignRunner:
         try:
             with self.engine.connect() as conn:
                 bootstrap_campaign_schema(conn)
-                due = _exec(conn, "SELECT symbol, MIN(decision_timestamp) AS start_ts, MAX(due_at) AS end_ts, COUNT(*) AS count FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at <= :now GROUP BY symbol", {"cid": self.campaign_id, "now": utc_now()}).fetchall()
+                due = _exec(conn, "SELECT symbol, timeframe, MIN(decision_timestamp) AS start_ts, MAX(due_at) AS end_ts, COUNT(*) AS count FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at <= :now GROUP BY symbol,timeframe", {"cid": self.campaign_id, "now": utc_now()}).fetchall()
             candles: dict[str, Any] = {}
             for row in due:
-                r = _row_dict(row); candles[r["symbol"]] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"])
+                r = _row_dict(row)
+                try: candles[(r["symbol"],r.get("timeframe"))] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"], r.get("timeframe"))
+                except TypeError: candles[(r["symbol"],r.get("timeframe"))] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"])
             def persist_resolution(conn: Any) -> dict[str, int]:
                 counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=utc_now())
                 event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts})

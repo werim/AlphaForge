@@ -23,7 +23,7 @@ def classify_expectancy_bucket(expectancy: float | None) -> str:
 
 
 def calculate_reject_accuracy(rejected_rows: list[Mapping[str, Any]]) -> float | None:
-    labeled = [r for r in rejected_rows if r.get("reject_correct") is not None]
+    labeled = [r for r in rejected_rows if r.get("reject_correct") is not None and not bool(r.get("execution_invalidated")) and not bool(r.get("outcome_ambiguous")) and r.get("evidence_complete") in (None, 1, True)]
     if not labeled:
         return None
     correct = sum(1 for r in labeled if bool(r.get("reject_correct")))
@@ -67,26 +67,32 @@ def record_closed_trade_review(session: Any, **payload: Any) -> bool:
 
 def record_rejected_signal_review(session: Any, **payload: Any) -> bool:
     fields = {
-        "signal_id": None, "symbol": None, "setup_type": None, "regime": None, "side": None, "reject_reason": None, "score": None,
+        "reject_decision_id": None, "signal_id": None, "symbol": None, "setup_type": None, "regime": None, "side": None, "reject_reason": None, "score": None,
         "raw_rr": None, "effective_rr": None, "expectancy_bucket": None, "volume_24h_usdt": None, "spread_pct": None,
         "expected_slippage_pct": None, "funding_rate_pct": None, "liquidity_score": None, "volatility_regime": None,
         "forward_window_bars": None, "would_have_hit_tp": None, "would_have_hit_sl": None, "max_favorable_excursion_pct": None,
-        "max_adverse_excursion_pct": None, "reject_correct": None,
+        "max_adverse_excursion_pct": None, "reject_correct": None, "execution_invalidated": None, "outcome_ambiguous": None, "evidence_complete": None,
     }
     fields.update(payload)
     try:
         session.execute(text("""
             INSERT INTO rejected_signal_reviews (
-                signal_id, symbol, setup_type, regime, side, reject_reason, score, raw_rr, effective_rr, expectancy_bucket,
+                reject_decision_id, signal_id, symbol, setup_type, regime, side, reject_reason, score, raw_rr, effective_rr, expectancy_bucket,
                 volume_24h_usdt, spread_pct, expected_slippage_pct, funding_rate_pct, liquidity_score, volatility_regime,
                 forward_window_bars, would_have_hit_tp, would_have_hit_sl, max_favorable_excursion_pct,
-                max_adverse_excursion_pct, reject_correct, created_at, payload_json
+                max_adverse_excursion_pct, reject_correct, execution_invalidated, outcome_ambiguous, evidence_complete, created_at, payload_json
             ) VALUES (
-                :signal_id, :symbol, :setup_type, :regime, :side, :reject_reason, :score, :raw_rr, :effective_rr, :expectancy_bucket,
+                :reject_decision_id, :signal_id, :symbol, :setup_type, :regime, :side, :reject_reason, :score, :raw_rr, :effective_rr, :expectancy_bucket,
                 :volume_24h_usdt, :spread_pct, :expected_slippage_pct, :funding_rate_pct, :liquidity_score, :volatility_regime,
                 :forward_window_bars, :would_have_hit_tp, :would_have_hit_sl, :max_favorable_excursion_pct,
-                :max_adverse_excursion_pct, :reject_correct, :created_at, :payload_json
+                :max_adverse_excursion_pct, :reject_correct, :execution_invalidated, :outcome_ambiguous, :evidence_complete, :created_at, :payload_json
             )
+            ON CONFLICT(reject_decision_id) WHERE reject_decision_id IS NOT NULL DO UPDATE SET
+                signal_id=excluded.signal_id, symbol=excluded.symbol, setup_type=excluded.setup_type, regime=excluded.regime,
+                side=excluded.side, reject_reason=excluded.reject_reason, score=excluded.score, raw_rr=excluded.raw_rr,
+                effective_rr=excluded.effective_rr, volume_24h_usdt=excluded.volume_24h_usdt, spread_pct=excluded.spread_pct,
+                expected_slippage_pct=excluded.expected_slippage_pct, funding_rate_pct=excluded.funding_rate_pct,
+                liquidity_score=excluded.liquidity_score, volatility_regime=excluded.volatility_regime, payload_json=excluded.payload_json
         """), {**fields, "created_at": _now(), "payload_json": _dump(payload.get("payload_json", payload))})
         return True
     except Exception as exc:
@@ -111,7 +117,7 @@ def update_adaptive_stats(session: Any, scope_type: str, scope_key: str) -> bool
                OR (:scope_type='SETUP' AND setup_type=:scope_key)
         """), {"scope_type": scope_type, "scope_key": scope_key}).mappings().one()
         rejects = session.execute(text("""
-            SELECT reject_correct FROM rejected_signal_reviews
+            SELECT reject_correct, execution_invalidated, outcome_ambiguous, evidence_complete FROM rejected_signal_reviews
             WHERE (:scope_type='GLOBAL')
                OR (:scope_type='SYMBOL' AND symbol=:scope_key)
                OR (:scope_type='REGIME' AND regime=:scope_key)
@@ -165,7 +171,7 @@ def update_adaptive_stats_by_scope(session: Any, scope_type: str, scope_key: str
         return False
     try:
         row = session.execute(text(f"""
-            SELECT COUNT(*) AS sample_size, AVG(reject_correct) AS reject_accuracy
+            SELECT COUNT(*) AS sample_size, AVG(CASE WHEN COALESCE(execution_invalidated,0)=0 AND COALESCE(outcome_ambiguous,0)=0 AND COALESCE(evidence_complete,1)=1 THEN reject_correct END) AS reject_accuracy
             FROM rejected_signal_reviews
             WHERE {predicate}
         """), {"scope_key": scope_key}).mappings().one()

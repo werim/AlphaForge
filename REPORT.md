@@ -1,5 +1,19 @@
 # PAPER reject forward-outcome feedback surgery — 2026-08-13
 
+## PR #317 idempotency and evidence-integrity correction — 2026-08-16
+
+The initial restoration incorrectly treated missing execution costs as a correct reject, used replace semantics for finalized outcomes, assumed one-minute bars, synchronized reviews by signal ID, and allowed incomplete candle windows to appear complete. This follow-up introduces a stable `reject_decision_id`, one operator review per final decision, insert-once outcomes, compare-and-set `RESOLVING` claims with stale-claim recovery, and canonical-outcome synchronization for retries. Missing costs, ambiguous outcomes, non-calculable net R, gaps, and incomplete windows retain raw TP/SL and excursion observations but keep `reject_correct` null and evidence incomplete.
+
+Pending labels now persist nullable `timeframe`, `horizon_bars`, `claim_token`, and `claimed_at`. New rows derive `due_at` from configured horizon bars and the actual signal timeframe; standalone runtime fetches each symbol/timeframe group with the matching provider interval. Legacy rows retain their stored `horizon_seconds` and pre-timeframe evaluation fallback because fabricating an interval would corrupt evidence. Revision `0006_reject_label_identity_timeframe` and SQLite bootstrap add the same nullable columns, review validity fields, and partial unique decision index without rewriting historical rows or exports.
+
+Geometry validation requires finite values, positive entry, nonzero risk, and directionally valid LONG/SHORT stop/target ordering. Candles are timestamp-sorted and deduplicated; MFE/MAE stop at the first terminal candle, while timeout uses the full horizon. Explicit bar-count, boundary, and gap checks prevent incomplete market windows from qualifying. Adaptive aggregation excludes invalidated, ambiguous, and incomplete rows. Trading thresholds, PAPER/LIVE_PRECHECK no-order guarantees, and LIVE execution authorization are unchanged; LIVE remains NOT READY.
+
+Changed implementation files are `runtime.py`, `ai_brain.py`, `adaptive_learning.py`, `burnin.py`, `burnin_campaign.py`, `burnin_resolver.py`, `persistence.py`, `schema_doctor.py`, configuration registry/loading, `.env.example`, and Alembic revision 0006. Focused tests cover costs, adaptive exclusion, immutable retry, duplicate identity, overlapping claims, 1m/5m/1h maturity/provider selection, invalid geometry, legacy campaign-only operation, and runtime persistence. Full-suite results are recorded after final execution below.
+
+Final verification: the focused reject-resolver/runtime/adaptive suite passed 61 tests; configuration, migration, and wider focused checks passed; `python -m compileall -q src` passed; and the complete repository suite passed 1,202 tests with 3 skips. The first full run exposed one timing-sensitive heartbeat assertion that passed immediately in isolation and two schema-doctor head-recognition failures; recognizing additive revision 0006 fixed the schema failures, and the final complete run was green. Push recommendation: update PR #317 for review, do not merge automatically, and do not infer LIVE readiness.
+
+---
+
 ## Need and root cause
 
 `AIBrain._persist_decision` created `rejected_signal_reviews` with intentionally null future fields, but the runtime's final reject boundary only wrote a burn-in observation. `persist_pending_reject_label` was called by campaign-specific flows, and `resolve_campaign_batch` was scheduled only by `BurnInCampaignRunner`; standalone PAPER runtime therefore had neither enqueueing nor evaluation. In addition, `_build_signal` discarded available stop, target, setup, and regime inputs, which explains both ineligible geometry and `unknown` metadata. The evaluator requires campaign identity, due market candles, complete geometry, and execution costs; ordinary PAPER supplied none of that linkage.

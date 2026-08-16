@@ -30,6 +30,7 @@ from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconcilia
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
+from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
@@ -138,7 +139,6 @@ class RuntimeConfig:
     phase7_burnin_release_id: str = "default"
     phase7_burnin_snapshot_interval_sec: float = 300.0
     reject_forward_horizon_bars: int = 240
-    reject_forward_bar_seconds: float = 60.0
     reject_resolver_interval_sec: float = 60.0
     agent_graph_enabled: bool = False
     agent_graph_shadow: bool = True
@@ -1176,12 +1176,12 @@ class RuntimeOrchestrator:
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if self._kill_switch_active():
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
-            await self._persist_reject(reject_payload)
+            await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
             return
         if risk_reject is not None:
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
-            await self._persist_reject(reject_payload)
+            await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
@@ -1202,13 +1202,14 @@ class RuntimeOrchestrator:
 
         if self._kill_switch_active():
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
-            await self._persist_reject(reject_payload)
+            await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
             return
 
         if order_plan.decision != "ACCEPTED":
             reject_reason = canonical_reject_reason(order_plan.reason)
             await self._persist_reject({
+                **market_ctx,
                 "signal_id": signal_id,
                 "symbol": selection.symbol,
                 "mode": self.config.execution_mode.value,
@@ -1250,7 +1251,7 @@ class RuntimeOrchestrator:
         if effective_rr < self.config.min_effective_rr:
             reject_reason = "LOW_EFFECTIVE_RR"
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
-            await self._persist_reject(reject_payload)
+            await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
             return
 
@@ -1274,7 +1275,7 @@ class RuntimeOrchestrator:
         if not portfolio_decision.accepted:
             reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
-            await self._persist_reject(reject_payload)
+            await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
             return
 
@@ -1450,15 +1451,36 @@ class RuntimeOrchestrator:
         }
 
     async def _persist_reject(self, payload: dict[str, Any]) -> None:
+        payload = self._canonical_reject_payload(payload)
         self._reject_log.append(payload)
         self.metrics.rejects_persisted += 1
         self._persist_burnin_decision({**payload, "decision": "REJECTED"}, lifecycle_state=LifecycleState.SIGNAL_REJECTED.value)
+        engine = self._resolve_persistence_engine()
+        if engine is not None:
+            with sessionmaker(bind=engine, future=True)() as session:
+                record_rejected_signal_review(session, reject_decision_id=payload["reject_decision_id"], signal_id=payload["signal_id"], symbol=payload.get("symbol"), setup_type=payload.get("setup_type"), regime=payload.get("regime"), side=payload.get("side"), reject_reason=payload.get("reason"), score=payload.get("score"), raw_rr=payload.get("rr"), effective_rr=payload.get("effective_rr"), volume_24h_usdt=payload.get("volume_24h_usdt"), spread_pct=payload.get("spread_pct"), expected_slippage_pct=payload.get("expected_slippage_pct"), funding_rate_pct=payload.get("funding_rate_pct"), liquidity_score=payload.get("liquidity_score"), volatility_regime=payload.get("volatility_regime"), payload_json=payload)
+                session.commit()
         self._persist_pending_reject(payload)
         if self.on_reject_persist is not None:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
         self._schedule_agent_shadow(payload)
+
+    def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")
+        result.update({
+            "reject_decision_id":str(result.get("reject_decision_id") or f"reject:{signal_id}"), "decision":"REJECTED",
+            "decision_timestamp":result.get("decision_timestamp") or canonical_utc_timestamp(),
+            "timeframe":result.get("timeframe") or result.get("interval"),
+            "entry":result.get("entry", result.get("entry_price")), "sl":result.get("sl", result.get("stop_loss", result.get("stop"))),
+            "tp":result.get("tp", result.get("take_profit", result.get("target"))),
+            "setup_type":result.get("setup_type", result.get("setup")), "regime":result.get("regime"),
+            "spread_pct":result.get("spread_pct",execution.get("spread_pct")), "expected_slippage_pct":result.get("expected_slippage_pct",execution.get("expected_slippage_pct")),
+            "funding_rate_pct":result.get("funding_rate_pct",execution.get("funding_rate_pct")), "liquidity_score":result.get("liquidity_score",execution.get("liquidity_score")),
+            "volatility_regime":result.get("volatility_regime",execution.get("volatility_regime")),
+        })
+        return result
 
     def _reject_campaign_id(self) -> str | None:
         if not self._burnin_run_id:
@@ -1479,14 +1501,14 @@ class RuntimeOrchestrator:
             with engine.begin() as conn:
                 persist_pending_reject_label(
                     conn, campaign_id=campaign_id, burnin_run_id=self._burnin_run_id,
-                    reject_decision_id=f"runtime-reject:{signal_id}", signal_id=signal_id or None,
+                    reject_decision_id=str(payload.get("reject_decision_id") or f"reject:{signal_id}"), signal_id=signal_id or None,
                     symbol=payload.get("symbol"), side=payload.get("side"),
-                    decision_timestamp=payload.get("decision_timestamp") or canonical_utc_timestamp(),
+                    decision_timestamp=payload.get("decision_timestamp") or canonical_utc_timestamp(), timeframe=payload.get("timeframe"),
                     entry=payload.get("entry"), stop=payload.get("sl"), target=payload.get("tp"),
-                    horizon_seconds=self.config.reject_forward_horizon_bars * self.config.reject_forward_bar_seconds,
+                    horizon_bars=self.config.reject_forward_horizon_bars,
                     execution_cost_assumptions=costs, regime=payload.get("regime") or payload.get("volatility_regime"),
                     reject_reason=payload.get("reason") or payload.get("reject_reason"),
-                    source_provenance={"provider": self.scanner_source or "UNKNOWN", "bar_seconds": self.config.reject_forward_bar_seconds,
+                    source_provenance={"provider": self.scanner_source or "UNKNOWN", "timeframe": payload.get("timeframe"),
                                        "setup_type": payload.get("setup_type"), "volatility_regime": payload.get("volatility_regime"),
                                        "liquidity_score": execution_ctx.get("liquidity_score")},
                 )
@@ -1513,16 +1535,18 @@ class RuntimeOrchestrator:
         engine, campaign_id = self._resolve_persistence_engine(), self._reject_campaign_id()
         if engine is None or campaign_id is None:
             return {"resolved": 0, "pending": 0, "ambiguous": 0, "failed": 0}
-        provider = self.reject_candle_provider
-        if provider is None:
-            from alphaforge.burnin_campaign import BinanceReadOnlyCandleProvider
-            provider = BinanceReadOnlyCandleProvider(interval="1m")
         now = canonical_utc_timestamp()
         with engine.connect() as conn:
-            due = conn.execute(text("SELECT symbol, MIN(decision_timestamp), MAX(due_at) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at<=:now GROUP BY symbol"), {"cid": campaign_id, "now": now}).fetchall()
+            due = conn.execute(text("SELECT symbol, timeframe, MIN(decision_timestamp), MAX(due_at) FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at<=:now GROUP BY symbol,timeframe"), {"cid": campaign_id, "now": now}).fetchall()
         candles = {}
-        for symbol, start, end in due:
-            candles[symbol] = await asyncio.to_thread(provider, symbol, start, end)
+        for symbol, timeframe, start, end in due:
+            if self.reject_candle_provider is None:
+                from alphaforge.burnin_campaign import BinanceReadOnlyCandleProvider
+                provider = BinanceReadOnlyCandleProvider(interval=timeframe or "1m")
+                candles[(symbol,timeframe)] = await asyncio.to_thread(provider, symbol, start, end)
+            else:
+                try: candles[(symbol,timeframe)] = await asyncio.to_thread(self.reject_candle_provider, symbol, start, end, timeframe)
+                except TypeError: candles[(symbol,timeframe)] = await asyncio.to_thread(self.reject_candle_provider, symbol, start, end)
         with engine.begin() as conn:
             return resolve_campaign_batch(conn, campaign_id, candles, now=now)
 
@@ -1809,7 +1833,7 @@ def _build_runtime_from_env() -> RuntimeOrchestrator:
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_soft_effective_rr_min=cfg.runtime.stop_too_wide_soft_effective_rr_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day)
     config.agent_graph_enabled = cfg.runtime.agent_graph_enabled
     config.agent_graph_shadow = cfg.runtime.agent_graph_shadow
     config.agent_graph_max_steps = cfg.runtime.agent_graph_max_steps

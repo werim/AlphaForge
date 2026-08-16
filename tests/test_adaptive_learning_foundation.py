@@ -79,6 +79,17 @@ def test_adaptive_stats_by_scope_rejection_reason() -> None:
         assert float(row.reject_accuracy) == 0.5
 
 
+def test_reject_accuracy_excludes_invalidated_and_ambiguous_evidence() -> None:
+    engine=init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        record_rejected_signal_review(session,reject_decision_id='valid',signal_id='v',reject_reason='LOW_SCORE',reject_correct=0,execution_invalidated=0,outcome_ambiguous=0,evidence_complete=1)
+        record_rejected_signal_review(session,reject_decision_id='invalid',signal_id='i',reject_reason='LOW_SCORE',reject_correct=1,execution_invalidated=1,outcome_ambiguous=0,evidence_complete=0)
+        record_rejected_signal_review(session,reject_decision_id='ambiguous',signal_id='a',reject_reason='LOW_SCORE',reject_correct=1,execution_invalidated=0,outcome_ambiguous=1,evidence_complete=0)
+        assert update_adaptive_stats_by_scope(session,'REJECTION_REASON','LOW_SCORE')
+        row=session.execute(text("SELECT reject_accuracy FROM adaptive_stats WHERE scope_type='REJECTION_REASON' AND scope_key='LOW_SCORE'")).one()
+        assert row.reject_accuracy == 0.0
+
+
 def test_adaptive_stats_by_scope_bucket_keys() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as session:

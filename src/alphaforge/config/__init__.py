@@ -73,6 +73,8 @@ class RuntimeSettings:
     min_signal_score: float = 0.62
     scan_interval_sec: float = 1.0
     heartbeat_interval_sec: float = 30.0
+    reject_forward_horizon_bars: int = 240
+    reject_resolver_interval_sec: float = 60.0
     max_symbols_per_scan: int = 5
     max_reject_log_entries: int = 1000
     max_concurrent_positions: int = 3
@@ -333,6 +335,8 @@ def load_config_from_env() -> AlphaForgeConfig:
         min_signal_score=val("ALPHAFORGE_MIN_SIGNAL_SCORE"),
         scan_interval_sec=val("ALPHAFORGE_SCAN_INTERVAL_SEC"),
         heartbeat_interval_sec=val("ALPHAFORGE_HEARTBEAT_INTERVAL_SEC"),
+        reject_forward_horizon_bars=val("ALPHAFORGE_REJECT_FORWARD_HORIZON_BARS"),
+        reject_resolver_interval_sec=val("ALPHAFORGE_REJECT_RESOLVER_INTERVAL_SEC"),
         max_symbols_per_scan=val("ALPHAFORGE_MAX_SYMBOLS_PER_SCAN"),
         max_reject_log_entries=val("ALPHAFORGE_MAX_REJECT_LOG_ENTRIES"),
         max_concurrent_positions=val("ALPHAFORGE_MAX_CONCURRENT_POSITIONS"),

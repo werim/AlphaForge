@@ -301,16 +301,34 @@ def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path)
         ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
     )
     orchestrator._burnin_run_id = "paper-restart-safe-run"
-    payload = {"signal_id":"eligible-1","symbol":"BTCUSDT","side":"LONG","entry":100.0,"sl":90.0,"tp":120.0,
+    payload = {"signal_id":"eligible-1","symbol":"BTCUSDT","side":"LONG","timeframe":"1m","entry":100.0,"sl":90.0,"tp":120.0,
                "reason":"LOW_CONFIDENCE","regime":"TRENDING","setup_type":"BREAKOUT","volatility_regime":"NORMAL",
                "decision_timestamp":"2026-01-01T00:00:00Z","execution_ctx":{"spread_pct":.001,"expected_slippage_pct":.001,
                "fee_pct":.001,"funding_rate_pct":0.0,"market_data_latency_ms":10,"liquidity_score":.9}}
-    orchestrator._persist_pending_reject(payload)
-    orchestrator._persist_pending_reject(payload)
+    asyncio.run(orchestrator._persist_reject(payload))
+    asyncio.run(orchestrator._persist_reject(payload))
     with engine.connect() as conn:
         row = conn.execute(text("SELECT signal_id,regime,status,source_provenance_json FROM burnin_pending_reject_labels")).one()
+        reviews = conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id='reject:eligible-1'")).scalar_one()
     assert row.signal_id == "eligible-1" and row.regime == "TRENDING" and row.status == "PENDING"
     assert 'BREAKOUT' in row.source_provenance_json and 'NORMAL' in row.source_provenance_json
+    assert reviews == 1
+
+
+def test_standalone_resolver_fetches_each_pending_timeframe(tmp_path: Path) -> None:
+    engine=init_db(f"sqlite+pysqlite:///{tmp_path/'intervals.db'}"); seen=[]
+    def provider(symbol,start,end,timeframe):
+        seen.append(timeframe)
+        seconds={'1m':60,'5m':300,'1h':3600}[timeframe]
+        from datetime import datetime,timezone
+        ts=datetime.fromtimestamp(datetime.fromisoformat(start.replace('Z','+00:00')).timestamp()+seconds,timezone.utc).isoformat()
+        return [{'timestamp':ts,'high':121,'low':99}]
+    orchestrator=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER,reject_forward_horizon_bars=1),ai_brain=_brain(),market_scanner=lambda:None,persistence_engine=engine,reject_candle_provider=provider)
+    orchestrator._burnin_run_id='interval-run'
+    for tf in ('1m','5m','1h'):
+        orchestrator._persist_pending_reject(orchestrator._canonical_reject_payload({'signal_id':tf,'symbol':'BTCUSDT','side':'LONG','timeframe':tf,'entry':100,'sl':90,'tp':120,'reason':'LOW_CONFIDENCE','decision_timestamp':'2026-01-01T00:00:00Z','execution_ctx':{'spread_pct':.001,'expected_slippage_pct':.001,'fee_pct':.001,'funding_rate_pct':0,'market_data_latency_ms':1}}))
+    asyncio.run(orchestrator._resolve_reject_forward_outcomes_once())
+    assert set(seen)=={'1m','5m','1h'}
 
 
 def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> None:

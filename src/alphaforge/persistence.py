@@ -322,11 +322,12 @@ def init_db(database_url: str | None = None) -> Engine:
         """
         CREATE TABLE IF NOT EXISTS rejected_signal_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            signal_id TEXT, symbol TEXT, setup_type TEXT, regime TEXT, side TEXT, reject_reason TEXT, score REAL,
+            reject_decision_id TEXT, signal_id TEXT, symbol TEXT, setup_type TEXT, regime TEXT, side TEXT, reject_reason TEXT, score REAL,
             raw_rr REAL, effective_rr REAL, expectancy_bucket TEXT, volume_24h_usdt REAL, spread_pct REAL,
             expected_slippage_pct REAL, funding_rate_pct REAL, liquidity_score REAL, volatility_regime TEXT,
             forward_window_bars INTEGER, would_have_hit_tp INTEGER, would_have_hit_sl INTEGER,
             max_favorable_excursion_pct REAL, max_adverse_excursion_pct REAL, reject_correct INTEGER,
+            execution_invalidated INTEGER, outcome_ambiguous INTEGER, evidence_complete INTEGER,
             created_at TEXT, payload_json TEXT
         )
         """,
@@ -713,6 +714,12 @@ def _apply_sqlite_migrations(conn: Any) -> None:
     closed_trade_cols = _sqlite_columns(conn, "closed_trade_reviews")
     if closed_trade_cols and "execution_metrics" not in closed_trade_cols:
         conn.execute(text("ALTER TABLE closed_trade_reviews ADD COLUMN execution_metrics TEXT"))
+    review_cols = _sqlite_columns(conn, "rejected_signal_reviews")
+    for name, ddl in (("reject_decision_id", "reject_decision_id TEXT"), ("execution_invalidated", "execution_invalidated INTEGER"), ("outcome_ambiguous", "outcome_ambiguous INTEGER"), ("evidence_complete", "evidence_complete INTEGER")):
+        if review_cols and name not in review_cols:
+            conn.execute(text(f"ALTER TABLE rejected_signal_reviews ADD COLUMN {ddl}"))
+    if review_cols:
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_rejected_reviews_decision_id ON rejected_signal_reviews(reject_decision_id) WHERE reject_decision_id IS NOT NULL"))
     lifecycle_cols = _sqlite_columns(conn, "trade_lifecycle_events")
     if {"signal_id", "event_ts", "lifecycle_state"}.issubset(lifecycle_cols):
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))
