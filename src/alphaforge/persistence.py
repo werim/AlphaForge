@@ -720,6 +720,15 @@ def _apply_sqlite_migrations(conn: Any) -> None:
             conn.execute(text(f"ALTER TABLE rejected_signal_reviews ADD COLUMN {ddl}"))
     if review_cols:
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_rejected_reviews_decision_id ON rejected_signal_reviews(reject_decision_id) WHERE reject_decision_id IS NOT NULL"))
+    pending_reject_cols = _sqlite_columns(conn, "burnin_pending_reject_labels")
+    for name, ddl in (
+        ("timeframe", "timeframe TEXT"),
+        ("horizon_bars", "horizon_bars INTEGER"),
+        ("claim_token", "claim_token TEXT"),
+        ("claimed_at", "claimed_at TEXT"),
+    ):
+        if pending_reject_cols and name not in pending_reject_cols:
+            _add_column_if_missing(conn, "burnin_pending_reject_labels", name, ddl)
     lifecycle_cols = _sqlite_columns(conn, "trade_lifecycle_events")
     if {"signal_id", "event_ts", "lifecycle_state"}.issubset(lifecycle_cols):
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_lifecycle_signal_event_ts_state ON trade_lifecycle_events(signal_id, event_ts, lifecycle_state)"))

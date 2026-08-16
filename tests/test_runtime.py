@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 import inspect
+import sqlite3
 
 import pytest
 from sqlalchemy import text
@@ -330,6 +331,67 @@ def test_standalone_resolver_fetches_each_pending_timeframe(tmp_path: Path) -> N
         orchestrator._persist_pending_reject(orchestrator._canonical_reject_payload({'signal_id':tf,'symbol':'BTCUSDT','side':'LONG','timeframe':tf,'entry':100,'sl':90,'tp':120,'reason':'LOW_CONFIDENCE','decision_timestamp':'2026-01-01T00:00:00Z','execution_ctx':{'spread_pct':.001,'expected_slippage_pct':.001,'fee_pct':.001,'funding_rate_pct':0,'market_data_latency_ms':1}}))
     asyncio.run(orchestrator._resolve_reject_forward_outcomes_once())
     assert set(seen)=={'1m','5m','1h'}
+
+
+def test_standalone_resolver_runs_after_pre_317_sqlite_upgrade_without_duplicates(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-resolver.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
+        conn.execute("CREATE TABLE orders(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT,symbol TEXT,status TEXT,created_at TEXT)")
+        conn.execute("""CREATE TABLE burnin_pending_reject_labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,pending_label_id TEXT NOT NULL UNIQUE,
+            campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,reject_decision_id TEXT NOT NULL UNIQUE,
+            signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,decision_timestamp TEXT NOT NULL,
+            entry REAL,stop REAL,target REAL,horizon_seconds REAL,execution_cost_assumptions_json TEXT NOT NULL,
+            regime TEXT,reject_reason TEXT,source_provenance_json TEXT NOT NULL,due_at TEXT NOT NULL,
+            status TEXT NOT NULL,evidence_complete INTEGER NOT NULL DEFAULT 0,last_error TEXT,
+            created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL)""")
+
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
+    seen = []
+    def provider(symbol, start, end, timeframe):
+        seen.append(timeframe)
+        return [{"timestamp":"2026-01-01T00:01:00Z","high":121,"low":99}]
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER,reject_forward_horizon_bars=1),
+        ai_brain=_brain(),market_scanner=lambda:None,persistence_engine=engine,reject_candle_provider=provider,
+    )
+    orchestrator._burnin_run_id = "legacy-upgrade-run"
+    campaign_id = orchestrator._reject_campaign_id()
+    costs = '{"entry_slippage_cost":0.01,"exit_slippage_cost":0.01,"fee_cost":0.01,"funding_cost":0.0,"latency_cost":0.0,"spread_cost":0.01}'
+    with engine.begin() as conn:
+        conn.execute(text("""INSERT INTO burnin_pending_reject_labels (
+            pending_label_id,campaign_id,burnin_run_id,reject_decision_id,signal_id,symbol,side,
+            decision_timestamp,entry,stop,target,horizon_seconds,execution_cost_assumptions_json,
+            regime,reject_reason,source_provenance_json,due_at,status,created_at,schema_version
+        ) VALUES ('legacy',:cid,:run,'legacy','legacy','BTCUSDT','LONG','2026-01-01T00:00:00Z',
+            100,90,120,60,:costs,'TRENDING','LOW_CONFIDENCE','{}','2026-01-01T00:01:00Z',
+            'PENDING','2026-01-01T00:00:00Z','pre-317')"""), {"cid":campaign_id,"run":orchestrator._burnin_run_id,"costs":costs})
+    payload = orchestrator._canonical_reject_payload({
+        "signal_id":"new","symbol":"BTCUSDT","side":"LONG","timeframe":"1m","entry":100,
+        "sl":90,"tp":120,"reason":"LOW_CONFIDENCE","decision_timestamp":"2026-01-01T00:00:00Z",
+        "execution_ctx":{"spread_pct":.001,"expected_slippage_pct":.001,"fee_pct":.001,
+                         "funding_rate_pct":0,"market_data_latency_ms":1},
+    })
+    orchestrator._persist_pending_reject(payload)
+
+    asyncio.run(orchestrator._resolve_reject_forward_outcomes_once())
+    restarted = RuntimeOrchestrator(
+        config=orchestrator.config,ai_brain=_brain(),market_scanner=lambda:None,
+        persistence_engine=engine,reject_candle_provider=provider,
+    )
+    restarted._burnin_run_id = orchestrator._burnin_run_id
+    asyncio.run(restarted._resolve_reject_forward_outcomes_once())
+
+    with engine.connect() as conn:
+        legacy = conn.execute(text("SELECT timeframe,horizon_bars,horizon_seconds FROM burnin_pending_reject_labels WHERE reject_decision_id='legacy'")).one()
+        new = conn.execute(text("SELECT timeframe,horizon_bars,horizon_seconds FROM burnin_pending_reject_labels WHERE reject_decision_id='reject:new'")).one()
+        pending_count = conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels")).scalar_one()
+        outcome_count = conn.execute(text("SELECT COUNT(*) FROM burnin_reject_outcomes")).scalar_one()
+    assert tuple(legacy) == (None,None,60.0)
+    assert tuple(new) == ("1m",1,60.0)
+    assert pending_count == 2 and outcome_count == 2
+    assert None in seen and "1m" in seen
 
 
 def test_reject_review_orphan_self_heals_to_one_pending_label_on_retry(tmp_path: Path) -> None:

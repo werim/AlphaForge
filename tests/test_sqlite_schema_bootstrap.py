@@ -13,6 +13,35 @@ from alphaforge.persistence import (
     init_db,
     save_order_decision,
 )
+from alphaforge.schema_doctor import inspect_database_schema
+
+
+LEGACY_PENDING_REJECT_DDL = """CREATE TABLE burnin_pending_reject_labels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pending_label_id TEXT NOT NULL UNIQUE,
+    campaign_id TEXT NOT NULL,
+    burnin_run_id TEXT NOT NULL,
+    reject_decision_id TEXT NOT NULL UNIQUE,
+    signal_id TEXT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    decision_timestamp TEXT NOT NULL,
+    entry REAL,
+    stop REAL,
+    target REAL,
+    horizon_seconds REAL,
+    execution_cost_assumptions_json TEXT NOT NULL,
+    regime TEXT,
+    reject_reason TEXT,
+    source_provenance_json TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    evidence_complete INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    schema_version TEXT NOT NULL
+)"""
 
 
 
@@ -69,6 +98,39 @@ def test_init_db_bootstraps_schema_migrations_before_selecting_versions(tmp_path
         applied_versions = conn.execute("SELECT version FROM schema_migrations").fetchall()
         assert ("2026_05_16_persistence_integrity_v1",) in applied_versions
         assert ("2026_06_19_rollback_evidence_bootstrap",) in applied_versions
+
+
+def test_init_db_adds_reject_resolver_columns_to_pre_317_sqlite_idempotently(tmp_path) -> None:
+    db_path = tmp_path / "pre_317.db"
+    with sqlite3.connect(db_path) as conn:
+        _create_verified_exposure_schema(conn)
+        conn.execute(LEGACY_PENDING_REJECT_DDL)
+        conn.execute(
+            """INSERT INTO burnin_pending_reject_labels (
+                pending_label_id,campaign_id,burnin_run_id,reject_decision_id,symbol,side,
+                decision_timestamp,horizon_seconds,execution_cost_assumptions_json,
+                source_provenance_json,due_at,status,created_at,schema_version
+            ) VALUES ('legacy','campaign','run','legacy-decision','BTCUSDT','LONG',
+                '2026-01-01T00:00:00Z',3600,'{}','{}','2026-01-01T01:00:00Z',
+                'PENDING','2026-01-01T00:00:00Z','pre-317')"""
+        )
+
+    before = inspect_database_schema(db_path)
+    assert "RUNTIME_REQUIRED_COLUMN_MISSING" in before.reasons
+
+    init_db(f"sqlite+pysqlite:///{db_path}").dispose()
+    init_db(f"sqlite+pysqlite:///{db_path}").dispose()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1]: row[2] for row in conn.execute("PRAGMA table_info(burnin_pending_reject_labels)")}
+        legacy = conn.execute(
+            "SELECT timeframe,horizon_bars,claim_token,claimed_at,horizon_seconds,status "
+            "FROM burnin_pending_reject_labels WHERE pending_label_id='legacy'"
+        ).fetchone()
+    assert {"timeframe", "horizon_bars", "claim_token", "claimed_at"}.issubset(columns)
+    assert columns["timeframe"] == "TEXT" and columns["horizon_bars"] == "INTEGER"
+    assert legacy == (None, None, None, None, 3600.0, "PENDING")
+    assert "RUNTIME_REQUIRED_COLUMN_MISSING" not in inspect_database_schema(db_path).reasons
 
 
 def test_init_db_bootstraps_live_rollback_validation_evidence_schema(tmp_path) -> None:

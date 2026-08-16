@@ -1,5 +1,21 @@
 # PAPER reject forward-outcome feedback surgery — 2026-08-13
 
+## Existing SQLite reject-label compatibility hotfix — 2026-08-16
+
+PR #317 updated the Alembic revision and fresh Phase 8 table DDL, and added normal-bootstrap compatibility for `rejected_signal_reviews`, but `_apply_sqlite_migrations` omitted the four new columns consumed by the standalone resolver on an already-existing `burnin_pending_reject_labels` table. SQLite `CREATE TABLE IF NOT EXISTS` does not alter that table, so startup could complete while the resolver's first `GROUP BY symbol,timeframe` failed. The prior tests started from fresh databases or bootstrapped the campaign schema directly; they did not run normal `init_db` against a real pre-#317 pending-label shape.
+
+The narrow repair adds nullable `timeframe`, `horizon_bars`, `claim_token`, and `claimed_at` columns idempotently in `_apply_sqlite_migrations`. The existing central schema doctor now conditionally requires the same columns whenever the pending-label table exists and performs that conservative additive repair during its pre-bootstrap validation, ensuring the schema is usable before startup reports success. Alembic 0006, fresh DDL, campaign bootstrap, normal SQLite bootstrap, and schema validation now agree on all four pending-label columns; the existing partial unique review-decision index and review columns remain symmetric in Alembic and normal bootstrap.
+
+Regression coverage creates a physical legacy SQLite table and row, verifies doctor detection, initializes twice, checks exact column affinities and null preservation, and exercises the standalone runtime scheduling query with both a legacy null-timeframe row and a new 1m row across restart. Both pending identities and both first outcomes remain singular. Legacy `horizon_seconds` remains unchanged, and no timeframe, horizon bars, claim, label, or outcome is fabricated during migration.
+
+Changed files are `src/alphaforge/persistence.py`, `src/alphaforge/schema_doctor.py`, `tests/test_sqlite_schema_bootstrap.py`, `tests/test_runtime.py`, and the three operational documents. There are no threshold, lifecycle, export, reject-decision, forward-outcome, or LIVE-readiness changes. The migration is safe for the existing PAPER database without deletion or reset: stop the process normally, retain a backup, and restart through canonical `init_db`; startup will add only missing nullable columns and preserve legacy pending rows.
+
+Verification: runtime, resolver, and SQLite bootstrap tests passed (74 passed, 3 skipped); compileall and diff checks passed. The full suite completed with 1,199 passed and 6 skipped. Its only four failures were Alembic test imports because Alembic is not installed in the container. Installing declared dependencies was attempted, but the package index was inaccessible through the environment proxy (HTTP 403), so the Alembic upgrade checks remain a CI/connected-environment merge gate rather than a behavioral failure in this patch.
+
+Push recommendation: ship as a narrow PAPER compatibility hotfix after the declared full suite passes; do not infer LIVE readiness.
+
+---
+
 ## PR #317 transient-window and atomic-boundary correction — 2026-08-16
 
 Two merge blockers remained. First, a partial or gapped candle response was written as an immutable incomplete outcome and the pending row became `FAILED`, so later complete market evidence could not repair it. The resolver now releases its claim back to `PENDING`, records `INCOMPLETE_MARKET_WINDOW` diagnostics, and creates no outcome until the explicit window-completeness check passes. Missing immutable execution-cost assumptions remain separately finalizable as execution-invalidated evidence. Second, runtime committed the operator review before opening a separate pending-label transaction. The authoritative PAPER boundary now upserts the review and idempotently enqueues the pending label through one `engine.begin()` transaction; any enqueue exception rolls both back, while retrying a pre-existing orphan review deterministically self-heals through the same reject identity.

@@ -1,3 +1,23 @@
+## Existing SQLite reject-label compatibility hotfix — 2026-08-16
+
+### Added
+- A real pre-#317 SQLite bootstrap and standalone resolver restart regression.
+
+### Changed
+- The central schema doctor now validates and additively repairs resolver-required columns when the pending-label table exists.
+
+### Fixed
+- Existing PAPER databases now receive nullable `timeframe`, `horizon_bars`, `claim_token`, and `claimed_at` columns before startup reports schema success.
+
+### Removed
+- Nothing; no rows, outcomes, or lifecycle evidence are removed.
+
+### Breaking Changes
+- None; the migration is nullable, additive, and idempotent.
+
+### Known Issues
+- Historical rows with null timeframe intentionally retain stored-seconds legacy semantics. LIVE remains NOT READY.
+
 ## Reject forward-label feedback restoration — 2026-08-13
 
 ### Added
