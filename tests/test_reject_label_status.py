@@ -116,6 +116,63 @@ def test_invalid_non_null_correct_label_fails(tmp_path):
     assert result["status"] == "FAIL" and "INVALID_REJECT_CORRECT_LABEL" in result["reason_codes"]
 
 
+def test_legacy_null_decision_review_links_by_signal_without_mutation(tmp_path):
+    _, conn, cid = database(tmp_path, resolve=False)
+    conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id=NULL")
+    result = report(conn, cid)
+    assert result["status"] == "INCOMPLETE"
+    assert result["integrity"]["pending_labels_without_reviews"] == 0
+    assert result["integrity"]["reviews_without_eligible_pending_labels"] == 0
+    assert conn.execute("SELECT reject_decision_id FROM rejected_signal_reviews").fetchone()[0] is None
+
+
+def test_explicit_decision_mismatch_is_not_hidden_by_same_signal(tmp_path):
+    _, conn, cid = database(tmp_path, resolve=False)
+    conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id='reject:other'")
+    result = report(conn, cid)
+    assert result["status"] == "FAIL"
+    assert {"ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_REVIEW"} <= set(result["reason_codes"])
+
+
+def test_multiple_legacy_signal_matches_fail_closed_as_ambiguous(tmp_path):
+    _, conn, cid = database(tmp_path, resolve=False)
+    conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id=NULL")
+    conn.execute("""INSERT INTO rejected_signal_reviews(
+        reject_decision_id,signal_id,reject_reason,created_at,payload_json
+    ) VALUES(NULL,'s1','LOW_CONFIDENCE','2026-01-01T00:00:00Z',?)""",
+                 (json.dumps({"campaign_id": cid}),))
+    result = report(conn, cid)
+    assert result["status"] == "FAIL"
+    assert {"AMBIGUOUS_REVIEW_LINKAGE", "DUPLICATE_REJECT_IDENTITY"} <= set(result["reason_codes"])
+    assert result["integrity"]["ambiguous_review_linkages"] == 1
+
+
+def test_one_legacy_review_cannot_link_to_multiple_pending_decisions(tmp_path):
+    _, conn, cid = database(tmp_path, resolve=False)
+    conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id=NULL")
+    original = dict(conn.execute("SELECT * FROM burnin_pending_reject_labels").fetchone())
+    columns = [key for key in original if key != "id"]
+    values = [original[key] for key in columns]
+    values[columns.index("pending_label_id")] = "prej_second"
+    values[columns.index("reject_decision_id")] = "reject:second"
+    conn.execute(f"INSERT INTO burnin_pending_reject_labels({','.join(columns)}) VALUES({','.join('?' for _ in columns)})", values)
+    result = report(conn, cid)
+    assert result["status"] == "FAIL"
+    assert result["integrity"]["ambiguous_review_linkages"] == 2
+    assert "AMBIGUOUS_REVIEW_LINKAGE" in result["reason_codes"]
+
+
+def test_legacy_linkage_remains_valid_after_resolver_synchronization(tmp_path):
+    _, conn, cid = database(tmp_path, resolve=False)
+    conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id=NULL")
+    resolve_pending_rejects(conn, {"BTCUSDT": [{"timestamp": "2026-01-01T00:01:00Z", "high": 101, "low": 89}]}, now=NOW)
+    result = report(conn, cid)
+    assert result["status"] == "PASS"
+    assert result["reject_quality"][0]["reject_accuracy"] == 1.0
+    assert result["reject_quality"][0]["reject_correct_count"] == 1
+    assert conn.execute("SELECT reject_decision_id FROM rejected_signal_reviews").fetchone()[0] is None
+
+
 def test_legacy_pre317_database_bootstraps_without_fabricating_geometry(tmp_path):
     path = tmp_path / "legacy.db"
     conn = sqlite3.connect(path)

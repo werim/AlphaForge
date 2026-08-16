@@ -4,11 +4,11 @@
 
 - Current version: Phase 9 SQL-first reject-label validation
 - Current phase: pre-Issue #309 Phase C evidence gating; Phase C has not started
-- Runtime maturity: read-only campaign and standalone validation exposes identity, resolver, finalized-evidence, and reject-quality integrity
+- Runtime maturity: read-only campaign and standalone validation exposes identity, resolver, finalized-evidence, and reject-quality integrity; legacy review linkage now mirrors resolver precedence and fails closed on ambiguity
 - BACKTEST/PAPER/LIVE alignment: observability only; decisions, lifecycle, resolver semantics, execution, and graph authority are unchanged
 - Lifecycle coverage: authoritative rejected reviews are checked through pending labels and canonical forward outcomes
 - Execution realism coverage: accuracy excludes incomplete, ambiguous, and execution-invalidated evidence; unavailable metrics remain null
-- Known critical risks: provider gaps and legacy null timeframe/horizon-bar evidence remain explicitly incomplete; a PASS requires mature eligible evidence
+- Known critical risks: provider gaps and legacy null timeframe/horizon-bar evidence remain explicitly incomplete; ambiguous legacy signal-only review identities fail closed; a PASS requires mature eligible evidence
 - Last audit date: 2026-08-16
 - Live readiness verdict: NOT LIVE READY
 

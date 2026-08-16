@@ -1186,6 +1186,14 @@ the declared Alembic package (`ModuleNotFoundError: alembic.config` / missing
 `alembic.command`), an already documented repository environment limitation.
 # PAPER reject forward-outcome integrity gate — 2026-08-16
 
+## PR #319 merge-blocker recheck
+
+The validator initially indexed reviews only by `reject_decision_id`, while the authoritative resolver permits a legacy review with `reject_decision_id IS NULL` to match the pending row's `signal_id`. That mismatch could falsely report `ORPHAN_PENDING_LABEL` and omit the synchronized legacy review from reject-quality aggregation. The validator now applies the resolver's deterministic precedence without mutation: exact decision matches first; only if none exists may null-decision reviews match by signal. Explicit conflicting decisions never fall back by signal. Multiple eligible legacy reviews, or multiple exact reviews in a damaged database, produce `AMBIGUOUS_REVIEW_LINKAGE` plus `DUPLICATE_REJECT_IDENTITY` and fail closed. Aggregation consumes this resolved pending-to-review mapping.
+
+Regressions cover legacy null-decision linkage before and after resolver synchronization, explicit mismatch isolation, ambiguous duplicate legacy matches, quality aggregation through the legacy mapping, and unchanged PR #318 null timeframe/horizon-bar preservation. No resolver, schema, lifecycle, trading, threshold, execution, or graph behavior changed.
+
+Focused recheck results: the hardened validator suite passed 17 tests; the required resolver/runtime/SQLite bootstrap selection passed 73 tests with 3 skips; compileall and diff checks passed. The complete local suite reached 1,215 passed and 6 skipped. Its four failures remain limited to importing the absent Alembic distribution in `tests/test_alembic_revision_graph.py`; installation could not reach the package index through this container's HTTP 403 proxy. This checkout has no Git remote, GitHub credentials, or accessible Actions API, so run #1509's exact hosted traceback and a post-push full CI result cannot be independently represented as verified here. GitHub Actions with its successfully imported Alembic dependency remains the merge gate.
+
 ## Need and root cause
 
 PRs #317 and #318 established authoritative reject review/pending/outcome persistence and legacy SQLite compatibility, but operators had no single deterministic proof that those rows remained one-to-one, mature, internally consistent, and suitable for reject-accuracy analysis. Raw counts could incorrectly mix incomplete, ambiguous, or execution-invalidated evidence and could not distinguish normal early-campaign incompleteness from corruption.
@@ -1204,6 +1212,6 @@ Focused tests cover a healthy correct reject, immature/no-outcome and incomplete
 
 Push recommendation: merge only after all required focused and full CI checks are green; this observability patch does not justify parameter tuning or Phase C cutover.
 
-Verification in this environment: the required resolver/runtime/bootstrap selection passed (73 passed, 3 skipped); the new validator suite passed (12 passed); compileall and diff checks passed. The full suite completed with 1,211 passed and 6 skipped; its only four failures are the pre-existing environment limitation that the Alembic package is not installed (`alembic.config`/`alembic.command` unavailable). CI with declared dependencies must be green before merge.
+Verification in this environment is recorded in the merge-blocker recheck above. CI with declared dependencies must be green before merge.
 
 ---

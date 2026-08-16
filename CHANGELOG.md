@@ -4035,9 +4035,10 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Changed
 - Operator documentation now defines the pre-Phase C evidence gate and canonical standalone identity syntax.
+- Validator review linkage now exactly follows resolver precedence: exact reject-decision identity first, then signal identity only for legacy null-decision reviews.
 
 ### Fixed
-- Nothing in trading or resolver behavior; this patch only makes existing inconsistencies visible.
+- Prevented legitimate legacy null-decision reviews from appearing as orphan pending labels, while failing closed on conflicting or ambiguous legacy linkage.
 
 ### Removed
 - Nothing.
