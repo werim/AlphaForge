@@ -1184,3 +1184,26 @@ the exact failing test passed immediately in isolation. The full suite completed
 with 1,179 passed, 6 skipped, and four failures because the environment lacks
 the declared Alembic package (`ModuleNotFoundError: alembic.config` / missing
 `alembic.command`), an already documented repository environment limitation.
+# PAPER reject forward-outcome integrity gate — 2026-08-16
+
+## Need and root cause
+
+PRs #317 and #318 established authoritative reject review/pending/outcome persistence and legacy SQLite compatibility, but operators had no single deterministic proof that those rows remained one-to-one, mature, internally consistent, and suitable for reject-accuracy analysis. Raw counts could incorrectly mix incomplete, ambiguous, or execution-invalidated evidence and could not distinguish normal early-campaign incompleteness from corruption.
+
+## Narrow implementation
+
+`reject_label_status.py` provides a SQL-first, read-only validator scoped to the persisted campaign identity or canonical `standalone:<burnin_run_id>` identity. `burnin_ops.py` exposes it without invoking mutating bootstrap. It reports identity cardinality/orphans, every resolver state, stale claims, overdue/oldest unresolved work, latest successful resolution, invalid correctness labels, missing excursions, canonical synchronization, geometry, and nullable per-reason quality metrics. Accuracy and correctness-derived counts use only complete, unambiguous, execution-valid evidence. Concrete reason codes classify retryable maturity/provider conditions as `INCOMPLETE` and structural/impossible evidence as `FAIL`.
+
+## Persistence, lifecycle, export, and compatibility
+
+The command opens SQLite with `mode=ro` plus `PRAGMA query_only`; repeated reports perform no initialization, schema migration, repair, deletion, or evidence update. Operators must run the existing schema doctor/bootstrap separately after deployment. The pre-#317 regression runs current bootstrap, proves PR #318 columns are present, preserves null timeframe/horizon bars and the original `horizon_seconds`, then validates the database. No schema or export changes exist. Lifecycle, reject decisions, resolver claims/outcome semantics, execution, thresholds, sizing, LIVE authorization, and agent-graph authority are unchanged.
+
+## Tests, risks, migration, and recommendation
+
+Focused tests cover a healthy correct reject, immature/no-outcome and incomplete-window states, duplicate/orphan identities, resolved-without-outcome, stale claims, exclusion of invalid/ambiguous/incomplete evidence, impossible correctness, legacy bootstrap, and byte-stable repeated validation. Remaining limitations are honest: review-only orphans are campaign-scoped using persisted review payload identity, old rows without that identity cannot safely be attributed; null legacy timeframe/horizon bars are never invented; provider outages remain operationally incomplete. Run schema doctor after deploying, preserve the database, then run this gate. Do not begin Issue #309 Phase C until the intended fresh PAPER identity returns `PASS` with a representative quantity and distribution of mature, complete, execution-valid outcomes—not merely one passing row. LIVE remains NOT READY.
+
+Push recommendation: merge only after all required focused and full CI checks are green; this observability patch does not justify parameter tuning or Phase C cutover.
+
+Verification in this environment: the required resolver/runtime/bootstrap selection passed (73 passed, 3 skipped); the new validator suite passed (12 passed); compileall and diff checks passed. The full suite completed with 1,211 passed and 6 skipped; its only four failures are the pre-existing environment limitation that the Alembic package is not installed (`alembic.config`/`alembic.command` unavailable). CI with declared dependencies must be green before merge.
+
+---

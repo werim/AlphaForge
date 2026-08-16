@@ -27,6 +27,7 @@ from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
 from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
+from alphaforge.reject_label_status import reject_label_status
 
 PHASE9_SCHEMA_VERSION = "phase9_ops_v2"
 ALLOWED_FINAL_DECISIONS = {"PAPER_BURNIN_INCOMPLETE", "PAPER_BURNIN_FAILED", "PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW", "PAPER_BURNIN_SUSPENDED"}
@@ -1646,6 +1647,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     d = sub.add_parser("diagnose-db", help="read-only campaign state diagnosis and safe cleanup plan"); d.add_argument("--max-heartbeat-age", type=float, default=120.0)
     doctor = sub.add_parser("db-doctor", help="inspect or safely migrate the canonical SQLite schema")
     doctor_mode = doctor.add_mutually_exclusive_group(); doctor_mode.add_argument("--check-only", action="store_true"); doctor_mode.add_argument("--apply", action="store_true")
+    labels = sub.add_parser("reject-label-status", help="read-only PAPER reject forward-outcome integrity gate")
+    label_identity = labels.add_mutually_exclusive_group(required=True)
+    label_identity.add_argument("--campaign-id")
+    label_identity.add_argument("--runtime-identity", help="canonical standalone:<burnin_run_id> identity")
+    labels.add_argument("--stale-claim-seconds", type=float, default=300.0)
     args = parser.parse_args(argv)
     db = _db_path(args)
     try:
@@ -1656,6 +1662,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.cmd == "diagnose-db":
             out = database_diagnosis(db, max_heartbeat_age=args.max_heartbeat_age)
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out.get("status") == "COMPLETE" else 2
+        if args.cmd == "reject-label-status":
+            identity = args.campaign_id or args.runtime_identity
+            if args.runtime_identity and not args.runtime_identity.startswith("standalone:"):
+                print(json.dumps({"status": "ERROR", "error": "INVALID_STANDALONE_RUNTIME_IDENTITY"}, indent=2)); return 2
+            readonly = _connect_readonly(db)
+            try:
+                out = reject_label_status(readonly, identity, stale_claim_seconds=args.stale_claim_seconds)
+            finally:
+                readonly.close()
+            print(json.dumps(out, indent=2, sort_keys=True, default=str))
+            return {"PASS": 0, "INCOMPLETE": 3, "FAIL": 4}.get(out.get("status"), 2)
         if args.cmd == "preflight":
             out = preflight(db, args.release_id, _symbols(args.symbols), _intervals(args.intervals), output_dir=args.output_dir)
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out["status"] == "PASS" else 3

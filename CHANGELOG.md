@@ -4027,3 +4027,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Legacy snapshots without geometry/components produce explicit DEFER evidence; the authoritative `_build_signal` fallback RR remains a documented Phase-C+ gap and is never used as Phase-B geometric RR. Phase C/D/E and all cutovers remain out of scope. LIVE is NOT READY.
+## PAPER reject-label integrity gate — 2026-08-16
+
+### Added
+- Read-only `reject-label-status` campaign/standalone CLI with fail-closed identity, resolver, evidence, geometry, and per-reason reject-quality diagnostics.
+- Focused PASS, INCOMPLETE, FAIL, exclusion, stale-claim, legacy-upgrade, and idempotency regressions.
+
+### Changed
+- Operator documentation now defines the pre-Phase C evidence gate and canonical standalone identity syntax.
+
+### Fixed
+- Nothing in trading or resolver behavior; this patch only makes existing inconsistencies visible.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- None; no schema, threshold, execution, lifecycle, or export behavior changed.
+
+### Known Issues
+- Historical null timeframe/horizon-bar values cannot be reconstructed and remain explicit evidence limitations. LIVE remains NOT READY.
