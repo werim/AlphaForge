@@ -629,7 +629,12 @@ class BurnInCampaignRunner:
             status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
             return completion, status
         completion, status = _with_fresh_lock_retry(self.engine, persist_maintenance)
-        self._qualify_if_due()
+        # Completion is already a valid terminal transition.  Running another
+        # potentially expensive qualification after that transition cannot
+        # affect whether this loop should exit, and used to make termination
+        # depend on an unrelated to_thread qualification finishing first.
+        if not completion.get("complete") and status in {"STARTING", "RUNNING"}:
+            self._qualify_if_due()
         return completion, status
 
     async def _maintenance_loop(self) -> None:
@@ -694,21 +699,26 @@ class BurnInCampaignRunner:
                 exc = task.exception()
                 if exc is not None:
                     raise exc
-                if task.get_name() == "phase8_runtime_start":
-                    with self.engine.connect() as conn:
-                        status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
-                    if status in {"STARTING", "RUNNING"}:
+                with self.engine.connect() as conn:
+                    status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
+                if status in {"STARTING", "RUNNING"}:
+                    if task.get_name() == "phase8_runtime_start":
                         raise RuntimeError("RUNTIME_EXITED_WHILE_CAMPAIGN_RUNNING")
+                    raise RuntimeError(f"SUPERVISOR_EXITED_WHILE_CAMPAIGN_RUNNING:{task.get_name()}")
             return {"status": "STOPPED", "campaign_id": self.campaign_id}
         except BaseException as exc:
             with self.engine.begin() as conn:
                 campaign = get_campaign(conn, self.campaign_id) or {}
                 if campaign.get("campaign_status") in {"STARTING", "RUNNING"}:
-                    fail_active_campaign_run(conn, self.campaign_id, "RUNTIME_SUPERVISION_FAILED", details={
-                        "reason": "RUNTIME_SUPERVISION_FAILED",
-                        "exception_type": exc.__class__.__name__,
-                        "message": str(exc),
-                    })
+                    terminalize_active_campaign_run(
+                        conn,
+                        self.campaign_id,
+                        run_status="FAILED",
+                        campaign_status="FAILED",
+                        reason="RUNTIME_SUPERVISION_FAILED",
+                        event_type="RUNTIME_SUPERVISION_FAILED",
+                        details={"exception_type": exc.__class__.__name__, "message": str(exc)},
+                    )
             raise
         finally:
             if self._stop_event is not None: self._stop_event.set()

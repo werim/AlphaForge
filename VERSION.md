@@ -4,7 +4,7 @@
 
 - Current version: PAPER burn-in split-brain persistence hotfix
 - Current phase: fail-closed PAPER operational burn-in validation
-- Runtime maturity: campaign workers inject one canonical database into runtime, AIBrain, lifecycle, reject, heartbeat, reconciliation, and campaign persistence
+- Runtime maturity: campaign workers inject one canonical database into runtime, AIBrain, lifecycle, reject, heartbeat, reconciliation, and campaign persistence; terminal maintenance exits promptly and active supervisor exits fail closed
 - BACKTEST/PAPER/LIVE alignment: shared runtime decision and lifecycle paths are unchanged; attached PAPER adds database-identity enforcement
 - Lifecycle coverage: SQL failures retain original exception/target evidence and market-loop failures become terminal
 - Execution realism coverage: unchanged; reconciliation and execution-cost gates remain enforced

@@ -7,6 +7,7 @@
 - Campaign supervision now treats runtime completion as decisive and stops maintenance/resolver siblings.
 
 ### Fixed
+- Completed maintenance ticks no longer launch an irrelevant post-terminal qualification, and a normally returning resolver/maintenance task cannot cancel an active runtime silently.
 - Attached PAPER lifecycle, decision, reject, heartbeat, reconciliation, and pending-label writes can no longer silently use the environment database. SQL retry now rolls back and retains original failure evidence.
 
 ### Removed

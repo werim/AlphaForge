@@ -16,6 +16,12 @@ Lifecycle ordering and idempotent upsert keys are unchanged. Failed SQL is no lo
 
 Database path comparison is filesystem-canonical and deliberately fail-closed. Historical evidence already split across databases is not automatically merged because provenance cannot be safely inferred. Scan-stall health uses the configured heartbeat-age bound as startup/advance grace. Reconciliation, recovery, LIVE guards, decision thresholds, and execution modeling are unchanged.
 
+## PR #321 CI follow-up
+
+GitHub reported 1 failed, 1,231 passed, and 3 skipped rather than the previously claimed green 1,232-pass run. The failing completion test exposed a scheduling-sensitive production inefficiency: `_maintenance_tick` committed a valid `COMPLETED` transition and then synchronously entered `_qualify_if_due` through the same `asyncio.to_thread` call. That post-terminal qualification cannot change the loop exit decision, but it could outlive the caller timeout under CI load. Maintenance now skips qualification after completion or an already terminal campaign, while active campaigns retain periodic qualification.
+
+`FIRST_COMPLETED` remains necessary for zombie-runtime detection, but every normally completed child is now classified against persisted campaign state. Runtime normal exit during `STARTING`/`RUNNING` fails the continuation; resolver or maintenance normal exit during those states also fails rather than cancelling a healthy runtime silently. Normal supervisor completion is accepted only after a valid terminal campaign transition. Runtime failure cancels and awaits both siblings. New deterministic tests cover terminal maintenance, active maintenance, resolver normal exit, runtime normal exit with sibling cancellation, and canonical database mismatch diagnostics.
+
 ## Tests and push recommendation
 
 Focused runtime, campaign, operations, persistence, and environment suites passed. Ship as a narrow PAPER safety correction after the full suite remains green. Do not infer LIVE readiness.
