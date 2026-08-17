@@ -221,6 +221,8 @@ class RuntimeOrchestrator:
     _last_error: str | None = field(default=None, init=False)
     _recovery_required: bool = field(default=False, init=False)
     _fail_closed_reason: str | None = field(default=None, init=False)
+    _fatal_task_exception: BaseException | None = field(default=None, init=False)
+    _fatal_task_name: str | None = field(default=None, init=False)
     _unknown_exchange_state: bool = field(default=False, init=False)
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
     _exchange_read_only_status: str = field(default="UNKNOWN", init=False)
@@ -626,16 +628,21 @@ class RuntimeOrchestrator:
         finally:
             self._runtime_status = "STOPPING"
             self._last_shutdown_time = canonical_utc_timestamp()
-            self._finalize_burnin_run(status="COMPLETED")
+            self._finalize_burnin_run(status="FAILED" if self._fatal_task_exception else "COMPLETED")
             self._generate_burnin_snapshot(reason="shutdown")
             self._persist_runtime_heartbeat(runtime_state="STOPPING")
-            self._persist_runtime_state_snapshot("CLEAN_SHUTDOWN")
+            self._persist_runtime_state_snapshot("FAILED" if self._fatal_task_exception else "CLEAN_SHUTDOWN")
             await self._shutdown_tasks()
+        if self._fatal_task_exception is not None:
+            reason = "MARKET_SCAN_LOOP_FAILED" if self._fatal_task_name == "market_scan_loop" else f"RUNTIME_TASK_FAILED:{self._fatal_task_name}"
+            raise RuntimeError(reason) from self._fatal_task_exception
 
     def _on_task_done(self, task: asyncio.Task[Any]) -> None:
         with contextlib.suppress(asyncio.CancelledError):
             exc = task.exception()
             if exc is not None:
+                self._fatal_task_exception = exc
+                self._fatal_task_name = task.get_name()
                 logger.exception("runtime_task_failed task=%s", task.get_name(), exc_info=exc)
                 self.shutdown()
 
@@ -1139,9 +1146,12 @@ class RuntimeOrchestrator:
                 await asyncio.sleep(max(0.0, self.config.scan_interval_sec - elapsed))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("market_scan_loop_failed")
-            self.shutdown()
+        except Exception as exc:
+            self._last_error = f"MARKET_SCAN_LOOP_FAILED:{exc.__class__.__name__}:{exc}"
+            self._runtime_status = "FAILED"
+            self._persist_runtime_state_snapshot("MARKET_SCAN_LOOP_FAILED")
+            logger.exception("MARKET_SCAN_LOOP_FAILED")
+            raise
 
     def _canonical_filter_config(self) -> dict[str, Any]:
         return runtime_filter_config(self.config, mode=self.config.execution_mode.value)
@@ -1839,13 +1849,13 @@ def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
         raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE_PRECHECK/LIVE") from exc
 
 
-def _build_runtime_from_env() -> RuntimeOrchestrator:
+def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session_factory: Any | None = None) -> RuntimeOrchestrator:
     cfg = load_config_from_env()
     mode = execution_mode_from_env(cfg.runtime.execution_mode)
     persistence_enabled = cfg.persistence.enabled
-    resolved_database_url = cfg.persistence.database_url
-    engine = init_db(resolved_database_url)
-    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    resolved_database_url = str(persistence_engine.url) if persistence_engine is not None else cfg.persistence.database_url
+    engine = persistence_engine or init_db(resolved_database_url)
+    SessionLocal = session_factory or sessionmaker(bind=engine, expire_on_commit=False, future=True)
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
         table_names = [str(row[0]) for row in rows]

@@ -1,3 +1,37 @@
+# PAPER burn-in canonical persistence and supervision surgery — 2026-08-17
+
+## Need and root cause
+
+The runtime builder created an engine and session factory from the environment, then campaign code replaced only `runtime.persistence_engine`. AIBrain and lifecycle/reject closures therefore retained a different database. Separately, the market loop swallowed fatal exceptions and campaign maintenance heartbeats allowed a dead scanner to appear healthy.
+
+## Files and behavior changed
+
+`runtime.py` accepts an injected engine/session factory, uses them for every persistence consumer, and propagates market-loop failures with persisted failure state. `burnin_campaign.py` builds the production runtime with the campaign engine, compares canonical paths before attachment, and treats unexpected runtime exit as a campaign failure rather than leaving resolver/maintenance alive. Worker launchers propagate the canonical database path. `persistence.py` rolls back before its compatibility retry and raises target plus original/fallback SQL evidence. `burnin_ops.py` requires fresh runtime-owned heartbeat and scan evidence and exposes scanner/decision counters and timestamps. Regression tests cover canonical lifecycle/reject/AIBrain bindings and original SQL failure evidence.
+
+## Lifecycle, persistence, export, and schema impact
+
+Lifecycle ordering and idempotent upsert keys are unchanged. Failed SQL is no longer converted to `None`; callers receive the causal exception after a correct rollback. All attached PAPER evidence uses one existing campaign schema. There is no schema or CSV/export format change and no migration is required. Append-only campaign failure diagnostics include expected and observed canonical paths.
+
+## Risks and limitations
+
+Database path comparison is filesystem-canonical and deliberately fail-closed. Historical evidence already split across databases is not automatically merged because provenance cannot be safely inferred. Scan-stall health uses the configured heartbeat-age bound as startup/advance grace. Reconciliation, recovery, LIVE guards, decision thresholds, and execution modeling are unchanged.
+
+## PR #321 CI follow-up
+
+GitHub reported 1 failed, 1,231 passed, and 3 skipped rather than the previously claimed green 1,232-pass run. The failing completion test exposed a scheduling-sensitive production inefficiency: `_maintenance_tick` committed a valid `COMPLETED` transition and then synchronously entered `_qualify_if_due` through the same `asyncio.to_thread` call. That post-terminal qualification cannot change the loop exit decision, but it could outlive the caller timeout under CI load. Maintenance now skips qualification after completion or an already terminal campaign, while active campaigns retain periodic qualification.
+
+`FIRST_COMPLETED` remains necessary for zombie-runtime detection, but every normally completed child is now classified against persisted campaign state. Runtime normal exit during `STARTING`/`RUNNING` fails the continuation; resolver or maintenance normal exit during those states also fails rather than cancelling a healthy runtime silently. Normal supervisor completion is accepted only after a valid terminal campaign transition. Runtime failure cancels and awaits both siblings. New deterministic tests cover terminal maintenance, active maintenance, resolver normal exit, runtime normal exit with sibling cancellation, and canonical database mismatch diagnostics.
+
+## Runtime heartbeat lineage follow-up
+
+Campaign health previously selected the newest global PAPER heartbeat, allowing a fresh unrelated runtime to mask a stale or absent attached runtime. Health now resolves the current `PHASE8_CAMPAIGN_ATTACHED` event for the campaign `active_run_id`, extracts its `runtime_instance_id`, and queries only PAPER heartbeats with that exact identity. Missing attachment identity is `RUNTIME_ATTACHMENT_IDENTITY_MISSING`; a known identity without matching heartbeat is `RUNTIME_HEARTBEAT_MISSING` and an active campaign also remains `RUNTIME_HEARTBEAT_STALE`. No global fallback exists, unrelated counters/timestamps remain excluded, and no schema migration is needed. Regression tests cover stale-target/fresh-unrelated and missing-attachment/fresh-global cases.
+
+## Tests and push recommendation
+
+The Phase 9 operations suite passed after adding lineage regressions. The complete behavioral suite excluding Alembic passed 1,231 tests with 6 skips, and the GitHub-equivalent offline backtest passed. The literal full command reached 1,232 passed and 6 skipped but its four Alembic checks could not import the declared Alembic dependency; installation was blocked by the environment proxy (HTTP 403). CI installs declared dependencies and remains the merge gate for those four migration checks. Do not infer LIVE readiness.
+
+---
+
 # PAPER reject forward-outcome feedback surgery — 2026-08-13
 
 ## Existing SQLite reject-label compatibility hotfix — 2026-08-16

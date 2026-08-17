@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PAPER canonical persistence and zombie supervision (2026-08-17)
+
+- Current version: PAPER burn-in split-brain persistence hotfix
+- Current phase: fail-closed PAPER operational burn-in validation
+- Runtime maturity: campaign workers inject one canonical database into runtime, AIBrain, lifecycle, reject, heartbeat, reconciliation, and campaign persistence; terminal maintenance exits promptly, active supervisor exits fail closed, and health evidence is scoped to the attached runtime instance
+- BACKTEST/PAPER/LIVE alignment: shared runtime decision and lifecycle paths are unchanged; attached PAPER adds database-identity enforcement
+- Lifecycle coverage: SQL failures retain original exception/target evidence and market-loop failures become terminal
+- Execution realism coverage: unchanged; reconciliation and execution-cost gates remain enforced
+- Known critical risks: historical split-brain evidence requires operator audit and must not be merged as one campaign
+- Last audit date: 2026-08-17
+- Live readiness verdict: NOT LIVE READY
+
 ## Phase C0 reject-gate production evidence correction (2026-08-16)
 
 - Current version: Phase C0 complete-denominator gate, production evidence revision

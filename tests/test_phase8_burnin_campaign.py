@@ -533,3 +533,93 @@ def test_execution_cost_hash_changes_with_effective_slippage(tmp_path):
     assert b['execution_cost_payload']['paper_slippage_bps'] == 3.0
     assert a['execution_cost_config_hash'] != b['execution_cost_config_hash']
     engine.dispose()
+
+
+def test_maintenance_terminal_completion_skips_post_terminal_qualification(tmp_path, monkeypatch):
+    db=tmp_path/'maintenance_terminal.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-maint-terminal',duration_days=0,symbols=[],intervals=[],target_decisions=0,target_closed_trades=0,target_reject_forward_outcomes=0)
+    start_or_resume_campaign(conn,camp.campaign_id)
+    conn.execute("UPDATE burnin_campaigns SET evidence_completeness_status='PASS', latest_qualification_id='q-final' WHERE campaign_id=?",(camp.campaign_id,)); conn.commit(); conn.close(); engine=_engine(db)
+    runner=BurnInCampaignRunner(engine,camp.campaign_id,lambda *_: [],maintenance_interval_seconds=0)
+    monkeypatch.setattr(runner, "_qualify_if_due", lambda: (_ for _ in ()).throw(AssertionError("terminal campaign must not requalify")))
+    runner._stop_event=asyncio.Event()
+    asyncio.run(runner._maintenance_loop())
+    with engine.connect() as sql:
+        row=get_campaign(sql,camp.campaign_id)
+    assert row["campaign_status"] == "COMPLETED"
+    assert runner._stop_event.is_set()
+    engine.dispose()
+
+
+def test_maintenance_does_not_exit_while_campaign_active(tmp_path, monkeypatch):
+    db=tmp_path/'maintenance_active.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-maint-active',duration_days=1,symbols=[],intervals=[]); start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close(); engine=_engine(db)
+    runner=BurnInCampaignRunner(engine,camp.campaign_id,lambda *_: [],maintenance_interval_seconds=0)
+    ticks=0
+    def active_tick():
+        nonlocal ticks
+        ticks += 1
+        return {"complete": False}, "RUNNING"
+    monkeypatch.setattr(runner, "_maintenance_tick", active_tick)
+    async def exercise():
+        runner._stop_event=asyncio.Event(); task=asyncio.create_task(runner._maintenance_loop())
+        while ticks < 3: await asyncio.sleep(0)
+        assert not task.done()
+        runner._stop_event.set(); await task
+    asyncio.run(exercise())
+    assert ticks >= 3
+    engine.dispose()
+
+
+def test_normal_resolver_exit_cannot_cancel_active_runtime_silently(tmp_path, monkeypatch):
+    db=tmp_path/'resolver_exit.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-resolver-exit',duration_days=1,symbols=[],intervals=[]); start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close(); engine=_engine(db)
+    class ActiveRuntime(_FakeRuntime):
+        def __init__(self): super().__init__(); self.cancelled=False
+        async def start(self):
+            try: await asyncio.Event().wait()
+            finally: self.cancelled=True
+    runtime=ActiveRuntime(); runner=BurnInCampaignRunner(engine,camp.campaign_id,lambda *_: [],runtime_factory=lambda: runtime)
+    async def resolver_returns(): return None
+    monkeypatch.setattr(runner, "_resolver_loop", resolver_returns)
+    with pytest.raises(RuntimeError, match="SUPERVISOR_EXITED_WHILE_CAMPAIGN_RUNNING:phase8_resolver_loop"):
+        asyncio.run(runner.run_foreground())
+    assert runtime.cancelled and runtime.shutdown_called
+    with engine.connect() as sql: assert get_campaign(sql,camp.campaign_id)["campaign_status"] == "FAILED"
+    engine.dispose()
+
+
+def test_unexpected_normal_runtime_exit_fails_campaign_and_stops_siblings(tmp_path, monkeypatch):
+    db=tmp_path/'runtime_normal_exit.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-runtime-exit',duration_days=1,symbols=[],intervals=[]); start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close(); engine=_engine(db)
+    class NormalRuntime(_FakeRuntime):
+        async def start(self): return None
+    runtime=NormalRuntime(); runner=BurnInCampaignRunner(engine,camp.campaign_id,lambda *_: [],runtime_factory=lambda: runtime)
+    sibling_stopped={"resolver":False,"maintenance":False}
+    async def sibling(name):
+        try: await asyncio.Event().wait()
+        finally: sibling_stopped[name]=True
+    monkeypatch.setattr(runner,"_resolver_loop",lambda: sibling("resolver")); monkeypatch.setattr(runner,"_maintenance_loop",lambda: sibling("maintenance"))
+    with pytest.raises(RuntimeError, match="RUNTIME_EXITED_WHILE_CAMPAIGN_RUNNING"):
+        asyncio.run(runner.run_foreground())
+    assert sibling_stopped == {"resolver":True,"maintenance":True}
+    assert runtime.shutdown_called
+    with engine.connect() as sql: assert get_campaign(sql,camp.campaign_id)["campaign_status"] == "FAILED"
+    engine.dispose()
+
+
+def test_campaign_runtime_database_identity_mismatch_remains_fail_closed(tmp_path):
+    campaign_db=tmp_path/'canonical.db'; wrong_db=tmp_path/'wrong.db'
+    conn=sqlite3.connect(campaign_db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-db-mismatch',duration_days=1,symbols=[],intervals=[]); start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close()
+    campaign_engine=_engine(campaign_db); wrong_engine=_engine(wrong_db); runtime=_FakeRuntime(); runtime.persistence_engine=wrong_engine
+    runner=BurnInCampaignRunner(campaign_engine,camp.campaign_id,lambda *_: [],runtime_factory=lambda: runtime)
+    with pytest.raises(RuntimeError, match="PERSISTENCE_DB_IDENTITY_MISMATCH"):
+        asyncio.run(runner.run_foreground())
+    with campaign_engine.connect() as sql:
+        campaign=get_campaign(sql,camp.campaign_id)
+        details=json.loads(sql.execute(text("SELECT details_json FROM burnin_campaign_events WHERE campaign_id=:cid AND event_type='PHASE8_CAMPAIGN_ATTACH_FAILED' ORDER BY id DESC LIMIT 1"),{"cid":camp.campaign_id}).scalar_one())
+    assert campaign["campaign_status"] == "PAUSED"
+    assert details["expected_canonical_path"] == str(campaign_db.resolve())
+    assert details["observed_canonical_path"] == str(wrong_db.resolve())
+    campaign_engine.dispose(); wrong_engine.dispose()
