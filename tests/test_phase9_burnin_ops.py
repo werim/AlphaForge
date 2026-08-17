@@ -513,6 +513,14 @@ def test_canary_qualified_only_canonical_verdict_allows_canary_review(monkeypatc
     monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
     db, conn = _conn(tmp_path)
     camp, run = _campaign(conn)
+    event(conn, camp.campaign_id, "PHASE8_CAMPAIGN_ATTACHED", burnin_run_id=run, details={"runtime_instance_id": "runtime:canary", "active_run_id": run})
+    conn.execute("""CREATE TABLE runtime_heartbeats(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, runtime_instance_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL, heartbeat_ts TEXT NOT NULL, scanner_source TEXT,
+        runtime_state TEXT NOT NULL, last_scan_ts TEXT, last_decision_ts TEXT,
+        active_positions_count INTEGER, pending_orders_count INTEGER,
+        evidence_status TEXT NOT NULL, payload_json TEXT)""")
+    conn.execute("INSERT INTO runtime_heartbeats(runtime_instance_id,execution_mode,heartbeat_ts,runtime_state,last_scan_ts,evidence_status,payload_json) VALUES (?,?,?,?,?,?,?)", ("runtime:canary", "PAPER", utc_now(), "STOPPING", utc_now(), "MEASURED_RUNTIME_HEARTBEAT", "{}"))
     conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED', evidence_completeness_status='PASS', last_heartbeat_at=? WHERE campaign_id=?", (utc_now(), camp.campaign_id))
     agg_hash = aggregate_campaign(conn, camp.campaign_id).get("evidence_hash")
     conn.execute("INSERT INTO burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,generated_at,status,sample_status,expectancy_status,execution_status,regime_status,reject_quality_status,calibration_status,drawdown_status,concentration_status,reconciliation_status,evidence_completeness_status,blockers_json,warnings_json,thresholds_json,metrics_json,evidence_hash,schema_version,campaign_id,source_run_ids_json,aggregate_evidence_hash) VALUES ('q_canary',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run, "rel", utc_now(), "CANARY_QUALIFIED", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "[]", "[]", "{}", "{}", agg_hash, "sv", camp.campaign_id, json.dumps([run]), agg_hash))
@@ -1409,3 +1417,56 @@ def test_launch_worker_runtime_error_terminalizes_starting_and_unblocks_prefligh
     checks = {c["name"]: c for c in pf["checks"]}
     assert checks["no_duplicate_active_campaign"]["status"] == "PASS"
     assert checks["no_stale_worker_occupying_campaign"]["status"] == "PASS"
+
+
+def test_health_uses_only_current_campaign_runtime_instance_heartbeat(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+    db, conn = _conn(tmp_path / "lineage_scoped")
+    camp, run = _campaign(conn)
+    event(conn, camp.campaign_id, "PHASE8_CAMPAIGN_ATTACHED", burnin_run_id=run,
+          details={"runtime_instance_id": "runtime:target", "active_run_id": run})
+    conn.execute("""CREATE TABLE runtime_heartbeats(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, runtime_instance_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL, heartbeat_ts TEXT NOT NULL, scanner_source TEXT,
+        runtime_state TEXT NOT NULL, last_scan_ts TEXT, last_decision_ts TEXT,
+        active_positions_count INTEGER, pending_orders_count INTEGER,
+        evidence_status TEXT NOT NULL, payload_json TEXT)""")
+    stale = "2020-01-01T00:00:00+00:00"
+    conn.execute("INSERT INTO runtime_heartbeats(runtime_instance_id,execution_mode,heartbeat_ts,runtime_state,last_scan_ts,last_decision_ts,evidence_status,payload_json) VALUES (?,?,?,?,?,?,?,?)",
+                 ("runtime:target", "PAPER", stale, "OPERATING", stale, None, "MEASURED_RUNTIME_HEARTBEAT", json.dumps({"scans": 2, "symbols_selected": 3, "decisions_generated": 1, "rejects_persisted": 1})))
+    conn.execute("INSERT INTO runtime_heartbeats(runtime_instance_id,execution_mode,heartbeat_ts,runtime_state,last_scan_ts,last_decision_ts,evidence_status,payload_json) VALUES (?,?,?,?,?,?,?,?)",
+                 ("runtime:unrelated", "PAPER", utc_now(), "OPERATING", utc_now(), utc_now(), "MEASURED_RUNTIME_HEARTBEAT", json.dumps({"scans": 999, "symbols_selected": 999, "decisions_generated": 999, "rejects_persisted": 999})))
+    conn.commit()
+    monkeypatch.setattr(ops, "_pid_alive", lambda _pid: True)
+
+    health = health_payload(conn, camp.campaign_id, max_heartbeat_age=120)
+
+    assert health["status"] == "UNHEALTHY"
+    assert "RUNTIME_HEARTBEAT_STALE" in health["unhealthy_reasons"]
+    assert health["runtime_instance_id"] == "runtime:target"
+    assert (health["scans"], health["symbols_selected"], health["decisions_generated"], health["rejects_persisted"]) == (2, 3, 1, 1)
+    assert health["last_scan_ts"] == stale and health["last_decision_ts"] is None
+    conn.close()
+
+
+def test_health_never_falls_back_to_global_heartbeat_without_attachment(tmp_path):
+    db, conn = _conn(tmp_path / "missing_lineage")
+    camp, _run = _campaign(conn)
+    conn.execute("""CREATE TABLE runtime_heartbeats(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, runtime_instance_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL, heartbeat_ts TEXT NOT NULL, scanner_source TEXT,
+        runtime_state TEXT NOT NULL, last_scan_ts TEXT, last_decision_ts TEXT,
+        active_positions_count INTEGER, pending_orders_count INTEGER,
+        evidence_status TEXT NOT NULL, payload_json TEXT)""")
+    conn.execute("INSERT INTO runtime_heartbeats(runtime_instance_id,execution_mode,heartbeat_ts,runtime_state,last_scan_ts,last_decision_ts,evidence_status,payload_json) VALUES (?,?,?,?,?,?,?,?)",
+                 ("runtime:unrelated", "PAPER", utc_now(), "OPERATING", utc_now(), utc_now(), "MEASURED_RUNTIME_HEARTBEAT", json.dumps({"scans": 999, "symbols_selected": 999, "decisions_generated": 999, "rejects_persisted": 999})))
+    conn.commit()
+
+    health = health_payload(conn, camp.campaign_id, max_heartbeat_age=999999)
+
+    assert health["status"] == "UNHEALTHY"
+    assert "RUNTIME_ATTACHMENT_IDENTITY_MISSING" in health["unhealthy_reasons"]
+    assert health["runtime_status"] == "UNAVAILABLE" and health["runtime_instance_id"] is None
+    assert health["runtime_heartbeat_age"] is None and health["last_scan_ts"] is None and health["last_decision_ts"] is None
+    assert (health["scans"], health["symbols_selected"], health["decisions_generated"], health["rejects_persisted"]) == (0, 0, 0, 0)
+    conn.close()

@@ -22,9 +22,13 @@ GitHub reported 1 failed, 1,231 passed, and 3 skipped rather than the previously
 
 `FIRST_COMPLETED` remains necessary for zombie-runtime detection, but every normally completed child is now classified against persisted campaign state. Runtime normal exit during `STARTING`/`RUNNING` fails the continuation; resolver or maintenance normal exit during those states also fails rather than cancelling a healthy runtime silently. Normal supervisor completion is accepted only after a valid terminal campaign transition. Runtime failure cancels and awaits both siblings. New deterministic tests cover terminal maintenance, active maintenance, resolver normal exit, runtime normal exit with sibling cancellation, and canonical database mismatch diagnostics.
 
+## Runtime heartbeat lineage follow-up
+
+Campaign health previously selected the newest global PAPER heartbeat, allowing a fresh unrelated runtime to mask a stale or absent attached runtime. Health now resolves the current `PHASE8_CAMPAIGN_ATTACHED` event for the campaign `active_run_id`, extracts its `runtime_instance_id`, and queries only PAPER heartbeats with that exact identity. Missing attachment identity is `RUNTIME_ATTACHMENT_IDENTITY_MISSING`; a known identity without matching heartbeat is `RUNTIME_HEARTBEAT_MISSING` and an active campaign also remains `RUNTIME_HEARTBEAT_STALE`. No global fallback exists, unrelated counters/timestamps remain excluded, and no schema migration is needed. Regression tests cover stale-target/fresh-unrelated and missing-attachment/fresh-global cases.
+
 ## Tests and push recommendation
 
-Focused runtime, campaign, operations, persistence, and environment suites passed. Ship as a narrow PAPER safety correction after the full suite remains green. Do not infer LIVE readiness.
+The Phase 9 operations suite passed after adding lineage regressions. The complete behavioral suite excluding Alembic passed 1,231 tests with 6 skips, and the GitHub-equivalent offline backtest passed. The literal full command reached 1,232 passed and 6 skipped but its four Alembic checks could not import the declared Alembic dependency; installation was blocked by the environment proxy (HTTP 403). CI installs declared dependencies and remains the merge gate for those four migration checks. Do not infer LIVE readiness.
 
 ---
 

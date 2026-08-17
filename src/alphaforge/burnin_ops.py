@@ -529,7 +529,8 @@ def _latest_attach(conn: sqlite3.Connection, campaign_id: str, since: str | None
     rows = conn.execute(f"SELECT * FROM burnin_campaign_events WHERE {where} ORDER BY id DESC", params).fetchall()
     for row in rows:
         details = _event_details(row)
-        if run_id is None or details.get("active_run_id") == run_id:
+        attached_run_id = details.get("active_run_id") or row["burnin_run_id"]
+        if run_id is None or attached_run_id == run_id:
             return row
     return None
 
@@ -815,14 +816,19 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     pid = campaign.get("worker_pid")
     alive = _pid_alive(pid)
     age = _age(campaign.get("last_heartbeat_at"))
+    attachment = _latest_attach(conn, campaign_id, run_id=campaign.get("active_run_id"))
+    attachment_details = _event_details(attachment) if attachment is not None else {}
+    runtime_instance_id = str(attachment_details.get("runtime_instance_id") or "").strip() or None
     runtime_row = None
-    try:
-        runtime_row = conn.execute(
-            "SELECT heartbeat_ts,last_scan_ts,last_decision_ts,payload_json,runtime_state "
-            "FROM runtime_heartbeats WHERE execution_mode='PAPER' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-    except sqlite3.OperationalError:
-        pass
+    if runtime_instance_id is not None:
+        try:
+            runtime_row = conn.execute(
+                "SELECT runtime_instance_id,heartbeat_ts,last_scan_ts,last_decision_ts,payload_json,runtime_state "
+                "FROM runtime_heartbeats WHERE execution_mode='PAPER' AND runtime_instance_id=? ORDER BY id DESC LIMIT 1",
+                (runtime_instance_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            pass
     runtime_hb = dict(runtime_row) if runtime_row else {}
     runtime_payload = json.loads(runtime_hb.get("payload_json") or "{}") if runtime_hb else {}
     runtime_age = _age(runtime_hb.get("heartbeat_ts"))
@@ -838,10 +844,10 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     evidence_regression = bool(previous and str(previous.get("evidence_completeness_status") or "") == "PASS" and str(campaign.get("evidence_completeness_status") or "") != "PASS")
     payload = {
         "campaign_id": campaign_id, "campaign_status": campaign.get("campaign_status"), "worker_pid": pid, "worker_alive": alive, "heartbeat_age": age,
-        "runtime_heartbeat_age": runtime_age, "last_scan_ts": runtime_hb.get("last_scan_ts"), "last_decision_ts": runtime_hb.get("last_decision_ts"),
+        "runtime_instance_id": runtime_instance_id, "runtime_heartbeat_age": runtime_age, "last_scan_ts": runtime_hb.get("last_scan_ts"), "last_decision_ts": runtime_hb.get("last_decision_ts"),
         "scans": int(runtime_payload.get("scans") or 0), "symbols_selected": int(runtime_payload.get("symbols_selected") or 0),
         "decisions_generated": int(runtime_payload.get("decisions_generated") or 0), "rejects_persisted": int(runtime_payload.get("rejects_persisted") or 0),
-        "runtime_status": "ATTACHED" if _latest_attach(conn, campaign_id) is not None else "UNKNOWN", "active_continuation_run": campaign.get("active_run_id"),
+        "runtime_status": "ATTACHED" if runtime_instance_id is not None else "UNAVAILABLE", "active_continuation_run": campaign.get("active_run_id"),
         "continuation_count": len(runs), "restart_count": campaign.get("restart_count"), "observed_duration": campaign.get("observed_duration_seconds"),
         "total_decisions": metrics.get("sample_count", 0), "accepted_decisions": metrics.get("accepted_count", 0), "rejected_decisions": metrics.get("rejected_count", 0),
         "pending_reject_labels": counts["pending_reject_labels"], "resolved_reject_labels": int(conn.execute("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status='RESOLVED'", (campaign_id,)).fetchone()[0] or 0),
@@ -863,6 +869,10 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         unhealthy.append("DEAD_WORKER")
     if age is None or age > max_heartbeat_age:
         unhealthy.append("STALE_HEARTBEAT")
+    if runtime_instance_id is None:
+        unhealthy.append("RUNTIME_ATTACHMENT_IDENTITY_MISSING")
+    elif not runtime_hb:
+        unhealthy.append("RUNTIME_HEARTBEAT_MISSING")
     if campaign.get("campaign_status") == "RUNNING" and (runtime_age is None or runtime_age > max_heartbeat_age):
         unhealthy.append("RUNTIME_HEARTBEAT_STALE")
     startup_age = _age(campaign.get("worker_started_at"))
