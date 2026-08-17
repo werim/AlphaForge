@@ -1,3 +1,23 @@
+## PAPER early-reject canonical geometry — 2026-08-17
+
+### Added
+- Production-shaped LONG, SHORT, negative-expectancy, idempotency, incomplete-input, and no-execution regressions for the early quality-reject path.
+
+### Changed
+- Binance PAPER candidates now carry stop and target from the same observed 24-hour range consumed by the normal signal/execution path.
+
+### Fixed
+- Early score/negative-expectancy rejects no longer lose available canonical ticker geometry before pending forward-label persistence.
+
+### Removed
+- Nothing; historical observations and reject outcomes are not rewritten.
+
+### Breaking Changes
+- None; persistence schemas, thresholds, reject decisions, and execution authorization are unchanged.
+
+### Known Issues
+- Missing, non-finite, equal, or directionally invalid ticker ranges remain `INCOMPLETE_REJECT_GEOMETRY`. A fresh PAPER campaign is required for post-fix evidence. LIVE remains NOT READY.
+
 ## PAPER canonical persistence and zombie supervision — 2026-08-17
 
 ### Added

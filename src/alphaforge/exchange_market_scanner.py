@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from typing import Any
 from urllib import request
@@ -9,6 +10,29 @@ from urllib import request
 
 async def scan_exchange_markets(config: Any) -> list[dict[str, Any]]:
     return await asyncio.to_thread(_scan_exchange_markets_sync, config)
+
+
+def _canonical_ticker_geometry(item: dict[str, Any], entry: float, side: str) -> dict[str, float]:
+    """Return executable-path geometry from observed ticker extremes, or nothing.
+
+    The 24-hour high/low are source observations rather than synthetic offsets.
+    Directional validation here keeps absent, equal, crossed, and non-finite
+    levels unavailable so reject labelling continues to fail closed.
+    """
+    try:
+        low = float(item.get("lowPrice"))
+        high = float(item.get("highPrice"))
+    except (TypeError, ValueError):
+        return {}
+    if not all(math.isfinite(value) and value > 0.0 for value in (entry, low, high)):
+        return {}
+    normalized_side = str(side).upper()
+    stop, target = (high, low) if normalized_side == "SHORT" else (low, high)
+    if normalized_side not in {"LONG", "SHORT"}:
+        return {}
+    if not ((target < entry < stop) if normalized_side == "SHORT" else (stop < entry < target)):
+        return {}
+    return {"sl": stop, "tp": target}
 
 
 def _scan_exchange_markets_sync(config: Any) -> list[dict[str, Any]]:
@@ -84,12 +108,15 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         volume_quote = float(item.get("quoteVolume", 0.0) or 0.0)
         trend_strength = min(1.0, change_pct / 0.02)
 
+        side = "LONG"
+        geometry = _canonical_ticker_geometry(item, entry, side)
         candidates.append(
             {
                 "symbol": symbol,
                 "source_exchange": "binance",
                 "entry": entry,
-                "side": "LONG",
+                "side": side,
+                **geometry,
                 "market_ts": now_ts,
                 "timeframe": "1m",
                 "volume_24h_usdt": volume_quote,

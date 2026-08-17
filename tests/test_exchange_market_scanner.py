@@ -85,6 +85,43 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
     assert btc["funding_status"] == "MEASURED"
 
 
+def test_binance_observed_range_supplies_canonical_trade_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "lowPrice": "96", "highPrice": "108",
+              "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
+            {},
+        ]),
+    )
+    btc = next(row for row in asyncio.run(scan_exchange_markets(load_config_from_env()))
+               if row.get("source_exchange") == "binance")
+    assert btc["sl"] == 96.0
+    assert btc["entry"] == 100.0
+    assert btc["tp"] == 108.0
+    assert "rr" not in btc
+
+
+def test_binance_invalid_or_missing_range_does_not_fabricate_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "lowPrice": "100", "highPrice": "108",
+              "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [],
+            {},
+        ]),
+    )
+    btc = next(row for row in asyncio.run(scan_exchange_markets(load_config_from_env()))
+               if row.get("source_exchange") == "binance")
+    assert "sl" not in btc and "tp" not in btc and "rr" not in btc
+
+
 def test_binance_urls_use_fapi_v1_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_urls: list[str] = []
     monkeypatch.setenv("BINANCE_BASE_URL", "https://fapi.binance.com")

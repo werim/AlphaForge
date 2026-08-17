@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PAPER early-reject canonical geometry (2026-08-17)
+
+- Current version: issue #322 PAPER reject forward-label geometry hotfix
+- Current phase: post-fix PAPER evidence collection; Phase C is not complete
+- Runtime maturity: early score and negative-expectancy rejects retain validated source ticker geometry as observation-only evidence before atomic review/pending-label persistence
+- BACKTEST/PAPER/LIVE alignment: normal and rejected signals consume the same scanner geometry; decision and authorization semantics are unchanged
+- Lifecycle coverage: rejects remain `SIGNAL_REJECTED`; no order or position lifecycle is created by labelling
+- Execution realism coverage: Binance stop/target use observed 24-hour low/high; unavailable or invalid ranges fail closed without numeric defaults
+- Known critical risks: campaign `camp_8a577772ded0bdf2` contains 590 immutable incomplete observations and must not be promoted as post-fix evidence; start a fresh campaign
+- Last audit date: 2026-08-17
+- Live readiness verdict: NOT LIVE READY
+
 ## PAPER canonical persistence and zombie supervision (2026-08-17)
 
 - Current version: PAPER burn-in split-brain persistence hotfix

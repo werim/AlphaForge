@@ -32,6 +32,34 @@ The Phase 9 operations suite passed after adding lineage regressions. The comple
 
 ---
 
+## Issue #322 — PAPER early-reject geometry surgery (2026-08-17)
+
+### Need and confirmed root cause
+
+The production path is `scan_exchange_markets` -> `select_symbols` -> `RuntimeOrchestrator._process_symbol` -> `_build_signal` -> `AIBrain.before_real_order` -> `score_signal` -> `choose_order_plan`. A score or post-cost expectancy failure returns `OrderPlan(decision="REJECTED", reason="Score below threshold or negative expectancy.")`; `_process_symbol` then enters its first post-score reject branch and calls `_persist_reject`, `_canonical_reject_payload`, `_persist_pending_reject`, and `persist_pending_reject_label`. The label status reader subsequently classifies the incomplete observation.
+
+PR #317 already made `_build_signal` and that reject payload preserve `sl`/`tp`, and the accepted path reads the same fields. The remaining production defect was earlier: Binance's real scanner emitted entry, side, timeframe, and volatility context, but never emitted stop or target despite its ticker response already containing observed `lowPrice` and `highPrice`. Consequently no later persistence normalizer had geometry to preserve, and all 590 rejects correctly failed closed as `INCOMPLETE_REJECT_GEOMETRY`.
+
+### Minimal behavior change and canonical source
+
+The Binance scanner now validates the observed 24-hour low/high around its existing canonical entry. For its existing LONG candidate, low is stop and high is target. This scanner candidate is the single input to both `_build_signal`/normal accepted execution and the early reject evidence path, rather than a reject-only SL/TP formula. RR remains on its pre-existing path so scores and reject decisions cannot change. Missing, non-numeric, non-finite, non-positive, equal, or directionally crossed source levels produce no geometry. `None` remains distinct from zero, and the existing resolver records exact missing fields and refuses label eligibility.
+
+No score, expectancy, risk, sizing, reconciliation, authorization, lifecycle, or portfolio gate changed. The rejected plan remains rejected and returns before `_execute`; tests assert no order, PAPER position, execution metric, or LIVE adapter mutation. Later post-score rejects benefit from the same source payload, while deliberately pre-signal runtime-control/risk rejects were not broadened merely to increase the denominator.
+
+### Files, persistence, compatibility, and tests
+
+`src/alphaforge/exchange_market_scanner.py` owns the source-observation validation and candidate geometry. `tests/test_exchange_market_scanner.py` verifies canonical range mapping and fail-closed invalid ranges. `tests/test_issue322_reject_geometry.py` drives the real `_scan_once`/selection/build/score/reject/persistence sequence for LONG, SHORT, negative expectancy, repeated persistence, label eligibility, exact incomplete fields, and no execution mutation. `CHANGELOG.md`, `VERSION.md`, and `REPORT.md` record the operational change.
+
+There is no schema, migration, CSV/export, identity, outcome, or historical-data rewrite. Atomic review plus pending persistence and their unique identities remain unchanged. Existing canonical outcomes remain immutable.
+
+### Existing campaign and push recommendation
+
+`camp_8a577772ded0bdf2` must be preserved as historical pre-fix evidence and restarted as a fresh post-fix PAPER campaign. Its 590 incomplete observations do not safely contain the absent source levels, and the idempotency/provenance contract does not authorize retroactively rewriting them. Phase C is not complete. Recommend this focused hotfix for review only after the focused and full repository suites pass. LIVE readiness is unchanged.
+
+Focused scanner/runtime/status validation passed 85 tests. The full behavioral run completed with 1,239 passed and 6 skipped; its only four failures were the repository's Alembic checks because the declared Alembic package is absent. Installing it was attempted and blocked by the environment proxy with HTTP 403. `compileall` and diff checks passed. CI with declared dependencies remains the full-suite merge gate.
+
+---
+
 # PAPER reject forward-outcome feedback surgery — 2026-08-13
 
 ## Existing SQLite reject-label compatibility hotfix — 2026-08-16
