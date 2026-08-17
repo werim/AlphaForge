@@ -1091,17 +1091,33 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
     """)
     try:
         session.execute(statement_by_lifecycle_key, payload)
-    except Exception:
+    except Exception as first_error:
+        # A failed SQLAlchemy statement poisons the transaction.  Roll it back
+        # before the compatibility conflict-target retry, and never hide the
+        # original database evidence if both forms fail.
+        if hasattr(session, "rollback"):
+            session.rollback()
         try:
             session.execute(statement_by_event_id, payload)
-        except Exception:
-            return None
+        except Exception as fallback_error:
+            if hasattr(session, "rollback"):
+                session.rollback()
+            target = str(getattr(getattr(session, "bind", None), "url", "UNKNOWN_PERSISTENCE_TARGET"))
+            raise RuntimeError(
+                f"trade_lifecycle_event_persistence_failed target={target} "
+                f"original={first_error.__class__.__name__}:{first_error} "
+                f"fallback={fallback_error.__class__.__name__}:{fallback_error}"
+            ) from first_error
 
     if hasattr(session, "commit"):
         try:
             session.commit()
-        except Exception:
-            return None
+        except Exception as commit_error:
+            target = str(getattr(getattr(session, "bind", None), "url", "UNKNOWN_PERSISTENCE_TARGET"))
+            raise RuntimeError(
+                f"trade_lifecycle_event_commit_failed target={target} "
+                f"original={commit_error.__class__.__name__}:{commit_error}"
+            ) from commit_error
 
     return True
 

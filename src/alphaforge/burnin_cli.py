@@ -7,7 +7,7 @@ from alphaforge.config import load_config_from_env
 from alphaforge.persistence import init_db
 
 def _db_path(args):
-    if getattr(args,'db',None): return args.db
+    if getattr(args,'db',None): return str(Path(args.db).expanduser().resolve())
     url=load_config_from_env().persistence.database_url
     return url.replace('sqlite:///','').replace('sqlite+pysqlite:///','') if 'sqlite' in url else 'alphaforge.db'
 
@@ -30,7 +30,7 @@ def _launch_detached_worker(db: str, campaign_id: str) -> dict[str, object]:
     cmd=[sys.executable, '-m', 'alphaforge.burnin_cli', '--db', db, 'worker', '--campaign-id', campaign_id]
     root=Path("artifacts") / "burnin" / campaign_id; root.mkdir(parents=True, exist_ok=True)
     stdout=(root / "worker.stdout.log").open("ab", buffering=0); stderr=(root / "worker.stderr.log").open("ab", buffering=0)
-    try: proc=subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env=os.environ.copy())
+    try: proc=subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env={**os.environ, "ALPHAFORGE_BURNIN_DATABASE_PATH": str(Path(db).expanduser().resolve())})
     finally: stdout.close(); stderr.close()
     time.sleep(0.2)
     if proc.poll() is not None:

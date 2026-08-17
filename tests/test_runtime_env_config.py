@@ -3,8 +3,31 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
+
+from alphaforge.persistence import init_db
 
 from alphaforge.runtime import ExecutionMode, _build_runtime_from_env
+
+
+def test_explicit_persistence_dependencies_override_env_for_all_runtime_consumers(monkeypatch, tmp_path) -> None:
+    env_db = tmp_path / "env.db"
+    campaign_db = tmp_path / "campaign.db"
+    monkeypatch.setenv("ALPHAFORGE_DATABASE_URL", f"sqlite+pysqlite:///{env_db}")
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    engine = init_db(f"sqlite+pysqlite:///{campaign_db}")
+    runtime = _build_runtime_from_env(persistence_engine=engine)
+
+    assert Path(runtime.persistence_engine.url.database).resolve() == campaign_db.resolve()
+    with runtime.ai_brain.session_factory() as session:
+        assert Path(session.bind.url.database).resolve() == campaign_db.resolve()
+    runtime.on_lifecycle_event({"signal_id": "canonical-signal", "symbol": "BTCUSDT", "mode": "PAPER", "lifecycle_state": "SIGNAL_CREATED", "timestamp": "2026-08-17T00:00:00Z", "details": {}})
+    runtime.on_reject_persist({"signal_id": "canonical-reject", "symbol": "BTCUSDT", "phase": "final", "reason": "LOW_CONFIDENCE", "confidence": .1, "score": .1, "rr": 1.0, "execution_ctx": {"evidence_status": "UNAVAILABLE"}})
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE signal_id='canonical-signal'")).scalar_one() == 1
+        assert conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE signal_id='canonical-reject' AND decision='REJECTED'")).scalar_one() == 1
+    assert not env_db.exists()
+    engine.dispose()
 
 
 def test_runtime_env_prefers_canonical_execution_mode(monkeypatch: pytest.MonkeyPatch) -> None:

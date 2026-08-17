@@ -815,6 +815,18 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     pid = campaign.get("worker_pid")
     alive = _pid_alive(pid)
     age = _age(campaign.get("last_heartbeat_at"))
+    runtime_row = None
+    try:
+        runtime_row = conn.execute(
+            "SELECT heartbeat_ts,last_scan_ts,last_decision_ts,payload_json,runtime_state "
+            "FROM runtime_heartbeats WHERE execution_mode='PAPER' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        pass
+    runtime_hb = dict(runtime_row) if runtime_row else {}
+    runtime_payload = json.loads(runtime_hb.get("payload_json") or "{}") if runtime_hb else {}
+    runtime_age = _age(runtime_hb.get("heartbeat_ts"))
+    scan_age = _age(runtime_hb.get("last_scan_ts"))
     qrow = conn.execute("SELECT status, blockers_json FROM burnin_qualification_snapshots WHERE qualification_id=?", (campaign.get("latest_qualification_id"),)).fetchone() if campaign.get("latest_qualification_id") else None
     counts = _counts(conn, campaign_id)
     runs = [dict(r) for r in conn.execute("SELECT burnin_run_id, continuation_sequence FROM burnin_campaign_runs WHERE campaign_id=? ORDER BY continuation_sequence", (campaign_id,)).fetchall()]
@@ -826,6 +838,9 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     evidence_regression = bool(previous and str(previous.get("evidence_completeness_status") or "") == "PASS" and str(campaign.get("evidence_completeness_status") or "") != "PASS")
     payload = {
         "campaign_id": campaign_id, "campaign_status": campaign.get("campaign_status"), "worker_pid": pid, "worker_alive": alive, "heartbeat_age": age,
+        "runtime_heartbeat_age": runtime_age, "last_scan_ts": runtime_hb.get("last_scan_ts"), "last_decision_ts": runtime_hb.get("last_decision_ts"),
+        "scans": int(runtime_payload.get("scans") or 0), "symbols_selected": int(runtime_payload.get("symbols_selected") or 0),
+        "decisions_generated": int(runtime_payload.get("decisions_generated") or 0), "rejects_persisted": int(runtime_payload.get("rejects_persisted") or 0),
         "runtime_status": "ATTACHED" if _latest_attach(conn, campaign_id) is not None else "UNKNOWN", "active_continuation_run": campaign.get("active_run_id"),
         "continuation_count": len(runs), "restart_count": campaign.get("restart_count"), "observed_duration": campaign.get("observed_duration_seconds"),
         "total_decisions": metrics.get("sample_count", 0), "accepted_decisions": metrics.get("accepted_count", 0), "rejected_decisions": metrics.get("rejected_count", 0),
@@ -848,6 +863,11 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         unhealthy.append("DEAD_WORKER")
     if age is None or age > max_heartbeat_age:
         unhealthy.append("STALE_HEARTBEAT")
+    if campaign.get("campaign_status") == "RUNNING" and (runtime_age is None or runtime_age > max_heartbeat_age):
+        unhealthy.append("RUNTIME_HEARTBEAT_STALE")
+    startup_age = _age(campaign.get("worker_started_at"))
+    if campaign.get("campaign_status") == "RUNNING" and startup_age is not None and startup_age > max_heartbeat_age and (scan_age is None or scan_age > max_heartbeat_age):
+        unhealthy.append("RUNTIME_SCAN_STALLED")
     if campaign.get("campaign_status") in {"FAILED", "RECOVERY_REQUIRED"}:
         unhealthy.append(str(campaign.get("campaign_status")))
     if counts["open_positions"] > max_open_positions:
@@ -1626,7 +1646,7 @@ def _launch_worker(db: str, campaign_id: str) -> subprocess.Popen[Any]:
         if os.name == "nt":
             creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        return subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER"}, creationflags=creationflags)
+        return subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER", "ALPHAFORGE_BURNIN_DATABASE_PATH": str(Path(db).expanduser().resolve())}, creationflags=creationflags)
     finally:
         stdout.close()
         stderr.close()

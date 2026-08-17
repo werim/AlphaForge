@@ -1,3 +1,27 @@
+# PAPER burn-in canonical persistence and supervision surgery — 2026-08-17
+
+## Need and root cause
+
+The runtime builder created an engine and session factory from the environment, then campaign code replaced only `runtime.persistence_engine`. AIBrain and lifecycle/reject closures therefore retained a different database. Separately, the market loop swallowed fatal exceptions and campaign maintenance heartbeats allowed a dead scanner to appear healthy.
+
+## Files and behavior changed
+
+`runtime.py` accepts an injected engine/session factory, uses them for every persistence consumer, and propagates market-loop failures with persisted failure state. `burnin_campaign.py` builds the production runtime with the campaign engine, compares canonical paths before attachment, and treats unexpected runtime exit as a campaign failure rather than leaving resolver/maintenance alive. Worker launchers propagate the canonical database path. `persistence.py` rolls back before its compatibility retry and raises target plus original/fallback SQL evidence. `burnin_ops.py` requires fresh runtime-owned heartbeat and scan evidence and exposes scanner/decision counters and timestamps. Regression tests cover canonical lifecycle/reject/AIBrain bindings and original SQL failure evidence.
+
+## Lifecycle, persistence, export, and schema impact
+
+Lifecycle ordering and idempotent upsert keys are unchanged. Failed SQL is no longer converted to `None`; callers receive the causal exception after a correct rollback. All attached PAPER evidence uses one existing campaign schema. There is no schema or CSV/export format change and no migration is required. Append-only campaign failure diagnostics include expected and observed canonical paths.
+
+## Risks and limitations
+
+Database path comparison is filesystem-canonical and deliberately fail-closed. Historical evidence already split across databases is not automatically merged because provenance cannot be safely inferred. Scan-stall health uses the configured heartbeat-age bound as startup/advance grace. Reconciliation, recovery, LIVE guards, decision thresholds, and execution modeling are unchanged.
+
+## Tests and push recommendation
+
+Focused runtime, campaign, operations, persistence, and environment suites passed. Ship as a narrow PAPER safety correction after the full suite remains green. Do not infer LIVE readiness.
+
+---
+
 # PAPER reject forward-outcome feedback surgery — 2026-08-13
 
 ## Existing SQLite reject-label compatibility hotfix — 2026-08-16

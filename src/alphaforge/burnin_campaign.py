@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from sqlalchemy import create_engine, event as sqlalchemy_event, text
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
@@ -659,20 +660,56 @@ class BurnInCampaignRunner:
             if self.runtime_factory is None:
                 from alphaforge.runtime import _build_runtime_from_env
                 self.runtime_factory = _build_runtime_from_env
-            runtime = self.runtime_factory()
-            setattr(runtime, "persistence_engine", self.engine)
+                try:
+                    runtime = self.runtime_factory(
+                        persistence_engine=self.engine,
+                        session_factory=sessionmaker(bind=self.engine, expire_on_commit=False, future=True),
+                    )
+                except TypeError as exc:
+                    # Compatibility for explicitly monkeypatched/test builders;
+                    # production's builder always accepts canonical injection.
+                    if "unexpected keyword" not in str(exc):
+                        raise
+                    runtime = self.runtime_factory()
+            else:
+                runtime = self.runtime_factory()
+            if getattr(runtime, "persistence_engine", None) is None:
+                setattr(runtime, "persistence_engine", self.engine)
+            expected_db = Path(str(self.engine.url.database)).expanduser().resolve()
+            runtime_engine = getattr(runtime, "persistence_engine", None)
+            observed_db = Path(str(runtime_engine.url.database)).expanduser().resolve() if runtime_engine is not None and runtime_engine.url.database else None
+            if observed_db != expected_db:
+                details = {"reason": "PERSISTENCE_DB_IDENTITY_MISMATCH", "expected_canonical_path": str(expected_db), "observed_canonical_path": str(observed_db) if observed_db else None}
+                with self.engine.begin() as conn:
+                    fail_active_campaign_run(conn, self.campaign_id, "PERSISTENCE_DB_IDENTITY_MISMATCH", details=details)
+                raise RuntimeError("PERSISTENCE_DB_IDENTITY_MISMATCH")
             attach = getattr(runtime, "_attach_phase8_campaign", None)
             if callable(attach): attach(self.campaign_id)
             else: raise RuntimeError("PHASE8_RUNTIME_ATTACH_UNAVAILABLE")
             tasks.append(asyncio.create_task(runtime.start(), name="phase8_runtime_start"))
             tasks.append(asyncio.create_task(self._resolver_loop(), name="phase8_resolver_loop"))
             tasks.append(asyncio.create_task(self._maintenance_loop(), name="phase8_maintenance_loop"))
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 exc = task.exception()
                 if exc is not None:
                     raise exc
+                if task.get_name() == "phase8_runtime_start":
+                    with self.engine.connect() as conn:
+                        status = (get_campaign(conn, self.campaign_id) or {}).get("campaign_status")
+                    if status in {"STARTING", "RUNNING"}:
+                        raise RuntimeError("RUNTIME_EXITED_WHILE_CAMPAIGN_RUNNING")
             return {"status": "STOPPED", "campaign_id": self.campaign_id}
+        except BaseException as exc:
+            with self.engine.begin() as conn:
+                campaign = get_campaign(conn, self.campaign_id) or {}
+                if campaign.get("campaign_status") in {"STARTING", "RUNNING"}:
+                    fail_active_campaign_run(conn, self.campaign_id, "RUNTIME_SUPERVISION_FAILED", details={
+                        "reason": "RUNTIME_SUPERVISION_FAILED",
+                        "exception_type": exc.__class__.__name__,
+                        "message": str(exc),
+                    })
+            raise
         finally:
             if self._stop_event is not None: self._stop_event.set()
             for task in tasks:

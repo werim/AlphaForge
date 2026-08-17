@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import importlib
+import pytest
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -274,3 +275,20 @@ def test_save_order_decision_unavailable_execution_metrics_persist_null() -> Non
         assert row.spread_pct is None
         assert row.expected_slippage_pct is None
         assert row.latency_ms is None
+
+
+def test_lifecycle_sql_failure_rolls_back_and_preserves_original_evidence() -> None:
+    class BrokenSession:
+        bind = type("Bind", (), {"url": "sqlite:///campaign.db"})()
+        def __init__(self): self.rollbacks = 0
+        def execute(self, statement, payload):
+            raise ValueError("schema target rejected statement")
+        def rollback(self): self.rollbacks += 1
+
+    session = BrokenSession()
+    with pytest.raises(RuntimeError) as caught:
+        save_trade_lifecycle_event(session, signal_id="broken", symbol="BTCUSDT", lifecycle_state="SIGNAL_CREATED")
+    assert session.rollbacks == 2
+    assert "target=sqlite:///campaign.db" in str(caught.value)
+    assert "original=ValueError:schema target rejected statement" in str(caught.value)
+    assert isinstance(caught.value.__cause__, ValueError)

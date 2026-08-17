@@ -1,3 +1,23 @@
+## PAPER canonical persistence and zombie supervision — 2026-08-17
+
+### Added
+- Canonical campaign database dependency injection, identity diagnostics, and runtime-heartbeat/scan health evidence.
+
+### Changed
+- Campaign supervision now treats runtime completion as decisive and stops maintenance/resolver siblings.
+
+### Fixed
+- Attached PAPER lifecycle, decision, reject, heartbeat, reconciliation, and pending-label writes can no longer silently use the environment database. SQL retry now rolls back and retains original failure evidence.
+
+### Removed
+- Hidden environment-database fallback and maintenance-only HEALTHY behavior for attached workers.
+
+### Breaking Changes
+- A mismatched attached persistence target now fails closed with `PERSISTENCE_DB_IDENTITY_MISMATCH`.
+
+### Known Issues
+- Existing split-brain databases need manual evidence audit; no automatic cross-database merge is safe. LIVE remains NOT READY.
+
 ## Existing SQLite reject-label compatibility hotfix — 2026-08-16
 
 ### Added
