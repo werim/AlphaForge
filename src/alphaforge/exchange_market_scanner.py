@@ -2,37 +2,65 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import time
 from typing import Any
-from urllib import request
+from urllib import parse, request
+
+from alphaforge.signal_geometry import build_breakout_geometry
 
 
 async def scan_exchange_markets(config: Any) -> list[dict[str, Any]]:
     return await asyncio.to_thread(_scan_exchange_markets_sync, config)
 
 
-def _canonical_ticker_geometry(item: dict[str, Any], entry: float, side: str) -> dict[str, float]:
-    """Return executable-path geometry from observed ticker extremes, or nothing.
-
-    The 24-hour high/low are source observations rather than synthetic offsets.
-    Directional validation here keeps absent, equal, crossed, and non-finite
-    levels unavailable so reject labelling continues to fail closed.
-    """
+def _binance_kline_geometry(base_url: str, symbol: str, *, timeout_sec: float) -> dict[str, Any]:
+    """Return canonical geometry from the last two closed 1m setup candles."""
+    query = parse.urlencode({"symbol": symbol, "interval": "1m", "limit": 3})
     try:
-        low = float(item.get("lowPrice"))
-        high = float(item.get("highPrice"))
-    except (TypeError, ValueError):
+        rows = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/klines?{query}", timeout_sec=timeout_sec)
+    except (OSError, TimeoutError, json.JSONDecodeError, TypeError, ValueError):
         return {}
-    if not all(math.isfinite(value) and value > 0.0 for value in (entry, low, high)):
+    if not isinstance(rows, list) or len(rows) < 3:
         return {}
-    normalized_side = str(side).upper()
-    stop, target = (high, low) if normalized_side == "SHORT" else (low, high)
-    if normalized_side not in {"LONG", "SHORT"}:
-        return {}
-    if not ((target < entry < stop) if normalized_side == "SHORT" else (stop < entry < target)):
-        return {}
-    return {"sl": stop, "tp": target}
+    candles = []
+    for row in rows[-3:-1]:
+        if not isinstance(row, list) or len(row) < 5:
+            return {}
+        candles.append({"open": row[1], "high": row[2], "low": row[3], "close": row[4]})
+    return build_breakout_geometry(candles[1], candles[0])
+
+
+async def enrich_selected_market_geometry(
+    candidates: list[dict[str, Any]], config: Any,
+) -> list[dict[str, Any]]:
+    """Enrich only canonically selected Binance candidates, once per symbol.
+
+    Calls are bounded by the already-selected candidate list and complete within
+    this coroutine. Provider/unavailable-data failures leave geometry absent.
+    """
+    binance = getattr(getattr(config, "exchange", object()), "binance", object())
+    base_url = str(getattr(binance, "base_url", "https://fapi.binance.com"))
+    timeout = float(getattr(getattr(config, "exchange", object()), "timeout_sec", 2.0) or 2.0)
+    keys: list[tuple[str, str] | None] = []
+    tasks: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
+    for candidate in candidates:
+        source = str(candidate.get("source_exchange") or "").lower()
+        symbol = str(candidate.get("symbol") or "")
+        timeframe = str(candidate.get("timeframe") or "").lower()
+        key = (symbol, timeframe) if source == "binance" and symbol and timeframe == "1m" else None
+        keys.append(key)
+        if key is not None and key not in tasks:
+            tasks[key] = asyncio.create_task(
+                asyncio.to_thread(_binance_kline_geometry, base_url, symbol, timeout_sec=timeout)
+            )
+    results = dict(zip(tasks, await asyncio.gather(*tasks.values()))) if tasks else {}
+    enriched: list[dict[str, Any]] = []
+    for candidate, key in zip(candidates, keys):
+        geometry = results.get(key, {})
+        if geometry and str(geometry.get("side") or "").upper() != str(candidate.get("side") or "").upper():
+            geometry = {}
+        enriched.append({**candidate, **geometry})
+    return enriched
 
 
 def _scan_exchange_markets_sync(config: Any) -> list[dict[str, Any]]:
@@ -108,15 +136,12 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         volume_quote = float(item.get("quoteVolume", 0.0) or 0.0)
         trend_strength = min(1.0, change_pct / 0.02)
 
-        side = "LONG"
-        geometry = _canonical_ticker_geometry(item, entry, side)
         candidates.append(
             {
                 "symbol": symbol,
                 "source_exchange": "binance",
                 "entry": entry,
-                "side": side,
-                **geometry,
+                "side": "LONG",
                 "market_ts": now_ts,
                 "timeframe": "1m",
                 "volume_24h_usdt": volume_quote,

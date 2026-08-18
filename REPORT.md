@@ -1,3 +1,35 @@
+# PR #323 — post-selection bounded signal geometry (2026-08-18)
+
+## Need and final root cause
+
+PR #322 originally mislabeled Binance 24-hour extrema as execution geometry; PR #323 correctly replaced that with the accepted backtest path's two-candle setup calculation. The remaining P1 was architectural: geometry HTTP calls still ran inside the raw Binance scanner, before `RuntimeOrchestrator._scan_once` invoked canonical `select_symbols`. With up to 30 raw Binance candidates, the old placement permitted up to 30 sequential `/fapi/v1/klines` calls, wasted evidence work on unselected symbols, and could resemble a PR #321 runtime stall.
+
+The accepted geometry source remains `backtest_order._build_market_ctx`, extracted as `build_breakout_geometry`: side follows current versus previous close, stop spans both setup candles, and target uses the existing bounded breakout/body-strength raw RR. No 24-hour price extreme is used as stop or target.
+
+## Final architecture and files changed
+
+`scan_exchange_markets` now returns the complete raw provider candidate universe without kline geometry. `RuntimeOrchestrator._scan_once` runs the unchanged `select_symbols(..., include_rejected=True)` and unchanged tradable/rank slice first. Only that already-bounded list is passed to `selected_candidate_enricher`; enriched inputs are then consumed by the existing `_process_symbol`, `_build_signal`, AIBrain, reject/accept, and persistence flow. Candidate count and `(symbol, source_exchange)` identity are guarded against enricher mutation.
+
+`enrich_selected_market_geometry` schedules at most one explicit-timeout `to_thread` request for each unique selected Binance 1m symbol and awaits the bounded set with `gather`; selected non-Binance candidates cause no Binance request, duplicates share one result, and no asyncio task survives completion. Therefore the final bound is `geometry requests per scan <= unique selected Binance symbols <= selected Binance symbols <= max_symbols_per_scan`. The default maximum is five. Expected network/JSON/unavailable-data errors return absent geometry; programmer/contract errors propagate through the existing market-loop failure path. Scan progress time is recorded only after enrichment completes, preserving PR #321 stale-scan meaning.
+
+Files changed by this follow-up are `src/alphaforge/exchange_market_scanner.py`, `src/alphaforge/runtime.py`, `tests/test_exchange_market_scanner.py`, `tests/test_issue322_reject_geometry.py`, `CHANGELOG.md`, `REPORT.md`, and `VERSION.md`. The shared `src/alphaforge/signal_geometry.py` and `backtest_order.py` reuse remain unchanged.
+
+## Behavior, parity, persistence, and safety
+
+The Binance raw scanner still emits LONG candidates. Geometry is applied only when its calculated side matches the selected candidate, so helper-level SHORT correctness remains covered without claiming production scanner SHORT support. Missing, incomplete, malformed, timed-out, or direction-mismatched setup candles do not fabricate entry, stop, target, or RR. Reject decisions remain rejected, exact `stop`/`target` missing evidence remains auditable as `INCOMPLETE_REJECT_GEOMETRY`, and ineligible rows do not enter `burnin_pending_reject_labels`.
+
+For identical candles, backtest and PAPER still consume the same shared calculation. Phase-B regression proves legacy SL, TP, raw RR, SignalAgent `raw_rr`, and QualityAgent stop width are unchanged, `rr_difference` is zero, and legacy/shadow parity is `MATCH`. The real production-chain regression remains mocked Binance market payload -> raw scanner -> canonical selection -> bounded enrichment -> `_scan_once` -> AIBrain early reject -> `_persist_reject` -> eligible pending label, with no manual SL/TP injection.
+
+No schema, migration, export, threshold, reject gate, reconciliation state, risk state, authorization, order, or position behavior changed. Expected provider failure is observational and fail-closed. Unexpected enrichment code failure propagates and does not publish false scan progress. Canonical PAPER database identity, worker supervision, campaign terminal behavior, and historical evidence identity remain unchanged.
+
+## Tests, risks, and recommendation
+
+Regressions cover 30 raw Binance candidates with limits five and two, full-universe canonical selection, exact selected-symbol requests, zero-selection/zero-request behavior, mixed providers, duplicate protection, timeout/incomplete evidence, programmer-error propagation, production-chain eligibility, idempotency, no execution mutation, helper SHORT geometry, and Phase-B parity. Focused scanner/geometry/Phase-B/runtime coverage passed 79 tests. The complete local suite reached 1,247 passed and 6 skipped; its only four failures were environment import failures because the declared Alembic distribution is absent (`alembic.config`/`alembic.command`). No behavioral test failed. `python -m compileall -q src tests backtest_order.py` and `git diff --check` passed.
+
+The remaining operational limitation is one bounded public kline request per unique selected Binance symbol; concurrent blocking threads cannot be force-stopped after coroutine cancellation, but every HTTP call retains the explicit provider timeout and the awaited asyncio task set is bounded to processable symbols. Preserve `camp_8a577772ded0bdf2` as immutable pre-fix evidence and start a fresh PAPER campaign after merge. LIVE remains NOT READY. Recommend GitHub CI and re-review before merge.
+
+---
+
 # PAPER burn-in canonical persistence and supervision surgery — 2026-08-17
 
 ## Need and root cause
@@ -38,17 +70,17 @@ The Phase 9 operations suite passed after adding lineage regressions. The comple
 
 The production path is `scan_exchange_markets` -> `select_symbols` -> `RuntimeOrchestrator._process_symbol` -> `_build_signal` -> `AIBrain.before_real_order` -> `score_signal` -> `choose_order_plan`. A score or post-cost expectancy failure returns `OrderPlan(decision="REJECTED", reason="Score below threshold or negative expectancy.")`; `_process_symbol` then enters its first post-score reject branch and calls `_persist_reject`, `_canonical_reject_payload`, `_persist_pending_reject`, and `persist_pending_reject_label`. The label status reader subsequently classifies the incomplete observation.
 
-PR #317 already made `_build_signal` and that reject payload preserve `sl`/`tp`, and the accepted path reads the same fields. The remaining production defect was earlier: Binance's real scanner emitted entry, side, timeframe, and volatility context, but never emitted stop or target despite its ticker response already containing observed `lowPrice` and `highPrice`. Consequently no later persistence normalizer had geometry to preserve, and all 590 rejects correctly failed closed as `INCOMPLETE_REJECT_GEOMETRY`.
+PR #317 already made `_build_signal` and that reject payload preserve `sl`/`tp`, and the accepted path reads the same fields. Binance's real scanner emitted entry, side, timeframe, and volatility context but no setup geometry, so all 590 rejects correctly failed closed as `INCOMPLETE_REJECT_GEOMETRY`. The original PR #322 analysis incorrectly treated unrelated ticker extrema as the missing setup geometry; PR #323 supersedes that conclusion.
 
 ### Minimal behavior change and canonical source
 
-The Binance scanner now validates the observed 24-hour low/high around its existing canonical entry. For its existing LONG candidate, low is stop and high is target. This scanner candidate is the single input to both `_build_signal`/normal accepted execution and the early reject evidence path, rather than a reject-only SL/TP formula. RR remains on its pre-existing path so scores and reject decisions cannot change. Missing, non-numeric, non-finite, non-positive, equal, or directionally crossed source levels produce no geometry. `None` remains distinct from zero, and the existing resolver records exact missing fields and refuses label eligibility.
+Superseded by PR #323: the original ticker-extrema mapping was removed. The scanner candidate remains the single input to both `_build_signal`/normal accepted execution and early-reject evidence, but geometry now comes only from the shared closed-timeframe setup builder. Missing setup evidence produces no geometry; `None` remains distinct from zero, and the resolver records exact missing fields and refuses label eligibility.
 
 No score, expectancy, risk, sizing, reconciliation, authorization, lifecycle, or portfolio gate changed. The rejected plan remains rejected and returns before `_execute`; tests assert no order, PAPER position, execution metric, or LIVE adapter mutation. Later post-score rejects benefit from the same source payload, while deliberately pre-signal runtime-control/risk rejects were not broadened merely to increase the denominator.
 
 ### Files, persistence, compatibility, and tests
 
-`src/alphaforge/exchange_market_scanner.py` owns the source-observation validation and candidate geometry. `tests/test_exchange_market_scanner.py` verifies canonical range mapping and fail-closed invalid ranges. `tests/test_issue322_reject_geometry.py` drives the real `_scan_once`/selection/build/score/reject/persistence sequence for LONG, SHORT, negative expectancy, repeated persistence, label eligibility, exact incomplete fields, and no execution mutation. `CHANGELOG.md`, `VERSION.md`, and `REPORT.md` record the operational change.
+`src/alphaforge/exchange_market_scanner.py` owns the source-observation validation and candidate geometry. `tests/test_exchange_market_scanner.py` verifies shared closed-candle mapping and fail-closed incomplete setup evidence. `tests/test_issue322_reject_geometry.py` drives the real `_scan_once`/selection/build/score/reject/persistence sequence for LONG, SHORT, negative expectancy, repeated persistence, label eligibility, exact incomplete fields, and no execution mutation. `CHANGELOG.md`, `VERSION.md`, and `REPORT.md` record the operational change.
 
 There is no schema, migration, CSV/export, identity, outcome, or historical-data rewrite. Atomic review plus pending persistence and their unique identities remain unchanged. Existing canonical outcomes remain immutable.
 
