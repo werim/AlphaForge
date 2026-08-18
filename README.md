@@ -102,6 +102,89 @@ Recommended use:
 2. Use `.env.medium.example` or `.env.example` for normal PAPER observation, dashboard backtests, and balanced evaluation with realistic costs, slippage, spread, funding, cooldown, and position limits.
 3. Use `.env.live.example` only for hardened LIVE preparation. It requires explicit local credentials and readiness evidence, keeps `REJECT_UNKNOWN_EXPECTANCY=true`, preserves strict risk/cost/staleness guards, and does not enable live trading or live orders by default.
 
+### Binance environment and endpoint configuration
+
+For normal Binance USD-M Futures **production** or **testnet** operation, set `BINANCE_ENVIRONMENT` and leave `BINANCE_BASE_URL` and `BINANCE_WS_URL` blank. AlphaForge resolves the canonical endpoints automatically. Explicit endpoint overrides are intended for `demo` or other operator-verified custom endpoints, not routine production/testnet use.
+
+| Use | `BINANCE_ENVIRONMENT` | `BINANCE_BASE_URL` | `BINANCE_WS_URL` | Resolved canonical endpoints |
+|---|---|---|---|---|
+| Production | `production` | leave blank | leave blank | REST `https://fapi.binance.com`, WS `wss://fstream.binance.com` |
+| Futures Testnet | `testnet` | leave blank | leave blank | REST `https://testnet.binancefuture.com`, WS `wss://stream.binancefuture.com` |
+| Demo/custom | `demo` | explicit operator-verified URL required | explicit operator-verified URL required for runtime websocket use | supplied explicitly by operator |
+
+Recommended production `.env` fragment:
+
+```dotenv
+BINANCE_ENVIRONMENT=production
+BINANCE_API_KEY=<your_production_readonly_key>
+BINANCE_API_SECRET=<your_production_readonly_secret>
+BINANCE_BASE_URL=
+BINANCE_WS_URL=
+```
+
+Recommended Futures Testnet `.env` fragment:
+
+```dotenv
+BINANCE_ENVIRONMENT=testnet
+BINANCE_API_KEY=<your_testnet_key>
+BINANCE_API_SECRET=<your_testnet_secret>
+BINANCE_BASE_URL=
+BINANCE_WS_URL=
+```
+
+Do not copy production credentials into testnet or testnet credentials into production. Reconciliation credentials and the selected Binance environment must refer to the same account environment.
+
+**Important precedence rule:** existing process environment variables override repository `.env` values. A stale shell export such as `BINANCE_ENVIRONMENT=production` or an explicit `BINANCE_BASE_URL=https://fapi.binance.com` can therefore override a `.env` that says `BINANCE_ENVIRONMENT=testnet`.
+
+Before changing environments, clear stale Binance overrides from the current shell if needed.
+
+macOS/Linux:
+
+```bash
+unset BINANCE_ENVIRONMENT BINANCE_TESTNET BINANCE_BASE_URL BINANCE_WS_URL BINANCE_API_KEY BINANCE_API_SECRET
+```
+
+Windows PowerShell:
+
+```powershell
+Remove-Item Env:BINANCE_ENVIRONMENT,Env:BINANCE_TESTNET,Env:BINANCE_BASE_URL,Env:BINANCE_WS_URL,Env:BINANCE_API_KEY,Env:BINANCE_API_SECRET -ErrorAction SilentlyContinue
+```
+
+Verify the effective reconciliation configuration without printing credentials:
+
+```bash
+python - <<'PY'
+from alphaforge.env_contract import bootstrap_environment
+from alphaforge.config import load_reconciliation_settings
+
+bootstrap_environment()
+c = load_reconciliation_settings()
+
+print("environment:", c.environment)
+print("base_url:", c.base_url)
+print("key_loaded:", bool(c.api_key))
+print("secret_loaded:", bool(c.api_secret))
+print("key_source:", c.sources.get("BINANCE_API_KEY"))
+print("secret_source:", c.sources.get("BINANCE_API_SECRET"))
+PY
+```
+
+For testnet, the expected environment/endpoint pair is:
+
+```text
+environment: testnet
+base_url: https://testnet.binancefuture.com
+```
+
+For production, the expected pair is:
+
+```text
+environment: production
+base_url: https://fapi.binance.com
+```
+
+Do not run a burn-in launch when authenticated reconciliation is unavailable or points at the wrong Binance environment. Preflight must fail closed until the selected account environment and reconciliation evidence agree.
+
 Mode switching uses the canonical `ALPHAFORGE_EXECUTION_MODE` value (`BACKTEST`, `PAPER`, or `LIVE`) plus the backward-compatible `EXECUTION_MODE` alias. Never assume PAPER success means LIVE readiness.
 
 LIVE trading can lose capital quickly from slippage, spread expansion, latency, exchange-side failures, and incomplete reconciliation. Do not enable LIVE unless lifecycle integrity, reject persistence, authenticated reconciliation, no-submit prechecks, execution-risk thresholds, kill-switch behavior, rollback evidence, alerting, and operator acknowledgement are validated in your environment.
