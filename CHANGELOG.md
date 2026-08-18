@@ -1,13 +1,55 @@
+## PR #323 post-selection request-bound correction — 2026-08-18
+
+### Added
+- Full-universe selection/request-bound, zero-selection, mixed-provider, duplicate, timeout, scan-progress, and parity regressions.
+
+### Changed
+- Canonical `select_symbols` now runs before selected-candidate geometry enrichment.
+- Geometry HTTP work is concurrently bounded to unique selected Binance 1m symbols and awaited within the scan.
+
+### Fixed
+- Eliminated the pre-selection N+1 kline fan-out and preserved PR #321 scan-progress/failure semantics.
+
+### Removed
+- Scanner-side geometry enrichment of candidates that never reach the decision path.
+
+### Breaking Changes
+- None; provider candidates, schemas, thresholds, reject gates, persistence identities, and LIVE authority are unchanged.
+
+### Known Issues
+- Each unique selected Binance symbol still requires one bounded public kline request. Missing evidence remains `INCOMPLETE_REJECT_GEOMETRY`; start a fresh PAPER campaign after merge. LIVE remains NOT READY.
+
+## PR #323 geometry parity correction — 2026-08-17
+
+### Added
+- A shared closed-candle breakout geometry builder and a real Binance scanner-to-pending-label integration regression.
+- Phase-B raw-RR and SL-width parity coverage plus helper-level SHORT coverage.
+
+### Changed
+- Binance candidates now derive geometry from the last two closed 1m setup candles; backtest candidate construction reuses the same calculation.
+
+### Fixed
+- Removed the incorrect mapping of Binance 24-hour extrema to execution stop/target.
+
+### Removed
+- The `_canonical_ticker_geometry` 24-hour low/high algorithm and claims that those extrema were canonical.
+
+### Breaking Changes
+- None; schemas, thresholds, reject outcomes, authorization, and persistence identities are unchanged.
+
+### Known Issues
+- Production-chain coverage is LONG; SHORT is proven at the shared helper because the mocked scanner scenario emits LONG. Kline enrichment is bounded by the scan budget, so unavailable setup candles remain `INCOMPLETE_REJECT_GEOMETRY`. LIVE remains NOT READY.
+
 ## PAPER early-reject canonical geometry — 2026-08-17
 
 ### Added
 - Production-shaped LONG, SHORT, negative-expectancy, idempotency, incomplete-input, and no-execution regressions for the early quality-reject path.
 
 ### Changed
-- Binance PAPER candidates now carry stop and target from the same observed 24-hour range consumed by the normal signal/execution path.
+- Superseded by PR #323: the initial PAPER candidate geometry mapping was removed before merge.
 
 ### Fixed
-- Early score/negative-expectancy rejects no longer lose available canonical ticker geometry before pending forward-label persistence.
+- Early score/negative-expectancy rejects retain only shared setup geometry before pending forward-label persistence.
 
 ### Removed
 - Nothing; historical observations and reject outcomes are not rewritten.
@@ -16,7 +58,7 @@
 - None; persistence schemas, thresholds, reject decisions, and execution authorization are unchanged.
 
 ### Known Issues
-- Missing, non-finite, equal, or directionally invalid ticker ranges remain `INCOMPLETE_REJECT_GEOMETRY`. A fresh PAPER campaign is required for post-fix evidence. LIVE remains NOT READY.
+- Superseded by PR #323: missing or invalid closed-timeframe setup candles remain `INCOMPLETE_REJECT_GEOMETRY`. A fresh PAPER campaign is required for post-fix evidence. LIVE remains NOT READY.
 
 ## PAPER canonical persistence and zombie supervision — 2026-08-17
 

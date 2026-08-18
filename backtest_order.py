@@ -21,6 +21,7 @@ from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_order_decision, save_signal, save_trade_lifecycle_event
 from alphaforge.portfolio_risk import BacktestPortfolioState, evaluate_portfolio_risk
 from alphaforge.symbol_selector import select_symbol
+from alphaforge.signal_geometry import build_breakout_geometry
 from alphaforge.symbols import SymbolListError, normalize_symbol_list
 from alphaforge.historical_market_data import (
     HistoricalCandle,
@@ -675,18 +676,16 @@ def _build_market_ctx(
     symbol_meta: Mapping[str, Any],
     recent: Optional[List[Candle]] = None,
 ) -> Dict[str, Any]:
-    bullish_breakout = now.close >= prev.close
-    side = "LONG" if bullish_breakout else "SHORT"
-    entry = now.close
-    sl = min(now.low, prev.low) if side == "LONG" else max(now.high, prev.high)
-    risk = max(entry - sl, 1e-9)
-    if side == "SHORT":
-        risk = max(sl - entry, 1e-9)
-    body = abs(now.close - now.open)
-    breakout_strength = max(0.0, (now.close - prev.high) / max(prev.high, 1e-9)) if side == "LONG" else max(0.0, (prev.low - now.close) / max(prev.low, 1e-9))
+    geometry = build_breakout_geometry(asdict(now), asdict(prev))
+    if not geometry:  # Candle validation already occurs at ingestion; retain defensive failure.
+        raise ValueError("invalid candle geometry")
+    side = geometry["side"]
+    entry = geometry["entry"]
+    sl = geometry["sl"]
+    tp = geometry["tp"]
+    rr = geometry["rr"]
+    breakout_strength = geometry["breakout_strength"]
     range_pct = ((now.high - now.low) / max(now.close, 1e-9)) * 100.0
-    rr = max(1.1, min(3.5, 1.2 + breakout_strength * 25.0 + body / max(now.open, 1e-9) * 8.0))
-    tp = entry + rr * risk if side == "LONG" else entry - rr * risk
     score = max(0.0, min(10.0, 3.0 + breakout_strength * 500.0 + range_pct))
     expectancy = ((score / 10.0) - 0.5) * (rr - 1.0)
     quote_volume = symbol_meta.get("quoteVolume")
