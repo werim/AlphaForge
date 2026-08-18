@@ -7,7 +7,7 @@ from urllib import request
 import pytest
 
 from alphaforge.config import load_config_from_env
-from alphaforge.exchange_market_scanner import scan_exchange_markets
+from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
 
 
 def _urlopen_multi(payloads: list[object], captured_urls: list[str] | None = None):
@@ -83,6 +83,51 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
     assert btc["spread_status"] == "MEASURED"
     assert btc["spread_source"] == "BINANCE_BOOK_TICKER"
     assert btc["funding_status"] == "MEASURED"
+
+
+def test_binance_closed_1m_candles_supply_canonical_trade_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "999", "lowPrice": "1", "highPrice": "2000",
+              "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT", "lastFundingRate": "0.0001"}],
+            [[0, "98", "100", "97", "99", "10"],
+             [60_000, "99", "101", "98", "100", "12"],
+             [120_000, "100", "500", "1", "400", "1"]],
+        ]),
+    )
+    cfg = load_config_from_env()
+    scanned = asyncio.run(scan_exchange_markets(cfg))
+    assert "sl" not in scanned[0] and "tp" not in scanned[0]
+    btc = asyncio.run(enrich_selected_market_geometry(scanned, cfg))[0]
+    assert btc["sl"] == 97.0
+    assert btc["entry"] == 100.0
+    assert btc["tp"] == pytest.approx(100.0 + 3.0 * (1.2 + 8.0 / 99.0))
+    assert btc["rr"] == pytest.approx(1.2 + 8.0 / 99.0)
+    assert btc["setup_type"] == "BREAKOUT_UP"
+
+
+def test_binance_invalid_or_missing_range_does_not_fabricate_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "lowPrice": "100", "highPrice": "108",
+              "quoteVolume": "90000000", "priceChangePercent": "1.2"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [],
+            [[0, "98", "100", "97", "99", "10"]],
+        ]),
+    )
+    cfg = load_config_from_env()
+    scanned = asyncio.run(scan_exchange_markets(cfg))
+    btc = asyncio.run(enrich_selected_market_geometry(scanned, cfg))[0]
+    assert "sl" not in btc and "tp" not in btc and "rr" not in btc
 
 
 def test_binance_urls_use_fapi_v1_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:

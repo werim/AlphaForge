@@ -25,7 +25,7 @@ from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationRepor
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
-from alphaforge.exchange_market_scanner import scan_exchange_markets
+from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
@@ -205,6 +205,7 @@ class RuntimeOrchestrator:
     paper_slippage_bps: float = 2.0
     persistence_engine: Engine | None = None
     control_store: RuntimeControlStore | None = None
+    selected_candidate_enricher: Callable[[list[dict[str, Any]]], Awaitable[list[dict[str, Any]]]] | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
     _shadow_queue: asyncio.Queue[dict[str, Any]] | None = field(default=None, init=False)
@@ -1162,7 +1163,6 @@ class RuntimeOrchestrator:
             return
         self.metrics.scans += 1
         candidates = await self.market_scanner()
-        self.metrics.last_scan_ts = canonical_utc_timestamp()
         pre_selection = select_symbols(candidates, {**self._canonical_filter_config(), "include_rejected": True})
         selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
         reject_reasons: dict[str, int] = {}
@@ -1177,6 +1177,19 @@ class RuntimeOrchestrator:
         else:
             self._last_scan_gate_blockers = []
         self.metrics.symbols_selected += len(selected)
+
+        if selected and self.selected_candidate_enricher is not None:
+            selected_inputs = [dict(row.diagnostics.get("inputs", {})) for row in selected]
+            enriched = await self.selected_candidate_enricher(selected_inputs)
+            if len(enriched) != len(selected_inputs):
+                raise RuntimeError("selected_candidate_enricher changed candidate count")
+            for row, before, after in zip(selected, selected_inputs, enriched):
+                if (after.get("symbol"), after.get("source_exchange")) != (
+                    before.get("symbol"), before.get("source_exchange")
+                ):
+                    raise RuntimeError("selected_candidate_enricher changed candidate identity")
+                row.diagnostics["inputs"] = dict(after)
+        self.metrics.last_scan_ts = canonical_utc_timestamp()
 
         for symbol_result in selected:
             await self._process_symbol(symbol_result)
@@ -1887,6 +1900,11 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
             return await _safe_market_scanner()
         return await scan_exchange_markets(cfg)
 
+    async def _selected_candidate_enricher(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if use_safe_scanner:
+            return candidates
+        return await enrich_selected_market_geometry(candidates, cfg)
+
     def _persist_lifecycle(payload: dict[str, Any]) -> None:
         if not persistence_enabled:
             return
@@ -1985,6 +2003,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         config=config,
         ai_brain=brain,
         market_scanner=_runtime_market_scanner,
+        selected_candidate_enricher=_selected_candidate_enricher,
         scanner_source=scanner_source,
         live_reconciliation_provider=live_reconciliation_provider,
         on_lifecycle_event=_persist_lifecycle,

@@ -1,5 +1,41 @@
 # AlphaForge Version
 
+## PR #323 post-selection geometry bound (2026-08-18)
+
+- Current version: PR #323 bounded selected-candidate enrichment correction
+- Current phase: GitHub CI/re-review before fresh PAPER evidence collection; Phase C has not started
+- Runtime maturity: canonical full-universe selection precedes geometry; requests per scan are bounded by unique selected Binance symbols and `max_symbols_per_scan`
+- BACKTEST/PAPER/LIVE alignment: BACKTEST and PAPER share one two-closed-candle builder; production scanner remains LONG-only and SHORT is helper-tested
+- Lifecycle coverage: rejects remain `SIGNAL_REJECTED`; missing geometry remains ineligible and auditable without order/position creation
+- Execution realism coverage: selected 1m Binance candidates use the last two completed 1m setup candles; provider failures leave geometry absent
+- Known critical risks: one explicitly timed public request remains per unique selected Binance symbol; fresh PAPER evidence is required and historical campaign `camp_8a577772ded0bdf2` remains immutable
+- Last audit date: 2026-08-18
+- Live readiness verdict: NOT LIVE READY
+
+## PR #323 geometry parity correction (2026-08-17)
+
+- Current version: PR #323 shared timeframe-geometry correction
+- Current phase: post-fix PAPER evidence validation; Phase C is not complete
+- Runtime maturity: accepted and rejected candidates share the extracted two-candle breakout geometry used by the accepted backtest path
+- BACKTEST/PAPER/LIVE alignment: superseded by the 2026-08-18 architecture above; the raw Binance scanner remains LONG-only and SHORT is helper-tested
+- Lifecycle coverage: early rejects remain `SIGNAL_REJECTED`; pending labels are idempotent and no order/position lifecycle is created
+- Execution realism coverage: stop spans the current/previous closed 1m candles and target uses the existing setup-strength RR calculation; missing candle evidence fails closed
+- Known critical risks: superseded by post-selection enrichment; only selected Binance candidates request geometry, and LIVE remains blocked
+- Last audit date: 2026-08-17
+- Live readiness verdict: NOT LIVE READY
+
+## PAPER early-reject canonical geometry (2026-08-17)
+
+- Current version: issue #322 PAPER reject forward-label geometry hotfix
+- Current phase: post-fix PAPER evidence collection; Phase C is not complete
+- Runtime maturity: superseded by PR #323; the early-reject persistence boundary remains, but its original ticker-extrema geometry was removed
+- BACKTEST/PAPER/LIVE alignment: normal and rejected signals consume the same scanner geometry; decision and authorization semantics are unchanged
+- Lifecycle coverage: rejects remain `SIGNAL_REJECTED`; no order or position lifecycle is created by labelling
+- Execution realism coverage: superseded; execution geometry now uses closed timeframe candles as documented above
+- Known critical risks: campaign `camp_8a577772ded0bdf2` contains 590 immutable incomplete observations and must not be promoted as post-fix evidence; start a fresh campaign
+- Last audit date: 2026-08-17
+- Live readiness verdict: NOT LIVE READY
+
 ## PAPER canonical persistence and zombie supervision (2026-08-17)
 
 - Current version: PAPER burn-in split-brain persistence hotfix
