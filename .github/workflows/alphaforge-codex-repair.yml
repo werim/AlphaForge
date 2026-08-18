@@ -1,0 +1,285 @@
+name: AlphaForge Codex PR Repair
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Open same-repo PR number targeting dev"
+        required: true
+        type: string
+      instruction:
+        description: "Repair instruction for Codex"
+        required: true
+        type: string
+
+concurrency:
+  group: alphaforge-codex-repair-${{ github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      (github.event_name == 'issue_comment' &&
+       github.event.action == 'created' &&
+       github.event.issue.pull_request &&
+       github.actor == 'werim' &&
+       startsWith(github.event.comment.body, '/codex-repair')) ||
+      (github.event_name == 'workflow_dispatch' && github.actor == 'werim')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      pr_number: ${{ steps.meta.outputs.pr_number }}
+      head_ref: ${{ steps.meta.outputs.head_ref }}
+      head_sha: ${{ steps.meta.outputs.head_sha }}
+      base_ref: ${{ steps.meta.outputs.base_ref }}
+      instruction: ${{ steps.meta.outputs.instruction }}
+    steps:
+      - name: Validate repair request and PR boundary
+        id: meta
+        uses: actions/github-script@v7
+        env:
+          DISPATCH_PR_NUMBER: ${{ inputs.pr_number }}
+          DISPATCH_INSTRUCTION: ${{ inputs.instruction }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const dispatch = context.eventName === 'workflow_dispatch';
+            const prNumber = dispatch
+              ? Number(process.env.DISPATCH_PR_NUMBER)
+              : Number(context.issue.number);
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.setFailed('A valid pull request number is required.');
+              return;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            if (pr.state !== 'open') {
+              core.setFailed('Codex repair is allowed only for open PRs.');
+              return;
+            }
+            if (pr.base.ref !== 'dev') {
+              core.setFailed(`Codex repair is restricted to PRs targeting dev; got ${pr.base.ref}.`);
+              return;
+            }
+            if (!pr.head.repo || pr.head.repo.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+              core.setFailed('Codex repair is restricted to same-repository PR branches.');
+              return;
+            }
+            if (pr.draft) {
+              core.setFailed('Codex repair is not run automatically on draft PRs.');
+              return;
+            }
+
+            const raw = dispatch
+              ? (process.env.DISPATCH_INSTRUCTION || '')
+              : (process.env.COMMENT_BODY || '').replace(/^\/codex-repair\b/i, '');
+            const instruction = raw.trim();
+            if (!instruction) {
+              core.setFailed('Repair instruction is empty.');
+              return;
+            }
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_ref', pr.head.ref);
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('base_ref', pr.base.ref);
+            core.setOutput('instruction', instruction);
+
+  codex:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      patch: ${{ steps.run_codex.outputs.final-message }}
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run bounded Codex repair
+        id: run_codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":workspace"
+          safety-strategy: drop-sudo
+          effort: high
+          prompt: |
+            You are AlphaForge's bounded pull-request repair agent.
+
+            Repository: ${{ github.repository }}
+            PR: #${{ needs.prepare.outputs.pr_number }}
+            Base: ${{ needs.prepare.outputs.base_ref }}
+            Exact starting head SHA: ${{ needs.prepare.outputs.head_sha }}
+
+            Read AGENTS.md first and obey its execution-realism, lifecycle,
+            persistence, reject-quality, and fail-closed safety rules.
+
+            TRUSTED OPERATOR REPAIR INSTRUCTION:
+            ---
+            ${{ needs.prepare.outputs.instruction }}
+            ---
+
+            Required behavior:
+            - Repair only the current PR and only the stated blocker(s).
+            - Prefer the smallest production-safe patch over architecture rewrites.
+            - Preserve BACKTEST/PAPER decision semantics unless the instruction
+              explicitly identifies a parity bug that must be corrected.
+            - Preserve reject decisions as valid outcomes; do not increase trade
+              frequency merely to make evidence look better.
+            - Never enable LIVE trading or relax LIVE authorization.
+            - Never change production trading thresholds or autonomous production
+              configuration learning.
+            - Never weaken risk, reconciliation, persistence, lifecycle,
+              authorization, or reject guardrails.
+            - Never fabricate unavailable market/execution evidence.
+            - Do not modify .github/**, AGENTS.md, .env*, requirements.txt,
+              pyproject.toml, setup.cfg, or setup.py.
+            - Do not commit or push; the workflow applies your patch separately.
+            - Add/update focused regression tests when the repair changes behavior.
+            - Run whatever focused checks are available without network access.
+              The repository's normal GitHub CI remains the authoritative full
+              validation gate after the patch is pushed.
+
+            FINAL RESPONSE CONTRACT:
+            If no safe code change is needed, return exactly:
+            NO_CHANGES
+
+            Otherwise return ONLY the raw unified patch produced by:
+              git diff --binary --no-ext-diff
+            Do not wrap it in Markdown fences and do not add prose before or after it.
+
+  apply:
+    needs: [prepare, codex]
+    if: >-
+      needs.codex.outputs.patch != '' &&
+      needs.codex.outputs.patch != 'NO_CHANGES'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out writable PR branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.head_ref }}
+          fetch-depth: 0
+
+      - name: Reject stale or malformed repair output
+        env:
+          EXPECTED_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+          CODEX_PATCH: ${{ needs.codex.outputs.patch }}
+        run: |
+          set -euo pipefail
+          current_sha="$(git rev-parse HEAD)"
+          if [ "$current_sha" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "PR head moved while Codex was working; refusing stale patch."
+            exit 1
+          fi
+
+          patch_file="$RUNNER_TEMP/codex-repair.patch"
+          printf '%s\n' "$CODEX_PATCH" > "$patch_file"
+          if ! grep -q '^diff --git ' "$patch_file"; then
+            echo "Codex output is not a raw git patch."
+            exit 1
+          fi
+          git apply --check "$patch_file"
+          git apply "$patch_file"
+
+      - name: Enforce protected-path and trading-safety boundaries
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only)"
+          if [ -z "$changed" ]; then
+            echo "Patch produced no repository changes."
+            exit 1
+          fi
+          printf '%s\n' "$changed"
+
+          if printf '%s\n' "$changed" | grep -Eq '^(\.github/|AGENTS\.md$|\.env($|\.)|requirements\.txt$|pyproject\.toml$|setup\.cfg$|setup\.py$|src/alphaforge/config\.py$|src/alphaforge/config_registry\.py$)'; then
+            echo "Repair attempted to modify a protected automation/configuration path."
+            exit 1
+          fi
+
+          if git diff --unified=0 | grep -E '^\+.*(live_trading_enabled|allow_live_orders|operator_live_acknowledged).*(True|true|1)' >/dev/null; then
+            echo "Repair attempted to enable a protected LIVE authority flag."
+            exit 1
+          fi
+
+          git diff --check
+          python -m compileall -q src tests backtest_order.py
+
+      - name: Commit and push repair to the same PR branch
+        env:
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          HEAD_REF: ${{ needs.prepare.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "alphaforge-codex-repair[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Codex repair for PR #${PR_NUMBER}"
+          git push origin "HEAD:${HEAD_REF}"
+
+      - name: Report pushed repair
+        id: report
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            const { data: branch } = await github.rest.repos.getBranch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              branch: '${{ needs.prepare.outputs.head_ref }}',
+            });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: `Codex repair pushed as \`${branch.commit.sha.slice(0, 12)}\`. Normal PR CI is now the authoritative validation gate.`,
+            });
+
+  no_changes:
+    needs: [prepare, codex]
+    if: needs.codex.outputs.patch == 'NO_CHANGES'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Report no safe change
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: 'Codex repair completed without producing a safe patch (`NO_CHANGES`). Human review is still required.',
+            });
