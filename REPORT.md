@@ -1333,3 +1333,32 @@ The first complete-denominator patch assumed production observations already con
 Regression coverage exercises the real `RuntimeOrchestrator._persist_reject` path, legacy unattributed evidence, one mature result beside future-due labels, and terminal state contradictions. No schema/export migration or evidence backfill is required. Existing legacy evidence remains immutable and explicitly incomplete. Push recommendation: update PR #320 only after all local checks and GitHub Actions are green; do not merge or infer LIVE readiness before then.
 
 ---
+# Alembic 0007 normalized runtime lifecycle schema repair — 2026-08-18
+
+## Why the patch was needed and root cause
+
+An SQLite database stamped at Alembic `0006_reject_label_identity_timeframe` could retain a mixed `trade_lifecycle_events` table and fail on the first normalized `SIGNAL_CREATED` insert. Investigation confirmed that `0005_core_identifier_normalization` was intentionally scoped to identifier columns on a list of other domain tables: it did not include `trade_lifecycle_events`, normalized lifecycle evidence, or runtime upsert indexes. Its successful application therefore truthfully reported completion of its narrow identifier task, not lifecycle readiness. The independent `schema_migrations` runtime-exposure v4 success check was also scoped to position/order exposure adapters. The actual defect was weak aggregate startup success criteria: schema doctor validated exposure and pending-label shapes but did not validate the lifecycle writer's complete SQL contract or conflict targets.
+
+## Files and exact behavior changed
+
+`alembic/versions/0007_repair_runtime_lifecycle_schema.py` follows 0006 and conservatively adds only missing nullable columns consumed by `save_trade_lifecycle_event()`. It preserves every existing row, legacy column, `event_payload`, and independent `payload`. Exact canonical values already present in `state` are the sole lifecycle-state backfill; unrecognized states remain NULL. No `event_ts`, `created_at`, decision, reject reason, score, RR, expectancy, or execution context is invented. No table rebuild is used.
+
+Before either unique index is created, 0007 queries duplicate non-NULL identities and aborts with the offending identity/count diagnostics when uniqueness is unsafe. NULL `event_id` and nullable composite-key legacy rows remain legal under SQLite UNIQUE semantics. The migration creates UNIQUE `(event_id)` and UNIQUE `(signal_id,event_ts,lifecycle_state)` targets required by the writer's two `ON CONFLICT` statements.
+
+`src/alphaforge/schema_doctor.py` now inspects all lifecycle persistence columns and their SQLite affinities, discovers ordered unique index targets through PRAGMA metadata, and returns `BLOCKED` for missing columns or conflict targets even when `alembic_version` is a recognized head. `burnin_ops.preflight` already treats any non-VALID doctor result as a critical failing `schema_current` check, so launch remains blocked without suppressing persistence errors.
+
+## Persistence, lifecycle, export/schema, and compatibility impact
+
+New runtime writes become possible after upgrade and retain existing idempotent upsert behavior. Historical rows and payloads are unchanged except the safe canonical-state copy described above. Lifecycle ordering logic, reject decisions, CSV exports, execution modeling, BACKTEST/PAPER decision parity, and persistence error propagation do not change. The additive nullable columns are backward compatible; the new uniqueness requirements can expose pre-existing contradictory evidence rather than rewriting it. No migration concern warrants a destructive rebuild.
+
+## Tests executed and remaining limitations
+
+Regression coverage constructs the reported exact mixed lifecycle shape at revision 0006, proves pre-upgrade doctor blocking, upgrades twice through normal Alembic execution, verifies every required column and both conflict targets, checks row/payload/null preservation and conservative state backfill, persists a real lifecycle event, and proves post-upgrade validation. A separate duplicate-identity regression proves fail-closed diagnostics and retained revision/row count. Revision-graph expectations now identify 0007 as head.
+
+Legacy rows lacking trustworthy timestamp evidence intentionally retain NULL `event_ts` and `created_at`. Operators must investigate duplicate identities before retrying an aborted upgrade; automated deletion, identity rewriting, or evidence merging would be unsafe. LIVE readiness remains blocked pending the broader established readiness criteria.
+
+## Migration and push recommendation
+
+After backup and merge, stop writers and run exactly: `git pull`, `alembic upgrade head`, the canonical `preflight`, then `launch` only if preflight returns PASS. Recommend merge after the focused and full suites pass; this repair does not itself establish LIVE readiness.
+
+---

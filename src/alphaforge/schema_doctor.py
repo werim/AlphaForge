@@ -27,7 +27,7 @@ KNOWN_MIGRATION_CHECKSUMS = {
     SCHEMA_VERSION: MIGRATION_CHECKSUM,
 }
 
-KNOWN_ALEMBIC_HEADS = frozenset({"0005_core_identifier_normalization", "0006_reject_label_identity_timeframe"})
+KNOWN_ALEMBIC_HEADS = frozenset({"0005_core_identifier_normalization", "0006_reject_label_identity_timeframe", "0007_repair_runtime_lifecycle_schema"})
 
 POSITION_ACTIVE = frozenset({"OPEN", "POSITION_OPENED", "ACTIVE"})
 POSITION_TERMINAL = frozenset({"CLOSED", "POSITION_CLOSED", "EXITED", "CANCELLED"})
@@ -56,6 +56,23 @@ CONDITIONAL_RUNTIME_SCHEMA: dict[str, dict[str, str]] = {
     },
 }
 
+LIFECYCLE_RUNTIME_SCHEMA: dict[str, str] = {
+    "event_id": "TEXT", "signal_id": "TEXT", "trade_id": "TEXT",
+    "order_id": "TEXT", "symbol": "TEXT", "mode": "TEXT",
+    "lifecycle_state": "TEXT", "state": "TEXT", "event_type": "TEXT",
+    "payload": "TEXT", "decision": "TEXT", "reject_reason": "TEXT",
+    "score": "REAL", "rr": "REAL", "effective_rr": "REAL",
+    "expectancy_bucket": "TEXT", "execution_ctx": "TEXT",
+    "execution_ctx_missing": "INTEGER", "event_ts": "TEXT",
+    "created_at": "TEXT", "lifecycle_seq": "INTEGER", "cancel_reason": "TEXT",
+    "lifecycle_id": "TEXT", "failure_reason": "TEXT",
+    "reconciliation_reason": "TEXT", "incident_payload": "TEXT",
+}
+LIFECYCLE_CONFLICT_TARGETS = (
+    ("event_id",),
+    ("signal_id", "event_ts", "lifecycle_state"),
+)
+
 
 @dataclass
 class SchemaReport:
@@ -65,6 +82,7 @@ class SchemaReport:
     missing_tables: list[str] = field(default_factory=list)
     missing_columns: list[dict[str, str]] = field(default_factory=list)
     type_mismatches: list[dict[str, str]] = field(default_factory=list)
+    missing_unique_constraints: list[dict[str, Any]] = field(default_factory=list)
     unsupported_legacy_shapes: list[dict[str, Any]] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     affected_rows: list[dict[str, Any]] = field(default_factory=list)
@@ -87,6 +105,7 @@ class MigrationReport:
     missing_tables: list[str] = field(default_factory=list)
     missing_columns: list[dict[str, str]] = field(default_factory=list)
     type_mismatches: list[dict[str, str]] = field(default_factory=list)
+    missing_unique_constraints: list[dict[str, Any]] = field(default_factory=list)
     unsupported_legacy_shapes: list[dict[str, Any]] = field(default_factory=list)
     affected_rows: list[dict[str, Any]] = field(default_factory=list)
     unsafe_changes_required: list[str] = field(default_factory=list)
@@ -223,6 +242,29 @@ def inspect_database_schema(target: Any) -> SchemaReport:
                     report.reasons.append("RUNTIME_REQUIRED_COLUMN_MISSING")
                 elif not _affinity_compatible(expected_type, columns[column]["type"]):
                     report.type_mismatches.append({"table": table, "column": column, "expected": expected_type, "actual": columns[column]["type"]})
+        lifecycle_table = "trade_lifecycle_events"
+        if report.alembic_revision == "0007_repair_runtime_lifecycle_schema" and lifecycle_table not in names:
+            report.missing_tables.append(lifecycle_table)
+            report.reasons.append("RUNTIME_LIFECYCLE_CONTRACT_INCOMPATIBLE")
+        if lifecycle_table in names:
+            columns = report.tables[lifecycle_table]
+            for column, expected_type in LIFECYCLE_RUNTIME_SCHEMA.items():
+                if column not in columns:
+                    report.missing_columns.append({"table": lifecycle_table, "column": column})
+                    report.reasons.append("RUNTIME_LIFECYCLE_CONTRACT_INCOMPATIBLE")
+                elif not _affinity_compatible(expected_type, columns[column]["type"]):
+                    report.type_mismatches.append({"table": lifecycle_table, "column": column, "expected": expected_type, "actual": columns[column]["type"]})
+            unique_targets: set[tuple[str, ...]] = set()
+            for index_row in conn.execute(f'PRAGMA index_list("{lifecycle_table}")'):
+                if not bool(index_row[2]):
+                    continue
+                index_name = str(index_row[1]).replace('"', '""')
+                target = tuple(str(row[2]) for row in conn.execute(f'PRAGMA index_info("{index_name}")'))
+                unique_targets.add(target)
+            for target in LIFECYCLE_CONFLICT_TARGETS:
+                if target not in unique_targets:
+                    report.missing_unique_constraints.append({"table": lifecycle_table, "columns": list(target)})
+                    report.reasons.append("RUNTIME_LIFECYCLE_CONFLICT_TARGET_MISSING")
         if report.missing_tables:
             report.reasons.append("EXPOSURE_TABLES_MISSING")
         ptable = report.exposure_tables["positions"]
@@ -284,6 +326,7 @@ def _blocked(report: SchemaReport, reasons: list[str] | None = None) -> Migratio
         reason=all_reasons[0] if all_reasons else "SCHEMA_UNSUPPORTED", reasons=all_reasons,
         missing_tables=report.missing_tables, missing_columns=report.missing_columns,
         type_mismatches=report.type_mismatches, unsupported_legacy_shapes=report.unsupported_legacy_shapes,
+        missing_unique_constraints=report.missing_unique_constraints,
         affected_rows=report.affected_rows, unsafe_changes_required=["manual schema/data migration required"],
         affected_features=["runtime_recovery", "reconciliation", "burnin_preflight"],
         next_action="verify database identity and perform a manual migration",
@@ -410,7 +453,7 @@ def validate_required_schema(target: Any, scope: str = "runtime") -> MigrationRe
                 conn.close()
         if integrity in {"MIGRATION_CHECKSUM_MISMATCH", "MIGRATION_PREVIOUSLY_FAILED"}:
             return _blocked(report, [integrity])
-    blocked = bool(report.missing_tables or report.missing_columns or report.type_mismatches or report.unsupported_legacy_shapes or report.reasons)
+    blocked = bool(report.missing_tables or report.missing_columns or report.type_mismatches or report.missing_unique_constraints or report.unsupported_legacy_shapes or report.reasons)
     if blocked:
         return _blocked(report)
     return MigrationReport(database=report.database, schema_status="VALID", schema_version=SCHEMA_VERSION,

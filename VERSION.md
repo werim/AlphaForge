@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Runtime lifecycle schema repair (2026-08-18)
+
+- Current version: Alembic `0007_repair_runtime_lifecycle_schema`
+- Current phase: additive SQLite lifecycle-contract repair before PAPER relaunch
+- Runtime maturity: launch preflight now verifies every lifecycle persistence column and both SQLite upsert conflict targets
+- BACKTEST/PAPER/LIVE alignment: all modes retain the shared lifecycle writer; incompatible databases block before launch
+- Lifecycle coverage: canonical legacy `state` evidence may populate `lifecycle_state`; ambiguous states and absent timestamps/decision metrics remain NULL
+- Execution realism coverage: unchanged; no execution context, score, RR, decision, or timestamp evidence is fabricated
+- Known critical risks: duplicate non-NULL lifecycle identities require operator reconciliation and intentionally abort migration; nullable legacy identities remain auditable
+- Last audit date: 2026-08-18
+- Live readiness verdict: NOT LIVE READY
+
 ## PR #323 post-selection geometry bound (2026-08-18)
 
 - Current version: PR #323 bounded selected-candidate enrichment correction
