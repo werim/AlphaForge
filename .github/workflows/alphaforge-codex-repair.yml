@@ -245,6 +245,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          HEAD_REF: ${{ needs.prepare.outputs.head_ref }}
         with:
           github-token: ${{ github.token }}
           script: |
@@ -252,7 +253,7 @@ jobs:
             const { data: branch } = await github.rest.repos.getBranch({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              branch: '${{ needs.prepare.outputs.head_ref }}',
+              branch: process.env.HEAD_REF,
             });
             await github.rest.issues.createComment({
               owner: context.repo.owner,
