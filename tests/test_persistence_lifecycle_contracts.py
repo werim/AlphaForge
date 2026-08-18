@@ -4,6 +4,7 @@ from pathlib import Path
 import importlib.util
 import sqlite3
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -48,7 +49,7 @@ def test_fetch_expectancy_stat_detail_keeps_metadata_separate_from_scalar_api() 
     assert detail["expectancy"] == 0.31
 
 
-def test_init_db_repairs_legacy_lifecycle_and_decision_compat_columns(tmp_path: Path) -> None:
+def test_init_db_blocks_incompatible_legacy_lifecycle_before_bootstrap_mutation(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy_runtime.db"
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
@@ -58,17 +59,15 @@ def test_init_db_repairs_legacy_lifecycle_and_decision_compat_columns(tmp_path: 
         conn.execute("INSERT INTO order_decisions (decision_id) VALUES ('preserve-decision')")
         conn.execute("INSERT INTO trade_lifecycle_events (event_id) VALUES ('preserve-event')")
 
-    init_db(f"sqlite+pysqlite:///{db_path}")
-    init_db(f"sqlite+pysqlite:///{db_path}")
+    with pytest.raises(RuntimeError, match="RUNTIME_LIFECYCLE_CONTRACT_INCOMPATIBLE"):
+        init_db(f"sqlite+pysqlite:///{db_path}")
 
     with sqlite3.connect(db_path) as conn:
-        decision_cols = {row[1] for row in conn.execute("PRAGMA table_info(order_decisions)")}
         lifecycle_cols = {row[1] for row in conn.execute("PRAGMA table_info(trade_lifecycle_events)")}
         decision_rows = conn.execute("SELECT COUNT(*) FROM order_decisions WHERE decision_id='preserve-decision'").fetchone()[0]
         lifecycle_rows = conn.execute("SELECT COUNT(*) FROM trade_lifecycle_events WHERE event_id='preserve-event'").fetchone()[0]
 
-    assert "payload" in decision_cols
-    assert {"trade_id", "state", "payload"}.issubset(lifecycle_cols)
+    assert lifecycle_cols == {"id", "event_id"}
     assert decision_rows == 1
     assert lifecycle_rows == 1
 

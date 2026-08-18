@@ -4172,3 +4172,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Historical observations without stable identity cannot be safely deduplicated and continue to block Phase C.
+## Runtime lifecycle schema repair — 2026-08-18
+
+### Added
+- Alembic `0007` additively repairs all columns consumed by lifecycle persistence and creates its two required unique conflict targets after duplicate diagnostics.
+- Schema-doctor and preflight validation of lifecycle columns, affinities, and ordered unique targets, plus mixed-0006 upgrade regressions.
+
+### Changed
+- Exact canonical legacy `state` values may be copied to nullable `lifecycle_state`; all ambiguous evidence remains untouched.
+
+### Fixed
+- Alembic-head databases can no longer pass preflight while `save_trade_lifecycle_event()` is structurally unable to insert `SIGNAL_CREATED`.
+
+### Removed
+- Nothing; no table, row, legacy column, or payload is removed or merged.
+
+### Breaking Changes
+- Databases with duplicate non-NULL `event_id` or duplicate non-NULL `(signal_id,event_ts,lifecycle_state)` evidence fail migration closed and require manual reconciliation.
+
+### Known Issues
+- Legacy rows without trustworthy timestamp evidence retain NULL `event_ts` and `created_at`; LIVE remains NOT READY.
