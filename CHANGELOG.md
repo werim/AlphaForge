@@ -4254,3 +4254,25 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Legacy rows without trustworthy timestamp evidence retain NULL `event_ts` and `created_at`; LIVE remains NOT READY.
+## PAPER campaign executable scope and geometry diagnostics — 2026-08-20
+
+### Added
+- Campaign symbol/provider qualification scope reporting and stable Binance closed-1m geometry diagnostics.
+- Defense-in-depth campaign mismatch events and regression coverage.
+
+### Changed
+- Attached PAPER campaigns now constrain and deduplicate scanner candidates before selection and geometry enrichment.
+- New PAPER campaign defaults explicitly declare Binance read-only source identity.
+
+### Fixed
+- Broad-market symbols and mismatched providers can no longer produce decisions under a narrower campaign identity.
+- Historical out-of-universe evidence now makes `reject-label-status` fail structurally.
+
+### Removed
+- Silent `{}` collapse for diagnosed Binance kline/geometry failures.
+
+### Breaking Changes
+- Campaigns without a supported explicit provider identity fail attachment; create a fresh campaign. No database migration is required.
+
+### Known Issues
+- The 56 pre-fix Binance incomplete-geometry rows lack enough stored evidence for exact retrospective classification. LIVE remains NOT READY.

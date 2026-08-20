@@ -294,9 +294,9 @@ def _runtime_for_campaign(db, *, mode=ExecutionMode.PAPER):
     return rt, engine
 
 def _campaign_matching_runtime(db, rt):
-    h=rt._phase8_runtime_hashes()
+    h=rt._phase8_runtime_hashes(["BTCUSDT"], ["1m"])
     conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
-    camp=create_campaign(conn,release_id=h['release_id'],duration_days=1,symbols=[],intervals=[])
+    camp=create_campaign(conn,release_id=h['release_id'],duration_days=1,symbols=["BTCUSDT"],intervals=["1m"])
     conn.execute("UPDATE burnin_campaigns SET config_hash=?, strategy_config_hash=?, universe_hash=?, execution_cost_config_hash=? WHERE campaign_id=?",(h['config_hash'],h['strategy_config_hash'],h['universe_hash'],h['execution_cost_config_hash'],camp.campaign_id))
     start_or_resume_campaign(conn,camp.campaign_id)
     conn.commit(); conn.close(); return camp.campaign_id,h
@@ -508,11 +508,11 @@ def test_canonical_identity_drift_reasons_for_filter_strategy_universe_and_cost(
 def test_effective_paper_slippage_identity_attaches_and_drifts(tmp_path):
     db=tmp_path/'effective_slippage.db'; rt, engine=_runtime_for_campaign(db)
     rt.paper_slippage_bps = 7.5
-    identity = build_phase8_campaign_identity(rt.config, [], [], release_id=rt.config.phase7_burnin_release_id, paper_slippage_bps=rt.paper_slippage_bps)
+    identity = build_phase8_campaign_identity(rt.config, ["BTCUSDT"], ["1m"], release_id=rt.config.phase7_burnin_release_id, paper_slippage_bps=rt.paper_slippage_bps)
     assert identity['execution_cost_payload']['paper_slippage_bps'] == 7.5
     assert identity['execution_cost_payload']['paper_expected_slippage_pct'] == 0.00075
     conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
-    camp=create_campaign(conn,release_id=identity['release_id'],duration_days=1,symbols=[],intervals=[],runtime_config=rt.config,paper_slippage_bps=rt.paper_slippage_bps)
+    camp=create_campaign(conn,release_id=identity['release_id'],duration_days=1,symbols=["BTCUSDT"],intervals=["1m"],runtime_config=rt.config,paper_slippage_bps=rt.paper_slippage_bps)
     start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close()
     rt._attach_phase8_campaign(camp.campaign_id)
     rt.paper_slippage_bps = 8.5

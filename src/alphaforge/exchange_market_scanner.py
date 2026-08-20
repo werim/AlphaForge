@@ -6,7 +6,9 @@ import time
 from typing import Any
 from urllib import parse, request
 
-from alphaforge.signal_geometry import build_breakout_geometry
+from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
+
+GEOMETRY_SOURCE = "BINANCE_CLOSED_1M_KLINES"
 
 
 async def scan_exchange_markets(config: Any) -> list[dict[str, Any]]:
@@ -18,16 +20,23 @@ def _binance_kline_geometry(base_url: str, symbol: str, *, timeout_sec: float) -
     query = parse.urlencode({"symbol": symbol, "interval": "1m", "limit": 3})
     try:
         rows = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/klines?{query}", timeout_sec=timeout_sec)
-    except (OSError, TimeoutError, json.JSONDecodeError, TypeError, ValueError):
-        return {}
-    if not isinstance(rows, list) or len(rows) < 3:
-        return {}
+    except (TimeoutError, asyncio.TimeoutError):
+        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_TIMEOUT", "geometry_source": GEOMETRY_SOURCE}
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_FETCH_FAILED", "geometry_source": GEOMETRY_SOURCE}
+    if not isinstance(rows, list):
+        return {"geometry_status": "INVALID", "geometry_reason": "KLINE_MALFORMED_PAYLOAD", "geometry_source": GEOMETRY_SOURCE}
+    if len(rows) < 3:
+        return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_INSUFFICIENT_ROWS", "geometry_source": GEOMETRY_SOURCE}
     candles = []
     for row in rows[-3:-1]:
         if not isinstance(row, list) or len(row) < 5:
-            return {}
+            return {"geometry_status": "INVALID", "geometry_reason": "KLINE_MALFORMED_PAYLOAD", "geometry_source": GEOMETRY_SOURCE}
         candles.append({"open": row[1], "high": row[2], "low": row[3], "close": row[4]})
-    return build_breakout_geometry(candles[1], candles[0])
+    geometry, reason = build_breakout_geometry_with_diagnostics(candles[1], candles[0])
+    if reason:
+        return {"geometry_status": "INVALID", "geometry_reason": reason, "geometry_source": GEOMETRY_SOURCE}
+    return {**geometry, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": GEOMETRY_SOURCE}
 
 
 def _fetch_json_with_latency(url: str, *, timeout_sec: float) -> tuple[Any, float | None]:

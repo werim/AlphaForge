@@ -7,7 +7,9 @@ from urllib import request
 import pytest
 
 from alphaforge.config import load_config_from_env
-from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
+from alphaforge.exchange_market_scanner import (_binance_kline_geometry,
+    enrich_selected_market_geometry, scan_exchange_markets)
+from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
 
 
 def _urlopen_multi(payloads: list[object], captured_urls: list[str] | None = None):
@@ -154,6 +156,28 @@ def test_binance_invalid_or_missing_range_does_not_fabricate_geometry(monkeypatc
     scanned = asyncio.run(scan_exchange_markets(cfg))
     btc = asyncio.run(enrich_selected_market_geometry(scanned, cfg))[0]
     assert "sl" not in btc and "tp" not in btc and "rr" not in btc
+    assert btc["geometry_status"] == "UNAVAILABLE"
+    assert btc["geometry_reason"] == "KLINE_INSUFFICIENT_ROWS"
+    assert btc["geometry_source"] == "BINANCE_CLOSED_1M_KLINES"
+
+
+@pytest.mark.parametrize(("current", "previous", "reason"), [
+    ({"open": "bad", "high": 2, "low": 1, "close": 2}, {"open": 1, "high": 2, "low": 1, "close": 1}, "KLINE_MALFORMED_PAYLOAD"),
+    ({"open": 2, "high": 1, "low": 2, "close": 2}, {"open": 1, "high": 2, "low": 1, "close": 1}, "OHLC_INVALID"),
+    ({"open": 1, "high": 2, "low": 1, "close": 1}, {"open": 1, "high": 2, "low": 1, "close": 1}, "ZERO_RISK_GEOMETRY"),
+])
+def test_geometry_diagnostics_never_fabricate(current, previous, reason):
+    geometry, observed = build_breakout_geometry_with_diagnostics(current, previous)
+    assert geometry == {}
+    assert observed == reason
+
+
+def test_kline_fetch_failure_is_queryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+    result = _binance_kline_geometry("https://example.invalid", "BTCUSDT", timeout_sec=1)
+    assert result == {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_FETCH_FAILED",
+                      "geometry_source": "BINANCE_CLOSED_1M_KLINES"}
 
 
 def test_binance_urls_use_fapi_v1_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:

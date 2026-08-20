@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 REQUIRED = {
-    "burnin_observations": {"observation_id", "burnin_run_id", "execution_mode", "decision", "evidence_complete", "missing_fields_json", "metrics_json"},
+    "burnin_observations": {"observation_id", "burnin_run_id", "execution_mode", "decision", "symbol", "evidence_complete", "missing_fields_json", "metrics_json", "source_provenance_json"},
     "rejected_signal_reviews": {"reject_decision_id", "signal_id", "reject_reason", "raw_rr", "effective_rr", "reject_correct", "execution_invalidated", "outcome_ambiguous", "evidence_complete", "max_favorable_excursion_pct", "max_adverse_excursion_pct"},
     "burnin_pending_reject_labels": {"pending_label_id", "campaign_id", "burnin_run_id", "reject_decision_id", "signal_id", "status", "due_at", "claimed_at", "timeframe", "horizon_bars", "horizon_seconds", "entry", "stop", "target", "execution_cost_assumptions_json"},
     "burnin_reject_outcomes": {"reject_outcome_id", "burnin_run_id", "reject_reason", "evidence_complete", "execution_invalidated", "ambiguous", "hypothetical_net_r_after_costs", "missed_profit", "avoided_loss", "payload_json"},
@@ -52,6 +52,24 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             "SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (identity,))]
     else:
         run_ids = []
+    declared_symbols: set[str] = set()
+    declared_providers: set[str] = set()
+    if not identity.startswith("standalone:") and "burnin_campaigns" in tables:
+        campaign_row = conn.execute(
+            "SELECT symbols_json, source_provenance_json FROM burnin_campaigns WHERE campaign_id=?",
+            (identity,)).fetchone()
+        if campaign_row:
+            try:
+                declared_symbols = {str(value).upper() for value in json.loads(campaign_row[0] or "[]")}
+            except (TypeError, ValueError):
+                declared_symbols = set()
+            try:
+                provenance = json.loads(campaign_row[1] or "{}")
+                provider_identity = " ".join(str(provenance.get(key) or "") for key in ("provider", "exchange"))
+                declared_providers = {provider for provider in ("binance", "hyperliquid")
+                                      if provider.upper() in provider_identity.upper()}
+            except (AttributeError, TypeError, ValueError):
+                declared_providers = set()
     run_ph = ",".join("?" for _ in run_ids) or "NULL"
     p = [dict(r) for r in conn.execute(
         f"SELECT * FROM burnin_pending_reject_labels WHERE burnin_run_id IN ({run_ph}) AND campaign_id=?",
@@ -94,6 +112,29 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
            OR (json_valid(payload_json) AND (json_extract(payload_json,'$.campaign_id')=?
                OR json_extract(payload_json,'$.runtime_identity')=?))""",
         [*decision_ids, *signal_ids, identity, identity])]
+    observed_symbols = {str(row.get("symbol") or "").upper() for row in observations if row.get("symbol")}
+    observed_providers: set[str] = set()
+    out_of_universe_decision_count = 0
+    provider_mismatch_decision_count = 0
+    for review in reviews:
+        payload = decoded(review.get("payload_json"), {})
+        symbol = str(review.get("symbol") or payload.get("symbol") or "").upper()
+        provider = str(payload.get("source_exchange") or "").lower()
+        if symbol:
+            observed_symbols.add(symbol)
+        if provider:
+            observed_providers.add(provider)
+        if declared_symbols and symbol and symbol not in declared_symbols:
+            out_of_universe_decision_count += 1
+        if declared_providers and provider and provider not in declared_providers:
+            provider_mismatch_decision_count += 1
+    for row in observations:
+        provenance = decoded(row.get("source_provenance_json"), {})
+        provider = str(provenance.get("source_exchange") or "").lower()
+        if provider:
+            observed_providers.add(provider)
+    out_of_universe_symbols = sorted(observed_symbols - declared_symbols) if declared_symbols else []
+    out_of_scope_providers = sorted(observed_providers - declared_providers) if declared_providers else []
     outcomes = [dict(r) for r in conn.execute(
         f"SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id IN ({run_ph})", run_ids)]
     # Mirror burnin_resolver._sync_review exactly: explicit decision identity
@@ -258,12 +299,15 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
     if failed_count: reasons.add("FAILED_LABELS_PRESENT")
     if ambiguous_count: reasons.add("AMBIGUOUS_LABELS_PRESENT")
     if execution_invalidated_count: reasons.add("EXECUTION_INVALIDATED_LABELS_PRESENT")
+    if out_of_universe_symbols: reasons.add("CAMPAIGN_UNIVERSE_MISMATCH")
+    if out_of_scope_providers or (not identity.startswith("standalone:") and not declared_providers):
+        reasons.add("CAMPAIGN_PROVIDER_MISMATCH")
     if not canonical: reasons.add("NO_FORWARD_OUTCOMES_YET")
     eligible = [r for r in review_by_pending.values() if r["evidence_complete"] == 1 and r["execution_invalidated"] != 1 and r["outcome_ambiguous"] != 1 and r["reject_correct"] is not None]
     if not eligible: reasons.add("INSUFFICIENT_MATURE_EVIDENCE")
     if coverage["mature_coverage_ratio"] is not None and coverage["mature_coverage_ratio"] < 1.0:
         reasons.add("INCOMPLETE_MATURE_COVERAGE")
-    failures = {"DUPLICATE_REJECT_IDENTITY", "AMBIGUOUS_REVIEW_LINKAGE", "ORPHAN_REJECT_REVIEW", "ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_OUTCOME", "INVALID_REJECT_CORRECT_LABEL", "INVALID_FINALIZED_EVIDENCE", "RESOLVED_WITHOUT_OUTCOME", "MISSING_ELIGIBLE_PENDING_LABEL", "DUPLICATE_PENDING_LABEL_OWNERSHIP", "PENDING_OUTCOME_STATE_INCONSISTENCY"}
+    failures = {"DUPLICATE_REJECT_IDENTITY", "AMBIGUOUS_REVIEW_LINKAGE", "ORPHAN_REJECT_REVIEW", "ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_OUTCOME", "INVALID_REJECT_CORRECT_LABEL", "INVALID_FINALIZED_EVIDENCE", "RESOLVED_WITHOUT_OUTCOME", "MISSING_ELIGIBLE_PENDING_LABEL", "DUPLICATE_PENDING_LABEL_OWNERSHIP", "PENDING_OUTCOME_STATE_INCONSISTENCY", "CAMPAIGN_UNIVERSE_MISMATCH", "CAMPAIGN_PROVIDER_MISMATCH"}
     status = "FAIL" if reasons & failures else "INCOMPLETE" if reasons else "PASS"
 
     quality = []
@@ -287,6 +331,14 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             "avoided_losing_trades": sum((o.get("avoided_loss") or 0) > 0 for o in os if o["evidence_complete"] == 1 and o["execution_invalidated"] != 1 and o["ambiguous"] != 1)})
 
     return {**base, "status": status, "reason_codes": sorted(reasons), "schema_limitations": [],
+        "campaign_scope": {"declared_symbols": sorted(declared_symbols),
+            "observed_decision_symbols": sorted(observed_symbols),
+            "out_of_universe_symbols": out_of_universe_symbols,
+            "out_of_universe_decision_count": out_of_universe_decision_count,
+            "declared_source_exchanges": sorted(declared_providers),
+            "observed_source_exchanges": sorted(observed_providers),
+            "out_of_scope_source_exchanges": out_of_scope_providers,
+            "provider_mismatch_decision_count": provider_mismatch_decision_count},
         "coverage": coverage,
         "integrity": {"rejected_reviews": len(reviews), "distinct_reject_decision_ids": len(set(r["reject_decision_id"] for r in reviews if r["reject_decision_id"] is not None)), "duplicate_reject_decision_ids": duplicate_review_ids,
             "pending_labels": len(p), "reject_outcomes": len(canonical), "reviews_without_eligible_pending_labels": orphan_reviews,

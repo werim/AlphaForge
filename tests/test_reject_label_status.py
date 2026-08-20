@@ -333,3 +333,22 @@ def test_campaign_standalone_and_unrelated_history_are_isolated(tmp_path):
     standalone = report(conn, "standalone:unrelated-run")
     assert standalone["coverage"]["total_rejected_decisions"] == 1
     assert standalone["coverage"]["unlabeled_rejects"] == 1
+
+
+def test_campaign_universe_contamination_is_read_only_structural_failure(tmp_path):
+    _, conn, cid = database(tmp_path)
+    run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
+    before = conn.total_changes
+    conn.execute("""INSERT INTO rejected_signal_reviews(
+        reject_decision_id,signal_id,symbol,reject_reason,created_at,payload_json)
+        VALUES('reject:bch','bch','BCHUSDT','LOW_CONFIDENCE','2026-01-01T00:00:00Z',?)""",
+        (json.dumps({"campaign_id": cid, "symbol": "BCHUSDT", "source_exchange": "binance"}),))
+    add_reject_observation(conn, run, "reject:bch", incomplete=True)
+    conn.commit()
+    before = conn.total_changes
+    result = report(conn, cid)
+    assert result["status"] == "FAIL"
+    assert "CAMPAIGN_UNIVERSE_MISMATCH" in result["reason_codes"]
+    assert result["campaign_scope"]["out_of_universe_symbols"] == ["BCHUSDT"]
+    assert result["campaign_scope"]["out_of_universe_decision_count"] == 1
+    assert conn.total_changes == before

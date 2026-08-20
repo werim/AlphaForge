@@ -155,7 +155,8 @@ def campaign_id_for(release_id: str, payload: Mapping[str, Any]) -> str:
 
 def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
     bootstrap_campaign_schema(conn)
-    prov=dict(source_provenance or {"provider":"PAPER_MARKET_DATA","source":"operator"})
+    prov=dict(source_provenance or {"provider":"BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE",
+                                    "order_submission": "DISABLED", "source":"operator"})
     if not prov: raise ValueError("missing provenance")
     if runtime_config is not None:
         ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id, paper_slippage_bps=paper_slippage_bps)

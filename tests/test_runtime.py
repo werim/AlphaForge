@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import inspect
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import text
@@ -94,6 +95,39 @@ def test_paper_execution_simulator_produces_fill() -> None:
     )
     assert result["status"] == "filled"
     assert result["fill_price"] > 100.0
+
+
+def test_attached_campaign_allowlist_bounds_and_deduplicates_before_selection(monkeypatch):
+    candidates = [{"symbol": symbol, "source_exchange": "binance"} for symbol in
+                  ("BTCUSDT", "ETHUSDT", "BCHUSDT", "XRPUSDT", "BNBUSDT", "BTCUSDT")]
+    observed = []
+    monkeypatch.setattr(runtime_module, "select_symbols", lambda rows, cfg: [
+        SimpleNamespace(symbol=row["symbol"], tradable=True, reject_reasons=[],
+                        diagnostics={"inputs": row}) for row in rows])
+    async def process(self, selection):
+        observed.append(selection.symbol)
+    monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
+    orchestrator = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+        max_symbols_per_scan=5), _brain(), lambda: asyncio.sleep(0, result=candidates))
+    orchestrator._burnin_run_id = "run"
+    orchestrator._campaign_symbols = frozenset({"BTCUSDT", "ETHUSDT"})
+    orchestrator._campaign_source_exchanges = frozenset({"binance"})
+    asyncio.run(orchestrator._scan_once())
+    assert observed == ["BTCUSDT", "ETHUSDT"]
+    assert orchestrator.metrics.symbols_selected == 2
+
+
+def test_campaign_defense_in_depth_fails_before_processing():
+    orchestrator = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        _brain(), lambda: asyncio.sleep(0, result=[]))
+    orchestrator._burnin_run_id = "run"
+    orchestrator._campaign_symbols = frozenset({"BTCUSDT", "ETHUSDT"})
+    orchestrator._campaign_source_exchanges = frozenset({"binance"})
+    with pytest.raises(RuntimeError, match="CAMPAIGN_UNIVERSE_RUNTIME_MISMATCH"):
+        orchestrator._assert_campaign_candidate("BCHUSDT", "binance", "BEFORE_PROCESS_SYMBOL")
+    assert orchestrator.metrics.decisions_generated == 0
+    assert orchestrator.metrics.rejects_persisted == 0
+    assert orchestrator.metrics.executions == 0
 
 
 def test_reject_lifecycle_persistence_increments_metrics() -> None:

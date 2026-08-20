@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PAPER campaign executable-scope correction (2026-08-20)
+
+- Current version: dev post-PR-#328 campaign-scope correctness repair.
+- Current phase: fresh PAPER campaign required; `camp_e902c3018c2eb1fd` remains immutable contaminated evidence.
+- Runtime maturity: attached campaign symbols and Binance provider identity now bound selection, decisions, persistence, and PAPER execution.
+- BACKTEST/PAPER/LIVE alignment: shared geometry calculation remains compatible; PAPER adds identity enforcement and LIVE authority is unchanged.
+- Lifecycle coverage: out-of-scope candidates cannot create lifecycle decisions; late invariant violations fail closed with durable diagnostics.
+- Execution realism coverage: closed-1m Binance geometry failures expose status, reason, and source without synthetic values.
+- Known critical risks: the historical 56 incomplete rows predate diagnostic reason capture and cannot be exactly classified without rewriting evidence.
+- Last audit date: 2026-08-20.
+- Live readiness verdict: NOT LIVE READY.
+
 ## PR #328 timeframe and health follow-up (2026-08-20)
 
 - PR #328 CI follow-up: PAPER decision-timeframe registry metadata now names the production Binance scanner consumer and a behavioral node proves unsupported values fail closed without a 1m fallback.

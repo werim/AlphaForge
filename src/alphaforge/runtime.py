@@ -225,6 +225,9 @@ class RuntimeOrchestrator:
     _recovery_required: bool = field(default=False, init=False)
     _fail_closed_reason: str | None = field(default=None, init=False)
     _campaign_intervals: tuple[str, ...] = field(default=(), init=False)
+    _campaign_id: str | None = field(default=None, init=False)
+    _campaign_symbols: frozenset[str] = field(default_factory=frozenset, init=False)
+    _campaign_source_exchanges: frozenset[str] = field(default_factory=frozenset, init=False)
     _fatal_task_exception: BaseException | None = field(default=None, init=False)
     _fatal_task_name: str | None = field(default=None, init=False)
     _unknown_exchange_state: bool = field(default=False, init=False)
@@ -695,7 +698,14 @@ class RuntimeOrchestrator:
                 self._fail_closed_reason = attachment_error or "PHASE8_CAMPAIGN_NOT_FOUND"
                 raise RuntimeError(self._fail_closed_reason)
             campaign_identity = campaign_attachment_identity(campaign)
+            self._campaign_id = campaign_id
             self._campaign_intervals = tuple(str(value) for value in (campaign.get("intervals") or []))
+            self._campaign_symbols = frozenset(str(value).upper() for value in (campaign.get("symbols") or []))
+            provenance = dict(campaign.get("source_provenance") or {})
+            provider_identity = " ".join(str(provenance.get(key) or "") for key in ("provider", "exchange"))
+            self._campaign_source_exchanges = frozenset(
+                exchange for exchange in ("binance", "hyperliquid") if exchange.upper() in provider_identity.upper()
+            )
             run_identity = run_attachment_identity(run) if run else {}
             runtime_identity = self._phase8_runtime_hashes(campaign.get("symbols") or [], campaign.get("intervals") or [])
             campaign_run_mismatches = identity_mismatches(campaign_identity, run_identity, ATTACHMENT_IDENTITY_FIELDS) if run else {"active_run": {"expected": campaign.get("active_run_id"), "observed": None}}
@@ -729,6 +739,14 @@ class RuntimeOrchestrator:
                     "active_run_mapping": mapping or {},
                 })
                 with contextlib.suppress(Exception): conn.commit()
+                self._fail_closed_reason = reason
+                raise RuntimeError(reason)
+            if not self._campaign_symbols or not self._campaign_source_exchanges:
+                reason = ("PHASE8_CAMPAIGN_UNIVERSE_INVALID" if not self._campaign_symbols
+                          else "PHASE8_CAMPAIGN_PROVIDER_IDENTITY_INVALID")
+                fail_active_campaign_run(conn, campaign_id, reason,
+                                         details={"source_provenance": provenance,
+                                                  "symbols": sorted(self._campaign_symbols)})
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
             self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
@@ -816,6 +834,8 @@ class RuntimeOrchestrator:
     def _persist_burnin_decision(self, payload: Mapping[str, Any], *, lifecycle_state: str | None = None) -> None:
         if self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
             return
+        self._assert_campaign_candidate(str(payload.get("symbol") or ""),
+                                        payload.get("source_exchange"), "DECISION_PERSISTENCE")
         if not self._burnin_run_id:
             self._start_or_resume_burnin_run()
         engine = self._resolve_persistence_engine()
@@ -832,8 +852,11 @@ class RuntimeOrchestrator:
                     "spread_pct", "expected_slippage_pct", "latency_ms", "funding_rate_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
-                                "campaign_id": campaign_id, "runtime_identity": runtime_identity})
-                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
+                                "campaign_id": campaign_id, "runtime_identity": runtime_identity,
+                                "geometry_status": payload.get("geometry_status"),
+                                "geometry_reason": payload.get("geometry_reason"),
+                                "geometry_source": payload.get("geometry_source")})
+                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
             self.metrics.burnin_observations += 1
             with engine.begin() as conn:
                 update_burnin_run_counters(conn, self._burnin_run_id)
@@ -1173,6 +1196,14 @@ class RuntimeOrchestrator:
             return
         self.metrics.scans += 1
         candidates = await self.market_scanner()
+        if self._burnin_run_id and self._campaign_symbols:
+            candidates = [candidate for candidate in candidates
+                          if str(candidate.get("symbol") or "").upper() in self._campaign_symbols
+                          and str(candidate.get("source_exchange") or "").lower() in self._campaign_source_exchanges]
+            deduplicated: dict[str, dict[str, Any]] = {}
+            for candidate in candidates:
+                deduplicated.setdefault(str(candidate.get("symbol") or "").upper(), candidate)
+            candidates = list(deduplicated.values())
         pre_selection = select_symbols(candidates, {**self._canonical_filter_config(), "include_rejected": True})
         selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
         reject_reasons: dict[str, int] = {}
@@ -1202,10 +1233,37 @@ class RuntimeOrchestrator:
         self.metrics.last_scan_ts = canonical_utc_timestamp()
 
         for symbol_result in selected:
+            inputs = symbol_result.diagnostics.get("inputs", {})
+            self._assert_campaign_candidate(symbol_result.symbol, inputs.get("source_exchange"),
+                                            "BEFORE_PROCESS_SYMBOL")
             await self._process_symbol(symbol_result)
+
+    def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
+        """Fail closed and durably diagnose an attached-campaign scope violation."""
+        if not self._burnin_run_id or not self._campaign_symbols:
+            return
+        normalized_symbol = str(symbol or "").upper()
+        normalized_source = str(source_exchange or "").lower()
+        if normalized_symbol in self._campaign_symbols and normalized_source in self._campaign_source_exchanges:
+            return
+        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        details = {"campaign_id": campaign_id, "burnin_run_id": self._burnin_run_id,
+                   "declared_symbols": sorted(self._campaign_symbols),
+                   "declared_source_exchanges": sorted(self._campaign_source_exchanges),
+                   "observed_symbol": normalized_symbol, "observed_source_exchange": normalized_source,
+                   "stage": stage}
+        engine = self._resolve_persistence_engine()
+        if engine is not None and campaign_id:
+            with engine.begin() as conn:
+                burnin_campaign_event(conn, campaign_id, "CAMPAIGN_UNIVERSE_RUNTIME_MISMATCH",
+                                      details=details)
+        self._fail_closed_reason = "CAMPAIGN_UNIVERSE_RUNTIME_MISMATCH"
+        raise RuntimeError(self._fail_closed_reason)
 
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
+        self._assert_campaign_candidate(selection.symbol, market_ctx.get("source_exchange"),
+                                        "PROCESS_SYMBOL")
         market_ctx.setdefault("mode", self.config.execution_mode.value)
         if self.config.execution_mode is ExecutionMode.PAPER and self.config.paper_fee_bps is not None:
             try:
@@ -1338,11 +1396,11 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
             await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
-            self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+            self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
             self._generate_burnin_snapshot(reason="periodic")
             return
 
-        self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+        self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
         self._schedule_agent_shadow({"signal_id": signal_id, "symbol": selection.symbol,
             "mode": self.config.execution_mode.value, "decision": "ACCEPTED",
             "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"),
@@ -1405,6 +1463,7 @@ class RuntimeOrchestrator:
         )
 
     async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> None:
+        self._assert_campaign_candidate(symbol, market_ctx.get("source_exchange"), "PAPER_EXECUTION")
         if self._kill_switch_active():
             raise RuntimeError("KILL_SWITCH_ACTIVE")
         mode = self.config.execution_mode
@@ -1501,6 +1560,8 @@ class RuntimeOrchestrator:
         }
 
     async def _persist_reject(self, payload: dict[str, Any]) -> None:
+        self._assert_campaign_candidate(str(payload.get("symbol") or ""),
+                                        payload.get("source_exchange"), "REJECT_PERSISTENCE")
         payload = self._canonical_reject_payload(payload)
         self._reject_log.append(payload)
         self.metrics.rejects_persisted += 1
