@@ -1395,3 +1395,39 @@ After backup and merge, stop writers and run exactly: `git pull`, `alembic upgra
 ### Verification result
 
 `tests/test_env_wiring_contract.py` passed all 124 tests. The full local suite completed with 1,259 passed and 6 skipped; its six failures are limited to Alembic imports because the Alembic distribution is absent from this environment. The behavioral wiring change itself is green, so the existing review thread is ready to resolve in the PR host after push.
+## Post-PR-#328 campaign universe regression surgery — 2026-08-20
+
+### Need and root cause
+
+Campaign symbols were hashed and persisted but never applied as an allow-list to the broad multi-provider scanner result. `max_symbols_per_scan=5` therefore selected up to five Binance USD-M symbols regardless of the two-symbol campaign identity. The qualification reader also did not compare persisted decision symbols with campaign identity. Geometry enrichment collapsed provider and deterministic failures to `{}`, so the 56 historical Binance incomplete rows cannot be retrospectively separated into timeout, malformed payload, insufficient rows, invalid OHLC, zero risk, or invalid target without mutating evidence.
+
+### Files and behavior
+
+`runtime.py` loads authoritative symbols and provider identity from the attached campaign, filters and symbol-deduplicates before canonical selection/enrichment, and rechecks scope before processing, reject persistence, and PAPER execution. Violations raise `CAMPAIGN_UNIVERSE_RUNTIME_MISMATCH` and append a campaign event containing campaign/run, declared scope, observed symbol/provider, and stage. `reject_label_status.py` remains read-only and SQL-first while reporting declared/observed symbols and providers, mismatch populations/counts, and structural FAIL reasons. `burnin_campaign.py` gives newly created PAPER campaigns explicit Binance read-only provider identity by default.
+
+`signal_geometry.py` keeps `build_breakout_geometry` backward compatible and adds a diagnostic variant. `exchange_market_scanner.py` records `COMPLETE`, `UNAVAILABLE`, or `INVALID`, a stable reason, and `BINANCE_CLOSED_1M_KLINES`; it neither retries nor synthesizes geometry. Runtime burn-in observations retain these diagnostics and candidate source exchange. Tests cover bounded allow-list behavior, late defense, historical read-only detection, and fail-closed geometry classifications.
+
+### Lifecycle, persistence, compatibility, migration, and risks
+
+No table, CSV, threshold, score, RR, reconciliation, authorization, or LIVE behavior changed; no migration is required. Out-of-scope candidates create no decision/reject/pending-label/order rows. One diagnostic campaign event is intentionally written only for a late runtime invariant violation. Historical rows and the contaminated campaign are not repaired. Because old rows contain only missing fields, the exact cause of each of the 56 Binance failures is unrecoverable; future attempts are classifiable. Start a new release/preflight/campaign and verify observed symbols/providers before qualification. LIVE remains NOT READY.
+
+### Push recommendation
+
+Focused required regressions passed 280 tests. The full suite completed with 1,265 passed and 6 skipped; six Alembic tests failed because the Alembic Python distribution is absent, and one backtest compatibility test exposed an overly strict diagnostic check. That compatibility defect was corrected and its 151-test backtest/scanner regression passed afterward; the environment-only Alembic failures remain. Compileall and diff checks pass. Never resume `camp_e902c3018c2eb1fd` as qualification evidence.
+
+---
+## PR #329 provider identity binding follow-up — 2026-08-20
+
+### Why and root cause
+
+PR #329 correctly used campaign provenance as the executable provider allow-list, but provider scope was not hashed. Mutating `source_provenance_json` could therefore alter executable behavior while retaining the campaign ID. The correction normalizes only stable exchange identity—`paper_source_exchanges`, currently `["binance"]`—and places it in the existing Phase 8 `config_payload`, hence `config_hash` and `campaign_id`.
+
+### Runtime, persistence, lifecycle, and compatibility
+
+Campaign creation requires normalized provenance scope to equal the requested identity scope. Runtime independently builds its expected Binance PAPER scope, compares it with persisted provenance, and terminalizes attachment with `PHASE8_CAMPAIGN_PROVIDER_DRIFT` on disagreement. The existing pre-selection symbol/provider filter, symbol deduplication, post-selection geometry bound, and processing/persistence/execution defenses remain unchanged. No threshold, RR, score, lifecycle, reconciliation, LIVE authority, table, or export changed.
+
+### Tests, migration, risks, and recommendation
+
+Tests cover config-hash divergence between Binance and Hyperliquid, creation mismatch, mutated-provenance attachment drift, direct Hyperliquid-identity rejection by the independently Binance-scoped runtime, same-symbol provider filtering with zero database side effects, read-only provider contamination failure, and explicit `KLINE_TIMEOUT`. The focused set passed 136 tests. The full suite produced 1,272 passed and 6 skipped; six failures were the environment's missing Alembic distribution and one unrelated heartbeat timing test passed immediately when rerun alone. No migration is required, but identity semantics require a fresh release/preflight/campaign. Never resume the contaminated historical campaign. LIVE remains NOT READY.
+
+---

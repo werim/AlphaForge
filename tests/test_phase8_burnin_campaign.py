@@ -294,9 +294,9 @@ def _runtime_for_campaign(db, *, mode=ExecutionMode.PAPER):
     return rt, engine
 
 def _campaign_matching_runtime(db, rt):
-    h=rt._phase8_runtime_hashes()
+    h=rt._phase8_runtime_hashes(["BTCUSDT"], ["1m"])
     conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
-    camp=create_campaign(conn,release_id=h['release_id'],duration_days=1,symbols=[],intervals=[])
+    camp=create_campaign(conn,release_id=h['release_id'],duration_days=1,symbols=["BTCUSDT"],intervals=["1m"])
     conn.execute("UPDATE burnin_campaigns SET config_hash=?, strategy_config_hash=?, universe_hash=?, execution_cost_config_hash=? WHERE campaign_id=?",(h['config_hash'],h['strategy_config_hash'],h['universe_hash'],h['execution_cost_config_hash'],camp.campaign_id))
     start_or_resume_campaign(conn,camp.campaign_id)
     conn.commit(); conn.close(); return camp.campaign_id,h
@@ -508,11 +508,11 @@ def test_canonical_identity_drift_reasons_for_filter_strategy_universe_and_cost(
 def test_effective_paper_slippage_identity_attaches_and_drifts(tmp_path):
     db=tmp_path/'effective_slippage.db'; rt, engine=_runtime_for_campaign(db)
     rt.paper_slippage_bps = 7.5
-    identity = build_phase8_campaign_identity(rt.config, [], [], release_id=rt.config.phase7_burnin_release_id, paper_slippage_bps=rt.paper_slippage_bps)
+    identity = build_phase8_campaign_identity(rt.config, ["BTCUSDT"], ["1m"], release_id=rt.config.phase7_burnin_release_id, paper_slippage_bps=rt.paper_slippage_bps)
     assert identity['execution_cost_payload']['paper_slippage_bps'] == 7.5
     assert identity['execution_cost_payload']['paper_expected_slippage_pct'] == 0.00075
     conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
-    camp=create_campaign(conn,release_id=identity['release_id'],duration_days=1,symbols=[],intervals=[],runtime_config=rt.config,paper_slippage_bps=rt.paper_slippage_bps)
+    camp=create_campaign(conn,release_id=identity['release_id'],duration_days=1,symbols=["BTCUSDT"],intervals=["1m"],runtime_config=rt.config,paper_slippage_bps=rt.paper_slippage_bps)
     start_or_resume_campaign(conn,camp.campaign_id); conn.commit(); conn.close()
     rt._attach_phase8_campaign(camp.campaign_id)
     rt.paper_slippage_bps = 8.5
@@ -522,6 +522,70 @@ def test_effective_paper_slippage_identity_attaches_and_drifts(tmp_path):
         assert 'PHASE8_CAMPAIGN_EXECUTION_COST_DRIFT' in str(exc)
     else:
         raise AssertionError('expected execution-cost drift')
+    engine.dispose()
+
+
+def test_provider_scope_participates_in_config_identity():
+    rt = RuntimeConfig(execution_mode=ExecutionMode.PAPER)
+    binance = build_phase8_campaign_identity(rt, ["BTCUSDT"], ["1m"],
+        paper_source_exchanges=["binance"])
+    hyperliquid = build_phase8_campaign_identity(rt, ["BTCUSDT"], ["1m"],
+        paper_source_exchanges=["hyperliquid"])
+    assert binance["config_payload"]["paper_source_exchanges"] == ["binance"]
+    assert hyperliquid["config_payload"]["paper_source_exchanges"] == ["hyperliquid"]
+    assert binance["config_hash"] != hyperliquid["config_hash"]
+
+
+def test_campaign_creation_rejects_provider_identity_provenance_disagreement(tmp_path):
+    conn = sqlite3.connect(tmp_path / "provider_creation.db")
+    with pytest.raises(ValueError, match="PHASE8_CAMPAIGN_PROVIDER_IDENTITY_MISMATCH"):
+        create_campaign(conn, release_id="rel-provider", duration_days=1,
+            symbols=["BTCUSDT"], intervals=["1m"],
+            source_provenance={"provider": "BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE"},
+            paper_source_exchanges=["hyperliquid"])
+    conn.close()
+
+
+def test_runtime_attachment_fails_closed_on_mutated_provider_provenance(tmp_path):
+    db = tmp_path / "provider_drift.db"
+    runtime, engine = _runtime_for_campaign(db)
+    campaign_id, _ = _campaign_matching_runtime(db, runtime)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE burnin_campaigns SET source_provenance_json=:p WHERE campaign_id=:cid"),
+                     {"cid": campaign_id, "p": json.dumps({"provider": "HYPERLIQUID", "exchange": "HYPERLIQUID"})})
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_PROVIDER_DRIFT"):
+        runtime._attach_phase8_campaign(campaign_id)
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT campaign_status,last_error FROM burnin_campaigns WHERE campaign_id=:cid"),
+                           {"cid": campaign_id}).one()
+    assert row == ("PAUSED", "PHASE8_CAMPAIGN_PROVIDER_DRIFT")
+    engine.dispose()
+
+
+def test_hyperliquid_identity_cannot_attach_to_binance_paper_runtime(tmp_path):
+    db = tmp_path / "provider_identity_drift.db"
+    runtime, engine = _runtime_for_campaign(db)
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    campaign = create_campaign(conn, release_id=runtime.config.phase7_burnin_release_id,
+        duration_days=1, symbols=["BTCUSDT"], intervals=["1m"],
+        runtime_config=runtime.config,
+        source_provenance={"provider": "HYPERLIQUID", "exchange": "HYPERLIQUID",
+                           "order_submission": "DISABLED"},
+        paper_source_exchanges=["hyperliquid"])
+    start_or_resume_campaign(conn, campaign.campaign_id)
+    conn.commit()
+    conn.close()
+
+    binance_identity = runtime._phase8_runtime_hashes(["BTCUSDT"], ["1m"])
+    assert campaign.config_hash != binance_identity["config_hash"]
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_PROVIDER_DRIFT"):
+        runtime._attach_phase8_campaign(campaign.campaign_id)
+    with engine.connect() as sql:
+        row = sql.execute(text(
+            "SELECT campaign_status,last_error FROM burnin_campaigns WHERE campaign_id=:cid"),
+            {"cid": campaign.campaign_id}).one()
+    assert row == ("PAUSED", "PHASE8_CAMPAIGN_PROVIDER_DRIFT")
     engine.dispose()
 
 

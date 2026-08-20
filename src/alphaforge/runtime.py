@@ -35,7 +35,7 @@ from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_reject_label, resolve_campaign_batch
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
 from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
@@ -225,6 +225,9 @@ class RuntimeOrchestrator:
     _recovery_required: bool = field(default=False, init=False)
     _fail_closed_reason: str | None = field(default=None, init=False)
     _campaign_intervals: tuple[str, ...] = field(default=(), init=False)
+    _campaign_id: str | None = field(default=None, init=False)
+    _campaign_symbols: frozenset[str] = field(default_factory=frozenset, init=False)
+    _campaign_source_exchanges: frozenset[str] = field(default_factory=frozenset, init=False)
     _fatal_task_exception: BaseException | None = field(default=None, init=False)
     _fatal_task_name: str | None = field(default=None, init=False)
     _unknown_exchange_state: bool = field(default=False, init=False)
@@ -695,9 +698,16 @@ class RuntimeOrchestrator:
                 self._fail_closed_reason = attachment_error or "PHASE8_CAMPAIGN_NOT_FOUND"
                 raise RuntimeError(self._fail_closed_reason)
             campaign_identity = campaign_attachment_identity(campaign)
+            self._campaign_id = campaign_id
             self._campaign_intervals = tuple(str(value) for value in (campaign.get("intervals") or []))
+            self._campaign_symbols = frozenset(str(value).upper() for value in (campaign.get("symbols") or []))
+            provenance = dict(campaign.get("source_provenance") or {})
+            observed_provider_scope = canonical_paper_source_exchanges(provenance)
             run_identity = run_attachment_identity(run) if run else {}
             runtime_identity = self._phase8_runtime_hashes(campaign.get("symbols") or [], campaign.get("intervals") or [])
+            expected_provider_scope = tuple(runtime_identity["config_payload"]["paper_source_exchanges"])
+            self._campaign_source_exchanges = frozenset(expected_provider_scope)
+            provider_drift = observed_provider_scope != expected_provider_scope
             campaign_run_mismatches = identity_mismatches(campaign_identity, run_identity, ATTACHMENT_IDENTITY_FIELDS) if run else {"active_run": {"expected": campaign.get("active_run_id"), "observed": None}}
             # git_commit is persisted provenance and must agree campaign-to-run;
             # it is not a runtime-config field and is therefore not fabricated for runtime comparison.
@@ -712,6 +722,8 @@ class RuntimeOrchestrator:
                 reason = "PHASE8_PAPER_FEE_ASSUMPTION_INVALID"
             elif attachment_error:
                 reason = attachment_error
+            elif provider_drift:
+                reason = "PHASE8_CAMPAIGN_PROVIDER_DRIFT"
             elif campaign_run_mismatches:
                 reason = "PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH"
             elif run_runtime_mismatches or campaign_runtime_mismatches:
@@ -725,10 +737,20 @@ class RuntimeOrchestrator:
                     "runtime_identity": runtime_identity,
                     "campaign_run_mismatches": campaign_run_mismatches,
                     "run_runtime_mismatches": run_runtime_mismatches or campaign_runtime_mismatches,
+                    "provider_scope": {"expected": list(expected_provider_scope),
+                                       "observed": list(observed_provider_scope)},
                     "identity_sources": {"campaign": "burnin_campaigns", "run": "burnin_runs", "runtime_release": runtime_identity.get("release_id_source")},
                     "active_run_mapping": mapping or {},
                 })
                 with contextlib.suppress(Exception): conn.commit()
+                self._fail_closed_reason = reason
+                raise RuntimeError(reason)
+            if not self._campaign_symbols or not self._campaign_source_exchanges:
+                reason = ("PHASE8_CAMPAIGN_UNIVERSE_INVALID" if not self._campaign_symbols
+                          else "PHASE8_CAMPAIGN_PROVIDER_IDENTITY_INVALID")
+                fail_active_campaign_run(conn, campaign_id, reason,
+                                         details={"source_provenance": provenance,
+                                                  "symbols": sorted(self._campaign_symbols)})
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
             self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
@@ -816,6 +838,8 @@ class RuntimeOrchestrator:
     def _persist_burnin_decision(self, payload: Mapping[str, Any], *, lifecycle_state: str | None = None) -> None:
         if self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
             return
+        self._assert_campaign_candidate(str(payload.get("symbol") or ""),
+                                        payload.get("source_exchange"), "DECISION_PERSISTENCE")
         if not self._burnin_run_id:
             self._start_or_resume_burnin_run()
         engine = self._resolve_persistence_engine()
@@ -832,8 +856,11 @@ class RuntimeOrchestrator:
                     "spread_pct", "expected_slippage_pct", "latency_ms", "funding_rate_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
-                                "campaign_id": campaign_id, "runtime_identity": runtime_identity})
-                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
+                                "campaign_id": campaign_id, "runtime_identity": runtime_identity,
+                                "geometry_status": payload.get("geometry_status"),
+                                "geometry_reason": payload.get("geometry_reason"),
+                                "geometry_source": payload.get("geometry_source")})
+                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
             self.metrics.burnin_observations += 1
             with engine.begin() as conn:
                 update_burnin_run_counters(conn, self._burnin_run_id)
@@ -1173,6 +1200,14 @@ class RuntimeOrchestrator:
             return
         self.metrics.scans += 1
         candidates = await self.market_scanner()
+        if self._burnin_run_id and self._campaign_symbols:
+            candidates = [candidate for candidate in candidates
+                          if str(candidate.get("symbol") or "").upper() in self._campaign_symbols
+                          and str(candidate.get("source_exchange") or "").lower() in self._campaign_source_exchanges]
+            deduplicated: dict[str, dict[str, Any]] = {}
+            for candidate in candidates:
+                deduplicated.setdefault(str(candidate.get("symbol") or "").upper(), candidate)
+            candidates = list(deduplicated.values())
         pre_selection = select_symbols(candidates, {**self._canonical_filter_config(), "include_rejected": True})
         selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
         reject_reasons: dict[str, int] = {}
@@ -1202,10 +1237,37 @@ class RuntimeOrchestrator:
         self.metrics.last_scan_ts = canonical_utc_timestamp()
 
         for symbol_result in selected:
+            inputs = symbol_result.diagnostics.get("inputs", {})
+            self._assert_campaign_candidate(symbol_result.symbol, inputs.get("source_exchange"),
+                                            "BEFORE_PROCESS_SYMBOL")
             await self._process_symbol(symbol_result)
+
+    def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
+        """Fail closed and durably diagnose an attached-campaign scope violation."""
+        if not self._burnin_run_id or not self._campaign_symbols:
+            return
+        normalized_symbol = str(symbol or "").upper()
+        normalized_source = str(source_exchange or "").lower()
+        if normalized_symbol in self._campaign_symbols and normalized_source in self._campaign_source_exchanges:
+            return
+        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        details = {"campaign_id": campaign_id, "burnin_run_id": self._burnin_run_id,
+                   "declared_symbols": sorted(self._campaign_symbols),
+                   "declared_source_exchanges": sorted(self._campaign_source_exchanges),
+                   "observed_symbol": normalized_symbol, "observed_source_exchange": normalized_source,
+                   "stage": stage}
+        engine = self._resolve_persistence_engine()
+        if engine is not None and campaign_id:
+            with engine.begin() as conn:
+                burnin_campaign_event(conn, campaign_id, "CAMPAIGN_UNIVERSE_RUNTIME_MISMATCH",
+                                      details=details)
+        self._fail_closed_reason = "CAMPAIGN_UNIVERSE_RUNTIME_MISMATCH"
+        raise RuntimeError(self._fail_closed_reason)
 
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
+        self._assert_campaign_candidate(selection.symbol, market_ctx.get("source_exchange"),
+                                        "PROCESS_SYMBOL")
         market_ctx.setdefault("mode", self.config.execution_mode.value)
         if self.config.execution_mode is ExecutionMode.PAPER and self.config.paper_fee_bps is not None:
             try:
@@ -1338,11 +1400,11 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
             await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
-            self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+            self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
             self._generate_burnin_snapshot(reason="periodic")
             return
 
-        self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+        self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
         self._schedule_agent_shadow({"signal_id": signal_id, "symbol": selection.symbol,
             "mode": self.config.execution_mode.value, "decision": "ACCEPTED",
             "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"),
@@ -1405,6 +1467,7 @@ class RuntimeOrchestrator:
         )
 
     async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> None:
+        self._assert_campaign_candidate(symbol, market_ctx.get("source_exchange"), "PAPER_EXECUTION")
         if self._kill_switch_active():
             raise RuntimeError("KILL_SWITCH_ACTIVE")
         mode = self.config.execution_mode
@@ -1501,6 +1564,8 @@ class RuntimeOrchestrator:
         }
 
     async def _persist_reject(self, payload: dict[str, Any]) -> None:
+        self._assert_campaign_candidate(str(payload.get("symbol") or ""),
+                                        payload.get("source_exchange"), "REJECT_PERSISTENCE")
         payload = self._canonical_reject_payload(payload)
         self._reject_log.append(payload)
         self.metrics.rejects_persisted += 1

@@ -14,20 +14,32 @@ def build_breakout_geometry(
     follows the current versus previous close, the stop spans both setup candles,
     and reward scales with breakout/body strength on that same timeframe.
     """
+    return build_breakout_geometry_with_diagnostics(current, previous)[0]
+
+
+def build_breakout_geometry_with_diagnostics(
+    current: Mapping[str, Any], previous: Mapping[str, Any]
+) -> tuple[dict[str, Any], str | None]:
+    """Return canonical geometry and a stable fail-closed diagnostic reason."""
     try:
         now = {name: float(current[name]) for name in ("open", "high", "low", "close")}
         prev = {name: float(previous[name]) for name in ("open", "high", "low", "close")}
     except (KeyError, TypeError, ValueError):
-        return {}
+        return {}, "KLINE_MALFORMED_PAYLOAD"
     values = (*now.values(), *prev.values())
     if not all(math.isfinite(value) and value > 0.0 for value in values):
-        return {}
+        return {}, "OHLC_INVALID"
+    # Preserve the shared historical API's tolerance of synthetic/backtest bars
+    # whose open/close lie outside the recorded range; an inverted range itself
+    # is unambiguously invalid provider evidence.
+    if any(candle["low"] > candle["high"] for candle in (now, prev)):
+        return {}, "OHLC_INVALID"
     side = "LONG" if now["close"] >= prev["close"] else "SHORT"
     entry = now["close"]
     stop = min(now["low"], prev["low"]) if side == "LONG" else max(now["high"], prev["high"])
     risk = entry - stop if side == "LONG" else stop - entry
     if risk <= 0.0:
-        return {}
+        return {}, "ZERO_RISK_GEOMETRY"
     body = abs(now["close"] - now["open"])
     breakout_strength = (
         max(0.0, (now["close"] - prev["high"]) / prev["high"])
@@ -37,7 +49,7 @@ def build_breakout_geometry(
     rr = max(1.1, min(3.5, 1.2 + breakout_strength * 25.0 + body / now["open"] * 8.0))
     target = entry + rr * risk if side == "LONG" else entry - rr * risk
     if target <= 0.0:
-        return {}
+        return {}, "INVALID_TARGET"
     return {
         "entry": entry,
         "side": side,
@@ -47,4 +59,4 @@ def build_breakout_geometry(
         "setup_type": "BREAKOUT_UP" if side == "LONG" else "BREAKDOWN_DOWN",
         "setup_reason": "CLOSE_ABOVE_PREV_HIGH" if side == "LONG" else "CLOSE_BELOW_PREV_LOW",
         "breakout_strength": breakout_strength,
-    }
+    }, None
