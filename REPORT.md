@@ -1,3 +1,7 @@
+## PR #328 CI wiring-contract follow-up
+
+The remaining CI failure was metadata-only: the PAPER decision timeframe was behaviorally consumed but its `Learning` category fell back to generic `load_config_from_env` metadata. The registry now identifies `_scan_binance` as the specific production consumer and points to a behavioral test that changes the environment value, proves unsupported `5m` performs no provider request or silent `1m` fallback, proves supported `1m` reaches scanner candidates, and verifies reject-evaluation identity/hash changes. No runtime, lifecycle, persistence, fee, latency, geometry, resolver-health, schema, or LIVE mutation semantics changed.
+
 ## PR #328 follow-up: timeframe semantics and resolver health
 
 A campaign interval such as `1h` is now explicitly a campaign reporting/universe interval, distinct from the canonical PAPER decision/setup timeframe and reject-forward evaluation timeframe. Identity persists all three semantics plus horizon bars, pending-label provenance repeats them, and the Binance scanner fails closed if configured away from its currently supported closed-`1m` geometry. Thus a `1h` campaign can intentionally evaluate `1m` decisions for 240 bars, but that four-hour horizon is no longer implicit and any semantic change alters identity. No persistence schema or export migration is required.
@@ -1387,3 +1391,7 @@ Legacy rows lacking trustworthy timestamp evidence intentionally retain NULL `ev
 After backup and merge, stop writers and run exactly: `git pull`, `alembic upgrade head`, the canonical `preflight`, then `launch` only if preflight returns PASS. Recommend merge after the focused and full suites pass; this repair does not itself establish LIVE readiness.
 
 ---
+
+### Verification result
+
+`tests/test_env_wiring_contract.py` passed all 124 tests. The full local suite completed with 1,259 passed and 6 skipped; its six failures are limited to Alembic imports because the Alembic distribution is absent from this environment. The behavioral wiring change itself is green, so the existing review thread is ready to resolve in the PR host after push.

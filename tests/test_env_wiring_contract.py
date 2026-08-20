@@ -7,7 +7,8 @@ import pytest
 from alphaforge.config import load_config_from_env
 from alphaforge.config_audit import audit_config
 from alphaforge.config_registry import CONFIG_REGISTRY, ENV_CONTRACT, effective_config_values
-from alphaforge.exchange_market_scanner import _scan_hyperliquid
+from alphaforge.exchange_market_scanner import _scan_binance, _scan_hyperliquid
+from alphaforge.burnin_campaign import build_phase8_campaign_identity
 
 
 def _alternate(setting):
@@ -66,6 +67,45 @@ def test_hyperliquid_enabled_controls_scanner_without_network(monkeypatch):
     monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
     cfg = load_config_from_env()
     assert _scan_hyperliquid(cfg, timeout_sec=0.01) == []
+
+
+def test_paper_decision_timeframe_controls_scanner_and_reject_evidence(monkeypatch):
+    """The env setting gates production candidates and hashes reject evaluation semantics."""
+    calls = []
+
+    def fetch(*args, **kwargs):
+        calls.append(args[0])
+        return None
+
+    monkeypatch.setenv("ALPHAFORGE_PAPER_DECISION_TIMEFRAME", "5m")
+    unsupported = load_config_from_env()
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", fetch)
+    assert _scan_binance(unsupported, timeout_sec=0.01) == []
+    assert calls == []  # unsupported geometry cannot silently fall back to 1m
+    unsupported_identity = build_phase8_campaign_identity(
+        unsupported.runtime, ["BTCUSDT"], ["1h"]
+    )
+    assert unsupported_identity["config_payload"]["decision_setup_timeframe"] == "5m"
+    assert unsupported_identity["config_payload"]["reject_evaluation_timeframe"] == "5m"
+
+    responses = iter([
+        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+        [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+        [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+        [],
+    ])
+    monkeypatch.setenv("ALPHAFORGE_PAPER_DECISION_TIMEFRAME", "1m")
+    supported = load_config_from_env()
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", lambda *a, **k: next(responses))
+    monkeypatch.setattr(
+        "alphaforge.exchange_market_scanner._fetch_json_with_latency",
+        lambda *a, **k: (next(responses), 1.0),
+    )
+    candidates = _scan_binance(supported, timeout_sec=0.01)
+    assert candidates[0]["timeframe"] == "1m"
+    supported_identity = build_phase8_campaign_identity(supported.runtime, ["BTCUSDT"], ["1h"])
+    assert supported_identity["config_payload"]["reject_evaluation_timeframe"] == "1m"
+    assert unsupported_identity["config_hash"] != supported_identity["config_hash"]
 
 
 def test_remaining_reserved_entries_have_reviewable_reasons():

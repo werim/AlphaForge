@@ -1,3 +1,23 @@
+## PR #328 CI wiring follow-up — 2026-08-20
+
+### Added
+- Behavioral environment-contract coverage for PAPER scanner and reject-evaluation timeframe semantics.
+
+### Changed
+- PAPER decision-timeframe metadata now names its specific production Binance scanner consumer.
+
+### Fixed
+- Config audit no longer rejects `ALPHAFORGE_PAPER_DECISION_TIMEFRAME` as generically wired.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None beyond the already-documented timeframe identity change.
+
+### Known Issues
+- Binance geometry remains 1m-only and unsupported configured timeframes fail closed.
+
 ## PR #328 timeframe and health follow-up — 2026-08-20
 
 ### Added

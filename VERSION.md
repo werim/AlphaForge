@@ -2,6 +2,7 @@
 
 ## PR #328 timeframe and health follow-up (2026-08-20)
 
+- PR #328 CI follow-up: PAPER decision-timeframe registry metadata now names the production Binance scanner consumer and a behavioral node proves unsupported values fail closed without a 1m fallback.
 - Campaign reporting intervals, PAPER decision/setup timeframe, reject evaluation timeframe, and horizon bars are explicit identity fields.
 - Resolver health regressions directly cover immature, overdue, stale-claim, resolver-failure, and provider-failure states.
 - `ALPHAFORGE_PAPER_FEE_BPS` is the total round-trip entry-plus-exit fee cost and is applied once.
