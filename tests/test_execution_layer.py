@@ -232,3 +232,10 @@ def test_paper_fee_evidence_is_explicit_and_missing_remains_unavailable():
     assert configured["fee_pct"] == pytest.approx(0.0004)
     assert configured["fee_source"] == "CONFIGURED_PAPER_ASSUMPTION"
     assert missing["fee_pct"] is None and missing["fee_source"] == "UNAVAILABLE"
+
+
+def test_paper_fee_bps_is_total_round_trip_cost_applied_once():
+    from alphaforge.runtime import RuntimeOrchestrator
+
+    costs = RuntimeOrchestrator._phase7_costs_from_execution_ctx(None, {"fee_pct": 0.0004})
+    assert costs["fee_cost"] == pytest.approx(0.0004)

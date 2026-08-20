@@ -1,3 +1,24 @@
+## PR #328 timeframe and health follow-up — 2026-08-20
+
+### Added
+- Explicit, hashed campaign interval, decision/setup timeframe, reject evaluation timeframe, and horizon-bar semantics.
+- Direct resolver health state regressions.
+
+### Changed
+- Documented PAPER fee basis points as total round-trip entry-plus-exit cost applied once.
+
+### Fixed
+- Prevented silent 1h campaign identity / 1m reject-evidence semantic ambiguity.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Campaign config identity now includes all evidence-critical timeframe semantics; create a fresh campaign.
+
+### Known Issues
+- Production Binance canonical setup geometry remains 1m-only and fails closed for unsupported configured timeframes. LIVE remains NOT READY.
+
 ## PAPER reject-forward evidence repair — 2026-08-20
 
 ### Added

@@ -89,6 +89,9 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         return []
     base_url = str(getattr(binance, "base_url", "https://fapi.binance.com"))
     quote_asset = str(getattr(binance, "default_quote_asset", "USDT")).upper()
+    decision_timeframe = str(getattr(getattr(config, "runtime", object()), "paper_decision_timeframe", "1m"))
+    if decision_timeframe != "1m":
+        return []  # the canonical geometry provider currently supports closed 1m setup candles only
     try:
         exchange_info = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/exchangeInfo", timeout_sec=timeout_sec)
         tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/24hr", timeout_sec=timeout_sec)
@@ -155,7 +158,7 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
                 "source_exchange": "binance",
                 "entry": entry,
                 "market_ts": now_ts,
-                "timeframe": "1m",
+                "timeframe": decision_timeframe,
                 "volume_24h_usdt": volume_quote,
                 "spread_pct": spread_pct,
                 "spread_bps": spread_pct * 10_000.0,

@@ -102,6 +102,10 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
     config_payload = dict(runtime_filter_config(runtime_config, mode=str(mode or "PAPER")))
     config_payload["symbols"] = sorted(map(str, symbols))
     config_payload["intervals"] = sorted(map(str, intervals))
+    config_payload["campaign_intervals"] = sorted(map(str, intervals))
+    config_payload["decision_setup_timeframe"] = str(getattr(runtime_config, "paper_decision_timeframe", "1m"))
+    config_payload["reject_evaluation_timeframe"] = config_payload["decision_setup_timeframe"]
+    config_payload["reject_forward_horizon_bars"] = int(getattr(runtime_config, "reject_forward_horizon_bars", 240))
     strategy_payload = {
         "min_signal_score": getattr(runtime_config, "min_signal_score", None),
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),

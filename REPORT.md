@@ -1,3 +1,9 @@
+## PR #328 follow-up: timeframe semantics and resolver health
+
+A campaign interval such as `1h` is now explicitly a campaign reporting/universe interval, distinct from the canonical PAPER decision/setup timeframe and reject-forward evaluation timeframe. Identity persists all three semantics plus horizon bars, pending-label provenance repeats them, and the Binance scanner fails closed if configured away from its currently supported closed-`1m` geometry. Thus a `1h` campaign can intentionally evaluate `1m` decisions for 240 bars, but that four-hour horizon is no longer implicit and any semantic change alters identity. No persistence schema or export migration is required.
+
+Direct operations tests now establish that immature queue growth remains healthy, overdue growth emits `RESOLVER_BACKLOG_GROWTH`, stale claims emit `STALE_RESOLVING_CLAIMS`, and resolver/provider failures remain unhealthy. The fee setting is explicitly total round-trip entry-plus-exit basis points and `_phase7_costs_from_execution_ctx` applies it once, avoiding undercount or double count. Existing strict qualification, latency, SHORT geometry, historical-campaign immutability, and disabled LIVE mutation behavior remain unchanged. Start a fresh PAPER campaign after merge.
+
 # PAPER reject-forward evidence regression surgery — 2026-08-20
 
 ## Need and root cause

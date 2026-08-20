@@ -1,5 +1,12 @@
 # AlphaForge Version
 
+## PR #328 timeframe and health follow-up (2026-08-20)
+
+- Campaign reporting intervals, PAPER decision/setup timeframe, reject evaluation timeframe, and horizon bars are explicit identity fields.
+- Resolver health regressions directly cover immature, overdue, stale-claim, resolver-failure, and provider-failure states.
+- `ALPHAFORGE_PAPER_FEE_BPS` is the total round-trip entry-plus-exit fee cost and is applied once.
+- No schema migration; fresh PAPER campaign required; LIVE remains NOT READY.
+
 ## PAPER reject-forward evidence repair (2026-08-20)
 
 - Current version: dev PAPER reject-forward evidence regression repair
