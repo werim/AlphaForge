@@ -4276,3 +4276,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - The 56 pre-fix Binance incomplete-geometry rows lack enough stored evidence for exact retrospective classification. LIVE remains NOT READY.
+## PR #329 provider identity binding — 2026-08-20
+
+### Added
+- Canonical normalized `paper_source_exchanges` in the hashed Phase 8 config identity.
+- Creation and attachment consistency checks plus timeout/provider-contamination regressions.
+
+### Changed
+- Runtime derives expected PAPER provider scope independently as Binance and compares persisted provenance against it.
+
+### Fixed
+- Mutating campaign provenance can no longer change executable provider scope without identity drift.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Pre-fix PAPER campaign identity is superseded; start a fresh campaign. No schema migration is required.
+
+### Known Issues
+- Historical pre-fix evidence remains non-qualifying. LIVE remains NOT READY.

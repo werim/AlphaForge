@@ -96,7 +96,14 @@ def bootstrap_campaign_schema(conn: Any) -> None:
         except Exception: pass
 
 
-def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None) -> dict[str, Any]:
+def canonical_paper_source_exchanges(source_provenance: Mapping[str, Any]) -> tuple[str, ...]:
+    """Extract only stable executable exchange identity from provider provenance."""
+    identity = " ".join(str(source_provenance.get(key) or "") for key in ("provider", "exchange"))
+    return tuple(exchange for exchange in ("binance", "hyperliquid")
+                 if exchange.upper() in identity.upper())
+
+
+def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], intervals: Sequence[str], *, release_id: str | None = None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] = ("binance",)) -> dict[str, Any]:
     """Canonical Phase 8 identity shared by CLI campaign creation and runtime attachment."""
     mode = getattr(getattr(runtime_config, "execution_mode", "PAPER"), "value", getattr(runtime_config, "execution_mode", "PAPER"))
     config_payload = dict(runtime_filter_config(runtime_config, mode=str(mode or "PAPER")))
@@ -106,6 +113,10 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
     config_payload["decision_setup_timeframe"] = str(getattr(runtime_config, "paper_decision_timeframe", "1m"))
     config_payload["reject_evaluation_timeframe"] = config_payload["decision_setup_timeframe"]
     config_payload["reject_forward_horizon_bars"] = int(getattr(runtime_config, "reject_forward_horizon_bars", 240))
+    config_payload["paper_source_exchanges"] = sorted({str(value).strip().lower()
+                                                        for value in paper_source_exchanges if str(value).strip()})
+    if not config_payload["paper_source_exchanges"]:
+        raise ValueError("paper_source_exchanges must identify at least one supported provider")
     strategy_payload = {
         "min_signal_score": getattr(runtime_config, "min_signal_score", None),
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
@@ -153,16 +164,23 @@ def git_commit() -> str:
 def campaign_id_for(release_id: str, payload: Mapping[str, Any]) -> str:
     return "camp_" + canonical_hash({"release_id": release_id, **payload})[:16]
 
-def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
+def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] | None = None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
     bootstrap_campaign_schema(conn)
     prov=dict(source_provenance or {"provider":"BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE",
                                     "order_submission": "DISABLED", "source":"operator"})
     if not prov: raise ValueError("missing provenance")
+    provenance_scope = canonical_paper_source_exchanges(prov)
+    identity_scope = tuple(sorted({str(value).strip().lower() for value in
+                                   (paper_source_exchanges or provenance_scope) if str(value).strip()}))
+    if not provenance_scope or identity_scope != provenance_scope:
+        raise ValueError("PHASE8_CAMPAIGN_PROVIDER_IDENTITY_MISMATCH")
     if runtime_config is not None:
-        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id, paper_slippage_bps=paper_slippage_bps)
+        ident = build_phase8_campaign_identity(runtime_config, symbols, intervals, release_id=release_id, paper_slippage_bps=paper_slippage_bps, paper_source_exchanges=identity_scope)
         ch=ident["config_hash"]; sh=ident["strategy_config_hash"]; uh=ident["universe_hash"]; ech=ident["execution_cost_config_hash"]
     else:
-        ch=make_config_hash(config or {"release_id": release_id, "symbols": list(symbols), "intervals": list(intervals)})
+        config_payload = dict(config or {"release_id": release_id, "symbols": list(symbols), "intervals": list(intervals)})
+        config_payload["paper_source_exchanges"] = list(identity_scope)
+        ch=make_config_hash(config_payload)
         sh=make_config_hash(strategy_config or {"strategy":"default"})
         uh=make_universe_hash(symbols, intervals)
         ech=make_config_hash(execution_cost_config) if execution_cost_config is not None else None

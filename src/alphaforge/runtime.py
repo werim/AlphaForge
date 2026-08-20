@@ -35,7 +35,7 @@ from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_reject_label, resolve_campaign_batch
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
 from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
@@ -702,12 +702,12 @@ class RuntimeOrchestrator:
             self._campaign_intervals = tuple(str(value) for value in (campaign.get("intervals") or []))
             self._campaign_symbols = frozenset(str(value).upper() for value in (campaign.get("symbols") or []))
             provenance = dict(campaign.get("source_provenance") or {})
-            provider_identity = " ".join(str(provenance.get(key) or "") for key in ("provider", "exchange"))
-            self._campaign_source_exchanges = frozenset(
-                exchange for exchange in ("binance", "hyperliquid") if exchange.upper() in provider_identity.upper()
-            )
+            observed_provider_scope = canonical_paper_source_exchanges(provenance)
             run_identity = run_attachment_identity(run) if run else {}
             runtime_identity = self._phase8_runtime_hashes(campaign.get("symbols") or [], campaign.get("intervals") or [])
+            expected_provider_scope = tuple(runtime_identity["config_payload"]["paper_source_exchanges"])
+            self._campaign_source_exchanges = frozenset(expected_provider_scope)
+            provider_drift = observed_provider_scope != expected_provider_scope
             campaign_run_mismatches = identity_mismatches(campaign_identity, run_identity, ATTACHMENT_IDENTITY_FIELDS) if run else {"active_run": {"expected": campaign.get("active_run_id"), "observed": None}}
             # git_commit is persisted provenance and must agree campaign-to-run;
             # it is not a runtime-config field and is therefore not fabricated for runtime comparison.
@@ -722,6 +722,8 @@ class RuntimeOrchestrator:
                 reason = "PHASE8_PAPER_FEE_ASSUMPTION_INVALID"
             elif attachment_error:
                 reason = attachment_error
+            elif provider_drift:
+                reason = "PHASE8_CAMPAIGN_PROVIDER_DRIFT"
             elif campaign_run_mismatches:
                 reason = "PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH"
             elif run_runtime_mismatches or campaign_runtime_mismatches:
@@ -735,6 +737,8 @@ class RuntimeOrchestrator:
                     "runtime_identity": runtime_identity,
                     "campaign_run_mismatches": campaign_run_mismatches,
                     "run_runtime_mismatches": run_runtime_mismatches or campaign_runtime_mismatches,
+                    "provider_scope": {"expected": list(expected_provider_scope),
+                                       "observed": list(observed_provider_scope)},
                     "identity_sources": {"campaign": "burnin_campaigns", "run": "burnin_runs", "runtime_release": runtime_identity.get("release_id_source")},
                     "active_run_mapping": mapping or {},
                 })

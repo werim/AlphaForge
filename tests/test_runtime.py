@@ -130,6 +130,36 @@ def test_campaign_defense_in_depth_fails_before_processing():
     assert orchestrator.metrics.executions == 0
 
 
+def test_attached_binance_campaign_filters_same_symbol_hyperliquid_candidate(monkeypatch):
+    observed = []
+    candidates = [{"symbol": "BTCUSDT", "source_exchange": "hyperliquid"},
+                  {"symbol": "BTCUSDT", "source_exchange": "binance"}]
+    monkeypatch.setattr(runtime_module, "select_symbols", lambda rows, cfg: [
+        SimpleNamespace(symbol=row["symbol"], tradable=True, reject_reasons=[],
+                        diagnostics={"inputs": row}) for row in rows])
+    async def process(self, selection):
+        observed.append(selection.diagnostics["inputs"]["source_exchange"])
+    monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
+    orchestrator = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        _brain(), lambda: asyncio.sleep(0, result=candidates))
+    orchestrator._burnin_run_id = "run"
+    orchestrator._campaign_symbols = frozenset({"BTCUSDT"})
+    orchestrator._campaign_source_exchanges = frozenset({"binance"})
+    with orchestrator._resolve_persistence_engine().begin() as conn:
+        bootstrap_campaign_schema(conn)
+    asyncio.run(orchestrator._scan_once())
+    assert observed == ["binance"]
+    assert orchestrator.metrics.decisions_generated == 0
+    assert orchestrator.metrics.rejects_persisted == 0
+    assert orchestrator.metrics.burnin_observations == 0
+    assert orchestrator.metrics.executions == 0
+    with orchestrator._resolve_persistence_engine().connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM order_decisions")).scalar_one() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews")).scalar_one() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_observations")).scalar_one() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels")).scalar_one() == 0
+
+
 def test_reject_lifecycle_persistence_increments_metrics() -> None:
     events: list[dict] = []
     rejects: list[dict] = []

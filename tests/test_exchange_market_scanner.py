@@ -180,6 +180,14 @@ def test_kline_fetch_failure_is_queryable(monkeypatch: pytest.MonkeyPatch) -> No
                       "geometry_source": "BINANCE_CLOSED_1M_KLINES"}
 
 
+def test_kline_timeout_is_queryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json",
+                        lambda *a, **k: (_ for _ in ()).throw(TimeoutError("timed out")))
+    result = _binance_kline_geometry("https://example.invalid", "BTCUSDT", timeout_sec=1)
+    assert result == {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_TIMEOUT",
+                      "geometry_source": "BINANCE_CLOSED_1M_KLINES"}
+
+
 def test_binance_urls_use_fapi_v1_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_urls: list[str] = []
     monkeypatch.setenv("BINANCE_BASE_URL", "https://fapi.binance.com")

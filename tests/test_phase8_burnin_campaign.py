@@ -525,6 +525,43 @@ def test_effective_paper_slippage_identity_attaches_and_drifts(tmp_path):
     engine.dispose()
 
 
+def test_provider_scope_participates_in_config_identity():
+    rt = RuntimeConfig(execution_mode=ExecutionMode.PAPER)
+    binance = build_phase8_campaign_identity(rt, ["BTCUSDT"], ["1m"],
+        paper_source_exchanges=["binance"])
+    hyperliquid = build_phase8_campaign_identity(rt, ["BTCUSDT"], ["1m"],
+        paper_source_exchanges=["hyperliquid"])
+    assert binance["config_payload"]["paper_source_exchanges"] == ["binance"]
+    assert hyperliquid["config_payload"]["paper_source_exchanges"] == ["hyperliquid"]
+    assert binance["config_hash"] != hyperliquid["config_hash"]
+
+
+def test_campaign_creation_rejects_provider_identity_provenance_disagreement(tmp_path):
+    conn = sqlite3.connect(tmp_path / "provider_creation.db")
+    with pytest.raises(ValueError, match="PHASE8_CAMPAIGN_PROVIDER_IDENTITY_MISMATCH"):
+        create_campaign(conn, release_id="rel-provider", duration_days=1,
+            symbols=["BTCUSDT"], intervals=["1m"],
+            source_provenance={"provider": "BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE"},
+            paper_source_exchanges=["hyperliquid"])
+    conn.close()
+
+
+def test_runtime_attachment_fails_closed_on_mutated_provider_provenance(tmp_path):
+    db = tmp_path / "provider_drift.db"
+    runtime, engine = _runtime_for_campaign(db)
+    campaign_id, _ = _campaign_matching_runtime(db, runtime)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE burnin_campaigns SET source_provenance_json=:p WHERE campaign_id=:cid"),
+                     {"cid": campaign_id, "p": json.dumps({"provider": "HYPERLIQUID", "exchange": "HYPERLIQUID"})})
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_PROVIDER_DRIFT"):
+        runtime._attach_phase8_campaign(campaign_id)
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT campaign_status,last_error FROM burnin_campaigns WHERE campaign_id=:cid"),
+                           {"cid": campaign_id}).one()
+    assert row == ("PAUSED", "PHASE8_CAMPAIGN_PROVIDER_DRIFT")
+    engine.dispose()
+
+
 def test_execution_cost_hash_changes_with_effective_slippage(tmp_path):
     rt, engine=_runtime_for_campaign(tmp_path/'slip_hash.db')
     a=build_phase8_campaign_identity(rt.config, [], [], release_id='rel', paper_slippage_bps=2.0)

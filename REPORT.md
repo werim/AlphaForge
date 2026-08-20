@@ -1416,3 +1416,18 @@ No table, CSV, threshold, score, RR, reconciliation, authorization, or LIVE beha
 Focused required regressions passed 280 tests. The full suite completed with 1,265 passed and 6 skipped; six Alembic tests failed because the Alembic Python distribution is absent, and one backtest compatibility test exposed an overly strict diagnostic check. That compatibility defect was corrected and its 151-test backtest/scanner regression passed afterward; the environment-only Alembic failures remain. Compileall and diff checks pass. Never resume `camp_e902c3018c2eb1fd` as qualification evidence.
 
 ---
+## PR #329 provider identity binding follow-up — 2026-08-20
+
+### Why and root cause
+
+PR #329 correctly used campaign provenance as the executable provider allow-list, but provider scope was not hashed. Mutating `source_provenance_json` could therefore alter executable behavior while retaining the campaign ID. The correction normalizes only stable exchange identity—`paper_source_exchanges`, currently `["binance"]`—and places it in the existing Phase 8 `config_payload`, hence `config_hash` and `campaign_id`.
+
+### Runtime, persistence, lifecycle, and compatibility
+
+Campaign creation requires normalized provenance scope to equal the requested identity scope. Runtime independently builds its expected Binance PAPER scope, compares it with persisted provenance, and terminalizes attachment with `PHASE8_CAMPAIGN_PROVIDER_DRIFT` on disagreement. The existing pre-selection symbol/provider filter, symbol deduplication, post-selection geometry bound, and processing/persistence/execution defenses remain unchanged. No threshold, RR, score, lifecycle, reconciliation, LIVE authority, table, or export changed.
+
+### Tests, migration, risks, and recommendation
+
+Tests cover config-hash divergence between Binance and Hyperliquid, creation mismatch, mutated-provenance attachment drift, same-symbol provider filtering with zero database side effects, read-only provider contamination failure, and explicit `KLINE_TIMEOUT`. The focused CI-equivalent set passed 286 tests. The full suite completed with 1,272 passed and 6 skipped; its only six failures require the unavailable Alembic distribution, and installation was blocked by the environment's package-index 403. No migration is required, but identity semantics require a fresh release/preflight/campaign. Never resume the contaminated historical campaign. LIVE remains NOT READY.
+
+---

@@ -1,5 +1,16 @@
 # AlphaForge Version
 
+## PR #329 provider identity binding follow-up (2026-08-20)
+
+- Current version: dev PR #329 provider-scope identity correction.
+- Current phase: fresh PAPER campaign required; historical contaminated evidence remains immutable.
+- Runtime maturity: canonical `paper_source_exchanges` is hashed into campaign config identity and independently checked at attachment.
+- BACKTEST/PAPER/LIVE alignment: PAPER provider identity is Binance read-only; trading logic and LIVE authority are unchanged.
+- Lifecycle and execution realism: pre-selection filtering and explicit kline diagnostics remain fail closed.
+- Known critical risks: historical campaigns created without this identity field cannot be resumed as post-fix evidence.
+- Last audit date: 2026-08-20.
+- Live readiness verdict: NOT LIVE READY.
+
 ## PAPER campaign executable-scope correction (2026-08-20)
 
 - Current version: dev post-PR-#328 campaign-scope correctness repair.
