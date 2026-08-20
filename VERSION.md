@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## PAPER reject-forward evidence repair (2026-08-20)
+
+- Current version: dev PAPER reject-forward evidence regression repair
+- Current phase: fresh-campaign PAPER validation required; historical `camp_5004b6d9236213b6` is immutable regression evidence
+- Runtime maturity: PAPER fee provenance, measured Binance book-ticker RTT, canonical bidirectional geometry, and mature resolver health are wired into the production chain
+- BACKTEST/PAPER/LIVE alignment: shared decision/lifecycle logic is unchanged; the explicit fee assumption is PAPER-only and LIVE mutation remains disabled
+- Lifecycle coverage: LONG and SHORT rejects can create pending labels; provider failures remain auditable incomplete geometry
+- Execution realism coverage: configured non-negative PAPER fees and measured public HTTP RTT are explicit; unavailable values remain null
+- Known critical risks: public-provider outages leave latency/geometry incomplete; new evidence must be collected in a new campaign
+- Last audit date: 2026-08-20
+- Live readiness verdict: NOT LIVE READY
+
 ## Runtime lifecycle schema repair (2026-08-18)
 
 - Current version: Alembic `0007_repair_runtime_lifecycle_schema`

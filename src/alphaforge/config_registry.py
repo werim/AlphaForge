@@ -123,6 +123,7 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_STOP_TOO_WIDE_EXTREME_MULT", "stop_too_wide_extreme_mult", "float", 1.50, "Trade Quality Filters", MODES, "Extreme wide-stop multiple.", 1.0, 10.0),
     _s("ALPHAFORGE_MAX_SPREAD_PCT", "max_spread_pct", "float", 0.05, "Execution Cost Filters", MODES, "Maximum spread percent.", 0.0, 1.0, deprecated_aliases=("MAX_SPREAD_PCT",)),
     _s("ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT", "max_expected_slippage_pct", "float", 0.05, "Execution Cost Filters", MODES, "Maximum expected slippage percent.", 0.0, 1.0, deprecated_aliases=("MAX_EXPECTED_SLIPPAGE_PCT",)),
+    _s("ALPHAFORGE_PAPER_FEE_BPS", "paper_fee_bps", "float", 4.0, "Execution Cost Filters", ("PAPER",), "Explicit round-trip PAPER fee assumption in basis points.", 0.0),
     _s("ALPHAFORGE_MAX_TOTAL_COST_PCT", "max_total_cost_pct", "float", 0.20, "Execution Cost Filters", MODES, "Maximum total explicit execution cost percent before rejection.", 0.0, 1.0, deprecated_aliases=("MAX_TOTAL_COST_PCT",)),
     _s("ALPHAFORGE_MIN_LIQUIDITY_SCORE", "min_liquidity_score", "float", 0.30, "Execution Cost Filters", MODES, "Minimum normalized liquidity score before rejection.", 0.0, 1.0, deprecated_aliases=("MIN_LIQUIDITY_SCORE",)),
     _s("ALPHAFORGE_MAX_VOLATILITY_PENALTY_PCT", "max_volatility_penalty_pct", "float", 0.20, "Execution Cost Filters", MODES, "Maximum RR volatility penalty before rejection.", 0.0, 10.0, deprecated_aliases=("MAX_VOLATILITY_PENALTY_PCT",)),

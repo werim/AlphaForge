@@ -117,6 +117,8 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "min_liquidity_usd": getattr(runtime_config, "min_liquidity_usd", None),
         "paper_slippage_bps": effective_paper_slippage_bps,
         "paper_expected_slippage_pct": None if effective_paper_slippage_bps is None else float(effective_paper_slippage_bps) / 10_000.0,
+        "paper_fee_bps": getattr(runtime_config, "paper_fee_bps", None),
+        "paper_fee_pct": None if getattr(runtime_config, "paper_fee_bps", None) is None else float(runtime_config.paper_fee_bps) / 10_000.0,
     }
     rid = release_id or os.getenv("ALPHAFORGE_RELEASE_ID", getattr(runtime_config, "phase7_burnin_release_id", "default"))
     return {

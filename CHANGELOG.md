@@ -1,3 +1,24 @@
+## PAPER reject-forward evidence repair — 2026-08-20
+
+### Added
+- Canonical `ALPHAFORGE_PAPER_FEE_BPS` evidence/provenance and measured Binance book-ticker HTTP RTT.
+- Regression coverage for fee identity, latency unavailability, and canonical SHORT ownership.
+
+### Changed
+- Canonical selected geometry now owns side, entry, stop, target, RR, and setup type; resolver health compares overdue rather than immature pending labels.
+
+### Fixed
+- Systematic missing fee/latency reject costs, discarded SHORT geometry, and false immature-queue backlog alarms.
+
+### Removed
+- Raw Binance scanner's fabricated LONG direction.
+
+### Breaking Changes
+- PAPER campaign execution-cost identity now includes the fee assumption; existing campaigns must not be resumed under the new identity.
+
+### Known Issues
+- Provider/clock failures deliberately preserve null latency and incomplete geometry. LIVE remains NOT READY.
+
 ## PR #323 post-selection request-bound correction — 2026-08-18
 
 ### Added

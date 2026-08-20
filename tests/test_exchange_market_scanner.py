@@ -83,6 +83,32 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
     assert btc["spread_status"] == "MEASURED"
     assert btc["spread_source"] == "BINANCE_BOOK_TICKER"
     assert btc["funding_status"] == "MEASURED"
+    assert btc["market_data_latency_ms"] is not None
+    assert btc["market_data_latency_source"] == "BINANCE_PUBLIC_HTTP_RTT"
+
+
+def test_binance_unavailable_monotonic_clock_does_not_fabricate_latency(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr("time.perf_counter", lambda: (_ for _ in ()).throw(RuntimeError("clock unavailable")))
+    monkeypatch.setattr("urllib.request.urlopen", _urlopen_multi([
+        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+        [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+        [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+        [],
+    ]))
+    btc = asyncio.run(scan_exchange_markets(load_config_from_env()))[0]
+    assert btc["market_data_latency_ms"] is None
+    assert btc["market_data_latency_status"] == "UNAVAILABLE"
+
+
+def test_canonical_short_geometry_overrides_unresolved_scanner_direction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._binance_kline_geometry", lambda *a, **k: {
+        "side": "SHORT", "entry": 99.0, "sl": 101.0, "tp": 96.0, "rr": 1.5,
+        "setup_type": "BREAKOUT_DOWN",
+    })
+    candidate = {"symbol": "BTCUSDT", "source_exchange": "binance", "timeframe": "1m", "entry": 100.0}
+    result = asyncio.run(enrich_selected_market_geometry([candidate], load_config_from_env()))[0]
+    assert (result["side"], result["entry"], result["sl"], result["tp"]) == ("SHORT", 99.0, 101.0, 96.0)
 
 
 def test_binance_closed_1m_candles_supply_canonical_trade_geometry(monkeypatch: pytest.MonkeyPatch) -> None:

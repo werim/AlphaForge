@@ -835,12 +835,22 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     scan_age = _age(runtime_hb.get("last_scan_ts"))
     qrow = conn.execute("SELECT status, blockers_json FROM burnin_qualification_snapshots WHERE qualification_id=?", (campaign.get("latest_qualification_id"),)).fetchone() if campaign.get("latest_qualification_id") else None
     counts = _counts(conn, campaign_id)
+    now = utc_now()
+    overdue_reject_labels = int(conn.execute(
+        "SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? "
+        "AND status IN ('PENDING','READY') AND due_at<=?", (campaign_id, now)
+    ).fetchone()[0] or 0)
+    stale_resolving_claims = int(conn.execute(
+        "SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status='RESOLVING' "
+        "AND (claimed_at IS NULL OR julianday(claimed_at)<=julianday(?)-(? / 86400.0))",
+        (campaign_id, now, max_heartbeat_age),
+    ).fetchone()[0] or 0)
     runs = [dict(r) for r in conn.execute("SELECT burnin_run_id, continuation_sequence FROM burnin_campaign_runs WHERE campaign_id=? ORDER BY continuation_sequence", (campaign_id,)).fetchall()]
     duplicate_seq = len({r["continuation_sequence"] for r in runs}) != len(runs)
     aggregate_contamination = any(str(r["burnin_run_id"]).endswith("__aggregate") or "aggregate" in str(r["burnin_run_id"]).lower() for r in runs)
     latest_hist = conn.execute("SELECT payload_json FROM burnin_health_history WHERE campaign_id=? ORDER BY id DESC LIMIT 1", (campaign_id,)).fetchone()
     previous = json.loads(latest_hist[0]) if latest_hist else {}
-    backlog_growth = bool(previous and counts["pending_reject_labels"] > int(previous.get("pending_reject_labels") or 0))
+    backlog_growth = bool(previous and overdue_reject_labels > int(previous.get("overdue_reject_labels") or 0))
     evidence_regression = bool(previous and str(previous.get("evidence_completeness_status") or "") == "PASS" and str(campaign.get("evidence_completeness_status") or "") != "PASS")
     payload = {
         "campaign_id": campaign_id, "campaign_status": campaign.get("campaign_status"), "worker_pid": pid, "worker_alive": alive, "heartbeat_age": age,
@@ -851,6 +861,7 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         "continuation_count": len(runs), "restart_count": campaign.get("restart_count"), "observed_duration": campaign.get("observed_duration_seconds"),
         "total_decisions": metrics.get("sample_count", 0), "accepted_decisions": metrics.get("accepted_count", 0), "rejected_decisions": metrics.get("rejected_count", 0),
         "pending_reject_labels": counts["pending_reject_labels"], "resolved_reject_labels": int(conn.execute("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status='RESOLVED'", (campaign_id,)).fetchone()[0] or 0),
+        "overdue_reject_labels": overdue_reject_labels, "stale_resolving_claims": stale_resolving_claims,
         "expired_reject_labels": int(conn.execute("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status='EXPIRED'", (campaign_id,)).fetchone()[0] or 0),
         "failed_reject_labels": int(conn.execute("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status='FAILED'", (campaign_id,)).fetchone()[0] or 0),
         "open_paper_positions": counts["open_positions"], "closed_paper_positions": int(conn.execute("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='CLOSED'", (campaign_id,)).fetchone()[0] or 0),
@@ -886,6 +897,10 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         unhealthy.append("REPEATED_PROVIDER_FAILURES")
     if counts["qualification_failures"]:
         unhealthy.append("QUALIFICATION_SNAPSHOT_FAILURE")
+    if counts["resolver_failures"]:
+        unhealthy.append("RESOLVER_FAILURES")
+    if stale_resolving_claims:
+        unhealthy.append("STALE_RESOLVING_CLAIMS")
     if backlog_growth:
         unhealthy.append("RESOLVER_BACKLOG_GROWTH")
     if evidence_regression:

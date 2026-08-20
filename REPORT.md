@@ -1,4 +1,23 @@
-# PR #323 — post-selection bounded signal geometry (2026-08-18)
+# PAPER reject-forward evidence regression surgery — 2026-08-20
+
+## Need and root cause
+
+Historical campaign `camp_5004b6d9236213b6` remains untouched. Its 409 pending labels lacked fee and latency costs because execution contexts had no fee assumption and Binance explicitly persisted latency as unavailable. Its 492 incomplete geometry observations lacked stop and target because the raw scanner fabricated LONG and enrichment discarded valid canonical SHORT geometry. Health also treated normal immature queue growth as resolver degradation.
+
+## Files and runtime behavior
+
+`execution.py`, runtime/config loading, the registry, and campaign identity now carry a non-negative explicit PAPER fee with `CONFIGURED_PAPER_ASSUMPTION` provenance; missing/invalid fee remains null and attached PAPER burn-in fails closed. The Binance scanner measures the conservative book-ticker request RTT with `perf_counter`; clock/provider failure remains `None`/`UNAVAILABLE`. Raw Binance candidates no longer claim direction, while selected two-closed-candle geometry authoritatively supplies side, entry, SL, TP, RR, and setup type without changing symbol/source identity. Resolver health now alarms on growth of overdue labels, stale resolving claims, and resolver/provider failures rather than immature pending growth.
+
+## Lifecycle, persistence, schema, compatibility, and migration
+
+Reject lifecycle ordering and strict critical-cost qualification are unchanged. Complete LONG and SHORT rejects remain eligible for pending-label persistence; genuine geometry/provider failure remains explicit incomplete evidence and cannot execute. No table or CSV schema changed and no migration is required. Campaign execution-cost hashes now include fee basis points and percentage, so operators must create a fresh campaign; the historical campaign must not be resumed or rewritten. LIVE order authorization and mutation paths are unchanged and disabled.
+
+## Tests, risks, limitations, and recommendation
+
+Regressions cover configured/missing fees, cost identity drift, measured/unavailable latency, canonical SHORT ownership, provider-failure incompleteness, production reject persistence, and mature resolver health. Public RTT includes network and Binance response time by design. Clock/provider outages reduce evidence completeness rather than producing zero. Recommend merge only after the relevant suites pass, then start a new PAPER campaign; do not recommend LIVE readiness.
+
+---
+
 
 ## Need and final root cause
 

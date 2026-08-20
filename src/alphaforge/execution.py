@@ -66,6 +66,12 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     funding_status = str(market_ctx.get("funding_status", "MEASURED" if funding_val is not None else "UNAVAILABLE"))
     funding_source = str(market_ctx.get("funding_source", "UNKNOWN" if funding_val is not None else "UNAVAILABLE"))
 
+    fee = _to_float(market_ctx.get("fee_pct"))
+    fee_status = str(market_ctx.get("fee_status", "CONFIGURED" if fee is not None else "UNAVAILABLE"))
+    fee_source = str(market_ctx.get("fee_source", "CONFIGURED_PAPER_ASSUMPTION" if fee is not None else "UNAVAILABLE"))
+    if fee is not None and (fee < 0 or fee_status.upper() == "UNAVAILABLE"):
+        fee = None
+
     orderbook = _to_float(market_ctx.get("orderbook_imbalance"))
     orderbook_status = str(market_ctx.get("orderbook_status", "MEASURED" if orderbook is not None else "UNAVAILABLE"))
     orderbook_source = str(market_ctx.get("orderbook_source", "UNKNOWN" if orderbook is not None else "UNAVAILABLE"))
@@ -108,6 +114,9 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "funding_rate_pct": funding_val,
         "funding_status": funding_status,
         "funding_source": funding_source,
+        "fee_pct": fee,
+        "fee_status": fee_status if fee is not None else "UNAVAILABLE",
+        "fee_source": fee_source if fee is not None else "UNAVAILABLE",
         "volatility_regime": volatility_regime if volatility_status != "UNAVAILABLE" else None,
         "volatility_status": volatility_status,
         "volatility_source": volatility_source,
