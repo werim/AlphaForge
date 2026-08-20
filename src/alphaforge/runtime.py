@@ -100,6 +100,8 @@ class RuntimeConfig:
     min_effective_rr: float = 1.10
     max_spread_pct: float = 0.0025
     max_expected_slippage_pct: float = 0.0020
+    paper_fee_bps: float | None = 4.0
+    paper_decision_timeframe: str = "1m"
     max_abs_funding_rate_pct: float = 0.0010
     min_liquidity_usd: float = 5_000_000.0
     # Keep every decision-filter field that can be environment-configured on
@@ -222,6 +224,7 @@ class RuntimeOrchestrator:
     _last_error: str | None = field(default=None, init=False)
     _recovery_required: bool = field(default=False, init=False)
     _fail_closed_reason: str | None = field(default=None, init=False)
+    _campaign_intervals: tuple[str, ...] = field(default=(), init=False)
     _fatal_task_exception: BaseException | None = field(default=None, init=False)
     _fatal_task_name: str | None = field(default=None, init=False)
     _unknown_exchange_state: bool = field(default=False, init=False)
@@ -692,6 +695,7 @@ class RuntimeOrchestrator:
                 self._fail_closed_reason = attachment_error or "PHASE8_CAMPAIGN_NOT_FOUND"
                 raise RuntimeError(self._fail_closed_reason)
             campaign_identity = campaign_attachment_identity(campaign)
+            self._campaign_intervals = tuple(str(value) for value in (campaign.get("intervals") or []))
             run_identity = run_attachment_identity(run) if run else {}
             runtime_identity = self._phase8_runtime_hashes(campaign.get("symbols") or [], campaign.get("intervals") or [])
             campaign_run_mismatches = identity_mismatches(campaign_identity, run_identity, ATTACHMENT_IDENTITY_FIELDS) if run else {"active_run": {"expected": campaign.get("active_run_id"), "observed": None}}
@@ -700,7 +704,13 @@ class RuntimeOrchestrator:
             run_runtime_mismatches = identity_mismatches(run_identity, runtime_identity, RUNTIME_ATTACHMENT_IDENTITY_FIELDS) if run else {}
             campaign_runtime_mismatches = identity_mismatches(campaign_identity, runtime_identity, CAMPAIGN_RUNTIME_IDENTITY_FIELDS)
             reason = None
-            if attachment_error:
+            try:
+                paper_fee_valid = self.config.paper_fee_bps is not None and float(self.config.paper_fee_bps) >= 0
+            except (TypeError, ValueError):
+                paper_fee_valid = False
+            if self.config.execution_mode is ExecutionMode.PAPER and not paper_fee_valid:
+                reason = "PHASE8_PAPER_FEE_ASSUMPTION_INVALID"
+            elif attachment_error:
                 reason = attachment_error
             elif campaign_run_mismatches:
                 reason = "PHASE8_CAMPAIGN_RUN_IDENTITY_MISMATCH"
@@ -1197,6 +1207,16 @@ class RuntimeOrchestrator:
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
         market_ctx.setdefault("mode", self.config.execution_mode.value)
+        if self.config.execution_mode is ExecutionMode.PAPER and self.config.paper_fee_bps is not None:
+            try:
+                paper_fee_bps = float(self.config.paper_fee_bps)
+                if paper_fee_bps < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                paper_fee_bps = None
+            if paper_fee_bps is not None:
+                market_ctx.update(fee_pct=paper_fee_bps / 10_000.0, fee_status="CONFIGURED",
+                                  fee_source="CONFIGURED_PAPER_ASSUMPTION")
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
         execution_ctx = build_execution_context(market_ctx)
         market_ctx["execution_ctx"] = execution_ctx
@@ -1543,6 +1563,9 @@ class RuntimeOrchestrator:
                     execution_cost_assumptions=costs, regime=payload.get("regime") or payload.get("volatility_regime"),
                     reject_reason=payload.get("reason") or payload.get("reject_reason"),
                     source_provenance={"provider": self.scanner_source or "UNKNOWN", "timeframe": payload.get("timeframe"),
+                                       "campaign_intervals": list(self._campaign_intervals),
+                                       "decision_setup_timeframe": self.config.paper_decision_timeframe,
+                                       "reject_evaluation_timeframe": payload.get("timeframe"),
                                        "setup_type": payload.get("setup_type"), "volatility_regime": payload.get("volatility_regime"),
                                        "liquidity_score": execution_ctx.get("liquidity_score")},
                 )
@@ -1874,7 +1897,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_decision_timeframe=cfg.runtime.paper_decision_timeframe)
     config.agent_graph_enabled = cfg.runtime.agent_graph_enabled
     config.agent_graph_shadow = cfg.runtime.agent_graph_shadow
     config.agent_graph_max_steps = cfg.runtime.agent_graph_max_steps

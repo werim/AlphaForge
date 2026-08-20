@@ -1,4 +1,33 @@
-# PR #323 — post-selection bounded signal geometry (2026-08-18)
+## PR #328 CI wiring-contract follow-up
+
+The remaining CI failure was metadata-only: the PAPER decision timeframe was behaviorally consumed but its `Learning` category fell back to generic `load_config_from_env` metadata. The registry now identifies `_scan_binance` as the specific production consumer and points to a behavioral test that changes the environment value, proves unsupported `5m` performs no provider request or silent `1m` fallback, proves supported `1m` reaches scanner candidates, and verifies reject-evaluation identity/hash changes. No runtime, lifecycle, persistence, fee, latency, geometry, resolver-health, schema, or LIVE mutation semantics changed.
+
+## PR #328 follow-up: timeframe semantics and resolver health
+
+A campaign interval such as `1h` is now explicitly a campaign reporting/universe interval, distinct from the canonical PAPER decision/setup timeframe and reject-forward evaluation timeframe. Identity persists all three semantics plus horizon bars, pending-label provenance repeats them, and the Binance scanner fails closed if configured away from its currently supported closed-`1m` geometry. Thus a `1h` campaign can intentionally evaluate `1m` decisions for 240 bars, but that four-hour horizon is no longer implicit and any semantic change alters identity. No persistence schema or export migration is required.
+
+Direct operations tests now establish that immature queue growth remains healthy, overdue growth emits `RESOLVER_BACKLOG_GROWTH`, stale claims emit `STALE_RESOLVING_CLAIMS`, and resolver/provider failures remain unhealthy. The fee setting is explicitly total round-trip entry-plus-exit basis points and `_phase7_costs_from_execution_ctx` applies it once, avoiding undercount or double count. Existing strict qualification, latency, SHORT geometry, historical-campaign immutability, and disabled LIVE mutation behavior remain unchanged. Start a fresh PAPER campaign after merge.
+
+# PAPER reject-forward evidence regression surgery — 2026-08-20
+
+## Need and root cause
+
+Historical campaign `camp_5004b6d9236213b6` remains untouched. Its 409 pending labels lacked fee and latency costs because execution contexts had no fee assumption and Binance explicitly persisted latency as unavailable. Its 492 incomplete geometry observations lacked stop and target because the raw scanner fabricated LONG and enrichment discarded valid canonical SHORT geometry. Health also treated normal immature queue growth as resolver degradation.
+
+## Files and runtime behavior
+
+`execution.py`, runtime/config loading, the registry, and campaign identity now carry a non-negative explicit PAPER fee with `CONFIGURED_PAPER_ASSUMPTION` provenance; missing/invalid fee remains null and attached PAPER burn-in fails closed. The Binance scanner measures the conservative book-ticker request RTT with `perf_counter`; clock/provider failure remains `None`/`UNAVAILABLE`. Raw Binance candidates no longer claim direction, while selected two-closed-candle geometry authoritatively supplies side, entry, SL, TP, RR, and setup type without changing symbol/source identity. Resolver health now alarms on growth of overdue labels, stale resolving claims, and resolver/provider failures rather than immature pending growth.
+
+## Lifecycle, persistence, schema, compatibility, and migration
+
+Reject lifecycle ordering and strict critical-cost qualification are unchanged. Complete LONG and SHORT rejects remain eligible for pending-label persistence; genuine geometry/provider failure remains explicit incomplete evidence and cannot execute. No table or CSV schema changed and no migration is required. Campaign execution-cost hashes now include fee basis points and percentage, so operators must create a fresh campaign; the historical campaign must not be resumed or rewritten. LIVE order authorization and mutation paths are unchanged and disabled.
+
+## Tests, risks, limitations, and recommendation
+
+Regressions cover configured/missing fees, cost identity drift, measured/unavailable latency, canonical SHORT ownership, provider-failure incompleteness, production reject persistence, and mature resolver health. Public RTT includes network and Binance response time by design. Clock/provider outages reduce evidence completeness rather than producing zero. Recommend merge only after the relevant suites pass, then start a new PAPER campaign; do not recommend LIVE readiness.
+
+---
+
 
 ## Need and final root cause
 
@@ -1362,3 +1391,7 @@ Legacy rows lacking trustworthy timestamp evidence intentionally retain NULL `ev
 After backup and merge, stop writers and run exactly: `git pull`, `alembic upgrade head`, the canonical `preflight`, then `launch` only if preflight returns PASS. Recommend merge after the focused and full suites pass; this repair does not itself establish LIVE readiness.
 
 ---
+
+### Verification result
+
+`tests/test_env_wiring_contract.py` passed all 124 tests. The full local suite completed with 1,259 passed and 6 skipped; its six failures are limited to Alembic imports because the Alembic distribution is absent from this environment. The behavioral wiring change itself is green, so the existing review thread is ready to resolve in the PR host after push.

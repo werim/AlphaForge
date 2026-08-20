@@ -30,6 +30,20 @@ def _binance_kline_geometry(base_url: str, symbol: str, *, timeout_sec: float) -
     return build_breakout_geometry(candles[1], candles[0])
 
 
+def _fetch_json_with_latency(url: str, *, timeout_sec: float) -> tuple[Any, float | None]:
+    """Fetch public price data and return its monotonic HTTP RTT when measurable."""
+    try:
+        started = time.perf_counter()
+    except Exception:  # an unavailable clock must not fabricate latency
+        return _fetch_json(url, timeout_sec=timeout_sec), None
+    payload = _fetch_json(url, timeout_sec=timeout_sec)
+    try:
+        elapsed = (time.perf_counter() - started) * 1000.0
+    except Exception:
+        return payload, None
+    return payload, elapsed if elapsed >= 0 else None
+
+
 async def enrich_selected_market_geometry(
     candidates: list[dict[str, Any]], config: Any,
 ) -> list[dict[str, Any]]:
@@ -57,8 +71,6 @@ async def enrich_selected_market_geometry(
     enriched: list[dict[str, Any]] = []
     for candidate, key in zip(candidates, keys):
         geometry = results.get(key, {})
-        if geometry and str(geometry.get("side") or "").upper() != str(candidate.get("side") or "").upper():
-            geometry = {}
         enriched.append({**candidate, **geometry})
     return enriched
 
@@ -77,10 +89,15 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         return []
     base_url = str(getattr(binance, "base_url", "https://fapi.binance.com"))
     quote_asset = str(getattr(binance, "default_quote_asset", "USDT")).upper()
+    decision_timeframe = str(getattr(getattr(config, "runtime", object()), "paper_decision_timeframe", "1m"))
+    if decision_timeframe != "1m":
+        return []  # the canonical geometry provider currently supports closed 1m setup candles only
     try:
         exchange_info = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/exchangeInfo", timeout_sec=timeout_sec)
         tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/24hr", timeout_sec=timeout_sec)
-        book_tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/bookTicker", timeout_sec=timeout_sec)
+        book_tickers, market_data_latency_ms = _fetch_json_with_latency(
+            f"{base_url.rstrip('/')}/fapi/v1/ticker/bookTicker", timeout_sec=timeout_sec
+        )
         funding = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/premiumIndex", timeout_sec=timeout_sec)
     except Exception:  # noqa: BLE001
         return []
@@ -108,7 +125,6 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
         if isinstance(item, dict) and item.get("symbol")
     }
     now_ts = time.time()
-    market_data_latency_ms = None
     candidates: list[dict[str, Any]] = []
     for item in tickers:
         if not isinstance(item, dict):
@@ -141,9 +157,8 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
                 "symbol": symbol,
                 "source_exchange": "binance",
                 "entry": entry,
-                "side": "LONG",
                 "market_ts": now_ts,
-                "timeframe": "1m",
+                "timeframe": decision_timeframe,
                 "volume_24h_usdt": volume_quote,
                 "spread_pct": spread_pct,
                 "spread_bps": spread_pct * 10_000.0,

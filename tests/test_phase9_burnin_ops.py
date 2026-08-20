@@ -1470,3 +1470,61 @@ def test_health_never_falls_back_to_global_heartbeat_without_attachment(tmp_path
     assert health["runtime_heartbeat_age"] is None and health["last_scan_ts"] is None and health["last_decision_ts"] is None
     assert (health["scans"], health["symbols_selected"], health["decisions_generated"], health["rejects_persisted"]) == (0, 0, 0, 0)
     conn.close()
+
+
+def _healthy_resolver_campaign(conn, camp, run):
+    now = utc_now()
+    conn.execute("""CREATE TABLE IF NOT EXISTS runtime_heartbeats(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,runtime_instance_id TEXT,execution_mode TEXT,
+        heartbeat_ts TEXT,runtime_state TEXT,last_scan_ts TEXT,last_decision_ts TEXT,
+        evidence_status TEXT,payload_json TEXT)""")
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED', last_heartbeat_at=? WHERE campaign_id=?", (now, camp.campaign_id))
+    event(conn, camp.campaign_id, "PHASE8_CAMPAIGN_ATTACHED", burnin_run_id=run,
+          details={"runtime_instance_id": "runtime:health", "active_run_id": run})
+    conn.execute("INSERT INTO runtime_heartbeats(runtime_instance_id,execution_mode,heartbeat_ts,runtime_state,last_scan_ts,evidence_status,payload_json) VALUES (?,?,?,?,?,?,?)",
+                 ("runtime:health", "PAPER", now, "OPERATING", now, "MEASURED_RUNTIME_HEARTBEAT", "{}"))
+    conn.commit()
+
+
+def _health_label(conn, camp, run, suffix, *, due_at, status="PENDING", claimed_at=None):
+    conn.execute("""INSERT INTO burnin_pending_reject_labels(
+        pending_label_id,campaign_id,burnin_run_id,reject_decision_id,signal_id,symbol,side,
+        decision_timestamp,entry,stop,target,horizon_seconds,execution_cost_assumptions_json,
+        regime,reject_reason,source_provenance_json,due_at,status,claimed_at,created_at,schema_version)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f"p-{suffix}", camp.campaign_id, run, f"r-{suffix}", f"s-{suffix}", "BTCUSDT", "LONG",
+         utc_now(), 1, .9, 1.2, 3600, "{}", "TREND", "LOW", "{}", due_at, status,
+         claimed_at, utc_now(), "sv"))
+    conn.commit()
+
+
+def test_health_immature_pending_growth_stays_healthy(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    _, conn = _conn(tmp_path); camp, run = _campaign(conn); _healthy_resolver_campaign(conn, camp, run)
+    assert health_payload(conn, camp.campaign_id)["status"] == "HEALTHY"
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    _health_label(conn, camp, run, "immature", due_at=future)
+    health = health_payload(conn, camp.campaign_id)
+    assert health["status"] == "HEALTHY"
+    assert "RESOLVER_BACKLOG_GROWTH" not in health["unhealthy_reasons"]
+
+
+def test_health_overdue_growth_and_stale_claim_are_unhealthy(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    _, conn = _conn(tmp_path); camp, run = _campaign(conn); _healthy_resolver_campaign(conn, camp, run)
+    health_payload(conn, camp.campaign_id)
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    _health_label(conn, camp, run, "overdue", due_at=past)
+    assert "RESOLVER_BACKLOG_GROWTH" in health_payload(conn, camp.campaign_id)["unhealthy_reasons"]
+    _health_label(conn, camp, run, "stale", due_at=past, status="RESOLVING", claimed_at=past)
+    assert "STALE_RESOLVING_CLAIMS" in health_payload(conn, camp.campaign_id, max_heartbeat_age=60)["unhealthy_reasons"]
+
+
+def test_health_resolver_and_provider_failures_remain_unhealthy(tmp_path):
+    _, conn = _conn(tmp_path); camp, run = _campaign(conn); _healthy_resolver_campaign(conn, camp, run)
+    for index in range(3):
+        event(conn, camp.campaign_id, "RESOLVER_BATCH_FAILED", details={"error": "PROVIDER_FAILURE", "n": index})
+    conn.commit()
+    reasons = health_payload(conn, camp.campaign_id)["unhealthy_reasons"]
+    assert "RESOLVER_FAILURES" in reasons
+    assert "REPEATED_PROVIDER_FAILURES" in reasons

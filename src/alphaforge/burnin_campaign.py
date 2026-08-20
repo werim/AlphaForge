@@ -102,6 +102,10 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
     config_payload = dict(runtime_filter_config(runtime_config, mode=str(mode or "PAPER")))
     config_payload["symbols"] = sorted(map(str, symbols))
     config_payload["intervals"] = sorted(map(str, intervals))
+    config_payload["campaign_intervals"] = sorted(map(str, intervals))
+    config_payload["decision_setup_timeframe"] = str(getattr(runtime_config, "paper_decision_timeframe", "1m"))
+    config_payload["reject_evaluation_timeframe"] = config_payload["decision_setup_timeframe"]
+    config_payload["reject_forward_horizon_bars"] = int(getattr(runtime_config, "reject_forward_horizon_bars", 240))
     strategy_payload = {
         "min_signal_score": getattr(runtime_config, "min_signal_score", None),
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
@@ -117,6 +121,8 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "min_liquidity_usd": getattr(runtime_config, "min_liquidity_usd", None),
         "paper_slippage_bps": effective_paper_slippage_bps,
         "paper_expected_slippage_pct": None if effective_paper_slippage_bps is None else float(effective_paper_slippage_bps) / 10_000.0,
+        "paper_fee_bps": getattr(runtime_config, "paper_fee_bps", None),
+        "paper_fee_pct": None if getattr(runtime_config, "paper_fee_bps", None) is None else float(runtime_config.paper_fee_bps) / 10_000.0,
     }
     rid = release_id or os.getenv("ALPHAFORGE_RELEASE_ID", getattr(runtime_config, "phase7_burnin_release_id", "default"))
     return {

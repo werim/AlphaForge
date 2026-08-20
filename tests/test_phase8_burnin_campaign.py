@@ -623,3 +623,34 @@ def test_campaign_runtime_database_identity_mismatch_remains_fail_closed(tmp_pat
     assert details["expected_canonical_path"] == str(campaign_db.resolve())
     assert details["observed_canonical_path"] == str(wrong_db.resolve())
     campaign_engine.dispose(); wrong_engine.dispose()
+
+
+def test_paper_fee_assumption_changes_execution_cost_identity():
+    from alphaforge.burnin_campaign import build_phase8_campaign_identity
+    from alphaforge.runtime import RuntimeConfig
+
+    first = build_phase8_campaign_identity(RuntimeConfig(paper_fee_bps=4.0), ["BTCUSDT"], ["1m"])
+    second = build_phase8_campaign_identity(RuntimeConfig(paper_fee_bps=5.0), ["BTCUSDT"], ["1m"])
+    assert first["execution_cost_payload"]["paper_fee_bps"] == 4.0
+    assert first["execution_cost_config_hash"] != second["execution_cost_config_hash"]
+
+
+def test_campaign_interval_and_reject_timeframe_semantics_are_explicit_and_hashed():
+    from alphaforge.burnin_campaign import build_phase8_campaign_identity
+    from alphaforge.runtime import RuntimeConfig
+
+    one_hour_campaign = build_phase8_campaign_identity(
+        RuntimeConfig(paper_decision_timeframe="1m", reject_forward_horizon_bars=240),
+        ["BTCUSDT"], ["1h"],
+    )
+    payload = one_hour_campaign["config_payload"]
+    assert payload["campaign_intervals"] == ["1h"]
+    assert payload["decision_setup_timeframe"] == "1m"
+    assert payload["reject_evaluation_timeframe"] == "1m"
+    assert payload["reject_forward_horizon_bars"] == 240
+
+    changed = build_phase8_campaign_identity(
+        RuntimeConfig(paper_decision_timeframe="5m", reject_forward_horizon_bars=240),
+        ["BTCUSDT"], ["1h"],
+    )
+    assert one_hour_campaign["config_hash"] != changed["config_hash"]

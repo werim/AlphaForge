@@ -222,3 +222,20 @@ def test_effective_rr_cost_penalty_is_applied_once() -> None:
 
     assert result.effective_rr == pytest.approx(2.0 - result.cost_penalty_total, rel=1e-9)
     assert result.effective_rr != pytest.approx(2.0 - (2 * result.cost_penalty_total), rel=1e-9)
+
+
+def test_paper_fee_evidence_is_explicit_and_missing_remains_unavailable():
+    from alphaforge.execution import build_execution_context
+
+    configured = build_execution_context({"fee_pct": 0.0004, "fee_source": "CONFIGURED_PAPER_ASSUMPTION"})
+    missing = build_execution_context({})
+    assert configured["fee_pct"] == pytest.approx(0.0004)
+    assert configured["fee_source"] == "CONFIGURED_PAPER_ASSUMPTION"
+    assert missing["fee_pct"] is None and missing["fee_source"] == "UNAVAILABLE"
+
+
+def test_paper_fee_bps_is_total_round_trip_cost_applied_once():
+    from alphaforge.runtime import RuntimeOrchestrator
+
+    costs = RuntimeOrchestrator._phase7_costs_from_execution_ctx(None, {"fee_pct": 0.0004})
+    assert costs["fee_cost"] == pytest.approx(0.0004)

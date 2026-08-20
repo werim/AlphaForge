@@ -1,3 +1,65 @@
+## PR #328 CI wiring follow-up — 2026-08-20
+
+### Added
+- Behavioral environment-contract coverage for PAPER scanner and reject-evaluation timeframe semantics.
+
+### Changed
+- PAPER decision-timeframe metadata now names its specific production Binance scanner consumer.
+
+### Fixed
+- Config audit no longer rejects `ALPHAFORGE_PAPER_DECISION_TIMEFRAME` as generically wired.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None beyond the already-documented timeframe identity change.
+
+### Known Issues
+- Binance geometry remains 1m-only and unsupported configured timeframes fail closed.
+
+## PR #328 timeframe and health follow-up — 2026-08-20
+
+### Added
+- Explicit, hashed campaign interval, decision/setup timeframe, reject evaluation timeframe, and horizon-bar semantics.
+- Direct resolver health state regressions.
+
+### Changed
+- Documented PAPER fee basis points as total round-trip entry-plus-exit cost applied once.
+
+### Fixed
+- Prevented silent 1h campaign identity / 1m reject-evidence semantic ambiguity.
+
+### Removed
+- None.
+
+### Breaking Changes
+- Campaign config identity now includes all evidence-critical timeframe semantics; create a fresh campaign.
+
+### Known Issues
+- Production Binance canonical setup geometry remains 1m-only and fails closed for unsupported configured timeframes. LIVE remains NOT READY.
+
+## PAPER reject-forward evidence repair — 2026-08-20
+
+### Added
+- Canonical `ALPHAFORGE_PAPER_FEE_BPS` evidence/provenance and measured Binance book-ticker HTTP RTT.
+- Regression coverage for fee identity, latency unavailability, and canonical SHORT ownership.
+
+### Changed
+- Canonical selected geometry now owns side, entry, stop, target, RR, and setup type; resolver health compares overdue rather than immature pending labels.
+
+### Fixed
+- Systematic missing fee/latency reject costs, discarded SHORT geometry, and false immature-queue backlog alarms.
+
+### Removed
+- Raw Binance scanner's fabricated LONG direction.
+
+### Breaking Changes
+- PAPER campaign execution-cost identity now includes the fee assumption; existing campaigns must not be resumed under the new identity.
+
+### Known Issues
+- Provider/clock failures deliberately preserve null latency and incomplete geometry. LIVE remains NOT READY.
+
 ## PR #323 post-selection request-bound correction — 2026-08-18
 
 ### Added
