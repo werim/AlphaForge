@@ -4,7 +4,7 @@
 
 - Current version: dev PR #329 provider-scope identity correction.
 - Current phase: fresh PAPER campaign required; historical contaminated evidence remains immutable.
-- Runtime maturity: canonical `paper_source_exchanges` is hashed into campaign config identity and independently checked at attachment.
+- Runtime maturity: canonical `paper_source_exchanges` is hashed into campaign config identity and independently checked at attachment, including direct cross-provider identity rejection.
 - BACKTEST/PAPER/LIVE alignment: PAPER provider identity is Binance read-only; trading logic and LIVE authority are unchanged.
 - Lifecycle and execution realism: pre-selection filtering and explicit kline diagnostics remain fail closed.
 - Known critical risks: historical campaigns created without this identity field cannot be resumed as post-fix evidence.

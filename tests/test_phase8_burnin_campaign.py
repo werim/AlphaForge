@@ -562,6 +562,33 @@ def test_runtime_attachment_fails_closed_on_mutated_provider_provenance(tmp_path
     engine.dispose()
 
 
+def test_hyperliquid_identity_cannot_attach_to_binance_paper_runtime(tmp_path):
+    db = tmp_path / "provider_identity_drift.db"
+    runtime, engine = _runtime_for_campaign(db)
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    campaign = create_campaign(conn, release_id=runtime.config.phase7_burnin_release_id,
+        duration_days=1, symbols=["BTCUSDT"], intervals=["1m"],
+        runtime_config=runtime.config,
+        source_provenance={"provider": "HYPERLIQUID", "exchange": "HYPERLIQUID",
+                           "order_submission": "DISABLED"},
+        paper_source_exchanges=["hyperliquid"])
+    start_or_resume_campaign(conn, campaign.campaign_id)
+    conn.commit()
+    conn.close()
+
+    binance_identity = runtime._phase8_runtime_hashes(["BTCUSDT"], ["1m"])
+    assert campaign.config_hash != binance_identity["config_hash"]
+    with pytest.raises(RuntimeError, match="PHASE8_CAMPAIGN_PROVIDER_DRIFT"):
+        runtime._attach_phase8_campaign(campaign.campaign_id)
+    with engine.connect() as sql:
+        row = sql.execute(text(
+            "SELECT campaign_status,last_error FROM burnin_campaigns WHERE campaign_id=:cid"),
+            {"cid": campaign.campaign_id}).one()
+    assert row == ("PAUSED", "PHASE8_CAMPAIGN_PROVIDER_DRIFT")
+    engine.dispose()
+
+
 def test_execution_cost_hash_changes_with_effective_slippage(tmp_path):
     rt, engine=_runtime_for_campaign(tmp_path/'slip_hash.db')
     a=build_phase8_campaign_identity(rt.config, [], [], release_id='rel', paper_slippage_bps=2.0)

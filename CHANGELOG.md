@@ -4281,6 +4281,7 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Added
 - Canonical normalized `paper_source_exchanges` in the hashed Phase 8 config identity.
 - Creation and attachment consistency checks plus timeout/provider-contamination regressions.
+- Direct regression proving a valid Hyperliquid identity cannot attach to the independently Binance-scoped PAPER runtime.
 
 ### Changed
 - Runtime derives expected PAPER provider scope independently as Binance and compares persisted provenance against it.

@@ -1428,6 +1428,6 @@ Campaign creation requires normalized provenance scope to equal the requested id
 
 ### Tests, migration, risks, and recommendation
 
-Tests cover config-hash divergence between Binance and Hyperliquid, creation mismatch, mutated-provenance attachment drift, same-symbol provider filtering with zero database side effects, read-only provider contamination failure, and explicit `KLINE_TIMEOUT`. The focused CI-equivalent set passed 286 tests. The full suite completed with 1,272 passed and 6 skipped; its only six failures require the unavailable Alembic distribution, and installation was blocked by the environment's package-index 403. No migration is required, but identity semantics require a fresh release/preflight/campaign. Never resume the contaminated historical campaign. LIVE remains NOT READY.
+Tests cover config-hash divergence between Binance and Hyperliquid, creation mismatch, mutated-provenance attachment drift, direct Hyperliquid-identity rejection by the independently Binance-scoped runtime, same-symbol provider filtering with zero database side effects, read-only provider contamination failure, and explicit `KLINE_TIMEOUT`. The focused set passed 136 tests. The full suite produced 1,272 passed and 6 skipped; six failures were the environment's missing Alembic distribution and one unrelated heartbeat timing test passed immediately when rerun alone. No migration is required, but identity semantics require a fresh release/preflight/campaign. Never resume the contaminated historical campaign. LIVE remains NOT READY.
 
 ---
