@@ -81,7 +81,7 @@ def test_mixed_0006_upgrade_repairs_lifecycle_contract_without_inventing_evidenc
         ).fetchall()
         assert rows[0] == (1, "legacy-1", "SIGNAL_CREATED", "SIGNAL_CREATED", None, None, '{"source":"legacy"}', None)
         assert rows[1] == (2, None, "UNRECOGNIZED_LEGACY_STATE", None, None, None, "legacy-two", None)
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0007_repair_runtime_lifecycle_schema"
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0008_database_doctor_lifecycle_contract"
 
     assert validate_required_schema(db).schema_status == "VALID"
     engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)

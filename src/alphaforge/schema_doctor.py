@@ -27,7 +27,7 @@ KNOWN_MIGRATION_CHECKSUMS = {
     SCHEMA_VERSION: MIGRATION_CHECKSUM,
 }
 
-KNOWN_ALEMBIC_HEADS = frozenset({"0005_core_identifier_normalization", "0006_reject_label_identity_timeframe", "0007_repair_runtime_lifecycle_schema"})
+KNOWN_ALEMBIC_HEADS = frozenset({"0005_core_identifier_normalization", "0006_reject_label_identity_timeframe", "0007_repair_runtime_lifecycle_schema", "0008_database_doctor_lifecycle_contract"})
 
 POSITION_ACTIVE = frozenset({"OPEN", "POSITION_OPENED", "ACTIVE"})
 POSITION_TERMINAL = frozenset({"CLOSED", "POSITION_CLOSED", "EXITED", "CANCELLED"})
@@ -243,7 +243,7 @@ def inspect_database_schema(target: Any) -> SchemaReport:
                 elif not _affinity_compatible(expected_type, columns[column]["type"]):
                     report.type_mismatches.append({"table": table, "column": column, "expected": expected_type, "actual": columns[column]["type"]})
         lifecycle_table = "trade_lifecycle_events"
-        if report.alembic_revision == "0007_repair_runtime_lifecycle_schema" and lifecycle_table not in names:
+        if report.alembic_revision in {"0007_repair_runtime_lifecycle_schema", "0008_database_doctor_lifecycle_contract"} and lifecycle_table not in names:
             report.missing_tables.append(lifecycle_table)
             report.reasons.append("RUNTIME_LIFECYCLE_CONTRACT_INCOMPATIBLE")
         if lifecycle_table in names:

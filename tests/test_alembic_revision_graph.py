@@ -54,8 +54,8 @@ def test_alembic_script_directory_loads_and_resolves_heads() -> None:
     config = Config(str(REPO_ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0007_repair_runtime_lifecycle_schema"]
-    assert script.get_current_head() == "0007_repair_runtime_lifecycle_schema"
+    assert script.get_heads() == ["0008_database_doctor_lifecycle_contract"]
+    assert script.get_current_head() == "0008_database_doctor_lifecycle_contract"
 
 
 def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Path) -> None:
@@ -185,7 +185,7 @@ def test_alembic_upgrade_head_is_idempotent_on_partially_initialized_sqlite_data
         }
         assert triggers == empty_database_triggers
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0007_repair_runtime_lifecycle_schema",
+            "0008_database_doctor_lifecycle_contract",
         )
 
 

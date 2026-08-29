@@ -1431,3 +1431,48 @@ Campaign creation requires normalized provenance scope to equal the requested id
 Tests cover config-hash divergence between Binance and Hyperliquid, creation mismatch, mutated-provenance attachment drift, direct Hyperliquid-identity rejection by the independently Binance-scoped runtime, same-symbol provider filtering with zero database side effects, read-only provider contamination failure, and explicit `KLINE_TIMEOUT`. The focused set passed 136 tests. The full suite produced 1,272 passed and 6 skipped; six failures were the environment's missing Alembic distribution and one unrelated heartbeat timing test passed immediately when rerun alone. No migration is required, but identity semantics require a fresh release/preflight/campaign. Never resume the contaminated historical campaign. LIVE remains NOT READY.
 
 ---
+# Database Doctor v1 surgery report — 2026-08-29
+
+## Need and root cause
+
+Alembic revision 0001 declared `trade_lifecycle_events.id` as `BIGINT PRIMARY KEY`.
+SQLite grants implicit rowid allocation only to the exact `INTEGER PRIMARY KEY`
+declaration, while the production writer intentionally supplies no surrogate
+ID. The same legacy table also required `order_intent_id` and `event_payload`,
+which the current writer does not populate.
+
+## Patch and runtime behavior
+
+- Added `alphaforge.db_doctor` commands for diagnose, plan, repair, and certify,
+  including JSON output, canonical path/file identity, inventory, integrity,
+  migration identity, actionable issue evidence, and real persistence probes.
+- Added Alembic `0008_database_doctor_lifecycle_contract`. SQLite rebuilds the
+  lifecycle table with an autoincrement rowid PK, nullable legacy evidence
+  columns, and both canonical unique identities. PostgreSQL receives an
+  explicit owned sequence/default without SQLite syntax.
+- Repair uses SQLite's online backup API before migration and validates backup
+  existence and integrity. Duplicate identities, corrupt databases, ambiguous
+  identity, failed backup, and failed probes remain blocked.
+
+## Lifecycle, persistence, export, and compatibility
+
+Historical rows, supplied numeric IDs, legacy order-intent IDs, and legacy
+event payloads are copied without synthesizing canonical event evidence. Row
+counts and uniqueness are verified before replacement. No CSV/export schema,
+trading threshold, rejection, execution, expectancy, risk, PAPER decision, or
+LIVE authorization behavior changes. No migration is required outside Alembic
+upgrade head; downgrade is intentionally non-destructive/no-op.
+
+## Tests and risks
+
+Focused tests cover current bootstrap, actual 0001 history, exact 0007 writer
+failure, repaired persistence, row preservation, duplicate fail-closed behavior,
+read-only missing-path diagnosis, validated backup, and real writer
+certification. The focused suite passed. Full-suite results are recorded in the
+delivery summary. A historical Alembic-only database can still expose unrelated
+optional writer-table drift; certification deliberately reports that condition.
+
+## Push recommendation
+
+Push for PAPER database remediation after backup retention has been verified.
+Do not interpret database certification as LIVE readiness.

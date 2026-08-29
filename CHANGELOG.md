@@ -4297,3 +4297,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Historical pre-fix evidence remains non-qualifying. LIVE remains NOT READY.
+## Database Doctor v1 — 2026-08-29
+
+### Added
+- Read-only identity/schema diagnosis, deterministic repair plans, validated SQLite backups, fail-closed repair, and real-writer certification commands.
+- Alembic `0008_database_doctor_lifecycle_contract` and historical-schema regression coverage.
+
+### Changed
+- The canonical SQLite lifecycle surrogate key is now `INTEGER PRIMARY KEY AUTOINCREMENT`; legacy `order_intent_id` and `event_payload` remain nullable evidence fields.
+
+### Fixed
+- Prevented `NOT NULL constraint failed: trade_lifecycle_events.id` and the subsequent obsolete legacy-column writer failures.
+
+### Removed
+- No historical rows or lifecycle evidence.
+
+### Breaking Changes
+- Duplicate non-null canonical lifecycle identities block migration for manual review.
+
+### Known Issues
+- Historical Alembic-only databases can contain other legacy runtime tables that are outside this lifecycle-only repair; writer certification exposes those failures. LIVE remains disabled.
