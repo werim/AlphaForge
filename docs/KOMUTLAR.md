@@ -574,7 +574,7 @@ python -m alphaforge.burnin_ops \
 PowerShell:
 
 ```powershell
-$RELEASE_ID="phase9_trial_10_8_1"
+$RELEASE_ID="2908T01"
 
 python -m alphaforge.burnin_ops `
   preflight `
@@ -642,14 +642,14 @@ Komut çıktısındaki gerçek `campaign_id` değerini kaydet.
 macOS / Linux örneği:
 
 ```bash
-CAMPAIGN_ID="camp_xxxxxxxxxxxxxxxx"
-export CAMPAIGN_ID
+CID="camp_xxxxxxxxxxxxxxxx"
+export CID
 ```
 
 PowerShell örneği:
 
 ```powershell
-$CAMPAIGN_ID="camp_xxxxxxxxxxxxxxxx"
+$CID="camp_xxxxxxxxxxxxxxxx"
 ```
 
 > `campaign_id` tahmin edilmez. Launch çıktısından veya SQL sorgusundan alınır.
@@ -691,23 +691,23 @@ sqlite3 $DB "SELECT campaign_id,release_id,campaign_status,active_run_id,worker_
 python -m alphaforge.burnin_ops \
   --db $DB \
   status \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 JSON:
 
 ```bash
 python -m alphaforge.burnin_ops \
-  --db alphaforge.db \
+  --db $DB \
   --json \
   status \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 PowerShell:
 
 ```powershell
-python -m alphaforge.burnin_ops --db alphaforge.db status --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB status --campaign-id $CID
 ```
 
 ---
@@ -720,7 +720,7 @@ Tek kontrol:
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   health \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 JSON:
@@ -730,7 +730,7 @@ python -m alphaforge.burnin_ops \
   --db "$DB" \
   --json \
   health \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 ---
@@ -741,7 +741,7 @@ python -m alphaforge.burnin_ops \
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   watch \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 `watch` tek bir operasyon kontrol çevrimi çalıştırır; sürekli terminal ekranı varsayımı yapma. Periyodik izleme gerekiyorsa komutu scheduler veya kontrollü shell döngüsüyle çağır.
@@ -751,7 +751,7 @@ macOS / Linux örneği, 60 saniyede bir:
 ```bash
 while true; do
   date
-  python -m alphaforge.burnin_ops --db "$DB" watch --campaign-id "$CAMPAIGN_ID"
+  python -m alphaforge.burnin_ops --db "$DB" watch --campaign-id "$CID"
   sleep 60
 done
 ```
@@ -767,28 +767,28 @@ Ctrl+C
 ## 18. Worker loglarını izle
 
 ```bash
-tail -n 200 "artifacts/burnin/$CAMPAIGN_ID/worker.stdout.log"
-tail -n 200 "artifacts/burnin/$CAMPAIGN_ID/worker.stderr.log"
+tail -n 200 "artifacts/burnin/$CID/worker.stdout.log"
+tail -n 200 "artifacts/burnin/$CID/worker.stderr.log"
 ```
 
 Canlı takip:
 
 ```bash
-tail -f "artifacts/burnin/$CAMPAIGN_ID/worker.stdout.log"
+tail -f "artifacts/burnin/$CID/worker.stdout.log"
 ```
 
 Hata logunu canlı takip:
 
 ```bash
-tail -f "artifacts/burnin/$CAMPAIGN_ID/worker.stderr.log"
+tail -f "artifacts/burnin/$CID/worker.stderr.log"
 ```
 
 PowerShell:
 
 ```powershell
-Get-Content "artifacts\burnin\$CAMPAIGN_ID\worker.stdout.log" -Tail 200
-Get-Content "artifacts\burnin\$CAMPAIGN_ID\worker.stderr.log" -Tail 200
-Get-Content "artifacts\burnin\$CAMPAIGN_ID\worker.stderr.log" -Wait -Tail 50
+Get-Content "artifacts\burnin\$CID\worker.stdout.log" -Tail 200
+Get-Content "artifacts\burnin\$CID\worker.stderr.log" -Tail 200
+Get-Content "artifacts\burnin\$CID\worker.stderr.log" -Wait -Tail 50
 ```
 
 ---
@@ -801,20 +801,20 @@ Detached burn-in'i durdurmak için ilk tercih `pause` olmalıdır:
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   pause \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 PowerShell:
 
 ```powershell
-python -m alphaforge.burnin_ops --db $DB pause --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB pause --campaign-id $CID
 ```
 
 Ardından doğrula:
 
 ```bash
-python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CID"
 ```
 
 `pause`, kampanyayı silmez ve tamamlanmış gibi işaretlemez.
@@ -827,20 +827,20 @@ python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   resume \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 PowerShell:
 
 ```powershell
-python -m alphaforge.burnin_ops --db $DB resume --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB resume --campaign-id $CID
 ```
 
 Resume sonrasında:
 
 ```bash
-python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CID"
 ```
 
 Release/config/strategy/universe/execution-cost identity değiştiyse devam etmeye zorlama. Yeni preflight ve yeni kampanya gerekir.
@@ -853,13 +853,13 @@ Release/config/strategy/universe/execution-cost identity değiştiyse devam etme
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   recovery-drill \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 PowerShell:
 
 ```powershell
-python -m alphaforge.burnin_ops --db $DB recovery-drill --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB recovery-drill --campaign-id $CID
 ```
 
 Bu komut gerçek bir recovery kanıtı üretir. Sırf status değiştirmek için kullanılmamalıdır.
@@ -872,13 +872,13 @@ Bu komut gerçek bir recovery kanıtı üretir. Sırf status değiştirmek için
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   audit \
-  --campaign-id "$CAMPAIGN_ID"
+  --campaign-id "$CID"
 ```
 
 PowerShell:
 
 ```powershell
-python -m alphaforge.burnin_ops --db $DB audit --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db $DB audit --campaign-id $CID
 ```
 
 Finalization öncesinde audit `PASS` olmalıdır.
@@ -888,21 +888,21 @@ Finalization öncesinde audit `PASS` olmalıdır.
 ## 23. Günlük rapor
 
 ```bash
-REPORT_DIR="artifacts/burnin/$CAMPAIGN_ID/daily_$(date -u +%Y%m%dT%H%M%SZ)
+REPORT_DIR="artifacts/burnin/$CID/daily_$(date -u +%Y%m%dT%H%M%SZ)
 "
 
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   report \
-  --campaign-id "$CAMPAIGN_ID" \
+  --campaign-id "$CID" \
   --output-dir "$REPORT_DIR"
 ```
 
 PowerShell:
 
 ```powershell
-$REPORT_DIR="artifacts\burnin\$CAMPAIGN_ID\daily_$(Get-Date -Format 'yyyyMMddTHHmmssZ')"
-python -m alphaforge.burnin_ops --db $DB report --campaign-id $CAMPAIGN_ID --output-dir $REPORT_DIR
+$REPORT_DIR="artifacts\burnin\$CID\daily_$(Get-Date -Format 'yyyyMMddTHHmmssZ')"
+python -m alphaforge.burnin_ops --db $DB report --campaign-id $CID --output-dir $REPORT_DIR
 ```
 
 Rapor klasörü JSON, CSV ve Markdown günlük özet çıktıları üretir.
@@ -916,20 +916,20 @@ Kampanya süresi tamamlanmadan, health/audit/recovery kanıtları oluşmadan fin
 macOS / Linux:
 
 ```bash
-FINAL_DIR="artifacts/burnin/$CAMPAIGN_ID/final"
+FINAL_DIR="artifacts/burnin/$CID/final"
 
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   finalize \
-  --campaign-id "$CAMPAIGN_ID" \
+  --campaign-id "$CID" \
   --output-dir "$FINAL_DIR"
 ```
 
 PowerShell:
 
 ```powershell
-$FINAL_DIR="artifacts\burnin\$CAMPAIGN_ID\final"
-python -m alphaforge.burnin_ops --db $DB finalize --campaign-id $CAMPAIGN_ID --output-dir $FINAL_DIR
+$FINAL_DIR="artifacts\burnin\$CID\final"
+python -m alphaforge.burnin_ops --db $DB finalize --campaign-id $CID --output-dir $FINAL_DIR
 ```
 
 Final paketinde en azından şu kanıtları incele:
@@ -991,7 +991,7 @@ Detached başlat:
 python -m alphaforge.burnin_cli \
   --db "$DB" \
   start \
-  --campaign-id "$CAMPAIGN_ID" \
+  --campaign-id "$CID" \
   --detach
 ```
 
@@ -1001,38 +1001,38 @@ Foreground başlat:
 python -m alphaforge.burnin_cli \
   --db "$DB" \
   start \
-  --campaign-id "$CAMPAIGN_ID" \
+  --campaign-id "$CID" \
   --foreground
 ```
 
 Status:
 
 ```bash
-python -m alphaforge.burnin_cli --db "$DB" status --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_cli --db "$DB" status --campaign-id "$CID"
 ```
 
 Pause:
 
 ```bash
-python -m alphaforge.burnin_cli --db "$DB" pause --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_cli --db "$DB" pause --campaign-id "$CID"
 ```
 
 Resume detached:
 
 ```bash
-python -m alphaforge.burnin_cli --db "$DB" resume --campaign-id "$CAMPAIGN_ID" --detach
+python -m alphaforge.burnin_cli --db "$DB" resume --campaign-id "$CID" --detach
 ```
 
 Tek resolver tick:
 
 ```bash
-python -m alphaforge.burnin_cli --db "$DB" worker --campaign-id "$CAMPAIGN_ID" --once
+python -m alphaforge.burnin_cli --db "$DB" worker --campaign-id "$CID" --once
 ```
 
 Qualification:
 
 ```bash
-python -m alphaforge.burnin_cli --db "$DB" qualify --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_cli --db "$DB" qualify --campaign-id "$CID"
 ```
 
 Evidence export:
@@ -1041,8 +1041,8 @@ Evidence export:
 python -m alphaforge.burnin_cli \
   --db "$DB" \
   export \
-  --campaign-id "$CAMPAIGN_ID" \
-  --output-dir "artifacts/burnin/$CAMPAIGN_ID/export"
+  --campaign-id "$CID" \
+  --output-dir "artifacts/burnin/$CID/export"
 ```
 
 ---
@@ -1068,7 +1068,7 @@ SELECT
     latest_qualification_id,
     last_error
 FROM burnin_campaigns
-WHERE campaign_id = '$CAMPAIGN_ID';
+WHERE campaign_id = '$CID';
 SQL
 ```
 
@@ -1086,7 +1086,7 @@ SELECT
     burnin_run_id,
     details_json
 FROM burnin_campaign_events
-WHERE campaign_id = '$CAMPAIGN_ID'
+WHERE campaign_id = '$CID'
 ORDER BY id DESC
 LIMIT 50;
 SQL
@@ -1100,7 +1100,7 @@ sqlite3 "$DB" <<SQL
 .mode column
 SELECT *
 FROM burnin_runs
-WHERE campaign_id = '$CAMPAIGN_ID'
+WHERE campaign_id = '$CID'
 ORDER BY id DESC;
 SQL
 ```
@@ -1117,7 +1117,7 @@ SELECT
     status,
     unhealthy_reasons_json
 FROM burnin_health_history
-WHERE campaign_id = '$CAMPAIGN_ID'
+WHERE campaign_id = '$CID'
 ORDER BY id DESC
 LIMIT 30;
 SQL
@@ -1137,7 +1137,7 @@ SELECT
     detected_at,
     details_json
 FROM burnin_ops_incidents
-WHERE campaign_id = '$CAMPAIGN_ID'
+WHERE campaign_id = '$CID'
 ORDER BY id DESC;
 SQL
 ```
@@ -1155,7 +1155,7 @@ SELECT
     status,
     checks_json
 FROM burnin_recovery_drills
-WHERE campaign_id = '$CAMPAIGN_ID'
+WHERE campaign_id = '$CID'
 ORDER BY id DESC;
 SQL
 ```
@@ -1174,7 +1174,7 @@ SELECT
     violations_json,
     aggregate_evidence_hash
 FROM burnin_integrity_audits
-WHERE campaign_id = '$CAMPAIGN_ID'
+WHERE campaign_id = '$CID'
 ORDER BY id DESC;
 SQL
 ```
@@ -1193,7 +1193,7 @@ SELECT
     blockers_json,
     package_dir
 FROM burnin_release_decisions
-WHERE campaign_id = '$CAMPAIGN_ID'
+WHERE campaign_id = '$CID'
 ORDER BY id DESC;
 SQL
 ```
@@ -1211,7 +1211,7 @@ FROM burnin_observations
 WHERE burnin_run_id IN (
     SELECT burnin_run_id
     FROM burnin_runs
-    WHERE campaign_id = '$CAMPAIGN_ID'
+    WHERE campaign_id = '$CID'
 )
 GROUP BY decision
 ORDER BY count DESC;
@@ -1231,7 +1231,7 @@ FROM burnin_reject_outcomes
 WHERE burnin_run_id IN (
     SELECT burnin_run_id
     FROM burnin_runs
-    WHERE campaign_id = '$CAMPAIGN_ID'
+    WHERE campaign_id = '$CID'
 )
 GROUP BY reject_reason
 ORDER BY count DESC;
@@ -1257,7 +1257,7 @@ FROM burnin_trade_outcomes
 WHERE burnin_run_id IN (
     SELECT burnin_run_id
     FROM burnin_runs
-    WHERE campaign_id = '$CAMPAIGN_ID'
+    WHERE campaign_id = '$CID'
 )
 AND closed_at IS NULL;
 SQL
@@ -1272,20 +1272,20 @@ SQL
 Kampanya PID'sini getir:
 
 ```bash
-sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CAMPAIGN_ID';"
+sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
 ```
 
 macOS / Linux:
 
 ```bash
-PID=$(sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CAMPAIGN_ID';")
+PID=$(sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';")
 ps -p "$PID" -o pid,ppid,etime,state,command
 ```
 
 PowerShell:
 
 ```powershell
-$PID_FROM_DB=sqlite3 $DB "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CAMPAIGN_ID';"
+$PID_FROM_DB=sqlite3 $DB "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
 Get-Process -Id $PID_FROM_DB
 ```
 
@@ -1324,10 +1324,10 @@ Stop-Process -Id $PID_FROM_DB
 Zorla sonlandırmadan sonra kampanyayı normal kabul etme. Aşağıdakileri çalıştır:
 
 ```bash
-python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" recovery-drill --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" audit --campaign-id "$CAMPAIGN_ID"
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" recovery-drill --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" audit --campaign-id "$CID"
 ```
 
 `UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED` görülürse bunu status alanını elle değiştirerek gizleme. Recovery kanıtını tamamla veya fail-closed yeni kampanya başlat.
@@ -1361,20 +1361,20 @@ python -m alphaforge.burnin_ops --db "$DB" audit --campaign-id "$CAMPAIGN_ID"
 ## 42. Günlük kontrol komut seti
 
 ```bash
-python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" watch --campaign-id "$CAMPAIGN_ID"
-tail -n 100 "artifacts/burnin/$CAMPAIGN_ID/worker.stderr.log"
-tail -n 100 "artifacts/burnin/$CAMPAIGN_ID/worker.stdout.log"
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" watch --campaign-id "$CID"
+tail -n 100 "artifacts/burnin/$CID/worker.stderr.log"
+tail -n 100 "artifacts/burnin/$CID/worker.stdout.log"
 ```
 
 ## 43. Hata sonrası minimum teşhis paketi
 
 ```bash
-python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CAMPAIGN_ID"
-tail -n 200 "artifacts/burnin/$CAMPAIGN_ID/worker.stderr.log"
-tail -n 200 "artifacts/burnin/$CAMPAIGN_ID/worker.stdout.log"
+python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CID"
+tail -n 200 "artifacts/burnin/$CID/worker.stderr.log"
+tail -n 200 "artifacts/burnin/$CID/worker.stdout.log"
 sqlite3 "$DB" "PRAGMA integrity_check;"
 ```
 
@@ -1518,7 +1518,7 @@ $env:EXECUTION_MODE = "PAPER"
 $env:ALPHAFORGE_ENABLE_LIVE_EXECUTION = "false"
 $DB = "artifacts/burnin/phase9.db"
 $RELEASE_ID = "phase9-$(git rev-parse --short HEAD)"
-$CAMPAIGN_ID = "<campaign_id-from-launch-output>"
+$CID = "<campaign_id-from-launch-output>"
 
 ### A. Diagnose an existing database
 
@@ -1531,11 +1531,11 @@ python -m alphaforge.burnin_ops --db $DB --json diagnose-db --max-heartbeat-age 
 python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT | Tee-Object -FilePath artifacts/burnin/reconciliation.json
 python -m alphaforge.burnin_ops --db $DB --json preflight --release-id $RELEASE_ID --symbols BTCUSDT,ETHUSDT --intervals 1h --output-dir artifacts/burnin/preflight
 python -m alphaforge.burnin_ops --db $DB --json launch --release-id $RELEASE_ID --duration-days 3 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach
-python -m alphaforge.burnin_ops --db $DB --json status --campaign-id $CAMPAIGN_ID
-python -m alphaforge.burnin_ops --db $DB --json health --campaign-id $CAMPAIGN_ID
-python -m alphaforge.burnin_ops --db $DB --json watch --campaign-id $CAMPAIGN_ID
-python -m alphaforge.burnin_ops --db $DB --json audit --campaign-id $CAMPAIGN_ID
-python -m alphaforge.burnin_ops --db $DB --json finalize --campaign-id $CAMPAIGN_ID --output-dir artifacts/burnin/final
+python -m alphaforge.burnin_ops --db $DB --json status --campaign-id $CID
+python -m alphaforge.burnin_ops --db $DB --json health --campaign-id $CID
+python -m alphaforge.burnin_ops --db $DB --json watch --campaign-id $CID
+python -m alphaforge.burnin_ops --db $DB --json audit --campaign-id $CID
+python -m alphaforge.burnin_ops --db $DB --json finalize --campaign-id $CID --output-dir artifacts/burnin/final
 ```
 
 ### Bash (macOS/Linux)
@@ -1546,7 +1546,7 @@ export EXECUTION_MODE=PAPER
 export ALPHAFORGE_ENABLE_LIVE_EXECUTION=false
 DB=artifacts/burnin/phase9.db
 RELEASE_ID="phase9-$(git rev-parse --short HEAD)"
-CAMPAIGN_ID='<campaign_id-from-launch-output>'
+CID='<campaign_id-from-launch-output>'
 
 # A. Diagnose an existing database
 
@@ -1559,11 +1559,11 @@ python -m alphaforge.burnin_ops --db "$DB" --json diagnose-db --max-heartbeat-ag
 python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT | tee artifacts/burnin/reconciliation.json
 python -m alphaforge.burnin_ops --db "$DB" --json preflight --release-id "$RELEASE_ID" --symbols BTCUSDT,ETHUSDT --intervals 1h --output-dir artifacts/burnin/preflight
 python -m alphaforge.burnin_ops --db "$DB" --json launch --release-id "$RELEASE_ID" --duration-days 3 --symbols BTCUSDT,ETHUSDT --intervals 1h --detach
-python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" --json watch --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" --json audit --campaign-id "$CAMPAIGN_ID"
-python -m alphaforge.burnin_ops --db "$DB" --json finalize --campaign-id "$CAMPAIGN_ID" --output-dir artifacts/burnin/final
+python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" --json watch --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" --json audit --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" --json finalize --campaign-id "$CID" --output-dir artifacts/burnin/final
 ```
 
 Credential variables (`BINANCE_API_KEY` and `BINANCE_API_SECRET`) must be supplied through the normal environment/dotenv contract and must never be echoed. Accept reconciliation only when `evidence_status` is `COMPLETE`, `sanitized_errors` is empty, `unknown_unreconciled_symbols` is empty, and all endpoint statuses pass. A local diagnostic recovery is never authenticated exchange evidence. Run `recovery-drill` only after both the database diagnosis and authenticated reconciliation prove zero positions and zero pending orders.
@@ -1649,7 +1649,7 @@ Run the schema upgrade/doctor once after deploying new code, then use the canoni
 
 ```powershell
 python -m alphaforge.burnin_ops --db "$DB" db-doctor --apply
-python -m alphaforge.burnin_ops --db "$DB" --json reject-label-status --campaign-id $CAMPAIGN_ID
+python -m alphaforge.burnin_ops --db "$DB" --json reject-label-status --campaign-id $CID
 ```
 
 Standalone PAPER uses its persisted runtime identity; do not create a campaign:
