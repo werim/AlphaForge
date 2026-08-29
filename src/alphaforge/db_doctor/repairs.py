@@ -4,6 +4,7 @@ from alembic import command
 from alembic.config import Config
 from .backup import create_backup
 from .diagnostics import diagnose
+from .writer_probes import run_writer_probes
 
 def repair(path: Path) -> dict:
     before=diagnose(path)
@@ -17,5 +18,10 @@ def repair(path: Path) -> dict:
     except Exception as exc:
         return {"status":"REPAIR_FAILED", "before":before, "backup_path":str(backup), "error":repr(exc), "recovery":"source retained; validated backup available"}
     after=diagnose(path)
-    return {"status":"REPAIRED" if not after["issues"] else "VERIFICATION_FAILED", "before":before,"after":after,"backup_path":str(backup)}
-
+    probes = None if after["issues"] else run_writer_probes(path)
+    verified = not after["issues"] and bool(probes and probes["passed"])
+    result = {"status":"REPAIRED" if verified else "VERIFICATION_FAILED", "before":before,
+              "after":after,"writer_probes":probes,"backup_path":str(backup)}
+    if not verified:
+        result["recommended_action"] = "retain the validated backup and review structural/writer evidence before retrying or restoring"
+    return result

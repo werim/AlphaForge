@@ -1433,6 +1433,20 @@ Tests cover config-hash divergence between Binance and Hyperliquid, creation mis
 ---
 # Database Doctor v1 surgery report — 2026-08-29
 
+## PR #331 merge-blocker correction
+
+Writer probes now use the shared SQLite online-backup snapshot primitive rather
+than a filesystem copy, capturing committed WAL content without checkpointing
+or mutating the source. The lifecycle migration inventories all deployed
+columns, indexes, triggers, checks, uniques, and foreign keys before creating a
+replacement; objects outside the explicitly understood canonical/legacy set
+block before destructive DDL. Before dropping the old table, ordered old/new
+values are compared exactly and independently hashed with deterministic SHA-256
+evidence digests. Repair reaches `REPAIRED` only when post-migration structural
+diagnosis and actual lifecycle, decision, heartbeat, and state writers pass on
+the safe snapshot. The lifecycle probes now cover creation, idempotent upsert,
+and a distinct valid rejection transition.
+
 ## Need and root cause
 
 Alembic revision 0001 declared `trade_lifecycle_events.id` as `BIGINT PRIMARY KEY`.

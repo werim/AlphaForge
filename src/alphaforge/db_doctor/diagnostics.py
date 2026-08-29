@@ -27,6 +27,15 @@ def diagnose(path: Path) -> dict:
         issues.append(issue("LIFECYCLE_TABLE_MISSING","CRITICAL",expected=TABLE,observed=None,repair="MANUAL_REVIEW",evidence=inspection["tables"],action="restore or migrate the correct database",table=TABLE))
     else:
         cols={c["name"]:c for c in inspection["columns"]}; sql=(inspection["create_sql"] or "").upper()
+        understood_columns={"id",*TEXT_COLUMNS,*REAL_COLUMNS,*INTEGER_COLUMNS}
+        unknown_columns=sorted(set(cols)-understood_columns)
+        lifecycle_objects=[o for o in inspection["objects"] if o["table"] == TABLE]
+        unknown_objects=[o for o in lifecycle_objects if
+                         (o["type"] == "trigger" or (o["type"] == "index" and
+                          not o["name"].startswith("sqlite_autoindex_") and
+                          o["name"] not in {"ux_trade_lifecycle_event_id","ux_lifecycle_signal_event_ts_state"}))]
+        if unknown_columns or unknown_objects:
+            issues.append(issue("LIFECYCLE_UNSUPPORTED_SCHEMA_OBJECT","CRITICAL",expected="explicitly understood lifecycle schema",observed={"columns":unknown_columns,"objects":unknown_objects},repair="MANUAL_REVIEW",evidence={"columns":unknown_columns,"objects":unknown_objects},action="review and explicitly preserve the deployed schema object before rebuild",table=TABLE))
         idcol=cols.get("id")
         if not idcol or idcol["type"].upper() != "INTEGER" or idcol["pk"] != 1:
             issues.append(issue("LIFECYCLE_PK_NOT_SQLITE_ROWID_COMPATIBLE","CRITICAL",expected="INTEGER PRIMARY KEY AUTOINCREMENT",observed=idcol,repair="REBUILD_REQUIRED",evidence=inspection["create_sql"],action="back up and rebuild lifecycle table",table=TABLE,column="id"))

@@ -4299,6 +4299,12 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Historical pre-fix evidence remains non-qualifying. LIVE remains NOT READY.
 ## Database Doctor v1 — 2026-08-29
 
+### Merge-blocker follow-up
+- Reused SQLite's online backup API for WAL-consistent private writer snapshots and added a distinct `SIGNAL_REJECTED` writer probe.
+- Lifecycle rebuild now inventories columns, indexes, triggers, checks, unique constraints, and foreign keys; unknown objects block before mutation.
+- Added deterministic full-value old/new evidence comparison and SHA-256 evidence digests before replacement.
+- `repair` now returns `REPAIRED` only after structural diagnosis and real writer certification both pass.
+
 ### Added
 - Read-only identity/schema diagnosis, deterministic repair plans, validated SQLite backups, fail-closed repair, and real-writer certification commands.
 - Alembic `0008_database_doctor_lifecycle_contract` and historical-schema regression coverage.

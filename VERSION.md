@@ -5,6 +5,7 @@
 - Current version: Alembic `0008_database_doctor_lifecycle_contract`.
 - Current phase: evidence-preserving SQLite lifecycle schema remediation and operator certification.
 - Runtime maturity: Database Doctor identifies, diagnoses, backs up, repairs, and probes the actual persistence writers; unknown or duplicate evidence fails closed.
+- Certification maturity: private probes use SQLite online backup snapshots with committed WAL content; repair success requires structural and executable writer verification.
 - BACKTEST/PAPER/LIVE alignment: shared persistence contract repaired; PAPER behavior is preserved and LIVE authority is unchanged.
 - Lifecycle coverage: `trade_lifecycle_events.id` is SQLite rowid/autoincrement compatible; canonical identities and legacy payload/order-intent evidence survive rebuild.
 - Execution realism coverage: unchanged; no execution, score, RR, timestamp, or historical identity evidence is invented.
