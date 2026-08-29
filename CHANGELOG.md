@@ -4323,3 +4323,16 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Historical Alembic-only databases can contain other legacy runtime tables that are outside this lifecycle-only repair; writer certification exposes those failures. LIVE remains disabled.
+## Database Doctor repository contract auditor — 2026-08-29
+### Added
+- Central schema contract/ownership registry, target resolver, SQLite probes, and exposure/adaptive audits.
+### Changed
+- PAPER certification fails closed on incompatible or ambiguous database contracts.
+### Fixed
+- Unknown exposure is never inferred as zero.
+### Removed
+- Nothing; no evidence is normalized.
+### Breaking Changes
+- PAPER certification is explicitly SQLite-only.
+### Known Issues
+- Owner conflicts are detected, not consolidated; LIVE remains NOT READY.

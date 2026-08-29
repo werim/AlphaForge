@@ -1490,3 +1490,8 @@ optional writer-table drift; certification deliberately reports that condition.
 
 Push for PAPER database remediation after backup retention has been verified.
 Do not interpret database certification as LIVE readiness.
+# Repository-wide Database Doctor contract audit — 2026-08-29
+
+Lifecycle-only diagnosis could not prove compatibility across independently owned Alembic, init, runtime, burn-in, campaign, ops, and ORM schemas. The doctor now maintains a non-DDL audit registry, inspects all SQLite tables and features read-only, resolves configured targets, classifies exposure and adaptive generations, and returns writer compatibility and conservative repair classes. No migration, runtime trading behavior, lifecycle semantics, evidence row, export, or LIVE authorization changes. Ambiguous exposure is never zero and manual-review evidence is never merged or deleted. Tests cover target conflicts, conflicting exposure, and read-only preservation. Remaining multiple ownership and ORM/Alembic alignment should be handled in a narrow follow-up PR; no migration is required.
+
+---

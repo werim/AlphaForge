@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Database Doctor repository contract auditor (2026-08-29)
+- Current version: Alembic `0008_database_doctor_lifecycle_contract`; no new migration.
+- Current phase: repository-wide read-only SQLite contract diagnosis.
+- Runtime maturity: ownership, writer, target, feature, exposure, and adaptive audits fail closed.
+- BACKTEST/PAPER/LIVE alignment: PAPER certification is SQLite-only; LIVE authority is unchanged.
+- Lifecycle coverage: v1 checks remain intact. Execution evidence is never invented.
+- Known critical risks: multiple schema owners and ORM/Alembic drift require follow-up.
+- Last audit date: 2026-08-29. Live readiness verdict: NOT LIVE READY.
+
 ## Database Doctor v1 (2026-08-29)
 
 - Current version: Alembic `0008_database_doctor_lifecycle_contract`.
