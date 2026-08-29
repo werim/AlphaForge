@@ -1,25 +1,38 @@
 from __future__ import annotations
 import sqlite3
 from pathlib import Path
-from .contracts import CONTRACTS,OWNER_MAP,WRITER_READER_MATRIX,CURRENT_REVISION, INTEGER_COLUMNS, REAL_COLUMNS, TABLE, TEXT_COLUMNS, UNIQUE_IDENTITIES, WRITER_COLUMNS
+from .contracts import CONTRACTS,OWNER_MAP,WRITER_READER_MATRIX,UNIQUE_REQUIREMENTS,INDEX_REQUIREMENTS,CURRENT_REVISION, INTEGER_COLUMNS, REAL_COLUMNS, TABLE, TEXT_COLUMNS, UNIQUE_IDENTITIES, WRITER_COLUMNS
 from .identity import collect_identity
 from .inspector import inspect_database
 from .targets import resolve_database_targets
+from .orm_audit import audit_orm
+from .dialect import audit_runtime_sql
 
 def issue(code, severity, *, expected, observed, repair, evidence, action, table=None, column=None):
     return {"code": code, "severity": severity, "table": table, "column": column, "expected": expected,
             "observed": observed, "repair_classification": repair, "evidence": evidence, "recommended_action": action}
 
+def _early(identity, targets, issues):
+    return {"status":"BLOCKED","identity":identity,"database_target_resolution":targets,
+            "dialect":{"target":None,"paper_runtime":"SQLITE_ONLY","supported_for_certification":False,"runtime_sql_surfaces":{}},
+            "SQLite_features":{},"migration_state":{},"schema_family":"UNKNOWN","schema_contracts":{},
+            "schema_ownership":OWNER_MAP,"ORM_alignment":{"tables_audited":[],"mismatches":[],"autogenerate_safe":False},
+            "lifecycle":None,"exposure":{"classification":"UNKNOWN_EXPOSURE","unknown_is_zero":False},
+            "runtime":{},"burnin":{},"campaign":{},"adaptive_expectancy":{},"readiness_release":{},
+            "writer_compatibility":{},"unsafe_data":issues,"issues":issues,"recommended_repairs":[],"inspection":None}
+
 def diagnose(path: Path) -> dict:
     identity = collect_identity(path); issues=[]; targets=resolve_database_targets(path)
     if targets["conflict"]: issues.append(issue("DATABASE_TARGET_CONFLICT","CRITICAL",expected="one canonical target",observed=targets,repair="MANUAL_REVIEW",evidence=targets,action="remove conflicting targets"))
+    unsupported=sorted(d for d in targets["dialects"] if d != "sqlite")
+    if unsupported: issues.append(issue("PAPER_DIALECT_UNSUPPORTED","CRITICAL",expected="sqlite",observed=unsupported,repair="MANUAL_REVIEW",evidence=targets,action="select a SQLite target for PAPER certification"))
     if not identity["exists"]:
         issues.append(issue("DATABASE_IDENTITY_UNVERIFIED", "CRITICAL", expected="existing SQLite file", observed="missing", repair="MANUAL_REVIEW", evidence=identity, action="verify --db path"))
-        return {"status":"BLOCKED", "identity":identity, "schema_family":"UNKNOWN", "inspection":None, "issues":issues}
+        return _early(identity,targets,issues)
     try: inspection=inspect_database(path)
     except Exception as exc:
         issues.append(issue("DATABASE_IDENTITY_UNVERIFIED", "CRITICAL", expected="readable SQLite database", observed=repr(exc), repair="MANUAL_REVIEW", evidence=identity, action="verify database identity and permissions"))
-        return {"status":"BLOCKED", "identity":identity, "schema_family":"UNKNOWN", "inspection":None, "issues":issues}
+        return _early(identity,targets,issues)
     if inspection["integrity"] != ["ok"]:
         issues.append(issue("SQLITE_INTEGRITY_FAILURE","CRITICAL",expected=["ok"],observed=inspection["integrity"],repair="MANUAL_REVIEW",evidence=inspection["integrity"],action="recover SQLite database before repair"))
     revs=inspection["alembic_revisions"]
@@ -71,14 +84,31 @@ def diagnose(path: Path) -> dict:
         if c.requirement=="REQUIRED" and not schema: issues.append(issue("RUNTIME_REQUIRED_TABLE_MISSING","CRITICAL",expected="present",observed=None,repair="REBUILD_REQUIRED",evidence=name,action="migrate explicitly",table=name))
         elif schema and missing:
             issues.append(issue("RUNTIME_REQUIRED_COLUMN_MISSING","ERROR",expected=c.columns,observed=sorted(present),repair="REBUILD_REQUIRED",evidence=missing,action="migrate explicitly",table=name))
-            if c.owner=="MULTIPLE": issues.append(issue("SCHEMA_OWNER_CONFLICT","ERROR",expected=OWNER_MAP[name],observed=missing,repair="MANUAL_REVIEW",evidence=OWNER_MAP[name],action="compare independent definitions",table=name))
-    features={k:inspection[k] for k in ("integrity","json1","foreign_keys_enabled","journal_mode","busy_timeout_ms")}
-    if not inspection["json1"]: issues.append(issue("SQLITE_JSON1_UNAVAILABLE","CRITICAL",expected=True,observed=False,repair="MANUAL_REVIEW",evidence=features,action="install JSON-capable SQLite"))
+            if len(c.owners)>1: issues.append(issue("SCHEMA_OWNER_CONFLICT","ERROR",expected=OWNER_MAP[name],observed=missing,repair="MANUAL_REVIEW",evidence=OWNER_MAP[name],action="compare independent definitions",table=name))
+        if schema:
+            idcol=next((x for x in schema["columns"] if x["name"]=="id"),None)
+            if "id" in c.columns and (not idcol or str(idcol["type"]).upper()!="INTEGER" or idcol["pk"]!=1): issues.append(issue("SQLITE_PK_SEMANTIC_MISMATCH","ERROR",expected="INTEGER PRIMARY KEY rowid semantics",observed=idcol,repair="REBUILD_REQUIRED",evidence=schema["sql"],action="rebuild explicitly",table=name,column="id"))
+            unique={tuple(i["columns"]) for i in schema["indexes"] if i["unique"]}
+            indexed={tuple(i["columns"]) for i in schema["indexes"]}
+            for wanted in UNIQUE_REQUIREMENTS.get(name,()):
+                if wanted not in unique: issues.append(issue("MISSING_UNIQUE_CONSTRAINT","ERROR",expected=wanted,observed=sorted(unique),repair="REBUILD_REQUIRED",evidence=schema["indexes"],action="review duplicates before explicit migration",table=name))
+            for wanted in INDEX_REQUIREMENTS.get(name,()):
+                if not any(tuple(cols[:len(wanted)])==wanted for cols in indexed): issues.append(issue("MISSING_REQUIRED_INDEX","ERROR",expected=wanted,observed=sorted(indexed),repair="SAFE_AUTO_REPAIR",evidence=schema["indexes"],action="create non-destructive index",table=name))
+            known=set(c.columns)
+            for col in schema["columns"]:
+                if col["name"] not in known and col["notnull"] and col["default"] is None: issues.append(issue("NOT_NULL_WRITER_CONFLICT","CRITICAL",expected="writer-compatible nullable/defaulted extension",observed=col,repair="REBUILD_REQUIRED",evidence=col,action="review independent writer contracts",table=name,column=col["name"]))
+    features={"capabilities":{"integrity":inspection["integrity"],"json_functions":inspection["json1"],"foreign_keys_supported":True,"sqlite_version":sqlite3.sqlite_version},"doctor_connection_observation":{"foreign_keys_enabled":inspection["foreign_keys_enabled"],"journal_mode":inspection["journal_mode"],"busy_timeout_ms":inspection["busy_timeout_ms"],"certification_evidence":False},"runtime_configuration_contract":{"foreign_keys":"ON","journal_mode":"WAL","busy_timeout_ms":30000,"source":"src/alphaforge/persistence.py:init_db connection hook"}}
+    if not inspection["json1"]: issues.append(issue("SQLITE_JSON1_UNAVAILABLE","CRITICAL",expected=True,observed=False,repair="MANUAL_REVIEW",evidence=features["capabilities"],action="install JSON-capable SQLite"))
     schemas=inspection["schemas"]; domain=all(n in schemas for n in ("positions","orders")); adapter=all(n in schemas for n in ("runtime_positions","runtime_orders")); dr=sum(schemas.get(n,{}).get("row_count",0) for n in ("positions","orders")); ar=sum(schemas.get(n,{}).get("row_count",0) for n in ("runtime_positions","runtime_orders"))
     exposure={"classification":"CONFLICTING_EXPOSURE" if domain and adapter and dr and ar else "ADAPTER_EXPOSURE" if domain and adapter else "RUNTIME_EXPOSURE" if adapter else "LEGACY_DOMAIN_EXPOSURE" if domain else "UNKNOWN_EXPOSURE","domain_rows":dr,"adapter_rows":ar,"multiple_active":bool(dr and ar),"unknown_is_zero":False}
     if exposure["classification"] in ("UNKNOWN_EXPOSURE","CONFLICTING_EXPOSURE"): issues.append(issue("EXPOSURE_SOURCE_AMBIGUOUS","CRITICAL",expected="one exposure source",observed=exposure,repair="MANUAL_REVIEW",evidence=exposure,action="identify authority; never infer zero"))
     if exposure["multiple_active"]: issues.append(issue("EXPOSURE_MULTIPLE_ACTIVE_SOURCES","CRITICAL",expected="one populated source",observed=exposure,repair="MANUAL_REVIEW",evidence=exposure,action="reconcile externally"))
     current=[n for n in ("adaptive_stats","setup_expectancy_stats","regime_expectancy_stats","symbol_expectancy_stats") if n in schemas]; legacy=[n for n in ("adaptive_threshold_stats","expectancy_stats") if n in schemas]; cr=sum(schemas[n]["row_count"] for n in current); lr=sum(schemas[n]["row_count"] for n in legacy); adaptive={"current_tables":current,"historical_tables":legacy,"current_rows":cr,"historical_rows":lr,"conflict":bool(cr and lr)}
     if adaptive["conflict"]: issues.append(issue("ADAPTIVE_SCHEMA_GENERATION_CONFLICT","CRITICAL",expected="one active generation",observed=adaptive,repair="MANUAL_REVIEW",evidence=adaptive,action="preserve and prove ownership"))
+    orm=audit_orm(schemas)
+    for mismatch in orm["mismatches"]:
+        issues.append(issue("ORM_ALEMBIC_CONTRACT_MISMATCH","ERROR",expected="ORM metadata matches deployed/Alembic schema",observed=mismatch,repair="MANUAL_REVIEW",evidence=mismatch,action="do not run alembic autogenerate",table=mismatch["table"]))
+        if mismatch["table"] in OWNER_MAP and len(OWNER_MAP[mismatch["table"]]["owners"])>1: issues.append(issue("SCHEMA_OWNER_CONFLICT","ERROR",expected=OWNER_MAP[mismatch["table"]],observed=mismatch,repair="MANUAL_REVIEW",evidence=mismatch,action="compare independent owner contracts",table=mismatch["table"]))
+    dialect_surfaces=audit_runtime_sql()
     family="ALEMBIC_HEAD" if inspection["alembic_revisions"]==[CURRENT_REVISION] else "LEGACY_ALEMBIC" if inspection["alembic_revisions"] else "INIT_DB" if TABLE in inspection["tables"] else "UNKNOWN"
-    return {"status":"HEALTHY" if not issues else "BLOCKED","identity":identity,"database_target_resolution":targets,"dialect":{"target":"sqlite","paper_runtime":"SQLITE_ONLY","supported_for_certification":True},"SQLite_features":features,"migration_state":{"alembic_revisions":inspection["alembic_revisions"],"schema_migrations":inspection["schema_migrations"]},"schema_family":family,"schema_contracts":contracts,"schema_ownership":OWNER_MAP,"ORM_alignment":{"autogenerate_safe":False,"mismatches":[]},"lifecycle":contracts.get(TABLE),"exposure":exposure,"runtime":{n:v for n,v in contracts.items() if v["surface"]=="runtime"},"burnin":{n:v for n,v in contracts.items() if v["surface"]=="burnin"},"campaign":{n:v for n,v in contracts.items() if v["surface"]=="campaign"},"adaptive_expectancy":adaptive,"readiness_release":{n:v for n,v in contracts.items() if v["surface"]=="readiness_release"},"writer_compatibility":{w:{"tables":d,"compatible":all(contracts.get(t,{}).get("compatible",False) for t in d)} for w,d in WRITER_READER_MATRIX.items()},"unsafe_data":[x for x in issues if x["repair_classification"]=="MANUAL_REVIEW"],"issues":issues,"recommended_repairs":[x for x in issues if x["repair_classification"]=="SAFE_AUTO_REPAIR"],"inspection":inspection}
+    return {"status":"HEALTHY" if not issues else "BLOCKED","identity":identity,"database_target_resolution":targets,"dialect":{"target":"sqlite","paper_runtime":"SQLITE_ONLY","supported_for_certification":True,"runtime_sql_surfaces":dialect_surfaces},"SQLite_features":features,"migration_state":{"alembic_revisions":inspection["alembic_revisions"],"schema_migrations":inspection["schema_migrations"]},"schema_family":family,"schema_contracts":contracts,"schema_ownership":OWNER_MAP,"ORM_alignment":orm,"lifecycle":contracts.get(TABLE),"exposure":exposure,"runtime":{n:v for n,v in contracts.items() if v["surface"]=="runtime"},"burnin":{n:v for n,v in contracts.items() if v["surface"]=="burnin"},"campaign":{n:v for n,v in contracts.items() if v["surface"]=="campaign"},"adaptive_expectancy":adaptive,"readiness_release":{n:v for n,v in contracts.items() if v["surface"]=="readiness_release"},"writer_compatibility":{w:{"tables":d,"compatible":all(contracts.get(t,{}).get("compatible",False) for t in d)} for w,d in WRITER_READER_MATRIX.items()},"unsafe_data":[x for x in issues if x["repair_classification"]=="MANUAL_REVIEW"],"issues":issues,"recommended_repairs":[x for x in issues if x["repair_classification"]=="SAFE_AUTO_REPAIR"],"inspection":inspection}

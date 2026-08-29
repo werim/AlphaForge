@@ -4326,8 +4326,10 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ## Database Doctor repository contract auditor — 2026-08-29
 ### Added
 - Central schema contract/ownership registry, target resolver, SQLite probes, and exposure/adaptive audits.
+- SQLAlchemy-backed cross-dialect target identity, real ORM/deployed-schema comparison, runtime SQL dialect classification, and deterministic constraint checks.
 ### Changed
 - PAPER certification fails closed on incompatible or ambiguous database contracts.
+- Early failures retain the complete machine-readable diagnosis shape; Doctor connection PRAGMAs are separated from the declared runtime configuration contract.
 ### Fixed
 - Unknown exposure is never inferred as zero.
 ### Removed
