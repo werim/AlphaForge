@@ -147,3 +147,28 @@ def test_repair_fails_closed_when_post_migration_writer_probe_fails(monkeypatch,
     result=repairs.repair(db)
     assert result["status"] == "VERIFICATION_FAILED" and Path(result["backup_path"]).is_file()
     assert result["writer_probes"]["passed"] is False and result["recommended_action"]
+
+def test_orm_findings_do_not_block_unrelated_lifecycle_repair(tmp_path):
+    db=tmp_path/"orm-warning-repair.db"; broken_current_database(db)
+    before=diagnose(db)
+    assert "ORM_ALEMBIC_CONTRACT_MISMATCH" in {i["code"] for i in before["repository_findings"]}
+    assert all("repair" not in i["blocks"] for i in before["repository_findings"] if i["code"]=="ORM_ALEMBIC_CONTRACT_MISMATCH")
+    assert repair(db)["status"]=="REPAIRED"
+
+def test_duplicate_lifecycle_evidence_is_explicit_repair_blocker(tmp_path):
+    db=tmp_path/"duplicate-blocker.db"; command.upgrade(config(db),"0007_repair_runtime_lifecycle_schema")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP INDEX ux_trade_lifecycle_event_id")
+        conn.execute("INSERT INTO trade_lifecycle_events(id,event_id,signal_id,event_type,event_payload,order_intent_id) VALUES(1,'same','a','X','{}',1),(2,'same','b','X','{}',2)")
+    result=repair(db)
+    assert result["status"]=="BLOCKED_MANUAL_REVIEW" and result["backup_path"] is None
+    assert any(i["code"]=="LIFECYCLE_DUPLICATE_EVENT_ID" and "repair" in i["blocks"] for i in result["before"]["issues"])
+
+def test_target_conflict_blocks_repair_before_backup(monkeypatch,tmp_path):
+    import alphaforge.db_doctor.repairs as repairs
+    db=tmp_path/"target-conflict.db"; init_db(f"sqlite+pysqlite:///{db}").dispose()
+    monkeypatch.setenv("ALPHAFORGE_DATABASE_URL","postgresql://db/other")
+    monkeypatch.setattr(repairs,"create_backup",lambda _path:pytest.fail("backup must not run"))
+    result=repairs.repair(db)
+    assert result["status"]=="BLOCKED_MANUAL_REVIEW"
+    assert any(i["code"]=="DATABASE_TARGET_CONFLICT" and "repair" in i["blocks"] for i in result["before"]["issues"])

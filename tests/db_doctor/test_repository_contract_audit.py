@@ -46,4 +46,25 @@ def test_init_db_reports_real_orm_and_owner_drift(tmp_path):
     assert result["ORM_alignment"]["autogenerate_safe"] is False
     assert any(m["table"]=="exchange_symbols" for m in result["ORM_alignment"]["mismatches"])
     assert "ORM_ALEMBIC_CONTRACT_MISMATCH" in {i["code"] for i in result["issues"]}
-    assert "SCHEMA_OWNER_CONFLICT" in {i["code"] for i in result["issues"]}
+    assert "INCOMPATIBLE_OWNER_CONTRACTS" in {i["code"] for i in result["issues"]}
+    assert result["status"]=="HEALTHY" and not result["runtime_blockers"]
+    assert "MULTIPLE_SCHEMA_OWNERS" in {i["code"] for i in result["repository_findings"]}
+    orm_issue=next(i for i in result["issues"] if i["code"]=="ORM_ALEMBIC_CONTRACT_MISMATCH")
+    assert orm_issue["blocks"]==["alembic_autogenerate"]
+
+def test_architecture_findings_do_not_skip_writer_probe(monkeypatch,tmp_path):
+    import alphaforge.db_doctor.verifier as verifier
+    db=tmp_path/"init.db"; init_db(f"sqlite+pysqlite:///{db}").dispose(); called=[]
+    monkeypatch.setattr(verifier,"run_writer_probes",lambda path:(called.append(path) or {"passed":True,"checks":[],"error":None}))
+    result=verifier.certify(db)
+    assert called==[db] and result["runtime_certification"]["status"]=="DATABASE_CERTIFIED"
+    assert result["repository_audit"]["status"]=="FINDINGS"
+
+def test_target_conflict_blocks_certification(monkeypatch,tmp_path):
+    import alphaforge.db_doctor.verifier as verifier
+    db=tmp_path/"init.db"; init_db(f"sqlite+pysqlite:///{db}").dispose()
+    monkeypatch.setenv("ALPHAFORGE_DATABASE_URL","postgresql://db/alpha")
+    monkeypatch.setattr(verifier,"run_writer_probes",lambda _path:pytest.fail("probe must not run"))
+    result=verifier.certify(db)
+    assert result["status"]=="NOT_CERTIFIED"
+    assert "DATABASE_TARGET_CONFLICT" in {i["code"] for i in result["runtime_certification"]["blockers"]}

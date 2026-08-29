@@ -4330,6 +4330,7 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Changed
 - PAPER certification fails closed on incompatible or ambiguous database contracts.
 - Early failures retain the complete machine-readable diagnosis shape; Doctor connection PRAGMAs are separated from the declared runtime configuration contract.
+- Findings now declare the operations they block; repository architecture warnings remain visible without suppressing unrelated lifecycle repair or writer probes.
 ### Fixed
 - Unknown exposure is never inferred as zero.
 ### Removed

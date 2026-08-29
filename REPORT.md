@@ -1498,4 +1498,6 @@ The follow-up replaces synthetic `MULTIPLE` ownership with real owner lists and 
 
 Focused repository-auditor tests passed 7 tests and schema/persistence/runtime/burn-in coverage passed 220 tests. Full collection remains environment-blocked because the declared Alembic package cannot be installed through the HTTP 403 package tunnel; no behavioral failure was dismissed. Remaining risk is that independent DDL owners are only diagnosed, not consolidated, and PostgreSQL runtime writers remain uncertified. Recommend the next PR establish one canonical metadata source and portable writer adapters without changing LIVE authority.
 
+CI #1541 exposed that architectural findings were incorrectly treated as universal blockers. Each finding now carries explicit operation gates. ORM drift and compatible multiple ownership block autogeneration/consolidation but not lifecycle repair or writer probes; target and integrity failures block repair and certification; exposure ambiguity blocks PAPER certification; duplicate or unsupported lifecycle evidence blocks repair/migration. Certification reports `runtime_certification` separately from `repository_audit`. Generic NOT NULL inference against intentionally partial optional-table contracts was removed, restoring canonical `init_db` runtime health without hiding repository findings.
+
 ---

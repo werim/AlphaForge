@@ -4,6 +4,7 @@
 - Current version: Alembic `0008_database_doctor_lifecycle_contract`; no new migration.
 - Current phase: repository-wide read-only SQLite contract diagnosis.
 - Runtime maturity: ownership, writer, target, feature, exposure, and adaptive audits fail closed.
+- Gating maturity: runtime certification, lifecycle repair, migration, schema consolidation, and Alembic autogeneration consume explicit per-finding blockers rather than treating every finding as a runtime failure.
 - ORM maturity: deployed metadata drift makes Alembic autogenerate explicitly unsafe; `exchange_symbols` is currently absent from the `init_db` family and differs from historical Alembic naming.
 - BACKTEST/PAPER/LIVE alignment: PAPER certification is SQLite-only; LIVE authority is unchanged.
 - Lifecycle coverage: v1 checks remain intact. Execution evidence is never invented.
