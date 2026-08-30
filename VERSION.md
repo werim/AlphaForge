@@ -422,3 +422,10 @@
 - Lifecycle/persistence/execution realism: lifecycle/schema/export shapes are unchanged; missing/invalid authenticated exchange evidence fails closed and remains unavailable rather than fabricated.
 - Known critical risks: valid Binance credentials/network access are operational dependencies for PAPER burn-in; existing custom/legacy DBs require deliberate operator selection.
 - Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.
+
+## PR #335 merge-blocker follow-up (2026-08-30)
+- Current version/phase: dev bootstrap contract review follow-up; no migration.
+- Runtime maturity/alignment: runtime, burn-in operations, and burn-in CLI now share URL > legacy path > canonical default precedence; explicit CLI remains highest.
+- Lifecycle/execution realism: unchanged; signed PAPER reconciliation remains fail closed and unavailable evidence is not fabricated.
+- Known critical risks: PAPER still depends on valid signed read-only Binance access; explicit legacy/custom DB selection remains operator responsibility.
+- Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.

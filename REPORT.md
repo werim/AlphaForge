@@ -1561,3 +1561,14 @@ Regression coverage creates an empty temporary SQLite path exclusively through `
 **Tests/execution.** Added clean canonical bootstrap, no-root-file, override precedence, burn-in parity, and Alembic declaration regression tests. Targeted and full pytest plus static legacy-literal audit are required before push; results are recorded in the final implementation response.
 
 **Risks/limitations/migration.** PAPER now intentionally blocks earlier when signed Binance read-only evidence is unavailable. Existing custom URL users need no action. Existing root databases are retained but must be explicitly selected. No destructive migration exists. LIVE order authorization and mutation behavior were not enabled. Push recommendation: merge only with tests green; LIVE remains NOT READY.
+
+---
+## PR #335 merge-blocker follow-up — 2026-08-30
+
+**Why/root cause.** `burnin_ops._db_path()` checked legacy `ALPHAFORGE_DB_PATH` before loading the canonical URL, unlike runtime and `burnin_cli`. The previous documentation patch also removed useful lifecycle operations and contained foreground launch, invalid DB-doctor, and raw-process credential checks.
+
+**Files and behavior.** `burnin_ops.py` now preserves explicit `--db`, bootstraps the canonical dotenv contract, and delegates URL/legacy/default precedence to `database_defaults.resolve_runtime_database_url`. Regression tests set both environment forms and prove runtime plus both burn-in CLIs select the URL, while explicit CLI input remains highest. `docs/KOMUTLAR.md` restores the full guide and corrects detached launch, DB-doctor syntax, canonical-loader credential booleans, canonical DB use, lifecycle operations, SQL, and troubleshooting.
+
+**Lifecycle/persistence/export/schema/compatibility.** No lifecycle, reconciliation, MTF, campaign identity, persistence, export, or schema behavior changed. No DB is created, moved, mutated, or deleted by this follow-up. Legacy `ALPHAFORGE_DB_PATH` remains supported below the canonical URL.
+
+**Tests/risks/migration/push.** Targeted precedence, burn-in, and documentation assertions plus the full suite are required. There is no migration. The only compatibility correction is removal of the unintended legacy-path precedence. LIVE mutation authorization remains unchanged and LIVE is NOT READY.

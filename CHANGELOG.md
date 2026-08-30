@@ -4405,3 +4405,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Existing legacy databases are not migrated automatically. LIVE remains fail-closed and NOT LIVE READY.
+
+## PR #335 merge-blocker follow-up — 2026-08-30
+
+### Added
+- Regression coverage for simultaneous canonical URL and legacy DB-path configuration, explicit CLI precedence, and documented DB-doctor syntax.
+
+### Changed
+- Restored the full operational command guide while retaining canonical DB and signed PAPER reconciliation corrections.
+
+### Fixed
+- Burn-in operations now resolve database precedence identically to runtime and burn-in CLI; multi-day guide launches detach before status/health commands.
+
+### Removed
+- Invalid documented `db-doctor diagnose` invocation.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains not production-authorized; existing explicit database files remain operator-managed.

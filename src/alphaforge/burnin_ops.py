@@ -21,11 +21,11 @@ from alphaforge.burnin_campaign import (
 )
 from alphaforge.config import load_config_from_env, load_reconciliation_settings
 from alphaforge.config_audit import audit_config
-from alphaforge.env_contract import dotenv_status
+from alphaforge.env_contract import bootstrap_environment, dotenv_status
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider, persist_campaign_linked_zero_exposure_reconciliation_evidence
 from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
-from alphaforge.database_defaults import sqlite_path_from_url
+from alphaforge.database_defaults import resolve_runtime_database_url, sqlite_path_from_url
 from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reject_label_status import reject_label_status
@@ -41,14 +41,14 @@ STARTUP_FAILURE_REASONS = {"WORKER_ATTACHMENT_TIMEOUT", "WORKER_EXITED_BEFORE_AT
 
 
 def _db_path(args: Any) -> str:
-    db = getattr(args, "db", None) or os.getenv("ALPHAFORGE_DB_PATH")
-    if db:
-        return str(db)
-    url = load_config_from_env().persistence.database_url
-    if url.startswith("sqlite+pysqlite:///"):
-        return url.removeprefix("sqlite+pysqlite:///")
-    if url.startswith("sqlite:///"):
-        return url.removeprefix("sqlite:///")
+    explicit_db = getattr(args, "db", None)
+    if explicit_db:
+        return str(explicit_db)
+    # Match runtime's dotenv bootstrap before applying the shared URL > legacy
+    # path > canonical-default resolver.  This keeps a value supplied only in
+    # .env from producing a different burn-in target.
+    bootstrap_environment()
+    url = resolve_runtime_database_url(os.environ)
     path = sqlite_path_from_url(url)
     if path is None:
         raise ValueError("burn-in operations require SQLite or explicit --db")
