@@ -3,11 +3,14 @@ from __future__ import annotations
 def _norm_default(value):
     if value is None:return None
     return str(value).strip("()'\"").lower()
-def audit_orm(inspected):
+def audit_orm(inspected, excluded_tables=()):
     from alphaforge.db.base import Base
     import alphaforge.models.schema, alphaforge.models.ai_schema  # noqa:F401
     mismatches=[]
+    excluded=set(excluded_tables)
     for table in Base.metadata.sorted_tables:
+        if table.name in excluded:
+            continue
         deployed=inspected.get(table.name)
         if not deployed:
             mismatches.append({"table":table.name,"kind":"TABLE_MISSING","orm_columns":sorted(c.name for c in table.columns),"deployed_columns":[]}); continue
@@ -26,4 +29,5 @@ def audit_orm(inspected):
         db_unique={tuple(sorted(i["columns"])) for i in deployed["indexes"] if i["unique"]}
         if not orm_unique.issubset(db_unique): details["unique"]={"orm":sorted(orm_unique),"deployed":sorted(db_unique)}
         if details:mismatches.append({"table":table.name,"kind":"CONTRACT_MISMATCH",**details})
-    return {"tables_audited":sorted(t.name for t in Base.metadata.sorted_tables),"mismatches":mismatches,"autogenerate_safe":not mismatches}
+    audited=sorted(t.name for t in Base.metadata.sorted_tables if t.name not in excluded)
+    return {"tables_audited":audited,"excluded_sql_first_tables":sorted(excluded),"mismatches":mismatches,"autogenerate_safe":not mismatches}

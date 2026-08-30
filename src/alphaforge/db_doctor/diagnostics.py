@@ -1,7 +1,7 @@
 from __future__ import annotations
 import sqlite3
 from pathlib import Path
-from .contracts import CONTRACTS,OWNER_MAP,WRITER_READER_MATRIX,UNIQUE_REQUIREMENTS,INDEX_REQUIREMENTS,CURRENT_REVISION, INTEGER_COLUMNS, REAL_COLUMNS, TABLE, TEXT_COLUMNS, UNIQUE_IDENTITIES, WRITER_COLUMNS
+from .contracts import CONTRACTS,OWNER_MAP,WRITER_READER_MATRIX,WRITER_GUARANTEED_COLUMNS,SQL_FIRST_TABLES,UNIQUE_REQUIREMENTS,INDEX_REQUIREMENTS,CURRENT_REVISION, INTEGER_COLUMNS, REAL_COLUMNS, TABLE, TEXT_COLUMNS, UNIQUE_IDENTITIES, WRITER_COLUMNS
 from .identity import collect_identity
 from .inspector import inspect_database
 from .targets import resolve_database_targets
@@ -122,6 +122,26 @@ def diagnose(path: Path) -> dict:
             for wanted in INDEX_REQUIREMENTS.get(name,()):
                 if not any(tuple(cols[:len(wanted)])==wanted for cols in indexed): issues.append(issue("MISSING_REQUIRED_INDEX","ERROR",expected=wanted,observed=sorted(indexed),repair="SAFE_AUTO_REPAIR",evidence=schema["indexes"],action="create non-destructive index",table=name))
 
+    # A NOT NULL column is a writer conflict only when it has no database
+    # default and the owning writer does not guarantee a non-NULL value.  Do not
+    # compare every writer with every table or treat valid required fields as
+    # incompatible merely because they are required.
+    for writer, tables in WRITER_READER_MATRIX.items():
+        if writer not in WRITER_GUARANTEED_COLUMNS:
+            # No proven static writer contract: compatibility is established by
+            # the isolated real-writer probes rather than guessed here.
+            continue
+        guaranteed=set(WRITER_GUARANTEED_COLUMNS.get(writer, ()))
+        for name in tables:
+            schema=inspection["schemas"].get(name)
+            if not schema:
+                continue
+            for column in schema["columns"]:
+                if column["pk"] or not column["notnull"] or column["default"] is not None:
+                    continue
+                if column["name"] not in guaranteed:
+                    issues.append(issue("NOT_NULL_WRITER_CONFLICT","CRITICAL",expected=f"{writer} guarantees a non-NULL value or schema supplies a default",observed=column,repair="MANUAL_REVIEW",evidence={"writer":writer,"column":column},action="reconcile the owning writer and SQL-first schema contract",table=name,column=column["name"]))
+
     features={"capabilities":{"integrity":inspection["integrity"],"json_functions":inspection["json1"],"foreign_keys_supported":True,"sqlite_version":sqlite3.sqlite_version},"doctor_connection_observation":{"foreign_keys_enabled":inspection["foreign_keys_enabled"],"journal_mode":inspection["journal_mode"],"busy_timeout_ms":inspection["busy_timeout_ms"],"certification_evidence":False},"runtime_configuration_contract":{"foreign_keys":"ON","journal_mode":"WAL","busy_timeout_ms":30000,"source":"src/alphaforge/persistence.py:init_db connection hook"}}
     if not inspection["json1"]: issues.append(issue("SQLITE_JSON1_UNAVAILABLE","CRITICAL",expected=True,observed=False,repair="MANUAL_REVIEW",evidence=features["capabilities"],action="install JSON-capable SQLite"))
     schemas=inspection["schemas"]; domain=all(n in schemas for n in ("positions","orders")); adapter=all(n in schemas for n in ("runtime_positions","runtime_orders")); dr=sum(schemas.get(n,{}).get("row_count",0) for n in ("positions","orders")); ar=sum(schemas.get(n,{}).get("row_count",0) for n in ("runtime_positions","runtime_orders"))
@@ -133,7 +153,7 @@ def diagnose(path: Path) -> dict:
     for name, ownership in OWNER_MAP.items():
         if name in schemas and len(ownership["owners"]) > 1:
             issues.append(issue("MULTIPLE_SCHEMA_OWNERS","WARNING",expected="one canonical schema owner",observed=ownership,repair="MANUAL_REVIEW",evidence=ownership,action="audit owner contracts before autogenerate or consolidation",table=name))
-    orm=audit_orm(schemas)
+    orm=audit_orm(schemas, SQL_FIRST_TABLES)
     for mismatch in orm["mismatches"]:
         issues.append(issue("ORM_ALEMBIC_CONTRACT_MISMATCH","ERROR",expected="ORM metadata matches deployed/Alembic schema",observed=mismatch,repair="MANUAL_REVIEW",evidence=mismatch,action="do not run alembic autogenerate",table=mismatch["table"]))
         if mismatch["table"] in OWNER_MAP and len(OWNER_MAP[mismatch["table"]]["owners"])>1: issues.append(issue("INCOMPATIBLE_OWNER_CONTRACTS","ERROR",expected=OWNER_MAP[mismatch["table"]],observed=mismatch,repair="MANUAL_REVIEW",evidence=mismatch,action="compare independent owner contracts",table=mismatch["table"]))

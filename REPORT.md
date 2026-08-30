@@ -1501,3 +1501,30 @@ Focused repository-auditor tests passed 7 tests and schema/persistence/runtime/b
 CI #1541 exposed that architectural findings were incorrectly treated as universal blockers. Each finding now carries explicit operation gates. ORM drift and compatible multiple ownership block autogeneration/consolidation but not lifecycle repair or writer probes; target and integrity failures block repair and certification; exposure ambiguity blocks PAPER certification; duplicate or unsupported lifecycle evidence blocks repair/migration. Certification reports `runtime_certification` separately from `repository_audit`. Generic NOT NULL inference against intentionally partial optional-table contracts was removed, restoring canonical `init_db` runtime health without hiding repository findings.
 
 ---
+## Fresh-database contract reconciliation — 2026-08-29
+
+### Why and root cause
+
+A repository-owned fresh SQLite database could be judged against obsolete or unrelated contracts. Database Doctor attributed SQL-first runtime tables to both `init_db`, ORM metadata, and sometimes Alembic; treated the obsolete ORM surrogate `id` as authoritative for natural-key expectancy tables; described reconciliation incidents with a nonexistent `incident_id`; and lacked writer-specific proof for interpreting NOT NULL columns. The fresh path also omitted the canonical reconciliation/runtime-control setup and the runtime-state time index until a later subsystem call.
+
+### Files and exact behavior
+
+`db_doctor/contracts.py` now declares `signals`, the wide `order_decisions`, `ai_decision_features`, lifecycle, and natural-key expectancy tables as SQL-first `init_db` contracts. `symbol`, `setup`, and `regime` remain their canonical primary keys; no surrogate IDs were introduced. The reconciliation contract now exactly mirrors `persist_findings`: incident type, severity, symbol, lifecycle reference, remediation status, acknowledgement/fail-closed flags, forensic payload, and creation time. Writer-guaranteed columns are explicit and scoped only to the writer that owns each table.
+
+`diagnostics.py` reports a NOT NULL writer conflict only for a no-default, non-PK column that the corresponding proven writer cannot guarantee. Valid required reconciliation, heartbeat, runtime-state, and persistence values no longer become false positives; unknown writer contracts are left to executable isolated probes rather than guessed. `orm_audit.py` excludes declared SQL-first tables from Alembic comparison and exposes that exclusion, while continuing to report unrelated ORM/deployment drift and keeping global autogenerate unsafe.
+
+`persistence.init_db` orchestrates canonical reconciliation, runtime-control, and runtime-state schema functions after its transaction. This adds the genuinely required runtime-state timestamp index through the normal fresh path. Heartbeat remains conditionally provisioned by PAPER/LIVE code so BACKTEST does not acquire heartbeat evidence. Writer probes now directly exercise signal and reconciliation persistence in addition to decisions, lifecycle, heartbeat, and runtime state. The CLI loads migration-only repair/certification modules lazily, so read-only `diagnose` remains usable when the local Alembic distribution is unavailable.
+
+### Lifecycle, persistence, export, schema, and compatibility
+
+Lifecycle transitions, uniqueness, reject persistence, and fail-closed checks are unchanged. The patch is fresh-bootstrap additive and idempotent; it neither rebuilds nor deletes existing tables or rows and introduces no user-database repair as its solution. No CSV/export shape changes. Existing databases may gain only the already-canonical runtime tables/indexes when `init_db` runs. Alembic autogenerate must remain disabled because unrelated ORM-only/deployed tables still differ; that repository warning does not block PAPER certification.
+
+### NOT NULL audit disposition
+
+Signal IDs/timestamps, order-decision generated IDs and serialized evidence, lifecycle identities/state/timestamps/serialized evidence, heartbeat identity/mode/state/evidence, runtime-state timestamp/instance, and all strict reconciliation incident fields are supplied by their real writers. Their NOT NULL constraints are valid. A required no-default column outside a writer's guaranteed set remains a CRITICAL `NOT_NULL_WRITER_CONFLICT`. Runtime control, burn-in, and adaptive learning are not statically guessed where a complete guarantee contract is not declared; real-writer probes and their own schema functions remain authoritative.
+
+### Tests, risks, migration, and recommendation
+
+Regression coverage creates an empty temporary SQLite path exclusively through `init_db`, provisions the conditional heartbeat surface, diagnoses it, asserts integrity and zero PAPER blockers/NOT NULL false positives/canonical owner conflicts, and runs isolated direct writer smoke probes. Focused reconciliation, runtime-control/state/heartbeat, and repository-audit suites were executed. The local environment cannot install the declared Alembic package because its package proxy returns HTTP 403, so migration-importing tests remain an external CI gate. No migration is required. Recommend merge after CI; do not infer LIVE readiness.
+
+---

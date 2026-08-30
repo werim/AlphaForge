@@ -3,7 +3,8 @@ import tempfile, uuid
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
-from alphaforge.persistence import save_order_decision, save_trade_lifecycle_event
+from alphaforge.persistence import save_signal, save_order_decision, save_trade_lifecycle_event
+from alphaforge.reconciliation import ReconciliationFinding, persist_findings
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
 from .backup import snapshot_database
@@ -17,6 +18,7 @@ def run_writer_probes(path: Path) -> dict:
         checks=[]
         try:
             with Session(engine) as session:
+                checks.append(("save_signal", bool(save_signal(session,signal_id=token,symbol="DBDOCTOR",side="LONG",timeframe="1m",mode="PAPER"))))
                 checks.append(("save_trade_lifecycle_event_signal_created", save_trade_lifecycle_event(session,event_id=token+":created",signal_id=token,symbol="DBDOCTOR",mode="PAPER",lifecycle_state="SIGNAL_CREATED")))
                 checks.append(("save_trade_lifecycle_event_upsert", save_trade_lifecycle_event(session,event_id=token+":created",signal_id=token,symbol="DBDOCTOR",mode="PAPER",lifecycle_state="SIGNAL_CREATED")))
                 checks.append(("save_trade_lifecycle_event_signal_rejected", save_trade_lifecycle_event(session,event_id=token+":rejected",signal_id=token,symbol="DBDOCTOR",mode="PAPER",lifecycle_state="SIGNAL_REJECTED",previous_lifecycle_state="SIGNAL_CREATED")))
@@ -25,6 +27,8 @@ def run_writer_probes(path: Path) -> dict:
             checks.append(("runtime_heartbeat",True))
             save_runtime_state_snapshot(engine,RuntimeStateSnapshot(instance_id=token,mode="PAPER",requested_mode="PAPER",actual_mode="PAPER",runtime_status="OPERATING"))
             checks.append(("runtime_state_snapshot",True))
+            persist_findings(engine,[ReconciliationFinding("LIFECYCLE_DIVERGENCE","HIGH","DBDOCTOR",token,"2026-08-29T00:00:00+00:00",{"probe":True},"OPEN",True)])
+            checks.append(("reconciliation_persist_findings",True))
         except Exception as exc:
             checks.append(("exception",False)); return {"passed":False,"checks":[{"name":n,"passed":bool(v)} for n,v in checks],"error":repr(exc),"isolation":"private database copy removed"}
         finally: engine.dispose()

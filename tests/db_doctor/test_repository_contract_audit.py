@@ -51,6 +51,8 @@ def test_init_db_reports_real_orm_and_owner_drift(tmp_path):
     assert "MULTIPLE_SCHEMA_OWNERS" in {i["code"] for i in result["repository_findings"]}
     orm_issue=next(i for i in result["issues"] if i["code"]=="ORM_ALEMBIC_CONTRACT_MISMATCH")
     assert orm_issue["blocks"]==["alembic_autogenerate"]
+    assert {"signals","order_decisions","trade_lifecycle_events","symbol_expectancy_stats"} <= set(result["ORM_alignment"]["excluded_sql_first_tables"])
+    assert not [i for i in result["issues"] if i["code"]=="INCOMPATIBLE_OWNER_CONTRACTS" and i["table"] in result["ORM_alignment"]["excluded_sql_first_tables"]]
 
 def test_architecture_findings_do_not_skip_writer_probe(monkeypatch,tmp_path):
     import alphaforge.db_doctor.verifier as verifier
