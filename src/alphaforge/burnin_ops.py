@@ -21,10 +21,11 @@ from alphaforge.burnin_campaign import (
 )
 from alphaforge.config import load_config_from_env, load_reconciliation_settings
 from alphaforge.config_audit import audit_config
-from alphaforge.env_contract import dotenv_status
+from alphaforge.env_contract import bootstrap_environment, dotenv_status
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider, persist_campaign_linked_zero_exposure_reconciliation_evidence
 from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
+from alphaforge.database_defaults import resolve_runtime_database_url, sqlite_path_from_url
 from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reject_label_status import reject_label_status
@@ -40,15 +41,18 @@ STARTUP_FAILURE_REASONS = {"WORKER_ATTACHMENT_TIMEOUT", "WORKER_EXITED_BEFORE_AT
 
 
 def _db_path(args: Any) -> str:
-    db = getattr(args, "db", None) or os.getenv("ALPHAFORGE_DB_PATH")
-    if db:
-        return str(db)
-    url = load_config_from_env().persistence.database_url
-    if url.startswith("sqlite+pysqlite:///"):
-        return url.removeprefix("sqlite+pysqlite:///")
-    if url.startswith("sqlite:///"):
-        return url.removeprefix("sqlite:///")
-    return "alphaforge.db"
+    explicit_db = getattr(args, "db", None)
+    if explicit_db:
+        return str(explicit_db)
+    # Match runtime's dotenv bootstrap before applying the shared URL > legacy
+    # path > canonical-default resolver.  This keeps a value supplied only in
+    # .env from producing a different burn-in target.
+    bootstrap_environment()
+    url = resolve_runtime_database_url(os.environ)
+    path = sqlite_path_from_url(url)
+    if path is None:
+        raise ValueError("burn-in operations require SQLite or explicit --db")
+    return str(path)
 
 
 def _connect(db: str) -> sqlite3.Connection:
@@ -412,6 +416,17 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     secret_rows = env_audit["resolved_non_secret_configuration"]
     credentials_ok = all(bool(secret_rows.get(name, {}).get("present")) and not bool(secret_rows.get(name, {}).get("placeholder_detected")) for name in ("BINANCE_API_KEY", "BINANCE_API_SECRET"))
     add("reconciliation_credentials_non_placeholder", "PASS" if (not reconciliation_enabled or credentials_ok) else "FAIL", {"enabled": reconciliation_enabled, "credentials_present": credentials_ok})
+    add("paper_reconciliation_enabled", "PASS" if reconciliation_enabled else "FAIL", {"enabled": reconciliation_enabled})
+    provider = reconciliation_provider or _readonly_reconciliation_provider(cfg, symbols)
+    if reconciliation_enabled and credentials_ok:
+        try:
+            signed_probe = build_readonly_reconciliation_probe(provider)()
+            probe_ok = signed_probe["evidence_status"] == "COMPLETE" and signed_probe["authenticated"] and signed_probe["input_source"] == "AUTHENTICATED_EXCHANGE_SNAPSHOT"
+            add("signed_readonly_reconciliation_available", "PASS" if probe_ok else "FAIL", signed_probe)
+        except Exception as exc:
+            add("signed_readonly_reconciliation_available", "FAIL", f"{exc.__class__.__name__}:{exc}")
+    else:
+        add("signed_readonly_reconciliation_available", "FAIL", "reconciliation disabled or credentials unavailable")
 
     try:
         commit = _git_commit()

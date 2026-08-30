@@ -57,7 +57,7 @@ SQLite lock errors are `DB_LOCKED`; unavailable data is never converted to numer
 ## PowerShell startup and manual verification
 
 ```powershell
-$env:ALPHAFORGE_DB_PATH = 'C:\AlphaForge\alphaforge.db'
+$env:ALPHAFORGE_DB_PATH = 'data/runtime/alphaforge_runtime.db'
 $env:ALPHAFORGE_PROJECT_ROOT = 'C:\AlphaForge'
 $env:ALPHAFORGE_PYTHON_EXECUTABLE = 'C:\AlphaForge\.venv\Scripts\python.exe'
 $bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)

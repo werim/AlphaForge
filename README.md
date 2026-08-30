@@ -366,3 +366,7 @@ Remove-Item Env:BINANCE_API_KEY,Env:BINANCE_API_SECRET
 The command must report `PASS` and COMPLETE reconciliation evidence against the selected account environment; unavailable/mismatched evidence fails closed. It does not establish LIVE readiness.
 
 `ALPHAFORGE_ALLOW_LIVE_ORDERS=true` is never sufficient by itself: the final adapter boundary also requires LIVE trading enablement, operator acknowledgement, qualification, clean reconciliation, and an inactive kill switch. The default is false. Prefer `ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT` over deprecated `ENABLE_REGIME_FILTER`, and `ALPHAFORGE_ENABLE_ORDERBOOK_FILTER` over deprecated `ENABLE_ORDERBOOK_FILTER`.
+
+### Canonical runtime database and PAPER reconciliation
+
+Fresh runtime persistence defaults to `data/runtime/alphaforge_runtime.db`; repository-root `alphaforge.db` is legacy and is neither migrated nor deleted automatically. `ALPHAFORGE_DATABASE_URL` remains canonical, `ALPHAFORGE_DB_PATH` is a burn-in compatibility override, and explicit `--db` wins for supporting CLIs. Normal PAPER enables signed read-only Binance reconciliation and preflight requires usable non-placeholder credentials; this does not authorize LIVE order mutation.

@@ -1548,3 +1548,38 @@ Signal IDs/timestamps, order-decision generated IDs and serialized evidence, lif
 Regression coverage creates an empty temporary SQLite path exclusively through `init_db`, provisions the conditional heartbeat surface, diagnoses it, asserts integrity and zero PAPER blockers/NOT NULL false positives/canonical owner conflicts, and runs isolated direct writer smoke probes. Focused reconciliation, runtime-control/state/heartbeat, and repository-audit suites were executed. The local environment cannot install the declared Alembic package because its package proxy returns HTTP 403, so migration-importing tests remain an external CI gate. No migration is required. Recommend merge after CI; do not infer LIVE readiness.
 
 ---
+
+---
+## Runtime bootstrap/default hardening — 2026-08-30
+
+**Need/root cause.** Registry/env examples, burn-in fallbacks, Settings, and Alembic still named repository-root `alphaforge.db`, while runtime had a cwd-sensitive newer path. PAPER reconciliation defaulted off and preflight treated credentials as non-blocking even though startup fail-closed required a provider.
+
+**Files/behavior.** `database_defaults.py` now owns the canonical repository-root-safe path, SQLAlchemy URL conversion, and URL > legacy `ALPHAFORGE_DB_PATH` > default precedence. Config, persistence, both burn-in CLIs, Settings, Alembic, and env profiles consume the contract. Alembic creates only the canonical parent directory. Burn-in `--db` remains highest precedence. Preflight requires enabled reconciliation, complete non-placeholder credentials, and a complete authenticated signed read-only snapshot. PAPER exchange reconciliation compares no simulated PAPER order as an intended real order, but real exchange orders/positions remain orphan exposure and fail closed.
+
+**Lifecycle/persistence/export/schema.** No lifecycle transition, persisted column, CSV export, or schema revision changed. Fresh directory creation is idempotent. No database is copied, renamed, deleted, or silently selected over an explicit URL.
+
+**Tests/execution.** Added clean canonical bootstrap, no-root-file, override precedence, burn-in parity, and Alembic declaration regression tests. Targeted and full pytest plus static legacy-literal audit are required before push; results are recorded in the final implementation response.
+
+**Risks/limitations/migration.** PAPER now intentionally blocks earlier when signed Binance read-only evidence is unavailable. Existing custom URL users need no action. Existing root databases are retained but must be explicitly selected. No destructive migration exists. LIVE order authorization and mutation behavior were not enabled. Push recommendation: merge only with tests green; LIVE remains NOT READY.
+
+---
+## PR #335 merge-blocker follow-up — 2026-08-30
+
+**Why/root cause.** `burnin_ops._db_path()` checked legacy `ALPHAFORGE_DB_PATH` before loading the canonical URL, unlike runtime and `burnin_cli`. The previous documentation patch also removed useful lifecycle operations and contained foreground launch, invalid DB-doctor, and raw-process credential checks.
+
+**Files and behavior.** `burnin_ops.py` now preserves explicit `--db`, bootstraps the canonical dotenv contract, and delegates URL/legacy/default precedence to `database_defaults.resolve_runtime_database_url`. Regression tests set both environment forms and prove runtime plus both burn-in CLIs select the URL, while explicit CLI input remains highest. `docs/KOMUTLAR.md` restores the full guide and corrects detached launch, DB-doctor syntax, canonical-loader credential booleans, canonical DB use, lifecycle operations, SQL, and troubleshooting.
+
+**Lifecycle/persistence/export/schema/compatibility.** No lifecycle, reconciliation, MTF, campaign identity, persistence, export, or schema behavior changed. No DB is created, moved, mutated, or deleted by this follow-up. Legacy `ALPHAFORGE_DB_PATH` remains supported below the canonical URL.
+
+**Tests/risks/migration/push.** Targeted precedence, burn-in, and documentation assertions plus the full suite are required. There is no migration. The only compatibility correction is removal of the unintended legacy-path precedence. LIVE mutation authorization remains unchanged and LIVE is NOT READY.
+
+---
+## PR #335 Alembic dotenv merge-blocker — 2026-08-30
+
+**Why/root cause.** Alembic inspected `os.environ` before AlphaForge's canonical dotenv bootstrap, so a DB override present only in `.env` could split migrations from runtime and burn-in.
+
+**Files/behavior.** `database_defaults.py` now exposes an Alembic-specific selector that runs the existing `bootstrap_environment` against the effective environment, preserves a deliberate non-default Alembic URL, and otherwise applies canonical URL aliases, legacy path, then default precedence. `alembic/env.py` uses that selector before creating the SQLite parent. Tests cover URL-only dotenv, URL plus legacy path, canonical default/no root DB, and deliberate Alembic override.
+
+**Lifecycle/persistence/export/schema/compatibility.** No lifecycle, reconciliation, LIVE, MTF, campaign identity, schema, migration revision, export, or existing DB behavior changed. No database is moved, deleted, or automatically migrated.
+
+**Tests/risks/migration/push.** Targeted resolver tests pass. Alembic integration/full-suite execution remains contingent on the declared Alembic package being installed. No migration is required. LIVE remains NOT READY.

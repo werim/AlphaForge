@@ -4,10 +4,10 @@ The doctor identifies the exact SQLite file, inspects it read-only, and never
 converts unknown state into a healthy result. Use it before PAPER startup:
 
 ```bash
-python -m alphaforge.db_doctor --db /absolute/path/alphaforge.db diagnose
-python -m alphaforge.db_doctor --db /absolute/path/alphaforge.db plan --json
-python -m alphaforge.db_doctor --db /absolute/path/alphaforge.db repair
-python -m alphaforge.db_doctor --db /absolute/path/alphaforge.db certify --json
+python -m alphaforge.db_doctor --db data/runtime/alphaforge_runtime.db diagnose
+python -m alphaforge.db_doctor --db data/runtime/alphaforge_runtime.db plan --json
+python -m alphaforge.db_doctor --db data/runtime/alphaforge_runtime.db repair
+python -m alphaforge.db_doctor --db data/runtime/alphaforge_runtime.db certify --json
 ```
 
 `repair` first creates and integrity-checks a SQLite online backup (including

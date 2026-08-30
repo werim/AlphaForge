@@ -239,13 +239,16 @@ def test_preflight_passes_with_matching_runtime_identity_and_records_payloads(mo
     import alphaforge.burnin_ops as ops
 
     monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("BINANCE_API_KEY", "valid-readonly-key-abcdef123456")
+    monkeypatch.setenv("BINANCE_API_SECRET", "valid-readonly-secret-abcdef123456")
     monkeypatch.setattr(ops, "_git_clean", lambda: True)
     monkeypatch.setattr(ops, "_git_commit", lambda: "commit")
     monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: "dev\n")
     monkeypatch.setattr(ops, "clock_skew_check", lambda: {"status": "PASS"})
     monkeypatch.setattr(ops, "_actual_runtime_identity", lambda release, symbols, intervals: {**ops._candidate_identity(release, symbols, intervals), "execution_mode": "PAPER"})
 
-    out = ops.preflight(str(tmp_path / "pf.db"), "rel", ["BTCUSDT"], ["1h"], require_market_data=False)
+    provider = type("Provider", (), {"snapshot": lambda self: {"evidence_status": "COMPLETE", "authenticated": True, "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT", "orders": [], "positions": []}})()
+    out = ops.preflight(str(tmp_path / "pf.db"), "rel", ["BTCUSDT"], ["1h"], require_market_data=False, reconciliation_provider=provider)
     check = next(c for c in out["checks"] if c["name"] == "runtime_identity_matches_campaign_identity")
     assert out["status"] == "PASS"
     assert check["status"] == "PASS"
@@ -961,6 +964,7 @@ def test_post_attach_exception_uses_accurate_event_and_terminalizes(tmp_path):
 
 
 def test_dead_unrelated_historical_provider_unavailable_recovers_with_local_evidence(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "false")
     import alphaforge.burnin_ops as ops
     from alphaforge.persistence import init_db
     from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, latest_runtime_state_snapshot
@@ -1169,6 +1173,7 @@ def _terminal_provider_failure(conn, camp, run):
 
 
 def test_terminal_paper_provider_failure_with_zero_execution_is_terminalized_and_unblocks_future_scope(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "false")
     import alphaforge.burnin_ops as ops
     from alphaforge.persistence import init_db
     from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot

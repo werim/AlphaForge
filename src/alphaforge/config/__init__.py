@@ -7,6 +7,7 @@ from typing import Mapping
 
 from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset
 from alphaforge.env_contract import bootstrap_environment, dotenv_status, resolve_binance_environment
+from alphaforge.database_defaults import resolve_runtime_database_url
 
 
 def _clean_env_value(raw: str | None) -> str | None:
@@ -54,16 +55,11 @@ def _comma_list(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _default_runtime_database_url() -> str:
-    return f"sqlite+pysqlite:///{(Path.cwd() / 'data' / 'runtime' / 'alphaforge_runtime.db').resolve()}"
+    return resolve_runtime_database_url({})
 
 
 def _resolve_database_url(env: Mapping[str, str]) -> str:
-    database_url = _alias(env, "ALPHAFORGE_DATABASE_URL", "ALPHAFORGE_DB_URL", "DATABASE_URL") or _default_runtime_database_url()
-    if not database_url.startswith("sqlite") or ":memory:" in database_url:
-        return database_url
-    prefix = "sqlite+pysqlite:///" if database_url.startswith("sqlite+pysqlite:///") else "sqlite:///"
-    raw_path = database_url.removeprefix(prefix)
-    return f"{prefix}{Path(raw_path).expanduser().resolve()}"
+    return resolve_runtime_database_url(env)
 
 @dataclass(slots=True)
 class RuntimeSettings:

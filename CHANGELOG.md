@@ -4385,3 +4385,63 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Unrelated ORM-only tables remain absent or divergent in the `init_db` family and are reported as non-PAPER repository warnings. LIVE remains NOT READY.
+
+## Runtime bootstrap/default hardening — 2026-08-30
+
+### Added
+- One repository-root-safe canonical runtime SQLite resolver and regression coverage for clean bootstrap/override precedence.
+
+### Changed
+- Fresh persistence and Alembic default to `data/runtime/alphaforge_runtime.db`; normal PAPER defaults to signed read-only Binance reconciliation.
+
+### Fixed
+- PAPER preflight now fails before launch unless the exact authenticated reconciliation snapshot is complete; PAPER simulated orders are not compared as expected real exchange orders.
+
+### Removed
+- Active fresh-default fallbacks that created repository-root `alphaforge.db`.
+
+### Breaking Changes
+- New PAPER installs require valid non-placeholder Binance read-only credentials to pass burn-in preflight. Explicit DB overrides remain supported.
+
+### Known Issues
+- Existing legacy databases are not migrated automatically. LIVE remains fail-closed and NOT LIVE READY.
+
+## PR #335 merge-blocker follow-up — 2026-08-30
+
+### Added
+- Regression coverage for simultaneous canonical URL and legacy DB-path configuration, explicit CLI precedence, and documented DB-doctor syntax.
+
+### Changed
+- Restored the full operational command guide while retaining canonical DB and signed PAPER reconciliation corrections.
+
+### Fixed
+- Burn-in operations now resolve database precedence identically to runtime and burn-in CLI; multi-day guide launches detach before status/health commands.
+
+### Removed
+- Invalid documented `db-doctor diagnose` invocation.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains not production-authorized; existing explicit database files remain operator-managed.
+
+## PR #335 Alembic dotenv merge-blocker — 2026-08-30
+
+### Added
+- Regression coverage for Alembic/runtime dotenv DB parity, URL-over-legacy precedence, canonical default, and deliberate Alembic overrides.
+
+### Changed
+- Alembic now bootstraps AlphaForge's canonical `.env` contract before resolving its default database target.
+
+### Fixed
+- Prevented Alembic from selecting the canonical default when runtime and burn-in select a database configured only in `.env`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains not production-authorized; no safety or reconciliation behavior changed.

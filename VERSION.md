@@ -414,3 +414,25 @@
 - **Critical risks:** non-SQLite schema doctor coverage and ambiguous legacy exposure shapes require manual migration
 - **Last audit:** 2026-07-24
 - **Live readiness:** **NOT READY** — full suite and production database validation remain operator gates
+
+## Runtime bootstrap/default hardening (2026-08-30)
+- Current version/phase: dev canonical PAPER bootstrap; no schema migration.
+- Runtime maturity: runtime, burn-in, and Alembic share `data/runtime/alphaforge_runtime.db`; PAPER preflight proves signed read-only reconciliation before PASS.
+- BACKTEST/PAPER/LIVE alignment: BACKTEST remains credential-free; PAPER ignores simulated orders when auditing real exchange absence; LIVE authorization/mutation gates are unchanged.
+- Lifecycle/persistence/execution realism: lifecycle/schema/export shapes are unchanged; missing/invalid authenticated exchange evidence fails closed and remains unavailable rather than fabricated.
+- Known critical risks: valid Binance credentials/network access are operational dependencies for PAPER burn-in; existing custom/legacy DBs require deliberate operator selection.
+- Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.
+
+## PR #335 merge-blocker follow-up (2026-08-30)
+- Current version/phase: dev bootstrap contract review follow-up; no migration.
+- Runtime maturity/alignment: runtime, burn-in operations, and burn-in CLI now share URL > legacy path > canonical default precedence; explicit CLI remains highest.
+- Lifecycle/execution realism: unchanged; signed PAPER reconciliation remains fail closed and unavailable evidence is not fabricated.
+- Known critical risks: PAPER still depends on valid signed read-only Binance access; explicit legacy/custom DB selection remains operator responsibility.
+- Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.
+
+## PR #335 Alembic dotenv merge-blocker (2026-08-30)
+- Current version/phase: dev bootstrap contract finalization; no migration.
+- Runtime maturity/alignment: Alembic, runtime, and burn-in now bootstrap the same dotenv DB contract while deliberate Alembic config overrides remain authoritative.
+- Lifecycle/execution realism: unchanged; reconciliation and LIVE safety remain fail closed.
+- Known critical risks: migration execution requires the declared Alembic dependency; custom DB ownership remains operator-managed.
+- Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.

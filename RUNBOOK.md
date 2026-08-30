@@ -229,3 +229,7 @@ Exit codes for `alphaforge.binance_reconciliation_check`:
 `alphaforge.config_check` exits `0` on PASS and `2` when one or more safe configuration errors are collected.
 
 The two diagnostic module entrypoints call AlphaForge's canonical `bootstrap_environment()` exactly once. Run them directly from the repository; quoted values and inline comments in `.env` are supported, and an already-set PowerShell process variable retains precedence. Library functions supplied an explicit environment mapping do not bootstrap or read host dotenv state.
+
+## Canonical bootstrap contract (2026-08-30)
+
+Use `data/runtime/alphaforge_runtime.db` for fresh installs. `alembic upgrade head`, runtime, burn-in operations, doctor tooling, and dashboard defaults resolve through the canonical persistence configuration. Root `alphaforge.db` is legacy and is not moved or deleted. Normal PAPER requires `ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION=true` plus valid signed read-only Binance credentials; preflight fails closed if the same runtime capability is unavailable. Explicit external database URLs remain unchanged.

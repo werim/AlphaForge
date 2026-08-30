@@ -13,13 +13,13 @@ Bütün komutları repository kökünden çalıştır.
 ### macOS / Linux
 
 ```bash
-cd /Volumes/Slave/Projects/AlphaForge
+cd AlphaForge
 ```
 
 ### Windows PowerShell
 
 ```powershell
-cd E:\Projeler\AlphaForge
+Set-Location AlphaForge
 ```
 
 Konumu doğrula:
@@ -195,21 +195,77 @@ $env:EXECUTION_MODE="PAPER"
 
 ---
 
+## 4.1 Temiz kurulum / ilk PAPER çalıştırma
+
+Repo klonlama ve `dev` seçimi, sanal ortam kurulumu ve `.env.medium.example` kopyalamasından sonra `.env` içine Binance **READ-ONLY** API credentials gir. Reconciliation açık olmalıdır. Secret değerlerini yazdırmadan, preflight/runtime ile aynı canonical dotenv/config yüklemesini doğrula.
+
+macOS / Linux:
+
+```bash
+python - <<'PY'
+from alphaforge.config import load_config_from_env, load_reconciliation_settings
+cfg = load_config_from_env()
+recon = load_reconciliation_settings()
+print(f"RECON={str(cfg.runtime.enable_binance_readonly_reconciliation).lower()}")
+print(f"KEY={bool(recon.api_key.strip())}")
+print(f"SECRET={bool(recon.api_secret.strip())}")
+PY
+```
+
+PowerShell:
+
+```powershell
+@'
+from alphaforge.config import load_config_from_env, load_reconciliation_settings
+cfg = load_config_from_env()
+recon = load_reconciliation_settings()
+print(f"RECON={str(cfg.runtime.enable_binance_readonly_reconciliation).lower()}")
+print(f"KEY={bool(recon.api_key.strip())}")
+print(f"SECRET={bool(recon.api_secret.strip())}")
+'@ | python
+```
+
+Beklenen çıktı yalnızca durum bilgisidir:
+
+```text
+RECON=true
+KEY=True
+SECRET=True
+```
+
+Sonra canonical schema ve PAPER akışını hazırla:
+
+```bash
+DB="data/runtime/alphaforge_runtime.db"
+alembic upgrade head
+python -m alphaforge.burnin_ops --db "$DB" db-doctor --check-only
+```
+
+PowerShell karşılığı:
+
+```powershell
+$DB = "data/runtime/alphaforge_runtime.db"
+alembic upgrade head
+python -m alphaforge.burnin_ops --db $DB db-doctor --check-only
+```
+
+Ardından preflight, `launch --detach`, launch çıktısından CID, status, health ve worker log kontrolü yap. Preflight authenticated signed read-only reconciliation tamamlanamazsa fail closed olur; hiçbir preflight adımı emir submit/cancel/amend etmez.
+
 ## 5. Veritabanını tanımla
+
+Yeni kurulum varsayılan olarak `data/runtime/alphaforge_runtime.db` oluşturur/kullanır. Repo kökündeki `alphaforge.db` legacy ve non-canonicaldır; varsayılan akış onu yeni oluşturmaz, taşımaz veya silmez. Normal işletimde DB environment değişkenlerini elle eşitlemek gerekmez. Öncelik `--db`, `ALPHAFORGE_DATABASE_URL`, uyumluluk amaçlı `ALPHAFORGE_DB_PATH`, ardından canonical default sırasındadır.
 
 ### macOS / Linux
 
 ```bash
-DB="/Volumes/Slave/Projects/AlphaForge/data/runtime/alphaforge_runtime.db"
+DB="data/runtime/alphaforge_runtime.db"
 export DB
-export ALPHAFORGE_DB_PATH="$DB"
 ```
 
 ### Windows PowerShell
 
 ```powershell
-$DB="E:\Projeler\AlphaForge\data\runtime\alphaforge_runtime.db"
-$env:ALPHAFORGE_DB_PATH=$DB
+$DB="data/runtime/alphaforge_runtime.db"
 ```
 
 Dosyayı kontrol et:
@@ -402,13 +458,13 @@ Ctrl+C
 macOS / Linux:
 
 ```bash
-ALPHAFORGE_MODE=PAPER python -m alphaforge.runtime
+ALPHAFORGE_EXECUTION_MODE=PAPER python -m alphaforge.runtime
 ```
 
 PowerShell:
 
 ```powershell
-$env:ALPHAFORGE_MODE="PAPER"
+$env:ALPHAFORGE_EXECUTION_MODE="PAPER"
 python -m alphaforge.runtime
 ```
 
@@ -417,13 +473,13 @@ python -m alphaforge.runtime
 macOS / Linux:
 
 ```bash
-ALPHAFORGE_MODE=PAPER ALPHAFORGE_RUNTIME_SAFE_SCANNER=1 python -m alphaforge.runtime
+ALPHAFORGE_EXECUTION_MODE=PAPER ALPHAFORGE_RUNTIME_SAFE_SCANNER=1 python -m alphaforge.runtime
 ```
 
 PowerShell:
 
 ```powershell
-$env:ALPHAFORGE_MODE="PAPER"
+$env:ALPHAFORGE_EXECUTION_MODE="PAPER"
 $env:ALPHAFORGE_RUNTIME_SAFE_SCANNER="1"
 python -m alphaforge.runtime
 ```
@@ -544,6 +600,9 @@ python -m alphaforge.burnin_ops resume --help
 python -m alphaforge.burnin_ops status --help
 python -m alphaforge.burnin_ops report --help
 python -m alphaforge.burnin_ops finalize --help
+python -m alphaforge.burnin_ops diagnose-db --help
+python -m alphaforge.burnin_ops db-doctor --help
+python -m alphaforge.db_doctor --help
 ```
 
 Makine tarafından işlenecek JSON çıktı için global `--json` seçeneğini `--db` sonrasında ve alt komuttan önce kullan:
@@ -561,7 +620,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id CAMP_ID
 macOS / Linux:
 
 ```bash
-$RELEASE_ID="phase9_trial_1"
+RELEASE_ID="phase9_trial_1"
 
 python -m alphaforge.burnin_ops \
   --db "$DB" \
@@ -577,6 +636,7 @@ PowerShell:
 $RELEASE_ID="2908T01"
 
 python -m alphaforge.burnin_ops `
+  --db $DB `
   preflight `
   --release-id $RELEASE_ID `
   --symbols BTCUSDT `
@@ -628,6 +688,7 @@ python -m alphaforge.burnin_ops \
 PowerShell:
 ```
 python -m alphaforge.burnin_ops `
+  --db $DB `
   launch `
   --release-id $RELEASE_ID `
   --symbols BTCUSDT `
@@ -1404,6 +1465,31 @@ Sembol veya interval evreni değişmiştir.
 
 Spread/slippage/latency/funding gibi execution-cost kimliği değişmiştir.
 
+
+### `EXCHANGE_RECONCILIATION_UNAVAILABLE`
+
+Normal PAPER runtime gerekli signed read-only Binance reconciliation provider/snapshot kanıtını alamamıştır. Bayrağın kapalı olması; eksik, partial veya placeholder credentials; yanlış Binance environment/base URL; auth/izin/ağ hatası olası nedenlerdir. Bölüm 4.1'deki canonical config-loader komutu yalnız `RECON`, `KEY`, `SECRET` durumlarını basar; secret değerlerini basmaz. Preflight artık aynı authenticated capability tamamlanmadan PASS vermez.
+
+### DB path ayrışması
+
+Effective runtime DB'yi secret olmadan yazdır ve burn-in komutlarında aynı `$DB` kullanıldığını doğrula:
+
+```bash
+python - <<'PY'
+from alphaforge.config import load_config_from_env
+from alphaforge.database_defaults import sqlite_path_from_url
+u = load_config_from_env().persistence.database_url
+print(u)
+print(sqlite_path_from_url(u))
+PY
+test ! -e ./alphaforge.db && echo "legacy root DB absent"
+alembic current
+alembic heads
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CID"
+```
+
+PowerShell'de root legacy kontrolü `Test-Path .\alphaforge.db`, canonical dosya kontrolü `Resolve-Path $DB` ile yapılır. Mevcut legacy dosyayı otomatik silme/taşıma; explicit operator override'ını araştır.
+
 ### `UNCLEAN_SHUTDOWN_RECOVERY_REQUIRED`
 
 Önceki worker temiz kapanış kanıtı bırakmamıştır. Recovery drill ve audit yapılmadan normal resume/finalize varsayımı yapma.
@@ -1516,7 +1602,7 @@ for name in ("BINANCE_API_KEY", "BINANCE_BASE_URL"):
 $env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
 $env:EXECUTION_MODE = "PAPER"
 $env:ALPHAFORGE_ENABLE_LIVE_EXECUTION = "false"
-$DB = "artifacts/burnin/phase9.db"
+$DB = "data/runtime/alphaforge_runtime.db"
 $RELEASE_ID = "phase9-$(git rev-parse --short HEAD)"
 $CID = "<campaign_id-from-launch-output>"
 
@@ -1544,7 +1630,7 @@ python -m alphaforge.burnin_ops --db $DB --json finalize --campaign-id $CID --ou
 export ALPHAFORGE_EXECUTION_MODE=PAPER
 export EXECUTION_MODE=PAPER
 export ALPHAFORGE_ENABLE_LIVE_EXECUTION=false
-DB=artifacts/burnin/phase9.db
+DB="data/runtime/alphaforge_runtime.db"
 RELEASE_ID="phase9-$(git rev-parse --short HEAD)"
 CID='<campaign_id-from-launch-output>'
 
@@ -1629,8 +1715,8 @@ Canonical environment, PowerShell startup, read-first verification, and guarded 
 ### Windows PowerShell: Control Center backend entry point
 
 ```powershell
-$env:ALPHAFORGE_DB_PATH = "<real DB path>"
-$env:ALPHAFORGE_PROJECT_ROOT = "E:\Projeler\AlphaForge"
+$env:ALPHAFORGE_DB_PATH = "data/runtime/alphaforge_runtime.db"
+$env:ALPHAFORGE_PROJECT_ROOT = (Get-Location).Path
 $env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
 $env:ALPHAFORGE_CONTROL_CORS_ORIGINS = "http://127.0.0.1:5173" # optional explicit cross-origin opt-in
 

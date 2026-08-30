@@ -44,13 +44,12 @@ _KNOWN_DB_PATHS = (
     "data/runtime.sqlite",
     "data/runtime.db",
     "data/alphaforge.sqlite",
-    "data/alphaforge.db",
+    "data/runtime/alphaforge_runtime.db",
     "paper_runtime.sqlite",
     "paper_runtime.db",
     "runtime.sqlite",
     "runtime.db",
     "alphaforge.sqlite",
-    "alphaforge.db",
 )
 _EXCLUDED_DIR_PARTS = {
     ".git",
