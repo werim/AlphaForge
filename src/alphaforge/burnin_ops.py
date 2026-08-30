@@ -25,6 +25,7 @@ from alphaforge.env_contract import dotenv_status
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider, persist_campaign_linked_zero_exposure_reconciliation_evidence
 from alphaforge.runtime_state import build_readonly_reconciliation_probe
 from alphaforge.persistence import init_db
+from alphaforge.database_defaults import sqlite_path_from_url
 from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reject_label_status import reject_label_status
@@ -48,7 +49,10 @@ def _db_path(args: Any) -> str:
         return url.removeprefix("sqlite+pysqlite:///")
     if url.startswith("sqlite:///"):
         return url.removeprefix("sqlite:///")
-    return "alphaforge.db"
+    path = sqlite_path_from_url(url)
+    if path is None:
+        raise ValueError("burn-in operations require SQLite or explicit --db")
+    return str(path)
 
 
 def _connect(db: str) -> sqlite3.Connection:
@@ -412,6 +416,17 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     secret_rows = env_audit["resolved_non_secret_configuration"]
     credentials_ok = all(bool(secret_rows.get(name, {}).get("present")) and not bool(secret_rows.get(name, {}).get("placeholder_detected")) for name in ("BINANCE_API_KEY", "BINANCE_API_SECRET"))
     add("reconciliation_credentials_non_placeholder", "PASS" if (not reconciliation_enabled or credentials_ok) else "FAIL", {"enabled": reconciliation_enabled, "credentials_present": credentials_ok})
+    add("paper_reconciliation_enabled", "PASS" if reconciliation_enabled else "FAIL", {"enabled": reconciliation_enabled})
+    provider = reconciliation_provider or _readonly_reconciliation_provider(cfg, symbols)
+    if reconciliation_enabled and credentials_ok:
+        try:
+            signed_probe = build_readonly_reconciliation_probe(provider)()
+            probe_ok = signed_probe["evidence_status"] == "COMPLETE" and signed_probe["authenticated"] and signed_probe["input_source"] == "AUTHENTICATED_EXCHANGE_SNAPSHOT"
+            add("signed_readonly_reconciliation_available", "PASS" if probe_ok else "FAIL", signed_probe)
+        except Exception as exc:
+            add("signed_readonly_reconciliation_available", "FAIL", f"{exc.__class__.__name__}:{exc}")
+    else:
+        add("signed_readonly_reconciliation_available", "FAIL", "reconciliation disabled or credentials unavailable")
 
     try:
         commit = _git_commit()

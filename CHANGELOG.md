@@ -4385,3 +4385,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Unrelated ORM-only tables remain absent or divergent in the `init_db` family and are reported as non-PAPER repository warnings. LIVE remains NOT READY.
+
+## Runtime bootstrap/default hardening — 2026-08-30
+
+### Added
+- One repository-root-safe canonical runtime SQLite resolver and regression coverage for clean bootstrap/override precedence.
+
+### Changed
+- Fresh persistence and Alembic default to `data/runtime/alphaforge_runtime.db`; normal PAPER defaults to signed read-only Binance reconciliation.
+
+### Fixed
+- PAPER preflight now fails before launch unless the exact authenticated reconciliation snapshot is complete; PAPER simulated orders are not compared as expected real exchange orders.
+
+### Removed
+- Active fresh-default fallbacks that created repository-root `alphaforge.db`.
+
+### Breaking Changes
+- New PAPER installs require valid non-placeholder Binance read-only credentials to pass burn-in preflight. Explicit DB overrides remain supported.
+
+### Known Issues
+- Existing legacy databases are not migrated automatically. LIVE remains fail-closed and NOT LIVE READY.

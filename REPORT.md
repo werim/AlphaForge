@@ -1548,3 +1548,16 @@ Signal IDs/timestamps, order-decision generated IDs and serialized evidence, lif
 Regression coverage creates an empty temporary SQLite path exclusively through `init_db`, provisions the conditional heartbeat surface, diagnoses it, asserts integrity and zero PAPER blockers/NOT NULL false positives/canonical owner conflicts, and runs isolated direct writer smoke probes. Focused reconciliation, runtime-control/state/heartbeat, and repository-audit suites were executed. The local environment cannot install the declared Alembic package because its package proxy returns HTTP 403, so migration-importing tests remain an external CI gate. No migration is required. Recommend merge after CI; do not infer LIVE readiness.
 
 ---
+
+---
+## Runtime bootstrap/default hardening — 2026-08-30
+
+**Need/root cause.** Registry/env examples, burn-in fallbacks, Settings, and Alembic still named repository-root `alphaforge.db`, while runtime had a cwd-sensitive newer path. PAPER reconciliation defaulted off and preflight treated credentials as non-blocking even though startup fail-closed required a provider.
+
+**Files/behavior.** `database_defaults.py` now owns the canonical repository-root-safe path, SQLAlchemy URL conversion, and URL > legacy `ALPHAFORGE_DB_PATH` > default precedence. Config, persistence, both burn-in CLIs, Settings, Alembic, and env profiles consume the contract. Alembic creates only the canonical parent directory. Burn-in `--db` remains highest precedence. Preflight requires enabled reconciliation, complete non-placeholder credentials, and a complete authenticated signed read-only snapshot. PAPER exchange reconciliation compares no simulated PAPER order as an intended real order, but real exchange orders/positions remain orphan exposure and fail closed.
+
+**Lifecycle/persistence/export/schema.** No lifecycle transition, persisted column, CSV export, or schema revision changed. Fresh directory creation is idempotent. No database is copied, renamed, deleted, or silently selected over an explicit URL.
+
+**Tests/execution.** Added clean canonical bootstrap, no-root-file, override precedence, burn-in parity, and Alembic declaration regression tests. Targeted and full pytest plus static legacy-literal audit are required before push; results are recorded in the final implementation response.
+
+**Risks/limitations/migration.** PAPER now intentionally blocks earlier when signed Binance read-only evidence is unavailable. Existing custom URL users need no action. Existing root databases are retained but must be explicitly selected. No destructive migration exists. LIVE order authorization and mutation behavior were not enabled. Push recommendation: merge only with tests green; LIVE remains NOT READY.

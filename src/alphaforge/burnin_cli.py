@@ -5,11 +5,14 @@ from sqlalchemy import create_engine
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, qualify_campaign, export_campaign_bundle, bootstrap_campaign_schema, aggregate_campaign, BurnInCampaignRunner, BinanceReadOnlyCandleProvider, DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS, terminalize_active_campaign_run, event
 from alphaforge.config import load_config_from_env
 from alphaforge.persistence import init_db
+from alphaforge.database_defaults import sqlite_path_from_url
 
 def _db_path(args):
     if getattr(args,'db',None): return str(Path(args.db).expanduser().resolve())
     url=load_config_from_env().persistence.database_url
-    return url.replace('sqlite:///','').replace('sqlite+pysqlite:///','') if 'sqlite' in url else 'alphaforge.db'
+    path=sqlite_path_from_url(url)
+    if path is None: raise ValueError('burn-in CLI requires SQLite or explicit --db')
+    return str(path)
 
 def _print(payload, json_out):
     print(json.dumps(payload,indent=None if json_out else 2,sort_keys=True,default=str) if json_out else _human(payload))

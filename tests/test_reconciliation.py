@@ -98,3 +98,47 @@ def test_distinct_fill_ids_no_duplicate_detection() -> None:
     snapshot = engine.snapshot_from_source({"orders": [], "positions": [], "fills": [{"trade_id": "t1", "symbol": "BTCUSDT"}, {"trade_id": "t2", "symbol": "BTCUSDT"}]})
     findings, _, _ = engine.reconcile(intended_orders=[], lifecycle_state_by_symbol={}, snapshot=snapshot, mode="LIVE")
     assert not any(f.finding_type == "DUPLICATE_FILL" for f in findings)
+
+
+def test_paper_simulated_order_is_not_expected_on_real_exchange() -> None:
+    class EmptyAuthenticatedExchange:
+        def snapshot(self):
+            return {"evidence_status": "COMPLETE", "authenticated": True,
+                    "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT",
+                    "orders": [], "positions": [], "fills": []}
+
+    async def scanner():
+        return []
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_AcceptBrain(), market_scanner=scanner,
+        live_reconciliation_provider=EmptyAuthenticatedExchange(),
+    )
+    orchestrator._pending_orders["BTCUSDT"] = {
+        "order_id": "paper-only", "symbol": "BTCUSDT", "status": "OPEN"
+    }
+    asyncio.run(orchestrator._run_reconciliation_once())
+    assert orchestrator._reconciliation_status == "CLEAN"
+    assert not orchestrator._unreconciled_symbols
+
+
+def test_paper_real_exchange_exposure_remains_orphan() -> None:
+    class ExposedExchange:
+        def snapshot(self):
+            return {"evidence_status": "COMPLETE", "authenticated": True,
+                    "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT",
+                    "orders": [{"order_id": "real", "symbol": "BTCUSDT", "status": "OPEN"}],
+                    "positions": [], "fills": []}
+
+    async def scanner():
+        return []
+
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_AcceptBrain(), market_scanner=scanner,
+        live_reconciliation_provider=ExposedExchange(),
+    )
+    asyncio.run(orchestrator._run_reconciliation_once())
+    assert "BTCUSDT" in orchestrator._unreconciled_symbols
+    assert orchestrator._fail_closed_reason == "ORPHAN_ORDER_DETECTED"

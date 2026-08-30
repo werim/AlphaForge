@@ -858,7 +858,7 @@
       "canonical_name": "ALPHAFORGE_DATABASE_URL",
       "classification": "WIRED",
       "consumed_by": "alphaforge.runtime._build_runtime_from_env",
-      "default": "sqlite:///./alphaforge.db",
+      "default": "sqlite+pysqlite:///data/runtime/alphaforge_runtime.db",
       "deprecated": false,
       "description": "Runtime persistence database URL.",
       "intended_future_subsystem": null,
@@ -1011,7 +1011,7 @@
       "canonical_name": "ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION",
       "classification": "WIRED",
       "consumed_by": "alphaforge.runtime._build_runtime_from_env",
-      "default": false,
+      "default": true,
       "deprecated": false,
       "description": "Enable signed read-only Binance reconciliation.",
       "intended_future_subsystem": null,
@@ -3862,11 +3862,11 @@
     },
     "ALPHAFORGE_DATABASE_URL": {
       "source": "default",
-      "value": "sqlite:///./alphaforge.db"
+      "value": "sqlite+pysqlite:///data/runtime/alphaforge_runtime.db"
     },
     "ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION": {
       "source": "default",
-      "value": false
+      "value": true
     },
     "ALPHAFORGE_ENABLE_CANARY_MODE": {
       "source": "default",

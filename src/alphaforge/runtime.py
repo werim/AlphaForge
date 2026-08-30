@@ -1032,7 +1032,7 @@ class RuntimeOrchestrator:
             if evidence_status == "COMPLETE":
                 snapshot = self._reconciliation_engine.snapshot_from_source(provider_snapshot)
                 findings, _recommendations, _metrics = self._reconciliation_engine.reconcile(
-                    intended_orders=[] if self._exchange_read_only_status == "LOCAL_ONLY" else list(self._pending_orders.values()),
+                    intended_orders=list(self._pending_orders.values()) if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} else [],
                     lifecycle_state_by_symbol=self._last_lifecycle_state_by_symbol,
                     snapshot=snapshot,
                     mode=ExecutionMode.LIVE.value,
@@ -1927,7 +1927,7 @@ class RuntimeOrchestrator:
             snapshot_source = {"orders": [], "positions": [], "fills": []}
         snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
         findings, recommendations, _metrics = self._reconciliation_engine.reconcile(
-            intended_orders=[] if self._exchange_read_only_status == "LOCAL_ONLY" else list(self._pending_orders.values()),
+            intended_orders=list(self._pending_orders.values()) if self.config.execution_mode in {ExecutionMode.LIVE, ExecutionMode.LIVE_PRECHECK} else [],
             lifecycle_state_by_symbol=self._last_lifecycle_state_by_symbol,
             snapshot=snapshot,
             mode=self.config.execution_mode.value,

@@ -414,3 +414,11 @@
 - **Critical risks:** non-SQLite schema doctor coverage and ambiguous legacy exposure shapes require manual migration
 - **Last audit:** 2026-07-24
 - **Live readiness:** **NOT READY** — full suite and production database validation remain operator gates
+
+## Runtime bootstrap/default hardening (2026-08-30)
+- Current version/phase: dev canonical PAPER bootstrap; no schema migration.
+- Runtime maturity: runtime, burn-in, and Alembic share `data/runtime/alphaforge_runtime.db`; PAPER preflight proves signed read-only reconciliation before PASS.
+- BACKTEST/PAPER/LIVE alignment: BACKTEST remains credential-free; PAPER ignores simulated orders when auditing real exchange absence; LIVE authorization/mutation gates are unchanged.
+- Lifecycle/persistence/execution realism: lifecycle/schema/export shapes are unchanged; missing/invalid authenticated exchange evidence fails closed and remains unavailable rather than fabricated.
+- Known critical risks: valid Binance credentials/network access are operational dependencies for PAPER burn-in; existing custom/legacy DBs require deliberate operator selection.
+- Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.
