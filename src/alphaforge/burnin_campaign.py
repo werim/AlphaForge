@@ -110,8 +110,21 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
     config_payload["symbols"] = sorted(map(str, symbols))
     config_payload["intervals"] = sorted(map(str, intervals))
     config_payload["campaign_intervals"] = sorted(map(str, intervals))
-    config_payload["decision_setup_timeframe"] = str(getattr(runtime_config, "paper_decision_timeframe", "1m"))
-    config_payload["reject_evaluation_timeframe"] = config_payload["decision_setup_timeframe"]
+    config_payload["regime_timeframe"] = str(getattr(runtime_config, "regime_timeframe", "1h"))
+    config_payload["setup_timeframe"] = str(getattr(runtime_config, "setup_timeframe", "15m"))
+    execution_tf = str(getattr(runtime_config, "execution_timeframe", "1m"))
+    deprecated_tf = str(getattr(runtime_config, "paper_decision_timeframe", execution_tf))
+    # Direct legacy RuntimeConfig construction remains deterministic. The env
+    # loader resolves the deprecated variable into execution_timeframe first.
+    if execution_tf == "1m" and deprecated_tf != "1m":
+        execution_tf = deprecated_tf
+    config_payload["execution_timeframe"] = execution_tf
+    config_payload["forward_label_evaluation_timeframe"] = config_payload["execution_timeframe"]
+    config_payload["multi_timeframe"] = {key: config_payload[key] for key in ("regime_timeframe", "setup_timeframe", "execution_timeframe")}
+    # Read-only compatibility labels for older exporters. They no longer define
+    # strategy identity independently of the explicit three-layer contract.
+    config_payload["decision_setup_timeframe"] = config_payload["execution_timeframe"]
+    config_payload["reject_evaluation_timeframe"] = config_payload["execution_timeframe"]
     config_payload["reject_forward_horizon_bars"] = int(getattr(runtime_config, "reject_forward_horizon_bars", 240))
     config_payload["paper_source_exchanges"] = sorted({str(value).strip().lower()
                                                         for value in paper_source_exchanges if str(value).strip()})

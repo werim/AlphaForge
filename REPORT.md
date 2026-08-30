@@ -1,3 +1,20 @@
+# PAPER multi-timeframe decision surgery — 2026-08-30
+
+## Need and root cause
+The canonical flow selected exchange candidates and sent one 1m-derived geometry record directly through AIBrain and the downstream risk gates. Campaign `intervals` were identity/reporting metadata; they did not fetch or analyze that timeframe. Thus a 1h campaign could persist 1m observations without any 1h structure participating.
+
+## Architecture and behavior
+After canonical symbol selection, PAPER now builds 1h regime, 15m structural setup, and 1m timing contexts from Binance closed klines as of one decision timestamp. The alignment evaluator rejects missing, incomplete, stale, future, contradictory, no-setup, and unconfirmed execution evidence. Alignment only continues into the existing runtime risk, AIBrain structural/expectancy, effective-RR, portfolio/correlation, and execution paths; it never accepts by itself. Provider failures produce incomplete contexts and rejection.
+
+## Files, persistence, lifecycle, and schema
+`multi_timeframe.py` owns closed-candle filtering, context builders, deterministic alignment, and provider cache. Runtime/config/campaign/operations files wire the gate, three explicit settings, identity drift, metrics, health, and JSON provenance. Canonical reject reasons were extended additively. Burn-in observation `metrics_json` and pending-label `source_provenance_json` carry MTF evidence alongside existing evidence. No table, ORM, Alembic, CSV, or SQL ownership changed. SIGNAL_CREATED -> SIGNAL_REJECTED ordering is retained.
+
+## Lookahead, load, compatibility, and migration
+Rows are usable only when provider `closeTime <= decision timestamp`; future/partial rows are filtered and the evaluator independently rejects future timestamps. Cache identity is `(symbol, timeframe, closed-boundary, provider URL)` and refreshes only on a new boundary; calls occur only for selected candidates. Historical campaigns/rows remain untouched. Stop the old worker, archive its campaign as historical, deploy, set the three variables, run preflight, create a new campaign, and launch it. The old alias maps only to execution timeframe.
+
+## Tests, risks, and recommendation
+Tests cover LONG/SHORT alignment, both mismatch classes, every missing layer, no setup, stale evidence, and partial/future candle exclusion, plus campaign/config/runtime regressions. Remaining risk is classifier calibration and public-provider availability; rejects during outage are intentional. Merge only with passing CI and collect a fresh PAPER qualification campaign. Do not recommend LIVE readiness.
+
 ## PR #328 CI wiring-contract follow-up
 
 The remaining CI failure was metadata-only: the PAPER decision timeframe was behaviorally consumed but its `Learning` category fell back to generic `load_config_from_env` metadata. The registry now identifies `_scan_binance` as the specific production consumer and points to a behavioral test that changes the environment value, proves unsupported `5m` performs no provider request or silent `1m` fallback, proves supported `1m` reaches scanner candidates, and verifies reject-evaluation identity/hash changes. No runtime, lifecycle, persistence, fee, latency, geometry, resolver-health, schema, or LIVE mutation semantics changed.

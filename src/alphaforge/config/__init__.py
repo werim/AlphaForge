@@ -88,7 +88,10 @@ class RuntimeSettings:
     max_spread_pct: float = 0.0025
     max_expected_slippage_pct: float = 0.0020
     paper_fee_bps: float = 4.0
-    paper_decision_timeframe: str = "1m"
+    regime_timeframe: str = "1h"
+    setup_timeframe: str = "15m"
+    execution_timeframe: str = "1m"
+    paper_decision_timeframe: str = "1m"  # deprecated compatibility mirror
     max_abs_funding_rate_pct: float = 0.0010
     min_liquidity_usd: float = 5_000_000.0
     max_trades_global_per_day: int = 10
@@ -352,7 +355,10 @@ def load_config_from_env() -> AlphaForgeConfig:
         max_spread_pct=val("ALPHAFORGE_MAX_SPREAD_PCT"),
         max_expected_slippage_pct=val("ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT"),
         paper_fee_bps=val("ALPHAFORGE_PAPER_FEE_BPS"),
-        paper_decision_timeframe=val("ALPHAFORGE_PAPER_DECISION_TIMEFRAME"),
+        regime_timeframe=val("ALPHAFORGE_REGIME_TIMEFRAME"),
+        setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),
+        execution_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
+        paper_decision_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
         max_abs_funding_rate_pct=val("ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT"),
         min_liquidity_usd=val("MIN_LIQUIDITY_USD"),
         max_trades_global_per_day=val("ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY"),

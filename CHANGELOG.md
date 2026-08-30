@@ -1,3 +1,23 @@
+## Fail-closed PAPER multi-timeframe runtime — 2026-08-30
+
+### Added
+- Closed-candle 1h regime, 15m setup, and 1m execution contexts, deterministic alignment rejects, bounded selected-symbol fetching, slower-timeframe caching, metrics, provenance, and tests.
+
+### Changed
+- PAPER campaign identity and health expose all three timeframes; `ALPHAFORGE_PAPER_DECISION_TIMEFRAME` is a deprecated execution-timeframe alias.
+
+### Fixed
+- Campaign interval labels can no longer imply higher-timeframe participation without actual runtime evidence.
+
+### Removed
+- None; historical evidence is not rewritten.
+
+### Breaking Changes
+- Every timeframe participates in the campaign config hash, so a new PAPER campaign is mandatory.
+
+### Known Issues
+- Binance/provider failure rejects candidates; the initial structural classifier requires fresh PAPER calibration. LIVE remains NOT READY.
+
 ## PR #328 CI wiring follow-up — 2026-08-20
 
 ### Added
