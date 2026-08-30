@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+## Fresh SQLite runtime-contract reconciliation (2026-08-29)
+- Current version: dev runtime-contract patch; no destructive migration and Alembic remains at `0008_database_doctor_lifecycle_contract`.
+- Current phase: canonical fresh-bootstrap and Database Doctor alignment for PAPER.
+- Runtime maturity: `init_db` provisions runtime control, runtime state, and reconciliation through their canonical runtime schema functions; heartbeat remains PAPER/LIVE-provisioned rather than a BACKTEST side effect.
+- BACKTEST/PAPER/LIVE alignment: shared persistence writers pass isolated fresh-database smoke probes; execution and decision behavior are unchanged.
+- Lifecycle coverage: canonical SQL-first lifecycle schema and both conflict identities remain verified.
+- Execution realism coverage: unchanged; unavailable execution values remain nullable and are not replaced with zero.
+- Known critical risks: unrelated legacy ORM-only tables still make global Alembic autogenerate unsafe; this is separated from PAPER runtime certification.
+- Last audit date: 2026-08-29. Live readiness verdict: NOT LIVE READY.
+
 ## Database Doctor repository contract auditor (2026-08-29)
 - Current version: Alembic `0008_database_doctor_lifecycle_contract`; no new migration.
 - Current phase: repository-wide read-only SQLite contract diagnosis.

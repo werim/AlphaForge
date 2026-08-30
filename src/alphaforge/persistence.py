@@ -400,6 +400,15 @@ def init_db(database_url: str | None = None) -> Engine:
         for statement in ddl:
             conn.execute(text(statement))
         _apply_sqlite_migrations(conn)
+    # Provision runtime-owned tables through their canonical schema functions;
+    # init_db orchestrates them but does not duplicate their definitions.
+    from alphaforge.reconciliation import ensure_reconciliation_tables
+    from alphaforge.runtime_control import ensure_runtime_control_schema
+    from alphaforge.runtime_state import ensure_runtime_state_schema
+
+    ensure_reconciliation_tables(engine)
+    ensure_runtime_control_schema(engine)
+    ensure_runtime_state_schema(engine)
     if engine.dialect.name == "sqlite" and sqlite_path is not None:
         # Run the central exposure migration only after the bootstrap
         # transaction commits.  This preserves existing rows and prevents

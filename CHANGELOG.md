@@ -4339,3 +4339,26 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - PAPER certification is explicitly SQLite-only.
 ### Known Issues
 - Owner conflicts are detected, not consolidated; LIVE remains NOT READY.
+## Fresh SQLite runtime-contract reconciliation — 2026-08-29
+
+### Added
+- Fresh `init_db` → diagnose regression coverage and isolated signal/reconciliation writer probes.
+- Writer-specific guaranteed-column metadata for precise NOT NULL compatibility checks.
+
+### Changed
+- Classified runtime persistence and natural-key expectancy tables as canonical SQL-first schemas, excluded from ORM autogenerate ownership.
+- Provisioned reconciliation, runtime control, and runtime state (including its required timestamp index) through canonical schema functions during fresh bootstrap.
+
+### Fixed
+- Reconciliation metadata's nonexistent `incident_id`, false NOT NULL writer conflicts, missing runtime-state index, and canonical-table owner conflicts.
+- Expectancy primary-key interpretation now preserves `setup`, `regime`, and `symbol` natural keys.
+- Read-only `db_doctor diagnose` no longer eagerly imports migration-only Alembic repair code.
+
+### Removed
+- Obsolete ORM/Alembic ownership claims for canonical SQL-first runtime tables.
+
+### Breaking Changes
+- None. No destructive migration or export change; Alembic autogenerate remains unsafe for unrelated legacy ORM drift.
+
+### Known Issues
+- Unrelated ORM-only tables remain absent or divergent in the `init_db` family and are reported as non-PAPER repository warnings. LIVE remains NOT READY.
