@@ -873,6 +873,9 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         "reconciliation_status": "SQL_DERIVED", "evidence_completeness_status": campaign.get("evidence_completeness_status"),
         "resolver_backlog_growth": backlog_growth, "evidence_completeness_regression": evidence_regression, "aggregate_contamination": aggregate_contamination, "duplicate_continuation_sequence": duplicate_seq,
     }
+    runtime_cfg = load_config_from_env().runtime
+    payload["multi_timeframe"] = {"regime_timeframe": runtime_cfg.regime_timeframe,
+        "setup_timeframe": runtime_cfg.setup_timeframe, "execution_timeframe": runtime_cfg.execution_timeframe}
     unhealthy: list[str] = []
     if campaign.get("campaign_status") == "RUNNING" and not pid:
         unhealthy.append("RUNNING_WITHOUT_WORKER")

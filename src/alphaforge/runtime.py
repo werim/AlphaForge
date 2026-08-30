@@ -43,6 +43,7 @@ from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestr
 from alphaforge.agents.phase_b import register_phase_b_handlers
 from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
     bootstrap_agent_schema, create_agent_shadow_engine)
+from alphaforge.multi_timeframe import BinanceMTFProvider
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
@@ -101,7 +102,11 @@ class RuntimeConfig:
     max_spread_pct: float = 0.0025
     max_expected_slippage_pct: float = 0.0020
     paper_fee_bps: float | None = 4.0
-    paper_decision_timeframe: str = "1m"
+    regime_timeframe: str = "1h"
+    setup_timeframe: str = "15m"
+    execution_timeframe: str = "1m"
+    paper_decision_timeframe: str = "1m"  # deprecated alias
+    require_mtf_alignment: bool = False
     max_abs_funding_rate_pct: float = 0.0010
     min_liquidity_usd: float = 5_000_000.0
     # Keep every decision-filter field that can be environment-configured on
@@ -187,6 +192,14 @@ class RuntimeMetrics:
     phase_b_errors: int = 0
     burnin_outcomes: int = 0
     burnin_snapshots: int = 0
+    mtf_contexts_built: int = 0
+    mtf_alignment_pass: int = 0
+    mtf_alignment_reject: int = 0
+    mtf_regime_missing: int = 0
+    mtf_setup_missing: int = 0
+    mtf_execution_missing: int = 0
+    mtf_direction_mismatch: int = 0
+    mtf_stale_context: int = 0
     persistence_enabled: bool = False
 
 
@@ -208,6 +221,7 @@ class RuntimeOrchestrator:
     persistence_engine: Engine | None = None
     control_store: RuntimeControlStore | None = None
     selected_candidate_enricher: Callable[[list[dict[str, Any]]], Awaitable[list[dict[str, Any]]]] | None = None
+    mtf_context_provider: Any | None = None
     _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _tasks: list[asyncio.Task[Any]] = field(default_factory=list, init=False)
     _shadow_queue: asyncio.Queue[dict[str, Any]] | None = field(default=None, init=False)
@@ -859,7 +873,7 @@ class RuntimeOrchestrator:
                                 "campaign_id": campaign_id, "runtime_identity": runtime_identity,
                                 "geometry_status": payload.get("geometry_status"),
                                 "geometry_reason": payload.get("geometry_reason"),
-                                "geometry_source": payload.get("geometry_source")})
+                                "geometry_source": payload.get("geometry_source"), "mtf": payload.get("mtf")})
                 persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
             self.metrics.burnin_observations += 1
             with engine.begin() as conn:
@@ -1282,6 +1296,52 @@ class RuntimeOrchestrator:
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
         execution_ctx = build_execution_context(market_ctx)
         market_ctx["execution_ctx"] = execution_ctx
+        mtf = market_ctx.get("mtf")
+        if self.config.execution_mode is ExecutionMode.PAPER and self.config.require_mtf_alignment:
+            source_exchange = str(market_ctx.get("source_exchange") or "").strip().lower()
+            if self.mtf_context_provider is not None and source_exchange == "binance":
+                decision_ms = int(float(market_ctx.get("market_ts") or time.time()) * 1000)
+                mtf = await self.mtf_context_provider.build(selection.symbol, market_ctx, execution_ctx=execution_ctx, decision_ts_ms=decision_ms,
+                    regime_timeframe=self.config.regime_timeframe, setup_timeframe=self.config.setup_timeframe,
+                    execution_timeframe=self.config.execution_timeframe)
+                market_ctx["mtf"] = mtf
+                self.metrics.mtf_contexts_built += 1
+            elif source_exchange != "binance":
+                mtf = {"regime": None, "setup": None, "execution": None,
+                    "alignment": {"aligned": False, "direction": None,
+                        "reasons": ["MTF_EXECUTION_UNAVAILABLE"],
+                        "timeframes": {"regime": self.config.regime_timeframe,
+                            "setup": self.config.setup_timeframe, "execution": self.config.execution_timeframe}},
+                    "provider": None, "source_exchange": source_exchange or None,
+                    "evidence_status": "INCOMPLETE", "provenance_error": "UNSUPPORTED_MTF_PROVIDER"}
+                market_ctx["mtf"] = mtf
+            alignment = (mtf or {}).get("alignment", {}) if isinstance(mtf, Mapping) else {}
+            candidate_side = str(market_ctx.get("side") or "").strip().upper()
+            aligned_side = str(alignment.get("direction") or "").strip().upper()
+            if alignment.get("aligned") and candidate_side in {"LONG", "SHORT"} and aligned_side != candidate_side:
+                alignment = {**alignment, "aligned": False,
+                    "reasons": list(dict.fromkeys([*(alignment.get("reasons") or []), "MTF_DIRECTION_MISMATCH"]))}
+                mtf = {**dict(mtf or {}), "alignment": alignment}
+                market_ctx["mtf"] = mtf
+            if not alignment.get("aligned"):
+                reasons = list(alignment.get("reasons") or ["MTF_EXECUTION_UNAVAILABLE"])
+                reason = reasons[0]
+                self.metrics.mtf_alignment_reject += 1
+                self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
+                self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
+                self.metrics.mtf_execution_missing += int("MTF_EXECUTION_UNAVAILABLE" in reasons)
+                self.metrics.mtf_stale_context += int("MTF_CONTEXT_STALE" in reasons)
+                self.metrics.mtf_direction_mismatch += int(any("MISMATCH" in item for item in reasons))
+                await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
+                reject_payload = {**market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
+                    "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED",
+                    "reason": reason, "reject_reason": reason, "confidence": 0.0, "score": None,
+                    "rr": market_ctx.get("rr"), "effective_rr": None, "explanation": "mtf_alignment_gate",
+                    "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}
+                await self._persist_reject(reject_payload)
+                await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
+                return
+            self.metrics.mtf_alignment_pass += 1
         raw_rr = market_ctx.get("rr")
         effective_rr = self._effective_rr_from_execution(raw_rr, execution_ctx)
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
@@ -1400,11 +1460,11 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
             await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
-            self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+            self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
             self._generate_burnin_snapshot(reason="periodic")
             return
 
-        self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+        self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
         self._schedule_agent_shadow({"signal_id": signal_id, "symbol": selection.symbol,
             "mode": self.config.execution_mode.value, "decision": "ACCEPTED",
             "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"),
@@ -1629,8 +1689,11 @@ class RuntimeOrchestrator:
                     reject_reason=payload.get("reason") or payload.get("reject_reason"),
                     source_provenance={"provider": self.scanner_source or "UNKNOWN", "timeframe": payload.get("timeframe"),
                                        "campaign_intervals": list(self._campaign_intervals),
-                                       "decision_setup_timeframe": self.config.paper_decision_timeframe,
-                                       "reject_evaluation_timeframe": payload.get("timeframe"),
+                                       "regime_timeframe": self.config.regime_timeframe,
+                                       "setup_timeframe": self.config.setup_timeframe,
+                                       "execution_timeframe": self.config.execution_timeframe,
+                                       "forward_label_evaluation_timeframe": self.config.execution_timeframe,
+                                       "mtf": payload.get("mtf"),
                                        "setup_type": payload.get("setup_type"), "volatility_regime": payload.get("volatility_regime"),
                                        "liquidity_score": execution_ctx.get("liquidity_score")},
                 )
@@ -1962,7 +2025,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_decision_timeframe=cfg.runtime.paper_decision_timeframe)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, regime_timeframe=cfg.runtime.regime_timeframe, setup_timeframe=cfg.runtime.setup_timeframe, execution_timeframe=cfg.runtime.execution_timeframe, paper_decision_timeframe=cfg.runtime.execution_timeframe, require_mtf_alignment=False)
     config.agent_graph_enabled = cfg.runtime.agent_graph_enabled
     config.agent_graph_shadow = cfg.runtime.agent_graph_shadow
     config.agent_graph_max_steps = cfg.runtime.agent_graph_max_steps
@@ -1979,6 +2042,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
     safe_scanner_requested = str(os.getenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")).strip().lower() in {"1", "true", "yes", "on"}
     use_safe_scanner = safe_scanner_requested
     scanner_source = "SAFE_PLACEHOLDER" if use_safe_scanner else "EXCHANGE_PUBLIC_MARKET_DATA"
+    config.require_mtf_alignment = mode == ExecutionMode.PAPER and not use_safe_scanner
 
     async def _runtime_market_scanner() -> list[dict[str, Any]]:
         if mode == ExecutionMode.BACKTEST and use_safe_scanner:
@@ -2092,6 +2156,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         ai_brain=brain,
         market_scanner=_runtime_market_scanner,
         selected_candidate_enricher=_selected_candidate_enricher,
+        mtf_context_provider=BinanceMTFProvider(base_url=cfg.exchange.binance.base_url, timeout_sec=cfg.exchange.timeout_sec) if mode == ExecutionMode.PAPER and not use_safe_scanner else None,
         scanner_source=scanner_source,
         live_reconciliation_provider=live_reconciliation_provider,
         on_lifecycle_event=_persist_lifecycle,

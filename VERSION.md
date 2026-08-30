@@ -1,5 +1,17 @@
 # AlphaForge Version
 
+## Fail-closed PAPER multi-timeframe runtime (2026-08-30)
+- PR #334 follow-up: MTF execution timing now consumes the canonical normalized execution context; aligned direction is bound to geometry side and non-Binance sources fail closed without cross-exchange substitution.
+- Current version: dev PAPER MTF decision architecture; no database migration.
+- Current phase: fresh 1h regime / 15m setup / 1m execution campaign qualification required.
+- Runtime maturity: selected Binance candidates receive cached, closed-candle contexts and deterministic alignment before existing AIBrain, expectancy, portfolio, and execution gates.
+- BACKTEST/PAPER/LIVE alignment: PAPER alone enables the new prerequisite while shared downstream gates remain authoritative; offline BACKTEST and LIVE authorization are unchanged.
+- Lifecycle coverage: MTF failures persist explicit SIGNAL_REJECTED evidence; historical rows are immutable.
+- Execution realism coverage: missing provider, spread, slippage, latency, liquidity, or candle evidence fails closed rather than becoming zero/neutral.
+- Known critical risks: the MA-based structural classifier requires fresh campaign calibration and public Binance availability; no LIVE qualification has been established.
+- Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.
+
+
 ## Fresh SQLite runtime-contract reconciliation (2026-08-29)
 - Current version: dev runtime-contract patch; no destructive migration and Alembic remains at `0008_database_doctor_lifecycle_contract`.
 - Current phase: canonical fresh-bootstrap and Database Doctor alignment for PAPER.
