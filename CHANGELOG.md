@@ -1,5 +1,8 @@
 ## Fail-closed PAPER multi-timeframe runtime — 2026-08-30
 
+### PR #334 follow-up
+- Fixed canonical latency/slippage wiring into MTF execution evidence, enforced MTF-to-geometry side equality, and blocked Binance candle use for unsupported candidate providers.
+
 ### Added
 - Closed-candle 1h regime, 15m setup, and 1m execution contexts, deterministic alignment rejects, bounded selected-symbol fetching, slower-timeframe caching, metrics, provenance, and tests.
 

@@ -1,5 +1,8 @@
 # PAPER multi-timeframe decision surgery — 2026-08-30
 
+## PR #334 targeted correction
+The first implementation passed raw scanner fields into the MTF execution layer even though the canonical execution builder had already normalized `market_data_latency_ms` and modelled expected slippage. It also aligned the three MTF layers without binding their direction to the enriched geometry side, and could call the Binance provider for another source. Runtime now passes the canonical execution context explicitly, rejects aligned-side/geometry-side disagreement as `MTF_DIRECTION_MISMATCH`, and emits explicit incomplete provenance for unsupported providers without fetching Binance candles. Regression coverage uses a Binance-shaped row with measured market-data latency and absent raw slippage, proves canonical normalization yields COMPLETE MTF execution evidence, covers both matching directions and both mismatch directions with persisted concrete reasons, and proves cross-provider substitution is impossible. No schema, identity, cache, lookahead, downstream gate, or LIVE behavior changed.
+
 ## Need and root cause
 The canonical flow selected exchange candidates and sent one 1m-derived geometry record directly through AIBrain and the downstream risk gates. Campaign `intervals` were identity/reporting metadata; they did not fetch or analyze that timeframe. Thus a 1h campaign could persist 1m observations without any 1h structure participating.
 

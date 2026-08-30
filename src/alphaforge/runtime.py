@@ -1298,14 +1298,31 @@ class RuntimeOrchestrator:
         market_ctx["execution_ctx"] = execution_ctx
         mtf = market_ctx.get("mtf")
         if self.config.execution_mode is ExecutionMode.PAPER and self.config.require_mtf_alignment:
-            if self.mtf_context_provider is not None:
+            source_exchange = str(market_ctx.get("source_exchange") or "").strip().lower()
+            if self.mtf_context_provider is not None and source_exchange == "binance":
                 decision_ms = int(float(market_ctx.get("market_ts") or time.time()) * 1000)
-                mtf = await self.mtf_context_provider.build(selection.symbol, market_ctx, decision_ts_ms=decision_ms,
+                mtf = await self.mtf_context_provider.build(selection.symbol, market_ctx, execution_ctx=execution_ctx, decision_ts_ms=decision_ms,
                     regime_timeframe=self.config.regime_timeframe, setup_timeframe=self.config.setup_timeframe,
                     execution_timeframe=self.config.execution_timeframe)
                 market_ctx["mtf"] = mtf
                 self.metrics.mtf_contexts_built += 1
+            elif source_exchange != "binance":
+                mtf = {"regime": None, "setup": None, "execution": None,
+                    "alignment": {"aligned": False, "direction": None,
+                        "reasons": ["MTF_EXECUTION_UNAVAILABLE"],
+                        "timeframes": {"regime": self.config.regime_timeframe,
+                            "setup": self.config.setup_timeframe, "execution": self.config.execution_timeframe}},
+                    "provider": None, "source_exchange": source_exchange or None,
+                    "evidence_status": "INCOMPLETE", "provenance_error": "UNSUPPORTED_MTF_PROVIDER"}
+                market_ctx["mtf"] = mtf
             alignment = (mtf or {}).get("alignment", {}) if isinstance(mtf, Mapping) else {}
+            candidate_side = str(market_ctx.get("side") or "").strip().upper()
+            aligned_side = str(alignment.get("direction") or "").strip().upper()
+            if alignment.get("aligned") and candidate_side in {"LONG", "SHORT"} and aligned_side != candidate_side:
+                alignment = {**alignment, "aligned": False,
+                    "reasons": list(dict.fromkeys([*(alignment.get("reasons") or []), "MTF_DIRECTION_MISMATCH"]))}
+                mtf = {**dict(mtf or {}), "alignment": alignment}
+                market_ctx["mtf"] = mtf
             if not alignment.get("aligned"):
                 reasons = list(alignment.get("reasons") or ["MTF_EXECUTION_UNAVAILABLE"])
                 reason = reasons[0]

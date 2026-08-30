@@ -1,6 +1,7 @@
 # AlphaForge Version
 
 ## Fail-closed PAPER multi-timeframe runtime (2026-08-30)
+- PR #334 follow-up: MTF execution timing now consumes the canonical normalized execution context; aligned direction is bound to geometry side and non-Binance sources fail closed without cross-exchange substitution.
 - Current version: dev PAPER MTF decision architecture; no database migration.
 - Current phase: fresh 1h regime / 15m setup / 1m execution campaign qualification required.
 - Runtime maturity: selected Binance candidates receive cached, closed-candle contexts and deterministic alignment before existing AIBrain, expectancy, portfolio, and execution gates.

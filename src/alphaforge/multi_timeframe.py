@@ -149,7 +149,7 @@ class BinanceMTFProvider:
         with request.urlopen(f"{self.base_url.rstrip('/')}/fapi/v1/klines?{query}", timeout=self.timeout_sec) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    async def build(self, symbol: str, market: Mapping[str, Any], *, decision_ts_ms: int,
+    async def build(self, symbol: str, market: Mapping[str, Any], *, execution_ctx: Mapping[str, Any], decision_ts_ms: int,
                     regime_timeframe: str, setup_timeframe: str, execution_timeframe: str) -> dict[str, Any]:
         layers = (("regime", regime_timeframe), ("setup", setup_timeframe), ("execution", execution_timeframe))
         async def one(layer: str, tf: str) -> tuple[str, list[dict[str, Any]]]:
@@ -165,7 +165,9 @@ class BinanceMTFProvider:
             values = {}
         regime = build_regime_context(values.get("regime", []), regime_timeframe)
         setup = build_setup_context(values.get("setup", []), setup_timeframe)
-        execution = build_execution_context(values.get("execution", []), execution_timeframe, market)
+        # Runtime's canonical execution builder owns normalization and modelling.
+        # Do not re-read raw scanner aliases or manufacture a second cost model.
+        execution = build_execution_context(values.get("execution", []), execution_timeframe, execution_ctx)
         alignment = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=decision_ts_ms)
         return {"regime": regime, "setup": setup, "execution": execution, "alignment": alignment,
                 "decision_timestamp": _iso(decision_ts_ms), "provider": "BINANCE_FUTURES_CLOSED_KLINES"}
