@@ -4425,3 +4425,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - LIVE remains not production-authorized; existing explicit database files remain operator-managed.
+
+## PR #335 Alembic dotenv merge-blocker — 2026-08-30
+
+### Added
+- Regression coverage for Alembic/runtime dotenv DB parity, URL-over-legacy precedence, canonical default, and deliberate Alembic overrides.
+
+### Changed
+- Alembic now bootstraps AlphaForge's canonical `.env` contract before resolving its default database target.
+
+### Fixed
+- Prevented Alembic from selecting the canonical default when runtime and burn-in select a database configured only in `.env`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None.
+
+### Known Issues
+- LIVE remains not production-authorized; no safety or reconciliation behavior changed.

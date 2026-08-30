@@ -1572,3 +1572,14 @@ Regression coverage creates an empty temporary SQLite path exclusively through `
 **Lifecycle/persistence/export/schema/compatibility.** No lifecycle, reconciliation, MTF, campaign identity, persistence, export, or schema behavior changed. No DB is created, moved, mutated, or deleted by this follow-up. Legacy `ALPHAFORGE_DB_PATH` remains supported below the canonical URL.
 
 **Tests/risks/migration/push.** Targeted precedence, burn-in, and documentation assertions plus the full suite are required. There is no migration. The only compatibility correction is removal of the unintended legacy-path precedence. LIVE mutation authorization remains unchanged and LIVE is NOT READY.
+
+---
+## PR #335 Alembic dotenv merge-blocker — 2026-08-30
+
+**Why/root cause.** Alembic inspected `os.environ` before AlphaForge's canonical dotenv bootstrap, so a DB override present only in `.env` could split migrations from runtime and burn-in.
+
+**Files/behavior.** `database_defaults.py` now exposes an Alembic-specific selector that runs the existing `bootstrap_environment` against the effective environment, preserves a deliberate non-default Alembic URL, and otherwise applies canonical URL aliases, legacy path, then default precedence. `alembic/env.py` uses that selector before creating the SQLite parent. Tests cover URL-only dotenv, URL plus legacy path, canonical default/no root DB, and deliberate Alembic override.
+
+**Lifecycle/persistence/export/schema/compatibility.** No lifecycle, reconciliation, LIVE, MTF, campaign identity, schema, migration revision, export, or existing DB behavior changed. No database is moved, deleted, or automatically migrated.
+
+**Tests/risks/migration/push.** Targeted resolver tests pass. Alembic integration/full-suite execution remains contingent on the declared Alembic package being installed. No migration is required. LIVE remains NOT READY.

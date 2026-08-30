@@ -429,3 +429,10 @@
 - Lifecycle/execution realism: unchanged; signed PAPER reconciliation remains fail closed and unavailable evidence is not fabricated.
 - Known critical risks: PAPER still depends on valid signed read-only Binance access; explicit legacy/custom DB selection remains operator responsibility.
 - Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.
+
+## PR #335 Alembic dotenv merge-blocker (2026-08-30)
+- Current version/phase: dev bootstrap contract finalization; no migration.
+- Runtime maturity/alignment: Alembic, runtime, and burn-in now bootstrap the same dotenv DB contract while deliberate Alembic config overrides remain authoritative.
+- Lifecycle/execution realism: unchanged; reconciliation and LIVE safety remain fail closed.
+- Known critical risks: migration execution requires the declared Alembic dependency; custom DB ownership remains operator-managed.
+- Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.

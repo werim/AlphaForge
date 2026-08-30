@@ -5,7 +5,10 @@ import re
 from typing import Mapping
 from sqlalchemy.engine import make_url
 
+from alphaforge.env_contract import bootstrap_environment
+
 DEFAULT_RUNTIME_DB_RELATIVE_PATH = Path("data/runtime/alphaforge_runtime.db")
+DEFAULT_RUNTIME_DATABASE_URL = "sqlite+pysqlite:///data/runtime/alphaforge_runtime.db"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 def default_runtime_db_path(root: Path | None = None) -> Path:
@@ -34,6 +37,18 @@ def resolve_runtime_database_url(env: Mapping[str, str], root: Path | None = Non
         if not path.is_absolute(): path = (root or REPOSITORY_ROOT) / path
         return sqlite_url_for_path(path)
     return default_runtime_database_url(root)
+
+
+def resolve_alembic_database_url(
+    declared_url: str,
+    env: dict[str, str],
+    root: Path | None = None,
+) -> str:
+    """Bootstrap dotenv, then resolve Alembic without overriding its explicit URL."""
+    bootstrap_environment(root, environ=env)
+    if declared_url.strip() != DEFAULT_RUNTIME_DATABASE_URL:
+        return declared_url
+    return resolve_runtime_database_url(env, root)
 
 def sqlite_path_from_url(database_url: str) -> Path | None:
     url = make_url(database_url)

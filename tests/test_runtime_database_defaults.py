@@ -2,7 +2,8 @@ from pathlib import Path
 from configparser import ConfigParser
 
 from alphaforge.database_defaults import (
-    DEFAULT_RUNTIME_DB_RELATIVE_PATH, default_runtime_database_url,
+    DEFAULT_RUNTIME_DATABASE_URL, DEFAULT_RUNTIME_DB_RELATIVE_PATH,
+    default_runtime_database_url, resolve_alembic_database_url,
     resolve_runtime_database_url, sqlite_path_from_url, sqlite_url_for_path,
 )
 from alphaforge.persistence import init_db
@@ -66,6 +67,62 @@ def test_alembic_declared_default_matches_runtime() -> None:
     parser.read("alembic.ini")
     declared = parser["alembic"]["sqlalchemy.url"]
     assert Path(sqlite_path_from_url(declared)).as_posix().endswith(DEFAULT_RUNTIME_DB_RELATIVE_PATH.as_posix())
+
+
+def _temporary_repository(tmp_path: Path, dotenv: str | None = None) -> Path:
+    (tmp_path / "src" / "alphaforge").mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='dotenv-contract-test'\n")
+    if dotenv is not None:
+        (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
+    return tmp_path
+
+
+def test_alembic_and_runtime_match_database_url_from_dotenv(monkeypatch, tmp_path: Path) -> None:
+    configured = tmp_path / "custom" / "runtime.db"
+    root = _temporary_repository(
+        tmp_path,
+        f"ALPHAFORGE_DATABASE_URL=sqlite+pysqlite:///{configured.as_posix()}\n",
+    )
+    for key in ("ALPHAFORGE_DATABASE_URL", "ALPHAFORGE_DB_URL", "DATABASE_URL", "ALPHAFORGE_DB_PATH"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(root)
+
+    from alphaforge.config import load_config_from_env
+
+    runtime_url = load_config_from_env().persistence.database_url
+    alembic_url = resolve_alembic_database_url(DEFAULT_RUNTIME_DATABASE_URL, {}, root)
+    assert sqlite_path_from_url(runtime_url) == configured
+    assert sqlite_path_from_url(alembic_url) == configured
+    assert not (root / "alphaforge.db").exists()
+
+
+def test_alembic_dotenv_database_url_wins_over_legacy_path(tmp_path: Path) -> None:
+    configured = tmp_path / "url-wins.db"
+    legacy = tmp_path / "legacy-loses.db"
+    root = _temporary_repository(
+        tmp_path,
+        "\n".join((
+            f"ALPHAFORGE_DATABASE_URL=sqlite+pysqlite:///{configured.as_posix()}",
+            f"ALPHAFORGE_DB_PATH={legacy.as_posix()}",
+        )),
+    )
+    resolved = resolve_alembic_database_url(DEFAULT_RUNTIME_DATABASE_URL, {}, root)
+    assert sqlite_path_from_url(resolved) == configured
+
+
+def test_alembic_dotenv_bootstrap_preserves_default_and_deliberate_override(tmp_path: Path) -> None:
+    default_root = _temporary_repository(tmp_path / "default-root")
+    default_url = resolve_alembic_database_url(DEFAULT_RUNTIME_DATABASE_URL, {}, default_root)
+    deliberate = f"sqlite+pysqlite:///{(tmp_path / 'operator.db').as_posix()}"
+    override_root = _temporary_repository(
+        tmp_path / "override-root",
+        f"ALPHAFORGE_DATABASE_URL=sqlite+pysqlite:///{(tmp_path / 'dotenv.db').as_posix()}\n",
+    )
+
+    assert sqlite_path_from_url(default_url) == default_root / DEFAULT_RUNTIME_DB_RELATIVE_PATH
+    assert resolve_alembic_database_url(deliberate, {}, override_root) == deliberate
+    assert not (default_root / "alphaforge.db").exists()
+    assert not (override_root / "alphaforge.db").exists()
 
 
 def test_windows_drive_url_is_not_corrupted() -> None:

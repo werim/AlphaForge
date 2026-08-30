@@ -5,7 +5,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alphaforge.db.base import Base
 from alphaforge.models import schema  # noqa: F401
-from alphaforge.database_defaults import resolve_runtime_database_url, sqlite_path_from_url
+from alphaforge.database_defaults import resolve_alembic_database_url, sqlite_path_from_url
 import os
 
 config = context.config
@@ -13,13 +13,9 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
-explicit_database_env = any(str(os.environ.get(name, "")).strip() for name in ("ALPHAFORGE_DATABASE_URL", "ALPHAFORGE_DB_URL", "DATABASE_URL", "ALPHAFORGE_DB_PATH"))
 declared_url = config.get_main_option("sqlalchemy.url")
-if explicit_database_env or declared_url == "sqlite+pysqlite:///data/runtime/alphaforge_runtime.db":
-    database_url = resolve_runtime_database_url(os.environ)
-    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
-else:
-    database_url = declared_url
+database_url = resolve_alembic_database_url(declared_url, os.environ)
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 database_path = sqlite_path_from_url(database_url)
 if database_path is not None:
     database_path.parent.mkdir(parents=True, exist_ok=True)
