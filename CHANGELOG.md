@@ -1,3 +1,23 @@
+## PAPER MTF execution-evidence semantics — 2026-08-30
+
+### Added
+- Auditable MA-delta strength and direction-threshold fields on every MTF layer, plus a dedicated runtime heartbeat counter for unconfirmed execution triggers.
+
+### Changed
+- Execution evidence completeness now describes the presence and validity of five closed candles and canonical spread, slippage, latency, and liquidity evidence; trigger confirmation remains a separate hard gate.
+
+### Fixed
+- A complete neutral 1m observation now rejects as `MTF_EXECUTION_NOT_CONFIRMED` without being mislabeled `MTF_EXECUTION_UNAVAILABLE`.
+
+### Removed
+- None; no historical burn-in evidence was altered.
+
+### Breaking Changes
+- None; no schema or export migration is required and all trading gates remain fail-closed.
+
+### Known Issues
+- The unchanged 0.0005 direction threshold still requires fresh campaign calibration. Public-provider failure remains fail-closed and LIVE remains NOT READY.
+
 ## Fail-closed PAPER multi-timeframe runtime — 2026-08-30
 
 ### PR #334 follow-up
