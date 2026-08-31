@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+## PAPER MTF heartbeat persistence follow-up (2026-08-31)
+- Current version: dev PR #336 observability follow-up; no schema, export, threshold, or execution change.
+- Current phase: heartbeat persistence verification before fresh post-fix PAPER campaign validation.
+- Runtime maturity: the complete MTF counter family emitted by runtime now survives the heartbeat safety allowlist.
+- BACKTEST/PAPER/LIVE alignment: trading behavior is unchanged; the heartbeat JSON extension is backward-compatible.
+- Lifecycle coverage: unchanged; neutral execution remains fail-closed before AIBrain.
+- Execution realism coverage: unchanged; no evidence or default value is fabricated.
+- Known critical risks: setup evidence availability versus no-valid-setup remains a separate semantic review; setup rejection is unchanged and fail-closed.
+- Last audit date: 2026-08-31. Live readiness verdict: NOT LIVE READY.
+
 ## PAPER MTF execution-evidence classification correction (2026-08-30)
 - Current version: dev PAPER MTF observability patch; no database migration or export change.
 - Current phase: fresh post-fix PAPER campaign validation while `camp_9afc71c6a419749c` remains immutable historical regression evidence.

@@ -1,3 +1,23 @@
+## PAPER MTF heartbeat persistence follow-up — 2026-08-31
+
+### Added
+- Regression coverage proving every MTF runtime counter survives heartbeat payload filtering while non-allowlisted credentials remain excluded.
+
+### Changed
+- The runtime-heartbeat allowlist now accepts the complete MTF counter family already emitted by the PAPER runtime.
+
+### Fixed
+- MTF counters are no longer silently dropped before persistence to `runtime_heartbeats.payload_json`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; heartbeat JSON is extended backward-compatibly and no database migration is required.
+
+### Known Issues
+- Setup context may still conflate an unavailable setup layer with available evidence that contains no valid setup; rejection remains deliberately fail-closed pending a separate review.
+
 ## PAPER MTF execution-evidence semantics — 2026-08-30
 
 ### Added

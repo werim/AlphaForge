@@ -1,3 +1,21 @@
+# PR #336 MTF heartbeat persistence follow-up — 2026-08-31
+
+## Need and root cause
+
+The PAPER runtime emitted all MTF counters to `save_runtime_heartbeat`, but `_safe_payload` applied a separate permitted-key allowlist that omitted them. Consequently, in-memory observability was correct while `runtime_heartbeats.payload_json` silently discarded the MTF counter family.
+
+## Minimal correction and test
+
+`src/alphaforge/runtime_heartbeat.py` now permits the nine existing MTF counter keys. `tests/test_runtime_heartbeat.py` persists representative campaign-shaped counts through the public heartbeat writer, reads the physical SQLite `payload_json`, parses it, and proves every counter survives while an unallowlisted credential remains excluded. No database schema, migration, export, MTF threshold, alignment reason, execution rule, trading gate, or LIVE behavior changes.
+
+Neutral execution remains rejected as `MTF_EXECUTION_NOT_CONFIRMED` before AIBrain exactly as implemented in the core patch. The possible setup-layer distinction between unavailable evidence and available evidence without a valid setup remains a non-blocking follow-up risk; this patch does not alter or weaken setup rejection behavior.
+
+## Validation and recommendation
+
+Focused heartbeat and MTF coverage passed 23 tests. The normal literal `pytest -q` command could not collect because the declared Alembic distribution is absent from this container. The complete behavioral suite excluding only the three Alembic-dependent modules passed 1,316 tests with 6 skipped. Compileall, diff validation, and the CI offline backtest/output check passed. Update PR #336 for review against `dev`; do not merge automatically and do not infer LIVE readiness.
+
+---
+
 # PAPER MTF execution-evidence classification correction — 2026-08-30
 
 ## Need and root cause
