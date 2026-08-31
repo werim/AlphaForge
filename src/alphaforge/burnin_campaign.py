@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
-from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, canonical_hash, config_hash as make_config_hash, persist_burnin_run, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
+from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as make_config_hash, persist_burnin_run, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
 from alphaforge.config import runtime_filter_config
 
@@ -429,7 +429,7 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     run_ids=[r["burnin_run_id"] if isinstance(r,dict) else r["burnin_run_id"] for r in runs]
     if not run_ids: return {"status":"NO_EVIDENCE","campaign_id":campaign_id,"run_ids":[]}
     ph=",".join([f":r{i}" for i in range(len(run_ids))]); p={f"r{i}":v for i,v in enumerate(run_ids)}
-    obs=_exec(conn,f"SELECT decision FROM burnin_observations WHERE burnin_run_id IN ({ph})",p).fetchall(); trades=_exec(conn,f"SELECT * FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph})",p).fetchall(); rejects=_exec(conn,f"SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id IN ({ph})",p).fetchall()
+    obs=_exec(conn,f"SELECT decision FROM burnin_observations WHERE burnin_run_id IN ({ph}) AND {canonical_decision_sql()}",p).fetchall(); trades=_exec(conn,f"SELECT * FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph})",p).fetchall(); rejects=_exec(conn,f"SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id IN ({ph})",p).fetchall()
     def gv(r,k): return (r[k] if isinstance(r, sqlite3.Row) else r._mapping[k])
     closed=[r for r in trades if gv(r,"closed_at") and int(gv(r,"evidence_complete") or 0)==1]
     resolved=[r for r in rejects if int(gv(r,"evidence_complete") or 0)==1]

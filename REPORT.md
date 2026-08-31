@@ -1,3 +1,23 @@
+# Burn-in canonical decision integrity — 2026-08-31
+
+## Need and root cause
+
+Campaign `camp_119394d8c198138d` persisted 519 canonical rejected decisions and 29 additional `incomplete_reject_geometry_*` audit observations. Qualification counted every observation row as a decision, producing 548 samples and 548 rejects. The root cause was the absence of a canonical-decision discriminator in denominator queries.
+
+## Minimal correction
+
+New observations persist `metrics_json.observation_kind`; normal runtime observations default to `CANONICAL_DECISION`, while incomplete-geometry audit rows explicitly use `DIAGNOSTIC`. A centralized SQL predicate consumes that discriminator and recognizes immutable pre-discriminator incomplete-geometry rows through a compatibility fallback. Run counter reconciliation, campaign aggregation, and Phase 7 qualification use the same predicate. Aggregate materialization still copies all 548 rows, preserving audit/export evidence.
+
+## Lifecycle, persistence, compatibility, and risks
+
+Incomplete geometry remains fail-closed at SIGNAL_REJECTED, no side/stop/target is fabricated, and pending/resolved reject labels are unchanged. No table, Alembic, or CSV schema changes are required; historical evidence is read but never rewritten. BACKTEST, PAPER decision logic, strategy thresholds, reject rates, order authorization, and LIVE behavior are unchanged. The remaining limitation is that any historical diagnostic category other than the known incomplete-geometry family must be explicitly classified before it can be safely excluded.
+
+## Validation and recommendation
+
+Regression coverage reproduces exactly 519 canonical REJECTED observations plus 29 diagnostics, proves qualification reports 519/519 and remains below a 520-decision gate, and proves all 548 rows survive aggregate materialization. Focused campaign qualification, Phase 7 qualification, and incomplete-geometry suites passed. Recommend review and a fresh PAPER qualification snapshot; do not infer LIVE readiness.
+
+---
+
 # PR #336 MTF heartbeat persistence follow-up — 2026-08-31
 
 ## Need and root cause

@@ -11,6 +11,24 @@ ALLOWED_BURNIN_MODES = {"PAPER", "LIVE_PRECHECK"}
 FORBIDDEN_PROVIDER_MARKERS = {"SYNTHETIC", "MOCK", "FAKE", "TEST_PROVIDER"}
 REGIMES = {"TRENDING","MEAN_REVERTING","CHOPPY","PANIC","LOW_LIQUIDITY","BREAKOUT","SHORT_SQUEEZE","RANGE_COMPRESSION","NEWS_DRIVEN","UNKNOWN"}
 CRITICAL_COST_FIELDS = ("spread_cost","entry_slippage_cost","exit_slippage_cost","fee_cost","funding_cost","latency_cost")
+CANONICAL_DECISION_KIND = "CANONICAL_DECISION"
+DIAGNOSTIC_OBSERVATION_KIND = "DIAGNOSTIC"
+
+def canonical_decision_sql(alias: str = "") -> str:
+    """SQL predicate separating decisions from auditable diagnostic observations."""
+    prefix = f"{alias}." if alias else ""
+    metrics = f"{prefix}metrics_json"
+    observation_id = f"{prefix}observation_id"
+    explicit_kind = (
+        f"CASE WHEN json_valid(COALESCE({metrics}, '')) "
+        f"THEN json_extract({metrics}, '$.observation_kind') END"
+    )
+    # Immutable rows created before observation_kind used this diagnostic ID.
+    legacy_kind = (
+        f"CASE WHEN {observation_id} LIKE 'incomplete_reject_geometry_%' "
+        f"THEN '{DIAGNOSTIC_OBSERVATION_KIND}' ELSE '{CANONICAL_DECISION_KIND}' END"
+    )
+    return f"UPPER(COALESCE({explicit_kind}, {legacy_kind})) = '{CANONICAL_DECISION_KIND}'"
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -144,7 +162,7 @@ def update_burnin_run_counters(conn: Any, burnin_run_id: str, *, status: str | N
         return {"status": "MISSING_RUN"}
     mapping = row._mapping if hasattr(row, "_mapping") else row
     start_time = mapping["start_time"] if hasattr(mapping, "__getitem__") else None
-    obs = conn.execute(_sa_text("SELECT decision, evidence_complete, observed_at FROM burnin_observations WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchall()
+    obs = conn.execute(_sa_text(f"SELECT decision, evidence_complete, observed_at FROM burnin_observations WHERE burnin_run_id=:bid AND {canonical_decision_sql()}"), {"bid": burnin_run_id}).fetchall()
     trades = conn.execute(_sa_text("SELECT evidence_complete, closed_at FROM burnin_trade_outcomes WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchall()
     rejects = conn.execute(_sa_text("SELECT evidence_complete, forward_label FROM burnin_reject_outcomes WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchall()
     def val(r, key):
@@ -200,9 +218,11 @@ def export_burnin_evidence(db_path: str | Path, output_dir: str | Path, burnin_r
 def _sa_text(sql: str) -> Any:
     return sql if False else __import__('sqlalchemy').text(sql)
 
-def persist_burnin_observation(conn: Any, *, observation_id: str, burnin_run_id: str, release_id: str, execution_mode: str, observed_at: str | None = None, symbol: str | None = None, interval: str | None = None, regime: str | None = None, decision: str | None = None, lifecycle_state: str | None = None, metrics: Mapping[str, Any] | None = None, source_provenance: Mapping[str, Any] | None = None, missing_fields: Sequence[str] = ()) -> None:
+def persist_burnin_observation(conn: Any, *, observation_id: str, burnin_run_id: str, release_id: str, execution_mode: str, observed_at: str | None = None, symbol: str | None = None, interval: str | None = None, regime: str | None = None, decision: str | None = None, lifecycle_state: str | None = None, metrics: Mapping[str, Any] | None = None, source_provenance: Mapping[str, Any] | None = None, missing_fields: Sequence[str] = (), observation_kind: str = CANONICAL_DECISION_KIND) -> None:
     sql="""INSERT OR REPLACE INTO burnin_observations(observation_id,burnin_run_id,release_id,observed_at,execution_mode,symbol,interval,regime,decision,lifecycle_state,evidence_complete,missing_fields_json,metrics_json,source_provenance_json,schema_version) VALUES (:observation_id,:burnin_run_id,:release_id,:observed_at,:execution_mode,:symbol,:interval,:regime,:decision,:lifecycle_state,:evidence_complete,:missing_fields_json,:metrics_json,:source_provenance_json,:schema_version)"""
-    params={"observation_id":observation_id,"burnin_run_id":burnin_run_id,"release_id":release_id,"observed_at":observed_at or utc_now(),"execution_mode":execution_mode,"symbol":symbol,"interval":interval,"regime":regime or "UNKNOWN","decision":decision,"lifecycle_state":lifecycle_state,"evidence_complete":0 if missing_fields else 1,"missing_fields_json":json.dumps(list(missing_fields),sort_keys=True),"metrics_json":json.dumps(dict(metrics or {}),sort_keys=True,default=str),"source_provenance_json":json.dumps(dict(source_provenance or {}),sort_keys=True,default=str),"schema_version":SCHEMA_VERSION}
+    observation_metrics = dict(metrics or {})
+    observation_metrics["observation_kind"] = str(observation_kind).upper()
+    params={"observation_id":observation_id,"burnin_run_id":burnin_run_id,"release_id":release_id,"observed_at":observed_at or utc_now(),"execution_mode":execution_mode,"symbol":symbol,"interval":interval,"regime":regime or "UNKNOWN","decision":decision,"lifecycle_state":lifecycle_state,"evidence_complete":0 if missing_fields else 1,"missing_fields_json":json.dumps(list(missing_fields),sort_keys=True),"metrics_json":json.dumps(observation_metrics,sort_keys=True,default=str),"source_provenance_json":json.dumps(dict(source_provenance or {}),sort_keys=True,default=str),"schema_version":SCHEMA_VERSION}
     conn.execute(sql if isinstance(conn, sqlite3.Connection) else _sa_text(sql), params)
 
 def persist_burnin_trade_outcome(conn: Any, *, outcome_id: str, burnin_run_id: str, release_id: str, symbol: str, regime: str = "UNKNOWN", trade_id: str | None = None, closed_at: str | None = None, gross_r: float | None = None, gross_pnl: float | None = None, costs: Mapping[str, Any] | None = None, net_r: float | None = None, net_pnl: float | None = None, effective_rr_at_entry: float | None = None, realized_effective_rr: float | None = None, hold_duration_seconds: float | None = None, mfe: float | None = None, mae: float | None = None, exit_reason: str | None = None, payload: Mapping[str, Any] | None = None) -> None:

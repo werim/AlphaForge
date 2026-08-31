@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+## Burn-in canonical decision integrity (2026-08-31)
+- Current version: dev burn-in evidence-integrity patch; no table or CSV schema migration.
+- Current phase: fresh PAPER campaign verification with historical diagnostic rows preserved.
+- Runtime maturity: qualification and campaign counters separate canonical decisions from diagnostic observations through an explicit persisted discriminator and a historical compatibility rule.
+- BACKTEST/PAPER/LIVE alignment: decision and reject behavior is unchanged; only PAPER burn-in evidence denominators change.
+- Lifecycle coverage: incomplete reject geometry remains fail-closed and auditable as SIGNAL_REJECTED without becoming a second decision.
+- Execution realism coverage: unchanged; missing geometry remains missing and is never fabricated.
+- Known critical risks: historical non-geometry diagnostic categories without an explicit discriminator require separate identification if any exist.
+- Last audit date: 2026-08-31. Live readiness verdict: NOT LIVE READY.
+
 ## PAPER MTF heartbeat persistence follow-up (2026-08-31)
 - Current version: dev PR #336 observability follow-up; no schema, export, threshold, or execution change.
 - Current phase: heartbeat persistence verification before fresh post-fix PAPER campaign validation.

@@ -1,3 +1,24 @@
+## Burn-in canonical decision integrity — 2026-08-31
+
+### Added
+- An explicit `observation_kind` discriminator for newly persisted canonical decisions and incomplete-geometry diagnostics.
+- Regression coverage for 519 canonical rejects plus 29 preserved diagnostics.
+
+### Changed
+- Run, campaign, and qualification decision denominators now count canonical market decisions only.
+
+### Fixed
+- Diagnostic incomplete-reject geometry observations can no longer satisfy minimum decision samples or inflate rejected denominators.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; historical rows remain immutable and require no migration.
+
+### Known Issues
+- Historical diagnostic categories other than the known incomplete-geometry rows need an explicit classification before exclusion.
+
 ## PAPER MTF heartbeat persistence follow-up — 2026-08-31
 
 ### Added

@@ -72,6 +72,60 @@ def _qualify(db,cid,**overrides):
 def _latest_blockers(db):
     conn=sqlite3.connect(db); row=conn.execute('select blockers_json from burnin_qualification_snapshots order by id desc limit 1').fetchone(); conn.close(); return json.loads(row[0])
 
+def test_campaign_qualification_excludes_29_diagnostics_from_519_decisions(tmp_path):
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    conn = sqlite3.connect(db)
+    run_id = conn.execute(
+        "SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)
+    ).fetchone()[0]
+    conn.execute("DELETE FROM burnin_observations WHERE burnin_run_id=?", (run_id,))
+    for index in range(519):
+        persist_burnin_observation(
+            conn, observation_id=f"decision_{index}", burnin_run_id=run_id,
+            release_id="relq", execution_mode="PAPER", decision="REJECTED",
+            symbol="BTCUSDT", source_provenance={"provider": "PAPER"},
+        )
+    # Deliberately omit the new discriminator to reproduce immutable campaign
+    # evidence from camp_119394d8c198138d and exercise the legacy classifier.
+    for index in range(29):
+        conn.execute(
+            "INSERT INTO burnin_observations(observation_id,burnin_run_id,release_id,"
+            "observed_at,execution_mode,symbol,decision,evidence_complete,missing_fields_json,"
+            "metrics_json,source_provenance_json,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"incomplete_reject_geometry_{index}", run_id, "relq",
+             "2026-08-31T21:43:01Z", "PAPER", "BTCUSDT", "REJECTED", 0,
+             '["stop","target"]', '{}', '{"provider":"PAPER"}', "legacy"),
+        )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (run_id,)).fetchone()[0] == 548
+    conn.close()
+
+    thresholds = BurnInThresholds(
+        minimum_duration_seconds=0, minimum_total_decisions=520,
+        minimum_accepted_trades=0, minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0, minimum_regime_sample=1,
+        minimum_regime_coverage=1, minimum_calibration_sample=1,
+        require_operator_ack=False, require_phase1_6_gates=False,
+    )
+    engine = _engine(db)
+    try:
+        result = qualify_campaign(engine, cid, thresholds)
+    finally:
+        engine.dispose()
+    conn = sqlite3.connect(db)
+    snapshot_row = conn.execute(
+        "SELECT metrics_json,blockers_json FROM burnin_qualification_snapshots WHERE qualification_id=?",
+        (result["qualification_id"],),
+    ).fetchone()
+    metrics = json.loads(snapshot_row[0])
+    blockers = json.loads(snapshot_row[1])
+    assert metrics["sample_count"] == 519
+    assert metrics["rejected_count"] == 519
+    assert any(blocker.startswith("MINIMUM_TOTAL_DECISIONS:519<520") for blocker in blockers)
+
+    assert conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (f"{cid}__aggregate",)).fetchone()[0] == 548
+    conn.close()
+
 def test_campaign_negative_material_regime_blocks(tmp_path):
     db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
     conn.execute("UPDATE burnin_regime_metrics SET lower_confidence_bound_expectancy=-0.2 WHERE regime='TRENDING'"); conn.commit(); conn.close()
