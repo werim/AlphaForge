@@ -1,3 +1,43 @@
+## PAPER MTF heartbeat persistence follow-up — 2026-08-31
+
+### Added
+- Regression coverage proving every MTF runtime counter survives heartbeat payload filtering while non-allowlisted credentials remain excluded.
+
+### Changed
+- The runtime-heartbeat allowlist now accepts the complete MTF counter family already emitted by the PAPER runtime.
+
+### Fixed
+- MTF counters are no longer silently dropped before persistence to `runtime_heartbeats.payload_json`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; heartbeat JSON is extended backward-compatibly and no database migration is required.
+
+### Known Issues
+- Setup context may still conflate an unavailable setup layer with available evidence that contains no valid setup; rejection remains deliberately fail-closed pending a separate review.
+
+## PAPER MTF execution-evidence semantics — 2026-08-30
+
+### Added
+- Auditable MA-delta strength and direction-threshold fields on every MTF layer, plus a dedicated runtime heartbeat counter for unconfirmed execution triggers.
+
+### Changed
+- Execution evidence completeness now describes the presence and validity of five closed candles and canonical spread, slippage, latency, and liquidity evidence; trigger confirmation remains a separate hard gate.
+
+### Fixed
+- A complete neutral 1m observation now rejects as `MTF_EXECUTION_NOT_CONFIRMED` without being mislabeled `MTF_EXECUTION_UNAVAILABLE`.
+
+### Removed
+- None; no historical burn-in evidence was altered.
+
+### Breaking Changes
+- None; no schema or export migration is required and all trading gates remain fail-closed.
+
+### Known Issues
+- The unchanged 0.0005 direction threshold still requires fresh campaign calibration. Public-provider failure remains fail-closed and LIVE remains NOT READY.
+
 ## Fail-closed PAPER multi-timeframe runtime — 2026-08-30
 
 ### PR #334 follow-up

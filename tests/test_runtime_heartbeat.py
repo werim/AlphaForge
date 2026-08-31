@@ -67,6 +67,35 @@ def test_payload_json_uses_allowlist_and_excludes_credentials(tmp_path) -> None:
     assert payload == {"scans": 2}
 
 
+def test_payload_json_preserves_mtf_observability_counters(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'mtf_counters.db'}")
+    mtf_counters = {
+        "mtf_contexts_built": 257,
+        "mtf_alignment_pass": 0,
+        "mtf_alignment_reject": 257,
+        "mtf_regime_missing": 0,
+        "mtf_setup_missing": 89,
+        "mtf_execution_missing": 0,
+        "mtf_execution_not_confirmed": 257,
+        "mtf_direction_mismatch": 168,
+        "mtf_stale_context": 0,
+    }
+    save_runtime_heartbeat(
+        engine,
+        runtime_instance_id="runtime:mtf-observability",
+        execution_mode="PAPER",
+        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
+        payload={**mtf_counters, "api_key": "must-not-persist"},
+    )
+
+    with engine.connect() as conn:
+        payload_json = conn.execute(text(
+            "SELECT payload_json FROM runtime_heartbeats LIMIT 1"
+        )).scalar_one()
+
+    assert json.loads(payload_json) == mtf_counters
+
+
 def test_freshness_states_are_deterministic_and_fail_closed(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'freshness.db'}")
     now = datetime(2026, 5, 23, 12, 0, tzinfo=timezone.utc)

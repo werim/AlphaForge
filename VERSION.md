@@ -1,5 +1,25 @@
 # AlphaForge Version
 
+## PAPER MTF heartbeat persistence follow-up (2026-08-31)
+- Current version: dev PR #336 observability follow-up; no schema, export, threshold, or execution change.
+- Current phase: heartbeat persistence verification before fresh post-fix PAPER campaign validation.
+- Runtime maturity: the complete MTF counter family emitted by runtime now survives the heartbeat safety allowlist.
+- BACKTEST/PAPER/LIVE alignment: trading behavior is unchanged; the heartbeat JSON extension is backward-compatible.
+- Lifecycle coverage: unchanged; neutral execution remains fail-closed before AIBrain.
+- Execution realism coverage: unchanged; no evidence or default value is fabricated.
+- Known critical risks: setup evidence availability versus no-valid-setup remains a separate semantic review; setup rejection is unchanged and fail-closed.
+- Last audit date: 2026-08-31. Live readiness verdict: NOT LIVE READY.
+
+## PAPER MTF execution-evidence classification correction (2026-08-30)
+- Current version: dev PAPER MTF observability patch; no database migration or export change.
+- Current phase: fresh post-fix PAPER campaign validation while `camp_9afc71c6a419749c` remains immutable historical regression evidence.
+- Runtime maturity: complete neutral 1m evidence is distinguished from missing/invalid evidence and still rejects before AIBrain.
+- BACKTEST/PAPER/LIVE alignment: only PAPER MTF evidence classification changed; shared downstream gates, BACKTEST behavior, and LIVE authorization are unchanged.
+- Lifecycle coverage: both unavailable evidence and unconfirmed triggers retain SIGNAL_CREATED -> SIGNAL_REJECTED ordering with full MTF diagnostics.
+- Execution realism coverage: required candle, spread, slippage, latency, and liquidity values must be present, finite, and non-negative; no defaults are fabricated.
+- Known critical risks: the unchanged 0.0005 per-timeframe defaults remain uncalibrated for production qualification; public Binance availability remains external.
+- Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.
+
 ## Fail-closed PAPER multi-timeframe runtime (2026-08-30)
 - PR #334 follow-up: MTF execution timing now consumes the canonical normalized execution context; aligned direction is bound to geometry side and non-Binance sources fail closed without cross-exchange substitution.
 - Current version: dev PAPER MTF decision architecture; no database migration.

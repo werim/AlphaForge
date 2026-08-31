@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from alphaforge.execution import build_execution_context as build_canonical_execution_context
-from alphaforge.multi_timeframe import BinanceMTFProvider, closed_candles, evaluate_mtf_alignment
+from alphaforge.multi_timeframe import (BinanceMTFProvider, build_execution_context,
+                                        closed_candles, evaluate_mtf_alignment)
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
 NOW = 10_000_000
@@ -46,6 +47,49 @@ def test_partial_and_future_candles_cannot_contaminate_decision():
     assert len(selected) == 1 and selected[0]["close"] == 1.5
 
 
+def _execution_candles(closes):
+    return [{"open_ts": i * 60_000, "open": close, "high": close, "low": close,
+             "close": close, "volume": 1.0, "close_ts": NOW - (len(closes) - i - 1) * 60_000}
+            for i, close in enumerate(closes)]
+
+
+def test_neutral_execution_is_available_but_never_confirmed():
+    market = {"spread_pct": .000348, "expected_slippage_pct": .001,
+              "latency_ms": 374.0, "liquidity_score": 1.0}
+    execution = build_execution_context(_execution_candles([100.0] * 5), "1m", market)
+    regime, setup, _ = aligned("LONG")
+    result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+
+    assert execution["evidence_status"] == "COMPLETE"
+    assert execution["direction"] == "NEUTRAL" and execution["trigger"] is None
+    assert execution["ma_delta_strength"] == 0.0
+    assert execution["direction_threshold"] == .0005
+    assert result["aligned"] is False
+    assert "MTF_EXECUTION_NOT_CONFIRMED" in result["reasons"]
+    assert "MTF_EXECUTION_UNAVAILABLE" not in result["reasons"]
+
+
+@pytest.mark.parametrize("missing_field", ["spread_pct", "expected_slippage_pct", "latency_ms", "liquidity_score"])
+def test_missing_required_execution_market_evidence_is_unavailable(missing_field):
+    market = {"spread_pct": .0002, "expected_slippage_pct": .001,
+              "latency_ms": 20.0, "liquidity_score": 1.0}
+    market[missing_field] = None
+    execution = build_execution_context(_execution_candles([100, 100.1, 100.2, 100.3, 100.4]), "1m", market)
+    regime, setup, _ = aligned("LONG")
+    result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+    assert execution["evidence_status"] == "INCOMPLETE"
+    assert "MTF_EXECUTION_UNAVAILABLE" in result["reasons"]
+
+
+def test_missing_execution_candles_remain_unavailable():
+    execution = build_execution_context([], "1m", {"spread_pct": .0002,
+        "expected_slippage_pct": .001, "latency_ms": 20.0, "liquidity_score": 1.0})
+    regime, setup, _ = aligned("LONG")
+    result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+    assert execution["evidence_status"] == "INCOMPLETE"
+    assert "MTF_EXECUTION_UNAVAILABLE" in result["reasons"]
+
+
 def test_realistic_binance_candidate_uses_canonical_normalized_execution_context(monkeypatch):
     decision_ms = 4_000_000
     rows = []
@@ -81,6 +125,41 @@ class _AlignedProvider:
         return {"provider": "BINANCE_FUTURES_CLOSED_KLINES", "alignment": {
             "aligned": True, "direction": self.direction, "reasons": [],
             "timeframes": {"regime": "1h", "setup": "15m", "execution": "1m"}}}
+
+
+class _NeutralExecutionProvider:
+    async def build(self, *_args, **_kwargs):
+        regime, setup, _ = aligned("LONG")
+        execution = context("1m", "NEUTRAL", trigger=None, ma_delta_strength=0.0,
+                            direction_threshold=.0005)
+        alignment = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+        return {"provider": "BINANCE_FUTURES_CLOSED_KLINES", "regime": regime,
+                "setup": setup, "execution": execution, "alignment": alignment}
+
+
+def test_paper_neutral_execution_rejects_before_ai_brain():
+    class BrainMustNotRun:
+        async def before_real_order(self, *_args, **_kwargs):
+            raise AssertionError("AIBrain must not run after an MTF rejection")
+
+    rejects = []
+    candidate = {"symbol": "BTCUSDT", "source_exchange": "binance", "side": "LONG",
+        "spread_pct": .0002, "market_data_latency_ms": 20.0, "liquidity_score": 1.0,
+        "market_ts": NOW / 1000}
+    selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="FAVORABLE",
+                                diagnostics={"inputs": candidate})
+    orchestrator = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+        require_mtf_alignment=True), BrainMustNotRun(), lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_NeutralExecutionProvider(),
+        on_reject_persist=lambda payload: rejects.append(payload))
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    assert rejects[-1]["reason"] == "MTF_EXECUTION_NOT_CONFIRMED"
+    assert rejects[-1]["decision"] == "REJECTED"
+    assert "MTF_EXECUTION_UNAVAILABLE" not in rejects[-1]["mtf"]["alignment"]["reasons"]
+    assert orchestrator.metrics.mtf_execution_not_confirmed == 1
+    assert orchestrator.metrics.mtf_execution_missing == 0
 
 
 @pytest.mark.parametrize(("mtf_side", "geometry_side", "expected_reason"), [

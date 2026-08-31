@@ -198,6 +198,7 @@ class RuntimeMetrics:
     mtf_regime_missing: int = 0
     mtf_setup_missing: int = 0
     mtf_execution_missing: int = 0
+    mtf_execution_not_confirmed: int = 0
     mtf_direction_mismatch: int = 0
     mtf_stale_context: int = 0
     persistence_enabled: bool = False
@@ -434,6 +435,15 @@ class RuntimeOrchestrator:
                 "reconciliation_runs": self.metrics.reconciliation_runs,
                 "reconciliation_fail_closed": self.metrics.reconciliation_fail_closed,
                 "persistence_enabled": self.metrics.persistence_enabled,
+                "mtf_contexts_built": self.metrics.mtf_contexts_built,
+                "mtf_alignment_pass": self.metrics.mtf_alignment_pass,
+                "mtf_alignment_reject": self.metrics.mtf_alignment_reject,
+                "mtf_regime_missing": self.metrics.mtf_regime_missing,
+                "mtf_setup_missing": self.metrics.mtf_setup_missing,
+                "mtf_execution_missing": self.metrics.mtf_execution_missing,
+                "mtf_execution_not_confirmed": self.metrics.mtf_execution_not_confirmed,
+                "mtf_direction_mismatch": self.metrics.mtf_direction_mismatch,
+                "mtf_stale_context": self.metrics.mtf_stale_context,
                 "top_selection_reject_reasons": dict(sorted(self._last_scan_rejection_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
                 "decision_gate_blockers": self._last_scan_gate_blockers,
                 "agent_shadow_queue_depth": self.metrics.agent_shadow_queue_depth,
@@ -1330,6 +1340,7 @@ class RuntimeOrchestrator:
                 self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
                 self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
                 self.metrics.mtf_execution_missing += int("MTF_EXECUTION_UNAVAILABLE" in reasons)
+                self.metrics.mtf_execution_not_confirmed += int("MTF_EXECUTION_NOT_CONFIRMED" in reasons)
                 self.metrics.mtf_stale_context += int("MTF_CONTEXT_STALE" in reasons)
                 self.metrics.mtf_direction_mismatch += int(any("MISMATCH" in item for item in reasons))
                 await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})

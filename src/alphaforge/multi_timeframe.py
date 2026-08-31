@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ MTF_REJECT_REASONS = (
 )
 
 _TF_SECONDS = {"1m": 60, "15m": 900, "1h": 3600}
+_DIRECTION_THRESHOLDS = {"1m": 0.0005, "15m": 0.0005, "1h": 0.0005}
 
 
 def _iso(ms: int) -> str:
@@ -41,25 +43,28 @@ def closed_candles(rows: Any, *, timeframe: str, decision_ts_ms: int) -> list[di
     return sorted(out, key=lambda c: c["open_ts"])
 
 
-def _direction(candles: list[dict[str, Any]], fast: int, slow: int) -> tuple[str, float | None]:
+def _direction(candles: list[dict[str, Any]], fast: int, slow: int, *,
+               neutral_threshold: float = 0.0005) -> tuple[str, float | None]:
     if len(candles) < slow:
         return "UNKNOWN", None
     closes = [float(c["close"]) for c in candles]
     fast_ma, slow_ma = sum(closes[-fast:]) / fast, sum(closes[-slow:]) / slow
     delta = (fast_ma - slow_ma) / slow_ma if slow_ma else 0.0
-    if abs(delta) < 0.0005:
+    if abs(delta) < neutral_threshold:
         return "NEUTRAL", abs(delta)
     return ("LONG" if delta > 0 else "SHORT"), abs(delta)
 
 
 def build_regime_context(candles: list[dict[str, Any]], timeframe: str) -> dict[str, Any]:
-    direction, strength = _direction(candles, 8, 20)
+    threshold = _DIRECTION_THRESHOLDS.get(timeframe, 0.0005)
+    direction, strength = _direction(candles, 8, 20, neutral_threshold=threshold)
     complete = direction not in {"UNKNOWN", "NEUTRAL"}
     returns = [abs(float(candles[i]["close"]) / float(candles[i-1]["close"]) - 1)
                for i in range(1, len(candles)) if candles[i-1]["close"]]
     volatility = None if not returns else sum(returns[-20:]) / min(20, len(returns))
     return {"timeframe": timeframe, "regime": "TRENDING" if complete else ("UNKNOWN" if direction == "UNKNOWN" else "CHOPPY"),
-            "direction": direction, "trend_strength": strength, "volatility_regime": None if volatility is None else ("HIGH" if volatility > .02 else "MODERATE"),
+            "direction": direction, "trend_strength": strength, "ma_delta_strength": strength,
+            "direction_threshold": threshold, "volatility_regime": None if volatility is None else ("HIGH" if volatility > .02 else "MODERATE"),
             "structure_state": "MA_TREND" if complete else "UNCONFIRMED", "confidence": strength,
             "last_closed_candle_ts": _iso(int(candles[-1]["close_ts"])) if candles else None,
             "last_closed_candle_ms": int(candles[-1]["close_ts"]) if candles else None,
@@ -67,7 +72,8 @@ def build_regime_context(candles: list[dict[str, Any]], timeframe: str) -> dict[
 
 
 def build_setup_context(candles: list[dict[str, Any]], timeframe: str) -> dict[str, Any]:
-    direction, quality = _direction(candles, 5, 12)
+    threshold = _DIRECTION_THRESHOLDS.get(timeframe, 0.0005)
+    direction, quality = _direction(candles, 5, 12, neutral_threshold=threshold)
     complete = direction in {"LONG", "SHORT"} and len(candles) >= 12
     last = candles[-1] if candles else None
     recent = candles[-12:] if len(candles) >= 12 else []
@@ -77,6 +83,7 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str) -> dict[s
         complete = False
     return {"timeframe": timeframe, "setup_type": "TREND_PULLBACK" if complete else None,
             "direction": direction if direction != "NEUTRAL" else "NONE", "structure_quality": quality,
+            "ma_delta_strength": quality, "direction_threshold": threshold,
             "momentum_state": "CONFIRMED" if complete else "UNCONFIRMED", "overextended": overextended,
             "entry_zone": None if not last else [last["low"], last["high"]], "structural_stop": None,
             "structural_target": None, "last_closed_candle_ts": _iso(int(last["close_ts"])) if last else None,
@@ -85,13 +92,19 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str) -> dict[s
 
 
 def build_execution_context(candles: list[dict[str, Any]], timeframe: str, market: Mapping[str, Any]) -> dict[str, Any]:
-    direction, _ = _direction(candles, 2, 5)
+    threshold = _DIRECTION_THRESHOLDS.get(timeframe, 0.0005)
+    direction, strength = _direction(candles, 2, 5, neutral_threshold=threshold)
     last = candles[-1] if candles else None
     trigger = direction in {"LONG", "SHORT"} and len(candles) >= 5
     required = (market.get("spread_pct"), market.get("expected_slippage_pct"),
                 market.get("latency_ms"), market.get("liquidity_score"))
-    complete = trigger and all(v is not None for v in required)
+    # Evidence availability and trigger confirmation are deliberately independent:
+    # a valid neutral observation is evidence, but can never authorize an entry.
+    market_complete = all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                          and math.isfinite(float(v)) and float(v) >= 0 for v in required)
+    complete = len(candles) >= 5 and direction != "UNKNOWN" and market_complete
     return {"timeframe": timeframe, "direction": direction, "trigger": "MOMENTUM_CONFIRMED" if trigger else None,
+            "ma_delta_strength": strength, "direction_threshold": threshold,
             "spread_pct": market.get("spread_pct"), "expected_slippage_pct": market.get("expected_slippage_pct"),
             "latency_ms": market.get("latency_ms"), "liquidity_score": market.get("liquidity_score"),
             "orderbook_imbalance": market.get("orderbook_imbalance"), "execution_regime": market.get("volatility_regime"),

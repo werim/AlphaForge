@@ -1,3 +1,43 @@
+# PR #336 MTF heartbeat persistence follow-up — 2026-08-31
+
+## Need and root cause
+
+The PAPER runtime emitted all MTF counters to `save_runtime_heartbeat`, but `_safe_payload` applied a separate permitted-key allowlist that omitted them. Consequently, in-memory observability was correct while `runtime_heartbeats.payload_json` silently discarded the MTF counter family.
+
+## Minimal correction and test
+
+`src/alphaforge/runtime_heartbeat.py` now permits the nine existing MTF counter keys. `tests/test_runtime_heartbeat.py` persists representative campaign-shaped counts through the public heartbeat writer, reads the physical SQLite `payload_json`, parses it, and proves every counter survives while an unallowlisted credential remains excluded. No database schema, migration, export, MTF threshold, alignment reason, execution rule, trading gate, or LIVE behavior changes.
+
+Neutral execution remains rejected as `MTF_EXECUTION_NOT_CONFIRMED` before AIBrain exactly as implemented in the core patch. The possible setup-layer distinction between unavailable evidence and available evidence without a valid setup remains a non-blocking follow-up risk; this patch does not alter or weaken setup rejection behavior.
+
+## Validation and recommendation
+
+Focused heartbeat and MTF coverage passed 23 tests. The normal literal `pytest -q` command could not collect because the declared Alembic distribution is absent from this container. The complete behavioral suite excluding only the three Alembic-dependent modules passed 1,316 tests with 6 skipped. Compileall, diff validation, and the CI offline backtest/output check passed. Update PR #336 for review against `dev`; do not merge automatically and do not infer LIVE readiness.
+
+---
+
+# PAPER MTF execution-evidence classification correction — 2026-08-30
+
+## Need and root cause
+
+Campaign `camp_9afc71c6a419749c` demonstrated that the execution builder made `evidence_status=COMPLETE` conditional on a directional trigger. Consequently, five valid closed 1m candles plus canonical spread, slippage, latency, and liquidity evidence were called unavailable whenever their 2/5 MA delta was neutral. The alignment evaluator then persisted `MTF_EXECUTION_UNAVAILABLE` alongside the accurate `MTF_EXECUTION_NOT_CONFIRMED`, making the first reason semantically misleading.
+
+## Files and exact behavior change
+
+`src/alphaforge/multi_timeframe.py` now computes execution completeness from required closed candles and finite, non-negative canonical market evidence independently of the trigger. A complete neutral observation remains triggerless and therefore fails alignment with `MTF_EXECUTION_NOT_CONFIRMED`; genuinely absent/invalid candles or market fields remain incomplete and fail with `MTF_EXECUTION_UNAVAILABLE`. Direction mismatches, stale checks, closed-candle filtering, and reason ordering are unchanged. The shared 0.0005 behavior is retained through explicit per-timeframe defaults rather than tuned to campaign outcomes, and each context records its observed absolute MA delta and applied threshold.
+
+`src/alphaforge/runtime.py` adds `mtf_execution_not_confirmed` independently from `mtf_execution_missing` and exposes the complete MTF counter family in persisted heartbeat payloads. Rejected burn-in observations already persist the full MTF structure, so neutral strength/threshold and all alignment reasons remain auditable without a schema change. `tests/test_multi_timeframe.py` adds regression coverage for neutral complete evidence, each missing execution field, missing candles, and the real PAPER pre-AIBrain reject boundary; existing tests retain aligned LONG/SHORT, both mismatch classes, stale/future evidence, unsupported provenance, and side binding coverage.
+
+## Lifecycle, persistence, compatibility, and safety
+
+The gate remains fail-closed: neutral execution never aligns, never reaches AIBrain, and never increases accepted decisions. SIGNAL_CREATED -> SIGNAL_REJECTED behavior is unchanged. No SQLite table, Alembic revision, CSV export, runtime threshold, effective-RR, spread, slippage, liquidity, expectancy, portfolio-risk, order authorization, or LIVE behavior changed. Heartbeat JSON gains one backward-compatible counter and exposes existing counters; historical campaign rows, including T04 evidence, are not rewritten. No migration is required.
+
+## Tests, remaining risks, and recommendation
+
+Focused MTF/runtime validation passed 17 tests. The relevant full behavioral suite passed 1,315 tests with 6 skipped; its only two failures were environment import failures in lifecycle migration tests because the declared Alembic distribution is absent. The literal full suite also stopped during collection for the same missing dependency. `python -m compileall -q src tests backtest_order.py` and `git diff --check` passed. The MA classifier is intentionally still a simple, identical 0.0005 default across all three timeframes; the implementation can now vary thresholds by timeframe after evidence-backed calibration, but this patch supplies no such tuning. Public Binance availability, the missing local Alembic dependency, and fresh campaign qualification remain operational risks. Open for review against `dev`; do not merge automatically and do not infer LIVE readiness.
+
+---
+
 # PAPER multi-timeframe decision surgery — 2026-08-30
 
 ## PR #334 targeted correction
