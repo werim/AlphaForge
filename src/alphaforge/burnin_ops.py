@@ -29,6 +29,7 @@ from alphaforge.database_defaults import resolve_runtime_database_url, sqlite_pa
 from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reject_label_status import reject_label_status
+from alphaforge.process_liveness import process_is_alive
 
 PHASE9_SCHEMA_VERSION = "phase9_ops_v2"
 ALLOWED_FINAL_DECISIONS = {"PAPER_BURNIN_INCOMPLETE", "PAPER_BURNIN_FAILED", "PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW", "PAPER_BURNIN_SUSPENDED"}
@@ -152,7 +153,7 @@ def database_diagnosis(db: str, *, max_heartbeat_age: float = 120.0) -> dict[str
             active = next((row for row in (continuations or []) if row["burnin_run_id"] == campaign.get("active_run_id")), None) if continuations_ok else None
             pid = campaign.get("worker_pid")
             heartbeat_age = _age(campaign.get("last_heartbeat_at"))
-            worker_alive = _pid_alive(pid) if pid else False
+            worker_alive = _campaign_worker_alive(campaign) if pid else False
             stale = heartbeat_age is None or heartbeat_age > max_heartbeat_age
             orphaned = [row for row in (continuations or []) if row["status"] in ACTIVE_RUN_STATUSES and row["burnin_run_id"] != campaign.get("active_run_id")] if continuations_ok else None
             position_columns = ["pending_position_id", "trade_id", "burnin_run_id", "symbol", "side", "status", "entry_time"]
@@ -273,14 +274,23 @@ def _age(ts: Any) -> float | None:
 
 
 def _pid_alive(pid: Any) -> bool:
-    try:
-        pid_int = int(pid or 0)
-        if pid_int <= 0:
-            return False
-        os.kill(pid_int, 0)
-        return True
-    except Exception:
-        return False
+    return process_is_alive(pid)
+
+
+_PID_ALIVE_IMPL = _pid_alive
+
+
+def _campaign_worker_alive(campaign: Mapping[str, Any]) -> bool:
+    # Preserve the established test/integration seam while production probes
+    # always continue through the stronger identity check below.
+    if _pid_alive is not _PID_ALIVE_IMPL:
+        return _pid_alive(campaign.get("worker_pid"))
+    campaign_id = str(campaign.get("campaign_id") or "")
+    return process_is_alive(
+        campaign.get("worker_pid"),
+        expected_command_parts=("alphaforge.burnin", campaign_id),
+        expected_started_at=campaign.get("worker_started_at"),
+    )
 
 
 def _git_clean() -> bool:
@@ -580,7 +590,7 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
         heartbeat = campaign.get("last_heartbeat_at")
         worker_exit_code = process.poll() if process is not None else None
         checks = {
-            "worker_alive": _pid_alive(pid),
+            "worker_alive": _campaign_worker_alive(campaign),
             "worker_not_exited": worker_exit_code is None,
             "attach_event_after_launch": attach is not None,
             "runtime_instance_evidence": bool(details.get("runtime_instance_id")),
@@ -590,7 +600,7 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
         last = {"status": "ATTACHED" if all(checks.values()) else "WAITING", "checks": checks, "worker_pid": pid, "worker_exit_code": worker_exit_code, "runtime_instance_id": details.get("runtime_instance_id"), "active_run_id": active_run_id, "heartbeat": heartbeat}
         if all(checks.values()):
             return last
-        if worker_exit_code is not None or (pid and not _pid_alive(pid)):
+        if worker_exit_code is not None or (pid and not _campaign_worker_alive(campaign)):
             last["status"] = "FAILED"
             last["reason"] = "WORKER_EXITED_BEFORE_ATTACHMENT"
             break
@@ -829,7 +839,7 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     agg = aggregate_campaign(conn, campaign_id)
     metrics = agg.get("metrics", {}) if agg.get("status") == "OK" else {}
     pid = campaign.get("worker_pid")
-    alive = _pid_alive(pid)
+    alive = _campaign_worker_alive(campaign)
     age = _age(campaign.get("last_heartbeat_at"))
     attachment = _latest_attach(conn, campaign_id, run_id=campaign.get("active_run_id"))
     attachment_details = _event_details(attachment) if attachment is not None else {}

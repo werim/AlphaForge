@@ -1,4 +1,4 @@
-# Burn-in canonical decision integrity — 2026-08-31
+# Burn-in evidence and continuation integrity — 2026-08-31
 
 ## Need and root cause
 
@@ -8,13 +8,19 @@ Campaign `camp_119394d8c198138d` persisted 519 canonical rejected decisions and 
 
 New observations persist `metrics_json.observation_kind`; normal runtime observations default to `CANONICAL_DECISION`, while incomplete-geometry audit rows explicitly use `DIAGNOSTIC`. A centralized SQL predicate consumes that discriminator and recognizes immutable pre-discriminator incomplete-geometry rows through a compatibility fallback. Run counter reconciliation, campaign aggregation, and Phase 7 qualification use the same predicate. Aggregate materialization still copies all 548 rows, preserving audit/export evidence.
 
+Campaign elapsed time is now recomputed from `burnin_campaign_runs`: closed eligible continuations contribute only `started_at -> ended_at`, the current RUNNING continuation contributes only `started_at -> now`, gaps contribute nothing, and FAILED continuations contribute only if an operational attachment event proves legitimate runtime. Derived per-run and campaign duration fields are synchronized without modifying immutable timestamps. Aggregation, qualification, completion, status, and export paths consume that contract.
+
+All process existence probes now route through one helper. POSIX retains `os.kill(pid, 0)` plus `/proc` command/creation identity where available; Windows exclusively uses `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`, `GetExitCodeProcess`, `GetProcessTimes`, and `CloseHandle`. No liveness path calls Windows `os.kill`. Worker ownership requires command identity on inspectable POSIX systems and creation-time correlation on Windows.
+
+The detached CLI reads `release_id` from the persisted campaign, overrides any conflicting parent environment for the child, and holds campaign/run state at STARTING. Only the existing runtime attachment identity transition may promote the successor to RUNNING.
+
 ## Lifecycle, persistence, compatibility, and risks
 
-Incomplete geometry remains fail-closed at SIGNAL_REJECTED, no side/stop/target is fabricated, and pending/resolved reject labels are unchanged. No table, Alembic, or CSV schema changes are required; historical evidence is read but never rewritten. BACKTEST, PAPER decision logic, strategy thresholds, reject rates, order authorization, and LIVE behavior are unchanged. The remaining limitation is that any historical diagnostic category other than the known incomplete-geometry family must be explicitly classified before it can be safely excluded.
+Incomplete geometry remains fail-closed at SIGNAL_REJECTED, no side/stop/target is fabricated, and pending/resolved reject labels are unchanged. No table, Alembic, or CSV schema changes are required; historical evidence rows and timestamps are not rewritten. BACKTEST, PAPER decision logic, strategy thresholds, reject rates, order authorization, and LIVE behavior are unchanged. Windows cannot obtain command line through the limited query handle, so persisted launch time and process creation time form the non-destructive ownership check there.
 
 ## Validation and recommendation
 
-Regression coverage reproduces exactly 519 canonical REJECTED observations plus 29 diagnostics, proves qualification reports 519/519 and remains below a 520-decision gate, and proves all 548 rows survive aggregate materialization. Focused campaign qualification, Phase 7 qualification, and incomplete-geometry suites passed. Recommend review and a fresh PAPER qualification snapshot; do not infer LIVE readiness.
+Regression coverage retains the exact 519 canonical plus 29 diagnostic case, covers explicit diagnostic classification, reproduces 9,790 active seconds plus a 44,000-second pause, an unattached failed startup, and 60 resumed seconds as 9,850 seconds, verifies query-only Windows liveness/dead/recycled PID handling, and verifies detached resume of release `3108T03` without parent release state. Recommend review and a fresh PAPER qualification snapshot; do not infer LIVE readiness.
 
 ---
 

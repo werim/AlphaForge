@@ -157,11 +157,12 @@ def next_burnin_continuation_sequence(conn: Any, *, release_id: str, execution_m
 
 def update_burnin_run_counters(conn: Any, burnin_run_id: str, *, status: str | None = None, end_time: str | None = None) -> dict[str, Any]:
     """Derive run counters from canonical SQL evidence to avoid drift."""
-    row = conn.execute(_sa_text("SELECT release_id, start_time FROM burnin_runs WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchone()
+    row = conn.execute(_sa_text("SELECT release_id, phase, start_time, observed_duration_seconds FROM burnin_runs WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchone()
     if row is None:
         return {"status": "MISSING_RUN"}
     mapping = row._mapping if hasattr(row, "_mapping") else row
     start_time = mapping["start_time"] if hasattr(mapping, "__getitem__") else None
+    phase = str(mapping["phase"] if hasattr(mapping, "__getitem__") else "").upper()
     obs = conn.execute(_sa_text(f"SELECT decision, evidence_complete, observed_at FROM burnin_observations WHERE burnin_run_id=:bid AND {canonical_decision_sql()}"), {"bid": burnin_run_id}).fetchall()
     trades = conn.execute(_sa_text("SELECT evidence_complete, closed_at FROM burnin_trade_outcomes WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchall()
     rejects = conn.execute(_sa_text("SELECT evidence_complete, forward_label FROM burnin_reject_outcomes WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchall()
@@ -178,11 +179,12 @@ def update_burnin_run_counters(conn: Any, burnin_run_id: str, *, status: str | N
     data_status = "PASS" if incomplete_obs == 0 else "INCOMPLETE"
     evidence_status = "PASS" if incomplete_obs == 0 and incomplete_trades == 0 and incomplete_rejects == 0 else "INCOMPLETE"
     times = [val(r, "observed_at") for r in obs if val(r, "observed_at")] + [val(r, "closed_at") for r in trades if val(r, "closed_at")]
-    observed_duration = None
-    parsed = [_parse_iso(t) for t in ([start_time] + times if start_time else times)]
-    parsed = [t for t in parsed if t is not None]
-    if len(parsed) >= 2:
-        observed_duration = max(0.0, (max(parsed) - min(parsed)).total_seconds())
+    observed_duration = mapping["observed_duration_seconds"] if phase == "PHASE8" else None
+    if phase != "PHASE8":
+        parsed = [_parse_iso(t) for t in ([start_time] + times if start_time else times)]
+        parsed = [t for t in parsed if t is not None]
+        if len(parsed) >= 2:
+            observed_duration = max(0.0, (max(parsed) - min(parsed)).total_seconds())
     sql = """UPDATE burnin_runs SET sample_count=:sample_count, accepted_count=:accepted_count, rejected_count=:rejected_count, closed_trade_count=:closed_trade_count, open_trade_count=:open_trade_count, observed_duration_seconds=COALESCE(:observed_duration_seconds, observed_duration_seconds), data_completeness_status=:data_status, evidence_completeness_status=:evidence_status, end_time=COALESCE(:end_time,end_time), status=COALESCE(:status,status), generated_at=:generated_at WHERE burnin_run_id=:bid"""
     params = {"bid": burnin_run_id, "sample_count": sample_count, "accepted_count": accepted_count, "rejected_count": rejected_count, "closed_trade_count": closed_trade_count, "open_trade_count": open_trade_count, "observed_duration_seconds": observed_duration, "data_status": data_status, "evidence_status": evidence_status, "end_time": end_time, "status": status, "generated_at": utc_now()}
     conn.execute(sql if isinstance(conn, sqlite3.Connection) else _sa_text(sql), params)

@@ -14,6 +14,7 @@ from sqlalchemy.exc import OperationalError
 from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as make_config_hash, persist_burnin_run, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
 from alphaforge.config import runtime_filter_config
+from alphaforge.process_liveness import process_is_alive
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
 DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
@@ -287,11 +288,7 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
     if not c: raise KeyError("campaign not found")
     pid = c.get("worker_pid")
     if pid:
-        try:
-            os.kill(int(pid), 0)
-        except (OSError, ValueError):
-            pass
-        else:
+        if process_is_alive(pid, expected_command_parts=("alphaforge.burnin", campaign_id), expected_started_at=c.get("worker_started_at")):
             raise RuntimeError("WORKER_SHUTDOWN_IN_PROGRESS")
     for k,v in {"config_hash":config_hash,"strategy_config_hash":strategy_config_hash,"universe_hash":universe_hash}.items():
         if v and v != c[k]:
@@ -364,6 +361,7 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
     """
     if isinstance(conn, Engine):
         return _with_fresh_lock_retry(conn, lambda fresh: materialize_campaign_aggregate(fresh, campaign_id))
+    active_campaign_duration(conn, campaign_id)
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
@@ -423,6 +421,7 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
     return agg_id
 
 def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
+    active_campaign_duration(conn, campaign_id)
     c=get_campaign(conn,campaign_id)
     if not c: return {"status":"UNAVAILABLE","reason":"NO_CAMPAIGN"}
     runs=[_row_dict(r) for r in _exec(conn,"SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:id AND (cr.status != 'FAILED' OR EXISTS (SELECT 1 FROM burnin_observations o WHERE o.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_trade_outcomes t WHERE t.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_reject_outcomes j WHERE j.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_regime_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_execution_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_calibration_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_drawdown_events m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_qualification_snapshots q WHERE q.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_suspension_events s WHERE s.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_reject_labels p WHERE p.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_position_outcomes p WHERE p.burnin_run_id=r.burnin_run_id)) ORDER BY cr.continuation_sequence",{"id":campaign_id}).fetchall()]
@@ -433,7 +432,7 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     def gv(r,k): return (r[k] if isinstance(r, sqlite3.Row) else r._mapping[k])
     closed=[r for r in trades if gv(r,"closed_at") and int(gv(r,"evidence_complete") or 0)==1]
     resolved=[r for r in rejects if int(gv(r,"evidence_complete") or 0)==1]
-    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED'),"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(resolved),"ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"source_run_ids":run_ids}
+    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED'),"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(resolved),"ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"metrics":metrics})
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
 
@@ -462,7 +461,7 @@ def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresho
 def export_campaign_bundle(db_path: str|Path, output_dir: str|Path, campaign_id: str) -> dict[str,Any]:
     conn=sqlite3.connect(str(db_path)); conn.row_factory=sqlite3.Row
     try:
-        bootstrap_campaign_schema(conn); c=get_campaign(conn,campaign_id)
+        bootstrap_campaign_schema(conn); active_campaign_duration(conn, campaign_id); c=get_campaign(conn,campaign_id)
         if not c: raise KeyError("campaign not found")
         root=Path(output_dir)/f"burnin_campaign_{campaign_id}"; root.mkdir(parents=True,exist_ok=True)
         agg=aggregate_campaign(conn,campaign_id); run_ids=agg.get("metrics",{}).get("source_run_ids",[])
@@ -470,7 +469,8 @@ def export_campaign_bundle(db_path: str|Path, output_dir: str|Path, campaign_id:
         tables={"runs.csv":"burnin_campaign_runs","observations.csv":"burnin_observations","trade_outcomes.csv":"burnin_trade_outcomes","reject_outcomes.csv":"burnin_reject_outcomes","pending_rejects.csv":"burnin_pending_reject_labels","pending_positions.csv":"burnin_pending_position_outcomes","regime_metrics.csv":"burnin_regime_metrics","execution_metrics.csv":"burnin_execution_metrics","calibration_metrics.csv":"burnin_calibration_metrics","drawdowns.csv":"burnin_drawdown_events","suspension_events.csv":"burnin_suspension_events","recovery_events.csv":"burnin_campaign_events"}
         counts={}
         for fname,table in tables.items():
-            if table in {"burnin_campaign_runs","burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes"}: rows=conn.execute(f"SELECT * FROM {table} WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
+            if table == "burnin_campaign_runs": rows=conn.execute("SELECT cr.*,r.observed_duration_seconds FROM burnin_campaign_runs cr JOIN burnin_runs r ON r.burnin_run_id=cr.burnin_run_id WHERE cr.campaign_id=? ORDER BY cr.id",(campaign_id,)).fetchall()
+            elif table in {"burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes"}: rows=conn.execute(f"SELECT * FROM {table} WHERE campaign_id=? ORDER BY id",(campaign_id,)).fetchall()
             else:
                 q=",".join("?" for _ in run_ids) or "''"; rows=conn.execute(f"SELECT * FROM {table} WHERE burnin_run_id IN ({q}) ORDER BY id",run_ids).fetchall()
             counts[fname]=len(rows); 
@@ -501,19 +501,46 @@ def _parse_utc(value: Any) -> datetime | None:
     except Exception:
         return None
 
+def active_campaign_duration(conn: Any, campaign_id: str, *, now: str | None = None, persist: bool = True) -> float:
+    """Derive accumulated attached RUNNING time from immutable continuation intervals."""
+    current = _parse_utc(now or utc_now())
+    campaign = get_campaign(conn, campaign_id)
+    if not campaign or current is None:
+        return 0.0
+    rows = _exec(conn, "SELECT burnin_run_id,status,started_at,ended_at FROM burnin_campaign_runs WHERE campaign_id=:cid ORDER BY continuation_sequence", {"cid": campaign_id}).fetchall()
+    total = 0.0
+    for raw in rows:
+        row = _row_dict(raw)
+        status = str(row.get("status") or "").upper()
+        attached = _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND burnin_run_id=:bid AND event_type='PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL' LIMIT 1", {"cid": campaign_id, "bid": row["burnin_run_id"]}).fetchone() is not None
+        eligible = status in {"RUNNING", "PAUSED", "RECOVERY_REQUIRED", "COMPLETED", "QUALIFIED", "SUSPENDED"} or (status == "FAILED" and attached)
+        start = _parse_utc(row.get("started_at"))
+        end = _parse_utc(row.get("ended_at"))
+        if status == "RUNNING" and campaign.get("campaign_status") == "RUNNING" and row["burnin_run_id"] == campaign.get("active_run_id"):
+            end = current
+        if not eligible or start is None or end is None:
+            seconds = 0.0
+        else:
+            seconds = max(0.0, (end - start).total_seconds())
+        total += seconds
+        if persist:
+            _exec(conn, "UPDATE burnin_runs SET observed_duration_seconds=:seconds WHERE burnin_run_id=:bid", {"seconds": seconds, "bid": row["burnin_run_id"]})
+    if persist:
+        _exec(conn, "UPDATE burnin_campaigns SET observed_duration_seconds=:seconds WHERE campaign_id=:cid", {"seconds": total, "cid": campaign_id})
+    return total
+
 def update_campaign_heartbeat(conn: Any, campaign_id: str) -> dict[str, Any]:
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
     now = utc_now()
-    start = _parse_utc(c.get("started_at") or c.get("created_at"))
-    cur = _parse_utc(now)
-    observed = 0.0 if start is None or cur is None else max(0.0, (cur - start).total_seconds())
-    _exec(conn, "UPDATE burnin_campaigns SET last_heartbeat_at=:now, observed_duration_seconds=COALESCE(:observed, observed_duration_seconds) WHERE campaign_id=:cid", {"cid": campaign_id, "now": now, "observed": observed})
+    observed = active_campaign_duration(conn, campaign_id, now=now)
+    _exec(conn, "UPDATE burnin_campaigns SET last_heartbeat_at=:now WHERE campaign_id=:cid", {"cid": campaign_id, "now": now})
     event(conn, campaign_id, "CAMPAIGN_HEARTBEAT", details={"observed_duration_seconds": observed})
     return {"campaign_id": campaign_id, "last_heartbeat_at": now, "observed_duration_seconds": observed}
 
 def check_campaign_completion(conn: Any, campaign_id: str) -> dict[str, Any]:
+    active_campaign_duration(conn, campaign_id)
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")

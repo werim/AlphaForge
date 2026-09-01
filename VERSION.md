@@ -1,13 +1,13 @@
 # AlphaForge Version
 
-## Burn-in canonical decision integrity (2026-08-31)
-- Current version: dev burn-in evidence-integrity patch; no table or CSV schema migration.
-- Current phase: fresh PAPER campaign verification with historical diagnostic rows preserved.
-- Runtime maturity: qualification and campaign counters separate canonical decisions from diagnostic observations through an explicit persisted discriminator and a historical compatibility rule.
-- BACKTEST/PAPER/LIVE alignment: decision and reject behavior is unchanged; only PAPER burn-in evidence denominators change.
-- Lifecycle coverage: incomplete reject geometry remains fail-closed and auditable as SIGNAL_REJECTED without becoming a second decision.
+## Burn-in evidence and continuation integrity (2026-08-31)
+- Current version: dev burn-in evidence/lifecycle patch; no table or CSV schema migration.
+- Current phase: fresh PAPER campaign verification with historical timestamps and diagnostic rows preserved.
+- Runtime maturity: qualification counts canonical decisions only, duration accumulates eligible continuation intervals only, detached successors inherit persisted release identity, and process probes are non-mutating on Windows.
+- BACKTEST/PAPER/LIVE alignment: decision and reject behavior is unchanged; corrections are limited to PAPER evidence and worker lifecycle control.
+- Lifecycle coverage: incomplete reject geometry remains fail-closed; detached successors remain STARTING until runtime attachment verifies identity; failed unattached startups add no active duration.
 - Execution realism coverage: unchanged; missing geometry remains missing and is never fabricated.
-- Known critical risks: historical non-geometry diagnostic categories without an explicit discriminator require separate identification if any exist.
+- Known critical risks: Windows command-line ownership is unavailable through the query-only handle, so worker ownership additionally depends on persisted launch time matching process creation time.
 - Last audit date: 2026-08-31. Live readiness verdict: NOT LIVE READY.
 
 ## PAPER MTF heartbeat persistence follow-up (2026-08-31)
