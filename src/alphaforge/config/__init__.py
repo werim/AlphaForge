@@ -87,6 +87,9 @@ class RuntimeSettings:
     regime_timeframe: str = "1h"
     setup_timeframe: str = "15m"
     execution_timeframe: str = "1m"
+    regime_direction_threshold: float = 0.0005
+    setup_direction_threshold: float = 0.0005
+    execution_direction_threshold: float = 0.0005
     paper_decision_timeframe: str = "1m"  # deprecated compatibility mirror
     max_abs_funding_rate_pct: float = 0.0010
     min_liquidity_usd: float = 5_000_000.0
@@ -354,6 +357,9 @@ def load_config_from_env() -> AlphaForgeConfig:
         regime_timeframe=val("ALPHAFORGE_REGIME_TIMEFRAME"),
         setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),
         execution_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
+        regime_direction_threshold=val("ALPHAFORGE_REGIME_DIRECTION_THRESHOLD"),
+        setup_direction_threshold=val("ALPHAFORGE_SETUP_DIRECTION_THRESHOLD"),
+        execution_direction_threshold=val("ALPHAFORGE_EXECUTION_DIRECTION_THRESHOLD"),
         paper_decision_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
         max_abs_funding_rate_pct=val("ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT"),
         min_liquidity_usd=val("MIN_LIQUIDITY_USD"),

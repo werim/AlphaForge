@@ -1,5 +1,25 @@
 # AlphaForge Version
 
+## PR #338 canonical reject follow-up (2026-09-01)
+- Current version: dev canonical decision/reject calibration correction; no destructive schema migration.
+- Current phase: review and CI validation before a fresh PAPER campaign.
+- Runtime maturity: only earlier canonical rows deduplicate canonical KPIs; diagnostic-first runtime ordering remains auditable and cannot suppress the decision.
+- BACKTEST/PAPER/LIVE alignment: MTF remains fail-closed; all per-layer threshold defaults remain 0.0005 and calibration never tunes them.
+- Lifecycle coverage: pending-label eligibility is based on recorded contract validation failures, with ineligible reason and integrity metrics.
+- Execution realism coverage: completed execution-strength evidence includes an overflow bucket and cost-adjusted outcomes.
+- Known critical risks: historical labels are not fabricated; local full-suite collection requires the declared Alembic dependency, unavailable from this network-restricted container.
+- Last audit date: 2026-09-01. Live readiness verdict: NOT LIVE READY.
+
+## Canonical PAPER reject calibration (2026-09-01)
+- Current version: dev canonical decision/reject calibration patch; no destructive schema migration.
+- Current phase: fresh PAPER burn-in required to collect outcome-complete MTF execution evidence.
+- Runtime maturity: decision KPIs deduplicate by reject-decision/signal identity while diagnostic evidence remains physical and exportable; pending labels are idempotent.
+- BACKTEST/PAPER/LIVE alignment: MTF remains a fail-closed PAPER gate; defaults remain 0.0005 and no threshold is auto-relaxed.
+- Lifecycle coverage: canonical rejects remain SIGNAL_REJECTED; ineligible geometry remains diagnostic rather than becoming a fabricated label.
+- Execution realism coverage: completed, cost-adjusted forward outcomes are bucketed by execution MA strength; ambiguous outcomes do not enter reject-correct denominators.
+- Known critical risks: historical campaigns are not rewritten and threshold choice still needs fresh uncensored/cost-complete evidence.
+- Last audit date: 2026-09-01. Live readiness verdict: NOT LIVE READY.
+
 ## Burn-in evidence and continuation integrity (2026-09-01)
 - Current version: dev burn-in evidence/lifecycle patch; no table or CSV schema migration.
 - Current phase: fresh PAPER campaign verification with historical timestamps and diagnostic rows preserved.

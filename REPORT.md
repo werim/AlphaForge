@@ -1,3 +1,33 @@
+# PR #338 canonical reject follow-up — 2026-09-01
+
+## Why and root cause
+The first patch used Python 3.12 f-string parsing not accepted by Python 3.11, allowed any earlier row—including a diagnostic—to suppress a later canonical decision, inferred label eligibility from diagnostic presence alone, and omitted strengths at or above 0.0005 from calibration. Production writes incomplete-geometry diagnostics before the canonical reject, so the ordering defect could erase the KPI decision.
+
+## Minimal correction and files
+`burnin.py` now requires the earlier competing row itself to satisfy the canonical discriminator and precomputes predicates at Python 3.11-sensitive call sites; `burnin_qualification.py` does the same. `burnin_campaign.py` derives ineligibility only from the pending-label contract's incomplete-geometry diagnostic plus concrete `missing_fields_json`, exposes ineligible counts/reasons and integrity issues, counts only eligible canonical labels in coverage, clamps coverage to 100%, and adds `>=0.0005` calibration overflow. `config_registry.py` binds threshold settings to the MTF provider and their behavioral test. CI compiles all `src`.
+
+## Lifecycle, persistence, export, compatibility, and migration
+Diagnostic rows remain physical, immutable, and exportable. Canonical identity priority remains reject decision, signal, then legacy observation ID. Pending labels remain uniquely idempotent; counters still advance after persistence and evidenced MTF regime provenance remains intact. No schema/CSV migration or label fabrication occurs. Threshold defaults remain 0.0005 and no calibration path changes a gate. Historical aggregates may be recomputed without rewriting source evidence.
+
+## Validation, risk, and recommendation
+Python 3.11 and current-Python whole-tree compilation pass. The requested seven-file focused suite passes 211 tests; config wiring plus new regressions pass 135 tests. Literal full-suite collection is not green locally because the declared Alembic distribution is absent and both pip and apt downloads are blocked by the environment proxy. A run excluding the primary database-doctor Alembic module reached 1,338 passed/6 skipped and showed six remaining Alembic-dependent failures plus one threshold-metadata failure that was fixed and revalidated. CI with declared dependencies must run literal `pytest -q` before PR readiness. Do not merge or infer LIVE readiness until it is green.
+
+# Canonical PAPER reject calibration — 2026-09-01
+
+## Need and root cause
+Physical observation counts were used as decision counts, so 469 diagnostic duplicates inflated 5,263 canonical rejects to 5,732. Incomplete-geometry diagnostics were written during pending-label validation; without one canonical identity contract these evidence rows could affect KPIs and appeared as missing labels. Regime was read only from top-level scanner fields, dropping available MTF regime provenance. Finally, one module constant controlled all MTF layers and was absent from campaign identity, while no completed-outcome strength report existed.
+
+## Files and behavior
+`burnin.py`, `burnin_campaign.py`, and `burnin_qualification.py` now share an identity-first canonical SQL predicate (reject decision, then signal, then legacy observation ID), preserve all diagnostic rows, and expose canonical rejects, label-eligible rejects, unique labels, and coverage. `burnin_resolver.py`'s existing unique reject-decision constraint/idempotent insert remains the exactly-once authority; diagnostic validation cannot replace or delete a valid canonical label. `runtime.py` derives regime from MTF only when that evidence exists, queues labels in the review transaction, and increments its persistence counter after success.
+
+`multi_timeframe.py`, `config/__init__.py`, and `config_registry.py` add independent regime/setup/execution thresholds with unchanged 0.0005 defaults. `burnin_campaign.py` includes them in strategy identity, so drift is explicit. Its calibration report consumes only completed market windows for `MTF_EXECUTION_NOT_CONFIRMED`, groups strength into five fixed buckets, reports TP/SL/ambiguous, cost-adjusted R, avoided loss and missed profit, and excludes ambiguous rows from reject correctness. It reports evidence only and never changes a threshold or increases trade count.
+
+## Lifecycle, persistence, export, compatibility, and migration
+No table or CSV schema migration is required. Existing rows remain immutable and exports retain diagnostics. Canonical KPI semantics change from physical rows to unique decision identities; accepted decisions retain signal identity and legacy fallback. MTF, execution, expectancy, and portfolio safety gates remain enabled and fail closed. Threshold environment changes intentionally create strategy-config drift/new campaign identity. Historical campaign aggregates should be regenerated for corrected KPIs, but historical labels are not fabricated.
+
+## Tests, risks, and recommendation
+Focused regressions cover the observed 5,732/469/5,263 case, retained diagnostics, canonical denominators, exactly-once labels, per-layer thresholds, strategy drift, and completed cost-adjusted calibration. Remaining risk is selection bias in rejected-only evidence; therefore defaults were not lowered. Merge only after review, then start a fresh PAPER burn-in to collect comparable outcome-complete evidence. Do not infer LIVE readiness.
+
 # Burn-in evidence and continuation integrity — 2026-09-01
 
 ## Need and root cause

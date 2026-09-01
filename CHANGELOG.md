@@ -1,3 +1,50 @@
+## PR #338 canonical reject follow-up — 2026-09-01
+
+### Added
+- Diagnostic-first and canonical-duplicate ordering regressions, contract-derived label-ineligibility breakdown, integrity status, and an execution-strength overflow bucket.
+- Whole-`src` compile validation in CI.
+
+### Changed
+- Canonical deduplication now considers only earlier canonical observations.
+- Label coverage uses labels belonging to eligible canonical rejects and is bounded at 100%; impossible/orphan label states are surfaced explicitly.
+
+### Fixed
+- Python 3.11-incompatible nested f-string quoting in burn-in counters and qualification.
+- Learning threshold environment metadata now names its production MTF consumer and behavioral regression.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; rows and exports remain immutable and no migration is required.
+
+### Known Issues
+- The local full suite cannot collect its Alembic tests because the declared package is absent and package download is blocked; focused burn-in coverage passes.
+
+## Canonical PAPER reject calibration — 2026-09-01
+
+### Added
+- Per-layer regime/setup/execution direction thresholds in configuration and campaign strategy identity.
+- Canonical reject-label coverage metrics and completed-outcome execution-strength calibration buckets.
+- Regression coverage for 5,732 physical / 5,263 canonical observations, idempotent labels, regime propagation, and threshold drift.
+
+### Changed
+- Decision/status/qualification denominators deduplicate canonical reject-decision or signal identities while retaining diagnostics.
+- PAPER reject regime falls back only to the evidenced MTF regime layer.
+
+### Fixed
+- Diagnostic rows can neither inflate decision KPIs nor suppress an eligible canonical pending label.
+- Runtime reject persistence counters advance after durable persistence rather than before an attempted write.
+
+### Removed
+- The single shared hardcoded threshold as the only MTF control.
+
+### Breaking Changes
+- Threshold changes now alter strategy configuration identity and require a new comparable campaign. No table migration is required.
+
+### Known Issues
+- Defaults remain 0.0005 pending cost-adjusted completed-outcome calibration; no automatic tuning is performed.
+
 ## Burn-in evidence and continuation integrity — 2026-09-01
 
 ### Added

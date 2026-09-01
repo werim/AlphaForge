@@ -135,6 +135,9 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "min_signal_score": getattr(runtime_config, "min_signal_score", None),
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
         "min_rr": getattr(runtime_config, "min_rr", None),
+        "regime_direction_threshold": getattr(runtime_config, "regime_direction_threshold", 0.0005),
+        "setup_direction_threshold": getattr(runtime_config, "setup_direction_threshold", 0.0005),
+        "execution_direction_threshold": getattr(runtime_config, "execution_direction_threshold", 0.0005),
     }
     effective_paper_slippage_bps = paper_slippage_bps if paper_slippage_bps is not None else getattr(runtime_config, "paper_slippage_bps", DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS)
     execution_cost_payload = {
@@ -428,13 +431,66 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     run_ids=[r["burnin_run_id"] if isinstance(r,dict) else r["burnin_run_id"] for r in runs]
     if not run_ids: return {"status":"NO_EVIDENCE","campaign_id":campaign_id,"run_ids":[]}
     ph=",".join([f":r{i}" for i in range(len(run_ids))]); p={f"r{i}":v for i,v in enumerate(run_ids)}
-    obs=_exec(conn,f"SELECT decision FROM burnin_observations WHERE burnin_run_id IN ({ph}) AND {canonical_decision_sql()}",p).fetchall(); trades=_exec(conn,f"SELECT * FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph})",p).fetchall(); rejects=_exec(conn,f"SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id IN ({ph})",p).fetchall()
+    obs=_exec(conn,f"SELECT decision,metrics_json FROM burnin_observations o WHERE burnin_run_id IN ({ph}) AND {canonical_decision_sql('o')}",p).fetchall(); trades=_exec(conn,f"SELECT * FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph})",p).fetchall(); rejects=_exec(conn,f"SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id IN ({ph})",p).fetchall()
     def gv(r,k): return (r[k] if isinstance(r, sqlite3.Row) else r._mapping[k])
     closed=[r for r in trades if gv(r,"closed_at") and int(gv(r,"evidence_complete") or 0)==1]
     resolved=[r for r in rejects if int(gv(r,"evidence_complete") or 0)==1]
-    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED'),"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(resolved),"ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
+    rejected_count=sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED')
+    labels=_exec(conn,"SELECT reject_decision_id FROM burnin_pending_reject_labels WHERE campaign_id=:cid",{"cid":campaign_id}).fetchall()
+    label_ids={gv(r,"reject_decision_id") for r in labels if gv(r,"reject_decision_id")}
+    unique_labels=len(label_ids)
+    diagnostic_rows=_exec(conn,f"SELECT json_extract(metrics_json,'$.reject_decision_id') AS reject_decision_id,missing_fields_json FROM burnin_observations WHERE burnin_run_id IN ({ph}) AND observation_id LIKE 'incomplete_reject_geometry_%' AND UPPER(COALESCE(json_extract(metrics_json,'$.observation_kind'),'DIAGNOSTIC'))='DIAGNOSTIC'",p).fetchall()
+    ineligible_by_reason={}
+    contract_ineligible_ids=set()
+    for row in diagnostic_rows:
+        rid=row[0]
+        try: reasons=json.loads(row[1] or "[]")
+        except (TypeError,json.JSONDecodeError): reasons=[]
+        if rid and reasons:
+            contract_ineligible_ids.add(rid)
+            for reason in sorted(set(map(str,reasons))): ineligible_by_reason[reason]=ineligible_by_reason.get(reason,0)+1
+    canonical_ids={json.loads(gv(r,"metrics_json") or "{}").get("reject_decision_id") for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED'}
+    canonical_ids.discard(None)
+    ineligible_ids=canonical_ids & contract_ineligible_ids
+    eligible_ids=canonical_ids-ineligible_ids
+    label_eligible=len(eligible_ids) if canonical_ids else rejected_count
+    eligible_labels=len(label_ids & eligible_ids) if canonical_ids else min(unique_labels,label_eligible)
+    integrity_issues=[]
+    if unique_labels > label_eligible: integrity_issues.append("UNIQUE_LABELS_EXCEED_ELIGIBLE_REJECTS")
+    orphan_labels=label_ids-canonical_ids if canonical_ids else set()
+    if orphan_labels: integrity_issues.append("LABELS_WITHOUT_CANONICAL_REJECT")
+    if label_ids & ineligible_ids: integrity_issues.append("LABELS_FOR_INELIGIBLE_REJECTS")
+    coverage=(eligible_labels/label_eligible if label_eligible else (1.0 if not eligible_labels else 0.0))
+    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(resolved),"ambiguous_rejected_forward_outcomes":sum(1 for r in rejects if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"metrics":metrics})
+    metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
+
+def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[str, Any]]:
+    """Outcome quality by observed execution strength; never selects/relaxes a gate."""
+    edges=((None,.0001,"<0.0001"),(.0001,.0002,"0.0001-0.0002"),(.0002,.0003,"0.0002-0.0003"),(.0003,.0004,"0.0003-0.0004"),(.0004,.0005,"0.0004-0.0005"),(.0005,None,">=0.0005"))
+    buckets={label:[] for _,_,label in edges}
+    rows=_exec(conn,"""SELECT o.*,p.source_provenance_json FROM burnin_reject_outcomes o
+        JOIN burnin_pending_reject_labels p ON p.reject_decision_id=substr(o.reject_outcome_id,6)
+        WHERE p.campaign_id=:cid AND o.reject_reason='MTF_EXECUTION_NOT_CONFIRMED'
+        AND json_extract(o.payload_json,'$.window_complete')=1 AND o.forward_label IS NOT NULL""",{"cid":campaign_id}).fetchall()
+    for raw in rows:
+        r=_row_dict(raw)
+        try:
+            provenance=json.loads(r.get("source_provenance_json") or "{}")
+            strength=float((((provenance.get("mtf") or {}).get("execution") or {}).get("ma_delta_strength")))
+        except (TypeError,ValueError):
+            continue
+        for low,high,label in edges:
+            if (low is None or strength>=low) and (high is None or strength<high):
+                buckets[label].append(r); break
+    result=[]
+    for _,_,label in edges:
+        rs=buckets[label]; non_amb=[r for r in rs if not int(r.get("ambiguous") or 0)]
+        correct=[r for r in non_amb if json.loads(r.get("payload_json") or "{}").get("reject_correct") is not None]
+        nets=[float(r["hypothetical_net_r_after_costs"]) for r in non_amb if r.get("hypothetical_net_r_after_costs") is not None]
+        result.append({"bucket":label,"count":len(rs),"TP_BEFORE_SL":sum(r.get("forward_label")=="TP_BEFORE_SL" for r in rs),"SL_BEFORE_TP":sum(r.get("forward_label")=="SL_BEFORE_TP" for r in rs),"ambiguous":sum(int(r.get("ambiguous") or 0) for r in rs),"reject_correct_pct":None if not correct else 100*sum(bool(json.loads(r.get("payload_json") or "{}").get("reject_correct")) for r in correct)/len(correct),"avg_hypothetical_net_r_after_costs":None if not nets else sum(nets)/len(nets),"sum_hypothetical_net_r_after_costs":sum(nets),"avoided_loss":sum(float(r.get("avoided_loss") or 0) for r in non_amb),"missed_profit":sum(float(r.get("missed_profit") or 0) for r in non_amb)})
+    return result
 
 def qualify_campaign(engine: Engine, campaign_id: str, thresholds: BurnInThresholds|None=None) -> dict[str,Any]:
     configure_sqlite_engine(engine)
