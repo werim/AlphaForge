@@ -7,7 +7,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from alphaforge.burnin import SCHEMA_VERSION, bootstrap_burnin_schema, canonical_hash, confidence_interval, utc_now, update_burnin_run_counters
+from alphaforge.burnin import SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, confidence_interval, utc_now, update_burnin_run_counters
 from alphaforge.release_gates import latest_valid_operator_ack, release_gate_status, latest_release_snapshot
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 from alphaforge.live_readiness import LiveReadinessEvaluator
@@ -98,7 +98,7 @@ class BurnInQualificationEngine:
             execm=conn.execute(text("SELECT * FROM burnin_execution_metrics WHERE burnin_run_id=:id ORDER BY id DESC LIMIT 1"),{"id":burnin_run_id}).mappings().first()
             dds=conn.execute(text("SELECT * FROM burnin_drawdown_events WHERE burnin_run_id=:id"),{"id":burnin_run_id}).mappings().all()
             derived = update_burnin_run_counters(conn, burnin_run_id)
-            obs_counts = conn.execute(text("SELECT SUM(CASE WHEN UPPER(COALESCE(decision,''))='ACCEPTED' THEN 1 ELSE 0 END) AS accepted, SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected, COUNT(*) AS samples FROM burnin_observations WHERE burnin_run_id=:id"), {"id": burnin_run_id}).mappings().first() or {}
+            obs_counts = conn.execute(text(f"SELECT SUM(CASE WHEN UPPER(COALESCE(decision,''))='ACCEPTED' THEN 1 ELSE 0 END) AS accepted, SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected, COUNT(*) AS samples FROM burnin_observations WHERE burnin_run_id=:id AND {canonical_decision_sql()}"), {"id": burnin_run_id}).mappings().first() or {}
             samples=int(obs_counts.get("samples") or 0); accepted=int(obs_counts.get("accepted") or 0); rejected_count=int(obs_counts.get("rejected") or 0); closed=len(trades)
             valid_labels={"TP_BEFORE_SL","SL_BEFORE_TP","TIMEOUT","AMBIGUOUS"}
             completed_rejects=[r for r in rejects if int(r.get("evidence_complete") or 0)==1 and str(r.get("forward_label") or "").upper() in valid_labels and r.get("hypothetical_net_r_after_costs") is not None]

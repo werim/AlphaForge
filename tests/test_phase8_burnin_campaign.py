@@ -3,8 +3,8 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 import alphaforge.burnin_campaign as campaign_module
-from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, aggregate_campaign, export_campaign_bundle, build_phase8_campaign_identity
-from alphaforge.burnin import persist_burnin_observation
+from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, aggregate_campaign, export_campaign_bundle, build_phase8_campaign_identity, active_campaign_duration
+from alphaforge.burnin import DIAGNOSTIC_OBSERVATION_KIND, persist_burnin_observation
 
 
 def test_campaign_create_start_resume_pause_and_export(tmp_path):
@@ -71,6 +71,136 @@ def _qualify(db,cid,**overrides):
 
 def _latest_blockers(db):
     conn=sqlite3.connect(db); row=conn.execute('select blockers_json from burnin_qualification_snapshots order by id desc limit 1').fetchone(); conn.close(); return json.loads(row[0])
+
+def test_campaign_qualification_excludes_29_diagnostics_from_519_decisions(tmp_path):
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    conn = sqlite3.connect(db)
+    run_id = conn.execute(
+        "SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)
+    ).fetchone()[0]
+    conn.execute("DELETE FROM burnin_observations WHERE burnin_run_id=?", (run_id,))
+    for index in range(519):
+        persist_burnin_observation(
+            conn, observation_id=f"decision_{index}", burnin_run_id=run_id,
+            release_id="relq", execution_mode="PAPER", decision="REJECTED",
+            symbol="BTCUSDT", source_provenance={"provider": "PAPER"},
+        )
+    # Deliberately omit the new discriminator to reproduce immutable campaign
+    # evidence from camp_119394d8c198138d and exercise the legacy classifier.
+    for index in range(29):
+        conn.execute(
+            "INSERT INTO burnin_observations(observation_id,burnin_run_id,release_id,"
+            "observed_at,execution_mode,symbol,decision,evidence_complete,missing_fields_json,"
+            "metrics_json,source_provenance_json,schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"incomplete_reject_geometry_{index}", run_id, "relq",
+             "2026-08-31T21:43:01Z", "PAPER", "BTCUSDT", "REJECTED", 0,
+             '["stop","target"]', '{}', '{"provider":"PAPER"}', "legacy"),
+        )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (run_id,)).fetchone()[0] == 548
+    conn.close()
+
+    thresholds = BurnInThresholds(
+        minimum_duration_seconds=0, minimum_total_decisions=520,
+        minimum_accepted_trades=0, minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0, minimum_regime_sample=1,
+        minimum_regime_coverage=1, minimum_calibration_sample=1,
+        require_operator_ack=False, require_phase1_6_gates=False,
+    )
+    engine = _engine(db)
+    try:
+        result = qualify_campaign(engine, cid, thresholds)
+    finally:
+        engine.dispose()
+    conn = sqlite3.connect(db)
+    snapshot_row = conn.execute(
+        "SELECT metrics_json,blockers_json FROM burnin_qualification_snapshots WHERE qualification_id=?",
+        (result["qualification_id"],),
+    ).fetchone()
+    metrics = json.loads(snapshot_row[0])
+    blockers = json.loads(snapshot_row[1])
+    assert metrics["sample_count"] == 519
+    assert metrics["rejected_count"] == 519
+    assert any(blocker.startswith("MINIMUM_TOTAL_DECISIONS:519<520") for blocker in blockers)
+    assert conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (f"{cid}__aggregate",)).fetchone()[0] == 548
+    conn.close()
+
+def test_explicit_diagnostic_kind_is_persisted_but_not_counted(tmp_path):
+    db=tmp_path/'explicit.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-explicit',duration_days=1,symbols=['BTCUSDT'],intervals=['1h'])
+    run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_burnin_observation(conn, observation_id='canonical', burnin_run_id=run['burnin_run_id'], release_id='rel-explicit', execution_mode='PAPER', decision='REJECTED')
+    persist_burnin_observation(conn, observation_id='audit-without-legacy-prefix', burnin_run_id=run['burnin_run_id'], release_id='rel-explicit', execution_mode='PAPER', decision='REJECTED', observation_kind=DIAGNOSTIC_OBSERVATION_KIND)
+    conn.commit()
+    aggregate=aggregate_campaign(conn,camp.campaign_id)
+    assert aggregate['metrics']['sample_count'] == 1
+    assert aggregate['metrics']['rejected_count'] == 1
+    assert conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=?", (run['burnin_run_id'],)).fetchone()[0] == 2
+    assert json.loads(conn.execute("SELECT metrics_json FROM burnin_observations WHERE observation_id='audit-without-legacy-prefix'").fetchone()[0])['observation_kind'] == 'DIAGNOSTIC'
+    conn.close()
+
+def test_active_duration_excludes_pause_gap_and_unattached_failed_startup(tmp_path, monkeypatch):
+    db=tmp_path/'duration.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='duration-release',duration_days=1,symbols=[],intervals=[])
+    runs=[start_or_resume_campaign(conn,camp.campaign_id)]
+    runs.append(start_or_resume_campaign(conn,camp.campaign_id,resume=True))
+    runs.append(start_or_resume_campaign(conn,camp.campaign_id,resume=True))
+    intervals=[
+        ('PAUSED','2026-08-31T00:00:00Z','2026-08-31T02:43:10Z'),
+        ('FAILED','2026-08-31T15:00:00Z','2026-08-31T15:00:01Z'),
+        ('RUNNING','2026-08-31T15:00:10Z',None),
+    ]
+    for run, (status, started, ended) in zip(runs, intervals):
+        conn.execute("UPDATE burnin_campaign_runs SET status=?,started_at=?,ended_at=? WHERE burnin_run_id=?", (status,started,ended,run['burnin_run_id']))
+        conn.execute("UPDATE burnin_runs SET status=?,start_time=?,end_time=? WHERE burnin_run_id=?", (status,started,ended,run['burnin_run_id']))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RUNNING',active_run_id=? WHERE campaign_id=?", (runs[2]['burnin_run_id'],camp.campaign_id))
+    observed=active_campaign_duration(conn,camp.campaign_id,now='2026-08-31T15:01:10Z')
+    assert observed == pytest.approx(9850.0)
+    assert observed != pytest.approx(54000.0, abs=1000)
+    assert conn.execute("SELECT observed_duration_seconds FROM burnin_runs WHERE burnin_run_id=?", (runs[1]['burnin_run_id'],)).fetchone()[0] == 0
+    monkeypatch.setattr(campaign_module, 'utc_now', lambda: '2026-08-31T15:01:10Z')
+    assert aggregate_campaign(conn,camp.campaign_id)['metrics']['observed_duration_seconds'] == pytest.approx(9850.0)
+    conn.commit()
+    conn.close()
+    engine=_engine(db)
+    try:
+        result=qualify_campaign(engine,camp.campaign_id,BurnInThresholds(minimum_duration_seconds=9851,minimum_total_decisions=0,minimum_accepted_trades=0,minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_sample=0,minimum_regime_coverage=0,minimum_calibration_sample=0,require_operator_ack=False,require_phase1_6_gates=False))
+    finally:
+        engine.dispose()
+    conn=sqlite3.connect(db)
+    metrics_json, blockers_json=conn.execute("SELECT metrics_json,blockers_json FROM burnin_qualification_snapshots WHERE qualification_id=?",(result['qualification_id'],)).fetchone()
+    assert json.loads(metrics_json)['observed_duration_seconds'] == pytest.approx(9850.0)
+    assert 'MINIMUM_DURATION:9850.0<9851' in json.loads(blockers_json)
+    conn.close()
+    bundle=export_campaign_bundle(db,tmp_path/'duration-export',camp.campaign_id)
+    with open(f"{bundle['output_dir']}/runs.csv", newline='') as handle:
+        exported={row['burnin_run_id']:float(row['observed_duration_seconds']) for row in __import__('csv').DictReader(handle)}
+    assert exported[runs[0]['burnin_run_id']] == pytest.approx(9790.0)
+    assert exported[runs[1]['burnin_run_id']] == 0.0
+    assert exported[runs[2]['burnin_run_id']] == pytest.approx(60.0)
+
+def test_active_duration_starts_at_operational_attachment_not_run_creation(tmp_path, monkeypatch):
+    db=tmp_path/'operational-duration.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='operational-release',duration_days=1,symbols=[],intervals=[])
+    run=start_or_resume_campaign(conn,camp.campaign_id)
+    conn.execute("UPDATE burnin_campaign_runs SET status='PAUSED',started_at='2026-09-01T10:00:00Z',ended_at='2026-09-01T11:05:00Z' WHERE burnin_run_id=?",(run['burnin_run_id'],))
+    conn.execute("UPDATE burnin_runs SET status='PAUSED',start_time='2026-09-01T10:00:00Z',end_time='2026-09-01T11:05:00Z' WHERE burnin_run_id=?",(run['burnin_run_id'],))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED' WHERE campaign_id=?",(camp.campaign_id,))
+    conn.execute("INSERT INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES(?,?,?,?,?,?,?)",('operational-event',camp.campaign_id,run['burnin_run_id'],'PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL','2026-09-01T10:05:00Z','{}','test'))
+    assert active_campaign_duration(conn,camp.campaign_id,now='2026-09-01T12:00:00Z') == pytest.approx(3600.0)
+    conn.close()
+
+def test_start_resume_blocks_duplicate_when_live_worker_identity_is_unavailable(tmp_path, monkeypatch):
+    import alphaforge.burnin_campaign as module
+    db=tmp_path/'mac-worker.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='mac-release',duration_days=1,symbols=[],intervals=[])
+    start_or_resume_campaign(conn,camp.campaign_id)
+    conn.execute("UPDATE burnin_campaigns SET worker_pid=99,worker_started_at='2026-09-01T00:00:00Z' WHERE campaign_id=?",(camp.campaign_id,)); conn.commit()
+    monkeypatch.setattr(module, 'process_is_alive', lambda *_args, **_kwargs: True)
+    with pytest.raises(RuntimeError, match='WORKER_SHUTDOWN_IN_PROGRESS'):
+        start_or_resume_campaign(conn,camp.campaign_id,resume=True)
+    assert conn.execute("SELECT COUNT(*) FROM burnin_campaign_runs WHERE campaign_id=?",(camp.campaign_id,)).fetchone()[0] == 1
+    conn.close()
 
 def test_campaign_negative_material_regime_blocks(tmp_path):
     db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
@@ -189,6 +319,9 @@ def test_qualification_is_observation_gated_after_initial_snapshot(tmp_path):
     runner._last_qualification_monotonic = 0
     with engine.begin() as conn:
         conn.execute(text("UPDATE burnin_campaigns SET latest_qualification_id='existing', target_decisions=500, target_closed_trades=30, target_reject_forward_outcomes=50 WHERE campaign_id=:cid"), {"cid": cid})
+        run_id=conn.execute(text("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=:cid"),{"cid":cid}).scalar_one()
+        for index in range(25):
+            persist_burnin_observation(conn,observation_id=f'cadence-diagnostic-{index}',burnin_run_id=run_id,release_id='relq',execution_mode='PAPER',decision='REJECTED',observation_kind=DIAGNOSTIC_OBSERVATION_KIND)
     try:
         assert runner._qualification_due() is False
     finally:
@@ -430,16 +563,39 @@ def test_cli_detached_start_launches_live_subprocess_and_persists_pid(monkeypatc
     from alphaforge import burnin_cli
     db=tmp_path/'detach_cli.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='reldet',duration_days=1,symbols=[],intervals=[]); conn.commit(); conn.close()
+    monkeypatch.setenv('ALPHAFORGE_RELEASE_ID', 'conflicting-shell-release')
     launched={}
     class Proc:
         pid=43210
         def poll(self): return None
-    def fake_popen(cmd, **kw): launched['cmd']=cmd; return Proc()
+    def fake_popen(cmd, **kw): launched['cmd']=cmd; launched['env']=kw['env']; return Proc()
     monkeypatch.setattr(burnin_cli.subprocess, 'Popen', fake_popen)
     assert burnin_cli.main(['--db', str(db), 'start', '--campaign-id', camp.campaign_id, '--detach']) == 0
     assert str(db) in launched['cmd'] and 'worker' in launched['cmd']
+    assert launched['env']['ALPHAFORGE_RELEASE_ID'] == 'reldet'
     conn=sqlite3.connect(db); row=conn.execute('select worker_pid,campaign_status from burnin_campaigns where campaign_id=?',(camp.campaign_id,)).fetchone(); runs=conn.execute('select count(*) from burnin_campaign_runs').fetchone()[0]; conn.close()
-    assert row == (43210,'RUNNING') and runs == 1
+    assert row == (43210,'STARTING') and runs == 1
+
+def test_cli_detached_resume_propagates_persisted_release_without_parent_env(monkeypatch, tmp_path):
+    from alphaforge import burnin_cli
+    db=tmp_path/'resume_release.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='3108T03',duration_days=1,symbols=[],intervals=[])
+    start_or_resume_campaign(conn,camp.campaign_id); pause_campaign(conn,camp.campaign_id); conn.commit(); conn.close()
+    monkeypatch.delenv('ALPHAFORGE_RELEASE_ID', raising=False)
+    captured={}
+    class Proc:
+        pid=43211
+        returncode=None
+        def poll(self): return None
+    def fake_popen(_cmd, **kwargs): captured.update(kwargs['env']); return Proc()
+    monkeypatch.setattr(burnin_cli.subprocess, 'Popen', fake_popen)
+    monkeypatch.setattr(burnin_cli.time, 'sleep', lambda _: None)
+    assert burnin_cli.main(['--db',str(db),'resume','--campaign-id',camp.campaign_id,'--detach']) == 0
+    assert captured['ALPHAFORGE_RELEASE_ID'] == '3108T03'
+    conn=sqlite3.connect(db)
+    campaign_status, run_release, run_status = conn.execute("SELECT c.campaign_status,r.release_id,r.status FROM burnin_campaigns c JOIN burnin_runs r ON r.burnin_run_id=c.active_run_id WHERE c.campaign_id=?", (camp.campaign_id,)).fetchone()
+    conn.close()
+    assert (campaign_status,run_release,run_status) == ('STARTING','3108T03','STARTING')
 
 
 def test_worker_default_runtime_factory_starts_real_builder(monkeypatch, tmp_path):

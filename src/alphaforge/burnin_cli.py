@@ -33,7 +33,22 @@ def _launch_detached_worker(db: str, campaign_id: str) -> dict[str, object]:
     cmd=[sys.executable, '-m', 'alphaforge.burnin_cli', '--db', db, 'worker', '--campaign-id', campaign_id]
     root=Path("artifacts") / "burnin" / campaign_id; root.mkdir(parents=True, exist_ok=True)
     stdout=(root / "worker.stdout.log").open("ab", buffering=0); stderr=(root / "worker.stderr.log").open("ab", buffering=0)
-    try: proc=subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env={**os.environ, "ALPHAFORGE_BURNIN_DATABASE_PATH": str(Path(db).expanduser().resolve())})
+    conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    try:
+        bootstrap_campaign_schema(conn)
+        campaign=get_campaign(conn, campaign_id)
+        if not campaign:
+            raise KeyError("campaign not found")
+        release_id=str(campaign["release_id"])
+        run_id=str(campaign["active_run_id"])
+        conn.execute("UPDATE burnin_campaigns SET campaign_status='STARTING' WHERE campaign_id=? AND active_run_id=?", (campaign_id, run_id))
+        conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE campaign_id=? AND burnin_run_id=? AND status='RUNNING'", (campaign_id, run_id))
+        conn.execute("UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=? AND status='RUNNING'", (run_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    child_env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER", "ALPHAFORGE_BURNIN_DATABASE_PATH": str(Path(db).expanduser().resolve())}
+    try: proc=subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env=child_env)
     finally: stdout.close(); stderr.close()
     time.sleep(0.2)
     if proc.poll() is not None:
@@ -43,9 +58,9 @@ def _launch_detached_worker(db: str, campaign_id: str) -> dict[str, object]:
     try:
         bootstrap_campaign_schema(conn)
         now=__import__('alphaforge.burnin').burnin.utc_now()
-        conn.execute("UPDATE burnin_campaigns SET worker_pid=?, worker_started_at=?, campaign_status='RUNNING' WHERE campaign_id=?", (proc.pid, now, campaign_id)); conn.commit()
+        conn.execute("UPDATE burnin_campaigns SET worker_pid=?, worker_started_at=? WHERE campaign_id=? AND campaign_status='STARTING'", (proc.pid, now, campaign_id)); conn.commit()
     finally: conn.close()
-    return {'status':'DETACHED','campaign_id':campaign_id,'worker_pid':proc.pid,'db':db}
+    return {'status':'DETACHED_STARTING','campaign_id':campaign_id,'worker_pid':proc.pid,'db':db,'release_id':release_id}
 
 def main(argv=None) -> int:
     ap=argparse.ArgumentParser(prog='python -m alphaforge.burnin_cli')

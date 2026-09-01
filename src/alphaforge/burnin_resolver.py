@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, math, sqlite3, uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping, Sequence
-from alphaforge.burnin import canonical_hash, persist_burnin_reject_outcome, persist_burnin_trade_outcome, persist_burnin_observation, utc_now, CRITICAL_COST_FIELDS
+from alphaforge.burnin import DIAGNOSTIC_OBSERVATION_KIND, canonical_hash, persist_burnin_reject_outcome, persist_burnin_trade_outcome, persist_burnin_observation, utc_now, CRITICAL_COST_FIELDS
 from alphaforge.burnin_campaign import CAMPAIGN_SCHEMA_VERSION, bootstrap_campaign_schema, _exec
 
 
@@ -53,7 +53,7 @@ def persist_pending_reject_label(conn: Any, *, campaign_id: str, burnin_run_id: 
     if timeframe is not None and interval_seconds is None: missing.append("timeframe")
     if missing:
         row=_exec(conn,"SELECT release_id FROM burnin_runs WHERE burnin_run_id=:bid",{"bid":burnin_run_id}).fetchone(); release_id=row[0] if row else "UNKNOWN"
-        persist_burnin_observation(conn,observation_id="incomplete_reject_geometry_"+canonical_hash({"reject_decision_id":reject_decision_id})[:20],burnin_run_id=burnin_run_id,release_id=release_id,execution_mode="PAPER",observed_at=decision_timestamp or utc_now(),symbol=symbol,interval=timeframe,regime=regime or "UNKNOWN",decision="REJECTED",lifecycle_state="SIGNAL_REJECTED",metrics={"reject_decision_id":reject_decision_id,"reject_reason":reject_reason,"campaign_id":campaign_id},source_provenance=source_provenance,missing_fields=sorted(set(missing)))
+        persist_burnin_observation(conn,observation_id="incomplete_reject_geometry_"+canonical_hash({"reject_decision_id":reject_decision_id})[:20],burnin_run_id=burnin_run_id,release_id=release_id,execution_mode="PAPER",observed_at=decision_timestamp or utc_now(),symbol=symbol,interval=timeframe,regime=regime or "UNKNOWN",decision="REJECTED",lifecycle_state="SIGNAL_REJECTED",metrics={"reject_decision_id":reject_decision_id,"reject_reason":reject_reason,"campaign_id":campaign_id},source_provenance=source_provenance,missing_fields=sorted(set(missing)),observation_kind=DIAGNOSTIC_OBSERVATION_KIND)
         return None
     due_at=datetime.fromtimestamp(_dt(decision_timestamp).timestamp()+float(horizon_seconds),timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
     pid="prej_"+canonical_hash({"reject_decision_id":reject_decision_id})[:20]

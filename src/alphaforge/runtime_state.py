@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 
 from alphaforge.contracts import canonical_utc_timestamp
 from alphaforge.schema_doctor import ExposureStateError, exposure_count
+from alphaforge.process_liveness import process_is_alive
 
 
 def build_readonly_reconciliation_probe(provider: Any | None) -> Any:
@@ -239,20 +240,8 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
                 err = f"campaign:{type(exc).__name__}:{exc}"
                 query_errors.append(err); campaign_state_query_errors.append(err); availability["campaign_state_available"] = False
     if latest and latest.get("process_id"):
-        try:
-            pid = int(latest["process_id"]); os.kill(pid, 0)
-            # PID existence alone is not lineage evidence: Linux exposes a
-            # command line cheaply; an unrelated reused PID is non-blocking.
-            cmdline_path = f"/proc/{pid}/cmdline"
-            if os.path.exists(cmdline_path):
-                cmdline = open(cmdline_path, "rb").read().decode("utf-8", "replace").replace("\x00", " ").lower()
-                expected = (not latest.get("campaign_id")) or ("alphaforge" in cmdline and str(latest["campaign_id"]).lower() in cmdline)
-                process_alive = expected
-            else:
-                # On platforms without process inspection, only fail closed if
-                # the snapshot has matching campaign lineage.
-                process_alive = bool(latest.get("campaign_id") and latest.get("campaign_id") == campaign_id)
-        except (OSError, ValueError): pass
+        expected = ("alphaforge", str(latest["campaign_id"])) if latest.get("campaign_id") else ()
+        process_alive = process_is_alive(latest["process_id"], expected_command_parts=expected)
     prior_unclean = bool(latest and str(latest.get("runtime_status") or "").upper() not in clean_statuses)
     prior_campaign = (latest or {}).get("campaign_id")
     same_campaign = bool(campaign_id and prior_campaign and campaign_id == prior_campaign)
