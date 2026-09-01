@@ -1,3 +1,19 @@
+# Canonical PAPER reject calibration — 2026-09-01
+
+## Need and root cause
+Physical observation counts were used as decision counts, so 469 diagnostic duplicates inflated 5,263 canonical rejects to 5,732. Incomplete-geometry diagnostics were written during pending-label validation; without one canonical identity contract these evidence rows could affect KPIs and appeared as missing labels. Regime was read only from top-level scanner fields, dropping available MTF regime provenance. Finally, one module constant controlled all MTF layers and was absent from campaign identity, while no completed-outcome strength report existed.
+
+## Files and behavior
+`burnin.py`, `burnin_campaign.py`, and `burnin_qualification.py` now share an identity-first canonical SQL predicate (reject decision, then signal, then legacy observation ID), preserve all diagnostic rows, and expose canonical rejects, label-eligible rejects, unique labels, and coverage. `burnin_resolver.py`'s existing unique reject-decision constraint/idempotent insert remains the exactly-once authority; diagnostic validation cannot replace or delete a valid canonical label. `runtime.py` derives regime from MTF only when that evidence exists, queues labels in the review transaction, and increments its persistence counter after success.
+
+`multi_timeframe.py`, `config/__init__.py`, and `config_registry.py` add independent regime/setup/execution thresholds with unchanged 0.0005 defaults. `burnin_campaign.py` includes them in strategy identity, so drift is explicit. Its calibration report consumes only completed market windows for `MTF_EXECUTION_NOT_CONFIRMED`, groups strength into five fixed buckets, reports TP/SL/ambiguous, cost-adjusted R, avoided loss and missed profit, and excludes ambiguous rows from reject correctness. It reports evidence only and never changes a threshold or increases trade count.
+
+## Lifecycle, persistence, export, compatibility, and migration
+No table or CSV schema migration is required. Existing rows remain immutable and exports retain diagnostics. Canonical KPI semantics change from physical rows to unique decision identities; accepted decisions retain signal identity and legacy fallback. MTF, execution, expectancy, and portfolio safety gates remain enabled and fail closed. Threshold environment changes intentionally create strategy-config drift/new campaign identity. Historical campaign aggregates should be regenerated for corrected KPIs, but historical labels are not fabricated.
+
+## Tests, risks, and recommendation
+Focused regressions cover the observed 5,732/469/5,263 case, retained diagnostics, canonical denominators, exactly-once labels, per-layer thresholds, strategy drift, and completed cost-adjusted calibration. Remaining risk is selection bias in rejected-only evidence; therefore defaults were not lowered. Merge only after review, then start a fresh PAPER burn-in to collect comparable outcome-complete evidence. Do not infer LIVE readiness.
+
 # Burn-in evidence and continuation integrity — 2026-09-01
 
 ## Need and root cause

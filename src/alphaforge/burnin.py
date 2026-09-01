@@ -28,7 +28,21 @@ def canonical_decision_sql(alias: str = "") -> str:
         f"CASE WHEN {observation_id} LIKE 'incomplete_reject_geometry_%' "
         f"THEN '{DIAGNOSTIC_OBSERVATION_KIND}' ELSE '{CANONICAL_DECISION_KIND}' END"
     )
-    return f"UPPER(COALESCE({explicit_kind}, {legacy_kind})) = '{CANONICAL_DECISION_KIND}'"
+    kind = f"UPPER(COALESCE({explicit_kind}, {legacy_kind})) = '{CANONICAL_DECISION_KIND}'"
+    # A decision is identified by reject_decision_id first, then signal_id.  The
+    # observation id is only a final fallback for legacy accepted observations.
+    # Keep the earliest physical row as the KPI row while retaining every row as
+    # evidence in burnin_observations.
+    table_alias = alias or "burnin_observations"
+    identity = (f"COALESCE(json_extract({metrics}, '$.reject_decision_id'), "
+                f"json_extract({metrics}, '$.signal_id'), {observation_id})")
+    other_metrics = "canonical_other.metrics_json"
+    other_identity = (f"COALESCE(json_extract({other_metrics}, '$.reject_decision_id'), "
+                      f"json_extract({other_metrics}, '$.signal_id'), canonical_other.observation_id)")
+    unique = ("NOT EXISTS (SELECT 1 FROM burnin_observations canonical_other "
+              f"WHERE canonical_other.burnin_run_id={table_alias}.burnin_run_id "
+              f"AND {other_identity}={identity} AND canonical_other.id<{table_alias}.id)")
+    return f"({kind}) AND ({unique})"
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -163,7 +177,7 @@ def update_burnin_run_counters(conn: Any, burnin_run_id: str, *, status: str | N
     mapping = row._mapping if hasattr(row, "_mapping") else row
     start_time = mapping["start_time"] if hasattr(mapping, "__getitem__") else None
     phase = str(mapping["phase"] if hasattr(mapping, "__getitem__") else "").upper()
-    obs = conn.execute(_sa_text(f"SELECT decision, evidence_complete, observed_at FROM burnin_observations WHERE burnin_run_id=:bid AND {canonical_decision_sql()}"), {"bid": burnin_run_id}).fetchall()
+    obs = conn.execute(_sa_text(f"SELECT decision, evidence_complete, observed_at FROM burnin_observations o WHERE burnin_run_id=:bid AND {canonical_decision_sql("o")}"), {"bid": burnin_run_id}).fetchall()
     trades = conn.execute(_sa_text("SELECT evidence_complete, closed_at FROM burnin_trade_outcomes WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchall()
     rejects = conn.execute(_sa_text("SELECT evidence_complete, forward_label FROM burnin_reject_outcomes WHERE burnin_run_id=:bid"), {"bid": burnin_run_id}).fetchall()
     def val(r, key):

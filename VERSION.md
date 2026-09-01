@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+## Canonical PAPER reject calibration (2026-09-01)
+- Current version: dev canonical decision/reject calibration patch; no destructive schema migration.
+- Current phase: fresh PAPER burn-in required to collect outcome-complete MTF execution evidence.
+- Runtime maturity: decision KPIs deduplicate by reject-decision/signal identity while diagnostic evidence remains physical and exportable; pending labels are idempotent.
+- BACKTEST/PAPER/LIVE alignment: MTF remains a fail-closed PAPER gate; defaults remain 0.0005 and no threshold is auto-relaxed.
+- Lifecycle coverage: canonical rejects remain SIGNAL_REJECTED; ineligible geometry remains diagnostic rather than becoming a fabricated label.
+- Execution realism coverage: completed, cost-adjusted forward outcomes are bucketed by execution MA strength; ambiguous outcomes do not enter reject-correct denominators.
+- Known critical risks: historical campaigns are not rewritten and threshold choice still needs fresh uncensored/cost-complete evidence.
+- Last audit date: 2026-09-01. Live readiness verdict: NOT LIVE READY.
+
 ## Burn-in evidence and continuation integrity (2026-09-01)
 - Current version: dev burn-in evidence/lifecycle patch; no table or CSV schema migration.
 - Current phase: fresh PAPER campaign verification with historical timestamps and diagnostic rows preserved.

@@ -1,3 +1,27 @@
+## Canonical PAPER reject calibration — 2026-09-01
+
+### Added
+- Per-layer regime/setup/execution direction thresholds in configuration and campaign strategy identity.
+- Canonical reject-label coverage metrics and completed-outcome execution-strength calibration buckets.
+- Regression coverage for 5,732 physical / 5,263 canonical observations, idempotent labels, regime propagation, and threshold drift.
+
+### Changed
+- Decision/status/qualification denominators deduplicate canonical reject-decision or signal identities while retaining diagnostics.
+- PAPER reject regime falls back only to the evidenced MTF regime layer.
+
+### Fixed
+- Diagnostic rows can neither inflate decision KPIs nor suppress an eligible canonical pending label.
+- Runtime reject persistence counters advance after durable persistence rather than before an attempted write.
+
+### Removed
+- The single shared hardcoded threshold as the only MTF control.
+
+### Breaking Changes
+- Threshold changes now alter strategy configuration identity and require a new comparable campaign. No table migration is required.
+
+### Known Issues
+- Defaults remain 0.0005 pending cost-adjusted completed-outcome calibration; no automatic tuning is performed.
+
 ## Burn-in evidence and continuation integrity — 2026-09-01
 
 ### Added

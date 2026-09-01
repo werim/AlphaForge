@@ -17,7 +17,7 @@ MTF_REJECT_REASONS = (
 )
 
 _TF_SECONDS = {"1m": 60, "15m": 900, "1h": 3600}
-_DIRECTION_THRESHOLDS = {"1m": 0.0005, "15m": 0.0005, "1h": 0.0005}
+DEFAULT_DIRECTION_THRESHOLD = 0.0005
 
 
 def _iso(ms: int) -> str:
@@ -55,8 +55,8 @@ def _direction(candles: list[dict[str, Any]], fast: int, slow: int, *,
     return ("LONG" if delta > 0 else "SHORT"), abs(delta)
 
 
-def build_regime_context(candles: list[dict[str, Any]], timeframe: str) -> dict[str, Any]:
-    threshold = _DIRECTION_THRESHOLDS.get(timeframe, 0.0005)
+def build_regime_context(candles: list[dict[str, Any]], timeframe: str, *, direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD) -> dict[str, Any]:
+    threshold = float(direction_threshold)
     direction, strength = _direction(candles, 8, 20, neutral_threshold=threshold)
     complete = direction not in {"UNKNOWN", "NEUTRAL"}
     returns = [abs(float(candles[i]["close"]) / float(candles[i-1]["close"]) - 1)
@@ -71,8 +71,8 @@ def build_regime_context(candles: list[dict[str, Any]], timeframe: str) -> dict[
             "evidence_status": "COMPLETE" if complete else "INCOMPLETE"}
 
 
-def build_setup_context(candles: list[dict[str, Any]], timeframe: str) -> dict[str, Any]:
-    threshold = _DIRECTION_THRESHOLDS.get(timeframe, 0.0005)
+def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *, direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD) -> dict[str, Any]:
+    threshold = float(direction_threshold)
     direction, quality = _direction(candles, 5, 12, neutral_threshold=threshold)
     complete = direction in {"LONG", "SHORT"} and len(candles) >= 12
     last = candles[-1] if candles else None
@@ -91,8 +91,8 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str) -> dict[s
             "evidence_status": "COMPLETE" if complete else "INCOMPLETE"}
 
 
-def build_execution_context(candles: list[dict[str, Any]], timeframe: str, market: Mapping[str, Any]) -> dict[str, Any]:
-    threshold = _DIRECTION_THRESHOLDS.get(timeframe, 0.0005)
+def build_execution_context(candles: list[dict[str, Any]], timeframe: str, market: Mapping[str, Any], *, direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD) -> dict[str, Any]:
+    threshold = float(direction_threshold)
     direction, strength = _direction(candles, 2, 5, neutral_threshold=threshold)
     last = candles[-1] if candles else None
     trigger = direction in {"LONG", "SHORT"} and len(candles) >= 5
@@ -155,6 +155,9 @@ def evaluate_mtf_alignment(regime: Mapping[str, Any] | None, setup: Mapping[str,
 class BinanceMTFProvider:
     base_url: str = "https://fapi.binance.com"
     timeout_sec: float = 2.0
+    regime_direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD
+    setup_direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD
+    execution_direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD
     _cache: dict[tuple[str, str, int, str], dict[str, Any]] = field(default_factory=dict)
 
     def _fetch(self, symbol: str, timeframe: str) -> Any:
@@ -176,11 +179,11 @@ class BinanceMTFProvider:
             values = dict(await asyncio.gather(*(one(layer, tf) for layer, tf in layers)))
         except Exception:
             values = {}
-        regime = build_regime_context(values.get("regime", []), regime_timeframe)
-        setup = build_setup_context(values.get("setup", []), setup_timeframe)
+        regime = build_regime_context(values.get("regime", []), regime_timeframe, direction_threshold=self.regime_direction_threshold)
+        setup = build_setup_context(values.get("setup", []), setup_timeframe, direction_threshold=self.setup_direction_threshold)
         # Runtime's canonical execution builder owns normalization and modelling.
         # Do not re-read raw scanner aliases or manufacture a second cost model.
-        execution = build_execution_context(values.get("execution", []), execution_timeframe, execution_ctx)
+        execution = build_execution_context(values.get("execution", []), execution_timeframe, execution_ctx, direction_threshold=self.execution_direction_threshold)
         alignment = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=decision_ts_ms)
         return {"regime": regime, "setup": setup, "execution": execution, "alignment": alignment,
                 "decision_timestamp": _iso(decision_ts_ms), "provider": "BINANCE_FUTURES_CLOSED_KLINES"}
