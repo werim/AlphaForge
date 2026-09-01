@@ -1,5 +1,16 @@
 # AlphaForge Version
 
+## PAPER closed-candle geometry integrity (2026-09-01)
+- Current version: dev post-PR338 invalid-geometry contamination correction; no schema migration.
+- Current phase: review, CI validation, then a fresh PAPER campaign.
+- Runtime maturity: enriched Binance 1m candidates fail closed before MTF/scoring when geometry is not COMPLETE; decisions use stable symbol/source/timeframe/closed-candle identity.
+- BACKTEST/PAPER/LIVE alignment: the production PAPER enrichment path is corrected; legacy unenriched test/backtest paths remain compatible and thresholds are unchanged.
+- Lifecycle coverage: invalid geometry records SIGNAL_CREATED -> SIGNAL_REJECTED with its provider reason and cannot enqueue a forward label.
+- Execution realism coverage: missing geometry leaves side/stop/target/RR null; no synthetic 2.0 RR remains in signal construction.
+- Known critical risks: historical contaminated evidence remains immutable and must not qualify the new behavior; provider candle availability remains external; local full pytest lacks the declared Alembic package and CI must validate those migration tests.
+- Last audit date: 2026-09-01. Live readiness verdict: NOT LIVE READY.
+- Merge-blocker follow-up: identity-less provider/data failures are idempotent `DIAGNOSTIC` observations, not canonical market rejects; identified invalid candles retain one canonical reject per candle, including across runtime restarts. In-memory candle suppression is bounded to one latest timestamp per market key.
+
 ## PR #338 canonical reject follow-up (2026-09-01)
 - Current version: dev canonical decision/reject calibration correction; no destructive schema migration.
 - Current phase: review and CI validation before a fresh PAPER campaign.

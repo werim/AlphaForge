@@ -137,6 +137,8 @@ def test_binance_closed_1m_candles_supply_canonical_trade_geometry(monkeypatch: 
     assert btc["tp"] == pytest.approx(100.0 + 3.0 * (1.2 + 8.0 / 99.0))
     assert btc["rr"] == pytest.approx(1.2 + 8.0 / 99.0)
     assert btc["setup_type"] == "BREAKOUT_UP"
+    assert btc["geometry_status"] == "COMPLETE"
+    assert btc["execution_candle_open_ts"] == 60_000
 
 
 def test_binance_invalid_or_missing_range_does_not_fabricate_geometry(monkeypatch: pytest.MonkeyPatch) -> None:

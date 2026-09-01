@@ -4564,3 +4564,29 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - LIVE remains not production-authorized; no safety or reconciliation behavior changed.
+## PAPER closed-candle geometry integrity — 2026-09-01
+
+### Added
+- A pre-MTF/scoring fail-closed gate for incomplete enriched PAPER Binance 1m geometry.
+- Stable per-symbol/source/timeframe/closed-candle decision identity and regression coverage.
+
+### Changed
+- Missing RR remains null during signal construction instead of defaulting to 2.0.
+
+### Fixed
+- Invalid geometry can no longer become a score-threshold reject or a forward-label candidate.
+- Repeated scans of one closed 1m candle no longer inflate canonical decisions; the next candle remains eligible.
+
+### Removed
+- Synthetic side/stop/target/RR evidence from invalid-geometry reject handling.
+
+### Breaking Changes
+- None; no schema or destructive data migration is required.
+
+### Known Issues
+- Existing contaminated PAPER rows remain immutable; a fresh post-merge PAPER campaign is required. Local Alembic-dependent tests require CI's declared dependency environment.
+
+### PR #339 Merge-blocker Fix
+- Identity-less geometry provider failures now persist as bounded, SQL-idempotent diagnostic observations and do not count as canonical accepted/rejected decisions.
+- Identified invalid candles retain stable canonical reject identity across runtime restarts.
+- Runtime candle polling suppression now stores only the latest timestamp per market key instead of an unbounded historical set.

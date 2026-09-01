@@ -32,7 +32,7 @@ from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import init_db
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
-from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
+from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
@@ -271,6 +271,7 @@ class RuntimeOrchestrator:
     _burnin_run_id: str | None = field(default=None, init=False)
     _burnin_evidence_incomplete: bool = field(default=False, init=False)
     _burnin_suspended: bool = field(default=False, init=False)
+    _latest_execution_candle_by_market: dict[tuple[str, str, str], Any] = field(default_factory=dict, init=False)
     _last_burnin_snapshot_ts: float = field(default=0.0, init=False)
     _recovery_decision: dict[str, Any] = field(default_factory=dict, init=False)
     _qualification_samples: tuple[dict[str, Any], ...] = field(default_factory=lambda: (
@@ -1267,7 +1268,13 @@ class RuntimeOrchestrator:
             inputs = symbol_result.diagnostics.get("inputs", {})
             self._assert_campaign_candidate(symbol_result.symbol, inputs.get("source_exchange"),
                                             "BEFORE_PROCESS_SYMBOL")
+            candle_key = self._execution_candle_market_key(symbol_result.symbol, inputs)
+            candle_ts = inputs.get("execution_candle_open_ts")
+            if candle_key is not None and self._latest_execution_candle_by_market.get(candle_key) == candle_ts:
+                continue
             await self._process_symbol(symbol_result)
+            if candle_key is not None:
+                self._latest_execution_candle_by_market[candle_key] = candle_ts
 
     def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
         """Fail closed and durably diagnose an attached-campaign scope violation."""
@@ -1309,6 +1316,31 @@ class RuntimeOrchestrator:
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
         execution_ctx = build_execution_context(market_ctx)
         market_ctx["execution_ctx"] = execution_ctx
+        geometry_required = (
+            self.config.execution_mode is ExecutionMode.PAPER
+            and self.selected_candidate_enricher is not None
+            and str(market_ctx.get("source_exchange") or "").lower() == "binance"
+            and str(market_ctx.get("timeframe") or "").lower() == "1m"
+        )
+        if geometry_required and str(market_ctx.get("geometry_status") or "").upper() != "COMPLETE":
+            reason = str(market_ctx.get("geometry_reason") or "GEOMETRY_INCOMPLETE").upper()
+            if self._execution_candle_decision_identity(selection.symbol, market_ctx) is None:
+                self._persist_geometry_diagnostic(selection.symbol, market_ctx, reason)
+                return
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol,
+                                             {"reason": "", "signal_id": signal_id})
+            reject_payload = {
+                **market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED",
+                "reason": reason, "reject_reason": reason, "confidence": 0.0, "score": None,
+                "side": None, "sl": None, "tp": None, "rr": None, "effective_rr": None,
+                "explanation": "canonical_geometry_gate", "execution_ctx": execution_ctx,
+                "timeframe": self.config.execution_timeframe,
+            }
+            await self._persist_reject(reject_payload)
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value,
+                                             selection.symbol, reject_payload)
+            return
         mtf = market_ctx.get("mtf")
         if self.config.execution_mode is ExecutionMode.PAPER and self.config.require_mtf_alignment:
             source_exchange = str(market_ctx.get("source_exchange") or "").strip().lower()
@@ -1809,6 +1841,9 @@ class RuntimeOrchestrator:
     def _resolve_signal_id(symbol: str, payload: Mapping[str, Any]) -> str:
         if payload.get("signal_id"):
             return str(payload["signal_id"])
+        candle_identity = RuntimeOrchestrator._execution_candle_decision_identity(symbol, payload)
+        if candle_identity is not None:
+            return f"runtime:{hashlib.sha256(candle_identity.encode('utf-8')).hexdigest()[:24]}"
         fingerprint = "|".join([
             str(symbol),
             str(payload.get("side", "UNKNOWN")),
@@ -1817,6 +1852,53 @@ class RuntimeOrchestrator:
             str(payload.get("market_ts") or payload.get("timestamp") or canonical_utc_timestamp()),
         ])
         return f"runtime:{hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:24]}"
+
+    @staticmethod
+    def _execution_candle_decision_identity(symbol: str, payload: Mapping[str, Any]) -> str | None:
+        key = RuntimeOrchestrator._execution_candle_market_key(symbol, payload)
+        if key is None:
+            return None
+        return "|".join((*key, str(payload["execution_candle_open_ts"])))
+
+    @staticmethod
+    def _execution_candle_market_key(symbol: str, payload: Mapping[str, Any]) -> tuple[str, str, str] | None:
+        if payload.get("execution_candle_open_ts") is None:
+            return None
+        return (str(symbol).upper(), str(payload.get("source_exchange") or "").lower(),
+                str(payload.get("timeframe") or "").lower())
+
+    def _persist_geometry_diagnostic(self, symbol: str, payload: Mapping[str, Any], reason: str) -> None:
+        """Persist one non-canonical provider diagnostic per run/market/reason."""
+        if not self._burnin_run_id:
+            self._start_or_resume_burnin_run()
+        engine = self._resolve_persistence_engine()
+        if engine is None or not self._burnin_run_id:
+            self._burnin_evidence_incomplete = True
+            return
+        identity = {"burnin_run_id": self._burnin_run_id, "symbol": symbol,
+                    "source_exchange": payload.get("source_exchange"),
+                    "timeframe": payload.get("timeframe"), "geometry_reason": reason}
+        observation_id = "geometry_provider_diagnostic_" + canonical_hash(identity)[:20]
+        with engine.begin() as conn:
+            exists = conn.execute(text(
+                "SELECT 1 FROM burnin_observations WHERE observation_id=:oid"
+            ), {"oid": observation_id}).first()
+            if exists:
+                return
+            persist_burnin_observation(
+                conn, observation_id=observation_id, burnin_run_id=self._burnin_run_id,
+                release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id),
+                execution_mode=self.config.execution_mode.value, symbol=symbol,
+                interval=payload.get("timeframe"), regime=payload.get("regime") or "UNKNOWN",
+                decision=None, lifecycle_state=None,
+                metrics={"geometry_status": payload.get("geometry_status"),
+                         "geometry_reason": reason, "geometry_source": payload.get("geometry_source")},
+                source_provenance={"provider": self.scanner_source or "UNKNOWN",
+                                   "source_exchange": payload.get("source_exchange")},
+                missing_fields=("execution_candle_open_ts",),
+                observation_kind=DIAGNOSTIC_OBSERVATION_KIND,
+            )
+        self.metrics.burnin_observations += 1
 
     def _evaluate_runtime_risk(self, symbol: str, market_ctx: Mapping[str, Any]) -> str | None:
         now = time.time()
@@ -2001,7 +2083,8 @@ class RuntimeOrchestrator:
     @staticmethod
     def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any], *, signal_id: str | None = None) -> dict[str, Any]:
         execution_ctx = build_execution_context(market_ctx)
-        rr = float(market_ctx.get("rr", 2.0) or 2.0)
+        raw_rr = market_ctx.get("rr")
+        rr = float(raw_rr) if raw_rr is not None else None
         return {
             "symbol": selection.symbol,
             "signal_id": signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
