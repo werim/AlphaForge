@@ -1,4 +1,4 @@
-# Burn-in evidence and continuation integrity — 2026-08-31
+# Burn-in evidence and continuation integrity — 2026-09-01
 
 ## Need and root cause
 
@@ -8,9 +8,9 @@ Campaign `camp_119394d8c198138d` persisted 519 canonical rejected decisions and 
 
 New observations persist `metrics_json.observation_kind`; normal runtime observations default to `CANONICAL_DECISION`, while incomplete-geometry audit rows explicitly use `DIAGNOSTIC`. A centralized SQL predicate consumes that discriminator and recognizes immutable pre-discriminator incomplete-geometry rows through a compatibility fallback. Run counter reconciliation, campaign aggregation, and Phase 7 qualification use the same predicate. Aggregate materialization still copies all 548 rows, preserving audit/export evidence.
 
-Campaign elapsed time is now recomputed from `burnin_campaign_runs`: closed eligible continuations contribute only `started_at -> ended_at`, the current RUNNING continuation contributes only `started_at -> now`, gaps contribute nothing, and FAILED continuations contribute only if an operational attachment event proves legitimate runtime. Derived per-run and campaign duration fields are synchronized without modifying immutable timestamps. Aggregation, qualification, completion, status, and export paths consume that contract.
+Campaign elapsed time is now recomputed from `burnin_campaign_runs`: when an operational attachment event exists its `event_time` replaces pre-attachment `started_at` as the lower bound; closed eligible continuations contribute only that bound through `ended_at`; the current RUNNING continuation contributes through now; gaps contribute nothing; and FAILED continuations contribute only if an operational attachment event proves legitimate runtime. Historical runs without that event retain the safe `started_at` compatibility fallback. Derived per-run and campaign duration fields are synchronized without modifying immutable timestamps. Aggregation, qualification, completion, status, and export paths consume that contract.
 
-All process existence probes now route through one helper. POSIX retains `os.kill(pid, 0)` plus `/proc` command/creation identity where available; Windows exclusively uses `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`, `GetExitCodeProcess`, `GetProcessTimes`, and `CloseHandle`. No liveness path calls Windows `os.kill`. Worker ownership requires command identity on inspectable POSIX systems and creation-time correlation on Windows.
+All process existence probes now route through one helper. Linux retains `os.kill(pid, 0)` plus `/proc` command/creation identity; inspectable mismatches fail closed. macOS uses the non-mutating signal-zero existence result and does not misclassify a live process when `/proc` identity is unavailable; campaign lifecycle callers conservatively block duplicate ownership. Windows exclusively uses `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`, `GetExitCodeProcess`, `GetProcessTimes`, and `CloseHandle`; no Windows liveness path calls `os.kill`.
 
 The detached CLI reads `release_id` from the persisted campaign, overrides any conflicting parent environment for the child, and holds campaign/run state at STARTING. Only the existing runtime attachment identity transition may promote the successor to RUNNING.
 
@@ -20,7 +20,7 @@ Incomplete geometry remains fail-closed at SIGNAL_REJECTED, no side/stop/target 
 
 ## Validation and recommendation
 
-Regression coverage retains the exact 519 canonical plus 29 diagnostic case, covers explicit diagnostic classification, reproduces 9,790 active seconds plus a 44,000-second pause, an unattached failed startup, and 60 resumed seconds as 9,850 seconds, verifies query-only Windows liveness/dead/recycled PID handling, and verifies detached resume of release `3108T03` without parent release state. Recommend review and a fresh PAPER qualification snapshot; do not infer LIVE readiness.
+Regression coverage retains the exact 519 canonical plus 29 diagnostic case, proves diagnostics do not change qualification cadence, covers explicit diagnostic classification, reproduces 9,790 active seconds plus a 44,000-second pause, an unattached failed startup, and 60 resumed seconds as 9,850 seconds, proves 10:00 creation / 10:05 operational / 11:05 pause yields 3,600 seconds, verifies macOS unavailable identity, Linux mismatch, and query-only Windows liveness handling, and verifies detached resume of release `3108T03` without parent release state. Recommend review and a fresh PAPER qualification snapshot; do not infer LIVE readiness.
 
 ---
 

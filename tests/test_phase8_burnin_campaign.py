@@ -179,6 +179,29 @@ def test_active_duration_excludes_pause_gap_and_unattached_failed_startup(tmp_pa
     assert exported[runs[1]['burnin_run_id']] == 0.0
     assert exported[runs[2]['burnin_run_id']] == pytest.approx(60.0)
 
+def test_active_duration_starts_at_operational_attachment_not_run_creation(tmp_path, monkeypatch):
+    db=tmp_path/'operational-duration.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='operational-release',duration_days=1,symbols=[],intervals=[])
+    run=start_or_resume_campaign(conn,camp.campaign_id)
+    conn.execute("UPDATE burnin_campaign_runs SET status='PAUSED',started_at='2026-09-01T10:00:00Z',ended_at='2026-09-01T11:05:00Z' WHERE burnin_run_id=?",(run['burnin_run_id'],))
+    conn.execute("UPDATE burnin_runs SET status='PAUSED',start_time='2026-09-01T10:00:00Z',end_time='2026-09-01T11:05:00Z' WHERE burnin_run_id=?",(run['burnin_run_id'],))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED' WHERE campaign_id=?",(camp.campaign_id,))
+    conn.execute("INSERT INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES(?,?,?,?,?,?,?)",('operational-event',camp.campaign_id,run['burnin_run_id'],'PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL','2026-09-01T10:05:00Z','{}','test'))
+    assert active_campaign_duration(conn,camp.campaign_id,now='2026-09-01T12:00:00Z') == pytest.approx(3600.0)
+    conn.close()
+
+def test_start_resume_blocks_duplicate_when_live_worker_identity_is_unavailable(tmp_path, monkeypatch):
+    import alphaforge.burnin_campaign as module
+    db=tmp_path/'mac-worker.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='mac-release',duration_days=1,symbols=[],intervals=[])
+    start_or_resume_campaign(conn,camp.campaign_id)
+    conn.execute("UPDATE burnin_campaigns SET worker_pid=99,worker_started_at='2026-09-01T00:00:00Z' WHERE campaign_id=?",(camp.campaign_id,)); conn.commit()
+    monkeypatch.setattr(module, 'process_is_alive', lambda *_args, **_kwargs: True)
+    with pytest.raises(RuntimeError, match='WORKER_SHUTDOWN_IN_PROGRESS'):
+        start_or_resume_campaign(conn,camp.campaign_id,resume=True)
+    assert conn.execute("SELECT COUNT(*) FROM burnin_campaign_runs WHERE campaign_id=?",(camp.campaign_id,)).fetchone()[0] == 1
+    conn.close()
+
 def test_campaign_negative_material_regime_blocks(tmp_path):
     db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
     conn.execute("UPDATE burnin_regime_metrics SET lower_confidence_bound_expectancy=-0.2 WHERE regime='TRENDING'"); conn.commit(); conn.close()
@@ -296,6 +319,9 @@ def test_qualification_is_observation_gated_after_initial_snapshot(tmp_path):
     runner._last_qualification_monotonic = 0
     with engine.begin() as conn:
         conn.execute(text("UPDATE burnin_campaigns SET latest_qualification_id='existing', target_decisions=500, target_closed_trades=30, target_reject_forward_outcomes=50 WHERE campaign_id=:cid"), {"cid": cid})
+        run_id=conn.execute(text("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=:cid"),{"cid":cid}).scalar_one()
+        for index in range(25):
+            persist_burnin_observation(conn,observation_id=f'cadence-diagnostic-{index}',burnin_run_id=run_id,release_id='relq',execution_mode='PAPER',decision='REJECTED',observation_kind=DIAGNOSTIC_OBSERVATION_KIND)
     try:
         assert runner._qualification_due() is False
     finally:

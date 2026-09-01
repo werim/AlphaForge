@@ -512,9 +512,13 @@ def active_campaign_duration(conn: Any, campaign_id: str, *, now: str | None = N
     for raw in rows:
         row = _row_dict(raw)
         status = str(row.get("status") or "").upper()
-        attached = _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND burnin_run_id=:bid AND event_type='PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL' LIMIT 1", {"cid": campaign_id, "bid": row["burnin_run_id"]}).fetchone() is not None
+        operational_row = _exec(conn, "SELECT MIN(event_time) FROM burnin_campaign_events WHERE campaign_id=:cid AND burnin_run_id=:bid AND event_type='PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL'", {"cid": campaign_id, "bid": row["burnin_run_id"]}).fetchone()
+        operational_at = _parse_utc(operational_row[0]) if operational_row and operational_row[0] else None
+        attached = operational_at is not None
         eligible = status in {"RUNNING", "PAUSED", "RECOVERY_REQUIRED", "COMPLETED", "QUALIFIED", "SUSPENDED"} or (status == "FAILED" and attached)
         start = _parse_utc(row.get("started_at"))
+        if operational_at is not None and (start is None or operational_at > start):
+            start = operational_at
         end = _parse_utc(row.get("ended_at"))
         if status == "RUNNING" and campaign.get("campaign_status") == "RUNNING" and row["burnin_run_id"] == campaign.get("active_run_id"):
             end = current
@@ -608,7 +612,7 @@ class BurnInCampaignRunner:
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
             c = get_campaign(conn, self.campaign_id) or {}
-            count = int(_exec(conn, "SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid", {"cid": self.campaign_id}).scalar() or 0)
+            count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
             agg = aggregate_campaign(conn, self.campaign_id)
         metrics = agg.get("metrics", {})
         first_evidence = not c.get("latest_qualification_id") and any(int(metrics.get(key) or 0) > 0 for key in ("sample_count", "closed_trade_count", "completed_rejected_forward_outcomes"))
@@ -625,7 +629,7 @@ class BurnInCampaignRunner:
             return None
         result = qualify_campaign(self.engine, self.campaign_id, self.thresholds)
         with self.engine.connect() as conn:
-            self._last_qualification_observation_count = int(_exec(conn, "SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid", {"cid": self.campaign_id}).scalar() or 0)
+            self._last_qualification_observation_count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
         self._last_qualification_monotonic = time.monotonic()
         return result
 

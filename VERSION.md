@@ -1,14 +1,14 @@
 # AlphaForge Version
 
-## Burn-in evidence and continuation integrity (2026-08-31)
+## Burn-in evidence and continuation integrity (2026-09-01)
 - Current version: dev burn-in evidence/lifecycle patch; no table or CSV schema migration.
 - Current phase: fresh PAPER campaign verification with historical timestamps and diagnostic rows preserved.
-- Runtime maturity: qualification counts canonical decisions only, duration accumulates eligible continuation intervals only, detached successors inherit persisted release identity, and process probes are non-mutating on Windows.
+- Runtime maturity: qualification and its scheduling cadence count canonical decisions only; duration begins at operational attachment and accumulates eligible continuation intervals only; detached successors inherit persisted release identity; process probes are non-mutating across supported platforms.
 - BACKTEST/PAPER/LIVE alignment: decision and reject behavior is unchanged; corrections are limited to PAPER evidence and worker lifecycle control.
 - Lifecycle coverage: incomplete reject geometry remains fail-closed; detached successors remain STARTING until runtime attachment verifies identity; failed unattached startups add no active duration.
 - Execution realism coverage: unchanged; missing geometry remains missing and is never fabricated.
-- Known critical risks: Windows command-line ownership is unavailable through the query-only handle, so worker ownership additionally depends on persisted launch time matching process creation time.
-- Last audit date: 2026-08-31. Live readiness verdict: NOT LIVE READY.
+- Known critical risks: Windows command-line ownership is unavailable through the query-only handle, so worker ownership additionally depends on persisted launch time matching process creation time; macOS without inspectable identity conservatively treats an existing PID as alive to prevent duplicate workers.
+- Last audit date: 2026-09-01. Live readiness verdict: NOT LIVE READY.
 
 ## PAPER MTF heartbeat persistence follow-up (2026-08-31)
 - Current version: dev PR #336 observability follow-up; no schema, export, threshold, or execution change.

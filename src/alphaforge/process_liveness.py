@@ -95,8 +95,8 @@ def process_is_alive(
     if not alive:
         return False
     expected_time = _timestamp(expected_started_at)
-    if expected_time is not None:
-        if creation is None or abs(creation - expected_time) > float(creation_tolerance_seconds):
+    if expected_time is not None and creation is not None:
+        if abs(creation - expected_time) > float(creation_tolerance_seconds):
             return False
     required = [str(part).strip().lower() for part in expected_command_parts if str(part).strip()]
     if required and cmdline is not None:
@@ -104,7 +104,10 @@ def process_is_alive(
         if not all(part in observed for part in required):
             return False
     # Windows cannot retrieve a command line through the query-only handle;
-    # creation time is therefore mandatory when ownership is requested.
+    # creation time is therefore mandatory when ownership is requested. On
+    # POSIX platforms without /proc (notably macOS), signal 0 establishes
+    # existence but identity metadata is unavailable; do not report that live
+    # process as dead. Callers can conservatively block duplicate ownership.
     if required and os.name == "nt" and expected_time is None:
         return False
     return True

@@ -1,14 +1,17 @@
-## Burn-in canonical decision integrity — 2026-08-31
+## Burn-in evidence and continuation integrity — 2026-09-01
 
 ### Added
 - An explicit `observation_kind` discriminator for newly persisted canonical decisions and incomplete-geometry diagnostics.
 - Regression coverage for 519 canonical rejects plus 29 preserved diagnostics.
 - A centralized cross-platform, query-only process liveness and creation-time identity helper.
 - Active-duration regression coverage for pause, failed startup, and resumed continuation intervals.
+- macOS/no-`/proc` existence regressions and operational-attachment duration coverage.
 
 ### Changed
 - Run, campaign, and qualification decision denominators now count canonical market decisions only.
 - Campaign duration, aggregate evidence, qualification, status, and exports derive elapsed time from eligible continuation intervals rather than campaign wall time.
+- Continuations with operational attachment evidence use the attachment event time—not pre-attachment creation time—as their active-duration lower bound.
+- Qualification cadence counters use the same canonical-decision predicate as qualification denominators.
 - Detached workers receive the persisted campaign release ID and remain STARTING until runtime attachment succeeds.
 
 ### Fixed
@@ -16,6 +19,7 @@
 - Paused/recovery downtime and unattached failed startups no longer satisfy burn-in duration.
 - Windows liveness probes no longer risk invoking `TerminateProcess` through `os.kill(pid, 0)`.
 - Detached resume no longer depends on the operator shell for `ALPHAFORGE_RELEASE_ID`.
+- macOS workers no longer appear dead solely because `/proc` identity metadata is unavailable.
 
 ### Removed
 - None.
