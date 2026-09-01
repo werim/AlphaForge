@@ -437,19 +437,38 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     resolved=[r for r in rejects if int(gv(r,"evidence_complete") or 0)==1]
     rejected_count=sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED')
     labels=_exec(conn,"SELECT reject_decision_id FROM burnin_pending_reject_labels WHERE campaign_id=:cid",{"cid":campaign_id}).fetchall()
-    unique_labels=len({gv(r,"reject_decision_id") for r in labels})
-    diagnostic_ids={r[0] for r in _exec(conn,f"SELECT json_extract(metrics_json,'$.reject_decision_id') FROM burnin_observations WHERE burnin_run_id IN ({ph}) AND UPPER(COALESCE(json_extract(metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='DIAGNOSTIC'",p).fetchall() if r[0]}
+    label_ids={gv(r,"reject_decision_id") for r in labels if gv(r,"reject_decision_id")}
+    unique_labels=len(label_ids)
+    diagnostic_rows=_exec(conn,f"SELECT json_extract(metrics_json,'$.reject_decision_id') AS reject_decision_id,missing_fields_json FROM burnin_observations WHERE burnin_run_id IN ({ph}) AND observation_id LIKE 'incomplete_reject_geometry_%' AND UPPER(COALESCE(json_extract(metrics_json,'$.observation_kind'),'DIAGNOSTIC'))='DIAGNOSTIC'",p).fetchall()
+    ineligible_by_reason={}
+    contract_ineligible_ids=set()
+    for row in diagnostic_rows:
+        rid=row[0]
+        try: reasons=json.loads(row[1] or "[]")
+        except (TypeError,json.JSONDecodeError): reasons=[]
+        if rid and reasons:
+            contract_ineligible_ids.add(rid)
+            for reason in sorted(set(map(str,reasons))): ineligible_by_reason[reason]=ineligible_by_reason.get(reason,0)+1
     canonical_ids={json.loads(gv(r,"metrics_json") or "{}").get("reject_decision_id") for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED'}
-    eligible_ids={rid for rid in canonical_ids if rid and rid not in diagnostic_ids}
+    canonical_ids.discard(None)
+    ineligible_ids=canonical_ids & contract_ineligible_ids
+    eligible_ids=canonical_ids-ineligible_ids
     label_eligible=len(eligible_ids) if canonical_ids else rejected_count
-    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"unique_reject_labels_persisted":unique_labels,"reject_label_coverage":(unique_labels/label_eligible if label_eligible else 1.0),"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(resolved),"ambiguous_rejected_forward_outcomes":sum(1 for r in rejects if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
+    eligible_labels=len(label_ids & eligible_ids) if canonical_ids else min(unique_labels,label_eligible)
+    integrity_issues=[]
+    if unique_labels > label_eligible: integrity_issues.append("UNIQUE_LABELS_EXCEED_ELIGIBLE_REJECTS")
+    orphan_labels=label_ids-canonical_ids if canonical_ids else set()
+    if orphan_labels: integrity_issues.append("LABELS_WITHOUT_CANONICAL_REJECT")
+    if label_ids & ineligible_ids: integrity_issues.append("LABELS_FOR_INELIGIBLE_REJECTS")
+    coverage=(eligible_labels/label_eligible if label_eligible else (1.0 if not eligible_labels else 0.0))
+    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(resolved),"ambiguous_rejected_forward_outcomes":sum(1 for r in rejects if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"metrics":metrics})
     metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
 
 def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[str, Any]]:
     """Outcome quality by observed execution strength; never selects/relaxes a gate."""
-    edges=((None,.0001,"<0.0001"),(.0001,.0002,"0.0001-0.0002"),(.0002,.0003,"0.0002-0.0003"),(.0003,.0004,"0.0003-0.0004"),(.0004,.0005,"0.0004-0.0005"))
+    edges=((None,.0001,"<0.0001"),(.0001,.0002,"0.0001-0.0002"),(.0002,.0003,"0.0002-0.0003"),(.0003,.0004,"0.0003-0.0004"),(.0004,.0005,"0.0004-0.0005"),(.0005,None,">=0.0005"))
     buckets={label:[] for _,_,label in edges}
     rows=_exec(conn,"""SELECT o.*,p.source_provenance_json FROM burnin_reject_outcomes o
         JOIN burnin_pending_reject_labels p ON p.reject_decision_id=substr(o.reject_outcome_id,6)
@@ -463,7 +482,7 @@ def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[st
         except (TypeError,ValueError):
             continue
         for low,high,label in edges:
-            if (low is None or strength>=low) and strength<high:
+            if (low is None or strength>=low) and (high is None or strength<high):
                 buckets[label].append(r); break
     result=[]
     for _,_,label in edges:

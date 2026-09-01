@@ -1,3 +1,17 @@
+# PR #338 canonical reject follow-up — 2026-09-01
+
+## Why and root cause
+The first patch used Python 3.12 f-string parsing not accepted by Python 3.11, allowed any earlier row—including a diagnostic—to suppress a later canonical decision, inferred label eligibility from diagnostic presence alone, and omitted strengths at or above 0.0005 from calibration. Production writes incomplete-geometry diagnostics before the canonical reject, so the ordering defect could erase the KPI decision.
+
+## Minimal correction and files
+`burnin.py` now requires the earlier competing row itself to satisfy the canonical discriminator and precomputes predicates at Python 3.11-sensitive call sites; `burnin_qualification.py` does the same. `burnin_campaign.py` derives ineligibility only from the pending-label contract's incomplete-geometry diagnostic plus concrete `missing_fields_json`, exposes ineligible counts/reasons and integrity issues, counts only eligible canonical labels in coverage, clamps coverage to 100%, and adds `>=0.0005` calibration overflow. `config_registry.py` binds threshold settings to the MTF provider and their behavioral test. CI compiles all `src`.
+
+## Lifecycle, persistence, export, compatibility, and migration
+Diagnostic rows remain physical, immutable, and exportable. Canonical identity priority remains reject decision, signal, then legacy observation ID. Pending labels remain uniquely idempotent; counters still advance after persistence and evidenced MTF regime provenance remains intact. No schema/CSV migration or label fabrication occurs. Threshold defaults remain 0.0005 and no calibration path changes a gate. Historical aggregates may be recomputed without rewriting source evidence.
+
+## Validation, risk, and recommendation
+Python 3.11 and current-Python whole-tree compilation pass. The requested seven-file focused suite passes 211 tests; config wiring plus new regressions pass 135 tests. Literal full-suite collection is not green locally because the declared Alembic distribution is absent and both pip and apt downloads are blocked by the environment proxy. A run excluding the primary database-doctor Alembic module reached 1,338 passed/6 skipped and showed six remaining Alembic-dependent failures plus one threshold-metadata failure that was fixed and revalidated. CI with declared dependencies must run literal `pytest -q` before PR readiness. Do not merge or infer LIVE readiness until it is green.
+
 # Canonical PAPER reject calibration — 2026-09-01
 
 ## Need and root cause

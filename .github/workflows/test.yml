@@ -49,7 +49,7 @@ jobs:
           python -c "import pytest; print(pytest.__version__)" || pip install pytest
 
       - name: Compile
-        run: python -m py_compile src/alphaforge/ai_brain.py
+        run: python -m compileall -q src
 
       - name: Run tests
         run: pytest -q

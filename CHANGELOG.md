@@ -1,3 +1,26 @@
+## PR #338 canonical reject follow-up — 2026-09-01
+
+### Added
+- Diagnostic-first and canonical-duplicate ordering regressions, contract-derived label-ineligibility breakdown, integrity status, and an execution-strength overflow bucket.
+- Whole-`src` compile validation in CI.
+
+### Changed
+- Canonical deduplication now considers only earlier canonical observations.
+- Label coverage uses labels belonging to eligible canonical rejects and is bounded at 100%; impossible/orphan label states are surfaced explicitly.
+
+### Fixed
+- Python 3.11-incompatible nested f-string quoting in burn-in counters and qualification.
+- Learning threshold environment metadata now names its production MTF consumer and behavioral regression.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; rows and exports remain immutable and no migration is required.
+
+### Known Issues
+- The local full suite cannot collect its Alembic tests because the declared package is absent and package download is blocked; focused burn-in coverage passes.
+
 ## Canonical PAPER reject calibration — 2026-09-01
 
 ### Added
