@@ -309,7 +309,49 @@ def test_geometry_timeout_remains_incomplete_and_non_executing(monkeypatch, tmp_
             "SELECT missing_fields_json FROM burnin_observations "
             "WHERE observation_id LIKE 'incomplete_reject_geometry_%'"
         )).scalar_one()
-        assert json.loads(missing) == ["stop", "target"]
+        assert json.loads(missing) == ["side", "stop", "target"]
+
+
+def test_zero_risk_geometry_fails_before_ai_and_deduplicates_closed_candle(tmp_path) -> None:
+    calls = 0
+    candle = {"value": 60_000}
+
+    class Brain:
+        def before_real_order(self, *_args):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("invalid geometry reached AI scoring")
+
+    async def enrich(rows):
+        return [{**rows[0], "geometry_status": "INVALID",
+                 "geometry_reason": "ZERO_RISK_GEOMETRY",
+                 "geometry_source": "BINANCE_CLOSED_1M_KLINES",
+                 "execution_candle_open_ts": candle["value"]}]
+
+    candidate = _selection_candidate("BTCUSDT", volume=90_000_000)
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'invalid-geometry-dedup.db'}")
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER), ai_brain=Brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[candidate]),
+        selected_candidate_enricher=enrich, persistence_engine=engine,
+    )
+    runtime._burnin_run_id = "invalid-geometry-dedup"
+
+    asyncio.run(runtime._scan_once())
+    asyncio.run(runtime._scan_once())
+    reject = runtime._reject_log[-1]
+    assert calls == 0 and runtime.metrics.decisions_generated == 0
+    assert reject["reason"] == "ZERO_RISK_GEOMETRY"
+    assert reject["rr"] is None and reject["effective_rr"] is None
+    assert reject["side"] is None and reject["sl"] is None and reject["tp"] is None
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews")).scalar_one() == 1
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels")).scalar_one() == 0
+
+    candle["value"] = 120_000
+    asyncio.run(runtime._scan_once())
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews")).scalar_one() == 2
 
 
 def test_geometry_programmer_error_propagates_without_false_scan_progress() -> None:

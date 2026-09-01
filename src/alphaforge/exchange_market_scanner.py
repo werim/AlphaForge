@@ -29,14 +29,17 @@ def _binance_kline_geometry(base_url: str, symbol: str, *, timeout_sec: float) -
     if len(rows) < 3:
         return {"geometry_status": "UNAVAILABLE", "geometry_reason": "KLINE_INSUFFICIENT_ROWS", "geometry_source": GEOMETRY_SOURCE}
     candles = []
+    execution_candle_open_ts = None
     for row in rows[-3:-1]:
         if not isinstance(row, list) or len(row) < 5:
             return {"geometry_status": "INVALID", "geometry_reason": "KLINE_MALFORMED_PAYLOAD", "geometry_source": GEOMETRY_SOURCE}
         candles.append({"open": row[1], "high": row[2], "low": row[3], "close": row[4]})
+        execution_candle_open_ts = row[0]
+    identity = {"execution_candle_open_ts": execution_candle_open_ts}
     geometry, reason = build_breakout_geometry_with_diagnostics(candles[1], candles[0])
     if reason:
-        return {"geometry_status": "INVALID", "geometry_reason": reason, "geometry_source": GEOMETRY_SOURCE}
-    return {**geometry, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": GEOMETRY_SOURCE}
+        return {**identity, "geometry_status": "INVALID", "geometry_reason": reason, "geometry_source": GEOMETRY_SOURCE}
+    return {**geometry, **identity, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": GEOMETRY_SOURCE}
 
 
 def _fetch_json_with_latency(url: str, *, timeout_sec: float) -> tuple[Any, float | None]:

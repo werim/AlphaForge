@@ -1679,3 +1679,30 @@ Regression coverage creates an empty temporary SQLite path exclusively through `
 **Lifecycle/persistence/export/schema/compatibility.** No lifecycle, reconciliation, LIVE, MTF, campaign identity, schema, migration revision, export, or existing DB behavior changed. No database is moved, deleted, or automatically migrated.
 
 **Tests/risks/migration/push.** Targeted resolver tests pass. Alembic integration/full-suite execution remains contingent on the declared Alembic package being installed. No migration is required. LIVE remains NOT READY.
+# PAPER closed-candle geometry integrity — 2026-09-01
+
+## Need and root cause
+Post-PR338 PAPER evidence showed `ZERO_RISK_GEOMETRY` candidates continuing into AIBrain, where `RuntimeOrchestrator._build_signal` replaced absent RR with 2.0. The geometry enricher exposed status and reason, but runtime had no explicit prerequisite between enrichment and MTF/signal/scoring. Scanner wall-clock `market_ts` also changed on every poll, so repeated observations of the same closed 1m candle acquired different signal identities.
+
+## Files and behavior
+`exchange_market_scanner.py` now carries the last closed execution candle's open timestamp with both valid and diagnostically invalid computed geometry. `runtime.py` uses symbol, source, timeframe, and that timestamp as the stable decision/signal identity; a repeated scan is skipped, while the next timestamp remains a new decision. After enrichment, production PAPER Binance 1m candidates whose geometry status is not `COMPLETE` now persist a geometry-specific canonical reject before MTF, signal construction, AIBrain, or order planning. The reject retains provider geometry status/reason/source and observed entry context, but explicitly leaves side, stop, target, raw RR, and effective RR null. `_build_signal` no longer supplies a 2.0 RR when RR is absent.
+
+## Lifecycle, persistence, export, compatibility, and migration
+Invalid geometry follows `SIGNAL_CREATED -> SIGNAL_REJECTED`; it is auditable as one canonical decision per execution candle and remains forward-label-ineligible because required geometry is absent. Existing rows and exports are preserved, and there is no destructive migration or schema change. Valid `COMPLETE` geometry continues through the existing MTF, scoring, expectancy, risk, and execution paths. Legacy paths without the production selected-candidate geometry contract retain their existing flow, but missing RR is now represented honestly as null. Trading and MTF thresholds are unchanged.
+
+## Tests, risks, and recommendation
+Regressions prove `ZERO_RISK_GEOMETRY` never invokes AIBrain, receives no RR or hypothetical geometry, retains its reason, creates no pending label, deduplicates repeated scans of one candle, and admits the next closed candle. Existing production-chain valid geometry, pending-label, and PR338 canonical-counting coverage remains in the suite. Historical contaminated rows are intentionally untouched and cannot demonstrate the corrected collection contract. After merge, start a fresh PAPER campaign; do not mix pre-fix evidence into qualification and do not infer LIVE readiness.
+
+Focused geometry/canonical coverage passed 23 tests, whole-source compilation and diff validation passed, and the behavioral suite excluding the database-doctor collection module reached 1,340 passed with 6 skipped. Literal full pytest collection remains blocked because the declared Alembic package is absent; the continued suite reported only six Alembic-dependent failures. CI with declared dependencies must run the literal full suite before merge.
+
+## Files changed
+- `src/alphaforge/exchange_market_scanner.py`
+- `src/alphaforge/runtime.py`
+- `tests/test_exchange_market_scanner.py`
+- `tests/test_issue322_reject_geometry.py`
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`
+
+## Push recommendation
+Merge only after full pytest and whole-source compilation are green, then collect a fresh PAPER campaign under the new identity contract.
+
+---
