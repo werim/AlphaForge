@@ -4585,3 +4585,8 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - Existing contaminated PAPER rows remain immutable; a fresh post-merge PAPER campaign is required. Local Alembic-dependent tests require CI's declared dependency environment.
+
+### PR #339 Merge-blocker Fix
+- Identity-less geometry provider failures now persist as bounded, SQL-idempotent diagnostic observations and do not count as canonical accepted/rejected decisions.
+- Identified invalid candles retain stable canonical reject identity across runtime restarts.
+- Runtime candle polling suppression now stores only the latest timestamp per market key instead of an unbounded historical set.

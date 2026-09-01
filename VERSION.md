@@ -9,6 +9,7 @@
 - Execution realism coverage: missing geometry leaves side/stop/target/RR null; no synthetic 2.0 RR remains in signal construction.
 - Known critical risks: historical contaminated evidence remains immutable and must not qualify the new behavior; provider candle availability remains external; local full pytest lacks the declared Alembic package and CI must validate those migration tests.
 - Last audit date: 2026-09-01. Live readiness verdict: NOT LIVE READY.
+- Merge-blocker follow-up: identity-less provider/data failures are idempotent `DIAGNOSTIC` observations, not canonical market rejects; identified invalid candles retain one canonical reject per candle, including across runtime restarts. In-memory candle suppression is bounded to one latest timestamp per market key.
 
 ## PR #338 canonical reject follow-up (2026-09-01)
 - Current version: dev canonical decision/reject calibration correction; no destructive schema migration.

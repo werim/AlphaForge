@@ -1705,4 +1705,7 @@ Focused geometry/canonical coverage passed 23 tests, whole-source compilation an
 ## Push recommendation
 Merge only after full pytest and whole-source compilation are green, then collect a fresh PAPER campaign under the new identity contract.
 
+## PR #339 merge-blocker follow-up
+Provider/data failures without a trustworthy `execution_candle_open_ts` previously fell through to the wall-clock `market_ts` signal identity and could become a new canonical reject on every poll. Runtime now persists one SQL-idempotent `DIAGNOSTIC` observation per burn-in run, market, and exact provider reason, without emitting a trading decision, rejected-signal review, or pending label. `ZERO_RISK_GEOMETRY` and other failures tied to an identified candle retain the canonical reject path and stable SQL decision identity. A restart regression proves the same identified candle remains one canonical KPI row, while a different timestamp becomes a second reject. The process-local dedup cache is now bounded to the latest timestamp for each symbol/source/timeframe key; SQL canonical identity remains authoritative. No schema, historical row, threshold, BACKTEST network dependency, or LIVE authorization behavior changed.
+
 ---
