@@ -123,6 +123,8 @@ Tek bir profili `.env` olarak kopyala.
 
 ### BACKTEST / yerel teşhis
 
+Bu profil yalnızca BACKTEST içindir; PAPER burn-in veya preflight için kullanma.
+
 macOS / Linux:
 
 ```bash
@@ -140,13 +142,13 @@ Copy-Item .env.test.example .env
 macOS / Linux:
 
 ```bash
-cp .env.medium.example .env
+cp .env.example .env
 ```
 
 PowerShell:
 
 ```powershell
-Copy-Item .env.medium.example .env
+Copy-Item .env.example .env
 ```
 
 ### LIVE hazırlık şablonu
@@ -171,33 +173,33 @@ Mod için kanonik değişken:
 ALPHAFORGE_EXECUTION_MODE=BACKTEST|PAPER|LIVE
 ```
 
-Geriye uyumluluk alias'ı:
+Geriye uyumluluk alias'ı yalnızca eski kurulumlar içindir:
 
 ```text
 EXECUTION_MODE=BACKTEST|PAPER|LIVE
 ```
 
-PAPER burn-in öncesinde ikisinin de PAPER olduğundan emin ol.
+Yeni kurulumda yalnızca canonical değişkeni kullan; stale alias'ı kaldır. `RUNTIME_LIMITS_ACTIVE` PAPER modundan otomatik olarak `true` türetilir ve `.env` içine ayrıca yazılmaz.
 
 macOS / Linux:
 
 ```bash
 export ALPHAFORGE_EXECUTION_MODE=PAPER
-export EXECUTION_MODE=PAPER
+unset EXECUTION_MODE
 ```
 
 PowerShell:
 
 ```powershell
 $env:ALPHAFORGE_EXECUTION_MODE="PAPER"
-$env:EXECUTION_MODE="PAPER"
+Remove-Item Env:EXECUTION_MODE -ErrorAction SilentlyContinue
 ```
 
 ---
 
 ## 4.1 Temiz kurulum / ilk PAPER çalıştırma
 
-Repo klonlama ve `dev` seçimi, sanal ortam kurulumu ve `.env.medium.example` kopyalamasından sonra `.env` içine Binance **READ-ONLY** API credentials gir. Reconciliation açık olmalıdır. Secret değerlerini yazdırmadan, preflight/runtime ile aynı canonical dotenv/config yüklemesini doğrula.
+Repo klonlama ve `dev` seçimi, sanal ortam kurulumu ve `.env.example` kopyalamasından sonra `.env` içine Binance **READ-ONLY** API credentials gir. Reconciliation açık olmalıdır. Secret değerlerini yazdırmadan, preflight/runtime ile aynı canonical dotenv/config yüklemesini doğrula. Şablondaki placeholder'lar secret değildir ve preflight bunlar değiştirilene kadar bilerek fail closed olur.
 
 macOS / Linux:
 
@@ -664,6 +666,8 @@ Preflight `PASS` olmadan launch yapma. Özellikle şunları düzelt:
 - release/config/strategy/universe/execution-cost identity eşleşmesi
 - sembol ve interval doğrulaması
 - saat sapması ve read-only market data erişimi
+
+Canonical `.env.example` kullanıldığında PAPER mode, runtime-limit türetimi ve candidate/runtime config hash aynı kaynaktan gelir. Gerçek read-only Binance credential girilmemişse yalnızca credential/reconciliation kapılarının fail-closed kalması beklenir. `ALPHAFORGE_ENABLE_LIVE_TRADING=false` ve `ALPHAFORGE_ALLOW_LIVE_ORDERS=false` değerlerini değiştirme; PAPER preflight hiçbir submit/cancel/amend çağrısı yapmaz.
 
 ---
 
@@ -1594,13 +1598,13 @@ for name in ("BINANCE_API_KEY", "BINANCE_BASE_URL"):
 
 ## Phase 9 operational acceptance (PAPER only, 2026-07-23)
 
-`diagnose-db` is database read-only. `config_check` and the default `config_fix` dry-run do not mutate configuration. **Preflight is not read-only:** it may create or update local database evidence. None of these commands submit or cancel exchange orders. Keep `ALPHAFORGE_EXECUTION_MODE=PAPER`, `EXECUTION_MODE=PAPER`, and `ALPHAFORGE_ENABLE_LIVE_EXECUTION=false`. REST-only reconciliation does **not** require a websocket; runtime/streaming websocket requirements remain strict.
+`diagnose-db` is database read-only. `config_check` and the default `config_fix` dry-run do not mutate configuration. **Preflight is not read-only:** it may create or update local database evidence. None of these commands submit or cancel exchange orders. Keep canonical `ALPHAFORGE_EXECUTION_MODE=PAPER`, remove the deprecated `EXECUTION_MODE` alias, and keep `ALPHAFORGE_ENABLE_LIVE_EXECUTION=false`. REST-only reconciliation does **not** require a websocket; runtime/streaming websocket requirements remain strict.
 
 ### PowerShell
 
 ```powershell
 $env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
-$env:EXECUTION_MODE = "PAPER"
+Remove-Item Env:EXECUTION_MODE -ErrorAction SilentlyContinue
 $env:ALPHAFORGE_ENABLE_LIVE_EXECUTION = "false"
 $DB = "data/runtime/alphaforge_runtime.db"
 $RELEASE_ID = "phase9-$(git rev-parse --short HEAD)"
@@ -1628,7 +1632,7 @@ python -m alphaforge.burnin_ops --db $DB --json finalize --campaign-id $CID --ou
 
 ```bash
 export ALPHAFORGE_EXECUTION_MODE=PAPER
-export EXECUTION_MODE=PAPER
+unset EXECUTION_MODE
 export ALPHAFORGE_ENABLE_LIVE_EXECUTION=false
 DB="data/runtime/alphaforge_runtime.db"
 RELEASE_ID="phase9-$(git rev-parse --short HEAD)"

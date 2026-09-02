@@ -1,3 +1,25 @@
+## Canonical PAPER env-template contract — 2026-09-02
+
+### Added
+- Regression coverage for canonical PAPER mode, derived runtime limits, production endpoint defaults, disabled LIVE/order gates, and credential-only template blockers.
+
+### Changed
+- `.env.example` is the documented PAPER burn-in template; `.env.test.example` is BACKTEST-only with PAPER runtime/reconciliation disabled.
+- PAPER/LIVE runtime profiles no longer contain non-operational reserved inventory; diagnostic entries remain empty.
+
+### Fixed
+- Template-driven BACKTEST/PAPER mode and runtime-identity hash drift during PAPER preflight.
+- Avoidable reserved-variable warnings from copied profiles.
+
+### Removed
+- Non-empty deprecated/reserved placeholder values from copyable env profiles.
+
+### Breaking Changes
+- None; existing `.env` files are not migrated automatically.
+
+### Known Issues
+- PAPER preflight intentionally remains fail-closed until both matching read-only Binance credentials are supplied and signed reconciliation succeeds.
+
 ## PR #338 canonical reject follow-up — 2026-09-01
 
 ### Added
