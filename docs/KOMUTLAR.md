@@ -620,7 +620,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id CAMP_ID
 macOS / Linux:
 
 ```bash
-RELEASE_ID="phase9_trial_1"
+RELEASE_ID="0209MAC02"
 
 python -m alphaforge.burnin_ops \
   --db "$DB" \
@@ -678,7 +678,7 @@ python -m alphaforge.burnin_ops \
   --db "$DB" \
   launch \
   --release-id "$RELEASE_ID" \
-  --duration-days 4 \
+  --duration-days 7 \
   --symbols BTCUSDT,ETHUSDT \
   --intervals 1h \
   --detach \
@@ -713,7 +713,7 @@ PowerShell örneği:
 $CID="camp_xxxxxxxxxxxxxxxx"
 ```
 
-> `campaign_id` tahmin edilmez. Launch çıktısından veya SQL sorgusundan alınır.
+> `cid` tahmin edilmez. Launch çıktısından veya SQL sorgusundan alınır.
 
 ---
 
