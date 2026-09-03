@@ -1,6 +1,9 @@
 from pathlib import Path
 import re
 
+from alphaforge.config_audit import audit_config
+from alphaforge.config_registry import CONTRACT_BY_NAME, decision_filter_config
+
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = [
     ROOT / ".env.example",
@@ -8,6 +11,7 @@ PROFILES = [
     ROOT / ".env.medium.example",
     ROOT / ".env.live.example",
 ]
+RUNTIME_PROFILES = [ROOT / ".env.example", ROOT / ".env.medium.example", ROOT / ".env.live.example"]
 REQUIRED_CORE_VARIABLES = {
     "ALPHAFORGE_EXECUTION_MODE",
     "EXECUTION_MODE",
@@ -15,16 +19,13 @@ REQUIRED_CORE_VARIABLES = {
     "ALPHAFORGE_ALLOW_LIVE_ORDERS",
     "ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION",
     "ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED",
-    "ALPHAFORGE_DRY_RUN",
     "BINANCE_API_KEY",
     "BINANCE_API_SECRET",
-    "ALPHAFORGE_RISK_PCT_PER_TRADE",
     "ALPHAFORGE_MAX_DAILY_LOSS_PCT",
     "ALPHAFORGE_MAX_CONCURRENT_POSITIONS",
     "ALPHAFORGE_MIN_SIGNAL_SCORE",
     "ALPHAFORGE_MIN_RR",
     "MIN_EFFECTIVE_RR",
-    "REJECT_UNKNOWN_EXPECTANCY",
     "ALPHAFORGE_STALE_MARKET_DATA_SEC",
     "ALPHAFORGE_MAX_SPREAD_PCT",
     "ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT",
@@ -32,8 +33,6 @@ REQUIRED_CORE_VARIABLES = {
     "MIN_LIQUIDITY_USD",
     "ALPHAFORGE_BACKTEST_TOP_N",
     "ALPHAFORGE_DATABASE_URL",
-    "ALPHAFORGE_EXPORT_VERIFY_INTEGRITY",
-    "ALPHAFORGE_ENABLE_LIVE_READINESS",
 }
 SECRET_KEYS = ("API_KEY", "API_SECRET", "BOT_TOKEN", "WEBHOOK_URL")
 ALLOWED_PLACEHOLDER_PATTERNS = (
@@ -82,7 +81,7 @@ def test_environment_profiles_do_not_contain_real_looking_secrets():
             if key.endswith("URL") and not any(token in key for token in SECRET_KEYS):
                 continue
             if any(token in key for token in SECRET_KEYS):
-                assert any(p in value for p in ALLOWED_PLACEHOLDER_PATTERNS), f"{profile.name} has non-placeholder {key}"
+                assert not value or any(p in value for p in ALLOWED_PLACEHOLDER_PATTERNS), f"{profile.name} has non-placeholder {key}"
             assert not suspicious.search(value), f"{profile.name} has real-looking secret in {key}"
 
 
@@ -90,14 +89,14 @@ def test_live_profile_is_stricter_than_test_profile_for_core_safety_thresholds()
     test = parse_env(ROOT / ".env.test.example")
     live = parse_env(ROOT / ".env.live.example")
 
-    assert as_float(live, "ALPHAFORGE_RISK_PCT_PER_TRADE") <= as_float(test, "ALPHAFORGE_RISK_PCT_PER_TRADE")
+    assert as_float(live, "ALPHAFORGE_BACKTEST_RISK_PCT") <= as_float(test, "ALPHAFORGE_BACKTEST_RISK_PCT")
     assert as_float(live, "ALPHAFORGE_MAX_DAILY_LOSS_PCT") <= as_float(test, "ALPHAFORGE_MAX_DAILY_LOSS_PCT")
     assert as_int(live, "ALPHAFORGE_MAX_CONCURRENT_POSITIONS") <= as_int(test, "ALPHAFORGE_MAX_CONCURRENT_POSITIONS")
     assert as_float(live, "ALPHAFORGE_MIN_SIGNAL_SCORE") >= as_float(test, "ALPHAFORGE_MIN_SIGNAL_SCORE")
-    assert live["REJECT_UNKNOWN_EXPECTANCY"].lower() == "true"
+    assert live["ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY"].lower() == "true"
     assert live["ALPHAFORGE_ENABLE_LIVE_TRADING"].lower() == "false"
     assert live["ALPHAFORGE_ALLOW_LIVE_ORDERS"].lower() == "false"
-    assert live["ALPHAFORGE_DRY_RUN"].lower() == "true"
+    assert live["ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED"].lower() == "false"
 
 
 def test_test_profile_is_clearly_marked_non_live_diagnostic():
@@ -106,8 +105,56 @@ def test_test_profile_is_clearly_marked_non_live_diagnostic():
     assert "DIAGNOSTIC" in text
     values = parse_env(ROOT / ".env.test.example")
     assert values["ALPHAFORGE_EXECUTION_MODE"] == "BACKTEST"
+    assert values["ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION"].lower() == "false"
+    assert values["ALPHAFORGE_ENABLE_PAPER_TRADING"].lower() == "false"
     assert values["ALPHAFORGE_ENABLE_LIVE_TRADING"].lower() == "false"
     assert values["ALPHAFORGE_ALLOW_LIVE_ORDERS"].lower() == "false"
+
+
+def test_default_template_is_canonical_paper_burnin_profile():
+    values = parse_env(ROOT / ".env.example")
+    decision = decision_filter_config(values["ALPHAFORGE_EXECUTION_MODE"], env=values)
+
+    assert values["ALPHAFORGE_EXECUTION_MODE"] == "PAPER"
+    assert decision["MODE"] == "PAPER"
+    assert decision["RUNTIME_LIMITS_ACTIVE"] is True
+    assert values["ALPHAFORGE_ENABLE_PAPER_TRADING"].lower() == "true"
+    assert values["ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION"].lower() == "true"
+    assert values["ALPHAFORGE_ENABLE_LIVE_TRADING"].lower() == "false"
+    assert values["ALPHAFORGE_ALLOW_LIVE_ORDERS"].lower() == "false"
+    assert values["BINANCE_ENVIRONMENT"] == "production"
+    assert values["BINANCE_BASE_URL"] == values["BINANCE_WS_URL"] == ""
+
+
+def test_default_paper_template_only_fails_audit_for_required_credentials():
+    values = parse_env(ROOT / ".env.example")
+    report = audit_config(env=values, root=ROOT)
+
+    assert report["warnings"] == []
+    assert report["errors"] == [
+        "BINANCE_API_KEY missing or placeholder while authenticated reconciliation is enabled",
+        "BINANCE_API_SECRET missing or placeholder while authenticated reconciliation is enabled",
+    ]
+
+
+def test_copyable_profiles_do_not_supply_reserved_values():
+    for profile in PROFILES:
+        values = parse_env(profile)
+        supplied = sorted(
+            name for name, value in values.items()
+            if value and CONTRACT_BY_NAME[name].classification == "RESERVED"
+        )
+        assert supplied == [], f"{profile.name} supplies reserved values: {supplied}"
+
+
+def test_runtime_profiles_do_not_contain_reserved_inventory():
+    for profile in RUNTIME_PROFILES:
+        values = parse_env(profile)
+        reserved = sorted(
+            name for name in values
+            if CONTRACT_BY_NAME[name].classification == "RESERVED"
+        )
+        assert reserved == [], f"{profile.name} contains reserved variables: {reserved}"
 
 
 def test_readme_mentions_all_environment_profiles():

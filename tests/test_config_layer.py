@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from alphaforge.config import load_config_from_env
+from alphaforge.config_registry import CONTRACT_BY_NAME
 from alphaforge.runtime import _build_runtime_from_env
 
 
@@ -29,9 +30,8 @@ def test_runtime_receives_config_values(monkeypatch):
 def test_env_example_keys_are_wired_or_reserved():
     content = Path('.env.example').read_text().splitlines()
     keys = [line.split('=',1)[0].strip() for line in content if line and not line.startswith('#') and '=' in line]
-    known = set(Path('src/alphaforge/config.py').read_text().split('"'))
     for key in keys:
-        assert key in known or 'RESERVED_NOT_WIRED' in '\n'.join(content)
+        assert key in CONTRACT_BY_NAME
 
 
 def test_default_binance_base_url_is_futures_host(monkeypatch):

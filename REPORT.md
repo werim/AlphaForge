@@ -1,3 +1,14 @@
+# Canonical PAPER env-template contract — 2026-09-02
+
+## Need and root cause
+Copying the BACKTEST diagnostic profile into `.env` made PAPER preflight derive `MODE=BACKTEST` and inactive runtime limits, so candidate and forced-PAPER runtime identities differed. Copyable templates also supplied non-operational reserved values, producing avoidable warnings. Authenticated reconciliation placeholders correctly failed closed but the operator contract did not clearly distinguish intentional credential blockers from template drift.
+
+## Minimal correction
+`.env.example` now identifies itself as the canonical PAPER runtime/burn-in profile, keeps production Binance REST/WS derived from `BINANCE_ENVIRONMENT=production`, and explicitly marks both read-only credential fields as must-fill. `.env.test.example` is BACKTEST-only with PAPER runtime and authenticated reconciliation disabled. Reserved inventory is absent from PAPER/LIVE runtime profiles and remains empty in the diagnostic inventory. README and `docs/KOMUTLAR.md` direct PAPER operators to `.env.example`, use only canonical `ALPHAFORGE_EXECUTION_MODE`, and explain that runtime limits are derived rather than configured independently.
+
+## Safety, compatibility, and validation
+LIVE enablement and real-order authorization remain false; PAPER preflight remains no-submit and reconciliation remains signed/read-only. No lifecycle, persistence, export, database, schema, or strategy-threshold behavior changed. Existing user `.env` files are not rewritten. Focused env-contract and Phase 9 identity/preflight coverage passes 23 tests, including exact candidate/runtime payload/hash equality and intentional placeholder credential rejection. Operators must replace both placeholders with matching read-only Binance credentials before preflight can pass authenticated reconciliation.
+
 # PR #338 canonical reject follow-up — 2026-09-01
 
 ## Why and root cause

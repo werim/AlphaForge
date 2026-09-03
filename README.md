@@ -73,10 +73,10 @@ AlphaForge now ships purpose-specific example profiles so BACKTEST diagnostics, 
 
 | Profile | Purpose | Safety posture |
 |---|---|---|
-| `.env.test.example` | Loose BACKTEST / local diagnostic runs to verify whether strategies can produce trades | NOT for LIVE; LIVE disabled, real orders blocked, diagnostic filters are intentionally looser |
+| `.env.test.example` | Loose BACKTEST-only diagnostics to verify whether strategies can produce trades | NOT for PAPER burn-in/preflight or LIVE; runtime and authenticated reconciliation are disabled |
 | `.env.medium.example` | Balanced PAPER/default evaluation and dashboard experimentation | LIVE disabled, realistic execution-cost and risk defaults |
 | `.env.live.example` | Hardened LIVE readiness preparation | Fail-closed defaults; real orders remain disabled until credentials, readiness evidence, and operator guards are explicitly supplied locally |
-| `.env.example` | Safe default template | Mirrors the medium PAPER-oriented profile and points to the purpose-specific templates |
+| `.env.example` | Canonical PAPER runtime and burn-in template | PAPER mode and runtime limits align; LIVE and real-order submission remain disabled |
 
 Copy exactly one profile to `.env` before running local workflows.
 
@@ -84,6 +84,7 @@ Windows PowerShell:
 
 ```powershell
 Copy-Item .env.test.example .env
+Copy-Item .env.example .env
 Copy-Item .env.medium.example .env
 Copy-Item .env.live.example .env
 ```
@@ -92,15 +93,18 @@ macOS/Linux:
 
 ```bash
 cp .env.test.example .env
+cp .env.example .env
 cp .env.medium.example .env
 cp .env.live.example .env
 ```
 
 Recommended use:
 
-1. Use `.env.test.example` when a BACKTEST or local PAPER diagnostic needs looser score, RR, trend/chop, spread, and universe limits to determine whether the strategy can produce auditable decisions. It remains unsafe for LIVE and keeps real-order gates closed.
-2. Use `.env.medium.example` or `.env.example` for normal PAPER observation, dashboard backtests, and balanced evaluation with realistic costs, slippage, spread, funding, cooldown, and position limits.
-3. Use `.env.live.example` only for hardened LIVE preparation. It requires explicit local credentials and readiness evidence, keeps `REJECT_UNKNOWN_EXPECTANCY=true`, preserves strict risk/cost/staleness guards, and does not enable live trading or live orders by default.
+1. Use `.env.test.example` only for BACKTEST diagnostics. Never use it for PAPER burn-in or preflight.
+2. Copy `.env.example` for normal PAPER runtime/burn-in; `.env.medium.example` remains the balanced dashboard/evaluation variant.
+3. Use `.env.live.example` only for hardened LIVE preparation. It requires explicit local credentials and readiness evidence, keeps `ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY=true`, preserves strict risk/cost/staleness guards, and does not enable live trading or live orders by default.
+
+The PAPER template deliberately keeps signed read-only reconciliation enabled and contains placeholders rather than secrets. Replace both `BINANCE_API_KEY` and `BINANCE_API_SECRET` locally with credentials for the selected Binance environment. Until then, `env_contract_valid`, `reconciliation_credentials_non_placeholder`, and `signed_readonly_reconciliation_available` fail closed by design. The template itself sets canonical `ALPHAFORGE_EXECUTION_MODE=PAPER`; `RUNTIME_LIMITS_ACTIVE` is derived as true from that mode, so it must not be added as a separate env variable. `ALPHAFORGE_ENABLE_LIVE_TRADING=false` and `ALPHAFORGE_ALLOW_LIVE_ORDERS=false` keep order submission disabled.
 
 ### Binance environment and endpoint configuration
 

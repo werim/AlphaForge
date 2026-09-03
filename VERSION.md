@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Canonical PAPER env-template contract (2026-09-02)
+- Current version: dev PAPER env-template safety correction; no runtime-code or schema migration.
+- Current phase: operator supplies matching read-only Binance credentials, then runs PAPER preflight.
+- Runtime maturity: `.env.example` is the canonical PAPER/burn-in profile; BACKTEST diagnostics are isolated in `.env.test.example`.
+- BACKTEST/PAPER/LIVE alignment: PAPER mode derives active runtime limits and stable campaign/runtime config identity from the same canonical setting.
+- Lifecycle/persistence/execution impact: unchanged; signed read-only reconciliation remains mandatory and real-order authorization remains disabled.
+- Known critical risks: placeholder or missing credentials intentionally block env contract and authenticated reconciliation; external Binance availability remains required.
+- Last audit date: 2026-09-02. Live readiness verdict: NOT LIVE READY.
+
 ## PAPER closed-candle geometry integrity (2026-09-01)
 - Current version: dev post-PR338 invalid-geometry contamination correction; no schema migration.
 - Current phase: review, CI validation, then a fresh PAPER campaign.
