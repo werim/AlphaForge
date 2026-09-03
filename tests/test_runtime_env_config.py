@@ -33,6 +33,7 @@ def test_explicit_persistence_dependencies_override_env_for_all_runtime_consumer
 def test_runtime_env_prefers_canonical_execution_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "live")
     monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "false")
     rt = _build_runtime_from_env()
     assert rt.config.execution_mode == ExecutionMode.LIVE
 

@@ -506,10 +506,12 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
 
 
 def test_live_start_blocks_placeholder_bootstrap_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ALPHAFORGE_REQUIRE_LIVE_QUALIFICATION", "0")
     monkeypatch.setenv("ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", "0")
     monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "false")
     orchestrator = _build_runtime_from_env()
     with pytest.raises(RuntimeError, match="exchange-backed market scanner is required"):
         asyncio.run(orchestrator.start())
@@ -658,16 +660,20 @@ def test_build_runtime_keeps_safe_scanner_for_backtest(monkeypatch: pytest.Monke
 
 
 def test_live_start_blocks_safe_scanner_override_through_runtime_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "false")
     orchestrator = _build_runtime_from_env()
     with pytest.raises(RuntimeError, match="LIVE mode blocked: exchange-backed market scanner is required"):
         asyncio.run(orchestrator.start())
 
 
 def test_live_start_phase6_disablement_precedes_real_adapter_requirement(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "0")
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "false")
     orchestrator = _build_runtime_from_env()
     with pytest.raises(RuntimeError, match="LIVE_REAL_ORDERS_DISABLED_IN_PHASE6"):
         asyncio.run(orchestrator.start())

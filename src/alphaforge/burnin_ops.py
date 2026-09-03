@@ -75,7 +75,10 @@ def _readonly_sqlite_uri(db: str, *, platform: str | None = None) -> str:
         if not PureWindowsPath(db).is_absolute():
             raw = PureWindowsPath(Path(db).resolve()).as_posix()
         return f"file:{quote(raw, safe='/:')}?mode=ro"
-    return f"file:{quote(Path(db).expanduser().resolve().as_posix(), safe='/:')}?mode=ro"
+    path = Path(db).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return f"file:{quote(path.as_posix(), safe='/:')}?mode=ro"
 
 
 def _connect_readonly(db: str) -> sqlite3.Connection:
