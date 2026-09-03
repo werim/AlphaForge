@@ -1,13 +1,17 @@
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 
 from alphaforge.execution import build_execution_context as build_canonical_execution_context
 from alphaforge.multi_timeframe import (BinanceMTFProvider, build_execution_context,
-                                        closed_candles, evaluate_mtf_alignment)
+                                        build_setup_context, closed_candles,
+                                        evaluate_mtf_alignment)
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+from alphaforge.persistence import init_db
 
 NOW = 10_000_000
 
@@ -51,6 +55,146 @@ def _execution_candles(closes):
     return [{"open_ts": i * 60_000, "open": close, "high": close, "low": close,
              "close": close, "volume": 1.0, "close_ts": NOW - (len(closes) - i - 1) * 60_000}
             for i, close in enumerate(closes)]
+
+
+def _provider_rows(closes, decision_ms):
+    rows = []
+    for index, close in enumerate(closes):
+        close_ms = decision_ms - (len(closes) - index - 1) * 60_000
+        rows.append([close_ms - 59_999, str(close + .02), str(close + .08),
+                     str(close - .08), str(close), "100", close_ms])
+    return rows
+
+
+def test_setup_classifies_countertrend_ma_as_regime_guided_pullback_not_long_trade():
+    candles = _execution_candles([100 + i * .1 for i in range(12)])
+    setup = build_setup_context(candles, "15m", regime={"direction": "SHORT"})
+
+    assert setup["direction"] == "LONG"  # retained diagnostic observation
+    assert setup["observed_direction"] == "LONG"
+    assert setup["trade_side"] == "SHORT"
+    assert setup["phase"] == "PULLBACK"
+    assert setup["setup_type"] == "SHORT_PULLBACK"
+    assert setup["candidate_ready"] is True
+
+
+def test_setup_detects_reentry_ready_when_recent_momentum_returns_to_regime():
+    candles = _execution_candles([100, 100.2, 100.4, 100.6, 100.8, 101, 101.2,
+                                  102, 101.8, 101.6, 101.4, 101.2])
+    setup = build_setup_context(candles, "15m", regime={"direction": "SHORT"})
+
+    assert setup["direction"] == "LONG"
+    assert setup["recent_direction"] == "SHORT"
+    assert setup["trade_side"] == "SHORT"
+    assert setup["phase"] == "REENTRY_READY"
+
+
+def test_guided_pullback_uses_execution_as_regime_side_confirmation():
+    regime = context("1h", "SHORT")
+    setup = context("15m", "LONG", generation_mode="REGIME_GUIDED",
+                    phase="PULLBACK", trade_side="SHORT", candidate_ready=True)
+    execution = context("1m", "SHORT", trigger="MOMENTUM_CONFIRMED",
+                        trade_side="SHORT", confirmed_for_side=True)
+
+    result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+
+    assert result["aligned"] is True
+    assert result["direction"] == "SHORT"
+    assert result["setup_phase"] == "PULLBACK"
+    assert "MTF_REGIME_SETUP_MISMATCH" not in result["reasons"]
+
+
+def test_guided_execution_counter_regime_is_rejected_with_additive_reason():
+    regime = context("1h", "SHORT")
+    setup = context("15m", "LONG", generation_mode="REGIME_GUIDED",
+                    phase="PULLBACK", trade_side="SHORT", candidate_ready=True)
+    execution = context("1m", "LONG", trigger="MOMENTUM_CONFIRMED",
+                        trade_side="SHORT", confirmed_for_side=False)
+
+    result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+
+    assert result["aligned"] is False
+    assert result["reasons"] == ["MTF_EXECUTION_COUNTER_REGIME"]
+
+
+def test_guided_flat_setup_is_complete_no_setup_evidence_not_unavailable():
+    candles = _execution_candles([100.0] * 12)
+    setup = build_setup_context(candles, "15m", regime={"direction": "SHORT"})
+    regime = context("1h", "SHORT")
+    execution = context("1m", "SHORT", trigger="MOMENTUM_CONFIRMED",
+                        trade_side="SHORT", confirmed_for_side=True)
+
+    result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+
+    assert setup["evidence_status"] == "COMPLETE"
+    assert setup["phase"] == "NO_SETUP"
+    assert result["reasons"] == ["MTF_NO_VALID_SETUP"]
+    assert "MTF_SETUP_UNAVAILABLE" not in result["reasons"]
+
+
+def test_non_finite_setup_evidence_is_invalid_and_fails_closed():
+    candles = _execution_candles([100 + i * .1 for i in range(12)])
+    candles[-1]["close"] = float("nan")
+    setup = build_setup_context(candles, "15m", regime={"direction": "LONG"})
+    regime = context("1h", "LONG")
+    execution = context("1m", "LONG", trigger="MOMENTUM_CONFIRMED",
+                        trade_side="LONG", confirmed_for_side=True)
+
+    result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
+
+    assert setup["phase"] == "INVALID"
+    assert setup["candidate_ready"] is False
+    assert setup["evidence_status"] == "INCOMPLETE"
+    assert "MTF_SETUP_UNAVAILABLE" in result["reasons"]
+    assert "MTF_NO_VALID_SETUP" in result["reasons"]
+
+
+def test_provider_generates_regime_guided_candidate(monkeypatch):
+    decision_ms = 20_000_000
+    rows_by_tf = {
+        "1h": _provider_rows([103 - i * .1 for i in range(24)], decision_ms),
+        "15m": _provider_rows([100 + i * .1 for i in range(16)], decision_ms),
+        "1m": _provider_rows([101 - i * .1 for i in range(8)], decision_ms),
+    }
+    provider = BinanceMTFProvider()
+    monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
+    canonical = {"spread_pct": .0002, "expected_slippage_pct": .0004,
+                 "latency_ms": 20.0, "liquidity_score": .9}
+
+    mtf = asyncio.run(provider.build("BTCUSDT", canonical, execution_ctx=canonical,
+        decision_ts_ms=decision_ms, regime_timeframe="1h", setup_timeframe="15m",
+        execution_timeframe="1m"))
+
+    assert mtf["regime"]["direction"] == "SHORT"
+    assert mtf["setup"]["direction"] == "LONG"
+    assert mtf["setup"]["phase"] == "PULLBACK"
+    assert mtf["alignment"]["aligned"] is True
+    assert mtf["generation"]["mode"] == "REGIME_GUIDED"
+    candidate = mtf["generation"]["candidate"]
+    assert candidate["side"] == "SHORT"
+    assert candidate["setup_type"] == "SHORT_PULLBACK"
+    assert candidate["sl"] > candidate["entry"] > candidate["tp"]
+
+
+def test_provider_rollback_mode_retains_legacy_equality_veto(monkeypatch):
+    decision_ms = 20_000_000
+    rows_by_tf = {
+        "1h": _provider_rows([103 - i * .1 for i in range(24)], decision_ms),
+        "15m": _provider_rows([100 + i * .1 for i in range(16)], decision_ms),
+        "1m": _provider_rows([101 - i * .1 for i in range(8)], decision_ms),
+    }
+    provider = BinanceMTFProvider(guided_signal_generation_enabled=False)
+    monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
+    canonical = {"spread_pct": .0002, "expected_slippage_pct": .0004,
+                 "latency_ms": 20.0, "liquidity_score": .9}
+
+    mtf = asyncio.run(provider.build("BTCUSDT", canonical, execution_ctx=canonical,
+        decision_ts_ms=decision_ms, regime_timeframe="1h", setup_timeframe="15m",
+        execution_timeframe="1m"))
+
+    assert mtf["generation"]["mode"] == "LEGACY_VETO"
+    assert mtf["alignment"]["aligned"] is False
+    assert "MTF_REGIME_SETUP_MISMATCH" in mtf["alignment"]["reasons"]
 
 
 def test_neutral_execution_is_available_but_never_confirmed():
@@ -135,6 +279,98 @@ class _NeutralExecutionProvider:
         alignment = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
         return {"provider": "BINANCE_FUTURES_CLOSED_KLINES", "regime": regime,
                 "setup": setup, "execution": execution, "alignment": alignment}
+
+
+class _GuidedProvider:
+    async def build(self, *_args, **_kwargs):
+        candidate = {"side": "SHORT", "entry": 100.0, "sl": 101.0, "tp": 98.0,
+                     "rr": 2.0, "setup_type": "SHORT_PULLBACK", "setup_phase": "PULLBACK",
+                     "geometry_status": "COMPLETE", "geometry_reason": None,
+                     "geometry_source": "MTF_REGIME_GUIDED_CLOSED_KLINES"}
+        return {"provider": "BINANCE_FUTURES_CLOSED_KLINES",
+                "regime": {"regime": "TRENDING", "direction": "SHORT"},
+                "setup": {"phase": "PULLBACK", "trade_side": "SHORT", "direction": "LONG"},
+                "execution": {"direction": "SHORT", "confirmed_for_side": True},
+                "alignment": {"aligned": True, "direction": "SHORT", "reasons": [],
+                    "generation_mode": "REGIME_GUIDED", "setup_phase": "PULLBACK",
+                    "timeframes": {"regime": "1h", "setup": "15m", "execution": "1m"}},
+                "generation": {"mode": "REGIME_GUIDED", "evidence_status": "COMPLETE",
+                               "candidate": candidate, "reason": None}}
+
+
+class _CounterRegimeGuidedProvider:
+    async def build(self, *_args, **_kwargs):
+        return {"provider": "BINANCE_FUTURES_CLOSED_KLINES",
+                "regime": {"regime": "TRENDING", "direction": "SHORT"},
+                "setup": {"phase": "PULLBACK", "trade_side": "SHORT", "direction": "LONG"},
+                "execution": {"direction": "LONG", "confirmed_for_side": False,
+                              "ma_delta_strength": .001},
+                "alignment": {"aligned": False, "direction": None,
+                    "generation_mode": "REGIME_GUIDED", "setup_phase": "PULLBACK",
+                    "reasons": ["MTF_EXECUTION_COUNTER_REGIME"],
+                    "timeframes": {"regime": "1h", "setup": "15m", "execution": "1m"}},
+                "generation": {"mode": "REGIME_GUIDED", "evidence_status": "INCOMPLETE",
+                               "candidate": None, "reason": None}}
+
+
+def test_runtime_replaces_independent_side_with_guided_candidate_before_quality_gates():
+    rejects = []
+    candidate = {"symbol": "BTCUSDT", "source_exchange": "binance", "side": "LONG",
+        "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0,
+        "setup_type": "BREAKOUT_UP", "geometry_status": "COMPLETE",
+        "spread_pct": .02, "market_data_latency_ms": 20.0, "liquidity_score": .9,
+        "volume_24h_usdt": 100_000_000, "market_ts": time.time()}
+    selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
+                                diagnostics={"inputs": candidate})
+    orchestrator = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+        require_mtf_alignment=True, max_spread_pct=.001), SimpleNamespace(),
+        lambda: asyncio.sleep(0, result=[]), mtf_context_provider=_GuidedProvider(),
+        on_reject_persist=lambda payload: rejects.append(payload))
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    assert rejects[-1]["reason"] == "SPREAD_TOO_HIGH"
+    assert rejects[-1]["side"] == "SHORT"
+    assert rejects[-1]["setup_type"] == "SHORT_PULLBACK"
+    assert rejects[-1]["mtf"]["shadow_evidence"]["would_have_been_side"] == "LONG"
+    assert rejects[-1]["mtf"]["shadow_evidence"]["disposition"] == "COUNTER_REGIME_LEGACY_CANDIDATE"
+    assert rejects[-1]["forward_label_subject"] == "GUIDED_CANDIDATE"
+    assert orchestrator.metrics.mtf_guided_candidates_generated == 1
+    assert orchestrator.metrics.mtf_legacy_candidates_shadowed == 1
+    assert orchestrator.metrics.mtf_setup_pullback == 1
+
+
+def test_counter_regime_candidate_remains_forward_labelled_with_mtf_provenance(tmp_path):
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'guided-forward.db'}")
+    candidate = {"symbol": "BTCUSDT", "source_exchange": "binance", "side": "LONG",
+        "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0,
+        "setup_type": "BREAKOUT_UP", "geometry_status": "COMPLETE",
+        "spread_pct": .0002, "market_data_latency_ms": 20.0, "liquidity_score": .9,
+        "volume_24h_usdt": 100_000_000, "market_ts": time.time(), "timeframe": "1m"}
+    selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
+                                diagnostics={"inputs": candidate})
+    orchestrator = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+        require_mtf_alignment=True, reject_forward_horizon_bars=2), SimpleNamespace(),
+        lambda: asyncio.sleep(0, result=[]), mtf_context_provider=_CounterRegimeGuidedProvider(),
+        persistence_engine=engine)
+    orchestrator._burnin_run_id = "guided-forward-run"
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT reject_reason,side,source_provenance_json "
+            "FROM burnin_pending_reject_labels"
+        )).mappings().one()
+    provenance = json.loads(row["source_provenance_json"])
+    assert row["reject_reason"] == "MTF_EXECUTION_COUNTER_REGIME"
+    assert row["side"] == "LONG"
+    assert provenance["mtf"]["setup"]["phase"] == "PULLBACK"
+    assert provenance["mtf"]["setup"]["trade_side"] == "SHORT"
+    assert provenance["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
+    assert provenance["forward_label_side"] == "LONG"
+    assert orchestrator.metrics.mtf_execution_counter_regime == 1
+    assert orchestrator.metrics.mtf_direction_mismatch == 1
 
 
 def test_paper_neutral_execution_rejects_before_ai_brain():

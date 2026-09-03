@@ -24,6 +24,17 @@ def test_paginated_klines_and_dedupe() -> None:
     assert [r.timestamp for r in rows] == [0, step, 2*step, 3*step, 4*step]
 
 
+def test_paginated_klines_honors_read_only_market_data_base_url() -> None:
+    calls = []
+    rows = fetch_binance_klines_paginated(
+        "BTCUSDT", "1m", 0, 0,
+        fetcher=lambda url: calls.append(url) or [[0, 1, 1, 1, 1, 1]],
+        base_url="https://market-data.example/",
+    )
+    assert len(rows) == 1
+    assert calls[0].startswith("https://market-data.example/fapi/v1/klines?")
+
+
 def test_incomplete_coverage_fails() -> None:
     pages = iter([[[0,1,1,1,1,1]], []])
     with pytest.raises(HistoricalDataError) as exc:

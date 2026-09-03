@@ -77,8 +77,17 @@ def test_payload_json_preserves_mtf_observability_counters(tmp_path) -> None:
         "mtf_setup_missing": 89,
         "mtf_execution_missing": 0,
         "mtf_execution_not_confirmed": 257,
+        "mtf_execution_counter_regime": 168,
         "mtf_direction_mismatch": 168,
         "mtf_stale_context": 0,
+        "mtf_guided_candidates_generated": 42,
+        "mtf_legacy_candidates_shadowed": 17,
+        "mtf_setup_continuation": 19,
+        "mtf_setup_pullback": 15,
+        "mtf_setup_reentry_ready": 8,
+        "mtf_setup_no_setup": 21,
+        "mtf_setup_overextended": 5,
+        "mtf_setup_invalid": 2,
     }
     save_runtime_heartbeat(
         engine,

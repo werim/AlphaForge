@@ -42,6 +42,17 @@ def test_canonical_provider_resolves_tp_and_persists_provenance(tmp_path):
     assert row[0] == 'TP_BEFORE_SL' and 'BINANCE_READ_ONLY_KLINES' in row[1]
 
 
+def test_canonical_provider_uses_configured_market_data_endpoint():
+    calls=[]
+    provider=BinanceReadOnlyCandleProvider(
+        interval='1m', base_url='https://market-data.example/',
+        fetcher=lambda url: calls.append(url) or [[1767225660000,'100','101','99','100','10']],
+    )
+    provider('BTCUSDT','2026-01-01T00:00:00Z','2026-01-01T00:01:00Z')
+    assert calls[0].startswith('https://market-data.example/fapi/v1/klines?')
+    assert provider.source_provenance['base_url'] == 'https://market-data.example'
+
+
 def test_provider_outage_does_not_expire_pending_label(tmp_path):
     conn,camp,run=setup(tmp_path)
     persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='outage',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})

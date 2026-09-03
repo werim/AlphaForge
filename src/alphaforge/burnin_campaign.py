@@ -122,11 +122,16 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
     config_payload["execution_timeframe"] = execution_tf
     config_payload["forward_label_evaluation_timeframe"] = config_payload["execution_timeframe"]
     config_payload["multi_timeframe"] = {key: config_payload[key] for key in ("regime_timeframe", "setup_timeframe", "execution_timeframe")}
+    config_payload["mtf_guided_signal_generation_enabled"] = bool(
+        getattr(runtime_config, "mtf_guided_signal_generation_enabled", True)
+    )
+    config_payload["multi_timeframe"]["guided_signal_generation_enabled"] = config_payload["mtf_guided_signal_generation_enabled"]
     # Read-only compatibility labels for older exporters. They no longer define
     # strategy identity independently of the explicit three-layer contract.
     config_payload["decision_setup_timeframe"] = config_payload["execution_timeframe"]
     config_payload["reject_evaluation_timeframe"] = config_payload["execution_timeframe"]
     config_payload["reject_forward_horizon_bars"] = int(getattr(runtime_config, "reject_forward_horizon_bars", 240))
+    config_payload["market_data_base_url"] = str(getattr(runtime_config, "market_data_base_url", "https://fapi.binance.com")).rstrip("/")
     config_payload["paper_source_exchanges"] = sorted({str(value).strip().lower()
                                                         for value in paper_source_exchanges if str(value).strip()})
     if not config_payload["paper_source_exchanges"]:
@@ -138,6 +143,9 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "regime_direction_threshold": getattr(runtime_config, "regime_direction_threshold", 0.0005),
         "setup_direction_threshold": getattr(runtime_config, "setup_direction_threshold", 0.0005),
         "execution_direction_threshold": getattr(runtime_config, "execution_direction_threshold", 0.0005),
+        "mtf_guided_signal_generation_enabled": bool(
+            getattr(runtime_config, "mtf_guided_signal_generation_enabled", True)
+        ),
     }
     effective_paper_slippage_bps = paper_slippage_bps if paper_slippage_bps is not None else getattr(runtime_config, "paper_slippage_bps", DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS)
     execution_cost_payload = {
@@ -631,9 +639,9 @@ class ProviderFailure(CampaignCandleProviderError): pass
 
 class BinanceReadOnlyCandleProvider:
     """Read-only canonical candle provider for PAPER burn-in forward labels."""
-    def __init__(self, *, interval: str = "1m", max_staleness_seconds: float | None = None, fetcher: Any | None = None) -> None:
-        self.interval = interval; self.max_staleness_seconds = max_staleness_seconds; self.fetcher = fetcher
-        self.source_provenance = {"provider": "BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE", "market_type": "USD_M_FUTURES", "interval": interval, "order_submission": "DISABLED"}
+    def __init__(self, *, interval: str = "1m", max_staleness_seconds: float | None = None, fetcher: Any | None = None, base_url: str = "https://fapi.binance.com") -> None:
+        self.interval = interval; self.max_staleness_seconds = max_staleness_seconds; self.fetcher = fetcher; self.base_url = base_url.rstrip("/")
+        self.source_provenance = {"provider": "BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE", "market_type": "USD_M_FUTURES", "interval": interval, "base_url": self.base_url, "order_submission": "DISABLED"}
 
     def __call__(self, symbol: str, start: str, end: str, interval: str | None = None) -> list[dict[str, Any]]:
         from alphaforge.historical_market_data import fetch_binance_klines_paginated, HistoricalDataError
@@ -644,7 +652,7 @@ class BinanceReadOnlyCandleProvider:
         end_ms = int(end_dt.timestamp() * 1000)
         try:
             resolved_interval=interval or self.interval
-            candles = fetch_binance_klines_paginated(symbol, resolved_interval, start_ms, end_ms, fetcher=self.fetcher)
+            candles = fetch_binance_klines_paginated(symbol, resolved_interval, start_ms, end_ms, fetcher=self.fetcher, base_url=self.base_url)
         except HistoricalDataError as exc:
             msg = str(exc)
             if "No candles" in msg or "shorter than one complete candle" in msg:
@@ -699,26 +707,33 @@ class BurnInCampaignRunner:
             print(f"AlphaForge resolver failure event unavailable ({event_exc!r}); original={original!r}", file=sys.stderr, flush=True)
 
     def resolver_tick(self) -> dict[str, Any]:
-        from alphaforge.burnin_resolver import resolve_campaign_batch
+        from alphaforge.burnin_resolver import resolve_campaign_batch, resolve_campaign_positions
         try:
             with self.engine.connect() as conn:
                 bootstrap_campaign_schema(conn)
                 due = _exec(conn, "SELECT symbol, timeframe, MIN(decision_timestamp) AS start_ts, MAX(due_at) AS end_ts, COUNT(*) AS count FROM burnin_pending_reject_labels WHERE campaign_id=:cid AND status IN ('PENDING','READY') AND due_at <= :now GROUP BY symbol,timeframe", {"cid": self.campaign_id, "now": utc_now()}).fetchall()
+                positions = _exec(conn, "SELECT trade_id,symbol,entry_time FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id", {"cid": self.campaign_id}).fetchall()
             candles: dict[str, Any] = {}
             for row in due:
                 r = _row_dict(row)
                 try: candles[(r["symbol"],r.get("timeframe"))] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"], r.get("timeframe"))
                 except TypeError: candles[(r["symbol"],r.get("timeframe"))] = self.candle_provider(r["symbol"], r["start_ts"], r["end_ts"])
-            def persist_resolution(conn: Any) -> dict[str, int]:
+            resolution_time = utc_now()
+            for row in positions:
+                r = _row_dict(row)
+                try: candles[(r["symbol"],"position",r["trade_id"])] = self.candle_provider(r["symbol"], r["entry_time"], resolution_time, "1m")
+                except TypeError: candles[(r["symbol"],"position",r["trade_id"])] = self.candle_provider(r["symbol"], r["entry_time"], resolution_time)
+            def persist_resolution(conn: Any) -> tuple[dict[str, int], dict[str, int]]:
                 counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=utc_now())
-                event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts})
-                return counts
-            counts = _with_fresh_lock_retry(self.engine, persist_resolution)
+                position_counts = resolve_campaign_positions(conn, self.campaign_id, candles, now=resolution_time)
+                event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts, "position_counts": position_counts})
+                return counts, position_counts
+            counts, position_counts = _with_fresh_lock_retry(self.engine, persist_resolution)
             q = self._qualify_if_due()
             if q is not None:
                 _with_fresh_lock_retry(self.engine, lambda conn: event(conn, self.campaign_id, "RESOLVER_QUALIFICATION_TRIGGERED", details=q))
             self.resolver_failure_count = 0
-            return {"status": "OK", "resolver_counts": counts, "qualification": q}
+            return {"status": "OK", "resolver_counts": counts, "position_counts": position_counts, "qualification": q}
         except Exception as exc:
             if isinstance(exc, OperationalError) and not _is_sqlite_lock_error(exc):
                 raise

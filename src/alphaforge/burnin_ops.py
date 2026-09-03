@@ -294,7 +294,52 @@ def _campaign_worker_alive(campaign: Mapping[str, Any]) -> bool:
 
 
 def _git_clean() -> bool:
-    return subprocess.run(["git", "diff", "--quiet"], cwd=Path.cwd()).returncode == 0 and subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=Path.cwd()).returncode == 0
+    return not subprocess.check_output(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=Path.cwd(),
+    )
+
+
+def _git_branch() -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=Path.cwd(),
+        text=True,
+    ).strip()
+
+
+def _git_worktree_fingerprint() -> str:
+    """Identify the exact tracked and untracked source used by a burn-in."""
+    root = Path.cwd().resolve()
+    digest = hashlib.sha256()
+    for label, payload in (
+        (b"head", subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root)),
+        (b"branch", _git_branch().encode()),
+        (b"status", subprocess.check_output(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=root)),
+        (b"diff", subprocess.check_output(["git", "diff", "--binary", "HEAD"], cwd=root)),
+    ):
+        digest.update(label + b"\0" + payload + b"\0")
+
+    untracked = subprocess.check_output(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=root,
+    ).split(b"\0")
+    for raw_path in sorted(path for path in untracked if path):
+        relative = Path(os.fsdecode(raw_path))
+        source = (root / relative).resolve()
+        try:
+            source.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"untracked source escapes worktree: {relative}") from exc
+        digest.update(b"untracked\0" + raw_path + b"\0")
+        if source.is_symlink():
+            digest.update(os.readlink(source).encode())
+        elif source.is_file():
+            with source.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _git_commit() -> str:
@@ -419,7 +464,7 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     add("dotenv_loaded", "PASS", {"path": dotenv.path, "loaded": dotenv.loaded})
     add("no_duplicate_env_keys", "PASS" if not env_audit["duplicate_template_variables"] else "FAIL", env_audit["duplicate_template_variables"])
     add("no_unknown_operational_env_variables", "PASS" if not env_audit["unknown_process_variables"] else "FAIL", env_audit["unknown_process_variables"])
-    endpoint_details = {"environment": cfg.binance.environment, "rest_base_url": cfg.binance.base_url, "ws_base_url": cfg.binance.ws_url, "resolution_source": cfg.binance.resolution_source}
+    endpoint_details = {"environment": cfg.binance.environment, "rest_base_url": cfg.binance.base_url, "ws_base_url": cfg.binance.ws_url, "market_data_base_url": cfg.binance.market_data_base_url, "resolution_source": cfg.binance.resolution_source}
     add("binance_environment_consistent", "PASS", endpoint_details)
     add("reconciliation_endpoint_matches_environment", "PASS", endpoint_details)
     reconciliation_enabled = bool(cfg.runtime.enable_binance_readonly_reconciliation)
@@ -444,12 +489,28 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     except Exception as exc:
         commit = "UNKNOWN"
         add("git_commit_known", "FAIL", str(exc))
-    add("working_tree_clean", "PASS" if _git_clean() else "FAIL", "dev branch must be clean")
     try:
-        branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
-        add("dev_branch", "PASS" if branch == "dev" else "FAIL", branch)
+        branch = _git_branch()
+        clean = _git_clean()
+        feature_branch = branch.startswith("feature/")
+        branch_allowed = branch == "dev" or feature_branch
+        worktree_fingerprint = _git_worktree_fingerprint() if feature_branch else None
+        fingerprint_token = f"wt-{worktree_fingerprint[:12]}" if worktree_fingerprint else None
+        source_bound = (branch == "dev" and clean) or (
+            feature_branch and fingerprint_token is not None and fingerprint_token in release_id
+        )
+        source_details = {
+            "branch": branch,
+            "clean": clean,
+            "worktree_fingerprint": worktree_fingerprint,
+            "required_release_token": fingerprint_token,
+            "release_id": release_id,
+        }
+        add("source_branch_allowed", "PASS" if branch_allowed else "FAIL", source_details)
+        add("source_worktree_identity_bound", "PASS" if source_bound else "FAIL", source_details)
     except Exception as exc:
-        add("dev_branch", "FAIL", str(exc))
+        add("source_branch_allowed", "FAIL", f"{exc.__class__.__name__}:{exc}")
+        add("source_worktree_identity_bound", "FAIL", f"{exc.__class__.__name__}:{exc}")
     mode = str(cfg.runtime.execution_mode).upper()
     add("execution_mode_paper", "PASS" if mode == "PAPER" else "FAIL", mode)
     add("live_mutation_path_disabled", "PASS" if mode != "LIVE" and not bool(getattr(cfg.runtime, "enable_live_execution", False)) else "FAIL", "LIVE mutation path must be unavailable")
@@ -497,9 +558,12 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("runtime_identity_matches_campaign_identity", "UNAVAILABLE", f"{exc.__class__.__name__}:{exc}")
     add("execution_cost_identity_complete", "PASS" if ident.get("execution_cost_config_hash") and all(k in ident.get("execution_cost_payload", {}) for k in ("max_spread_pct", "paper_slippage_bps", "min_liquidity_usd")) else "FAIL", ident.get("execution_cost_payload"))
     try:
-        provenance = BinanceReadOnlyCandleProvider(interval=intervals[0] if intervals else "1h").source_provenance
+        provenance = BinanceReadOnlyCandleProvider(interval=intervals[0] if intervals else "1h", base_url=cfg.binance.market_data_base_url).source_provenance
         ok = provenance.get("provider") == "BINANCE_READ_ONLY_KLINES" and provenance.get("order_submission") == "DISABLED"
         add("source_provenance_present", "PASS" if ok else "FAIL", provenance)
+        configured_market_url = str(cfg.binance.market_data_base_url).rstrip("/")
+        resolver_market_url = str(provenance.get("base_url") or "").rstrip("/")
+        add("market_data_endpoint_consistent", "PASS" if configured_market_url == resolver_market_url else "FAIL", {"scanner_and_mtf": configured_market_url, "outcome_resolver": resolver_market_url})
     except Exception as exc:
         add("source_provenance_present", "UNAVAILABLE", f"{exc.__class__.__name__}:{exc}")
 
@@ -528,7 +592,7 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     add("disk_space_sufficient", "PASS" if usage.free > 100 * 1024 * 1024 else "FAIL", {"free_bytes": usage.free})
     if require_market_data:
         try:
-            BinanceReadOnlyCandleProvider(interval=intervals[0] if intervals else "1h")(symbols[0], "2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z")
+            BinanceReadOnlyCandleProvider(interval=intervals[0] if intervals else "1h", base_url=cfg.binance.market_data_base_url)(symbols[0], "2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z")
             add("binance_readonly_klines_reachable", "PASS", symbols[0] if symbols else None)
         except Exception as exc:
             add("binance_readonly_klines_reachable", "FAIL", f"{exc.__class__.__name__}:{exc}")
@@ -716,7 +780,7 @@ def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Seq
             return {"status": "LAUNCHED", "campaign_id": campaign.campaign_id, "burnin_run_id": start["burnin_run_id"], "worker_pid": proc.pid, "attachment": attach, "evidence_locations": {"preflight": pf["evidence_locations"], "database": db, "artifacts": f"artifacts/burnin/{campaign.campaign_id}"}}
         engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
         try:
-            runner = BurnInCampaignRunner(engine, campaign.campaign_id, BinanceReadOnlyCandleProvider())
+            runner = BurnInCampaignRunner(engine, campaign.campaign_id, BinanceReadOnlyCandleProvider(base_url=load_config_from_env().exchange.binance.market_data_base_url))
             result = asyncio.run(runner.run_foreground())
             return {"status": "FOREGROUND_STOPPED", "campaign_id": campaign.campaign_id, "burnin_run_id": start["burnin_run_id"], "runner": result}
         finally:
@@ -1699,7 +1763,14 @@ def _launch_worker(db: str, campaign_id: str) -> subprocess.Popen[Any]:
         if os.name == "nt":
             creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        return subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER", "ALPHAFORGE_BURNIN_DATABASE_PATH": str(Path(db).expanduser().resolve())}, creationflags=creationflags)
+        return subprocess.Popen(
+            cmd,
+            stdout=stdout,
+            stderr=stderr,
+            env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER", "ALPHAFORGE_BURNIN_DATABASE_PATH": str(Path(db).expanduser().resolve())},
+            creationflags=creationflags,
+            start_new_session=os.name != "nt",
+        )
     finally:
         stdout.close()
         stderr.close()

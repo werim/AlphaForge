@@ -40,7 +40,7 @@ def test_config_drift_pauses_campaign(tmp_path):
 from alphaforge.burnin import persist_burnin_trade_outcome, persist_burnin_reject_outcome, persist_burnin_observation
 from alphaforge.burnin_qualification import BurnInThresholds
 from alphaforge.burnin_campaign import qualify_campaign, BurnInCampaignRunner
-from alphaforge.burnin_resolver import persist_pending_reject_label
+from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label
 
 COSTS={"spread_cost":0.01,"entry_slippage_cost":0.01,"exit_slippage_cost":0.01,"fee_cost":0.01,"funding_cost":0.0,"latency_cost":0.0}
 
@@ -257,6 +257,24 @@ def test_campaign_worker_runs_resolver_and_triggers_qualification(tmp_path):
     conn=sqlite3.connect(db)
     assert conn.execute("select count(*) from burnin_campaign_events where event_type='RESOLVER_BATCH'").fetchone()[0] == 1
     assert conn.execute("select count(*) from burnin_qualification_snapshots").fetchone()[0] >= 1
+    conn.close()
+
+
+def test_campaign_worker_resolves_open_paper_position(tmp_path):
+    db=tmp_path/'position-worker.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='rel-position',duration_days=1,symbols=['BTCUSDT'],intervals=['1h','15m','1m'])
+    run=start_or_resume_campaign(conn,camp.campaign_id)
+    model={'spread_penalty':0.0,'slippage_penalty':0.0,'fee_penalty':0.0,'funding_penalty':0.0,'latency_penalty':0.0,'volatility_penalty':0.0,'liquidity_penalty':0.0}
+    persist_pending_position(conn,trade_id='paper-trade',campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],signal_id='guided',symbol='BTCUSDT',side='SHORT',entry_time='2026-01-01T00:00:00Z',planned_entry=100,simulated_fill=100,stop=110,target=80,quantity=1,notional=100,entry_spread=0,entry_slippage=0,entry_fee=0,regime='SHORT',source_provenance={'execution_cost_unit':'R','execution_cost_model':model,'setup_phase':'CONTINUATION','execution_direction':'SHORT'})
+    conn.commit(); conn.close()
+    def provider(symbol,start,end,interval='1m'):
+        return [{'timestamp':'2026-01-01T00:01:00Z','high':101,'low':79}]
+    engine=_engine(db); result=BurnInCampaignRunner(engine,camp.campaign_id,provider).resolver_tick(); engine.dispose()
+    conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    outcome=conn.execute("SELECT exit_reason,evidence_complete,payload_json FROM burnin_trade_outcomes WHERE trade_id='paper-trade'").fetchone()
+    assert result['position_counts']['tp']==1
+    assert outcome['exit_reason']=='TP_HIT' and outcome['evidence_complete']==1
+    assert json.loads(outcome['payload_json'])['phase']=='CONTINUATION'
     conn.close()
 
 

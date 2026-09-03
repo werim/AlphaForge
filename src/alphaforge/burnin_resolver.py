@@ -154,7 +154,7 @@ def persist_pending_position(conn: Any, **kw) -> str:
     _exec(conn,"""INSERT OR IGNORE INTO burnin_pending_position_outcomes(pending_position_id,trade_id,campaign_id,burnin_run_id,signal_id,symbol,side,entry_time,planned_entry,simulated_fill,stop,target,quantity,notional,entry_spread,entry_slippage,entry_fee,regime,source_provenance_json,status,created_at,schema_version) VALUES (:pid,:trade_id,:campaign_id,:burnin_run_id,:signal_id,:symbol,:side,:entry_time,:planned_entry,:simulated_fill,:stop,:target,:quantity,:notional,:entry_spread,:entry_slippage,:entry_fee,:regime,:prov,'OPEN',:now,:sv)""", vals)
     return pid
 
-def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_price: float, exit_reason: str, exit_costs: Mapping[str,Any], mfe: float|None=None, mae: float|None=None) -> dict[str,Any]:
+def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_price: float, exit_reason: str, exit_costs: Mapping[str,Any], mfe: float|None=None, mae: float|None=None, ambiguous: bool=False) -> dict[str,Any]:
     bootstrap_campaign_schema(conn); row=_exec(conn,"SELECT * FROM burnin_pending_position_outcomes WHERE trade_id=:t",{"t":trade_id}).fetchone()
     if not row: raise KeyError('position not found')
     r=dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
@@ -163,11 +163,61 @@ def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_p
     gross_pnl=(float(exit_price)-fill)*qty*sign; risk=abs(fill-float(r.get('stop') or fill)) or 1.0; gross_r=(float(exit_price)-fill)*sign/risk
     missing=[k for k in ('exit_spread','exit_slippage','exit_fee','funding','latency_impact_penalty') if exit_costs.get(k) is None]
     total=None if missing else sum(float(exit_costs.get(k) or 0) for k in ('exit_spread','exit_slippage','exit_fee','funding','latency_impact_penalty')) + float(r.get('entry_spread') or 0)+float(r.get('entry_slippage') or 0)+float(r.get('entry_fee') or 0)
-    net_pnl=None if total is None else gross_pnl-total; net_r=None if total is None else gross_r-total
+    try: provenance=json.loads(r.get('source_provenance_json') or '{}')
+    except (TypeError,json.JSONDecodeError): provenance={}
+    net_r=None if total is None else gross_r-total
+    net_pnl=None if total is None else gross_pnl-total
+    if total is not None and provenance.get('execution_cost_unit') == 'R':
+        net_pnl=gross_pnl-(total*risk*qty)
     hold=(_dt(exit_time)-_dt(r['entry_time'])).total_seconds()
-    _exec(conn,"""UPDATE burnin_pending_position_outcomes SET status='CLOSED',exit_time=:xt,exit_price=:xp,exit_reason=:xr,gross_pnl=:gp,gross_r=:gr,exit_spread=:es,exit_slippage=:esl,exit_fee=:ef,funding=:fu,latency_impact_penalty=:li,total_execution_cost=:tc,net_pnl=:np,net_r=:nr,hold_duration_seconds=:hold,mfe=:mfe,mae=:mae,evidence_complete=:ec,missing_fields_json=:mf,resolved_at=:now WHERE trade_id=:tid""",{"tid":trade_id,"xt":exit_time,"xp":exit_price,"xr":exit_reason,"gp":gross_pnl,"gr":gross_r,"es":exit_costs.get('exit_spread'),"esl":exit_costs.get('exit_slippage'),"ef":exit_costs.get('exit_fee'),"fu":exit_costs.get('funding'),"li":exit_costs.get('latency_impact_penalty'),"tc":total,"np":net_pnl,"nr":net_r,"hold":hold,"mfe":mfe,"mae":mae,"ec":0 if missing else 1,"mf":json.dumps(missing),"now":utc_now()})
-    persist_burnin_trade_outcome(conn,outcome_id='tout_'+trade_id,burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),trade_id=trade_id,symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',closed_at=exit_time,gross_r=gross_r,gross_pnl=gross_pnl,costs={'spread_cost':None if exit_costs.get('exit_spread') is None else (r.get('entry_spread') or 0)+exit_costs.get('exit_spread'),'entry_slippage_cost':r.get('entry_slippage'),'exit_slippage_cost':exit_costs.get('exit_slippage'),'fee_cost':None if exit_costs.get('exit_fee') is None else (r.get('entry_fee') or 0)+exit_costs.get('exit_fee'),'funding_cost':exit_costs.get('funding'),'latency_cost':exit_costs.get('latency_impact_penalty')},net_r=net_r,net_pnl=net_pnl,hold_duration_seconds=hold,mfe=mfe,mae=mae,exit_reason=exit_reason,payload={'pending_position_id':r['pending_position_id'],'planned_rr_ignored':True})
-    return {'status':'CLOSED','trade_id':trade_id,'evidence_complete':not missing,'net_r':net_r}
+    evidence_missing=[*missing, *(['ambiguous_intrabar_sequence'] if ambiguous else [])]
+    _exec(conn,"""UPDATE burnin_pending_position_outcomes SET status='CLOSED',exit_time=:xt,exit_price=:xp,exit_reason=:xr,gross_pnl=:gp,gross_r=:gr,exit_spread=:es,exit_slippage=:esl,exit_fee=:ef,funding=:fu,latency_impact_penalty=:li,total_execution_cost=:tc,net_pnl=:np,net_r=:nr,hold_duration_seconds=:hold,mfe=:mfe,mae=:mae,evidence_complete=:ec,missing_fields_json=:mf,resolved_at=:now WHERE trade_id=:tid""",{"tid":trade_id,"xt":exit_time,"xp":exit_price,"xr":exit_reason,"gp":gross_pnl,"gr":gross_r,"es":exit_costs.get('exit_spread'),"esl":exit_costs.get('exit_slippage'),"ef":exit_costs.get('exit_fee'),"fu":exit_costs.get('funding'),"li":exit_costs.get('latency_impact_penalty'),"tc":total,"np":net_pnl,"nr":net_r,"hold":hold,"mfe":mfe,"mae":mae,"ec":0 if evidence_missing else 1,"mf":json.dumps(evidence_missing),"now":utc_now()})
+    outcome_payload={'pending_position_id':r['pending_position_id'],'signal_id':r.get('signal_id'),'source_provenance':provenance,'phase':provenance.get('setup_phase'),'execution':provenance.get('execution_direction'),'ambiguous_intrabar_sequence':ambiguous}
+    persist_burnin_trade_outcome(conn,outcome_id='tout_'+trade_id,burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),trade_id=trade_id,symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',closed_at=exit_time,gross_r=gross_r,gross_pnl=gross_pnl,costs={'spread_cost':None if exit_costs.get('exit_spread') is None else (r.get('entry_spread') or 0)+exit_costs.get('exit_spread'),'entry_slippage_cost':r.get('entry_slippage'),'exit_slippage_cost':exit_costs.get('exit_slippage'),'fee_cost':None if exit_costs.get('exit_fee') is None else (r.get('entry_fee') or 0)+exit_costs.get('exit_fee'),'funding_cost':exit_costs.get('funding'),'latency_cost':exit_costs.get('latency_impact_penalty'),'volatility_penalty':exit_costs.get('volatility_penalty'),'liquidity_penalty':exit_costs.get('liquidity_penalty')},net_r=net_r,net_pnl=net_pnl,effective_rr_at_entry=provenance.get('effective_rr_at_entry'),realized_effective_rr=net_r,hold_duration_seconds=hold,mfe=mfe,mae=mae,exit_reason=exit_reason,payload=outcome_payload)
+    if ambiguous:
+        _exec(conn,"UPDATE burnin_trade_outcomes SET evidence_complete=0,missing_cost_fields_json=:mf WHERE outcome_id=:oid",{'mf':json.dumps(evidence_missing),'oid':'tout_'+trade_id})
+    return {'status':'CLOSED','trade_id':trade_id,'evidence_complete':not evidence_missing,'net_r':net_r,'exit_reason':exit_reason}
+
+
+def resolve_campaign_positions(conn: Any, campaign_id: str, candles_by_trade: Mapping[Any,Sequence[Mapping[str,Any]]], *, now: str|None=None) -> dict[str,int]:
+    """Resolve campaign PAPER positions from exchange 1m candles without inventing intrabar order."""
+    bootstrap_campaign_schema(conn); now=now or utc_now()
+    rows=_exec(conn,"SELECT * FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id",{'cid':campaign_id}).fetchall()
+    counts={'closed':0,'tp':0,'sl':0,'ambiguous':0,'pending':0}
+    for raw in rows:
+        r=dict(raw) if isinstance(raw,sqlite3.Row) else dict(raw._mapping)
+        candles=candles_by_trade.get((r['symbol'],'position',r['trade_id'])) or candles_by_trade.get(r['trade_id']) or []
+        normalized=[]
+        for candle in candles:
+            try:
+                ts=_dt(candle.get('timestamp') or candle.get('open_time') or candle.get('time'))
+                high=float(candle['high']); low=float(candle['low'])
+                if math.isfinite(high) and math.isfinite(low) and high >= low and _dt(r['entry_time']) < ts <= _dt(now):
+                    normalized.append((ts,high,low))
+            except (TypeError,ValueError,KeyError): continue
+        normalized.sort(key=lambda item:item[0])
+        fill=float(r.get('simulated_fill') or r['planned_entry']); stop=float(r['stop']); target=float(r['target']); risk=abs(fill-stop) or 1.0
+        sign=-1 if _side(r['side'])=='SHORT' else 1
+        favorable=[]; adverse=[]; terminal=None
+        for ts,high,low in normalized:
+            favorable.append(((high-fill)*sign)/risk if sign>0 else ((fill-low)/risk))
+            adverse.append(((fill-low)/risk) if sign>0 else ((high-fill)/risk))
+            sl,tp=_hit(r['side'],high,low,stop,target)
+            if sl or tp:
+                terminal=(ts,sl,tp); break
+        if terminal is None:
+            counts['pending']+=1; continue
+        try: provenance=json.loads(r.get('source_provenance_json') or '{}')
+        except (TypeError,json.JSONDecodeError): provenance={}
+        model=provenance.get('execution_cost_model') if isinstance(provenance.get('execution_cost_model'),Mapping) else {}
+        def half(name):
+            value=model.get(name)
+            return None if value is None else float(value)/2.0
+        exit_costs={'exit_spread':half('spread_penalty'),'exit_slippage':half('slippage_penalty'),'exit_fee':half('fee_penalty'),'funding':model.get('funding_penalty'),'latency_impact_penalty':model.get('latency_penalty'),'volatility_penalty':model.get('volatility_penalty'),'liquidity_penalty':model.get('liquidity_penalty')}
+        ts,sl,tp=terminal; ambiguous=bool(sl and tp); reason='AMBIGUOUS_INTRABAR' if ambiguous else ('SL_HIT' if sl else 'TP_HIT'); price=stop if sl else target
+        resolve_position_closure(conn,trade_id=r['trade_id'],exit_time=ts.isoformat().replace('+00:00','Z'),exit_price=price,exit_reason=reason,exit_costs=exit_costs,mfe=max(favorable,default=0.0),mae=max(adverse,default=0.0),ambiguous=ambiguous)
+        counts['closed']+=1; counts['ambiguous' if ambiguous else 'sl' if sl else 'tp']+=1
+    return counts
 
 
 def resolve_pending_rejects(conn: Any, candles_by_symbol: Mapping[str, Sequence[Mapping[str,Any]]] | Sequence[Mapping[str,Any]], *, now: str|None=None) -> dict[str,int]:
