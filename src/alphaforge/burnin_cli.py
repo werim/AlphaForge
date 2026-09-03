@@ -17,6 +17,10 @@ def _db_path(args):
 def _print(payload, json_out):
     print(json.dumps(payload,indent=None if json_out else 2,sort_keys=True,default=str) if json_out else _human(payload))
 
+def _candle_provider():
+    cfg = load_config_from_env()
+    return BinanceReadOnlyCandleProvider(base_url=cfg.exchange.binance.market_data_base_url)
+
 def _human(p):
     if not isinstance(p,dict): return str(p)
     return '\n'.join(f"{k}: {json.dumps(v,default=str) if isinstance(v,(dict,list)) else v}" for k,v in p.items())
@@ -48,7 +52,7 @@ def _launch_detached_worker(db: str, campaign_id: str) -> dict[str, object]:
     finally:
         conn.close()
     child_env={**os.environ, "ALPHAFORGE_RELEASE_ID": release_id, "ALPHAFORGE_EXECUTION_MODE": "PAPER", "EXECUTION_MODE": "PAPER", "ALPHAFORGE_BURNIN_DATABASE_PATH": str(Path(db).expanduser().resolve())}
-    try: proc=subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env=child_env)
+    try: proc=subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env=child_env, start_new_session=os.name != "nt")
     finally: stdout.close(); stderr.close()
     time.sleep(0.2)
     if proc.poll() is not None:
@@ -83,7 +87,7 @@ def main(argv=None) -> int:
         if args.cmd=='worker':
             engine=init_db(f"sqlite+pysqlite:///{db}")
             try:
-                runner=BurnInCampaignRunner(engine,args.campaign_id,BinanceReadOnlyCandleProvider())
+                runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider())
                 if args.once:
                     with engine.begin() as conn: bootstrap_campaign_schema(conn)
                     res=runner.resolver_tick(); _print(res,args.json); return 0 if res.get('status') in {'OK','PAUSED'} else 1
@@ -122,7 +126,7 @@ def main(argv=None) -> int:
                     out=_launch_detached_worker(db,args.campaign_id); _print({**res, **out},args.json); return 0
                 engine=init_db(f"sqlite+pysqlite:///{db}")
                 try:
-                    runner=BurnInCampaignRunner(engine,args.campaign_id,BinanceReadOnlyCandleProvider())
+                    runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider())
                     import asyncio; out=asyncio.run(runner.run_foreground()); _print({**res, **out},args.json); return 0
                 finally: engine.dispose()
             if args.cmd=='pause': pause_campaign(conn,args.campaign_id); conn.commit(); _print({'status':'PAUSED','campaign_id':args.campaign_id},args.json); return 0

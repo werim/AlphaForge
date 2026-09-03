@@ -84,9 +84,11 @@ class RuntimeSettings:
     max_spread_pct: float = 0.0025
     max_expected_slippage_pct: float = 0.0020
     paper_fee_bps: float = 4.0
+    market_data_base_url: str = "https://fapi.binance.com"
     regime_timeframe: str = "1h"
     setup_timeframe: str = "15m"
     execution_timeframe: str = "1m"
+    mtf_guided_signal_generation_enabled: bool = True
     regime_direction_threshold: float = 0.0005
     setup_direction_threshold: float = 0.0005
     execution_direction_threshold: float = 0.0005
@@ -137,6 +139,7 @@ class RuntimeSettings:
 @dataclass(slots=True)
 class BinanceSettings:
     base_url: str = "https://fapi.binance.com"
+    market_data_base_url: str = "https://fapi.binance.com"
     ws_url: str = "wss://fstream.binance.com"
     environment: str = "production"
     resolution_source: str = "default"
@@ -354,9 +357,11 @@ def load_config_from_env() -> AlphaForgeConfig:
         max_spread_pct=val("ALPHAFORGE_MAX_SPREAD_PCT"),
         max_expected_slippage_pct=val("ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT"),
         paper_fee_bps=val("ALPHAFORGE_PAPER_FEE_BPS"),
+        market_data_base_url=str(val("ALPHAFORGE_BINANCE_MARKET_DATA_BASE_URL")).rstrip("/"),
         regime_timeframe=val("ALPHAFORGE_REGIME_TIMEFRAME"),
         setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),
         execution_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
+        mtf_guided_signal_generation_enabled=val("ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED"),
         regime_direction_threshold=val("ALPHAFORGE_REGIME_DIRECTION_THRESHOLD"),
         setup_direction_threshold=val("ALPHAFORGE_SETUP_DIRECTION_THRESHOLD"),
         execution_direction_threshold=val("ALPHAFORGE_EXECUTION_DIRECTION_THRESHOLD"),
@@ -400,6 +405,7 @@ def load_config_from_env() -> AlphaForgeConfig:
     )
     binance = BinanceSettings(
         base_url=resolved_binance.rest_base_url,
+        market_data_base_url=str(val("ALPHAFORGE_BINANCE_MARKET_DATA_BASE_URL")).rstrip("/"),
         ws_url=resolved_binance.ws_base_url,
         environment=resolved_binance.environment,
         resolution_source=resolved_binance.resolution_source,

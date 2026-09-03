@@ -58,6 +58,32 @@ def test_entry_fill_does_not_create_closed_burnin_outcome(tmp_path: Path):
     assert row[1] == 1
 
 
+def test_attached_paper_execution_persists_guided_pending_position(tmp_path: Path):
+    import asyncio, json
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+    from alphaforge.ai_brain import AIBrain
+    from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
+    from alphaforge.persistence import init_db
+    from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+
+    engine=init_db(f"sqlite+pysqlite:///{tmp_path / 'attached.sqlite'}")
+    with engine.begin() as conn:
+        campaign=create_campaign(conn,release_id='guided',duration_days=7,symbols=['BTCUSDT'],intervals=['1h','15m','1m'])
+        run=start_or_resume_campaign(conn,campaign.campaign_id)
+    orch=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),ai_brain=AIBrain(Session(engine)),market_scanner=lambda:asyncio.sleep(0,result=[]),persistence_engine=engine,scanner_source='EXCHANGE_PUBLIC_MARKET_DATA')
+    orch._campaign_id=campaign.campaign_id; orch._burnin_run_id=run['burnin_run_id']
+    execution_ctx={'spread_pct':.0002,'expected_slippage_pct':.0002,'fee_pct':.0004,'funding_rate_pct':.0,'latency_ms':10,'liquidity_score':.9,'volatility_regime':'normal'}
+    mtf={'regime':{'regime':'LONG'},'setup':{'phase':'PULLBACK'},'execution':{'direction':'LONG'}}
+    asyncio.run(orch._execute('BTCUSDT',{'signal_id':'guided-signal','order_type':'MARKET'},{'source_exchange':'binance','side':'LONG','entry':100,'sl':99,'tp':102,'rr':2,'execution_ctx':execution_ctx,'mtf':mtf}))
+    with engine.connect() as conn:
+        row=conn.execute(text("SELECT signal_id,side,stop,target,source_provenance_json,status FROM burnin_pending_position_outcomes")).mappings().one()
+    provenance=json.loads(row['source_provenance_json'])
+    assert row['signal_id']=='guided-signal' and row['side']=='LONG' and row['status']=='OPEN'
+    assert (row['stop'],row['target'])==(99,102)
+    assert provenance['setup_phase']=='PULLBACK' and provenance['execution_direction']=='LONG'
+
+
 def test_position_closed_creates_one_realized_burnin_outcome(tmp_path: Path):
     import asyncio
     from sqlalchemy import text

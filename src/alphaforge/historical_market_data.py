@@ -97,7 +97,7 @@ def _coverage_error(reason: str, candles: list[HistoricalCandle], start_ms: int,
     return HistoricalDataError(details)
 
 
-def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, end_ms: int, fetcher: Callable[[str], Any] | None = None) -> list[HistoricalCandle]:
+def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, end_ms: int, fetcher: Callable[[str], Any] | None = None, *, base_url: str = "https://fapi.binance.com") -> list[HistoricalCandle]:
     symbol = validate_single_binance_symbol(symbol)
     fetch = fetcher or _fetch_json
     step = _interval_ms(interval, source_function="fetch_binance_klines_paginated")
@@ -109,7 +109,7 @@ def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, en
         if cursor > end_ms:
             break
         params = urlencode({"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": end_ms, "limit": 1500})
-        rows = fetch(f"https://fapi.binance.com/fapi/v1/klines?{params}")
+        rows = fetch(f"{base_url.rstrip('/')}/fapi/v1/klines?{params}")
         if not rows:
             break
         page_new = 0

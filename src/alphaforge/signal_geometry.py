@@ -60,3 +60,63 @@ def build_breakout_geometry_with_diagnostics(
         "setup_reason": "CLOSE_ABOVE_PREV_HIGH" if side == "LONG" else "CLOSE_BELOW_PREV_LOW",
         "breakout_strength": breakout_strength,
     }, None
+
+
+def build_regime_guided_geometry_with_diagnostics(
+    current: Mapping[str, Any],
+    previous: Mapping[str, Any],
+    *,
+    side: str,
+    setup_type: str,
+    setup_phase: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Build executable geometry after the higher-timeframe side is selected.
+
+    Unlike ``build_breakout_geometry_with_diagnostics``, candle-to-candle direction
+    is evidence for timing and reward strength, not an independent trade-side
+    decision.  Stop placement remains structural and therefore fail-closed.
+    """
+    normalized_side = str(side or "").upper()
+    if normalized_side not in {"LONG", "SHORT"}:
+        return {}, "REGIME_SIDE_INVALID"
+    try:
+        now = {name: float(current[name]) for name in ("open", "high", "low", "close")}
+        prev = {name: float(previous[name]) for name in ("open", "high", "low", "close")}
+    except (KeyError, TypeError, ValueError):
+        return {}, "KLINE_MALFORMED_PAYLOAD"
+    values = (*now.values(), *prev.values())
+    if not all(math.isfinite(value) and value > 0.0 for value in values):
+        return {}, "OHLC_INVALID"
+    if any(candle["low"] > candle["high"] for candle in (now, prev)):
+        return {}, "OHLC_INVALID"
+
+    entry = now["close"]
+    stop = (min(now["low"], prev["low"]) if normalized_side == "LONG"
+            else max(now["high"], prev["high"]))
+    risk = entry - stop if normalized_side == "LONG" else stop - entry
+    if risk <= 0.0:
+        return {}, "ZERO_RISK_GEOMETRY"
+    body = abs(now["close"] - now["open"])
+    breakout_strength = (
+        max(0.0, (now["close"] - prev["high"]) / prev["high"])
+        if normalized_side == "LONG"
+        else max(0.0, (prev["low"] - now["close"]) / prev["low"])
+    )
+    rr = max(1.1, min(3.5, 1.2 + breakout_strength * 25.0 + body / now["open"] * 8.0))
+    target = entry + rr * risk if normalized_side == "LONG" else entry - rr * risk
+    if target <= 0.0:
+        return {}, "INVALID_TARGET"
+    return {
+        "entry": entry,
+        "side": normalized_side,
+        "sl": stop,
+        "tp": target,
+        "rr": rr,
+        "setup_type": setup_type,
+        "setup_phase": setup_phase,
+        "setup_reason": f"REGIME_GUIDED_{setup_phase}",
+        "breakout_strength": breakout_strength,
+        "geometry_status": "COMPLETE",
+        "geometry_reason": None,
+        "geometry_source": "MTF_REGIME_GUIDED_CLOSED_KLINES",
+    }, None

@@ -65,7 +65,7 @@ async def enrich_selected_market_geometry(
     this coroutine. Provider/unavailable-data failures leave geometry absent.
     """
     binance = getattr(getattr(config, "exchange", object()), "binance", object())
-    base_url = str(getattr(binance, "base_url", "https://fapi.binance.com"))
+    base_url = str(getattr(binance, "market_data_base_url", getattr(binance, "base_url", "https://fapi.binance.com")))
     timeout = float(getattr(getattr(config, "exchange", object()), "timeout_sec", 2.0) or 2.0)
     keys: list[tuple[str, str] | None] = []
     tasks: dict[tuple[str, str], asyncio.Task[dict[str, Any]]] = {}
@@ -99,7 +99,7 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
     binance = getattr(getattr(config, "exchange", object()), "binance", object())
     if str(getattr(binance, "default_market_type", "USD_M")).upper() != "USD_M":
         return []
-    base_url = str(getattr(binance, "base_url", "https://fapi.binance.com"))
+    base_url = str(getattr(binance, "market_data_base_url", getattr(binance, "base_url", "https://fapi.binance.com")))
     quote_asset = str(getattr(binance, "default_quote_asset", "USDT")).upper()
     decision_timeframe = str(getattr(getattr(config, "runtime", object()), "paper_decision_timeframe", "1m"))
     if decision_timeframe != "1m":

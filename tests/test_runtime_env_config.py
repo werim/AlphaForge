@@ -33,6 +33,7 @@ def test_explicit_persistence_dependencies_override_env_for_all_runtime_consumer
 def test_runtime_env_prefers_canonical_execution_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "live")
     monkeypatch.setenv("EXECUTION_MODE", "paper")
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "false")
     rt = _build_runtime_from_env()
     assert rt.config.execution_mode == ExecutionMode.LIVE
 
@@ -97,6 +98,7 @@ def test_runtime_env_loads_runtime_config_fields(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("ALPHAFORGE_OPERATOR_LIVE_ACKNOWLEDGED", "on")
     monkeypatch.setenv("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", "7")
     monkeypatch.setenv("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", "3")
+    monkeypatch.setenv("ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED", "false")
 
     rt = _build_runtime_from_env()
     cfg = rt.config
@@ -117,6 +119,23 @@ def test_runtime_env_loads_runtime_config_fields(monkeypatch: pytest.MonkeyPatch
     assert cfg.operator_live_acknowledged is True
     assert cfg.reconciliation_interval_sec == pytest.approx(7)
     assert cfg.reconciliation_timeout_sec == pytest.approx(3)
+    assert cfg.mtf_guided_signal_generation_enabled is False
+
+
+def test_mtf_guided_signal_generation_env_controls_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "false")
+    monkeypatch.setenv("ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED", "false")
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'mtf-env.sqlite3'}")
+
+    rt = _build_runtime_from_env(persistence_engine=engine)
+
+    assert rt.config.mtf_guided_signal_generation_enabled is False
+    assert rt.mtf_context_provider is not None
+    assert rt.mtf_context_provider.guided_signal_generation_enabled is False
+    engine.dispose()
 
 
 def test_live_reconciliation_enabled_requires_credentials(monkeypatch: pytest.MonkeyPatch) -> None:

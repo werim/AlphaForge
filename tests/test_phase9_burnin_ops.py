@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json, sqlite3, subprocess
+import json, os, sqlite3, subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -255,6 +255,42 @@ def test_preflight_passes_with_matching_runtime_identity_and_records_payloads(mo
     assert check["details"]["config_payload_differences"] == {}
 
 
+def test_preflight_accepts_feature_worktree_only_when_release_binds_fingerprint(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("BINANCE_API_KEY", "valid-readonly-key-abcdef123456")
+    monkeypatch.setenv("BINANCE_API_SECRET", "valid-readonly-secret-abcdef123456")
+    monkeypatch.setattr(ops, "_git_clean", lambda: False)
+    monkeypatch.setattr(ops, "_git_commit", lambda: "commit")
+    monkeypatch.setattr(ops, "_git_branch", lambda: "feature/mtf-guided-signal-generation")
+    monkeypatch.setattr(ops, "_git_worktree_fingerprint", lambda: "abc123def456" + "0" * 52)
+    monkeypatch.setattr(ops, "clock_skew_check", lambda: {"status": "PASS"})
+    monkeypatch.setattr(ops, "_actual_runtime_identity", lambda release, symbols, intervals: {**ops._candidate_identity(release, symbols, intervals), "execution_mode": "PAPER"})
+    provider = type("Provider", (), {"snapshot": lambda self: {"evidence_status": "COMPLETE", "authenticated": True, "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT", "orders": [], "positions": []}})()
+
+    accepted = ops.preflight(
+        str(tmp_path / "accepted.db"),
+        "mtf-guided-wt-abc123def456",
+        ["BTCUSDT"],
+        ["1h", "15m", "1m"],
+        require_market_data=False,
+        reconciliation_provider=provider,
+    )
+    rejected = ops.preflight(
+        str(tmp_path / "rejected.db"),
+        "mtf-guided-wt-wrong000000",
+        ["BTCUSDT"],
+        ["1h", "15m", "1m"],
+        require_market_data=False,
+        reconciliation_provider=provider,
+    )
+
+    assert accepted["status"] == "PASS"
+    assert rejected["status"] == "FAIL_CLOSED"
+    assert "source_worktree_identity_bound" in rejected["blockers"]
+
+
 def test_preflight_fails_closed_for_derived_runtime_config_drift(monkeypatch, tmp_path):
     import alphaforge.burnin_ops as ops
 
@@ -359,14 +395,15 @@ def test_worker_launch_uses_persisted_campaign_release_not_shell_release(monkeyp
         pid = 123
 
     def fake_popen(cmd, **kwargs):
-        captured.update(kwargs["env"])
+        captured.update(kwargs)
         return P()
 
     monkeypatch.setenv("ALPHAFORGE_RELEASE_ID", "wrong_shell_release")
     monkeypatch.setattr(ops.subprocess, "Popen", fake_popen)
     ops._launch_worker(str(db), camp.campaign_id)
-    assert captured["ALPHAFORGE_RELEASE_ID"] == "phase9_trial"
-    assert captured["ALPHAFORGE_EXECUTION_MODE"] == captured["EXECUTION_MODE"] == "PAPER"
+    assert captured["env"]["ALPHAFORGE_RELEASE_ID"] == "phase9_trial"
+    assert captured["env"]["ALPHAFORGE_EXECUTION_MODE"] == captured["env"]["EXECUTION_MODE"] == "PAPER"
+    assert captured["start_new_session"] is (os.name != "nt")
 
 
 def test_failed_zero_sample_run_is_terminal_and_excluded_from_aggregate(tmp_path):

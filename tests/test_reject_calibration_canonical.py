@@ -68,6 +68,19 @@ def test_layer_thresholds_are_independent_and_identity_sensitive():
     assert a['strategy_config_hash'] != b['strategy_config_hash']
 
 
+def test_guided_generation_mode_is_campaign_identity_sensitive():
+    enabled = build_phase8_campaign_identity(
+        RuntimeConfig(mtf_guided_signal_generation_enabled=True),
+        symbols=['BTC'], intervals=['1m'], paper_source_exchanges=['binance'])
+    rollback = build_phase8_campaign_identity(
+        RuntimeConfig(mtf_guided_signal_generation_enabled=False),
+        symbols=['BTC'], intervals=['1m'], paper_source_exchanges=['binance'])
+
+    assert enabled['config_hash'] != rollback['config_hash']
+    assert enabled['strategy_config_hash'] != rollback['strategy_config_hash']
+    assert enabled['config_payload']['multi_timeframe']['guided_signal_generation_enabled'] is True
+
+
 def test_pending_label_exactly_once_and_calibration_excludes_incomplete():
     c=sqlite3.connect(':memory:'); c.row_factory=sqlite3.Row; bootstrap_campaign_schema(c)
     persist_burnin_run(c,BurnInRun('r','rel',git_commit='g',config_hash='c',strategy_config_hash='s',universe_hash='u',source_provenance={'provider':'PAPER'}))
