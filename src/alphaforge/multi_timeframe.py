@@ -171,8 +171,15 @@ def build_execution_context(candles: list[dict[str, Any]], timeframe: str, marke
                            if valid_ohlc else ("UNKNOWN", None))
     last = candles[-1] if valid_ohlc else None
     trigger = direction in {"LONG", "SHORT"} and len(candles) >= 5
-    required = (market.get("spread_pct"), market.get("expected_slippage_pct"),
-                market.get("latency_ms"), market.get("liquidity_score"))
+    # MTF execution confirmation is based on market evidence available before
+    # an order exists. Public market-data latency belongs here; order execution
+    # latency is a separate pre-submit/cost-model concern.
+    required = (
+        market.get("spread_pct"),
+        market.get("expected_slippage_pct"),
+        market.get("market_data_latency_ms"),
+        market.get("liquidity_score"),
+    )
     # Evidence availability and trigger confirmation are deliberately independent:
     # a valid neutral observation is evidence, but can never authorize an entry.
     market_complete = all(isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -187,8 +194,11 @@ def build_execution_context(candles: list[dict[str, Any]], timeframe: str, marke
             "trade_side": normalized_side or None, "confirmed_for_side": confirmed_for_side,
             "side_confirmation": side_confirmation,
             "ma_delta_strength": strength, "direction_threshold": threshold,
-            "spread_pct": market.get("spread_pct"), "expected_slippage_pct": market.get("expected_slippage_pct"),
-            "latency_ms": market.get("latency_ms"), "liquidity_score": market.get("liquidity_score"),
+            "spread_pct": market.get("spread_pct"),
+            "expected_slippage_pct": market.get("expected_slippage_pct"),
+            "market_data_latency_ms": market.get("market_data_latency_ms"),
+            "latency_ms": market.get("latency_ms"),
+            "liquidity_score": market.get("liquidity_score"),
             "orderbook_imbalance": market.get("orderbook_imbalance"), "execution_regime": market.get("volatility_regime"),
             "effective_rr": market.get("effective_rr"), "last_closed_candle_ts": _iso(int(last["close_ts"])) if last else None,
             "last_closed_candle_ms": int(last["close_ts"]) if last else None,

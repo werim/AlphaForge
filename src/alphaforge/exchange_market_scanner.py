@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from typing import Any
 from urllib import parse, request
@@ -17,7 +18,7 @@ async def scan_exchange_markets(config: Any) -> list[dict[str, Any]]:
 
 def _binance_kline_geometry(base_url: str, symbol: str, *, timeout_sec: float) -> dict[str, Any]:
     """Return canonical geometry from the last two closed 1m setup candles."""
-    query = parse.urlencode({"symbol": symbol, "interval": "1m", "limit": 3})
+    query = parse.urlencode({"symbol": symbol, "interval": "1m", "limit": 21})
     try:
         rows = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/klines?{query}", timeout_sec=timeout_sec)
     except (TimeoutError, asyncio.TimeoutError):
@@ -35,11 +36,27 @@ def _binance_kline_geometry(base_url: str, symbol: str, *, timeout_sec: float) -
             return {"geometry_status": "INVALID", "geometry_reason": "KLINE_MALFORMED_PAYLOAD", "geometry_source": GEOMETRY_SOURCE}
         candles.append({"open": row[1], "high": row[2], "low": row[3], "close": row[4]})
         execution_candle_open_ts = row[0]
+    recent_klines: list[dict[str, float]] = []
+    for row in rows[:-1][-20:]:
+        if not isinstance(row, list) or len(row) < 5:
+            continue
+        try:
+            open_price, high, low, close = map(float, row[1:5])
+        except (TypeError, ValueError):
+            continue
+        if (not all(math.isfinite(value) and value > 0 for value in (open_price, high, low, close))
+                or high < max(open_price, close) or low > min(open_price, close)):
+            continue
+        recent_klines.append({"open": open_price, "high": high, "low": low, "close": close})
     identity = {"execution_candle_open_ts": execution_candle_open_ts}
     geometry, reason = build_breakout_geometry_with_diagnostics(candles[1], candles[0])
     if reason:
         return {**identity, "geometry_status": "INVALID", "geometry_reason": reason, "geometry_source": GEOMETRY_SOURCE}
-    return {**geometry, **identity, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": GEOMETRY_SOURCE}
+    volatility_evidence = ({"recent_klines": recent_klines,
+                            "recent_klines_status": "MEASURED",
+                            "recent_klines_source": GEOMETRY_SOURCE}
+                           if len(recent_klines) >= 2 else {})
+    return {**geometry, **identity, **volatility_evidence, "geometry_status": "COMPLETE", "geometry_reason": None, "geometry_source": GEOMETRY_SOURCE}
 
 
 def _fetch_json_with_latency(url: str, *, timeout_sec: float) -> tuple[Any, float | None]:

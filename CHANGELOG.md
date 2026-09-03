@@ -1,3 +1,24 @@
+## Execution-cost evidence attribution — 2026-09-03
+
+### Added
+- Regression coverage for fee/latency decomposition, unchanged total/effective RR math, monotonic HTTP RTT milliseconds, fail-closed missing volatility, and closed-candle volatility propagation.
+
+### Changed
+- Selected Binance PAPER candidates expose up to 20 validated closed 1m candles and their evidence source to the execution context.
+
+### Fixed
+- Fee and latency penalties are no longer swapped in `ExecutionCostModel` and effective-RR diagnostics.
+- Available closed 1m range evidence is no longer discarded before volatility classification.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; no schema, export, threshold, coefficient, or lifecycle migration. A fresh PAPER campaign is required for comparable post-fix economics.
+
+### Known Issues
+- Repository `.env` loading can override pytest-local endpoint/database values in four wider-suite tests; public HTTP RTT remains transport evidence rather than order submit/ack latency.
+
 ## Canonical PAPER env-template contract — 2026-09-02
 
 ### Added

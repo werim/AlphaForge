@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Execution-cost evidence attribution (2026-09-03)
+- Current version: dev execution-cost diagnostic and closed-1m volatility-evidence correction; no schema migration or threshold change.
+- Current phase: review and a fresh PAPER campaign after merge; existing campaign evidence remains immutable.
+- Runtime maturity: fee and latency penalties are attributed to their canonical fields; PAPER volatility uses up to 20 closed Binance 1m candles and remains unavailable/fail-closed when evidence is absent.
+- BACKTEST/PAPER/LIVE alignment: the shared cost model is corrected; PAPER evidence propagation is improved; LIVE authorization and order semantics are unchanged.
+- Lifecycle/persistence/execution impact: lifecycle and persistence schemas are unchanged; total penalty is unchanged by the attribution fix, while real volatility evidence can legitimately change effective RR versus the former missing-evidence penalty.
+- Known critical risks: public HTTP RTT is market-data transport latency, not order submit/ack latency; a new campaign is required for homogeneous post-fix evidence.
+- Last audit date: 2026-09-03. Live readiness verdict: NOT LIVE READY.
+
 ## Canonical PAPER env-template contract (2026-09-02)
 - Current version: dev PAPER env-template safety correction; no runtime-code or schema migration.
 - Current phase: operator supplies matching read-only Binance credentials, then runs PAPER preflight.

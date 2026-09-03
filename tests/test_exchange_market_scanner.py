@@ -7,8 +7,9 @@ from urllib import request
 import pytest
 
 from alphaforge.config import load_config_from_env
-from alphaforge.exchange_market_scanner import (_binance_kline_geometry,
+from alphaforge.exchange_market_scanner import (_binance_kline_geometry, _fetch_json_with_latency,
     enrich_selected_market_geometry, scan_exchange_markets)
+from alphaforge.execution import build_execution_context, build_execution_cost_model
 from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
 
 
@@ -89,6 +90,21 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
     assert btc["market_data_latency_source"] == "BINANCE_PUBLIC_HTTP_RTT"
 
 
+def test_binance_public_http_latency_is_monotonic_round_trip_milliseconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = iter((10.0, 11.25))
+    monkeypatch.setattr("alphaforge.exchange_market_scanner.time.perf_counter", lambda: next(ticks))
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", lambda _url, *, timeout_sec: {"ok": True})
+    payload, latency_ms = _fetch_json_with_latency("https://example.invalid", timeout_sec=1.0)
+    assert payload == {"ok": True}
+    assert latency_ms == pytest.approx(1250.0)
+    model = build_execution_cost_model({
+        "spread_pct": 0.0, "expected_slippage_pct": 0.0, "fee_pct": 0.0,
+        "funding_rate_pct": 0.0, "latency_ms": latency_ms,
+        "liquidity_score": 1.0, "volatility_regime": "normal",
+    })
+    assert model.latency_penalty == pytest.approx(0.25)
+
+
 def test_binance_unavailable_monotonic_clock_does_not_fabricate_latency(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
     monkeypatch.setattr("time.perf_counter", lambda: (_ for _ in ()).throw(RuntimeError("clock unavailable")))
@@ -139,6 +155,14 @@ def test_binance_closed_1m_candles_supply_canonical_trade_geometry(monkeypatch: 
     assert btc["setup_type"] == "BREAKOUT_UP"
     assert btc["geometry_status"] == "COMPLETE"
     assert btc["execution_candle_open_ts"] == 60_000
+    assert len(btc["recent_klines"]) == 2
+    assert btc["recent_klines"][-1]["high"] == 101.0
+    assert btc["recent_klines_source"] == "BINANCE_CLOSED_1M_KLINES"
+    execution_ctx = build_execution_context(btc)
+    assert execution_ctx["volatility_regime"] == "high"
+    assert execution_ctx["volatility_status"] == "MEASURED"
+    assert execution_ctx["volatility_source"] == "BINANCE_CLOSED_1M_KLINES"
+    assert build_execution_cost_model(execution_ctx).volatility_penalty == pytest.approx(0.12)
 
 
 def test_binance_invalid_or_missing_range_does_not_fabricate_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,7 +216,13 @@ def test_kline_timeout_is_queryable(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_binance_urls_use_fapi_v1_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_urls: list[str] = []
+
+    # Isolate this test from repository/process .env values. This test
+    # explicitly verifies production Binance Futures REST URL construction.
+    monkeypatch.setenv("BINANCE_ENVIRONMENT", "production")
+    monkeypatch.delenv("BINANCE_TESTNET", raising=False)
     monkeypatch.setenv("BINANCE_BASE_URL", "https://fapi.binance.com")
+    monkeypatch.setenv("BINANCE_WS_URL", "wss://fstream.binance.com/ws")
     monkeypatch.setattr(
         "urllib.request.urlopen",
         _urlopen_multi(

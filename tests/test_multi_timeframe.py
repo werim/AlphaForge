@@ -247,7 +247,9 @@ def test_realistic_binance_candidate_uses_canonical_normalized_execution_context
                   "liquidity_score": 0.9, "volatility_regime": "MODERATE"}
     assert "expected_slippage_pct" not in raw_market and "latency_ms" not in raw_market
     canonical = build_canonical_execution_context(raw_market)
-    assert canonical["expected_slippage_pct"] is not None and canonical["latency_ms"] == 42.0
+    assert canonical["expected_slippage_pct"] is not None
+    assert canonical["market_data_latency_ms"] == 42.0
+    assert canonical["latency_ms"] is None
 
     mtf = asyncio.run(provider.build("BTCUSDT", raw_market, execution_ctx=canonical,
         decision_ts_ms=decision_ms, regime_timeframe="1h", setup_timeframe="15m",
@@ -255,7 +257,8 @@ def test_realistic_binance_candidate_uses_canonical_normalized_execution_context
 
     assert mtf["execution"]["evidence_status"] == "COMPLETE"
     assert mtf["execution"]["expected_slippage_pct"] == canonical["expected_slippage_pct"]
-    assert mtf["execution"]["latency_ms"] == 42.0
+    assert mtf["execution"]["market_data_latency_ms"] == 42.0
+    assert mtf["execution"]["latency_ms"] is None
     assert "MTF_EXECUTION_UNAVAILABLE" not in mtf["alignment"]["reasons"]
 
 
@@ -423,7 +426,8 @@ def test_runtime_binds_aligned_direction_to_geometry_and_persists_reject(
     asyncio.run(orchestrator._process_symbol(selection))
 
     assert rejects and rejects[-1]["reason"] == expected_reason
-    assert provider.execution_ctx["latency_ms"] == 31.0
+    assert provider.execution_ctx["market_data_latency_ms"] == 31.0
+    assert provider.execution_ctx["latency_ms"] is None
     if expected_reason == "MTF_DIRECTION_MISMATCH":
         assert rejects[-1]["mtf"]["alignment"]["aligned"] is False
 

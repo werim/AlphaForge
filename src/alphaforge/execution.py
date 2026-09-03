@@ -57,9 +57,37 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     md_latency_status = str(market_ctx.get("market_data_latency_status", "MEASURED" if md_latency is not None else "UNAVAILABLE"))
     md_latency_source = str(market_ctx.get("market_data_latency_source", "UNKNOWN" if md_latency is not None else "UNAVAILABLE"))
 
+    # Keep public market-data/network RTT separate from executable order latency.
+    # Generic latency_ms is accepted only when it is explicitly supplied as
+    # execution evidence (for example a PAPER/BACKTEST model assumption).
+    explicit_latency = _to_float(market_ctx.get("latency_ms"))
+    explicit_latency_status = str(
+        market_ctx.get(
+            "latency_status",
+            "UNAVAILABLE" if explicit_latency is None else "MODEL_ESTIMATE",
+        )
+    )
+    explicit_latency_source = str(
+        market_ctx.get(
+            "latency_source",
+            "UNAVAILABLE" if explicit_latency is None else "EXPLICIT_EXECUTION_LATENCY",
+        )
+    )
+
     submit_ack = _to_float(market_ctx.get("submit_ack_latency_ms"))
     submit_ack_status = str(market_ctx.get("submit_ack_latency_status", "UNAVAILABLE" if submit_ack is None else "MEASURED"))
     submit_ack_source = str(market_ctx.get("submit_ack_latency_source", "UNAVAILABLE" if submit_ack is None else "RUNTIME_ACK"))
+
+    # A measured submit/ack latency is authoritative when available. Public
+    # market-data HTTP RTT must never be promoted into this field.
+    if submit_ack is not None:
+        execution_latency = submit_ack
+        execution_latency_status = submit_ack_status
+        execution_latency_source = submit_ack_source
+    else:
+        execution_latency = explicit_latency
+        execution_latency_status = explicit_latency_status
+        execution_latency_source = explicit_latency_source
 
     funding = funding_rate_pct if funding_rate_pct is not None else market_ctx.get("funding_rate_pct")
     funding_val = _to_float(funding)
@@ -86,7 +114,10 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     liquidity_status = str(market_ctx.get("liquidity_status", "MEASURED" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
     liquidity_source = str(market_ctx.get("liquidity_source", "UNKNOWN" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
     volatility_status = str(market_ctx.get("volatility_status", "MEASURED" if klines else "UNAVAILABLE"))
-    volatility_source = str(market_ctx.get("volatility_source", "KLINE_RANGE" if klines else "UNAVAILABLE"))
+    volatility_source = str(market_ctx.get(
+        "volatility_source",
+        market_ctx.get("recent_klines_source", "KLINE_RANGE") if klines else "UNAVAILABLE",
+    ))
 
     return {
         "expected_slippage_pct": max(expected_slippage_pct, 0.0) if slippage_status != "UNAVAILABLE" else None,
@@ -99,7 +130,9 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "submit_ack_latency_ms": max(submit_ack, 0.0) if submit_ack is not None else None,
         "submit_ack_latency_status": submit_ack_status,
         "submit_ack_latency_source": submit_ack_source,
-        "latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
+        "latency_ms": max(execution_latency, 0.0) if execution_latency is not None else None,
+        "latency_status": execution_latency_status,
+        "latency_source": execution_latency_source,
         "spread_pct": max(spread_pct, 0.0) if spread_status != "UNAVAILABLE" else None,
         "spread_status": spread_status,
         "spread_source": spread_source,
@@ -125,7 +158,8 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
             "spread_status": spread_status,
             "expected_slippage_pct": max(expected_slippage_pct, 0.0) if slippage_status != "UNAVAILABLE" else None,
             "slippage_status": slippage_status,
-            "latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
+            "latency_ms": max(execution_latency, 0.0) if execution_latency is not None else None,
+            "latency_status": execution_latency_status,
             "market_data_latency_status": md_latency_status,
             "liquidity_score": (max(min(liquidity_score, 1.0), 0.0) if liquidity_score is not None and liquidity_status != "UNAVAILABLE" else None),
             "liquidity_status": liquidity_status,
@@ -330,7 +364,7 @@ def classify_execution_evidence(execution_ctx: Mapping[str, Any], *, require_mea
     statuses = {
         "spread_pct": str(execution_ctx.get("spread_status", "")).upper(),
         "expected_slippage_pct": str(execution_ctx.get("slippage_status", "")).upper(),
-        "latency_ms": str(execution_ctx.get("latency_status", execution_ctx.get("market_data_latency_status", ""))).upper(),
+        "latency_ms": str(execution_ctx.get("latency_status", "")).upper(),
         "liquidity_score": str(execution_ctx.get("liquidity_status", "")).upper(),
         "funding_rate_pct": str(execution_ctx.get("funding_status", "")).upper(),
         "orderbook_imbalance": str(execution_ctx.get("orderbook_status", "")).upper(),
@@ -390,7 +424,18 @@ def build_execution_cost_model(execution_ctx: Mapping[str, Any], *, include_miss
     total=spread_penalty+slippage_penalty+fee_penalty+latency_penalty+funding_penalty+liquidity_penalty+volatility_penalty
     if include_missing_penalty and missing:
         total += min(0.5, 0.1*len(missing))
-    return ExecutionCostModel(spread_penalty,slippage_penalty,fee_penalty,latency_penalty,funding_penalty,liquidity_penalty,volatility_penalty,round(total,6),tuple(sorted(set(missing))),completeness)
+    return ExecutionCostModel(
+        spread_penalty=spread_penalty,
+        slippage_penalty=slippage_penalty,
+        latency_penalty=latency_penalty,
+        fee_penalty=fee_penalty,
+        funding_penalty=funding_penalty,
+        liquidity_penalty=liquidity_penalty,
+        volatility_penalty=volatility_penalty,
+        total_penalty=round(total, 6),
+        missing_fields=tuple(sorted(set(missing))),
+        completeness=completeness,
+    )
 def normalize_pct_input(value: Any, *, field: str) -> tuple[float, str]:
     """
     Normalize spread/slippage inputs into fractional rate units.

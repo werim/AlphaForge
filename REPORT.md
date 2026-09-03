@@ -1,3 +1,20 @@
+# Execution-cost evidence attribution — 2026-09-03
+
+## Need and root cause
+`build_execution_cost_model()` passed positional values in fee-then-latency order to a dataclass whose fields are latency-then-fee. Totals were computed before construction and therefore remained correct, but persisted diagnostics and `calculate_effective_rr()` decomposition mislabeled the two components. Separately, the PAPER geometry request fetched closed 1m candles but returned only two-candle geometry, so `build_execution_context()` could not classify volatility and correctly applied the fail-closed 0.10 R unavailable-evidence penalty.
+
+## Minimal correction and files
+`src/alphaforge/execution.py` constructs `ExecutionCostModel` entirely with keyword arguments and preserves the originating closed-kline source in volatility diagnostics. `src/alphaforge/exchange_market_scanner.py` requests 21 one-minute rows, excludes the newest potentially open row, validates up to 20 finite positive closed OHLC rows, and attaches them to the already selected candidate. Geometry still uses the same last two closed rows. No threshold, coefficient, MTF rule, scoring weight, or risk gate changed.
+
+## Latency, volatility, and effective-RR audit
+PAPER `market_data_latency_ms` is measured with monotonic `perf_counter()` around the Binance public `bookTicker` HTTP request, converted once from seconds to milliseconds, labeled `BINANCE_PUBLIC_HTTP_RTT`, and copied unchanged to `latency_ms`. It is actual market-data request RTT—not candle age, scan delay, or submit/ack latency—so observed 400–1900 ms values legitimately produce 0.08–0.38 R under the existing coefficient. Volatility is now deterministically classified from closed 1m range evidence without lookahead; absent or invalid evidence remains unavailable and retains the 0.10 R penalty. The constructor fix alone changes no total or effective RR. Volatility propagation may change both according to measured low/normal/high evidence.
+
+## Lifecycle, persistence, compatibility, and campaign impact
+There is no schema, export, lifecycle, or migration change and no historical row is modified. Existing campaign totals remain mathematically interpretable; fee and latency diagnostic labels must be mentally swapped for pre-fix rows, and the 0.10 R volatility penalty records genuinely unavailable evidence in that runtime. Because post-fix candidates can carry measured volatility and therefore different effective RR, a new PAPER campaign identity/database is required after merge for clean comparison. LIVE authorization is unchanged and no LIVE readiness is inferred.
+
+## Validation and remaining risk
+Focused constructor, effective-RR, fail-closed volatility, latency-unit/source, and closed-candle propagation regressions pass. The wider execution/scanner/runtime/MTF suite passes 142 tests; four existing failures are caused by repository `.env` values overriding test-local endpoint/database settings, not by these paths. Test environment isolation remains a separate finding.
+
 # Canonical PAPER env-template contract — 2026-09-02
 
 ## Need and root cause
