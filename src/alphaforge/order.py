@@ -884,7 +884,10 @@ def _resolve_execution_ctx(market_ctx: Mapping[str, Any]) -> tuple[dict[str, Any
 
 def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any], *, mode: str = "live", min_effective_rr: float | None = None) -> tuple[float, list[str], dict[str, Any]]:
     rr = float(order.get("risk_reward", 1.0) or 1.0)
-    require_measured = str(mode).upper() in {"LIVE", "LIVE_PRECHECK", "PAPER"}
+    # PAPER has no real submit/ack before a virtual order exists, so explicitly
+    # sourced model estimates are valid pre-submit evidence. LIVE paths remain
+    # measured-only and fail closed.
+    require_measured = str(mode).upper() in {"LIVE", "LIVE_PRECHECK"}
     evidence_status = classify_execution_evidence(execution_ctx, require_measured=require_measured)
     result = calculate_effective_rr(rr, execution_ctx, include_missing_penalty=False)
     model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)

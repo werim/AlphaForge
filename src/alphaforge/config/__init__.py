@@ -84,6 +84,7 @@ class RuntimeSettings:
     max_spread_pct: float = 0.0025
     max_expected_slippage_pct: float = 0.0020
     paper_fee_bps: float = 4.0
+    paper_execution_latency_ms: float = 50.0
     market_data_base_url: str = "https://fapi.binance.com"
     regime_timeframe: str = "1h"
     setup_timeframe: str = "15m"
@@ -357,6 +358,7 @@ def load_config_from_env() -> AlphaForgeConfig:
         max_spread_pct=val("ALPHAFORGE_MAX_SPREAD_PCT"),
         max_expected_slippage_pct=val("ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT"),
         paper_fee_bps=val("ALPHAFORGE_PAPER_FEE_BPS"),
+        paper_execution_latency_ms=val("ALPHAFORGE_PAPER_EXECUTION_LATENCY_MS"),
         market_data_base_url=str(val("ALPHAFORGE_BINANCE_MARKET_DATA_BASE_URL")).rstrip("/"),
         regime_timeframe=val("ALPHAFORGE_REGIME_TIMEFRAME"),
         setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),

@@ -159,7 +159,7 @@ def test_provider_generates_regime_guided_candidate(monkeypatch):
     provider = BinanceMTFProvider()
     monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
     canonical = {"spread_pct": .0002, "expected_slippage_pct": .0004,
-                 "latency_ms": 20.0, "liquidity_score": .9}
+                 "market_data_latency_ms": 20.0, "liquidity_score": .9}
 
     mtf = asyncio.run(provider.build("BTCUSDT", canonical, execution_ctx=canonical,
         decision_ts_ms=decision_ms, regime_timeframe="1h", setup_timeframe="15m",
@@ -199,7 +199,7 @@ def test_provider_rollback_mode_retains_legacy_equality_veto(monkeypatch):
 
 def test_neutral_execution_is_available_but_never_confirmed():
     market = {"spread_pct": .000348, "expected_slippage_pct": .001,
-              "latency_ms": 374.0, "liquidity_score": 1.0}
+              "market_data_latency_ms": 374.0, "liquidity_score": 1.0}
     execution = build_execution_context(_execution_candles([100.0] * 5), "1m", market)
     regime, setup, _ = aligned("LONG")
     result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
@@ -427,7 +427,9 @@ def test_runtime_binds_aligned_direction_to_geometry_and_persists_reject(
 
     assert rejects and rejects[-1]["reason"] == expected_reason
     assert provider.execution_ctx["market_data_latency_ms"] == 31.0
-    assert provider.execution_ctx["latency_ms"] is None
+    assert provider.execution_ctx["latency_ms"] == 50.0
+    assert provider.execution_ctx["latency_status"] == "MODEL_ESTIMATE"
+    assert provider.execution_ctx["latency_source"] == "CONFIGURED_PAPER_ASSUMPTION"
     if expected_reason == "MTF_DIRECTION_MISMATCH":
         assert rejects[-1]["mtf"]["alignment"]["aligned"] is False
 
