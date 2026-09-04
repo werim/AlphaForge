@@ -1,3 +1,23 @@
+## PAPER preflight dotenv bootstrap correction — 2026-09-05
+
+### Added
+- Focused mocked regressions for dotenv-only reconciliation credentials, COMPLETE authenticated evidence, process precedence, environment restoration, secret non-disclosure, and disabled LIVE mutation paths.
+
+### Changed
+- The `burnin_ops` executable now scopes canonical repository dotenv values to the CLI invocation, matching the reconciliation diagnostic executable.
+
+### Fixed
+- PAPER preflight audit and actual read-only reconciliation provider construction no longer resolve credentials from different environment mappings.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; deterministic library loaders, schema, persistence, strategy, campaign identity, and Binance endpoint resolution are unchanged.
+
+### Known Issues
+- A dirty `dev` worktree continues to fail `source_worktree_identity_bound` by design.
+
 ## 0409T02 audit semantics and test determinism — 2026-09-05
 
 ### Added

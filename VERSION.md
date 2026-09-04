@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## PAPER preflight dotenv bootstrap correction (2026-09-05)
+- Current version: dev burn-in executable dotenv-scope regression fix; no schema, strategy, endpoint, or campaign change.
+- Current phase: operator reruns PAPER preflight after restoring a clean `dev` worktree; no campaign action is authorized by this patch.
+- Runtime maturity: `burnin_ops` now gives config audit and signed read-only provider construction the same canonical repository `.env` view, with process values taking precedence and in-process environment restoration.
+- BACKTEST/PAPER/LIVE alignment: PAPER remains mandatory for burn-in preflight; LIVE trading and LIVE orders remain disabled and the signed reconciliation gate remains fail-closed.
+- Lifecycle/persistence/execution impact: none; no database rows, schema, lifecycle transitions, strategy thresholds, execution costs, or Binance endpoint resolution changed.
+- Known critical risks: preflight still blocks a dirty `dev` worktree and still requires genuine COMPLETE authenticated exchange evidence.
+- Last audit date: 2026-09-05. Live readiness verdict: NOT LIVE READY.
+
 ## 0409T02 audit semantics and test determinism (2026-09-05)
 - Current version: dev burn-in attribution, recovery-duration, environment precedence, and lifecycle persistence correction; no schema migration or threshold tuning.
 - Current phase: review only; no campaign start, commit, PR, or merge has been performed.

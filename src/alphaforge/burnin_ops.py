@@ -1785,7 +1785,7 @@ def _launch_worker(db: str, campaign_id: str) -> subprocess.Popen[Any]:
         stderr.close()
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m alphaforge.burnin_ops")
     parser.add_argument("--db")
     parser.add_argument("--json", action="store_true")
@@ -1865,6 +1865,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(out, indent=2, sort_keys=True, default=str)); return code
     except Exception as exc:
         print(json.dumps({"status": "ERROR", "error": f"{exc.__class__.__name__}:{exc}"}, indent=2)); return 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the burn-in executable with canonical dotenv values scoped to this call."""
+    original = dict(os.environ)
+    try:
+        boot = bootstrap_environment()
+        return _main(argv)
+    finally:
+        for key in getattr(locals().get("boot"), "keys_loaded", ()):
+            if key in original:
+                os.environ[key] = original[key]
+            else:
+                os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

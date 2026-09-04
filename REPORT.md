@@ -1,3 +1,17 @@
+# PAPER preflight dotenv bootstrap correction — 2026-09-05
+
+## Why and confirmed root cause
+The standalone Binance reconciliation executable bootstrapped the canonical repository `.env` before calling the deterministic reconciliation loader, but `burnin_ops` did not. Its audit independently merged dotenv into an isolated mapping, so credentials appeared present while `_readonly_reconciliation_provider()` called `load_reconciliation_settings()` against an unbootstrapped process mapping and returned no provider.
+
+## Minimal correction and files
+`src/alphaforge/burnin_ops.py` now wraps its executable body with the same bootstrap/restore boundary used by `binance_reconciliation_check`: repository dotenv values are inserted only when absent, all values loaded for the call are removed afterward, and pre-existing process values remain authoritative. `load_config_from_env()` and `load_reconciliation_settings()` remain deterministic and do not read files implicitly. `tests/test_phase9_burnin_ops.py` covers dotenv-only credentials, provider construction, COMPLETE authenticated probe evidence, process precedence, environment restoration, secret non-disclosure, PAPER mode, and disabled LIVE mutation flags.
+
+## Lifecycle, persistence, compatibility, and migration
+No schema, persistence, lifecycle, campaign identity, strategy, MTF, execution-cost, endpoint, database-state, or exchange-evidence semantics changed. The signed read-only gate is not weakened and no evidence is synthesized. The executable bootstrap applies to the burn-in CLI call boundary and is backward-compatible with explicit process configuration. No migration is required.
+
+## Validation, risks, and recommendation
+The two new mocked regressions pass. The focused burn-in/environment/config/reconciliation set passes 144 tests from an isolated temporary repository copy. The source repository's artifact directory is sandbox read-only in this session, so the same focused run there produced seven artifact-write permission failures unrelated to behavior; the isolated rerun was green. The dirty-worktree preflight gate remains authoritative. Do not start a campaign or infer LIVE readiness; rerun PAPER preflight only after operator-managed worktree cleanup.
+
 # 0409T02 audit semantics and test determinism — 2026-09-05
 
 ## Need and confirmed root causes

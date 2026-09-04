@@ -255,6 +255,136 @@ def test_preflight_passes_with_matching_runtime_identity_and_records_payloads(mo
     assert check["details"]["config_payload_differences"] == {}
 
 
+def _exercise_burnin_preflight_dotenv(monkeypatch, tmp_path, capsys, *, process_credentials=None):
+    import alphaforge.burnin_ops as ops
+
+    dotenv_only_names = (
+        "ALPHAFORGE_EXECUTION_MODE", "ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION",
+        "ALPHAFORGE_ENABLE_LIVE_TRADING", "ALPHAFORGE_ENABLE_LIVE_EXECUTION",
+        "ALPHAFORGE_ALLOW_LIVE_ORDERS",
+    )
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='temporary'\nversion='0'\n")
+    (tmp_path / "src" / "alphaforge").mkdir(parents=True)
+    dotenv_key = "dotenv-readonly-key-abcdef123456"
+    dotenv_secret = "dotenv-readonly-secret-abcdef123456"
+    (tmp_path / ".env").write_text(
+        "\n".join((
+            "ALPHAFORGE_EXECUTION_MODE=PAPER",
+            "ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION=true",
+            "ALPHAFORGE_ENABLE_LIVE_TRADING=false",
+            "ALPHAFORGE_ENABLE_LIVE_EXECUTION=false",
+            "ALPHAFORGE_ALLOW_LIVE_ORDERS=false",
+            f"BINANCE_API_KEY={dotenv_key}",
+            f"BINANCE_API_SECRET={dotenv_secret}",
+        )) + "\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    for name in (*dotenv_only_names, "BINANCE_API_KEY", "BINANCE_API_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    if process_credentials is not None:
+        monkeypatch.setenv("BINANCE_API_KEY", process_credentials[0])
+        monkeypatch.setenv("BINANCE_API_SECRET", process_credentials[1])
+
+    observed = {"audit": [], "provider": [], "safety": []}
+
+    def audit():
+        observed["audit"].append((os.environ.get("BINANCE_API_KEY"), os.environ.get("BINANCE_API_SECRET")))
+        return {
+            "status": "PASS", "errors": [], "warnings": [],
+            "duplicate_template_variables": {}, "unknown_process_variables": [],
+            "resolved_non_secret_configuration": {
+                "BINANCE_API_KEY": {"present": True, "placeholder_detected": False},
+                "BINANCE_API_SECRET": {"present": True, "placeholder_detected": False},
+            },
+        }
+
+    class Provider:
+        def __init__(self, *, config, tracked_symbols):
+            observed["provider"].append((config.api_key, config.api_secret, tracked_symbols()))
+
+        def snapshot(self):
+            return {
+                "evidence_status": "COMPLETE", "authenticated": True,
+                "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT",
+                "orders": [], "positions": [], "errors": [],
+            }
+
+    monkeypatch.setattr(ops, "audit_config", audit)
+    monkeypatch.setattr(ops, "BinanceReadonlyReconciliationProvider", Provider)
+    monkeypatch.setattr(ops, "BinanceReadOnlyCandleProvider", type("CandleProvider", (), {
+        "__init__": lambda self, **kwargs: setattr(self, "source_provenance", {
+            "provider": "BINANCE_READ_ONLY_KLINES", "order_submission": "DISABLED",
+            "base_url": kwargs["base_url"],
+        }),
+        "__call__": lambda self, *args: [],
+    }))
+    monkeypatch.setattr(ops, "_git_clean", lambda: True)
+    monkeypatch.setattr(ops, "_git_commit", lambda: "commit")
+    monkeypatch.setattr(ops, "_git_branch", lambda: "dev")
+    monkeypatch.setattr(ops, "clock_skew_check", lambda: {"status": "PASS"})
+
+    def runtime_identity(release, symbols, intervals):
+        cfg = ops.load_config_from_env()
+        observed["safety"].append((
+            cfg.runtime.execution_mode, cfg.runtime.live_enabled, cfg.runtime.allow_live_orders,
+        ))
+        return {**ops._candidate_identity(release, symbols, intervals), "execution_mode": "PAPER"}
+
+    monkeypatch.setattr(ops, "_actual_runtime_identity", runtime_identity)
+    db = tmp_path / "preflight.db"
+    code = ops.main([
+        "--db", str(db), "preflight", "--release-id", "dotenv-regression",
+        "--symbols", "BTCUSDT", "--intervals", "1h",
+        "--output-dir", str(tmp_path / "preflight-artifacts"),
+    ])
+    output = capsys.readouterr().out
+    return code, json.loads(output), output, observed, (dotenv_key, dotenv_secret), dotenv_only_names
+
+
+def test_burnin_preflight_bootstraps_dotenv_for_provider_and_restores_environment(monkeypatch, tmp_path, capsys):
+    for name in ("BINANCE_API_KEY", "BINANCE_API_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+
+    code, payload, output, observed, dotenv_credentials, dotenv_only_names = _exercise_burnin_preflight_dotenv(
+        monkeypatch, tmp_path, capsys
+    )
+
+    assert code == 0 and payload["status"] == "PASS", {
+        c["name"]: c["details"] for c in payload["checks"] if c["status"] != "PASS"
+    }
+    assert observed["audit"] == [dotenv_credentials]
+    assert observed["provider"] == [(dotenv_credentials[0], dotenv_credentials[1], {"BTCUSDT"})] * 2
+    signed = next(c for c in payload["checks"] if c["name"] == "signed_readonly_reconciliation_available")
+    assert signed["status"] == "PASS"
+    assert signed["details"]["evidence_status"] == "COMPLETE"
+    assert signed["details"]["authenticated"] is True
+    assert observed["safety"] == [("PAPER", False, False)]
+    assert next(c for c in payload["checks"] if c["name"] == "live_mutation_path_disabled")["status"] == "PASS"
+    assert os.environ.get("BINANCE_API_KEY") is None
+    assert os.environ.get("BINANCE_API_SECRET") is None
+    assert all(name not in os.environ for name in dotenv_only_names)
+    assert dotenv_credentials[0] not in output and dotenv_credentials[1] not in output
+
+
+def test_burnin_preflight_process_credentials_override_dotenv_without_contamination(monkeypatch, tmp_path, capsys):
+    process_credentials = ("process-readonly-key-abcdef123456", "process-readonly-secret-abcdef123456")
+
+    code, payload, output, observed, dotenv_credentials, dotenv_only_names = _exercise_burnin_preflight_dotenv(
+        monkeypatch, tmp_path, capsys, process_credentials=process_credentials
+    )
+
+    assert code == 0 and payload["status"] == "PASS", {
+        c["name"]: c["details"] for c in payload["checks"] if c["status"] != "PASS"
+    }
+    assert observed["audit"] == [process_credentials]
+    assert observed["provider"] == [(process_credentials[0], process_credentials[1], {"BTCUSDT"})] * 2
+    assert os.environ["BINANCE_API_KEY"] == process_credentials[0]
+    assert os.environ["BINANCE_API_SECRET"] == process_credentials[1]
+    assert all(name not in os.environ for name in dotenv_only_names)
+    for secret in (*process_credentials, *dotenv_credentials):
+        assert secret not in output
+
+
 def test_preflight_accepts_feature_worktree_only_when_release_binds_fingerprint(monkeypatch, tmp_path):
     import alphaforge.burnin_ops as ops
 
