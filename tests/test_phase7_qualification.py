@@ -31,6 +31,15 @@ def test_missing_costs_block_qualification():
     assert any("INCOMPLETE_COST_EVIDENCE" in b for b in snap.blockers)
 
 
+def test_qualification_emits_legacy_and_explicit_recovery_status():
+    e=_engine(); _run(e)
+
+    snap=BurnInQualificationEngine(e, BurnInThresholds(require_operator_ack=False,require_phase1_6_gates=False)).evaluate("r")
+
+    assert snap.metrics["recovery_status"] == "RECOVERED"
+    assert snap.metrics["drawdown_recovery_status"] == "RECOVERED"
+
+
 def test_positive_lcb_can_qualify_but_live_not_enabled():
     e=_engine(); _run(e)
     with e.begin() as c:

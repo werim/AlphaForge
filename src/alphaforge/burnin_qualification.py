@@ -196,7 +196,8 @@ class BurnInQualificationEngine:
         return "PASS"
     def _compute_drawdown(self,dds,blockers,metrics):
         maxdd=max([float(d.get("drawdown_pct") or 0) for d in dds], default=0.0); unresolved=sum(1 for d in dds if not int(d.get("resolved") or 0)); rolling=min([float(d.get("rolling_expectancy")) for d in dds if d.get("rolling_expectancy") is not None], default=None)
-        metrics.update(max_drawdown_pct=maxdd,unresolved_drawdown_events=unresolved,rolling_expectancy=rolling,loss_cluster_state="UNRESOLVED" if unresolved else "RESOLVED",drawdown_recovery_status="INSUFFICIENT" if unresolved else "RECOVERED")
+        recovery_status="INSUFFICIENT" if unresolved else "RECOVERED"
+        metrics.update(max_drawdown_pct=maxdd,unresolved_drawdown_events=unresolved,rolling_expectancy=rolling,loss_cluster_state="UNRESOLVED" if unresolved else "RESOLVED",drawdown_recovery_status=recovery_status,recovery_status=recovery_status)
         if maxdd>self.thresholds.max_drawdown_pct or unresolved: blockers.append("DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER"); return "FAIL"
         return "PASS"
     def _compute_execution(self,execm,blockers,metrics):

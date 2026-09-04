@@ -2300,13 +2300,9 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
     cfg = load_config_from_env()
     mode = execution_mode_from_env(cfg.runtime.execution_mode)
     persistence_enabled = cfg.persistence.enabled
-    explicit_database = any(str(os.getenv(name) or "").strip() for name in (
-        "ALPHAFORGE_DATABASE_URL", "ALPHAFORGE_DB_URL", "DATABASE_URL", "ALPHAFORGE_DB_PATH"
-    ))
     resolved_database_url = (
         str(persistence_engine.url) if persistence_engine is not None
-        else cfg.persistence.database_url if explicit_database
-        else "sqlite+pysqlite:///:memory:"
+        else cfg.persistence.database_url
     )
     engine = persistence_engine or init_db(resolved_database_url)
     SessionLocal = session_factory or sessionmaker(bind=engine, expire_on_commit=False, future=True)

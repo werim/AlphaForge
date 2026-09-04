@@ -23,6 +23,29 @@ from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 
 
+def test_dashboard_runtime_factory_reuses_control_engine(tmp_path, monkeypatch) -> None:
+    import alphaforge.dashboard.app as dashboard_app
+
+    captured = {}
+    sentinel = object()
+
+    def build_runtime(*, persistence_engine):
+        captured["engine"] = persistence_engine
+        return sentinel
+
+    monkeypatch.setattr(
+        dashboard_app,
+        "_build_runtime_from_env",
+        build_runtime,
+    )
+    app = create_app(f"sqlite+pysqlite:///{tmp_path / 'shared.db'}")
+
+    runtime = app.state.runtime_supervisor.runtime_factory("PAPER")
+
+    assert runtime is sentinel
+    assert captured["engine"] is app.state.control_engine
+
+
 def test_dashboard_health_and_status_are_read_only_and_honest(tmp_path) -> None:
     db_path = tmp_path / "dashboard.db"
     database_url = f"sqlite+pysqlite:///{db_path}"
