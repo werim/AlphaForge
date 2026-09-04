@@ -114,7 +114,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         os.environ["EXECUTION_MODE"] = mode
         os.environ["ALPHAFORGE_EXECUTION_MODE"] = mode
         try:
-            return _build_runtime_from_env()
+            return _build_runtime_from_env(persistence_engine=app.state.control_engine)
         finally:
             if old_exec is None:
                 os.environ.pop("EXECUTION_MODE", None)

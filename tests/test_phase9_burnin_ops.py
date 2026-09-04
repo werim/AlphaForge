@@ -324,6 +324,8 @@ def test_phase9_health_detects_running_without_worker_and_sql_counters(monkeypat
     assert "RUNNING_WITHOUT_WORKER" in h["unhealthy_reasons"]
     w = watch_once(conn, camp.campaign_id)
     assert w["status"] == "RECOVERY_REQUIRED"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
 
 
 def test_watchdog_detects_backlog_growth_and_provider_failures(monkeypatch, tmp_path):

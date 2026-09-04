@@ -35,4 +35,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    from alphaforge.env_contract import bootstrap_environment
+    bootstrap_environment()
     raise SystemExit(main())

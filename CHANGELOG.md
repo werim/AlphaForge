@@ -1,3 +1,30 @@
+## 0409T02 audit semantics and test determinism — 2026-09-05
+
+### Added
+- Explicit attributable/non-attributable reject-evidence diagnostics and focused R-unit, recovery-duration, lifecycle, and reconciliation regressions.
+
+### Changed
+- Phase 7 reject-quality metrics consume only attributable strategy evidence.
+- Lifecycle persistence returns deterministic rows/counts for its supplied event set.
+- Library configuration resolves explicit process mappings without implicitly loading dotenv; executable entry points still bootstrap dotenv with process values taking precedence.
+
+### Fixed
+- Independent/opposite-side legacy shadow outcomes can no longer validate or invalidate MTF rejects.
+- Watchdog recovery updates canonical campaign/run state together and observed duration stops at the last proven heartbeat.
+- Database aliases, execution-mode aliases, score/position/filter aliases, and the deprecated effective-RR alias reach runtime configuration.
+- Config audit, config-check, Binance reconciliation CLI, Alembic, and burn-in DB-path resolution no longer leak dotenv values into later in-process callers; repository findings remain diagnostic and do not become DB-doctor runtime blockers.
+- Score10 diagnostic summaries always expose `enabled`; complete reconciliation clears stale exchange-state errors only.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; no schema migration, threshold change, campaign rewrite, or LIVE/PAPER gate relaxation.
+
+### Known Issues
+- Historical 0409T02 qualification evidence remains non-recomputed; a fresh campaign is required after review/merge.
+- Local `.env` execution threshold differs from the code default and correctly produces strategy drift for a manually default-constructed runtime.
+
 ## Execution-cost evidence attribution — 2026-09-03
 
 ### Added

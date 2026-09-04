@@ -106,18 +106,19 @@ class BurnInQualificationEngine:
             ambiguous_rejects=[r for r in completed_rejects if str(r.get("forward_label") or "").upper()=="AMBIGUOUS"]
             incomplete_rejects=[r for r in rejects if r not in completed_rejects]
             pending_rejects=max(0, rejected_count-len(rejects))
-            rejected_fwd=len(completed_rejects)
+            attributable_rejects=[r for r in completed_rejects if self._reject_quality_attributable(r)]
+            rejected_fwd=len(attributable_rejects)
             persisted_mismatch = any(int(run.get(k) or 0) != int(v or 0) for k,v in {"sample_count":samples,"accepted_count":accepted,"rejected_count":rejected_count,"closed_trade_count":closed}.items())
             if persisted_mismatch:
                 blockers.append("BURNIN_COUNTER_RECONCILIATION_FAILED")
             sample_status="PASS"
             for name,obs,limit in [("MINIMUM_DURATION",float(run.get("observed_duration_seconds") or 0),self.thresholds.minimum_duration_seconds),("MINIMUM_TOTAL_DECISIONS",samples,self.thresholds.minimum_total_decisions),("MINIMUM_ACCEPTED_TRADES",accepted,self.thresholds.minimum_accepted_trades),("MINIMUM_CLOSED_TRADES",closed,self.thresholds.minimum_closed_trades),("MINIMUM_REJECTED_FORWARD_OUTCOMES",rejected_fwd,self.thresholds.minimum_rejected_forward_outcomes)]:
                 if obs < limit: sample_status="INSUFFICIENT"; blockers.append(f"{name}:{obs}<{limit}")
-            metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=closed,open_trade_count=max(0,accepted-closed),completed_rejected_forward_outcomes=len(completed_rejects),pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=derived.get("observed_duration_seconds") or run.get("observed_duration_seconds"))
+            metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=closed,open_trade_count=max(0,accepted-closed),completed_rejected_forward_outcomes=len(completed_rejects),attributable_rejected_forward_outcomes=len(attributable_rejects),non_attributable_rejected_forward_outcomes=len(completed_rejects)-len(attributable_rejects),pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=derived.get("observed_duration_seconds") or run.get("observed_duration_seconds"))
             self._compute_expectancy(trades, blockers, metrics)
             expectancy_status="PASS" if (metrics.get("lower_confidence_bound_expectancy") is not None and metrics["lower_confidence_bound_expectancy"]>=self.thresholds.min_lower_confidence_bound_expectancy and not any(b.startswith("INCOMPLETE_COST") or b=="COST_DRAG_EXCESSIVE_OR_MISSING" for b in blockers)) else "FAIL"
             regime_status=self._check_regimes(regimes, blockers, metrics)
-            reject_status=self._compute_reject_quality(completed_rejects, trades, blockers, metrics)
+            reject_status=self._compute_reject_quality(attributable_rejects, trades, blockers, metrics)
             cal_status=self._compute_calibration(cal, blockers, metrics)
             dd_status=self._compute_drawdown(dds, blockers, metrics)
             exec_status=self._compute_execution(execm, blockers, metrics)
@@ -150,6 +151,17 @@ class BurnInQualificationEngine:
         metrics.update(mean_net_r=mean,median_net_r=median,net_expectancy=mean,profit_factor_after_costs=(pos/neg if neg else (None if not pos else math.inf)),payoff_ratio_after_costs=payoff,hit_rate=hit,break_even_hit_rate=breakeven,lower_confidence_bound_expectancy=lcb,expectancy_confidence_interval=[lcb,ucb],total_cost_drag=total_cost,cost_drag_per_trade=cost_drag,slippage_damage_ratio=(slip/total_cost if total_cost else None),funding_damage_ratio=(funding/total_cost if total_cost else None),latency_damage_ratio=(latency/total_cost if total_cost else None),spread_cost_total=spread)
         if lcb is None or lcb < self.thresholds.min_lower_confidence_bound_expectancy: blockers.append("LOWER_CONFIDENCE_BOUND_EXPECTANCY_NOT_POSITIVE")
         if cost_drag is None or cost_drag > self.thresholds.max_cost_drag_per_trade: blockers.append("COST_DRAG_EXCESSIVE_OR_MISSING")
+    @staticmethod
+    def _reject_quality_attributable(row):
+        try: payload=json.loads(row.get("payload_json") or "{}")
+        except (TypeError,json.JSONDecodeError): payload={}
+        if payload.get("reject_quality_attributable") is False:
+            return False
+        if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE":
+            return False
+        return str(row.get("reject_reason") or "").upper() not in {
+            "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RUNTIME_RECOVERY_REQUIRED"
+        }
     def _check_regimes(self,regimes,blockers,metrics):
         material=0; status="PASS"; by={}
         for r in regimes:
@@ -184,7 +196,8 @@ class BurnInQualificationEngine:
         return "PASS"
     def _compute_drawdown(self,dds,blockers,metrics):
         maxdd=max([float(d.get("drawdown_pct") or 0) for d in dds], default=0.0); unresolved=sum(1 for d in dds if not int(d.get("resolved") or 0)); rolling=min([float(d.get("rolling_expectancy")) for d in dds if d.get("rolling_expectancy") is not None], default=None)
-        metrics.update(max_drawdown_pct=maxdd,unresolved_drawdown_events=unresolved,rolling_expectancy=rolling,loss_cluster_state="UNRESOLVED" if unresolved else "RESOLVED",recovery_status="INSUFFICIENT" if unresolved else "RECOVERED")
+        recovery_status="INSUFFICIENT" if unresolved else "RECOVERED"
+        metrics.update(max_drawdown_pct=maxdd,unresolved_drawdown_events=unresolved,rolling_expectancy=rolling,loss_cluster_state="UNRESOLVED" if unresolved else "RESOLVED",drawdown_recovery_status=recovery_status,recovery_status=recovery_status)
         if maxdd>self.thresholds.max_drawdown_pct or unresolved: blockers.append("DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER"); return "FAIL"
         return "PASS"
     def _compute_execution(self,execm,blockers,metrics):

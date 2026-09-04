@@ -76,8 +76,12 @@ def _placeholder(value: str) -> bool:
 
 def audit_config(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> dict[str, object]:
     root = repository_root(root)
-    supplied = os.environ if env is None else env
-    boot = bootstrap_environment(root) if env is None else None
+    if env is None:
+        supplied = dict(os.environ)
+        boot = bootstrap_environment(root, environ=supplied)
+    else:
+        supplied = env
+        boot = None
     errors: list[str] = []
     warnings: list[str] = []
     documented: set[str] = set()

@@ -747,6 +747,24 @@ def test_live_reconciliation_loop_fails_closed_on_incomplete_evidence() -> None:
         asyncio.run(orchestrator._reconcile_runtime_state())
 
 
+def test_complete_reconciliation_clears_only_stale_exchange_unknown_failure() -> None:
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        live_reconciliation_provider=_StaticProvider({"evidence_status": "COMPLETE", "orders": [], "positions": [], "fills": []}),
+    )
+    orchestrator._unknown_exchange_state = True
+    orchestrator._fail_closed_reason = "EXCHANGE_STATE_UNKNOWN"
+    orchestrator._reconciliation_status = "EXCHANGE_STATE_UNKNOWN"
+
+    asyncio.run(orchestrator._reconcile_runtime_state())
+
+    assert orchestrator._unknown_exchange_state is False
+    assert orchestrator._fail_closed_reason is None
+    assert orchestrator._reconciliation_status == "CLEAN"
+
+
 def test_runtime_scan_refuses_new_work_when_persisted_kill_switch_on() -> None:
     from sqlalchemy import create_engine
     from alphaforge.runtime_control import RuntimeControlStore

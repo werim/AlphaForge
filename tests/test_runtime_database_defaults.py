@@ -88,8 +88,11 @@ def test_alembic_and_runtime_match_database_url_from_dotenv(monkeypatch, tmp_pat
     monkeypatch.chdir(root)
 
     from alphaforge.config import load_config_from_env
+    from alphaforge.env_contract import bootstrap_environment
 
-    runtime_url = load_config_from_env().persistence.database_url
+    isolated_env: dict[str, str] = {}
+    bootstrap_environment(root, environ=isolated_env)
+    runtime_url = load_config_from_env(env=isolated_env, root=root).persistence.database_url
     alembic_url = resolve_alembic_database_url(DEFAULT_RUNTIME_DATABASE_URL, {}, root)
     assert sqlite_path_from_url(runtime_url) == configured
     assert sqlite_path_from_url(alembic_url) == configured

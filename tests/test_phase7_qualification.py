@@ -31,6 +31,15 @@ def test_missing_costs_block_qualification():
     assert any("INCOMPLETE_COST_EVIDENCE" in b for b in snap.blockers)
 
 
+def test_qualification_emits_legacy_and_explicit_recovery_status():
+    e=_engine(); _run(e)
+
+    snap=BurnInQualificationEngine(e, BurnInThresholds(require_operator_ack=False,require_phase1_6_gates=False)).evaluate("r")
+
+    assert snap.metrics["recovery_status"] == "RECOVERED"
+    assert snap.metrics["drawdown_recovery_status"] == "RECOVERED"
+
+
 def test_positive_lcb_can_qualify_but_live_not_enabled():
     e=_engine(); _run(e)
     with e.begin() as c:
@@ -116,3 +125,29 @@ def test_pending_reject_does_not_count_as_forward_outcome():
     assert snap.metrics["completed_rejected_forward_outcomes"] == 0
     assert snap.metrics["pending_rejected_forward_outcomes"] == 6
     assert any("MINIMUM_REJECTED_FORWARD_OUTCOMES" in b for b in snap.blockers)
+
+
+def test_non_attributable_shadow_and_infrastructure_outcomes_are_diagnostic_only():
+    e=_engine(); _run(e)
+    rows = [
+        ("shadow", "MTF_EXECUTION_COUNTER_REGIME", 0, 50,
+         {"forward_label_subject":"LEGACY_SCANNER_SHADOW_CANDIDATE",
+          "forward_label_side":"LONG", "authoritative_mtf_side":"SHORT"}),
+        ("guided", "LOW_EFFECTIVE_RR", 1, 0,
+         {"forward_label_subject":"GUIDED_CANDIDATE"}),
+        ("infra", "EXCHANGE_STATE_UNKNOWN", 50, 0,
+         {"forward_label_subject":"GUIDED_CANDIDATE"}),
+    ]
+    with e.begin() as c:
+        for oid, reason, avoided, missed, payload in rows:
+            c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel',:reason,'BTCUSDT','TRENDING','SL_BEFORE_TP',:avoided,:missed,:net,1,:payload,'v')"), {"id":oid,"reason":reason,"avoided":avoided,"missed":missed,"net":avoided-missed,"payload":json.dumps(payload)})
+    th=BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=0,minimum_closed_trades=0,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=0,minimum_calibration_sample=0,require_operator_ack=False,require_phase1_6_gates=False)
+    snap=BurnInQualificationEngine(e, th).evaluate("r")
+
+    assert snap.metrics["completed_rejected_forward_outcomes"] == 3
+    assert snap.metrics["attributable_rejected_forward_outcomes"] == 1
+    assert snap.metrics["non_attributable_rejected_forward_outcomes"] == 2
+    assert snap.metrics["reject_precision"] == 1.0
+    assert snap.metrics["false_reject_rate"] == 0.0
+    assert snap.metrics["net_reject_value"] == 1.0
+    assert snap.metrics["reject_value_by_reason"] == {"LOW_EFFECTIVE_RR": 1.0}

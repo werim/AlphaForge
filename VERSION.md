@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## 0409T02 audit semantics and test determinism (2026-09-05)
+- Current version: dev burn-in attribution, recovery-duration, environment precedence, and lifecycle persistence correction; no schema migration or threshold tuning.
+- Current phase: review only; no campaign start, commit, PR, or merge has been performed.
+- Runtime maturity: executable dotenv bootstrap preserves process precedence, library loaders are deterministic and in-process helpers do not leak file-backed values; lifecycle export results are scoped to supplied events; legacy scanner shadow outcomes are diagnostic and non-attributable to MTF reject quality.
+- BACKTEST/PAPER/LIVE alignment: PAPER/LIVE exchange-state gates remain fail-closed; successful complete reconciliation may clear only stale exchange-state errors. LIVE credential and authorization checks remain strict.
+- Lifecycle/persistence/execution impact: existing rows and campaign databases are unchanged; healthy observed duration is capped by canonical operational/heartbeat intervals; execution-cost evidence is explicitly normalized to R.
+- Known critical risks: historical 0409T02 qualification snapshots retain their original invalid attribution and must not be reused as corrected reject-quality evidence; the local `.env` intentionally differs from default 1m threshold identity.
+- Last audit date: 2026-09-05. Live readiness verdict: NOT LIVE READY.
+
 ## Execution-cost evidence attribution (2026-09-03)
 - Current version: dev execution-cost diagnostic and closed-1m volatility-evidence correction; no schema migration or threshold change.
 - Current phase: review and a fresh PAPER campaign after merge; existing campaign evidence remains immutable.

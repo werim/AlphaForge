@@ -145,3 +145,18 @@ def test_live_reconciliation_enabled_requires_credentials(monkeypatch: pytest.Mo
     monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
     with pytest.raises(RuntimeError, match="credentials are missing"):
         _build_runtime_from_env()
+
+
+def test_runtime_without_explicit_db_env_uses_configured_persistence_url(monkeypatch, tmp_path):
+    import alphaforge.runtime as runtime_module
+    from alphaforge.config import load_config_from_env
+
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'configured.db'}"
+    cfg = load_config_from_env(env={"ALPHAFORGE_DATABASE_URL": database_url})
+    for name in ("ALPHAFORGE_DATABASE_URL", "ALPHAFORGE_DB_URL", "DATABASE_URL", "ALPHAFORGE_DB_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(runtime_module, "load_config_from_env", lambda: cfg)
+
+    runtime = _build_runtime_from_env()
+
+    assert str(runtime.ai_brain.session_factory.kw["bind"].url) == database_url

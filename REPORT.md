@@ -1,3 +1,19 @@
+# 0409T02 audit semantics and test determinism — 2026-09-05
+
+## Need and confirmed root causes
+MTF rejects were forward-labeled with independent `LEGACY_SCANNER_SHADOW_CANDIDATE` geometry and Phase 7 treated those outcomes as reject-quality evidence even though side and geometry were not guaranteed to match the rejected guided trade. Campaign watchdog handling could leave campaign state at `RECOVERY_REQUIRED` while the active run remained `RUNNING`, and duration reporting dropped already observed healthy time or risked extending it beyond the last proven heartbeat. Separately, implicit dotenv bootstrap and in-process audit/DB-path helpers copied file-backed canonical values into `os.environ`; those leaked values then outranked later process-level deprecated aliases and redirected tests to the repository runtime database. Alembic resolution had the same mutation problem, creating false database-target conflicts that promoted repository diagnostics into apparent repair blockers. `_persist_lifecycle_rows()` returned every BACKTEST lifecycle event in the selected database and derived SQL counts from the entire table, leaking unrelated test/run state into its result.
+
+## Minimal corrections and files
+`src/alphaforge/burnin_resolver.py` retains legacy shadow outcomes for diagnostics but marks them non-attributable; `src/alphaforge/burnin_qualification.py` excludes non-attributable and infrastructure-only evidence from reject precision/value metrics. `src/alphaforge/burnin_campaign.py` preserves label-subject provenance in aggregates and caps stopped/recovery-required active intervals at the last heartbeat. `src/alphaforge/burnin_ops.py` transitions campaign, active run, and campaign-run mapping together on watchdog failure. `src/alphaforge/runtime.py` uses the canonical R-normalized execution-cost model and clears only stale exchange-state fail-closed reasons after complete reconciliation.
+
+`src/alphaforge/config/__init__.py` is now a deterministic process-mapping/default loader; executable entry points explicitly bootstrap dotenv. `src/alphaforge/config_audit.py`, `src/alphaforge/config_check.py`, `src/alphaforge/database_defaults.py`, and `src/alphaforge/burnin_ops.py` merge dotenv into isolated mappings or restore the calling environment, preserving process-over-dotenv precedence without cross-call contamination. `backtest_order.py` scopes lifecycle return rows and decision counts to the input event set. `src/alphaforge/dashboard/backtest_control.py` exposes an explicit `enabled` boolean and limits the optional export to process/dashboard opt-in.
+
+## Safety, compatibility, and validation
+No threshold, MTF classification rule, schema, historical row, campaign, LIVE authorization, or exchange-state bypass changed. Unsupported PAPER decision timeframes still return before Binance fetch. The requested config/runtime cluster passes 174 tests, DB Doctor passes 28, the timeframe/campaign pair passes 2, the reconciliation/config contamination regression passes 30, and the final isolated full suite passes 1,410 tests with 3 skipped. Tests ran from a `/tmp` repository copy so the current campaign database and repository artifact directories were not modified. No commit or PR was created.
+
+## Remaining limitations
+Historical 0409T02 outcomes remain immutable and therefore require fresh post-fix campaign evidence before qualification. A library caller that needs repository dotenv values must now bootstrap explicitly (or supply an isolated merged mapping); command entry points retain that behavior. The repository-local `.env` uses a 0.0003 execution-direction threshold while code defaults use 0.0005; this is real strategy identity drift for manually constructed default runtimes, not a reason to weaken attachment checks. Deprecation warnings for FastAPI and Python 3.12 SQLite adapters remain unrelated.
+
 # Execution-cost evidence attribution — 2026-09-03
 
 ## Need and root cause

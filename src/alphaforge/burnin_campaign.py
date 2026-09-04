@@ -401,7 +401,9 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
     _exec(conn, f"""INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,trade_id,symbol,regime,closed_at,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,effective_rr_at_entry,realized_effective_rr,hold_duration_seconds,mfe,mae,exit_reason,evidence_complete,missing_cost_fields_json,payload_json,schema_version)
         SELECT outcome_id || ':agg:' || :cid, :agg, release_id, trade_id, symbol, regime, closed_at, gross_r, gross_pnl, spread_cost, entry_slippage_cost, exit_slippage_cost, fee_cost, funding_cost, latency_cost, volatility_penalty, liquidity_penalty, total_execution_cost, net_r, net_pnl, effective_rr_at_entry, realized_effective_rr, hold_duration_seconds, mfe, mae, exit_reason, evidence_complete, missing_cost_fields_json, payload_json, schema_version FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph}) AND closed_at IS NOT NULL""", {**params, "agg": agg_id, "cid": campaign_id})
     _exec(conn, f"""INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,hypothetical_entry,hypothetical_stop,hypothetical_target,forward_label,would_tp,would_sl,timeout,ambiguous,hypothetical_gross_r,hypothetical_net_r_after_costs,avoided_loss,missed_profit,execution_invalidated,evidence_horizon,evidence_complete,payload_json,schema_version)
-        SELECT reject_outcome_id || ':agg:' || :cid, :agg, release_id, reject_reason, symbol, regime, decision_time, hypothetical_entry, hypothetical_stop, hypothetical_target, forward_label, would_tp, would_sl, timeout, ambiguous, hypothetical_gross_r, hypothetical_net_r_after_costs, avoided_loss, missed_profit, execution_invalidated, evidence_horizon, evidence_complete, payload_json, schema_version FROM burnin_reject_outcomes WHERE burnin_run_id IN ({ph})""", {**params, "agg": agg_id, "cid": campaign_id})
+        SELECT reject_outcome_id || ':agg:' || :cid, :agg, release_id, reject_reason, symbol, regime, decision_time, hypothetical_entry, hypothetical_stop, hypothetical_target, forward_label, would_tp, would_sl, timeout, ambiguous, hypothetical_gross_r, hypothetical_net_r_after_costs, avoided_loss, missed_profit, execution_invalidated, evidence_horizon, evidence_complete,
+        json_set(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{{}}' END, '$.forward_label_subject', COALESCE(json_extract(payload_json,'$.forward_label_subject'), (SELECT json_extract(p.source_provenance_json,'$.forward_label_subject') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=substr(burnin_reject_outcomes.reject_outcome_id,6) LIMIT 1))), schema_version
+        FROM burnin_reject_outcomes WHERE burnin_run_id IN ({ph})""", {**params, "agg": agg_id, "cid": campaign_id})
     # Aggregate regime metrics by regime; use conservative min LCB/max drawdown and weighted mean net R.
     regs = [_row_dict(r) for r in _exec(conn, f"SELECT * FROM burnin_regime_metrics WHERE burnin_run_id IN ({ph})", params).fetchall()]
     by_reg: dict[str, list[dict[str, Any]]] = {}
@@ -584,8 +586,14 @@ def active_campaign_duration(conn: Any, campaign_id: str, *, now: str | None = N
         if operational_at is not None and (start is None or operational_at > start):
             start = operational_at
         end = _parse_utc(row.get("ended_at"))
-        if status == "RUNNING" and campaign.get("campaign_status") == "RUNNING" and row["burnin_run_id"] == campaign.get("active_run_id"):
-            end = current
+        if status == "RUNNING" and row["burnin_run_id"] == campaign.get("active_run_id"):
+            if campaign.get("campaign_status") == "RUNNING":
+                end = current
+            elif end is None:
+                # A watchdog may fail-close the campaign before the worker sees
+                # the status change. Preserve only time proven by its last
+                # campaign heartbeat; never count the unobserved gap to `now`.
+                end = _parse_utc(campaign.get("last_heartbeat_at"))
         if not eligible or start is None or end is None:
             seconds = 0.0
         else:
@@ -788,7 +796,7 @@ class BurnInCampaignRunner:
                     raise
                 print(f"AlphaForge maintenance cycle skipped after SQLite contention: {exc}", file=sys.stderr, flush=True)
                 continue
-            if completion.get("complete") or status in {"COMPLETED","FAILED","QUALIFIED","SUSPENDED","PAUSED"}:
+            if completion.get("complete") or status in {"COMPLETED","FAILED","QUALIFIED","SUSPENDED","PAUSED","RECOVERY_REQUIRED"}:
                 self._stop_event.set(); return
 
     async def run_foreground(self) -> dict[str, Any]:

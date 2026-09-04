@@ -875,19 +875,22 @@ class RuntimeOrchestrator:
             logger.exception("phase7_burnin_run_persistence_failed", exc_info=exc)
 
     def _phase7_costs_from_execution_ctx(self, execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
+        model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
         spread = execution_ctx.get("spread_pct")
         slip = execution_ctx.get("expected_slippage_pct")
+        fee = execution_ctx.get("fee_pct")
         funding = execution_ctx.get("funding_rate_pct")
-        latency_ms = execution_ctx.get("market_data_latency_ms")
+        latency_ms = execution_ctx.get("latency_ms")
         return {
-            "spread_cost": None if spread is None else abs(float(spread)),
-            "entry_slippage_cost": None if slip is None else abs(float(slip)) / 2.0,
-            "exit_slippage_cost": None if slip is None else abs(float(slip)) / 2.0,
-            "fee_cost": execution_ctx.get("fee_pct"),
-            "funding_cost": None if funding is None else abs(float(funding)),
-            "latency_cost": None if latency_ms is None else abs(float(latency_ms)) / 1_000_000.0,
-            "volatility_penalty": execution_ctx.get("volatility_penalty_pct"),
-            "liquidity_penalty": execution_ctx.get("liquidity_penalty_pct"),
+            "spread_cost": None if spread is None else model.spread_penalty,
+            "entry_slippage_cost": None if slip is None else model.slippage_penalty / 2.0,
+            "exit_slippage_cost": None if slip is None else model.slippage_penalty / 2.0,
+            "fee_cost": None if fee is None else model.fee_penalty,
+            "funding_cost": None if funding is None else model.funding_penalty,
+            "latency_cost": None if latency_ms is None else model.latency_penalty,
+            "volatility_penalty": model.volatility_penalty,
+            "liquidity_penalty": model.liquidity_penalty,
+            "execution_cost_unit": "R",
         }
 
     def _persist_burnin_decision(self, payload: Mapping[str, Any], *, lifecycle_state: str | None = None) -> None:
@@ -2193,6 +2196,10 @@ class RuntimeOrchestrator:
                 complete = str(snapshot_source.get("evidence_status") or "INCOMPLETE").upper() == "COMPLETE"
                 self._unknown_exchange_state = not complete
                 self._exchange_read_only_status = "AVAILABLE" if complete else "UNAVAILABLE"
+                if complete and self._fail_closed_reason in {
+                    "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE"
+                }:
+                    self._fail_closed_reason = None
                 if not complete:
                     if self.config.execution_mode == ExecutionMode.LIVE:
                         raise RuntimeError("LIVE mode blocked: reconciliation evidence incomplete")
@@ -2293,7 +2300,10 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
     cfg = load_config_from_env()
     mode = execution_mode_from_env(cfg.runtime.execution_mode)
     persistence_enabled = cfg.persistence.enabled
-    resolved_database_url = str(persistence_engine.url) if persistence_engine is not None else cfg.persistence.database_url
+    resolved_database_url = (
+        str(persistence_engine.url) if persistence_engine is not None
+        else cfg.persistence.database_url
+    )
     engine = persistence_engine or init_db(resolved_database_url)
     SessionLocal = session_factory or sessionmaker(bind=engine, expire_on_commit=False, future=True)
     with engine.connect() as conn:
@@ -2445,6 +2455,8 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
 
 
 async def main() -> None:
+    from alphaforge.env_contract import bootstrap_environment
+    bootstrap_environment()
     cfg = load_config_from_env()
     mode = execution_mode_from_env(cfg.runtime.execution_mode)
     if mode == ExecutionMode.PAPER and not cfg.runtime.paper_enabled:
