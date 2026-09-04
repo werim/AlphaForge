@@ -2066,6 +2066,8 @@ def _sql_nullable_number(value: Any) -> Any:
 
 def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None = None, *, run_id: str | None = None, profile_name: str | None = None) -> List[dict[str, Any]]:
     engine = init_db(database_url)
+    persisted_event_ids: set[str] = set()
+    decision_counts: dict[str, dict[str, int]] = {}
     with Session(engine) as session:
         for idx, row in enumerate(rows):
             execution_ctx_missing = any(
@@ -2087,6 +2089,12 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 decision = "ACCEPTED"
                 reject_reason = row.reject_reason
             signal_id = _lifecycle_signal_id(row, lifecycle_state)
+            event_id = _lifecycle_event_id(row, idx, lifecycle_state)
+            persisted_event_ids.add(event_id)
+            signal_counts = decision_counts.setdefault(
+                signal_id,
+                {"sql_order_decision_count": 0, "sql_rejected_decision_count": 0},
+            )
             execution_ctx = {
                 "volume_24h_usdt": row.volume_24h_usdt,
                 "spread_pct": row.spread_pct,
@@ -2179,6 +2187,9 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 expectancy_bucket=row.expectancy_bucket,
             )
             if decision == "REJECTED" or lifecycle_state == "ORDER_PLACED":
+                signal_counts["sql_order_decision_count"] += 1
+                if decision == "REJECTED":
+                    signal_counts["sql_rejected_decision_count"] += 1
                 save_order_decision(
                     session,
                     decision_id=f"{signal_id}:{lifecycle_state}:{row.lifecycle_seq or idx + 1}",
@@ -2207,7 +2218,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 )
             save_trade_lifecycle_event(
                 session,
-                event_id=_lifecycle_event_id(row, idx, lifecycle_state),
+                event_id=event_id,
                 signal_id=signal_id,
                 order_id=row.order_id or None,
                 symbol=row.symbol,
@@ -2266,7 +2277,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                     """
                 ),
                 {
-                    "evidence_id": _lifecycle_event_id(row, idx, lifecycle_state),
+                    "evidence_id": event_id,
                     "run_id": run_id or os.getenv("ALPHAFORGE_RUN_ID"),
                     "profile_id": os.getenv("ALPHAFORGE_PROFILE_ID"),
                     "profile_name": profile_name or os.getenv("ALPHAFORGE_PROFILE_NAME"),
@@ -2315,7 +2326,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                     WHERE evidence_id=:evidence_id
                 """),
                 {
-                    "evidence_id": _lifecycle_event_id(row, idx, lifecycle_state),
+                    "evidence_id": event_id,
                     "total_cost_pct": _sql_nullable_number(row.total_cost_pct),
                     "total_explicit_cost_pct": _sql_nullable_number(row.total_explicit_cost_pct),
                     "spread_source": row.spread_source or None,
@@ -2334,21 +2345,6 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
             )
         if hasattr(session, "commit"):
             session.commit()
-        decision_counts = {
-            row["signal_id"]: {"sql_order_decision_count": row["total_count"], "sql_rejected_decision_count": row["rejected_count"]}
-            for row in session.execute(
-                text(
-                    """
-                    SELECT signal_id,
-                           COUNT(*) AS total_count,
-                           SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected_count
-                    FROM order_decisions
-                    WHERE mode = 'BACKTEST'
-                    GROUP BY signal_id
-                    """
-                )
-            ).mappings().all()
-        }
         persisted = session.execute(
             text(
                 """
@@ -2420,6 +2416,8 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
     out = []
     for row in persisted:
         data = dict(row)
+        if data.get("event_id") not in persisted_event_ids:
+            continue
         data.update(decision_counts.get(data.get("signal_id"), {"sql_order_decision_count": 0, "sql_rejected_decision_count": 0}))
         out.append(data)
     return out

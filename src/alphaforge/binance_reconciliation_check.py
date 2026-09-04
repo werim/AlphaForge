@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -97,7 +98,7 @@ def _failure(reason: str, *, stage: str, setting: str | None = None, exc_type: s
     return {"evidence_status": "INCOMPLETE", "failed_stage": stage, "sanitized_errors": [error]}
 
 
-def main() -> int:
+def _main() -> int:
     parser = _SafeParser()
     parser.add_argument("--sanitize-position-risk", type=Path)
     parser.add_argument("--output", type=Path)
@@ -108,7 +109,6 @@ def main() -> int:
     except _UsageError:
         print(json.dumps(_failure("invalid_setting_value", stage="CLI", setting="--symbols"), sort_keys=True))
         return 4
-    bootstrap_environment()
     if args.sanitize_position_risk:
         if not args.output:
             print(json.dumps(_failure("missing_required_setting", stage="CLI", setting="--output"), sort_keys=True))
@@ -146,6 +146,19 @@ def main() -> int:
         errors = str(result.get("sanitized_errors", ""))
         return 3 if "ReconciliationAuthError" in errors else 1
     return 0
+
+
+def main() -> int:
+    original = dict(os.environ)
+    try:
+        boot = bootstrap_environment()
+        return _main()
+    finally:
+        for key in getattr(locals().get("boot"), "keys_loaded", ()):
+            if key in original:
+                os.environ[key] = original[key]
+            else:
+                os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

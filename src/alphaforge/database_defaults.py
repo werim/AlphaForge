@@ -44,11 +44,12 @@ def resolve_alembic_database_url(
     env: dict[str, str],
     root: Path | None = None,
 ) -> str:
-    """Bootstrap dotenv, then resolve Alembic without overriding its explicit URL."""
-    bootstrap_environment(root, environ=env)
+    """Resolve Alembic without leaking dotenv values into the caller environment."""
     if declared_url.strip() != DEFAULT_RUNTIME_DATABASE_URL:
         return declared_url
-    return resolve_runtime_database_url(env, root)
+    resolved_env = dict(env)
+    bootstrap_environment(root, environ=resolved_env)
+    return resolve_runtime_database_url(resolved_env, root)
 
 def sqlite_path_from_url(database_url: str) -> Path | None:
     url = make_url(database_url)

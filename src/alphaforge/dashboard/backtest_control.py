@@ -646,10 +646,10 @@ def _outcome_split(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 
 def _backtest_score10_sl_dominance_enabled() -> bool:
-    resolved = effective_config_values()["ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD"]
-    # Dashboard calibration export is opt-in even though the strategy runtime
-    # guard itself defaults on; only an explicit source enables this artifact.
-    return bool(resolved["value"]) and resolved["source"] != "default"
+    resolved = effective_config_values(include_files=False)["ALPHAFORGE_BACKTEST_SCORE10_SL_DOMINANCE_GUARD"]
+    # This optional diagnostic export is process/dashboard opt-in. A repository
+    # dotenv template must not silently enable it in PAPER/LIVE-adjacent paths.
+    return bool(resolved["value"]) and resolved["source"] in {"process_env", "dashboard"}
 
 
 def _diagnostic_outcome(row: Mapping[str, Any]) -> str:
@@ -744,6 +744,7 @@ def build_score10_sl_dominance_guard(rows: list[Mapping[str, Any]], *, min_forwa
         })
     return {
         "guard_name": "SCORE10_SL_DOMINANCE_GUARD", "mode": "BACKTEST_ONLY", "diagnostic_only": True,
+        "enabled": True,
         "production_thresholds_unchanged": True, "paper_live_unchanged": True, "acceptance_or_rejection_rule": False,
         "min_forward_evaluable_count": min_forward_evaluable, "score10_row_count": len(score10),
         "guard_confirmed_count": sum(1 for r in out if r["guard_confirmed"]),

@@ -45,11 +45,11 @@ def _db_path(args: Any) -> str:
     explicit_db = getattr(args, "db", None)
     if explicit_db:
         return str(explicit_db)
-    # Match runtime's dotenv bootstrap before applying the shared URL > legacy
-    # path > canonical-default resolver.  This keeps a value supplied only in
-    # .env from producing a different burn-in target.
-    bootstrap_environment()
-    url = resolve_runtime_database_url(os.environ)
+    # Match executable dotenv resolution without leaking file-backed values
+    # into callers that invoke this helper in-process.
+    resolved_env = dict(os.environ)
+    bootstrap_environment(environ=resolved_env)
+    url = resolve_runtime_database_url(resolved_env)
     path = sqlite_path_from_url(url)
     if path is None:
         raise ValueError("burn-in operations require SQLite or explicit --db")
@@ -1036,6 +1036,12 @@ def watch_once(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
     if failures:
         persist_incident(conn, campaign_id, "WATCHDOG_FAILURE", {"failures": failures, "health": health})
         if not cleaned_dead_worker:
+            campaign = get_campaign(conn, campaign_id) or {}
+            run_id = campaign.get("active_run_id")
+            terminal_at = campaign.get("last_heartbeat_at") or utc_now()
+            if run_id:
+                conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status IN ('STARTING','RUNNING')", (terminal_at, run_id))
+                conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,?) WHERE campaign_id=? AND burnin_run_id=? AND status IN ('STARTING','RUNNING')", (terminal_at, campaign_id, run_id))
             conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='WATCHDOG_FAILURE' WHERE campaign_id=?", (campaign_id,))
         conn.commit()
     return {"status": "OK" if not failures else "RECOVERY_REQUIRED", "failures": failures, "health": health, "cleaned_dead_worker": cleaned_dead_worker}

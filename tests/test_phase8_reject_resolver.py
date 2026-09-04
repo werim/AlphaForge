@@ -28,6 +28,32 @@ def test_missing_costs_mark_incomplete(tmp_path):
     persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='x',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=3600,execution_cost_assumptions={},regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
     resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:30:00Z','high':130,'low':99}]},now='2026-01-01T02:00:00Z')
     assert conn.execute('select evidence_complete from burnin_reject_outcomes').fetchone()[0] == 0
+
+
+def test_reject_net_r_subtracts_costs_already_normalized_to_r(tmp_path):
+    conn,camp,run=setup(tmp_path)
+    costs={"spread_cost":0.05,"entry_slippage_cost":0.03,"exit_slippage_cost":0.03,
+           "fee_cost":0.04,"funding_cost":0.01,"latency_cost":0.04,
+           "execution_cost_unit":"R"}
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='units',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=95,target=106,horizon_seconds=60,execution_cost_assumptions=costs,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER','forward_label_subject':'GUIDED_CANDIDATE'})
+    resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:01:00Z','high':106,'low':99}]},now='2026-01-01T00:02:00Z')
+    row=conn.execute('select hypothetical_gross_r,hypothetical_net_r_after_costs,payload_json from burnin_reject_outcomes').fetchone()
+    payload=json.loads(row['payload_json'])
+    assert row['hypothetical_gross_r'] == 1.2
+    assert row['hypothetical_net_r_after_costs'] == 1.0
+    assert payload['execution_cost_unit'] == 'R'
+    assert payload['reject_quality_attributable'] is True
+
+
+def test_legacy_shadow_outcome_is_resolved_but_not_marked_reject_correct(tmp_path):
+    conn,camp,run=setup(tmp_path)
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='shadow',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=60,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='MTF_EXECUTION_COUNTER_REGIME',source_provenance={'provider':'PAPER','forward_label_subject':'LEGACY_SCANNER_SHADOW_CANDIDATE','forward_label_side':'LONG','mtf':{'regime':{'direction':'SHORT'}}})
+    resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:01:00Z','high':101,'low':89}]},now='2026-01-01T00:02:00Z')
+    payload=json.loads(conn.execute('select payload_json from burnin_reject_outcomes').fetchone()[0])
+    assert payload['forward_label_subject'] == 'LEGACY_SCANNER_SHADOW_CANDIDATE'
+    assert payload['reject_quality_attributable'] is False
+    assert payload['reject_correct'] is None
+    assert payload['non_attributable_reason'] == 'LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT'
 from alphaforge.burnin_campaign import BinanceReadOnlyCandleProvider, MarketDataUnavailable
 
 

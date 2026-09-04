@@ -144,4 +144,7 @@ def main(argv=None) -> int:
     except Exception as exc:
         _print({'status':'ERROR','error':f'{exc.__class__.__name__}:{exc}'},getattr(args,'json',False)); return 1
 
-if __name__=='__main__': sys.exit(main())
+if __name__=='__main__':
+    from alphaforge.env_contract import bootstrap_environment
+    bootstrap_environment()
+    sys.exit(main())

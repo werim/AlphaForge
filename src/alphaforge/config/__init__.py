@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Mapping
 
 from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset
-from alphaforge.env_contract import bootstrap_environment, dotenv_status, resolve_binance_environment
+from alphaforge.env_contract import dotenv_status, repository_root, resolve_binance_environment
 from alphaforge.database_defaults import resolve_runtime_database_url
 
 
@@ -177,7 +177,13 @@ def load_reconciliation_settings(*, env: Mapping[str, str] | None = None) -> Rec
              "ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", "ALPHAFORGE_RECONCILIATION_POSITION_EPSILON",
              "ALPHAFORGE_RECONCILIATION_MAX_FILL_SYMBOLS", "BINANCE_API_KEY", "BINANCE_API_SECRET",
              "BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL")
-    values = effective_config_subset(names, env=env, fail_on_alias_conflict=True, include_files=False)
+    values = effective_config_subset(
+        names,
+        env=env,
+        root=repository_root(),
+        fail_on_alias_conflict=True,
+        include_files=False,
+    )
     val = lambda name: values[name]["value"]
     endpoint_env = {name: str(val(name)) for name in ("BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL") if val(name)}
     environment_source = str(values["BINANCE_ENVIRONMENT"]["source"])
@@ -330,12 +336,22 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
     })
     return cfg
 
-def load_config_from_env() -> AlphaForgeConfig:
-    bootstrap_environment()
-    env = os.environ
-    managed = effective_config_values(env=env)
+def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> AlphaForgeConfig:
+    root = repository_root(root)
+    process_env = os.environ if env is None else env
+    managed = effective_config_values(env=process_env, root=root, include_files=False)
     val = lambda name: managed[name]["value"]
-    resolved_binance = resolve_binance_environment(env)
+    # Executable entry points bootstrap dotenv once. The library loader itself
+    # remains deterministic and resolves process values plus typed defaults.
+    env = process_env
+    endpoint_env = {
+        name: str(val(name))
+        for name in ("BINANCE_ENVIRONMENT", "BINANCE_BASE_URL", "BINANCE_WS_URL")
+        if val(name)
+    }
+    if str(managed["BINANCE_ENVIRONMENT"]["source"]).startswith("alias (BINANCE_TESTNET)"):
+        endpoint_env["BINANCE_TESTNET"] = endpoint_env.pop("BINANCE_ENVIRONMENT")
+    resolved_binance = resolve_binance_environment(endpoint_env)
     runtime = RuntimeSettings(
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
         paper_enabled=val("ALPHAFORGE_ENABLE_PAPER_TRADING"),
@@ -448,7 +464,17 @@ def load_config_from_env() -> AlphaForgeConfig:
                 panic_conditions_enabled=val("ALPHAFORGE_BACKTEST_FILTER_PANIC_CONDITIONS_ENABLED"),
             ),
         ),
-        persistence=PersistenceSettings(database_url=_resolve_database_url(env), enabled=val("ALPHAFORGE_PERSISTENCE_ENABLED")),
+        persistence=PersistenceSettings(
+            database_url=(
+                resolve_runtime_database_url({})
+                if managed["ALPHAFORGE_DATABASE_URL"]["source"] == "default"
+                else resolve_runtime_database_url(
+                    {"ALPHAFORGE_DATABASE_URL": str(val("ALPHAFORGE_DATABASE_URL"))},
+                    root,
+                )
+            ),
+            enabled=val("ALPHAFORGE_PERSISTENCE_ENABLED"),
+        ),
         logging=LoggingSettings(level=val("ALPHAFORGE_LOG_LEVEL")),
         notifications=NotificationSettings(telegram_enabled=val("ALPHAFORGE_ENABLE_TELEGRAM"), telegram_bot_token=val("TELEGRAM_BOT_TOKEN"), telegram_chat_id=val("TELEGRAM_CHAT_ID")),
     )

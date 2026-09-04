@@ -364,8 +364,12 @@ def effective_config_subset(names: tuple[str, ...], *, env: Mapping[str, str] | 
         out[name] = {"setting": setting, "value": setting.parse(raw), "source": source}
     return out
 
-def effective_config_values(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> dict[str, dict[str, Any]]:
-    return effective_config_subset(tuple(setting.env_name for setting in CONFIG_REGISTRY), env=env, root=root)
+def effective_config_values(*, env: Mapping[str, str] | None = None, root: Path | None = None,
+                            include_files: bool = True) -> dict[str, dict[str, Any]]:
+    return effective_config_subset(
+        tuple(setting.env_name for setting in CONFIG_REGISTRY), env=env, root=root,
+        include_files=include_files,
+    )
 
 def decision_filter_config(mode: str, *, env: Mapping[str, str] | None = None, root: Path | None = None) -> dict[str, Any]:
     snap = effective_config_values(env=env, root=root)

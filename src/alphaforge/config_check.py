@@ -86,10 +86,18 @@ def audit_settings(*, env: Mapping[str, str] | None = None) -> dict[str, Any]:
 
 
 def main() -> int:
-    bootstrap_environment()
-    result = audit_settings()
-    print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] == "PASS" else 2
+    original = dict(os.environ)
+    try:
+        boot = bootstrap_environment()
+        result = audit_settings()
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["status"] == "PASS" else 2
+    finally:
+        for key in getattr(locals().get("boot"), "keys_loaded", ()):
+            if key in original:
+                os.environ[key] = original[key]
+            else:
+                os.environ.pop(key, None)
 
 
 if __name__ == "__main__":

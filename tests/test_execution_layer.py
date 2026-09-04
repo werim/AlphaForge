@@ -238,4 +238,30 @@ def test_paper_fee_bps_is_total_round_trip_cost_applied_once():
     from alphaforge.runtime import RuntimeOrchestrator
 
     costs = RuntimeOrchestrator._phase7_costs_from_execution_ctx(None, {"fee_pct": 0.0004})
-    assert costs["fee_cost"] == pytest.approx(0.0004)
+    assert costs["fee_cost"] == pytest.approx(0.004)
+    assert costs["execution_cost_unit"] == "R"
+
+
+def test_phase7_forward_costs_are_hand_computable_r_penalties():
+    from alphaforge.runtime import RuntimeOrchestrator
+
+    costs = RuntimeOrchestrator._phase7_costs_from_execution_ctx(None, {
+        "spread_pct": 0.001,
+        "expected_slippage_pct": 0.002,
+        "fee_pct": 0.0004,
+        "funding_rate_pct": 0.0002,
+        "latency_ms": 500.0,
+        "liquidity_score": 1.0,
+        "volatility_regime": "normal",
+    })
+
+    assert costs["spread_cost"] == pytest.approx(0.025)
+    assert costs["entry_slippage_cost"] == pytest.approx(0.03)
+    assert costs["exit_slippage_cost"] == pytest.approx(0.03)
+    assert costs["fee_cost"] == pytest.approx(0.004)
+    assert costs["funding_cost"] == pytest.approx(0.0005)
+    assert costs["latency_cost"] == pytest.approx(0.1)
+    assert sum(costs[key] for key in (
+        "spread_cost", "entry_slippage_cost", "exit_slippage_cost",
+        "fee_cost", "funding_cost", "latency_cost",
+    )) == pytest.approx(0.1895)

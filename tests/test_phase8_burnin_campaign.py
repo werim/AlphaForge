@@ -3,7 +3,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 import alphaforge.burnin_campaign as campaign_module
-from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, aggregate_campaign, export_campaign_bundle, build_phase8_campaign_identity, active_campaign_duration
+from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign, pause_campaign, get_campaign, aggregate_campaign, export_campaign_bundle, build_phase8_campaign_identity, active_campaign_duration, materialize_campaign_aggregate
 from alphaforge.burnin import DIAGNOSTIC_OBSERVATION_KIND, persist_burnin_observation
 
 
@@ -189,6 +189,38 @@ def test_active_duration_starts_at_operational_attachment_not_run_creation(tmp_p
     conn.execute("INSERT INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES(?,?,?,?,?,?,?)",('operational-event',camp.campaign_id,run['burnin_run_id'],'PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL','2026-09-01T10:05:00Z','{}','test'))
     assert active_campaign_duration(conn,camp.campaign_id,now='2026-09-01T12:00:00Z') == pytest.approx(3600.0)
     conn.close()
+
+
+def test_recovery_required_duration_is_capped_at_last_healthy_heartbeat(tmp_path):
+    db=tmp_path/'recovery-duration.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='recovery-duration',duration_days=1,symbols=[],intervals=[])
+    run=start_or_resume_campaign(conn,camp.campaign_id)
+    conn.execute("UPDATE burnin_campaign_runs SET status='RUNNING',started_at='2026-09-01T10:00:00Z',ended_at=NULL WHERE burnin_run_id=?",(run['burnin_run_id'],))
+    conn.execute("UPDATE burnin_runs SET status='RUNNING',start_time='2026-09-01T10:00:00Z',end_time=NULL WHERE burnin_run_id=?",(run['burnin_run_id'],))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',active_run_id=?,last_heartbeat_at='2026-09-01T11:00:00Z' WHERE campaign_id=?",(run['burnin_run_id'],camp.campaign_id))
+
+    observed=active_campaign_duration(conn,camp.campaign_id,now='2026-09-01T15:00:00Z')
+
+    assert observed == pytest.approx(3600.0)
+    assert conn.execute("SELECT observed_duration_seconds FROM burnin_runs WHERE burnin_run_id=?",(run['burnin_run_id'],)).fetchone()[0] == pytest.approx(3600.0)
+    conn.close()
+
+
+def test_aggregate_preserves_legacy_shadow_subject_for_fail_closed_qualification(tmp_path):
+    db=tmp_path/'shadow-aggregate.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='shadow-aggregate',duration_days=1,symbols=['BTCUSDT'],intervals=['1m'])
+    run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='shadow-id',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=1,entry=100,stop=90,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='MTF_EXECUTION_COUNTER_REGIME',source_provenance={'forward_label_subject':'LEGACY_SCANNER_SHADOW_CANDIDATE'})
+    persist_burnin_reject_outcome(conn,reject_outcome_id='rout_shadow-id',burnin_run_id=run['burnin_run_id'],release_id='shadow-aggregate',reject_reason='MTF_EXECUTION_COUNTER_REGIME',symbol='BTCUSDT',regime='TRENDING',forward_label='SL_BEFORE_TP',hypothetical_net_r_after_costs=-1,avoided_loss=1,missed_profit=0,payload={})
+    conn.commit(); conn.close()
+
+    engine=_engine(db)
+    with engine.begin() as sql_conn:
+        aggregate_id=materialize_campaign_aggregate(sql_conn,camp.campaign_id)
+        payload=json.loads(sql_conn.execute(text("SELECT payload_json FROM burnin_reject_outcomes WHERE burnin_run_id=:id"),{"id":aggregate_id}).scalar_one())
+    engine.dispose()
+
+    assert payload['forward_label_subject'] == 'LEGACY_SCANNER_SHADOW_CANDIDATE'
 
 def test_start_resume_blocks_duplicate_when_live_worker_identity_is_unavailable(tmp_path, monkeypatch):
     import alphaforge.burnin_campaign as module
