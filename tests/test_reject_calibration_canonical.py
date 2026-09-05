@@ -62,10 +62,19 @@ def test_layer_thresholds_are_independent_and_identity_sensitive():
     assert build_setup_context(candles,'15m',direction_threshold=0)['direction'] != build_setup_context(candles,'15m',direction_threshold=.1)['direction']
     market={'spread_pct':0,'expected_slippage_pct':0,'latency_ms':0,'liquidity_score':1}
     assert build_execution_context(candles,'1m',market,direction_threshold=0)['trigger']
-    base=dict(regime_direction_threshold=.0005,setup_direction_threshold=.0005)
-    a=build_phase8_campaign_identity(RuntimeConfig(**base,execution_direction_threshold=.0005),symbols=['BTC'],intervals=['1m'],paper_source_exchanges=['binance'])
-    b=build_phase8_campaign_identity(RuntimeConfig(**base,execution_direction_threshold=.0004),symbols=['BTC'],intervals=['1m'],paper_source_exchanges=['binance'])
-    assert a['strategy_config_hash'] != b['strategy_config_hash']
+    defaults = RuntimeConfig()
+    assert (defaults.regime_direction_threshold, defaults.setup_direction_threshold,
+            defaults.execution_direction_threshold) == (.0005, .0003, .0005)
+    base=dict(regime_direction_threshold=.0005,setup_direction_threshold=.0003,
+              execution_direction_threshold=.0005)
+    a=build_phase8_campaign_identity(RuntimeConfig(**base),symbols=['BTC'],intervals=['1m'],paper_source_exchanges=['binance'])
+    for field, value in [('regime_direction_threshold', .0004),
+                         ('setup_direction_threshold', .0004),
+                         ('execution_direction_threshold', .0004)]:
+        changed = build_phase8_campaign_identity(
+            RuntimeConfig(**{**base, field: value}), symbols=['BTC'], intervals=['1m'],
+            paper_source_exchanges=['binance'])
+        assert a['strategy_config_hash'] != changed['strategy_config_hash']
 
 
 def test_guided_generation_mode_is_campaign_identity_sensitive():

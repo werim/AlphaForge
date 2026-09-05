@@ -141,7 +141,7 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
         "min_rr": getattr(runtime_config, "min_rr", None),
         "regime_direction_threshold": getattr(runtime_config, "regime_direction_threshold", 0.0005),
-        "setup_direction_threshold": getattr(runtime_config, "setup_direction_threshold", 0.0005),
+        "setup_direction_threshold": getattr(runtime_config, "setup_direction_threshold", 0.0003),
         "execution_direction_threshold": getattr(runtime_config, "execution_direction_threshold", 0.0005),
         "mtf_guided_signal_generation_enabled": bool(
             getattr(runtime_config, "mtf_guided_signal_generation_enabled", True)

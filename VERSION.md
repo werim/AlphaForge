@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Guided MTF setup identity diagnostic correction (2026-09-05)
+- Current version: dev setup-direction sensitivity and setup-opportunity idempotency patch; no schema migration.
+- Current phase: focused validation complete; a fresh PAPER campaign is required because the setup threshold changes strategy/config identity.
+- Runtime maturity: the setup layer defaults to `0.0003`; regime and execution layers remain `0.0005`. One closed 15m setup identity may receive later 1m observations but may produce at most one accepted entry.
+- BACKTEST/PAPER/LIVE alignment: PAPER guided-MTF semantics are corrected without changing scoring, effective-RR, or execution gates; no LIVE-readiness claim is made.
+- Lifecycle/persistence/execution impact: `NO_SETUP`, `INVALID`, and `OVEREXTENDED` persist once per symbol/setup-timeframe/closed-candle opportunity. Canonical counters remain deduplicated; no table or export schema changes.
+- Known critical risks: campaign `camp_53a9afa55070606a` remains historical evidence under the old threshold and must not be mixed with post-patch evidence.
+- Last audit date: 2026-09-05. Live readiness verdict: NOT LIVE READY.
+
 ## PAPER preflight dotenv bootstrap correction (2026-09-05)
 - Current version: dev burn-in executable dotenv-scope regression fix; no schema, strategy, endpoint, or campaign change.
 - Current phase: operator reruns PAPER preflight after restoring a clean `dev` worktree; no campaign action is authorized by this patch.

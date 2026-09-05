@@ -7,6 +7,8 @@ import pytest
 from sqlalchemy import text
 
 from alphaforge.execution import build_execution_context as build_canonical_execution_context
+from alphaforge.burnin import (BurnInRun, bootstrap_burnin_schema,
+                               canonical_decision_sql, persist_burnin_run)
 from alphaforge.multi_timeframe import (BinanceMTFProvider, build_execution_context,
                                         build_setup_context, closed_candles,
                                         evaluate_mtf_alignment)
@@ -64,6 +66,30 @@ def _provider_rows(closes, decision_ms):
         rows.append([close_ms - 59_999, str(close + .02), str(close + .08),
                      str(close - .08), str(close), "100", close_ms])
     return rows
+
+
+def _setup_candles_for_delta(delta):
+    recent = 700.0 * (1.0 + delta) / (7.0 - 5.0 * delta)
+    return _execution_candles([100.0] * 7 + [recent] * 5)
+
+
+def test_setup_threshold_default_recovers_observed_directional_strength():
+    setup = build_setup_context(
+        _setup_candles_for_delta(.000491), "15m", regime={"direction": "LONG"})
+
+    assert setup["direction_threshold"] == .0003
+    assert setup["ma_delta_strength"] == pytest.approx(.000491)
+    assert setup["direction"] == "LONG"
+    assert setup["phase"] == "CONTINUATION"
+
+
+def test_same_setup_strength_remains_neutral_at_old_threshold():
+    setup = build_setup_context(
+        _setup_candles_for_delta(.000491), "15m", regime={"direction": "LONG"},
+        direction_threshold=.0005)
+
+    assert setup["direction"] == "NONE"
+    assert setup["phase"] == "NO_SETUP"
 
 
 def test_setup_classifies_countertrend_ma_as_regime_guided_pullback_not_long_trade():
@@ -143,6 +169,7 @@ def test_non_finite_setup_evidence_is_invalid_and_fails_closed():
     result = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=NOW)
 
     assert setup["phase"] == "INVALID"
+    assert setup["last_closed_candle_ms"] == NOW
     assert setup["candidate_ready"] is False
     assert setup["evidence_status"] == "INCOMPLETE"
     assert "MTF_SETUP_UNAVAILABLE" in result["reasons"]
@@ -314,6 +341,140 @@ class _CounterRegimeGuidedProvider:
                     "timeframes": {"regime": "1h", "setup": "15m", "execution": "1m"}},
                 "generation": {"mode": "REGIME_GUIDED", "evidence_status": "INCOMPLETE",
                                "candidate": None, "reason": None}}
+
+
+class _SequencedGuidedProvider:
+    def __init__(self, setup_closes, confirmations):
+        self.setup_closes = list(setup_closes)
+        self.confirmations = list(confirmations)
+        self.calls = 0
+
+    async def build(self, *_args, **_kwargs):
+        index = min(self.calls, len(self.setup_closes) - 1)
+        setup_close = self.setup_closes[index]
+        confirmed = self.confirmations[min(self.calls, len(self.confirmations) - 1)]
+        self.calls += 1
+        setup_phase = "PULLBACK" if any(self.confirmations) else "NO_SETUP"
+        candidate = ({"side": "LONG", "entry": 100.0, "sl": 99.0, "tp": 102.0,
+                      "rr": 2.0, "setup_type": "LONG_PULLBACK",
+                      "setup_phase": "PULLBACK", "geometry_status": "COMPLETE",
+                      "geometry_reason": None,
+                      "geometry_source": "MTF_REGIME_GUIDED_CLOSED_KLINES"}
+                     if confirmed else None)
+        reasons = [] if confirmed else (["MTF_EXECUTION_NOT_CONFIRMED"]
+                                         if setup_phase == "PULLBACK"
+                                         else ["MTF_NO_VALID_SETUP"])
+        return {"provider": "BINANCE_FUTURES_CLOSED_KLINES",
+                "regime": {"timeframe": "1h", "regime": "TRENDING",
+                           "direction": "LONG", "last_closed_candle_ms": 1},
+                "setup": {"timeframe": "15m", "phase": setup_phase,
+                          "trade_side": "LONG", "direction": "NONE",
+                          "last_closed_candle_ms": setup_close},
+                "execution": {"timeframe": "1m",
+                              "direction": "LONG" if confirmed else "NEUTRAL",
+                              "confirmed_for_side": confirmed,
+                              "last_closed_candle_ms": self.calls},
+                "alignment": {"aligned": confirmed,
+                    "direction": "LONG" if confirmed else None, "reasons": reasons,
+                    "generation_mode": "REGIME_GUIDED", "setup_phase": setup_phase,
+                    "timeframes": {"regime": "1h", "setup": "15m", "execution": "1m"}},
+                "generation": {"mode": "REGIME_GUIDED",
+                    "evidence_status": "COMPLETE" if candidate else "INCOMPLETE",
+                    "candidate": candidate, "reason": None}}
+
+
+class _AlwaysAcceptBrain:
+    def before_real_order(self, *_args, **_kwargs):
+        plan = SimpleNamespace(decision="ACCEPTED", reason="", confidence=.9,
+                               order_type="MARKET", limit_price=None, stop_price=None)
+        return SimpleNamespace(total_score=.9, components={}), plan, "accepted"
+
+
+def _runtime_candidate():
+    return {"symbol": "BTCUSDT", "source_exchange": "binance", "side": "LONG",
+            "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0,
+            "setup_type": "BREAKOUT_UP", "geometry_status": "COMPLETE",
+            "spread_pct": .0002, "market_data_latency_ms": 20.0,
+            "liquidity_score": .9, "volume_24h_usdt": 100_000_000,
+            "market_ts": time.time(), "timeframe": "1m", "equity": 100_000.0,
+            "available_balance": 100_000.0, "notional": 1_000.0}
+
+
+def _selection(candidate=None):
+    candidate = candidate or _runtime_candidate()
+    return SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
+                           diagnostics={"inputs": candidate})
+
+
+def test_repeated_same_no_setup_candle_is_one_canonical_reject_and_counter(tmp_path):
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'setup-idempotency.db'}")
+    with engine.begin() as conn:
+        bootstrap_burnin_schema(conn)
+        persist_burnin_run(conn, BurnInRun("mtf-run", "rel", git_commit="g",
+            config_hash="c", strategy_config_hash="s", universe_hash="u",
+            source_provenance={"provider": "PAPER"}))
+    rejects = []
+    provider = _SequencedGuidedProvider([900_000, 900_000], [False, False])
+    runtime = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+        require_mtf_alignment=True), SimpleNamespace(), lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=provider, persistence_engine=engine,
+        on_reject_persist=lambda payload: rejects.append(payload))
+    runtime._burnin_run_id = "mtf-run"
+
+    asyncio.run(runtime._process_symbol(_selection()))
+    asyncio.run(runtime._process_symbol(_selection()))
+    restarted = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+        require_mtf_alignment=True), SimpleNamespace(), lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_SequencedGuidedProvider([900_000], [False]),
+        persistence_engine=engine, on_reject_persist=lambda payload: rejects.append(payload))
+    restarted._burnin_run_id = "mtf-run"
+    asyncio.run(restarted._process_symbol(_selection()))
+
+    with engine.connect() as conn:
+        canonical = conn.execute(text(
+            f"SELECT COUNT(*) FROM burnin_observations o WHERE {canonical_decision_sql('o')}"
+        )).scalar_one()
+        counters = conn.execute(text(
+            "SELECT sample_count,rejected_count FROM burnin_runs WHERE burnin_run_id='mtf-run'"
+        )).one()
+    assert len(rejects) == 1
+    assert rejects[0]["setup_identity"] == "setup:BTCUSDT:15m:900000"
+    assert canonical == 1
+    assert tuple(counters) == (1, 1)
+
+
+def test_new_closed_setup_candle_can_create_new_canonical_decision():
+    rejects = []
+    provider = _SequencedGuidedProvider([900_000, 1_800_000], [False, False])
+    runtime = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+        require_mtf_alignment=True), SimpleNamespace(), lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=provider,
+        on_reject_persist=lambda payload: rejects.append(payload))
+
+    asyncio.run(runtime._process_symbol(_selection()))
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert len(rejects) == 2
+    assert rejects[0]["setup_identity"] != rejects[1]["setup_identity"]
+
+
+def test_valid_setup_allows_later_execution_confirmation_but_only_one_entry():
+    rejects = []
+    provider = _SequencedGuidedProvider([900_000] * 3, [False, True, True])
+    runtime = RuntimeOrchestrator(RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+        require_mtf_alignment=True), _AlwaysAcceptBrain(),
+        lambda: asyncio.sleep(0, result=[]), mtf_context_provider=provider,
+        on_reject_persist=lambda payload: rejects.append(payload))
+
+    asyncio.run(runtime._process_symbol(_selection()))
+    asyncio.run(runtime._process_symbol(_selection()))
+    runtime._active_positions.clear()
+    runtime._symbol_cooldown_until.clear()
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert [row["reason"] for row in rejects] == ["MTF_EXECUTION_NOT_CONFIRMED"]
+    assert runtime.metrics.executions == 1
+    assert runtime._accepted_setup_identities == {"setup:BTCUSDT:15m:900000"}
 
 
 def test_runtime_replaces_independent_side_with_guided_candidate_before_quality_gates():

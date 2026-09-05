@@ -91,7 +91,7 @@ class RuntimeSettings:
     execution_timeframe: str = "1m"
     mtf_guided_signal_generation_enabled: bool = True
     regime_direction_threshold: float = 0.0005
-    setup_direction_threshold: float = 0.0005
+    setup_direction_threshold: float = 0.0003
     execution_direction_threshold: float = 0.0005
     paper_decision_timeframe: str = "1m"  # deprecated compatibility mirror
     max_abs_funding_rate_pct: float = 0.0010

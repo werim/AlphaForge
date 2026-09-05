@@ -24,6 +24,7 @@ REGIME_GUIDED_SETUP_PHASES = ("CONTINUATION", "PULLBACK", "REENTRY_READY")
 
 _TF_SECONDS = {"1m": 60, "15m": 900, "1h": 3600}
 DEFAULT_DIRECTION_THRESHOLD = 0.0005
+DEFAULT_SETUP_DIRECTION_THRESHOLD = 0.0003
 
 
 def _valid_ohlc(candles: list[dict[str, Any]], minimum_rows: int) -> bool:
@@ -100,12 +101,14 @@ def build_regime_context(candles: list[dict[str, Any]], timeframe: str, *, direc
 
 def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *,
                         regime: Mapping[str, Any] | None = None,
-                        direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD) -> dict[str, Any]:
+                        direction_threshold: float = DEFAULT_SETUP_DIRECTION_THRESHOLD) -> dict[str, Any]:
     threshold = float(direction_threshold)
     valid_ohlc = _valid_ohlc(candles, 12)
     direction, quality = (_direction(candles, 5, 12, neutral_threshold=threshold)
                           if valid_ohlc else ("UNKNOWN", None))
     complete = direction in {"LONG", "SHORT"} and len(candles) >= 12
+    identity_last = (candles[-1] if candles
+                     and isinstance(candles[-1].get("close_ts"), int) else None)
     last = candles[-1] if valid_ohlc else None
     recent = candles[-12:] if valid_ohlc else []
     span = (max(float(c["high"]) for c in recent) - min(float(c["low"]) for c in recent)) if recent else None
@@ -118,8 +121,8 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *,
             "ma_delta_strength": quality, "direction_threshold": threshold,
             "momentum_state": "CONFIRMED" if complete else "UNCONFIRMED", "overextended": overextended,
             "entry_zone": None if not last else [last["low"], last["high"]], "structural_stop": None,
-            "structural_target": None, "last_closed_candle_ts": _iso(int(last["close_ts"])) if last else None,
-            "last_closed_candle_ms": int(last["close_ts"]) if last else None,
+            "structural_target": None, "last_closed_candle_ts": _iso(int(identity_last["close_ts"])) if identity_last else None,
+            "last_closed_candle_ms": int(identity_last["close_ts"]) if identity_last else None,
             "evidence_status": "COMPLETE" if complete else "INCOMPLETE"}
 
     regime_direction = str(regime.get("direction") or "UNKNOWN").upper()
@@ -157,8 +160,8 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *,
             "overextended": overextended,
             "entry_zone": None if not last else [last["low"], last["high"]],
             "structural_stop": None, "structural_target": None,
-            "last_closed_candle_ts": _iso(int(last["close_ts"])) if last else None,
-            "last_closed_candle_ms": int(last["close_ts"]) if last else None,
+            "last_closed_candle_ts": _iso(int(identity_last["close_ts"])) if identity_last else None,
+            "last_closed_candle_ms": int(identity_last["close_ts"]) if identity_last else None,
             "evidence_status": "COMPLETE" if evidence_complete else "INCOMPLETE"}
 
 
@@ -277,7 +280,7 @@ class BinanceMTFProvider:
     base_url: str = "https://fapi.binance.com"
     timeout_sec: float = 2.0
     regime_direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD
-    setup_direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD
+    setup_direction_threshold: float = DEFAULT_SETUP_DIRECTION_THRESHOLD
     execution_direction_threshold: float = DEFAULT_DIRECTION_THRESHOLD
     guided_signal_generation_enabled: bool = True
     _cache: dict[tuple[str, str, int, str], dict[str, Any]] = field(default_factory=dict)

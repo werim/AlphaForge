@@ -109,7 +109,7 @@ class RuntimeConfig:
     execution_timeframe: str = "1m"
     mtf_guided_signal_generation_enabled: bool = True
     regime_direction_threshold: float = 0.0005
-    setup_direction_threshold: float = 0.0005
+    setup_direction_threshold: float = 0.0003
     execution_direction_threshold: float = 0.0005
     paper_decision_timeframe: str = "1m"  # deprecated alias
     require_mtf_alignment: bool = False
@@ -284,6 +284,8 @@ class RuntimeOrchestrator:
     _burnin_evidence_incomplete: bool = field(default=False, init=False)
     _burnin_suspended: bool = field(default=False, init=False)
     _latest_execution_candle_by_market: dict[tuple[str, str, str], Any] = field(default_factory=dict, init=False)
+    _canonical_setup_reject_ids: set[str] = field(default_factory=set, init=False)
+    _accepted_setup_identities: set[str] = field(default_factory=set, init=False)
     _last_burnin_snapshot_ts: float = field(default=0.0, init=False)
     _recovery_decision: dict[str, Any] = field(default_factory=dict, init=False)
     _qualification_samples: tuple[dict[str, Any], ...] = field(default_factory=lambda: (
@@ -914,11 +916,17 @@ class RuntimeOrchestrator:
                     "spread_pct", "expected_slippage_pct", "latency_ms", "funding_rate_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
+                                "setup_identity": payload.get("setup_identity"),
                                 "campaign_id": campaign_id, "runtime_identity": runtime_identity,
                                 "geometry_status": payload.get("geometry_status"),
                                 "geometry_reason": payload.get("geometry_reason"),
                                 "geometry_source": payload.get("geometry_source"), "mtf": payload.get("mtf")})
-                persist_burnin_observation(conn, observation_id=f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}", burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
+                setup_identity = payload.get("setup_identity")
+                observation_id = (self._setup_observation_id(
+                                      str(setup_identity), str(payload.get("decision")))
+                                  if setup_identity else
+                                  f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}")
+                persist_burnin_observation(conn, observation_id=observation_id, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
             self.metrics.burnin_observations += 1
             with engine.begin() as conn:
                 update_burnin_run_counters(conn, self._burnin_run_id)
@@ -1405,6 +1413,11 @@ class RuntimeOrchestrator:
             candidate_side = str(market_ctx.get("side") or "").strip().upper()
             setup_layer = (mtf or {}).get("setup") if isinstance((mtf or {}).get("setup"), Mapping) else {}
             setup_phase = str(setup_layer.get("phase") or "UNKNOWN").upper()
+            setup_identity = self._setup_opportunity_identity(selection.symbol, mtf)
+            if setup_identity is not None:
+                market_ctx["setup_identity"] = setup_identity
+                mtf = {**dict(mtf or {}), "setup_identity": setup_identity}
+                market_ctx["mtf"] = mtf
             if guided:
                 metric_name = {"CONTINUATION": "mtf_setup_continuation",
                                "PULLBACK": "mtf_setup_pullback",
@@ -1463,6 +1476,15 @@ class RuntimeOrchestrator:
                         return
                     reasons = list(dict.fromkeys([geometry_reason, *reasons]))
                 reason = reasons[0]
+                canonical_setup_reject = setup_phase in {"NO_SETUP", "INVALID", "OVEREXTENDED"}
+                if canonical_setup_reject and setup_identity is not None:
+                    reject_decision_id = f"reject:{self._setup_decision_key(setup_identity)}"
+                    if self._setup_decision_recorded(setup_identity, decision="REJECTED"):
+                        return
+                    self._canonical_setup_reject_ids.add(setup_identity)
+                    signal_id = f"runtime:{hashlib.sha256(setup_identity.encode('utf-8')).hexdigest()[:24]}"
+                else:
+                    reject_decision_id = None
                 self.metrics.mtf_alignment_reject += 1
                 self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
                 self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
@@ -1479,8 +1501,13 @@ class RuntimeOrchestrator:
                     "reason": reason, "reject_reason": reason, "confidence": 0.0, "score": None,
                     "rr": market_ctx.get("rr"), "effective_rr": None, "explanation": "mtf_alignment_gate",
                     "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}
+                if reject_decision_id is not None:
+                    reject_payload["reject_decision_id"] = reject_decision_id
                 await self._persist_reject(reject_payload)
                 await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
+                return
+            if setup_identity is not None and self._setup_decision_recorded(
+                    setup_identity, decision="ACCEPTED"):
                 return
             self.metrics.mtf_alignment_pass += 1
         if geometry_required and str(market_ctx.get("geometry_status") or "").upper() != "COMPLETE":
@@ -1612,6 +1639,8 @@ class RuntimeOrchestrator:
             return
 
         if self.config.execution_mode in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK}:
+            if market_ctx.get("setup_identity"):
+                self._accepted_setup_identities.add(str(market_ctx["setup_identity"]))
             await self._emit_lifecycle_event(LifecycleState.WAITING_ENTRY_ZONE.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleState.ENTRY_TRIGGERED.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, selection.symbol, {})
@@ -1620,11 +1649,11 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
             await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
-            self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+            self._persist_burnin_decision({"signal_id": signal_id, "setup_identity": market_ctx.get("setup_identity"), "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
             self._generate_burnin_snapshot(reason="periodic")
             return
 
-        self._persist_burnin_decision({"signal_id": signal_id, "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+        self._persist_burnin_decision({"signal_id": signal_id, "setup_identity": market_ctx.get("setup_identity"), "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
         self._schedule_agent_shadow({"signal_id": signal_id, "symbol": selection.symbol,
             "mode": self.config.execution_mode.value, "decision": "ACCEPTED",
             "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"),
@@ -2046,6 +2075,49 @@ class RuntimeOrchestrator:
             return None
         return (str(symbol).upper(), str(payload.get("source_exchange") or "").lower(),
                 str(payload.get("timeframe") or "").lower())
+
+    @staticmethod
+    def _setup_opportunity_identity(symbol: str, mtf: Any) -> str | None:
+        """Identify one closed setup-timeframe opportunity independently of 1m scans."""
+        if not isinstance(mtf, Mapping):
+            return None
+        setup = mtf.get("setup")
+        if not isinstance(setup, Mapping):
+            return None
+        timeframe = str(setup.get("timeframe") or "").strip().lower()
+        close_ms = setup.get("last_closed_candle_ms")
+        if not timeframe or not isinstance(close_ms, int):
+            return None
+        return f"setup:{str(symbol).upper()}:{timeframe}:{close_ms}"
+
+    def _setup_decision_recorded(self, setup_identity: str, *, decision: str) -> bool:
+        normalized = str(decision).upper()
+        memory = (self._accepted_setup_identities if normalized == "ACCEPTED"
+                  else self._canonical_setup_reject_ids)
+        if setup_identity in memory:
+            return True
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            return False
+        observation_id = self._setup_observation_id(setup_identity, normalized)
+        try:
+            with engine.connect() as conn:
+                exists = conn.execute(text(
+                    "SELECT 1 FROM burnin_observations WHERE observation_id=:oid"
+                ), {"oid": observation_id}).first()
+        except Exception:
+            return False
+        if exists:
+            memory.add(setup_identity)
+            return True
+        return False
+
+    def _setup_decision_key(self, setup_identity: str) -> str:
+        scope = self._reject_campaign_id() or self.runtime_instance_id
+        return "setup:" + canonical_hash({"scope": scope, "setup_identity": setup_identity})[:24]
+
+    def _setup_observation_id(self, setup_identity: str, decision: str) -> str:
+        return f"obs:{self._setup_decision_key(setup_identity)}:{str(decision).upper()}"
 
     def _persist_geometry_diagnostic(self, symbol: str, payload: Mapping[str, Any], reason: str) -> None:
         """Persist one non-canonical provider diagnostic per run/market/reason."""

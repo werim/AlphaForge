@@ -1,3 +1,21 @@
+# Guided MTF setup identity diagnostic correction — 2026-09-05
+
+## Why the patch was needed and root cause
+Campaign `camp_53a9afa55070606a` produced 274 MTF contexts but 273 `NO_SETUP` phases and no guided candidates. Deduplication exposed only 20 unique closed 15m states; the setup-layer default of `0.0005` classified all 20 as neutral, while `0.0003` classified 6/20 as directional. Independently, the runtime used closed 1m execution-candle identity for scan suppression, so each new 1m candle persisted another canonical reject even when the closed 15m setup candle had not changed.
+
+## Minimal correction and exact behavior
+The setup-direction default is now `0.0003` in runtime settings, provider setup construction, registry metadata, campaign-identity fallback, and `.env.example`. Regime and execution thresholds remain `0.0005`; effective-RR, scoring, execution, and portfolio gates are unchanged. The three thresholds remain independent fields in the strategy identity hash.
+
+The runtime derives `setup:SYMBOL:timeframe:last_closed_candle_ms` after MTF construction. For terminal `NO_SETUP`, `INVALID`, and `OVEREXTENDED` states, the campaign-scoped reject and observation identities are stable, so repeated scans persist one canonical setup reject and one counter contribution. A newly closed setup candle has a new identity and can produce a new decision. Valid setups are not suppressed: later closed 1m observations continue through confirmation. Once an entry is accepted, that setup identity is consumed and cannot authorize another entry unless future rearm semantics explicitly introduce a new identity/state.
+
+## Files, persistence, lifecycle, compatibility, and migration
+Changed runtime/config files: `.env.example`, `src/alphaforge/config/__init__.py`, `src/alphaforge/config_registry.py`, `src/alphaforge/multi_timeframe.py`, `src/alphaforge/runtime.py`, and `src/alphaforge/burnin_campaign.py`. Focused regressions were added to `tests/test_multi_timeframe.py` and `tests/test_reject_calibration_canonical.py`; this report plus `VERSION.md` and `CHANGELOG.md` document the behavior.
+
+There is no database or CSV schema migration. Setup identity is carried in existing JSON payload/metrics fields. Lifecycle semantics remain fail-closed: terminal setup states reach `SIGNAL_REJECTED`; valid setups may progress through waiting/trigger/order states only after 1m confirmation. Historical campaign rows are not rewritten. The changed threshold intentionally changes campaign strategy/config identity, so a fresh campaign is required and old/new evidence must not be combined.
+
+## Tests, risks, and push recommendation
+Focused command: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -q -p no:cacheprovider tests/test_multi_timeframe.py tests/test_reject_calibration_canonical.py`. Result: 39 passed. Coverage includes the requested 0.000491 sensitivity boundary, repeated/new setup candles, restart-level reject idempotency, later 1m confirmation, single accepted entry, and canonical run-counter consistency. The subsequent runtime/config/campaign pass produced 227 passes and 9 runtime-bootstrap failures; every failure was `sqlite3.OperationalError: attempt to write a readonly database` when repository `.env` resolution selected the sandbox-read-only runtime SQLite file, rather than an assertion failure in the changed behavior. Syntax parsing and `git diff --check` pass. Remaining risk is operational rather than structural: the diagnostic threshold needs fresh PAPER evidence before any expectancy or readiness conclusion. Recommend review and focused CI in a writable runtime-DB environment, then a fresh PAPER campaign; do not infer LIVE readiness.
+
 # PAPER preflight dotenv bootstrap correction — 2026-09-05
 
 ## Why and confirmed root cause

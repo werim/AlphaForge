@@ -654,6 +654,28 @@
 
 # Changelog
 
+## Guided MTF setup identity diagnostic correction — 2026-09-05
+
+### Added
+- Stable, campaign-scoped setup-opportunity decision identity derived from symbol, setup timeframe, and setup closed-candle timestamp.
+- Focused setup sensitivity, idempotency, later-confirmation, single-entry, and canonical-counter regressions.
+
+### Changed
+- Setup-direction threshold default from `0.0005` to `0.0003`; regime and execution threshold defaults remain `0.0005`.
+- Valid 15m setups remain active across subsequent 1m execution observations until one entry is accepted.
+
+### Fixed
+- Repeated scans of unchanged `NO_SETUP`, `INVALID`, or `OVEREXTENDED` 15m states no longer inflate canonical reject and campaign/dashboard decision counters.
+
+### Removed
+- Nothing.
+
+### Breaking Changes
+- Campaign strategy/config identity changes; start a fresh PAPER campaign and do not combine it with old-threshold evidence.
+
+### Known Issues
+- Threshold effectiveness still requires fresh execution-cost-complete PAPER evidence; this diagnostic patch does not establish LIVE readiness.
+
 ## Phase 9 Binance Unicode symbol catalog validation (2026-07-25)
 
 ## Added
