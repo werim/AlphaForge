@@ -1,3 +1,23 @@
+# Post-343 reject-evidence semantic isolation — 2026-09-05
+
+### Added
+- Separate, explicitly non-attributable `legacy_shadow_geometry` diagnostics for guided-null rejects and focused persistence/qualification/calibration regressions.
+
+### Changed
+- Qualification pending, completed-forward, label-coverage, integrity, reject-quality, and execution-threshold calibration inputs now exclude legacy scanner shadow outcomes fail closed.
+
+### Fixed
+- `REGIME_GUIDED` decisions with no generated candidate can no longer expose legacy scanner RR or complete geometry as canonical guided evidence.
+
+### Removed
+- Legacy scanner side/entry/stop/target/RR/setup attribution from the canonical guided-null reject envelope; the values remain in diagnostic shadow evidence.
+
+### Breaking Changes
+- None. No schema migration; evidence semantics are stricter.
+
+### Known Issues
+- Historical affected release/campaign evidence is not rewritten and cannot support a readiness decision; a fresh release and campaign are required.
+
 ## Burn-in qualification evidence accounting correction — 2026-09-05
 
 ### Added

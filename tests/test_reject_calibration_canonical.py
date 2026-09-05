@@ -102,6 +102,20 @@ def test_pending_label_exactly_once_and_calibration_excludes_incomplete():
     c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_rid','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','TP_BEFORE_SL',1,0,0,.4,0,.4,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':False}),))
     out=execution_threshold_calibration(c,'camp'); bucket=next(x for x in out if x['bucket']=='0.0001-0.0002')
     assert bucket['count']==1 and bucket['TP_BEFORE_SL']==1 and bucket['reject_correct_pct']==0
+    shadow_kw={**kw,'reject_decision_id':'shadow','signal_id':'shadow',
+               'source_provenance':{'forward_label_subject':'LEGACY_SCANNER_SHADOW_CANDIDATE',
+                                    'mtf':{'execution':{'ma_delta_strength':.00015}}}}
+    persist_burnin_observation(c,observation_id='canonical-shadow',burnin_run_id='r',release_id='rel',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'shadow'})
+    persist_pending_reject_label(c,**shadow_kw)
+    c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_shadow','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','SL_BEFORE_TP',0,1,0,-10,10,0,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':True,'forward_label_subject':'LEGACY_SCANNER_SHADOW_CANDIDATE','reject_quality_attributable':False}),))
+    shadow_excluded=next(x for x in execution_threshold_calibration(c,'camp') if x['bucket']=='0.0001-0.0002')
+    assert shadow_excluded == bucket
+    aggregate=aggregate_campaign(c,'camp')['metrics']
+    assert aggregate['completed_rejected_forward_outcomes'] == 1
+    assert aggregate['unique_reject_labels_persisted'] == 1
+    assert aggregate['diagnostic_unique_reject_labels_persisted'] == 2
+    assert aggregate['non_attributable_reject_labels_persisted'] == 1
+    assert aggregate['reject_label_integrity_status'] == 'PASS'
     c.execute("update burnin_reject_outcomes set payload_json='{}'")
     assert sum(x['count'] for x in execution_threshold_calibration(c,'camp'))==0
 
