@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
-from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as make_config_hash, persist_burnin_run, reject_decision_id_from_outcome, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
+from alphaforge.burnin import LEGACY_REJECT_IDENTITY_MODE, BurnInRun, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as make_config_hash, persist_burnin_run, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
 from alphaforge.config import runtime_filter_config
 from alphaforge.process_liveness import process_is_alive
@@ -461,6 +461,8 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
             for reason in sorted(set(map(str,reasons))): ineligible_by_reason[reason]=ineligible_by_reason.get(reason,0)+1
     canonical_ids={json.loads(gv(r,"metrics_json") or "{}").get("reject_decision_id") for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED'}
     canonical_ids.discard(None)
+    all_observation_metrics=[gv(r,"metrics_json") for r in _exec(conn,f"SELECT metrics_json FROM burnin_observations WHERE burnin_run_id IN ({ph})",p).fetchall()]
+    identity_mode=qualification_reject_identity_mode([r.get("phase") for r in runs], all_observation_metrics)
     pending_provenance={}
     for row in _exec(conn,"SELECT reject_decision_id,source_provenance_json FROM burnin_pending_reject_labels WHERE campaign_id=:cid",{"cid":campaign_id}).fetchall():
         try: pending_provenance[gv(row,"reject_decision_id")]=json.loads(gv(row,"source_provenance_json") or "{}")
@@ -468,7 +470,7 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     def qualification_attributable(row):
         mapped=dict(row) if isinstance(row,sqlite3.Row) else dict(row._mapping)
         rid=reject_decision_id_from_outcome(mapped)
-        if canonical_ids and rid not in canonical_ids: return False
+        if identity_mode != LEGACY_REJECT_IDENTITY_MODE and rid not in canonical_ids: return False
         try: payload=json.loads(mapped.get("payload_json") or "{}")
         except (TypeError,json.JSONDecodeError): payload={}
         subject=payload.get("forward_label_subject") or pending_provenance.get(rid,{}).get("forward_label_subject")
@@ -479,15 +481,15 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     qualification_resolved=[r for r in resolved if qualification_attributable(r)]
     ineligible_ids=canonical_ids & contract_ineligible_ids
     eligible_ids=canonical_ids-ineligible_ids
-    label_eligible=len(eligible_ids) if canonical_ids else rejected_count
-    eligible_labels=len(label_ids & eligible_ids) if canonical_ids else min(unique_labels,label_eligible)
+    label_eligible=(rejected_count if identity_mode == LEGACY_REJECT_IDENTITY_MODE else len(eligible_ids))
+    eligible_labels=(min(unique_labels,label_eligible) if identity_mode == LEGACY_REJECT_IDENTITY_MODE else len(label_ids & eligible_ids))
     integrity_issues=[]
     if unique_labels > label_eligible: integrity_issues.append("UNIQUE_LABELS_EXCEED_ELIGIBLE_REJECTS")
-    orphan_labels=label_ids-canonical_ids if canonical_ids else set()
+    orphan_labels=(set() if identity_mode == LEGACY_REJECT_IDENTITY_MODE else label_ids-canonical_ids)
     if orphan_labels: integrity_issues.append("LABELS_WITHOUT_CANONICAL_REJECT")
     if label_ids & ineligible_ids: integrity_issues.append("LABELS_FOR_INELIGIBLE_REJECTS")
     coverage=(eligible_labels/label_eligible if label_eligible else (1.0 if not eligible_labels else 0.0))
-    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(qualification_resolved),"diagnostic_completed_rejected_forward_outcomes":len(resolved),"non_attributable_or_orphan_rejected_forward_outcomes":len(resolved)-len(qualification_resolved),"qualification_reject_identity_unit":"CANONICAL_DECISION","qualification_reject_identity_mode":"CANONICAL_LINK_REQUIRED" if canonical_ids else "LEGACY_NO_IDENTITY_FALLBACK","ambiguous_rejected_forward_outcomes":sum(1 for r in qualification_resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
+    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(qualification_resolved),"diagnostic_completed_rejected_forward_outcomes":len(resolved),"non_attributable_or_orphan_rejected_forward_outcomes":len(resolved)-len(qualification_resolved),"qualification_reject_identity_unit":"CANONICAL_DECISION","qualification_reject_identity_mode":identity_mode,"ambiguous_rejected_forward_outcomes":sum(1 for r in qualification_resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"diagnostic_ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
     qualification_hash_payload={key:metrics[key] for key in ("sample_count","accepted_count","rejected_count","closed_trade_count","completed_rejected_forward_outcomes","ambiguous_rejected_forward_outcomes","observed_duration_seconds","source_run_ids","qualification_reject_identity_unit","qualification_reject_identity_mode")}
     qualification_hash_payload["reject_outcomes"] = sorted(({
         "reject_decision_id": reject_decision_id_from_outcome(dict(r) if isinstance(r,sqlite3.Row) else dict(r._mapping)),
@@ -511,12 +513,17 @@ def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[st
         WHERE cr.campaign_id=:cid AND UPPER(COALESCE(o.decision,''))='REJECTED'
         AND {canonical_decision_sql('o')}""",{"cid":campaign_id}).fetchall()
     canonical_ids={str(row[0]) for row in canonical_rows if row[0]}
+    phase_rows=_exec(conn,"""SELECT r.phase FROM burnin_runs r JOIN burnin_campaign_runs cr
+        ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:cid""",{"cid":campaign_id}).fetchall()
+    observation_rows=_exec(conn,"""SELECT o.metrics_json FROM burnin_observations o
+        JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid""",{"cid":campaign_id}).fetchall()
+    identity_mode=qualification_reject_identity_mode([row[0] for row in phase_rows], [row[0] for row in observation_rows])
     for raw in rows:
         r=_row_dict(raw)
         try:
             payload=json.loads(r.get("payload_json") or "{}")
             provenance=json.loads(r.get("source_provenance_json") or "{}")
-            if canonical_ids and reject_decision_id_from_outcome(r) not in canonical_ids: continue
+            if identity_mode != LEGACY_REJECT_IDENTITY_MODE and reject_decision_id_from_outcome(r) not in canonical_ids: continue
             if payload.get("reject_quality_attributable") is False: continue
             if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE" or provenance.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE": continue
             strength=float((((provenance.get("mtf") or {}).get("execution") or {}).get("ma_delta_strength")))

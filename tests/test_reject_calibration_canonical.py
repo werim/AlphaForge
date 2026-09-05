@@ -92,8 +92,10 @@ def test_guided_generation_mode_is_campaign_identity_sensitive():
 
 def test_pending_label_exactly_once_and_calibration_excludes_incomplete():
     c=sqlite3.connect(':memory:'); c.row_factory=sqlite3.Row; bootstrap_campaign_schema(c)
-    persist_burnin_run(c,BurnInRun('r','rel',git_commit='g',config_hash='c',strategy_config_hash='s',universe_hash='u',source_provenance={'provider':'PAPER'}))
+    persist_burnin_run(c,BurnInRun('r','rel',phase='PHASE8',git_commit='g',config_hash='c',strategy_config_hash='s',universe_hash='u',source_provenance={'provider':'PAPER'}))
     c.execute("insert into burnin_campaigns(campaign_id,release_id,campaign_status,created_at,config_hash,strategy_config_hash,universe_hash,git_commit,source_provenance_json,symbols_json,intervals_json,schema_version) values('camp','rel','RUNNING','x','c','s','u','g','{}','[]','[]','v')")
+    c.execute("insert into burnin_campaign_runs(campaign_id,burnin_run_id,continuation_sequence,status,started_at,created_at,schema_version) values('camp','r',0,'RUNNING','x','x','v')")
+    persist_burnin_observation(c,observation_id='canonical-rid',burnin_run_id='r',release_id='rel',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'rid'})
     kw=dict(campaign_id='camp',burnin_run_id='r',reject_decision_id='rid',signal_id='s',symbol='BTC',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=60,execution_cost_assumptions={},regime='TRENDING',reject_reason='MTF_EXECUTION_NOT_CONFIRMED',source_provenance={'mtf':{'execution':{'ma_delta_strength':.00015}}})
     assert persist_pending_reject_label(c,**kw)==persist_pending_reject_label(c,**kw)
     assert c.execute('select count(*) from burnin_pending_reject_labels').fetchone()[0]==1
@@ -106,8 +108,10 @@ def test_pending_label_exactly_once_and_calibration_excludes_incomplete():
 
 def test_calibration_keeps_strength_at_or_above_highest_edge():
     c=sqlite3.connect(':memory:'); c.row_factory=sqlite3.Row; bootstrap_campaign_schema(c)
-    persist_burnin_run(c,BurnInRun('r','rel',git_commit='g',config_hash='c',strategy_config_hash='s',universe_hash='u',source_provenance={'provider':'PAPER'}))
+    persist_burnin_run(c,BurnInRun('r','rel',phase='PHASE8',git_commit='g',config_hash='c',strategy_config_hash='s',universe_hash='u',source_provenance={'provider':'PAPER'}))
     c.execute("insert into burnin_campaigns(campaign_id,release_id,campaign_status,created_at,config_hash,strategy_config_hash,universe_hash,git_commit,source_provenance_json,symbols_json,intervals_json,schema_version) values('camp','rel','RUNNING','x','c','s','u','g','{}','[]','[]','v')")
+    c.execute("insert into burnin_campaign_runs(campaign_id,burnin_run_id,continuation_sequence,status,started_at,created_at,schema_version) values('camp','r',0,'RUNNING','x','x','v')")
+    persist_burnin_observation(c,observation_id='canonical-overflow',burnin_run_id='r',release_id='rel',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'overflow'})
     kw=dict(campaign_id='camp',burnin_run_id='r',reject_decision_id='overflow',signal_id='s',symbol='BTC',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=60,execution_cost_assumptions={},regime='TRENDING',reject_reason='MTF_EXECUTION_NOT_CONFIRMED',source_provenance={'mtf':{'execution':{'ma_delta_strength':.0007}}})
     persist_pending_reject_label(c,**kw)
     c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_overflow','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','SL_BEFORE_TP',0,1,0,-1,1,0,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':True}),))

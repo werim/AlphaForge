@@ -41,6 +41,14 @@ def _canonical_reject(conn, run_id, reject_id, setup_identity):
     )
 
 
+def _canonical_accept(conn, run_id, signal_id):
+    persist_burnin_observation(
+        conn, observation_id=f"obs-{signal_id}", burnin_run_id=run_id,
+        release_id="rel", execution_mode="PAPER", decision="ACCEPTED",
+        metrics={"signal_id": signal_id, "setup_identity": f"setup:{signal_id}"},
+    )
+
+
 def _outcome(conn, run_id, reject_id, *, net=-1.0, subject="GUIDED_CANDIDATE"):
     persist_burnin_reject_outcome(
         conn, reject_outcome_id=f"rout_{reject_id}", burnin_run_id=run_id,
@@ -51,6 +59,64 @@ def _outcome(conn, run_id, reject_id, *, net=-1.0, subject="GUIDED_CANDIDATE"):
         payload={"reject_decision_id": reject_id, "forward_label_subject": subject,
                  "reject_quality_attributable": subject == "GUIDED_CANDIDATE"},
     )
+
+
+def test_identity_aware_zero_rejects_fail_closed_for_orphan_outcomes(tmp_path):
+    db, conn, campaign_id, run_id = _campaign(tmp_path)
+    _canonical_accept(conn, run_id, "accepted-1")
+    baseline = aggregate_campaign(conn, campaign_id)
+    _outcome(conn, run_id, "orphan-guided-1")
+    _outcome(conn, run_id, "orphan-guided-2", net=2)
+    after_orphans = aggregate_campaign(conn, campaign_id)
+    conn.commit(); conn.close()
+
+    engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
+    thresholds = BurnInThresholds(
+        minimum_duration_seconds=0, minimum_total_decisions=0,
+        minimum_accepted_trades=0, minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=1, minimum_regime_coverage=0,
+        minimum_calibration_sample=0, require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )
+    snapshot = BurnInQualificationEngine(engine, thresholds).evaluate(run_id)
+    engine.dispose()
+
+    assert snapshot.metrics["qualification_reject_identity_mode"] == "CANONICAL_LINK_REQUIRED"
+    assert snapshot.metrics["diagnostic_completed_rejected_forward_outcomes"] == 2
+    assert snapshot.metrics["completed_rejected_forward_outcomes"] == 0
+    assert snapshot.metrics["orphan_rejected_forward_outcomes"] == 2
+    assert any(b.startswith("MINIMUM_REJECTED_FORWARD_OUTCOMES:") for b in snapshot.blockers)
+    assert after_orphans["metrics"]["completed_rejected_forward_outcomes"] == 0
+    assert after_orphans["evidence_hash"] == baseline["evidence_hash"]
+
+
+def test_canonical_pending_and_ambiguous_counts_ignore_orphan_outcomes(tmp_path):
+    db, conn, _campaign_id, run_id = _campaign(tmp_path)
+    for index in range(13):
+        reject_id = f"canonical-{index}"
+        _canonical_reject(conn, run_id, reject_id, f"setup:BTCUSDT:15m:{index}")
+        if index < 5:
+            _outcome(conn, run_id, reject_id)
+    for index in range(20):
+        _outcome(conn, run_id, f"orphan-{index}")
+    conn.execute("UPDATE burnin_reject_outcomes SET forward_label='AMBIGUOUS', ambiguous=1 WHERE reject_outcome_id IN ('rout_canonical-0','rout_orphan-0')")
+    conn.commit(); conn.close()
+
+    engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
+    snapshot = BurnInQualificationEngine(engine, BurnInThresholds(
+        minimum_duration_seconds=0, minimum_total_decisions=0,
+        minimum_accepted_trades=0, minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0, minimum_regime_coverage=0,
+        minimum_calibration_sample=0, require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate(run_id)
+    engine.dispose()
+
+    assert snapshot.metrics["diagnostic_completed_rejected_forward_outcomes"] == 25
+    assert snapshot.metrics["identity_linked_rejected_forward_outcomes"] == 5
+    assert snapshot.metrics["pending_rejected_forward_outcomes"] == 8
+    assert snapshot.metrics["ambiguous_rejected_forward_outcomes"] == 1
+    assert snapshot.metrics["diagnostic_ambiguous_rejected_forward_outcomes"] == 2
 
 
 def test_phase7_counts_only_canonical_guided_reject_identity(tmp_path):
