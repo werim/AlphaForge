@@ -148,7 +148,10 @@ def test_non_attributable_shadow_and_infrastructure_outcomes_are_diagnostic_only
     assert snap.metrics["diagnostic_completed_rejected_forward_outcomes"] == 3
     assert snap.metrics["attributable_rejected_forward_outcomes"] == 1
     assert snap.metrics["non_attributable_rejected_forward_outcomes"] == 2
+    assert snap.metrics["pending_rejected_forward_outcomes"] == 5
     assert snap.metrics["reject_precision"] == 1.0
     assert snap.metrics["false_reject_rate"] == 0.0
     assert snap.metrics["net_reject_value"] == 1.0
     assert snap.metrics["reject_value_by_reason"] == {"LOW_EFFECTIVE_RR": 1.0}
+    assert snap.reject_quality_status == "PASS"
+    assert "REJECT_QUALITY_INSUFFICIENT" not in snap.blockers

@@ -1895,9 +1895,31 @@ class RuntimeOrchestrator:
         guided_generation = generation.get("mode") == "REGIME_GUIDED"
         guided_candidate = (guided_generation and generation.get("evidence_status") == "COMPLETE"
                             and isinstance(generation.get("candidate"), Mapping))
+        guided_without_candidate = guided_generation and not isinstance(generation.get("candidate"), Mapping)
         forward_label_subject = ("GUIDED_CANDIDATE" if guided_candidate else
                                  "LEGACY_SCANNER_SHADOW_CANDIDATE" if guided_generation else
                                  "LEGACY_CANDIDATE")
+        if guided_without_candidate:
+            shadow_geometry = {key: result.get(key) for key in (
+                "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
+                "take_profit", "rr", "raw_rr", "risk_reward", "effective_rr", "setup_type",
+                "setup_reason", "geometry_status", "geometry_reason", "geometry_source",
+            )}
+            result["legacy_shadow_geometry"] = {
+                **shadow_geometry,
+                "attributable": False,
+                "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
+            }
+            for key in (
+                "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
+                "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
+                "risk_reward", "effective_rr", "setup_type", "setup_reason", "geometry_source",
+            ):
+                result[key] = None
+            result["geometry_status"] = "UNAVAILABLE"
+            result["geometry_reason"] = "GUIDED_CANDIDATE_UNAVAILABLE"
+            result["reject_quality_attributable"] = False
+            result["non_attributable_reason"] = "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
         campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         result.update({
@@ -1912,7 +1934,8 @@ class RuntimeOrchestrator:
             "volatility_regime":result.get("volatility_regime",execution.get("volatility_regime")),
             "campaign_id": result.get("campaign_id") or campaign_id,
             "runtime_identity": result.get("runtime_identity") or runtime_identity,
-            "forward_label_subject": result.get("forward_label_subject") or forward_label_subject,
+            "forward_label_subject": (forward_label_subject if guided_generation
+                                      else result.get("forward_label_subject") or forward_label_subject),
         })
         return result
 
@@ -1931,20 +1954,28 @@ class RuntimeOrchestrator:
         execution_ctx = dict(payload.get("execution_ctx") or {})
         costs = self._phase7_costs_from_execution_ctx(execution_ctx)
         signal_id = str(payload.get("signal_id") or "")
+        shadow_geometry = (payload.get("legacy_shadow_geometry")
+                           if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                           and isinstance(payload.get("legacy_shadow_geometry"), Mapping) else {})
+        label_geometry = shadow_geometry or payload
         try:
             def persist(target: Any) -> str | None:
                 return persist_pending_reject_label(
                     target, campaign_id=campaign_id, burnin_run_id=self._burnin_run_id,
                     reject_decision_id=str(payload.get("reject_decision_id") or f"reject:{signal_id}"), signal_id=signal_id or None,
-                    symbol=payload.get("symbol"), side=payload.get("side"),
+                    symbol=payload.get("symbol"), side=label_geometry.get("side"),
                     decision_timestamp=payload.get("decision_timestamp") or canonical_utc_timestamp(), timeframe=payload.get("timeframe"),
-                    entry=payload.get("entry"), stop=payload.get("sl"), target=payload.get("tp"),
+                    entry=label_geometry.get("entry", label_geometry.get("entry_price")),
+                    stop=label_geometry.get("sl", label_geometry.get("stop_loss", label_geometry.get("stop"))),
+                    target=label_geometry.get("tp", label_geometry.get("take_profit", label_geometry.get("target"))),
                     horizon_bars=self.config.reject_forward_horizon_bars,
                     execution_cost_assumptions=costs, regime=payload.get("regime") or payload.get("volatility_regime"),
                     reject_reason=payload.get("reason") or payload.get("reject_reason"),
                     source_provenance={"provider": self.scanner_source or "UNKNOWN", "timeframe": payload.get("timeframe"),
                                        "forward_label_subject": payload.get("forward_label_subject"),
-                                       "forward_label_side": payload.get("side"),
+                                       "forward_label_side": label_geometry.get("side"),
+                                       "reject_quality_attributable": payload.get("reject_quality_attributable"),
+                                       "non_attributable_reason": payload.get("non_attributable_reason"),
                                        "campaign_intervals": list(self._campaign_intervals),
                                        "regime_timeframe": self.config.regime_timeframe,
                                        "setup_timeframe": self.config.setup_timeframe,

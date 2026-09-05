@@ -1,3 +1,23 @@
+# Post-343 reject-evidence semantic isolation — 2026-09-05
+
+## Why the patch was needed and exact root cause
+For `REGIME_GUIDED` rejects with `generation.candidate = null`, runtime attribution correctly selected `LEGACY_SCANNER_SHADOW_CANDIDATE`, but `_canonical_reject_payload()` retained the legacy scanner's top-level side, entry, stop, target, RR, and `geometry_status=COMPLETE`. `_persist_reject()` then wrote those values into the canonical rejected review and burn-in observation, while `_persist_pending_reject()` reused the same fields for diagnostic forward resolution. The subject label was non-attributable, but the canonical geometry envelope still described the shadow as though it belonged to the guided decision. In addition, run qualification's pending count subtracted all identity-linked outcomes, and campaign label coverage/integrity counted non-attributable shadow labels.
+
+## Files and functions changed
+`src/alphaforge/runtime.py` changes `RuntimeOrchestrator._canonical_reject_payload()` and `_persist_pending_reject()`. Guided-null canonical fields now fail closed (`side`, entry/stop/target aliases, raw/effective RR, and legacy setup attribution are null; geometry is `UNAVAILABLE/GUIDED_CANDIDATE_UNAVAILABLE`). The original scanner geometry is retained under `legacy_shadow_geometry` with explicit non-attribution and is used only to enqueue the diagnostic shadow label. Guided provenance is derived authoritatively from generation state and cannot be overridden by a conflicting caller field.
+
+`src/alphaforge/burnin_qualification.py` changes `BurnInQualificationEngine.evaluate()` so non-attributable shadow outcomes do not reduce qualification-pending rejects. `src/alphaforge/burnin_campaign.py` changes `aggregate_campaign()` so shadow pending labels and outcomes remain diagnostic but do not enter qualification label counts, coverage, integrity failures, completed forward-outcome counts, or evidence hashes. Existing resolver and execution-threshold calibration attribution guards remain in force.
+
+Targeted regressions are in `tests/test_runtime.py`, `tests/test_phase7_qualification.py`, and `tests/test_reject_calibration_canonical.py`; existing resolver coverage in `tests/test_phase8_reject_resolver.py` was rerun.
+
+## Before/after semantics and compatibility
+Before: a guided-null reject could persist canonical `rr≈1.20` and `geometry_status=COMPLETE` from a legacy scanner candidate, and a resolved shadow could reduce pending qualification counts or perturb campaign label accounting. After: canonical attributable RR/effective RR and guided trade geometry are absent; the diagnostic shadow geometry and forward outcome remain persisted with `reject_quality_attributable=false`; only real complete guided candidates retain attributable geometry. Reject reasons, MTF thresholds, strategy decisions, lifecycle order, execution behavior, and trade frequency are unchanged.
+
+No schema or CSV shape changed and no migration is required. Historical rows are not rewritten. Evidence produced by the affected release/campaign is semantically invalid for canonical guided-geometry claims; prior qualification/calibration snapshots derived before fail-closed exclusion cannot be rehabilitated by recomputation alone. Use a fresh release ID and fresh campaign ID for readiness evidence. LIVE remains NOT READY.
+
+## Tests and remaining risk
+Targeted persistence, resolver, qualification, campaign aggregation, and calibration tests cover guided-null canonical nullability, separately persisted shadow geometry, explicit non-attribution, unchanged guided-candidate attribution, shadow exclusion from minimum/count/quality metrics, and calibration exclusion. Remaining risk is historical data ambiguity: untagged legacy rows cannot be proven attributable retroactively and must not be mixed into new readiness evidence.
+
 # Burn-in qualification evidence accounting correction — 2026-09-05
 
 ## Why the patch was needed and root cause

@@ -111,7 +111,7 @@ class BurnInQualificationEngine:
             identity_linked_rejects=[r for r in completed_rejects if identity_mode == LEGACY_REJECT_IDENTITY_MODE or reject_decision_id_from_outcome(r) in canonical_reject_ids]
             attributable_rejects=[r for r in identity_linked_rejects if self._reject_quality_attributable(r)]
             qualification_ambiguous_rejects=[r for r in attributable_rejects if str(r.get("forward_label") or "").upper()=="AMBIGUOUS"]
-            resolved_identity_count=(len(identity_linked_rejects) if identity_mode == LEGACY_REJECT_IDENTITY_MODE else len({reject_decision_id_from_outcome(r) for r in identity_linked_rejects}))
+            resolved_identity_count=(len(attributable_rejects) if identity_mode == LEGACY_REJECT_IDENTITY_MODE else len({reject_decision_id_from_outcome(r) for r in attributable_rejects}))
             pending_rejects=max(0, rejected_count-resolved_identity_count)
             rejected_fwd=len(attributable_rejects)
             persisted_mismatch = any(int(run.get(k) or 0) != int(v or 0) for k,v in {"sample_count":samples,"accepted_count":accepted,"rejected_count":rejected_count,"closed_trade_count":closed}.items())

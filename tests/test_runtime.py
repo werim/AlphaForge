@@ -390,6 +390,74 @@ def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path)
         assert provenance["runtime_identity"] == "standalone:paper-restart-safe-run"
 
 
+def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'guided-shadow.db'}")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, reject_forward_horizon_bars=1),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    orchestrator._burnin_run_id = "guided-shadow-run"
+    source = {
+        "signal_id": "guided-null", "symbol": "BTCUSDT", "side": "LONG", "timeframe": "1m",
+        "entry": 100.0, "sl": 90.0, "tp": 112.0, "rr": 1.2, "effective_rr": 1.1,
+        "setup_type": "LEGACY_BREAKOUT", "geometry_status": "COMPLETE",
+        "geometry_source": "BINANCE_1M_KLINES", "reason": "MTF_EXECUTION_COUNTER_REGIME",
+        "decision_timestamp": "2026-01-01T00:00:00Z",
+        "execution_ctx": {"spread_pct": .001, "expected_slippage_pct": .001, "fee_pct": .001,
+                          "funding_rate_pct": 0.0, "latency_ms": 10},
+        "mtf": {"generation": {"mode": "REGIME_GUIDED", "candidate": None,
+                                "evidence_status": "INCOMPLETE"},
+                "setup": {"candidate_ready": False, "trade_side": None,
+                          "structural_stop": None, "structural_target": None}},
+    }
+
+    canonical = orchestrator._canonical_reject_payload(source)
+    assert canonical["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
+    assert canonical["reject_quality_attributable"] is False
+    assert canonical["rr"] is None and canonical["effective_rr"] is None
+    assert canonical["side"] is None and canonical["entry"] is None
+    assert canonical["sl"] is None and canonical["tp"] is None
+    assert canonical["geometry_status"] == "UNAVAILABLE"
+    assert canonical["legacy_shadow_geometry"]["rr"] == pytest.approx(1.2)
+    assert canonical["legacy_shadow_geometry"]["geometry_status"] == "COMPLETE"
+    assert canonical["legacy_shadow_geometry"]["attributable"] is False
+    assert canonical["reason"] == "MTF_EXECUTION_COUNTER_REGIME"
+
+    asyncio.run(orchestrator._persist_reject(source))
+    with engine.connect() as conn:
+        review = conn.execute(text("SELECT side,raw_rr,effective_rr,payload_json FROM rejected_signal_reviews WHERE reject_decision_id='reject:guided-null'")).one()
+        pending = conn.execute(text("SELECT side,entry,stop,target,source_provenance_json FROM burnin_pending_reject_labels WHERE reject_decision_id='reject:guided-null'")).one()
+    review_payload = json.loads(review.payload_json)
+    provenance = json.loads(pending.source_provenance_json)
+    assert review.side is None and review.raw_rr is None and review.effective_rr is None
+    assert review_payload["geometry_status"] == "UNAVAILABLE"
+    assert tuple(pending[:4]) == ("LONG", 100.0, 90.0, 112.0)
+    assert provenance["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
+    assert provenance["reject_quality_attributable"] is False
+
+
+def test_real_guided_rejected_candidate_remains_attributable() -> None:
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None,
+    )
+    payload = orchestrator._canonical_reject_payload({
+        "signal_id": "guided-real", "symbol": "BTCUSDT", "side": "SHORT",
+        "entry": 100.0, "sl": 105.0, "tp": 90.0, "rr": 2.0,
+        "effective_rr": 1.8, "geometry_status": "COMPLETE", "reason": "LOW_EFFECTIVE_RR",
+        "mtf": {"generation": {"mode": "REGIME_GUIDED", "evidence_status": "COMPLETE",
+                                "candidate": {"side": "SHORT", "entry": 100.0,
+                                              "sl": 105.0, "tp": 90.0, "rr": 2.0}}},
+    })
+
+    assert payload["forward_label_subject"] == "GUIDED_CANDIDATE"
+    assert payload["rr"] == pytest.approx(2.0)
+    assert payload["effective_rr"] == pytest.approx(1.8)
+    assert payload["geometry_status"] == "COMPLETE"
+    assert payload["reason"] == "LOW_EFFECTIVE_RR"
+    assert "legacy_shadow_geometry" not in payload
+
+
 def test_standalone_resolver_fetches_each_pending_timeframe(tmp_path: Path) -> None:
     engine=init_db(f"sqlite+pysqlite:///{tmp_path/'intervals.db'}"); seen=[]
     def provider(symbol,start,end,timeframe):

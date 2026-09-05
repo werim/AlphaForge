@@ -552,3 +552,13 @@
 - Lifecycle/execution realism: unchanged; reconciliation and LIVE safety remain fail closed.
 - Known critical risks: migration execution requires the declared Alembic dependency; custom DB ownership remains operator-managed.
 - Last audit date: 2026-08-30. Live readiness verdict: NOT LIVE READY.
+## Post-343 reject-evidence semantic isolation (2026-09-05)
+
+- **Current version/phase:** dev post-343 evidence correction; no schema migration.
+- **Runtime maturity:** PAPER guided-null rejects fail closed for canonical geometry while legacy scanner geometry remains diagnostic-only.
+- **BACKTEST/PAPER/LIVE alignment:** strategy and thresholds unchanged; attribution correction applies at shared reject persistence/qualification boundaries.
+- **Lifecycle coverage:** unchanged; canonical reject reason and lifecycle chain are preserved.
+- **Execution realism:** real complete guided candidates remain attributable; absent guided candidates never inherit scanner RR/geometry.
+- **Known critical risks:** affected historical/current campaign evidence is invalid for guided reject attribution and old snapshots are not rewritten.
+- **Last audit:** 2026-09-05.
+- **Live readiness:** **NOT READY** — a fresh release ID and campaign ID with new PAPER evidence are required.
