@@ -660,6 +660,7 @@ def test_audit_detects_pre_decision_candle_hash_mismatch_and_dashboard_mismatch(
     camp, run = _campaign(conn)
     persist_burnin_reject_outcome(conn, reject_outcome_id="rout", burnin_run_id=run, release_id="rel", reject_reason="LOW", symbol="BTCUSDT", decision_time="2026-01-01T01:00:00Z", forward_label="TP_BEFORE_SL", hypothetical_net_r_after_costs=1.0, payload={"candle_timestamps": ["2026-01-01T00:00:00Z"]})
     conn.execute("INSERT INTO burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,generated_at,status,sample_status,expectancy_status,execution_status,regime_status,reject_quality_status,calibration_status,drawdown_status,concentration_status,reconciliation_status,evidence_completeness_status,blockers_json,warnings_json,thresholds_json,metrics_json,evidence_hash,schema_version,campaign_id,source_run_ids_json,aggregate_evidence_hash) VALUES ('q_bad',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run, "rel", utc_now(), "CANARY_QUALIFIED", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "[]", "[]", "{}", "{}", "hash", "sv", camp.campaign_id, json.dumps([run]), "wrong"))
+    conn.execute("UPDATE burnin_campaigns SET latest_qualification_id='q_bad' WHERE campaign_id=?", (camp.campaign_id,))
     conn.commit()
     monkeypatch.setattr(ops, "_dashboard_campaign_snapshot", lambda db, cid: {"decisions": 999, "accepted": 999, "rejected": 999})
     audit = audit_payload(conn, camp.campaign_id)
@@ -793,9 +794,9 @@ def test_null_and_mismatched_aggregate_hash_fail_audit(monkeypatch, tmp_path):
     camp, run = _campaign(conn)
     conn.execute("INSERT INTO burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,generated_at,status,sample_status,expectancy_status,execution_status,regime_status,reject_quality_status,calibration_status,drawdown_status,concentration_status,reconciliation_status,evidence_completeness_status,blockers_json,warnings_json,thresholds_json,metrics_json,evidence_hash,schema_version,campaign_id,source_run_ids_json,aggregate_evidence_hash) VALUES ('q_null',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run, "rel", utc_now(), "CANARY_QUALIFIED", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "[]", "[]", "{}", "{}", "hash", "sv", camp.campaign_id, json.dumps([run]), None))
     conn.execute("INSERT INTO burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,generated_at,status,sample_status,expectancy_status,execution_status,regime_status,reject_quality_status,calibration_status,drawdown_status,concentration_status,reconciliation_status,evidence_completeness_status,blockers_json,warnings_json,thresholds_json,metrics_json,evidence_hash,schema_version,campaign_id,source_run_ids_json,aggregate_evidence_hash) VALUES ('q_bad_hash',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run, "rel", utc_now(), "CANARY_QUALIFIED", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "PASS", "[]", "[]", "{}", "{}", "hash", "sv", camp.campaign_id, json.dumps([run]), "wrong"))
+    conn.execute("UPDATE burnin_campaigns SET latest_qualification_id='q_bad_hash' WHERE campaign_id=?", (camp.campaign_id,))
     conn.commit()
     audit = audit_payload(conn, camp.campaign_id)
-    assert "AGGREGATE_EVIDENCE_HASH_MISSING" in audit["violations"]
     assert "AGGREGATE_EVIDENCE_HASH_MISMATCH" in audit["violations"]
 
 

@@ -1,3 +1,20 @@
+# Burn-in qualification evidence accounting correction — 2026-09-05
+
+## Why the patch was needed and root cause
+Campaign `camp_8c102b8eb4ba13a1` demonstrated two incompatible units: canonical decisions were deduplicated by stable setup observation identity, while forward reject labels were created per 1m scan. Phase7 read every resolved reject outcome, so orphan scan labels could become independent reject-quality samples. Aggregate hashes also included diagnostic label counts, dashboard queries counted physical observations, and integrity compared every historical qualification snapshot with the latest aggregate. A low-volume event gate allowed displayed qualification blockers to remain stale.
+
+## Files and exact behavior changed
+`src/alphaforge/burnin.py` adds backward-compatible reject-decision identity recovery. `src/alphaforge/burnin_resolver.py` records that identity in new outcome payloads. `src/alphaforge/burnin_qualification.py` requires canonical linkage when identity-aware observations exist and applies provenance attribution afterward. `src/alphaforge/burnin_campaign.py` separates diagnostic outcome counts from canonical qualification counts, hashes only the canonical qualification universe, filters execution-strength calibration identically, and refreshes changed evidence on a bounded cadence. `src/alphaforge/dashboard/queries.py` uses canonical decision SQL. `src/alphaforge/burnin_ops.py` exposes snapshot age/freshness, hides stale blockers from the current-blocker field, checks the current snapshot link, and refreshes stale qualification before final audit. Focused regressions are in `tests/test_burnin_qualification_evidence_integrity.py`, with expectation updates in the existing Phase7/Phase9 suites.
+
+## Runtime, lifecycle, persistence, export, and schema impact
+No MTF threshold, execution confirmation, TP/SL/RR, horizon, strategy, resolver, lifecycle, or exchange safety behavior changed. Scan-level rows remain in existing tables and exports. Qualification uses canonical decision identity; `GUIDED_CANDIDATE` outcomes qualify only when canonically linked and otherwise valid. Legacy shadow and infrastructure outcomes remain diagnostic and non-attributable. No columns or tables were added, so no migration is required. Existing outcome IDs remain readable through the `rout_<reject_decision_id>` compatibility path.
+
+## Hash/finalization and freshness semantics
+The aggregate hash covers canonical decision/trade counts, canonical attributable reject outcome identities and economics, duration, and source-run lineage. Diagnostic label volume and orphan scan outcomes do not perturb it. Integrity validates the campaign's current qualification snapshot against current canonical evidence; historical snapshots are evidence-at-time and are not expected to match later evidence. Health reports generated time, age, hash freshness, snapshot blockers, current blockers, and stale blockers separately. Qualification remains bounded rather than per scan, but changed canonical evidence is no longer indefinitely blocked by the 25-observation gate. Finalization creates a fresh qualification snapshot when the current link is absent or stale before running integrity checks.
+
+## Tests, risks, migration, and recommendation
+Focused identity/hash/freshness/finalization tests pass, including deterministic hash recomputation, diagnostic hash stability, new-setup sample growth, dashboard/SQL unit parity, legacy-shadow exclusion, guided attribution, and hand-computable R-cost arithmetic. Broader MTF, burn-in, resolver, qualification, runtime, and finalization suites are bounded to related files. No production campaign was started, modified, deleted, or re-finalized. Existing campaign data is preserved; previously pseudo-replicated rows become diagnostic-only on recomputation. A new clean burn-in is required before any readiness conclusion. Commit on the current branch after the bounded suite passes; do not merge or claim LIVE readiness.
+
 # Guided MTF setup identity diagnostic correction — 2026-09-05
 
 ## Why the patch was needed and root cause

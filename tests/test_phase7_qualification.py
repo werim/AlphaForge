@@ -144,7 +144,8 @@ def test_non_attributable_shadow_and_infrastructure_outcomes_are_diagnostic_only
     th=BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=0,minimum_closed_trades=0,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=0,minimum_calibration_sample=0,require_operator_ack=False,require_phase1_6_gates=False)
     snap=BurnInQualificationEngine(e, th).evaluate("r")
 
-    assert snap.metrics["completed_rejected_forward_outcomes"] == 3
+    assert snap.metrics["completed_rejected_forward_outcomes"] == 1
+    assert snap.metrics["diagnostic_completed_rejected_forward_outcomes"] == 3
     assert snap.metrics["attributable_rejected_forward_outcomes"] == 1
     assert snap.metrics["non_attributable_rejected_forward_outcomes"] == 2
     assert snap.metrics["reject_precision"] == 1.0

@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 
-from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as make_config_hash, persist_burnin_run, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
+from alphaforge.burnin import BurnInRun, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as make_config_hash, persist_burnin_run, reject_decision_id_from_outcome, utc_now, universe_hash as make_universe_hash, update_burnin_run_counters
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
 from alphaforge.config import runtime_filter_config
 from alphaforge.process_liveness import process_is_alive
@@ -461,6 +461,22 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
             for reason in sorted(set(map(str,reasons))): ineligible_by_reason[reason]=ineligible_by_reason.get(reason,0)+1
     canonical_ids={json.loads(gv(r,"metrics_json") or "{}").get("reject_decision_id") for r in obs if str(gv(r,"decision") or '').upper()=='REJECTED'}
     canonical_ids.discard(None)
+    pending_provenance={}
+    for row in _exec(conn,"SELECT reject_decision_id,source_provenance_json FROM burnin_pending_reject_labels WHERE campaign_id=:cid",{"cid":campaign_id}).fetchall():
+        try: pending_provenance[gv(row,"reject_decision_id")]=json.loads(gv(row,"source_provenance_json") or "{}")
+        except (TypeError,json.JSONDecodeError): pending_provenance[gv(row,"reject_decision_id")]={}
+    def qualification_attributable(row):
+        mapped=dict(row) if isinstance(row,sqlite3.Row) else dict(row._mapping)
+        rid=reject_decision_id_from_outcome(mapped)
+        if canonical_ids and rid not in canonical_ids: return False
+        try: payload=json.loads(mapped.get("payload_json") or "{}")
+        except (TypeError,json.JSONDecodeError): payload={}
+        subject=payload.get("forward_label_subject") or pending_provenance.get(rid,{}).get("forward_label_subject")
+        return (payload.get("reject_quality_attributable") is not False
+                and subject != "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                and str(mapped.get("reject_reason") or "").upper() not in {
+                    "EXCHANGE_STATE_UNKNOWN","EXCHANGE_RECONCILIATION_UNAVAILABLE","RUNTIME_RECOVERY_REQUIRED"})
+    qualification_resolved=[r for r in resolved if qualification_attributable(r)]
     ineligible_ids=canonical_ids & contract_ineligible_ids
     eligible_ids=canonical_ids-ineligible_ids
     label_eligible=len(eligible_ids) if canonical_ids else rejected_count
@@ -471,8 +487,14 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     if orphan_labels: integrity_issues.append("LABELS_WITHOUT_CANONICAL_REJECT")
     if label_ids & ineligible_ids: integrity_issues.append("LABELS_FOR_INELIGIBLE_REJECTS")
     coverage=(eligible_labels/label_eligible if label_eligible else (1.0 if not eligible_labels else 0.0))
-    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(resolved),"ambiguous_rejected_forward_outcomes":sum(1 for r in rejects if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
-    metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"metrics":metrics})
+    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(qualification_resolved),"diagnostic_completed_rejected_forward_outcomes":len(resolved),"non_attributable_or_orphan_rejected_forward_outcomes":len(resolved)-len(qualification_resolved),"qualification_reject_identity_unit":"CANONICAL_DECISION","qualification_reject_identity_mode":"CANONICAL_LINK_REQUIRED" if canonical_ids else "LEGACY_NO_IDENTITY_FALLBACK","ambiguous_rejected_forward_outcomes":sum(1 for r in qualification_resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
+    qualification_hash_payload={key:metrics[key] for key in ("sample_count","accepted_count","rejected_count","closed_trade_count","completed_rejected_forward_outcomes","ambiguous_rejected_forward_outcomes","observed_duration_seconds","source_run_ids","qualification_reject_identity_unit","qualification_reject_identity_mode")}
+    qualification_hash_payload["reject_outcomes"] = sorted(({
+        "reject_decision_id": reject_decision_id_from_outcome(dict(r) if isinstance(r,sqlite3.Row) else dict(r._mapping)),
+        "reject_reason": gv(r,"reject_reason"), "forward_label": gv(r,"forward_label"),
+        "hypothetical_net_r_after_costs": gv(r,"hypothetical_net_r_after_costs")
+    } for r in qualification_resolved), key=lambda item: str(item["reject_decision_id"]))
+    metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"qualification_evidence":qualification_hash_payload})
     metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
 
@@ -484,12 +506,21 @@ def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[st
         JOIN burnin_pending_reject_labels p ON p.reject_decision_id=substr(o.reject_outcome_id,6)
         WHERE p.campaign_id=:cid AND o.reject_reason='MTF_EXECUTION_NOT_CONFIRMED'
         AND json_extract(o.payload_json,'$.window_complete')=1 AND o.forward_label IS NOT NULL""",{"cid":campaign_id}).fetchall()
+    canonical_rows=_exec(conn,f"""SELECT json_extract(o.metrics_json,'$.reject_decision_id')
+        FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id
+        WHERE cr.campaign_id=:cid AND UPPER(COALESCE(o.decision,''))='REJECTED'
+        AND {canonical_decision_sql('o')}""",{"cid":campaign_id}).fetchall()
+    canonical_ids={str(row[0]) for row in canonical_rows if row[0]}
     for raw in rows:
         r=_row_dict(raw)
         try:
+            payload=json.loads(r.get("payload_json") or "{}")
             provenance=json.loads(r.get("source_provenance_json") or "{}")
+            if canonical_ids and reject_decision_id_from_outcome(r) not in canonical_ids: continue
+            if payload.get("reject_quality_attributable") is False: continue
+            if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE" or provenance.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE": continue
             strength=float((((provenance.get("mtf") or {}).get("execution") or {}).get("ma_delta_strength")))
-        except (TypeError,ValueError):
+        except (TypeError,ValueError,json.JSONDecodeError):
             continue
         for low,high,label in edges:
             if (low is None or strength>=low) and (high is None or strength<high):
@@ -686,6 +717,7 @@ class BurnInCampaignRunner:
             c = get_campaign(conn, self.campaign_id) or {}
             count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
             agg = aggregate_campaign(conn, self.campaign_id)
+            latest_hash = _exec(conn,"SELECT aggregate_evidence_hash FROM burnin_qualification_snapshots WHERE qualification_id=:qid",{"qid":c.get("latest_qualification_id")}).scalar() if c.get("latest_qualification_id") else None
         metrics = agg.get("metrics", {})
         first_evidence = not c.get("latest_qualification_id") and any(int(metrics.get(key) or 0) > 0 for key in ("sample_count", "closed_trade_count", "completed_rejected_forward_outcomes"))
         near_completion = any(
@@ -694,7 +726,8 @@ class BurnInCampaignRunner:
         )
         elapsed = time.monotonic() - self._last_qualification_monotonic
         enough_new = count - self._last_qualification_observation_count >= self.qualification_observation_threshold
-        return first_evidence or near_completion or (elapsed >= self.qualification_interval_seconds and enough_new)
+        evidence_changed = latest_hash is not None and latest_hash != agg.get("evidence_hash")
+        return first_evidence or near_completion or (elapsed >= self.qualification_interval_seconds and (enough_new or evidence_changed))
 
     def _qualify_if_due(self) -> dict[str, Any] | None:
         if not self._qualification_due():

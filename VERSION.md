@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+## Burn-in qualification evidence accounting correction (2026-09-05)
+- Current version: dev canonical reject-attribution, aggregate-hash, dashboard-counter, and qualification-freshness correction; no schema migration or strategy tuning.
+- Current phase: Phase 7/8 PAPER burn-in evidence integrity repair.
+- Runtime maturity: diagnostic PAPER only; scan evidence remains auditable while qualification uses canonical decision identity.
+- BACKTEST/PAPER/LIVE alignment: decision/reject thresholds and lifecycle gates are unchanged; PAPER reconciliation remains fail-closed.
+- Lifecycle coverage: unchanged; rejected and infrastructure-blocked decisions remain persisted.
+- Execution realism coverage: existing R-normalized cost model retained and dimensionally regression-tested.
+- Known critical risks: existing campaign snapshots must be refreshed before their blockers are current; historical diagnostic labels remain non-qualifying; a clean full-duration burn-in is still required.
+- Last audit date: 2026-09-05. Live readiness verdict: NOT LIVE READY.
+
 ## Guided MTF setup identity diagnostic correction (2026-09-05)
 - Current version: dev setup-direction sensitivity and setup-opportunity idempotency patch; no schema migration.
 - Current phase: focused validation complete; a fresh PAPER campaign is required because the setup threshold changes strategy/config identity.

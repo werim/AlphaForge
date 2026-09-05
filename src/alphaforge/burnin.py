@@ -63,6 +63,25 @@ def utc_now() -> str:
 def canonical_hash(payload: Any) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
+def reject_decision_id_from_outcome(row: Mapping[str, Any]) -> str | None:
+    """Recover the qualification identity carried by a reject outcome.
+
+    New resolver rows carry it explicitly.  The outcome-id fallback preserves
+    compatibility with existing ``rout_<reject_decision_id>`` rows and campaign
+    aggregate copies.
+    """
+    try:
+        payload = json.loads(row.get("payload_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    explicit = payload.get("reject_decision_id")
+    if explicit:
+        return str(explicit)
+    outcome_id = str(row.get("reject_outcome_id") or "")
+    if not outcome_id.startswith("rout_"):
+        return None
+    return outcome_id[5:].split(":agg:", 1)[0] or None
+
 def config_hash(config: Mapping[str, Any]) -> str:
     return canonical_hash(dict(config))
 
