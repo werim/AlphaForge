@@ -280,6 +280,7 @@ def test_campaign_worker_runs_resolver_and_triggers_qualification(tmp_path):
     db=tmp_path/'worker.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relw',duration_days=1,symbols=['BTCUSDT'],intervals=['1h'])
     run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_burnin_observation(conn,observation_id='canonical-rx',burnin_run_id=run['burnin_run_id'],release_id='relw',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'rx','signal_id':'s'})
     persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='rx',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
     conn.commit(); conn.close()
     e=_engine(db)
@@ -537,6 +538,7 @@ def test_runtime_attachment_records_full_release_mismatch_and_terminalizes_run(m
 def test_resolver_loop_runs_automatically_without_manual_cli(tmp_path):
     db=tmp_path/'auto.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='rela',duration_days=1,symbols=['BTCUSDT'],intervals=['1h']); run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_burnin_observation(conn,observation_id='canonical-auto',burnin_run_id=run['burnin_run_id'],release_id='rela',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'auto','signal_id':'s'})
     persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='auto',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
     conn.commit(); conn.close(); e=_engine(db)
     async def go():

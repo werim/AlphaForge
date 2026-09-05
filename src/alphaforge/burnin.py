@@ -13,6 +13,25 @@ REGIMES = {"TRENDING","MEAN_REVERTING","CHOPPY","PANIC","LOW_LIQUIDITY","BREAKOU
 CRITICAL_COST_FIELDS = ("spread_cost","entry_slippage_cost","exit_slippage_cost","fee_cost","funding_cost","latency_cost")
 CANONICAL_DECISION_KIND = "CANONICAL_DECISION"
 DIAGNOSTIC_OBSERVATION_KIND = "DIAGNOSTIC"
+CANONICAL_REJECT_IDENTITY_MODE = "CANONICAL_LINK_REQUIRED"
+LEGACY_REJECT_IDENTITY_MODE = "LEGACY_NO_IDENTITY_FALLBACK"
+
+def qualification_reject_identity_mode(phases: Sequence[str], observation_metrics: Sequence[Any]) -> str:
+    """Identify legacy evidence explicitly; uncertain/empty evidence fails closed."""
+    if any(str(phase or "").upper() == "PHASE8" for phase in phases):
+        return CANONICAL_REJECT_IDENTITY_MODE
+    saw_observation = False
+    for raw in observation_metrics:
+        saw_observation = True
+        try:
+            metrics = json.loads(raw or "{}") if not isinstance(raw, Mapping) else dict(raw)
+        except (TypeError, json.JSONDecodeError):
+            return CANONICAL_REJECT_IDENTITY_MODE
+        if any(metrics.get(key) is not None for key in (
+            "observation_kind", "reject_decision_id", "signal_id", "setup_identity"
+        )):
+            return CANONICAL_REJECT_IDENTITY_MODE
+    return LEGACY_REJECT_IDENTITY_MODE if saw_observation else CANONICAL_REJECT_IDENTITY_MODE
 
 def canonical_decision_sql(alias: str = "") -> str:
     """SQL predicate separating decisions from auditable diagnostic observations."""
@@ -62,6 +81,25 @@ def utc_now() -> str:
 
 def canonical_hash(payload: Any) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+def reject_decision_id_from_outcome(row: Mapping[str, Any]) -> str | None:
+    """Recover the qualification identity carried by a reject outcome.
+
+    New resolver rows carry it explicitly.  The outcome-id fallback preserves
+    compatibility with existing ``rout_<reject_decision_id>`` rows and campaign
+    aggregate copies.
+    """
+    try:
+        payload = json.loads(row.get("payload_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    explicit = payload.get("reject_decision_id")
+    if explicit:
+        return str(explicit)
+    outcome_id = str(row.get("reject_outcome_id") or "")
+    if not outcome_id.startswith("rout_"):
+        return None
+    return outcome_id[5:].split(":agg:", 1)[0] or None
 
 def config_hash(config: Mapping[str, Any]) -> str:
     return canonical_hash(dict(config))

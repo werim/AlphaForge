@@ -1,3 +1,30 @@
+## Burn-in qualification evidence accounting correction — 2026-09-05
+
+### Added
+- Explicit canonical-decision qualification identity metrics, orphan/non-attributable diagnostic counts, snapshot freshness fields, and focused evidence-integrity regressions.
+- Fail-closed zero-canonical-reject and canonical pending/ambiguous accounting regressions.
+
+### Changed
+- Phase7 reject-quality metrics, minimum reject-forward sample size, MTF execution calibration, and aggregate hashes now use canonical attributable reject outcomes.
+- Dashboard decisions use the same canonical observation predicate as SQL aggregation.
+- Bounded qualification cadence refreshes changed canonical evidence, and finalization refreshes a stale aggregate link before auditing.
+
+### Fixed
+- Repeated scan labels and orphan outcomes can no longer pseudo-replicate reject precision, false-reject rate, net reject value, or qualification sample size.
+- An empty canonical reject-ID set no longer implies legacy evidence; only explicitly identity-less historical observations receive the compatibility fallback.
+- Orphan outcomes can no longer reduce canonical pending rejects or inflate qualification ambiguous counts.
+- Historical snapshots are no longer compared to the current aggregate as though they represented the same evidence instant.
+- Stale qualification blockers are exposed separately from current blockers.
+
+### Removed
+- None; diagnostic observations, pending labels, and outcomes remain persisted.
+
+### Breaking Changes
+- None. No schema migration; legacy runs without reject identity retain an explicit compatibility fallback.
+
+### Known Issues
+- Existing snapshots are not rewritten. They remain stale until the next bounded qualification trigger or finalization refresh.
+
 ## PAPER preflight dotenv bootstrap correction — 2026-09-05
 
 ### Added

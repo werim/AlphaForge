@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from alphaforge.runtime_heartbeat import evaluate_runtime_heartbeat_freshness
 from alphaforge.runtime_state import latest_runtime_state_snapshot
+from alphaforge.burnin import canonical_decision_sql
 from .rollback_queries import fetch_rollback_evidence_status
 
 
@@ -331,11 +332,13 @@ def fetch_phase8_campaign(engine: Engine, campaign_id: str | None = None) -> dic
             cid = row["campaign_id"]
             runs = conn.execute(text("SELECT burnin_run_id, continuation_sequence, status FROM burnin_campaign_runs WHERE campaign_id=:cid ORDER BY continuation_sequence"), {"cid": cid}).mappings().all() if _has_table(engine,"burnin_campaign_runs") else []
             run_ids = [r["burnin_run_id"] for r in runs]
-            def count_table(table: str, expr: str = "COUNT(*)", extra: str = ""):
+            def count_table(table: str, expr: str = "COUNT(*)", extra: str = "", alias: str = ""):
                 if not run_ids or not _has_table(engine, table): return None
                 ph=",".join([f":r{i}" for i in range(len(run_ids))]); p={f"r{i}":v for i,v in enumerate(run_ids)}
                 with engine.connect() as count_conn:
-                    return count_conn.execute(text(f"SELECT {expr} FROM {table} WHERE burnin_run_id IN ({ph}) {extra}"), p).scalar()
+                    table_expr=f"{table} {alias}" if alias else table
+                    prefix=f"{alias}." if alias else ""
+                    return count_conn.execute(text(f"SELECT {expr} FROM {table_expr} WHERE {prefix}burnin_run_id IN ({ph}) {extra}"), p).scalar()
             latest = None
             if _has_table(engine,"burnin_qualification_snapshots") and row.get("latest_qualification_id"):
                 latest = conn.execute(text("SELECT status, blockers_json, warnings_json, generated_at FROM burnin_qualification_snapshots WHERE qualification_id=:qid"), {"qid": row["latest_qualification_id"]}).mappings().first()
@@ -344,9 +347,10 @@ def fetch_phase8_campaign(engine: Engine, campaign_id: str | None = None) -> dic
     def loads(v, fallback):
         try: return json.loads(v or json.dumps(fallback))
         except Exception: return fallback
-    decisions=count_table("burnin_observations")
-    accepted=count_table("burnin_observations","COUNT(*)","AND UPPER(COALESCE(decision,''))='ACCEPTED'")
-    rejected=count_table("burnin_observations","COUNT(*)","AND UPPER(COALESCE(decision,''))='REJECTED'")
+    canonical=f"AND {canonical_decision_sql('o')}"
+    decisions=count_table("burnin_observations","COUNT(*)",canonical,"o")
+    accepted=count_table("burnin_observations","COUNT(*)",f"AND UPPER(COALESCE(o.decision,''))='ACCEPTED' {canonical}","o")
+    rejected=count_table("burnin_observations","COUNT(*)",f"AND UPPER(COALESCE(o.decision,''))='REJECTED' {canonical}","o")
     closed=count_table("burnin_trade_outcomes","COUNT(*)","AND closed_at IS NOT NULL AND evidence_complete=1")
     pending_rejects=None
     pending_positions=None

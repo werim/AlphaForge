@@ -925,7 +925,10 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     runtime_payload = json.loads(runtime_hb.get("payload_json") or "{}") if runtime_hb else {}
     runtime_age = _age(runtime_hb.get("heartbeat_ts"))
     scan_age = _age(runtime_hb.get("last_scan_ts"))
-    qrow = conn.execute("SELECT status, blockers_json FROM burnin_qualification_snapshots WHERE qualification_id=?", (campaign.get("latest_qualification_id"),)).fetchone() if campaign.get("latest_qualification_id") else None
+    qrow = conn.execute("SELECT status, blockers_json, generated_at, aggregate_evidence_hash, metrics_json FROM burnin_qualification_snapshots WHERE qualification_id=?", (campaign.get("latest_qualification_id"),)).fetchone() if campaign.get("latest_qualification_id") else None
+    qualification_age = _age(qrow["generated_at"]) if qrow else None
+    qualification_fresh = bool(qrow and qrow["aggregate_evidence_hash"] is not None and qrow["aggregate_evidence_hash"] == agg.get("evidence_hash"))
+    qualification_blockers = json.loads(qrow["blockers_json"] or "[]") if qrow else []
     counts = _counts(conn, campaign_id)
     now = utc_now()
     overdue_reject_labels = int(conn.execute(
@@ -959,7 +962,14 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         "open_paper_positions": counts["open_positions"], "closed_paper_positions": int(conn.execute("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='CLOSED'", (campaign_id,)).fetchone()[0] or 0),
         "incomplete_outcomes": int(conn.execute("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='CLOSED' AND evidence_complete=0", (campaign_id,)).fetchone()[0] or 0),
         "resolver_failure_count": counts["resolver_failures"], "provider_failure_count": counts["provider_failures"], "qualification_failure_count": counts["qualification_failures"],
-        "latest_qualification_verdict": (qrow["status"] if qrow else campaign.get("qualification_status")), "latest_blockers": json.loads(qrow["blockers_json"] or "[]") if qrow else [],
+        "latest_qualification_verdict": (qrow["status"] if qrow else campaign.get("qualification_status")),
+        "qualification_snapshot_generated_at": qrow["generated_at"] if qrow else None,
+        "qualification_snapshot_age_seconds": qualification_age,
+        "qualification_snapshot_fresh": qualification_fresh,
+        "qualification_snapshot_stale": bool(qrow and not qualification_fresh),
+        "qualification_snapshot_blockers": qualification_blockers,
+        "latest_blockers": qualification_blockers if qualification_fresh else [],
+        "stale_qualification_blockers": qualification_blockers if qrow and not qualification_fresh else [],
         "source_run_ids": metrics.get("source_run_ids", []), "aggregate_evidence_hash": agg.get("evidence_hash"),
         "config_drift_status": "DRIFT" if campaign.get("last_error") in CONFIG_DRIFT_REASONS else "OK", "config_drift_reason": campaign.get("last_error") if campaign.get("last_error") in CONFIG_DRIFT_REASONS else None,
         "reconciliation_status": "SQL_DERIVED", "evidence_completeness_status": campaign.get("evidence_completeness_status"),
@@ -1617,14 +1627,15 @@ def audit_payload(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
         chk("same_candle_tp_sl_remains_ambiguous", bad_dual_hit == 0, {"bad_rows": bad_dual_hit})
         chk("failed_provider_calls_do_not_become_expired", provider_expired == 0, {"bad_rows": provider_expired})
         chk("expired_outcomes_are_not_counted_complete", conn.execute(f"SELECT COUNT(*) FROM burnin_reject_outcomes WHERE burnin_run_id IN ({ph}) AND forward_label='EXPIRED' AND evidence_complete=1", run_ids).fetchone()[0] == 0)
-        qrows = conn.execute("SELECT source_run_ids_json, aggregate_evidence_hash FROM burnin_qualification_snapshots WHERE campaign_id=? AND source_run_ids_json IS NOT NULL", (campaign_id,)).fetchall()
+        qrows = conn.execute("SELECT qualification_id, source_run_ids_json, aggregate_evidence_hash FROM burnin_qualification_snapshots WHERE campaign_id=? AND source_run_ids_json IS NOT NULL ORDER BY id", (campaign_id,)).fetchall()
         chk("qualification_source_run_ids_json_exact", all(json.loads(r["source_run_ids_json"] or "[]") == run_ids for r in qrows), run_ids)
         recomputed = aggregate_campaign(conn, campaign_id).get("evidence_hash")
-        missing_hashes = [idx for idx, r in enumerate(qrows) if r["aggregate_evidence_hash"] is None]
-        mismatched_hashes = [idx for idx, r in enumerate(qrows) if r["aggregate_evidence_hash"] is not None and r["aggregate_evidence_hash"] != recomputed]
-        chk("AGGREGATE_EVIDENCE_HASH_MISSING", not missing_hashes, {"missing_snapshot_indexes": missing_hashes})
-        chk("AGGREGATE_EVIDENCE_HASH_MISMATCH", not mismatched_hashes, {"mismatched_snapshot_indexes": mismatched_hashes, "recomputed": recomputed})
-        chk("stored_aggregate_evidence_hash_matches_recomputed", not missing_hashes and not mismatched_hashes, recomputed)
+        current = next((r for r in reversed(qrows) if r["qualification_id"] == campaign.get("latest_qualification_id")), None)
+        missing_hash = bool(current and current["aggregate_evidence_hash"] is None)
+        mismatched_hash = bool(current and current["aggregate_evidence_hash"] is not None and current["aggregate_evidence_hash"] != recomputed)
+        chk("AGGREGATE_EVIDENCE_HASH_MISSING", not missing_hash, {"qualification_id": current["qualification_id"] if current else None})
+        chk("AGGREGATE_EVIDENCE_HASH_MISMATCH", not mismatched_hash, {"qualification_id": current["qualification_id"] if current else None, "recomputed": recomputed})
+        chk("stored_aggregate_evidence_hash_matches_recomputed", not missing_hash and not mismatched_hash, recomputed)
     agg = aggregate_campaign(conn, campaign_id)
     chk("aggregate_evidence_hash_reproducible", agg.get("evidence_hash") == aggregate_campaign(conn, campaign_id).get("evidence_hash"), agg.get("evidence_hash"))
     immutable_ok = True
@@ -1698,6 +1709,19 @@ def _latest_integrity_audit(conn: sqlite3.Connection, campaign_id: str) -> dict[
 def finalize(conn: sqlite3.Connection, db: str, campaign_id: str, outdir: str | Path) -> dict[str, Any]:
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
+    campaign_before = get_campaign(conn, campaign_id) or {}
+    current_hash = aggregate_campaign(conn, campaign_id).get("evidence_hash")
+    current_snapshot = conn.execute(
+        "SELECT aggregate_evidence_hash FROM burnin_qualification_snapshots WHERE qualification_id=?",
+        (campaign_before.get("latest_qualification_id"),),
+    ).fetchone() if campaign_before.get("latest_qualification_id") else None
+    if not current_snapshot or current_snapshot["aggregate_evidence_hash"] != current_hash:
+        conn.commit()
+        qualification_engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
+        try:
+            qualify_campaign(qualification_engine, campaign_id)
+        finally:
+            qualification_engine.dispose()
     audit = audit_payload(conn, campaign_id)
     health = health_payload(conn, campaign_id)
     completion = check_campaign_completion(conn, campaign_id)
