@@ -1,3 +1,23 @@
+# Canonical final-reject causality — 2026-09-05
+
+### Added
+- `primary_reject_reason` and ordered `reject_reasons` in canonical rejected burn-in `metrics_json`, with focused MTF, score, effective-RR, acceptance, and evidence-integrity regressions.
+
+### Changed
+- Runtime and AI persistence now share the existing score-reject reason priority.
+
+### Fixed
+- COMPLETE post-MTF rejects can no longer be persisted without their final score/effective-RR rejection cause.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None; no schema, threshold, formula, lifecycle, or export-shape change.
+
+### Known Issues
+- Historical POST351 rows are not rewritten and retain their original missing top-level cause.
+
 # Post-343 reject-evidence semantic isolation — 2026-09-05
 
 ### Added

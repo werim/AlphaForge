@@ -17,7 +17,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
-from alphaforge.ai_brain import AIBrain
+from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
 from alphaforge.execution import build_execution_context, build_execution_cost_model
@@ -921,6 +921,11 @@ class RuntimeOrchestrator:
                                 "geometry_status": payload.get("geometry_status"),
                                 "geometry_reason": payload.get("geometry_reason"),
                                 "geometry_source": payload.get("geometry_source"), "mtf": payload.get("mtf")})
+                if str(payload.get("decision") or "").upper() == "REJECTED":
+                    metrics.update({
+                        "primary_reject_reason": payload.get("primary_reject_reason"),
+                        "reject_reasons": payload.get("reject_reasons"),
+                    })
                 setup_identity = payload.get("setup_identity")
                 observation_id = (self._setup_observation_id(
                                       str(setup_identity), str(payload.get("decision")))
@@ -1500,7 +1505,8 @@ class RuntimeOrchestrator:
                     "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED",
                     "reason": reason, "reject_reason": reason, "confidence": 0.0, "score": None,
                     "rr": market_ctx.get("rr"), "effective_rr": None, "explanation": "mtf_alignment_gate",
-                    "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}
+                    "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf,
+                    "primary_reject_reason": reason, "reject_reasons": reasons}
                 if reject_decision_id is not None:
                     reject_payload["reject_decision_id"] = reject_decision_id
                 await self._persist_reject(reject_payload)
@@ -1566,7 +1572,7 @@ class RuntimeOrchestrator:
             return
 
         if order_plan.decision != "ACCEPTED":
-            reject_reason = canonical_reject_reason(order_plan.reason)
+            reject_reason = score_reject_reason(score_ctx)
             await self._persist_reject({
                 **market_ctx,
                 "signal_id": signal_id,
@@ -1889,6 +1895,14 @@ class RuntimeOrchestrator:
 
     def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")
+        supplied_reasons = result.get("reject_reasons")
+        reject_reasons = [canonical_reject_reason(value) for value in supplied_reasons
+                          if value] if isinstance(supplied_reasons, (list, tuple)) else []
+        primary_reject_reason = canonical_reject_reason(
+            result.get("primary_reject_reason") or result.get("reason")
+            or result.get("reject_reason") or (reject_reasons[0] if reject_reasons else None)
+        )
+        reject_reasons = list(dict.fromkeys([primary_reject_reason, *reject_reasons]))
         mtf = result.get("mtf") if isinstance(result.get("mtf"), Mapping) else {}
         regime_layer = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
         generation = mtf.get("generation") if isinstance(mtf.get("generation"), Mapping) else {}
@@ -1924,6 +1938,7 @@ class RuntimeOrchestrator:
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         result.update({
             "reject_decision_id":str(result.get("reject_decision_id") or f"reject:{signal_id}"), "decision":"REJECTED",
+            "primary_reject_reason": primary_reject_reason, "reject_reasons": reject_reasons,
             "decision_timestamp":result.get("decision_timestamp") or canonical_utc_timestamp(),
             "timeframe":result.get("timeframe") or result.get("interval"),
             "entry":result.get("entry", result.get("entry_price")), "sl":result.get("sl", result.get("stop_loss", result.get("stop"))),

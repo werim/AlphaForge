@@ -40,6 +40,24 @@ class OrderPlan:
     reason: str
 
 
+def score_reject_reason(score_ctx: ScoreContext) -> str:
+    """Return the existing canonical reason for a failed AI score gate."""
+    reason = "LOW_SCORE"
+    if "low_p_win" in score_ctx.reason_flags:
+        reason = "LOW_P_WIN"
+    elif "low_execution_probability" in score_ctx.reason_flags:
+        reason = "LOW_EXECUTION_PROBABILITY"
+    elif "low_confidence" in score_ctx.reason_flags:
+        reason = "LOW_CONFIDENCE"
+    elif "negative_expectancy_after_costs" in score_ctx.reason_flags:
+        reason = "NEGATIVE_EXPECTANCY_AFTER_COSTS"
+    elif "high_fakeout_probability" in score_ctx.reason_flags:
+        reason = "HIGH_FAKEOUT_PROBABILITY"
+    elif "low_regime_fit_probability" in score_ctx.reason_flags:
+        reason = "LOW_REGIME_FIT_PROBABILITY"
+    return reason
+
+
 class AIBrain:
     """Deterministic SQL-first decision engine for futures signals.
 
@@ -388,13 +406,7 @@ class AIBrain:
                         ON CONFLICT(decision_id) DO UPDATE SET signal_id=excluded.signal_id, symbol=excluded.symbol, mode=excluded.mode, phase=excluded.phase, decision=excluded.decision, order_type=excluded.order_type, confidence=excluded.confidence, score=excluded.score, rr=excluded.rr, reject_reason=excluded.reject_reason, explanation=excluded.explanation, order_payload=excluded.order_payload, expected_slippage_pct=excluded.expected_slippage_pct, effective_rr=excluded.effective_rr, updated_at=excluded.updated_at RETURNING id"""), decision_payload).scalar_one()
             session.execute(text("INSERT INTO ai_decision_features (decision_id, features, penalties, reason_flags, execution_features, created_at) VALUES (:decision_id, :features, :penalties, :reason_flags, :execution_features, :created_at) ON CONFLICT(decision_id) DO UPDATE SET features=excluded.features, penalties=excluded.penalties, reason_flags=excluded.reason_flags, execution_features=excluded.execution_features, created_at=excluded.created_at"), {"decision_id": decision_id, "features": _json_dumps(score_ctx.components), "penalties": _json_dumps(score_ctx.penalties), "reason_flags": _json_dumps(score_ctx.reason_flags), "execution_features": _json_dumps({"expected_slippage_pct": _num(market_ctx, "expected_slippage_pct", 0.0), "spread_pct": _num(market_ctx, "spread_pct", 0.0), "latency_ms": int(_num(market_ctx, "latency_ms", 0.0)), "orderbook_imbalance": _num(market_ctx, "orderbook_imbalance", 0.0), "funding_rate_pct": _num(market_ctx, "funding_rate_pct", 0.0), "volatility_regime": str(market_ctx.get("volatility_regime", "unknown") or "unknown"), "probabilistic_score": score_ctx.probabilistic, "order_row_id": order_row_id}), "created_at": now})
             if order_plan.decision != "ACCEPTED":
-                reject_reason = "LOW_SCORE"
-                if "low_p_win" in score_ctx.reason_flags: reject_reason = "LOW_P_WIN"
-                elif "low_execution_probability" in score_ctx.reason_flags: reject_reason = "LOW_EXECUTION_PROBABILITY"
-                elif "low_confidence" in score_ctx.reason_flags: reject_reason = "LOW_CONFIDENCE"
-                elif "negative_expectancy_after_costs" in score_ctx.reason_flags: reject_reason = "NEGATIVE_EXPECTANCY_AFTER_COSTS"
-                elif "high_fakeout_probability" in score_ctx.reason_flags: reject_reason = "HIGH_FAKEOUT_PROBABILITY"
-                elif "low_regime_fit_probability" in score_ctx.reason_flags: reject_reason = "LOW_REGIME_FIT_PROBABILITY"
+                reject_reason = score_reject_reason(score_ctx)
                 record_rejected_signal_review(session, reject_decision_id=f"reject:{signal_id}", signal_id=str(signal_id), symbol=str(signal.get("symbol", "UNKNOWN")), setup_type=signal.get("setup"), regime=signal.get("regime"), side=str(signal.get("side", "UNKNOWN")), reject_reason=reject_reason, score=score_ctx.total_score, raw_rr=signal.get("risk_reward"), effective_rr=decision_payload["effective_rr"], expectancy_bucket=signal.get("expectancy_bucket"), volume_24h_usdt=market_ctx.get("volume_24h_usdt"), spread_pct=market_ctx.get("spread_pct"), expected_slippage_pct=market_ctx.get("expected_slippage_pct"), funding_rate_pct=market_ctx.get("funding_rate_pct"), liquidity_score=market_ctx.get("liquidity_score"), volatility_regime=market_ctx.get("volatility_regime"), forward_window_bars=None, would_have_hit_tp=None, would_have_hit_sl=None, max_favorable_excursion_pct=None, max_adverse_excursion_pct=None, reject_correct=None)
             session.execute(text("INSERT INTO trade_lifecycle_events (signal_id, event_type, payload, created_at) VALUES (:signal_id, :event_type, :payload, :created_at)"), {"signal_id": signal_id, "event_type": f"decision_{order_plan.decision.lower()}", "payload": _json_dumps({"phase": phase, "order_type": order_plan.order_type, "explanation": explanation}), "created_at": now})
             session.commit()

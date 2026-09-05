@@ -1,3 +1,19 @@
+# Canonical final-reject causality — 2026-09-05
+
+## Why the patch was needed and root cause
+`RuntimeOrchestrator._persist_burnin_decision()` selected numeric and nested MTF diagnostics for canonical `metrics_json` but omitted the final reject reason. Therefore a post-MTF rejection could have COMPLETE geometry and an empty `mtf.alignment.reasons` list while exposing no reason from the later score/effective-RR gate. The MTF branch also retained its ordered reasons only inside nested diagnostics rather than in a canonical final-reason array.
+
+## Files and functions changed
+`src/alphaforge/runtime.py` now canonicalizes rejected payload causality in `_canonical_reject_payload()`, supplies the full ordered MTF reason list at the MTF gate, persists `primary_reject_reason` and `reject_reasons` for rejected burn-in observations, and uses the existing AI score taxonomy at the score gate. `src/alphaforge/ai_brain.py` extracts the pre-existing score-reason priority into `score_reject_reason()` so AI review and runtime canonical persistence cannot diverge. `tests/test_runtime.py` covers MTF, COMPLETE low-effective-RR, LOW_SCORE, accepted decisions, and unchanged evidence/provenance fields.
+
+The observed gate order is: MTF alignment; required canonical geometry; pre-AI kill switch; runtime risk (fail-closed/recovery/heartbeat/exchange/orphan/position/cooldown/staleness/spread/slippage/funding/liquidity/duplicate); AI score/probability/expectancy decision; post-AI kill switch; `MIN_EFFECTIVE_RR`; portfolio risk; acceptance/order lifecycle. `MIN_RR` is configuration/strategy identity in this runtime path, not a separate final gate.
+
+## Runtime, lifecycle, persistence, export, compatibility, and migration
+No threshold, 1m confirmation, MTF construction, geometry, RR/score formula, lifecycle transition, execution behavior, database column, or CSV export shape changed. Rejected observation JSON gains backward-compatible fields. `mtf.alignment.reasons` remains untouched as MTF-only diagnostics. Existing evidence completeness, `observation_kind`, runtime identity, and source provenance remain intact. No migration is required; historical rows are not rewritten.
+
+## Tests, POST351 classification, and risks
+Focused causality regressions passed (8 tests), the complete runtime module passed (58 tests with its default DB redirected to writable `/private/tmp`), and AI persistence/integration regressions passed (10 tests). POST351's two COMPLETE candidates would now have an explicit primary reason and reason array. Because the actual score gate precedes effective RR, a candidate with score about 0.264 that fails the AI gate is classified by the existing score taxonomy (for example `LOW_SCORE` when no more-specific score flag wins); `LOW_EFFECTIVE_RR` is recorded when the AI gate passes and effective RR then fails. Historical POST351 records remain unchanged. LIVE remains NOT READY.
+
 # Post-343 reject-evidence semantic isolation — 2026-09-05
 
 ## Why the patch was needed and exact root cause

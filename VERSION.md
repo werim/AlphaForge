@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Canonical final-reject causality (2026-09-05)
+- Current version: dev canonical rejection-causality persistence patch; no schema migration or threshold change.
+- Current phase: focused PAPER evidence integrity validation complete.
+- Runtime maturity: canonical rejected burn-in observations now carry `primary_reject_reason` and ordered `reject_reasons`; accepted observations carry neither.
+- BACKTEST/PAPER/LIVE alignment: decision order, MTF confirmation, score/RR formulas, thresholds, and execution behavior are unchanged.
+- Lifecycle/persistence/execution impact: lifecycle and table/CSV schemas are unchanged; only rejected `metrics_json` gains final gate causality while nested MTF diagnostics remain MTF-specific.
+- Known critical risks: historical POST351 rows are immutable and remain unexplained; fresh observations are required for corrected evidence.
+- Last audit date: 2026-09-05. Live readiness verdict: NOT LIVE READY.
+
 ## Burn-in qualification evidence accounting correction (2026-09-05)
 - Current version: dev fail-closed canonical reject-attribution, pending/ambiguous accounting, aggregate-hash, dashboard-counter, and qualification-freshness correction; no schema migration or strategy tuning.
 - Current phase: Phase 7/8 PAPER burn-in evidence integrity repair.

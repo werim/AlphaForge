@@ -12,13 +12,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-from alphaforge.ai_brain import AIBrain
+from alphaforge.ai_brain import AIBrain, ScoreContext, score_reject_reason
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.persistence import init_db
 from alphaforge import persistence as persistence_module
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
 from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot, latest_runtime_state_snapshot, build_readonly_reconciliation_probe, persist_verified_paper_recovery
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, create_campaign
+from alphaforge.burnin import export_burnin_evidence
 import alphaforge.runtime as runtime_module
 
 
@@ -362,7 +363,8 @@ def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_p
 
 
 def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path) -> None:
-    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'pending.db'}")
+    db_path = tmp_path / "pending.db"
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, reject_forward_horizon_bars=2),
         ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
@@ -377,17 +379,92 @@ def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path)
     with engine.connect() as conn:
         row = conn.execute(text("SELECT signal_id,regime,status,source_provenance_json FROM burnin_pending_reject_labels")).one()
         reviews = conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id='reject:eligible-1'")).scalar_one()
-        observations = conn.execute(text("SELECT metrics_json,source_provenance_json FROM burnin_observations WHERE decision='REJECTED'")).all()
+        observations = conn.execute(text("SELECT evidence_complete,metrics_json,source_provenance_json FROM burnin_observations WHERE decision='REJECTED'")).all()
     assert row.signal_id == "eligible-1" and row.regime == "TRENDING" and row.status == "PENDING"
     assert 'BREAKOUT' in row.source_provenance_json and 'NORMAL' in row.source_provenance_json
     assert reviews == 1
     assert observations
-    for metrics_json, provenance_json in observations:
+    for evidence_complete, metrics_json, provenance_json in observations:
         metrics = json.loads(metrics_json); provenance = json.loads(provenance_json)
+        assert evidence_complete == 1
         assert metrics["reject_decision_id"] == "reject:eligible-1"
         assert metrics["signal_id"] == "eligible-1"
         assert metrics["runtime_identity"] == "standalone:paper-restart-safe-run"
+        assert metrics["primary_reject_reason"] == "LOW_CONFIDENCE"
+        assert metrics["reject_reasons"] == ["LOW_CONFIDENCE"]
+        assert metrics["observation_kind"] == "CANONICAL_DECISION"
         assert provenance["runtime_identity"] == "standalone:paper-restart-safe-run"
+    exported = export_burnin_evidence(db_path, tmp_path / "export", "paper-restart-safe-run")
+    assert set(exported) == {
+        "burnin_summary.json", "burnin_qualification.json", "burnin_regime_metrics.csv",
+        "burnin_execution_metrics.csv", "burnin_reject_quality.csv", "burnin_calibration.csv",
+        "burnin_drawdowns.csv", "burnin_suspension_events.csv",
+    }
+
+
+@pytest.mark.parametrize(("signal_id", "reason", "extra", "expected_reasons"), [
+    ("mtf-cause", "MTF_EXECUTION_NOT_CONFIRMED",
+     {"mtf": {"alignment": {"aligned": False, "reasons": ["MTF_EXECUTION_NOT_CONFIRMED"]}},
+      "reject_reasons": ["MTF_EXECUTION_NOT_CONFIRMED"]},
+     ["MTF_EXECUTION_NOT_CONFIRMED"]),
+    ("effective-rr-cause", "LOW_EFFECTIVE_RR",
+     {"geometry_status": "COMPLETE", "rr": 1.205, "effective_rr": 1.168},
+     ["LOW_EFFECTIVE_RR"]),
+    ("score-cause", "LOW_SCORE",
+     {"geometry_status": "COMPLETE", "score": 0.264, "rr": 2.0, "effective_rr": 1.8},
+     ["LOW_SCORE"]),
+])
+def test_canonical_reject_metrics_persist_final_causality(
+        tmp_path: Path, signal_id: str, reason: str, extra: dict, expected_reasons: list[str]) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / f'{signal_id}.db'}")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    orchestrator._burnin_run_id = f"run-{signal_id}"
+    payload = {
+        "signal_id": signal_id, "symbol": "BTCUSDT", "side": "LONG", "timeframe": "1m",
+        "entry": 100.0, "sl": 99.0, "tp": 101.2, "reason": reason,
+        "decision_timestamp": "2026-01-01T00:00:00Z", **extra,
+    }
+
+    asyncio.run(orchestrator._persist_reject(payload))
+
+    with engine.connect() as conn:
+        metrics = json.loads(conn.execute(text(
+            "SELECT metrics_json FROM burnin_observations WHERE decision='REJECTED'"
+        )).scalar_one())
+    assert metrics["primary_reject_reason"] == reason
+    assert metrics["reject_reasons"] == expected_reasons
+    if reason.startswith("MTF_"):
+        assert metrics["mtf"]["alignment"]["reasons"] == expected_reasons
+
+
+def test_score_gate_uses_existing_low_score_reason_when_no_specific_flag() -> None:
+    score_ctx = ScoreContext(0.264, 0.6, {}, {}, False, [], {})
+    assert score_reject_reason(score_ctx) == "LOW_SCORE"
+
+
+def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'accepted.db'}")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    orchestrator._burnin_run_id = "accepted-run"
+
+    orchestrator._persist_burnin_decision({
+        "signal_id": "accepted-1", "symbol": "BTCUSDT", "decision": "ACCEPTED",
+        "timeframe": "1m", "geometry_status": "COMPLETE", "score": 0.8,
+        "rr": 2.0, "effective_rr": 1.8,
+    })
+
+    with engine.connect() as conn:
+        metrics = json.loads(conn.execute(text(
+            "SELECT metrics_json FROM burnin_observations WHERE decision='ACCEPTED'"
+        )).scalar_one())
+    assert "primary_reject_reason" not in metrics
+    assert "reject_reasons" not in metrics
 
 
 def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path: Path) -> None:
