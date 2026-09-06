@@ -19,7 +19,10 @@ class _EarlyRejectBrain:
         self.score = score
 
     def before_real_order(self, signal, market, regime, stats):
-        score = type("Score", (), {"total_score": self.score, "components": {}})()
+        reason_flags = ([self.reason.lower()]
+                        if self.reason.lower() == "negative_expectancy_after_costs" else [])
+        score = type("Score", (), {"total_score": self.score, "components": {},
+                                    "reason_flags": reason_flags})()
         plan = type("Plan", (), {"decision": "REJECTED", "reason": self.reason,
                                   "confidence": self.score, "order_type": "REJECTED",
                                   "limit_price": None, "stop_price": None})()
@@ -69,7 +72,9 @@ def test_real_early_reject_sequence_retains_observational_geometry_without_execu
     asyncio.run(runtime._scan_once())
 
     assert runtime._reject_log[-1]["decision"] == "REJECTED"
-    assert runtime._reject_log[-1]["reason"] == reason.upper()
+    expected_reason = ("NEGATIVE_EXPECTANCY_AFTER_COSTS"
+                       if reason == "negative_expectancy_after_costs" else "LOW_CONFIDENCE")
+    assert runtime._reject_log[-1]["reason"] == expected_reason
     entry, stop, target = (runtime._reject_log[-1][key] for key in ("entry", "sl", "tp"))
     assert (target < entry < stop) if side == "SHORT" else (stop < entry < target)
     assert runtime._pending_orders == {}
@@ -152,7 +157,7 @@ def test_production_binance_scanner_to_pending_reject_label(monkeypatch, tmp_pat
     asyncio.run(runtime._scan_once())
 
     reject = runtime._reject_log[-1]
-    assert reject["reason"] == "SCORE BELOW THRESHOLD OR NEGATIVE EXPECTANCY."
+    assert reject["reason"] == "LOW_CONFIDENCE"
     assert reject["entry"] == 100.0 and reject["sl"] == 97.0
     assert reject["tp"] > reject["entry"]
     assert runtime.metrics.symbols_selected == 1
