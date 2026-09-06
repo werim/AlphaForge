@@ -1,3 +1,24 @@
+# PR #344 M0 reject identity and watchdog blockers — 2026-09-06
+
+## Why the patch was needed and root cause
+Fresh PAPER evidence contained 19 canonical rejected decisions but 159 pending reject-label identities. The read-only `reject-label-status` integrity gate treated all physical labels, reviews, and outcomes as qualification evidence even when their persisted provenance explicitly marked them as `LEGACY_SCANNER_SHADOW_CANDIDATE` and `reject_quality_attributable=false`. Those 140 diagnostic shadow identities therefore contaminated the canonical denominator and appeared as orphan qualification labels despite already being excluded from campaign aggregation.
+
+The watchdog had a separate severity-collapse bug. `health_payload()` put a single increase in overdue reject labels into `unhealthy_reasons` as `RESOLVER_BACKLOG_GROWTH`; `watch_once()` treats every unhealthy reason as blocking, writes `WATCHDOG_FAILURE`, and atomically moves the campaign and active run to `RECOVERY_REQUIRED`. Worker liveness, fresh campaign/runtime heartbeats, zero resolver/provider failures, and zero stale claims could not prevent that false terminalization.
+
+## Minimal files and behavior changed
+`src/alphaforge/reject_label_status.py` now partitions explicitly non-attributable shadow/infrastructure rows from qualification rows without deleting or rewriting evidence. Diagnostic row counts remain visible. Every qualification-attributable pending label must map to exactly one canonical `REJECTED` observation; zero or multiple canonical owners fail closed as `LABELS_WITHOUT_CANONICAL_REJECT`.
+
+`src/alphaforge/burnin_ops.py` keeps one-sample overdue backlog growth observable in health history as `DEGRADED` with warning `RESOLVER_BACKLOG_GROWTH`. Backlog escalation is bounded: three consecutive overdue-growth health samples become blocking `RESOLVER_BACKLOG_SUSTAINED_GROWTH`. Existing immediate blockers remain unchanged, including stale campaign/runtime heartbeat, missing/dead worker, missing runtime attachment, stalled scan, existing recovery/failed state, resolver failures, stale claims, repeated provider failures, DB write failure, evidence regression, config drift, source contamination, duplicate continuation sequence, and unresolved-position excess.
+
+Focused regressions are in `tests/test_reject_label_status.py` and `tests/test_phase9_burnin_ops.py`. They prove shadow evidence remains diagnostic, attributable orphan identity still fails closed, transient backlog growth leaves a fresh attached live worker and all three RUNNING records untouched, no blocking incident is created for that warning, and sustained overdue growth still terminalizes fail closed.
+
+## Lifecycle, persistence, schema, compatibility, and risk
+No MTF logic, strategy/trading threshold, `MIN_EFFECTIVE_RR`, confidence score, order behavior, resolver algorithm, lifecycle vocabulary, table schema, or CSV shape changed. Existing shadow evidence remains persisted and exportable. Health history gains backward-compatible JSON fields/status `DEGRADED`; no migration is required. Historical campaign/run states are not repaired automatically.
+
+Targeted tests executed: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -q -p no:cacheprovider tests/test_reject_label_status.py tests/test_phase9_burnin_ops.py` — 142 passed. `git diff --check` also passed before the documentation update and is rerun at handoff.
+
+No additional confirmed #344 M0 code blocker remains in this scope. A fresh PAPER campaign is still required to prove post-fix operational behavior; historical false `RECOVERY_REQUIRED` transitions and old label rows remain immutable evidence and do not establish readiness. LIVE remains NOT READY.
+
 # Canonical final-reject causality — 2026-09-05
 
 ## Why the patch was needed and root cause

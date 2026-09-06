@@ -469,7 +469,8 @@ def test_watchdog_detects_backlog_growth_and_provider_failures(monkeypatch, tmp_
         event(conn, camp.campaign_id, "RESOLVER_BATCH_FAILED", details={"error": "PROVIDER_FAILURE", "n": i})
     conn.commit()
     h = health_payload(conn, camp.campaign_id, max_heartbeat_age=999999)
-    assert "RESOLVER_BACKLOG_GROWTH" in h["unhealthy_reasons"]
+    assert "RESOLVER_BACKLOG_GROWTH" in h["warning_reasons"]
+    assert "RESOLVER_BACKLOG_GROWTH" not in h["unhealthy_reasons"]
     assert "REPEATED_PROVIDER_FAILURES" in h["unhealthy_reasons"]
 
 
@@ -1647,13 +1648,15 @@ def test_health_never_falls_back_to_global_heartbeat_without_attachment(tmp_path
     conn.close()
 
 
-def _healthy_resolver_campaign(conn, camp, run):
+def _healthy_resolver_campaign(conn, camp, run, *, running=False):
     now = utc_now()
     conn.execute("""CREATE TABLE IF NOT EXISTS runtime_heartbeats(
         id INTEGER PRIMARY KEY AUTOINCREMENT,runtime_instance_id TEXT,execution_mode TEXT,
         heartbeat_ts TEXT,runtime_state TEXT,last_scan_ts TEXT,last_decision_ts TEXT,
         evidence_status TEXT,payload_json TEXT)""")
-    conn.execute("UPDATE burnin_campaigns SET campaign_status='PAUSED', last_heartbeat_at=? WHERE campaign_id=?", (now, camp.campaign_id))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status=?, worker_pid=?, worker_started_at=?, last_heartbeat_at=? WHERE campaign_id=?",
+                 ("RUNNING" if running else "PAUSED", os.getpid() if running else None,
+                  now if running else None, now, camp.campaign_id))
     event(conn, camp.campaign_id, "PHASE8_CAMPAIGN_ATTACHED", burnin_run_id=run,
           details={"runtime_instance_id": "runtime:health", "active_run_id": run})
     conn.execute("INSERT INTO runtime_heartbeats(runtime_instance_id,execution_mode,heartbeat_ts,runtime_state,last_scan_ts,evidence_status,payload_json) VALUES (?,?,?,?,?,?,?)",
@@ -1684,15 +1687,56 @@ def test_health_immature_pending_growth_stays_healthy(tmp_path):
     assert "RESOLVER_BACKLOG_GROWTH" not in health["unhealthy_reasons"]
 
 
-def test_health_overdue_growth_and_stale_claim_are_unhealthy(tmp_path):
+def test_health_transient_overdue_growth_is_degraded_and_stale_claim_is_unhealthy(tmp_path):
     from datetime import datetime, timedelta, timezone
     _, conn = _conn(tmp_path); camp, run = _campaign(conn); _healthy_resolver_campaign(conn, camp, run)
     health_payload(conn, camp.campaign_id)
     past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
     _health_label(conn, camp, run, "overdue", due_at=past)
-    assert "RESOLVER_BACKLOG_GROWTH" in health_payload(conn, camp.campaign_id)["unhealthy_reasons"]
+    transient = health_payload(conn, camp.campaign_id)
+    assert transient["status"] == "DEGRADED"
+    assert "RESOLVER_BACKLOG_GROWTH" in transient["warning_reasons"]
+    assert "RESOLVER_BACKLOG_GROWTH" not in transient["unhealthy_reasons"]
     _health_label(conn, camp, run, "stale", due_at=past, status="RESOLVING", claimed_at=past)
     assert "STALE_RESOLVING_CLAIMS" in health_payload(conn, camp.campaign_id, max_heartbeat_age=60)["unhealthy_reasons"]
+
+
+def test_watch_transient_backlog_growth_keeps_fresh_live_campaign_running(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    _, conn = _conn(tmp_path); camp, run = _campaign(conn)
+    _healthy_resolver_campaign(conn, camp, run, running=True)
+    health_payload(conn, camp.campaign_id)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    _health_label(conn, camp, run, "transient", due_at=past)
+
+    result = watch_once(conn, camp.campaign_id)
+
+    assert result["status"] == "OK"
+    assert result["health"]["status"] == "DEGRADED"
+    assert result["failures"] == []
+    assert conn.execute("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == "RUNNING"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
+    assert conn.execute("SELECT COUNT(*) FROM burnin_ops_incidents WHERE campaign_id=? AND incident_type='WATCHDOG_FAILURE'", (camp.campaign_id,)).fetchone()[0] == 0
+
+
+def test_watch_sustained_overdue_backlog_growth_still_fail_closes(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    _, conn = _conn(tmp_path); camp, run = _campaign(conn)
+    _healthy_resolver_campaign(conn, camp, run, running=True)
+    health_payload(conn, camp.campaign_id)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    for index in range(2):
+        _health_label(conn, camp, run, f"sustained-{index}", due_at=past)
+        assert health_payload(conn, camp.campaign_id)["status"] == "DEGRADED"
+    _health_label(conn, camp, run, "sustained-2", due_at=past)
+
+    result = watch_once(conn, camp.campaign_id)
+
+    assert result["status"] == "RECOVERY_REQUIRED"
+    assert "RESOLVER_BACKLOG_SUSTAINED_GROWTH" in result["failures"]
+    assert conn.execute("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
 
 
 def test_health_resolver_and_provider_failures_remain_unhealthy(tmp_path):

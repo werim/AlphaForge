@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## PR #344 M0 blocker correction (2026-09-06)
+- Current version: dev reject-label canonical attribution and bounded watchdog backlog escalation patch; no schema or strategy change.
+- Current phase: focused PAPER operational-integrity tests pass; fresh PAPER runtime validation remains required.
+- Runtime maturity: diagnostic shadow labels remain auditable but cannot enter canonical qualification identity; transient overdue-backlog growth is `DEGRADED`, while three consecutive growth samples fail closed.
+- BACKTEST/PAPER/LIVE alignment: trading, MTF, score, RR, and execution decisions are unchanged; watchdog changes affect PAPER campaign supervision only.
+- Lifecycle/persistence/execution impact: healthy attached RUNNING campaigns are not terminalized by backlog growth alone; genuine resolver/backlog degradation and all prior hard-safety conditions retain `RECOVERY_REQUIRED` protection. JSON health evidence is additive; schema/export shapes are unchanged.
+- Known critical risks: historical false recovery transitions are not rewritten; fresh PAPER evidence is required. No additional confirmed #344 M0 code blocker remains in scope.
+- Last audit date: 2026-09-06. Live readiness verdict: NOT LIVE READY.
+
 ## Canonical final-reject causality (2026-09-05)
 - Current version: dev canonical rejection-causality persistence patch; no schema migration or threshold change.
 - Current phase: focused PAPER evidence integrity validation complete.
