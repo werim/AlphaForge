@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Mapping
 
 
 class CommandParseError(ValueError):
@@ -12,6 +13,14 @@ class CommandParseError(ValueError):
 class RemoteControlCommand:
     name: str
     argv: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteControlResult:
+    command: str
+    returncode: int
+    stdout: str
+    stderr: str
 
 
 def _require_trusted_config(config: Mapping[str, str], *keys: str) -> dict[str, str]:
@@ -68,3 +77,28 @@ def map_remote_command(command: str, config: Mapping[str, str]) -> RemoteControl
             ),
         )
     raise CommandParseError("unsupported remote control command")
+
+
+def execute_remote_command(
+    command: RemoteControlCommand,
+    *,
+    config: Mapping[str, str],
+    timeout: float = 5.0,
+    max_output_chars: int = 4096,
+) -> RemoteControlResult:
+    if command.name not in {"STATUS", "HEALTH"}:
+        raise CommandParseError("unsupported remote control command")
+    expected = map_remote_command(command.name, config)
+    if command.argv != expected.argv:
+        raise CommandParseError("unexpected remote control argv")
+    completed = subprocess.run(
+        command.argv,
+        shell=False,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    stdout = (completed.stdout or "")[:max_output_chars]
+    stderr = (completed.stderr or "")[:max_output_chars]
+    return RemoteControlResult(command=command.name, returncode=completed.returncode, stdout=stdout, stderr=stderr)
