@@ -1,3 +1,26 @@
+# PR #344 M0 reject identity and watchdog blockers — 2026-09-06
+
+### Added
+- Strict one-canonical-REJECTED owner validation for qualification-attributable reject labels.
+- Backlog warning/streak diagnostics and regressions for transient healthy watch operation and sustained unsafe escalation.
+
+### Changed
+- One-sample overdue reject-backlog growth is reported as `DEGRADED`/`RESOLVER_BACKLOG_GROWTH`; three consecutive growth samples fail closed as `RESOLVER_BACKLOG_SUSTAINED_GROWTH`.
+- Reject-label status reports diagnostic non-attributable shadow rows separately from canonical qualification rows.
+
+### Fixed
+- Diagnostic shadow identities no longer contaminate canonical reject-label integrity or qualification coverage.
+- Watch no longer self-terminalizes an otherwise healthy, fresh, attached RUNNING campaign on transient backlog growth alone.
+
+### Removed
+- None; all diagnostic shadow evidence remains persisted and exportable.
+
+### Breaking Changes
+- None. No schema, CSV, lifecycle vocabulary, MTF, threshold, score, RR, or trading-behavior change.
+
+### Known Issues
+- Historical false recovery transitions and pre-fix evidence are not rewritten; a fresh PAPER campaign is required. LIVE remains NOT READY.
+
 # Canonical final-reject causality — 2026-09-05
 
 ### Added

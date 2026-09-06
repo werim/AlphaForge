@@ -25,6 +25,7 @@ def database(tmp_path, *, resolve=True, costs=COSTS, candles=None):
         decision_timestamp="2026-01-01T00:00:00Z", timeframe="1m", horizon_bars=1,
         entry=100, stop=90, target=120, execution_cost_assumptions=costs, regime="TRENDING",
         reject_reason="LOW_CONFIDENCE", source_provenance={"provider": "PAPER"})
+    add_reject_observation(conn, run, "reject:1")
     if resolve:
         resolve_pending_rejects(conn, {"BTCUSDT": candles or [{"timestamp": "2026-01-01T00:01:00Z", "high": 101, "low": 89}]}, now=NOW)
     conn.commit()
@@ -184,6 +185,71 @@ def test_legacy_linkage_remains_valid_after_resolver_synchronization(tmp_path):
     assert result["reject_quality"][0]["reject_accuracy"] == 1.0
     assert result["reject_quality"][0]["reject_correct_count"] == 1
     assert conn.execute("SELECT reject_decision_id FROM rejected_signal_reviews").fetchone()[0] is None
+
+
+def test_non_attributable_shadow_label_remains_diagnostic_not_canonical_identity(tmp_path):
+    _, conn, cid = database(tmp_path)
+    run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
+    conn.execute("""INSERT INTO rejected_signal_reviews(
+        reject_decision_id,signal_id,reject_reason,created_at,payload_json)
+        VALUES('shadow:orphan','shadow','MTF_EXECUTION_COUNTER_REGIME','2026-01-01T00:00:00Z',?)""",
+        (json.dumps({"campaign_id": cid, "forward_label_subject": "LEGACY_SCANNER_SHADOW_CANDIDATE",
+                     "reject_quality_attributable": False}),))
+    persist_pending_reject_label(conn, campaign_id=cid, burnin_run_id=run,
+        reject_decision_id="shadow:orphan", signal_id="shadow", symbol="BTCUSDT", side="LONG",
+        decision_timestamp="2026-01-01T00:00:00Z", timeframe="1m", horizon_bars=1,
+        entry=100, stop=90, target=120, execution_cost_assumptions=COSTS,
+        regime="TRENDING", reject_reason="MTF_EXECUTION_COUNTER_REGIME",
+        source_provenance={"forward_label_subject": "LEGACY_SCANNER_SHADOW_CANDIDATE",
+                           "reject_quality_attributable": False})
+    conn.commit()
+
+    result = report(conn, cid)
+
+    assert result["status"] == "PASS"
+    assert "ORPHAN_PENDING_LABEL" not in result["reason_codes"]
+    assert result["coverage"]["total_rejected_decisions"] == 1
+    assert result["integrity"]["pending_labels"] == 1
+    assert result["integrity"]["diagnostic_non_attributable_pending_labels"] == 1
+
+
+def test_attributable_label_requires_exactly_one_canonical_reject(tmp_path):
+    _, conn, cid = database(tmp_path)
+    run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
+    persist_pending_reject_label(conn, campaign_id=cid, burnin_run_id=run,
+        reject_decision_id="guided:orphan", signal_id="guided", symbol="BTCUSDT", side="LONG",
+        decision_timestamp="2026-01-01T00:00:00Z", timeframe="1m", horizon_bars=1,
+        entry=100, stop=90, target=120, execution_cost_assumptions=COSTS,
+        regime="TRENDING", reject_reason="LOW_CONFIDENCE",
+        source_provenance={"forward_label_subject": "GUIDED_CANDIDATE",
+                           "reject_quality_attributable": True})
+    conn.execute("""INSERT INTO rejected_signal_reviews(
+        reject_decision_id,signal_id,reject_reason,created_at,payload_json)
+        VALUES('guided:orphan','guided','LOW_CONFIDENCE','2026-01-01T00:00:00Z',?)""",
+        (json.dumps({"campaign_id": cid, "forward_label_subject": "GUIDED_CANDIDATE",
+                     "reject_quality_attributable": True}),))
+    conn.commit()
+
+    result = report(conn, cid)
+
+    assert result["status"] == "FAIL"
+    assert "LABELS_WITHOUT_CANONICAL_REJECT" in result["reason_codes"]
+    assert result["integrity"]["qualification_labels_without_exactly_one_canonical_reject"] == 1
+
+    add_reject_observation(conn, run, "guided:orphan")
+    linked = report(conn, cid)
+    assert "LABELS_WITHOUT_CANONICAL_REJECT" not in linked["reason_codes"]
+    conn.execute("""INSERT INTO burnin_observations(
+        observation_id,burnin_run_id,release_id,observed_at,execution_mode,decision,
+        lifecycle_state,evidence_complete,missing_fields_json,metrics_json,
+        source_provenance_json,schema_version)
+        SELECT 'reject_guided:duplicate',burnin_run_id,release_id,observed_at,execution_mode,
+        decision,lifecycle_state,evidence_complete,missing_fields_json,metrics_json,
+        source_provenance_json,schema_version FROM burnin_observations
+        WHERE observation_id='reject_guided:orphan'""")
+    duplicated = report(conn, cid)
+    assert duplicated["status"] == "FAIL"
+    assert "LABELS_WITHOUT_CANONICAL_REJECT" in duplicated["reason_codes"]
 
 
 def test_legacy_pre317_database_bootstraps_without_fabricating_geometry(tmp_path):

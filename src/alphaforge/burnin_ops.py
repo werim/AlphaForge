@@ -943,9 +943,20 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     runs = [dict(r) for r in conn.execute("SELECT burnin_run_id, continuation_sequence FROM burnin_campaign_runs WHERE campaign_id=? ORDER BY continuation_sequence", (campaign_id,)).fetchall()]
     duplicate_seq = len({r["continuation_sequence"] for r in runs}) != len(runs)
     aggregate_contamination = any(str(r["burnin_run_id"]).endswith("__aggregate") or "aggregate" in str(r["burnin_run_id"]).lower() for r in runs)
-    latest_hist = conn.execute("SELECT payload_json FROM burnin_health_history WHERE campaign_id=? ORDER BY id DESC LIMIT 1", (campaign_id,)).fetchone()
-    previous = json.loads(latest_hist[0]) if latest_hist else {}
+    recent_hist = conn.execute(
+        "SELECT payload_json FROM burnin_health_history WHERE campaign_id=? ORDER BY id DESC LIMIT 2",
+        (campaign_id,),
+    ).fetchall()
+    recent_payloads = [json.loads(row[0]) for row in recent_hist]
+    previous = recent_payloads[0] if recent_payloads else {}
     backlog_growth = bool(previous and overdue_reject_labels > int(previous.get("overdue_reject_labels") or 0))
+    backlog_growth_streak = 1 if backlog_growth else 0
+    if backlog_growth:
+        for item in recent_payloads:
+            if not item.get("resolver_backlog_growth"):
+                break
+            backlog_growth_streak += 1
+    sustained_backlog_growth = backlog_growth_streak >= 3
     evidence_regression = bool(previous and str(previous.get("evidence_completeness_status") or "") == "PASS" and str(campaign.get("evidence_completeness_status") or "") != "PASS")
     payload = {
         "campaign_id": campaign_id, "campaign_status": campaign.get("campaign_status"), "worker_pid": pid, "worker_alive": alive, "heartbeat_age": age,
@@ -973,7 +984,9 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         "source_run_ids": metrics.get("source_run_ids", []), "aggregate_evidence_hash": agg.get("evidence_hash"),
         "config_drift_status": "DRIFT" if campaign.get("last_error") in CONFIG_DRIFT_REASONS else "OK", "config_drift_reason": campaign.get("last_error") if campaign.get("last_error") in CONFIG_DRIFT_REASONS else None,
         "reconciliation_status": "SQL_DERIVED", "evidence_completeness_status": campaign.get("evidence_completeness_status"),
-        "resolver_backlog_growth": backlog_growth, "evidence_completeness_regression": evidence_regression, "aggregate_contamination": aggregate_contamination, "duplicate_continuation_sequence": duplicate_seq,
+        "resolver_backlog_growth": backlog_growth, "resolver_backlog_growth_streak": backlog_growth_streak,
+        "resolver_backlog_sustained_growth": sustained_backlog_growth,
+        "evidence_completeness_regression": evidence_regression, "aggregate_contamination": aggregate_contamination, "duplicate_continuation_sequence": duplicate_seq,
     }
     runtime_cfg = load_config_from_env().runtime
     payload["multi_timeframe"] = {"regime_timeframe": runtime_cfg.regime_timeframe,
@@ -1006,8 +1019,11 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         unhealthy.append("RESOLVER_FAILURES")
     if stale_resolving_claims:
         unhealthy.append("STALE_RESOLVING_CLAIMS")
+    warnings: list[str] = []
     if backlog_growth:
-        unhealthy.append("RESOLVER_BACKLOG_GROWTH")
+        warnings.append("RESOLVER_BACKLOG_GROWTH")
+    if sustained_backlog_growth:
+        unhealthy.append("RESOLVER_BACKLOG_SUSTAINED_GROWTH")
     if evidence_regression:
         unhealthy.append("EVIDENCE_COMPLETENESS_REGRESSION")
     if campaign.get("last_error") in CONFIG_DRIFT_REASONS:
@@ -1016,8 +1032,9 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         unhealthy.append("SOURCE_AGGREGATE_CONTAMINATION")
     if duplicate_seq:
         unhealthy.append("DUPLICATE_CONTINUATION_SEQUENCE")
-    payload["status"] = "HEALTHY" if not unhealthy else "UNHEALTHY"
+    payload["status"] = "UNHEALTHY" if unhealthy else ("DEGRADED" if warnings else "HEALTHY")
     payload["unhealthy_reasons"] = unhealthy
+    payload["warning_reasons"] = warnings
     hid = "health_" + canonical_hash({"campaign_id": campaign_id, "at": utc_now(), "payload": payload})[:20]
     conn.execute("INSERT OR REPLACE INTO burnin_health_history(health_id,campaign_id,generated_at,status,unhealthy_reasons_json,payload_json,schema_version) VALUES (?,?,?,?,?,?,?)", (hid, campaign_id, utc_now(), payload["status"], json.dumps(unhealthy), json.dumps(payload, sort_keys=True, default=str), PHASE9_SCHEMA_VERSION))
     conn.commit()
