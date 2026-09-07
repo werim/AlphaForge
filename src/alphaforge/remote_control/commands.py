@@ -38,21 +38,27 @@ class RemoteControlConfig:
     db: str
     cid: str
     run: str
+    authorized_sender: str
 
 
 def load_remote_control_config(data: Mapping[str, Any]) -> RemoteControlConfig:
     if not isinstance(data, Mapping):
         raise ValueError("remote control config must be an object")
-    allowed = {"db", "cid", "run"}
+    allowed = {"db", "cid", "run", "authorized_sender"}
     if set(data.keys()) != allowed:
-        raise ValueError("remote control config must contain exactly db, cid, and run")
+        raise ValueError("remote control config must contain exactly db, cid, run, and authorized_sender")
     values: dict[str, str] = {}
     for key in allowed:
         value = data.get(key)
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"invalid remote control config field: {key}")
         values[key] = value
-    return RemoteControlConfig(db=values["db"], cid=values["cid"], run=values["run"])
+    return RemoteControlConfig(
+        db=values["db"],
+        cid=values["cid"],
+        run=values["run"],
+        authorized_sender=values["authorized_sender"],
+    )
 
 
 def _trusted_values(config: RemoteControlConfig) -> dict[str, str]:

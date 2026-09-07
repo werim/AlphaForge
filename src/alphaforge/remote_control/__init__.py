@@ -57,16 +57,28 @@ def run_remote_control_message(
     max_output_chars: int = 4096,
     max_body_chars: int = 1024,
 ) -> RemoteControlDispatchResult:
-    del sender, subject
+    del subject
     if not isinstance(body, str) or not body.strip():
         raise ValueError("remote control body must be a non-empty string")
     if "\n" in body or "\r" in body:
         raise ValueError("remote control body must be a single line")
     if len(body) > max_body_chars:
         raise ValueError("remote control body is too long")
-    return run_remote_control_local(
-        body.strip(),
-        config_path=config_path,
+    config = load_remote_control_config_file(config_path)
+    if not isinstance(sender, str) or not sender.strip():
+        raise ValueError("remote control sender must be a non-empty string")
+    if sender.strip() != config.authorized_sender:
+        raise ValueError("unauthorized remote control sender")
+    trusted = {
+        "remote_control_db_path": config.db,
+        "remote_control_campaign_id": config.cid,
+        "remote_control_run_id": config.run,
+    }
+    command_name = parse_remote_command(body.strip())
+    command = map_remote_command(command_name, trusted)
+    return dispatch_remote_control_command(
+        command,
+        config=trusted,
         executor=executor,
         timeout=timeout,
         max_output_chars=max_output_chars,
