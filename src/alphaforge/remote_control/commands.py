@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 class CommandParseError(ValueError):
@@ -22,6 +22,15 @@ class RemoteControlResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteControlDispatchResult:
+    command: str
+    returncode: int
+    stdout: str
+    stderr: str
+    formatted: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,19 +144,57 @@ def execute_remote_command(
     return RemoteControlResult(command=command.name, returncode=completed.returncode, stdout=stdout, stderr=stderr)
 
 
+def format_remote_control_result(result: RemoteControlResult, *, max_output_chars: int = 4096) -> str:
+    stdout = (result.stdout or "")[:max_output_chars]
+    stderr = (result.stderr or "")[:max_output_chars]
+    status = "OK" if result.returncode == 0 else "FAIL"
+    parts = [f"{result.command}: {status} rc={result.returncode}"]
+    if stdout:
+        parts.append(f"stdout={stdout}")
+    if stderr:
+        parts.append(f"stderr={stderr}")
+    return " | ".join(parts)
+
+
+def dispatch_remote_control_command(
+    command: RemoteControlCommand,
+    *,
+    config: Mapping[str, str],
+    executor: Callable[..., RemoteControlResult],
+    timeout: float = 5.0,
+    max_output_chars: int = 4096,
+) -> RemoteControlDispatchResult:
+    if command.name not in {"STATUS", "HEALTH"}:
+        raise CommandParseError("unsupported remote control command")
+    expected = map_remote_command(command.name, config)
+    if command.argv != expected.argv:
+        raise CommandParseError("unexpected remote control argv")
+    result = executor(command, config=config, timeout=timeout, max_output_chars=max_output_chars)
+    formatted = format_remote_control_result(result, max_output_chars=max_output_chars)
+    return RemoteControlDispatchResult(
+        command=result.command,
+        returncode=result.returncode,
+        stdout=result.stdout[:max_output_chars],
+        stderr=result.stderr[:max_output_chars],
+        formatted=formatted,
+    )
+
+
 def run_remote_control_text(
     text: str,
     config: RemoteControlConfig,
     *,
+    executor: Callable[..., RemoteControlResult] = execute_remote_command,
     timeout: float = 5.0,
     max_output_chars: int = 4096,
-) -> RemoteControlResult:
+) -> RemoteControlDispatchResult:
     command_name = parse_remote_command(text)
     trusted = _trusted_values(config)
     mapped = map_remote_command(command_name, trusted)
-    return execute_remote_command(
+    return dispatch_remote_control_command(
         mapped,
         config=trusted,
+        executor=executor,
         timeout=timeout,
         max_output_chars=max_output_chars,
     )

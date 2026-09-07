@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 from alphaforge.remote_control.commands import (
     CommandParseError,
     RemoteControlConfig,
-    execute_remote_command,
+    RemoteControlResult,
+    dispatch_remote_control_command,
     load_remote_control_config,
     map_remote_command,
     parse_remote_command,
@@ -87,42 +88,62 @@ class RemoteControlCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             map_remote_command("STATUS", invalid)
 
-    def test_execute_remote_command_invokes_subprocess_with_exact_argv_and_no_shell(self):
+    def test_dispatch_remote_control_command_uses_fake_executor_and_formats_output(self):
         command = map_remote_command("STATUS", TRUSTED_VALUES)
-        proc = Mock(returncode=0, stdout="ok", stderr="")
-        with patch("alphaforge.remote_control.commands.subprocess.run", return_value=proc) as run:
-            result = execute_remote_command(
-                command,
-                config=TRUSTED_VALUES,
-                timeout=2.5,
-                max_output_chars=10,
-            )
-        run.assert_called_once_with(
-            command.argv,
-            shell=False,
-            check=False,
-            capture_output=True,
-            text=True,
+        fake_result = RemoteControlResult(
+            command="STATUS",
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+        executor = Mock(return_value=fake_result)
+        result = dispatch_remote_control_command(
+            command,
+            config=TRUSTED_VALUES,
+            executor=executor,
             timeout=2.5,
+            max_output_chars=10,
+        )
+        executor.assert_called_once_with(
+            command,
+            config=TRUSTED_VALUES,
+            timeout=2.5,
+            max_output_chars=10,
         )
         self.assertEqual(result.command, "STATUS")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "ok")
         self.assertEqual(result.stderr, "")
+        self.assertEqual(result.formatted, "STATUS: OK rc=0 | stdout=ok")
 
-    def test_execute_remote_command_truncates_stdout_and_stderr(self):
+    def test_dispatch_remote_control_command_truncates_output_safely(self):
         command = map_remote_command("HEALTH", TRUSTED_VALUES)
-        proc = Mock(returncode=1, stdout="x" * 50, stderr="y" * 50)
-        with patch("alphaforge.remote_control.commands.subprocess.run", return_value=proc):
-            result = execute_remote_command(command, config=TRUSTED_VALUES, max_output_chars=8)
+        fake_result = RemoteControlResult(
+            command="HEALTH",
+            returncode=1,
+            stdout="x" * 50,
+            stderr="y" * 50,
+        )
+        executor = Mock(return_value=fake_result)
+        result = dispatch_remote_control_command(
+            command,
+            config=TRUSTED_VALUES,
+            executor=executor,
+            max_output_chars=8,
+        )
         self.assertEqual(result.stdout, "xxxxxxxx")
         self.assertEqual(result.stderr, "yyyyyyyy")
+        self.assertIn("HEALTH: FAIL rc=1", result.formatted)
+        self.assertIn("stdout=xxxxxxxx", result.formatted)
+        self.assertIn("stderr=yyyyyyyy", result.formatted)
 
-    def test_execute_remote_command_rejects_unmapped_argv(self):
+    def test_dispatch_remote_control_command_rejects_unmapped_argv(self):
         command = map_remote_command("STATUS", TRUSTED_VALUES)
         bad = type(command)(name=command.name, argv=command.argv[:-1] + ("WRONG",))
+        executor = Mock()
         with self.assertRaises(CommandParseError):
-            execute_remote_command(bad, config=TRUSTED_VALUES)
+            dispatch_remote_control_command(bad, config=TRUSTED_VALUES, executor=executor)
+        executor.assert_not_called()
 
     def test_wiring_maps_status_and_health_from_loaded_config(self):
         config = load_remote_control_config(
@@ -151,16 +172,13 @@ class RemoteControlCommandTests(unittest.TestCase):
             ),
         }
         for text, argv in expected_argv.items():
-            with self.subTest(text=text), patch(
-                "alphaforge.remote_control.commands.execute_remote_command"
-            ) as execute:
-                run_remote_control_text(text, config)
-                command = execute.call_args.args[0]
+            with self.subTest(text=text):
+                executor = Mock(return_value=RemoteControlResult(command=text.split()[1], returncode=0, stdout="ok", stderr=""))
+                result = run_remote_control_text(text, config, executor=executor)
+                command = executor.call_args.args[0]
                 self.assertEqual(command.argv, argv)
-                self.assertEqual(
-                    execute.call_args.kwargs["config"],
-                    TRUSTED_VALUES,
-                )
+                self.assertEqual(executor.call_args.kwargs["config"], TRUSTED_VALUES)
+                self.assertTrue(result.formatted.startswith(f"{command.name}: OK rc=0"))
 
     def test_email_body_cannot_override_trusted_values(self):
         config = RemoteControlConfig(
@@ -173,11 +191,11 @@ class RemoteControlCommandTests(unittest.TestCase):
             "AF HEALTH --campaign-id OTHER",
             "AF STATUS --run-id OTHER",
         )
-        with patch("alphaforge.remote_control.commands.execute_remote_command") as execute:
-            for body in bodies:
-                with self.subTest(body=body), self.assertRaises(CommandParseError):
-                    run_remote_control_text(body, config)
-            execute.assert_not_called()
+        executor = Mock()
+        for body in bodies:
+            with self.subTest(body=body), self.assertRaises(CommandParseError):
+                run_remote_control_text(body, config, executor=executor)
+        executor.assert_not_called()
 
     def test_wiring_rejects_unknown_command_without_execution(self):
         config = RemoteControlConfig(
@@ -185,10 +203,8 @@ class RemoteControlCommandTests(unittest.TestCase):
             cid="CID-123",
             run="RUN-456",
         )
-        with patch("alphaforge.remote_control.commands.execute_remote_command") as execute:
-            with self.assertRaises(CommandParseError):
-                run_remote_control_text("AF REPORT", config)
-            execute.assert_not_called()
+        with self.assertRaises(CommandParseError):
+            run_remote_control_text("AF REPORT", config, executor=Mock())
 
 
 if __name__ == "__main__":
