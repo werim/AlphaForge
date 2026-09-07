@@ -44,3 +44,30 @@ def run_remote_control_local(
         timeout=timeout,
         max_output_chars=max_output_chars,
     )
+
+
+def run_remote_control_message(
+    body: str,
+    *,
+    config_path: str | Path,
+    executor: Callable[..., RemoteControlResult],
+    sender: str | None = None,
+    subject: str | None = None,
+    timeout: float = 5.0,
+    max_output_chars: int = 4096,
+    max_body_chars: int = 1024,
+) -> RemoteControlDispatchResult:
+    del sender, subject
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("remote control body must be a non-empty string")
+    if "\n" in body or "\r" in body:
+        raise ValueError("remote control body must be a single line")
+    if len(body) > max_body_chars:
+        raise ValueError("remote control body is too long")
+    return run_remote_control_local(
+        body.strip(),
+        config_path=config_path,
+        executor=executor,
+        timeout=timeout,
+        max_output_chars=max_output_chars,
+    )
