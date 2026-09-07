@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 from alphaforge.remote_control.commands import (
     RemoteControlConfig,
@@ -13,6 +13,10 @@ from alphaforge.remote_control.commands import (
     map_remote_command,
     parse_remote_command,
 )
+
+
+class RemoteControlReplayStore(Protocol):
+    def reserve(self, message_id: str) -> bool: ...
 
 
 def load_remote_control_config_file(path: str | Path) -> RemoteControlConfig:
@@ -51,11 +55,14 @@ def run_remote_control_message(
     *,
     config_path: str | Path,
     executor: Callable[..., RemoteControlResult],
+    replay_store: RemoteControlReplayStore,
     sender: str | None = None,
+    message_id: str | None = None,
     subject: str | None = None,
     timeout: float = 5.0,
     max_output_chars: int = 4096,
     max_body_chars: int = 1024,
+    max_message_id_chars: int = 128,
 ) -> RemoteControlDispatchResult:
     del subject
     if not isinstance(body, str) or not body.strip():
@@ -69,6 +76,13 @@ def run_remote_control_message(
         raise ValueError("remote control sender must be a non-empty string")
     if sender.strip() != config.authorized_sender:
         raise ValueError("unauthorized remote control sender")
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise ValueError("remote control message_id must be a non-empty string")
+    message_id = message_id.strip()
+    if len(message_id) > max_message_id_chars:
+        raise ValueError("remote control message_id is too long")
+    if not replay_store.reserve(message_id):
+        raise ValueError("duplicate remote control message_id")
     trusted = {
         "remote_control_db_path": config.db,
         "remote_control_campaign_id": config.cid,

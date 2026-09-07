@@ -40,6 +40,19 @@ def make_config_file(tmpdir: str, *, include_sender: bool = True) -> Path:
     return path
 
 
+class FakeReplayStore:
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+        self.calls: list[str] = []
+
+    def reserve(self, message_id: str) -> bool:
+        self.calls.append(message_id)
+        if message_id in self.seen:
+            return False
+        self.seen.add(message_id)
+        return True
+
+
 class RemoteControlCommandTests(unittest.TestCase):
     def test_parse_remote_command_accepts_only_exact_status_and_health(self):
         self.assertEqual(parse_remote_command("AF STATUS"), "STATUS")
@@ -114,14 +127,22 @@ class RemoteControlCommandTests(unittest.TestCase):
         executor = Mock(return_value=fake_result)
         result = dispatch_remote_control_command(
             command,
-            config=TRUSTED_VALUES,
+            config={
+                "remote_control_db_path": "/trusted/control.db",
+                "remote_control_campaign_id": "CID-123",
+                "remote_control_run_id": "RUN-456",
+            },
             executor=executor,
             timeout=2.5,
             max_output_chars=10,
         )
         executor.assert_called_once_with(
             command,
-            config=TRUSTED_VALUES,
+            config={
+                "remote_control_db_path": "/trusted/control.db",
+                "remote_control_campaign_id": "CID-123",
+                "remote_control_run_id": "RUN-456",
+            },
             timeout=2.5,
             max_output_chars=10,
         )
@@ -137,7 +158,11 @@ class RemoteControlCommandTests(unittest.TestCase):
         executor = Mock(return_value=fake_result)
         result = dispatch_remote_control_command(
             command,
-            config=TRUSTED_VALUES,
+            config={
+                "remote_control_db_path": "/trusted/control.db",
+                "remote_control_campaign_id": "CID-123",
+                "remote_control_run_id": "RUN-456",
+            },
             executor=executor,
             max_output_chars=8,
         )
@@ -152,7 +177,15 @@ class RemoteControlCommandTests(unittest.TestCase):
         bad = type(command)(name=command.name, argv=command.argv[:-1] + ("WRONG",))
         executor = Mock()
         with self.assertRaises(CommandParseError):
-            dispatch_remote_control_command(bad, config=TRUSTED_VALUES, executor=executor)
+            dispatch_remote_control_command(
+                bad,
+                config={
+                    "remote_control_db_path": "/trusted/control.db",
+                    "remote_control_campaign_id": "CID-123",
+                    "remote_control_run_id": "RUN-456",
+                },
+                executor=executor,
+            )
         executor.assert_not_called()
 
     def test_wiring_maps_status_and_health_from_loaded_config(self):
@@ -271,71 +304,135 @@ class RemoteControlCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = make_config_file(tmp)
             executor = Mock(return_value=RemoteControlResult(command="STATUS", returncode=0, stdout="ok", stderr=""))
+            store = FakeReplayStore()
             with patch("alphaforge.remote_control.commands.subprocess.run") as run:
                 result = run_remote_control_message(
                     "AF STATUS",
                     config_path=path,
                     executor=executor,
+                    replay_store=store,
                     sender="sender@example.com",
+                    message_id="<msg-1>",
                     subject="ignored",
                 )
             run.assert_not_called()
+        self.assertEqual(store.calls, ["<msg-1>"])
         executor.assert_called_once()
         self.assertEqual(executor.call_args.args[0].argv, map_remote_command("STATUS", TRUSTED_VALUES).argv)
         self.assertEqual(result.formatted, "STATUS: OK rc=0 | stdout=ok")
 
-    def test_message_adapter_routes_health_exactly_once(self):
+    def test_message_adapter_duplicate_message_id_dispatches_only_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = make_config_file(tmp)
-            executor = Mock(return_value=RemoteControlResult(command="HEALTH", returncode=1, stdout="x" * 20, stderr="y" * 20))
-            with patch("alphaforge.remote_control.commands.subprocess.run") as run:
-                result = run_remote_control_message(
+            store = FakeReplayStore()
+            executor = Mock(return_value=RemoteControlResult(command="HEALTH", returncode=0, stdout="ok", stderr=""))
+            first = run_remote_control_message(
+                "AF HEALTH",
+                config_path=path,
+                executor=executor,
+                replay_store=store,
+                sender="sender@example.com",
+                message_id="<dup-1>",
+                subject="ignored",
+            )
+            with self.assertRaises(ValueError):
+                run_remote_control_message(
                     "AF HEALTH",
                     config_path=path,
                     executor=executor,
+                    replay_store=store,
                     sender="sender@example.com",
+                    message_id="<dup-1>",
                     subject="ignored",
-                    max_output_chars=8,
                 )
-            run.assert_not_called()
-        executor.assert_called_once()
-        self.assertEqual(executor.call_args.args[0].argv, map_remote_command("HEALTH", TRUSTED_VALUES).argv)
-        self.assertEqual(result.stdout, "xxxxxxxx")
-        self.assertEqual(result.stderr, "yyyyyyyy")
+        self.assertEqual(first.command, "HEALTH")
+        self.assertEqual(store.calls, ["<dup-1>", "<dup-1>"])
+        self.assertEqual(executor.call_count, 1)
 
     def test_message_adapter_rejects_empty_multiline_and_oversized_input_without_executor(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = make_config_file(tmp)
             executor = Mock()
+            store = FakeReplayStore()
             bad_bodies = ("", "   ", "AF STATUS\nAF HEALTH", "A" * 2048)
             for body in bad_bodies:
                 with self.subTest(body=body), self.assertRaises(ValueError):
-                    run_remote_control_message(body, config_path=path, executor=executor, sender="sender@example.com")
+                    run_remote_control_message(
+                        body,
+                        config_path=path,
+                        executor=executor,
+                        replay_store=store,
+                        sender="sender@example.com",
+                        message_id="<msg-body>",
+                    )
             executor.assert_not_called()
 
     def test_message_adapter_rejects_wrong_or_missing_sender_before_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = make_config_file(tmp)
             executor = Mock()
+            store = FakeReplayStore()
             for sender in (None, "", "other@example.com"):
                 with self.subTest(sender=sender), self.assertRaises(ValueError):
-                    run_remote_control_message("AF STATUS", config_path=path, executor=executor, sender=sender)
+                    run_remote_control_message(
+                        "AF STATUS",
+                        config_path=path,
+                        executor=executor,
+                        replay_store=store,
+                        sender=sender,
+                        message_id="<msg-sender>",
+                    )
             executor.assert_not_called()
+            self.assertEqual(store.calls, [])
+
+    def test_message_adapter_rejects_missing_or_oversized_message_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = make_config_file(tmp)
+            executor = Mock()
+            store = FakeReplayStore()
+            for message_id in (None, "", "x" * 129):
+                with self.subTest(message_id=message_id), self.assertRaises(ValueError):
+                    run_remote_control_message(
+                        "AF STATUS",
+                        config_path=path,
+                        executor=executor,
+                        replay_store=store,
+                        sender="sender@example.com",
+                        message_id=message_id,
+                    )
+            executor.assert_not_called()
+            self.assertEqual(store.calls, [])
 
     def test_message_adapter_rejects_extra_arguments_before_executor(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = make_config_file(tmp)
             executor = Mock()
+            store = FakeReplayStore()
             with self.assertRaises(CommandParseError):
-                run_remote_control_message("AF STATUS NOW", config_path=path, executor=executor, sender="sender@example.com")
+                run_remote_control_message(
+                    "AF STATUS NOW",
+                    config_path=path,
+                    executor=executor,
+                    replay_store=store,
+                    sender="sender@example.com",
+                    message_id="<msg-extra>",
+                )
             executor.assert_not_called()
 
     def test_message_body_cannot_override_authorized_sender(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = make_config_file(tmp)
             executor = Mock()
+            store = FakeReplayStore()
             with self.assertRaises(CommandParseError):
-                run_remote_control_message("AF STATUS sender=other@example.com", config_path=path, executor=executor, sender="sender@example.com")
+                run_remote_control_message(
+                    "AF STATUS sender=other@example.com",
+                    config_path=path,
+                    executor=executor,
+                    replay_store=store,
+                    sender="sender@example.com",
+                    message_id="<msg-override>",
+                )
             executor.assert_not_called()
 
     def test_message_adapter_fails_closed_on_invalid_config(self):
@@ -344,6 +441,22 @@ class RemoteControlCommandTests(unittest.TestCase):
             path.write_text(json.dumps({"db": "/trusted/control.db", "cid": "CID-123"}), encoding="utf-8")
             with self.assertRaises(ValueError):
                 load_remote_control_config_file(path)
+
+    def test_replay_store_is_dependency_injected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = make_config_file(tmp)
+            executor = Mock(return_value=RemoteControlResult(command="STATUS", returncode=0, stdout="ok", stderr=""))
+            store = FakeReplayStore()
+            run_remote_control_message(
+                "AF STATUS",
+                config_path=path,
+                executor=executor,
+                replay_store=store,
+                sender="sender@example.com",
+                message_id="<msg-di>",
+            )
+        self.assertEqual(store.calls, ["<msg-di>"])
+        executor.assert_called_once()
 
 
 if __name__ == "__main__":
