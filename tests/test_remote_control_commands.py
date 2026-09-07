@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import json
+import tempfile
+from pathlib import Path
 from unittest.mock import Mock
 
+from alphaforge.remote_control import load_remote_control_config_file, run_remote_control_local
 from alphaforge.remote_control.commands import (
     CommandParseError,
     RemoteControlConfig,
@@ -205,6 +209,60 @@ class RemoteControlCommandTests(unittest.TestCase):
         )
         with self.assertRaises(CommandParseError):
             run_remote_control_text("AF REPORT", config, executor=Mock())
+
+    def test_local_entrypoint_wires_status_through_trusted_config_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "remote_control.json"
+            path.write_text(
+                json.dumps({"db": "/trusted/control.db", "cid": "CID-123", "run": "RUN-456"}),
+                encoding="utf-8",
+            )
+            executor = Mock(return_value=RemoteControlResult(command="STATUS", returncode=0, stdout="ok", stderr=""))
+            result = run_remote_control_local(
+                "AF STATUS",
+                config_path=path,
+                executor=executor,
+            )
+        self.assertEqual(executor.call_args.args[0].argv, map_remote_command("STATUS", TRUSTED_VALUES).argv)
+        self.assertEqual(result.formatted, "STATUS: OK rc=0 | stdout=ok")
+
+    def test_local_entrypoint_wires_health_through_trusted_config_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "remote_control.json"
+            path.write_text(
+                json.dumps({"db": "/trusted/control.db", "cid": "CID-123", "run": "RUN-456"}),
+                encoding="utf-8",
+            )
+            executor = Mock(return_value=RemoteControlResult(command="HEALTH", returncode=1, stdout="x" * 50, stderr="y" * 50))
+            result = run_remote_control_local(
+                "AF HEALTH",
+                config_path=path,
+                executor=executor,
+                max_output_chars=8,
+            )
+        self.assertEqual(executor.call_args.args[0].argv, map_remote_command("HEALTH", TRUSTED_VALUES).argv)
+        self.assertEqual(result.stdout, "xxxxxxxx")
+        self.assertEqual(result.stderr, "yyyyyyyy")
+        self.assertIn("HEALTH: FAIL rc=1", result.formatted)
+
+    def test_local_entrypoint_rejects_malformed_input_before_executor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "remote_control.json"
+            path.write_text(
+                json.dumps({"db": "/trusted/control.db", "cid": "CID-123", "run": "RUN-456"}),
+                encoding="utf-8",
+            )
+            executor = Mock()
+            with self.assertRaises(CommandParseError):
+                run_remote_control_local("AF STATUS --db /attacker.db", config_path=path, executor=executor)
+            executor.assert_not_called()
+
+    def test_local_entrypoint_fails_closed_on_missing_or_invalid_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "remote_control.json"
+            path.write_text(json.dumps({"db": "/trusted/control.db", "cid": "CID-123"}), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_remote_control_config_file(path)
 
 
 if __name__ == "__main__":
