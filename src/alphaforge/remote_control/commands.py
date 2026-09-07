@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any
 
 
 class CommandParseError(ValueError):
@@ -21,6 +22,36 @@ class RemoteControlResult:
     returncode: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteControlConfig:
+    db: str
+    cid: str
+    run: str
+
+
+def load_remote_control_config(data: Mapping[str, Any]) -> RemoteControlConfig:
+    if not isinstance(data, Mapping):
+        raise ValueError("remote control config must be an object")
+    allowed = {"db", "cid", "run"}
+    if set(data.keys()) != allowed:
+        raise ValueError("remote control config must contain exactly db, cid, and run")
+    values: dict[str, str] = {}
+    for key in allowed:
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"invalid remote control config field: {key}")
+        values[key] = value
+    return RemoteControlConfig(db=values["db"], cid=values["cid"], run=values["run"])
+
+
+def _trusted_values(config: RemoteControlConfig) -> dict[str, str]:
+    return {
+        "remote_control_db_path": config.db,
+        "remote_control_campaign_id": config.cid,
+        "remote_control_run_id": config.run,
+    }
 
 
 def _require_trusted_config(config: Mapping[str, str], *keys: str) -> dict[str, str]:
@@ -102,3 +133,21 @@ def execute_remote_command(
     stdout = (completed.stdout or "")[:max_output_chars]
     stderr = (completed.stderr or "")[:max_output_chars]
     return RemoteControlResult(command=command.name, returncode=completed.returncode, stdout=stdout, stderr=stderr)
+
+
+def run_remote_control_text(
+    text: str,
+    config: RemoteControlConfig,
+    *,
+    timeout: float = 5.0,
+    max_output_chars: int = 4096,
+) -> RemoteControlResult:
+    command_name = parse_remote_command(text)
+    trusted = _trusted_values(config)
+    mapped = map_remote_command(command_name, trusted)
+    return execute_remote_command(
+        mapped,
+        config=trusted,
+        timeout=timeout,
+        max_output_chars=max_output_chars,
+    )
