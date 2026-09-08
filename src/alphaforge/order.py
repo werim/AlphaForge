@@ -20,7 +20,6 @@ from alphaforge.persistence import (
     save_order_decision,
     save_signal,
     save_trade_lifecycle_event,
-    upsert_expectancy_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -854,7 +853,6 @@ def before_real_order(session: Session, order: Mapping[str, Any], market_ctx: Ma
 def after_position_close(session: Session, closed_trade: Mapping[str, Any], replay_ctx: Mapping[str, Any]) -> None:
     brain = AIBrain(session)
     brain.after_position_close(closed_trade, replay_ctx)
-    pnl = float(closed_trade.get("pnl", 0.0))
     execution_metrics = _execution_review(closed_trade)
     save_closed_trade_review(
         session,
@@ -863,9 +861,6 @@ def after_position_close(session: Session, closed_trade: Mapping[str, Any], repl
         review_payload={"closed_trade": dict(closed_trade), "replay_ctx": dict(replay_ctx)},
         execution_metrics=execution_metrics,
     )
-    upsert_expectancy_stats(session, "setup_expectancy_stats", "setup", str(closed_trade.get("setup", "unknown")), pnl)
-    upsert_expectancy_stats(session, "regime_expectancy_stats", "regime", str(closed_trade.get("regime", "unknown")), pnl)
-    upsert_expectancy_stats(session, "symbol_expectancy_stats", "symbol", str(closed_trade.get("symbol", "unknown")), pnl)
     save_trade_lifecycle_event(session, signal_id=None, event_type="after_position_close", payload={"trade_id": closed_trade.get("trade_id"), "execution_metrics": execution_metrics})
 
 

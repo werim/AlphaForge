@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## M0 scoring-context wiring correction (2026-09-08)
+- Current version: isolated runtime scoring-context wiring and observability patch; no schema, strategy, or threshold change.
+- Current phase: focused PAPER/LIVE parity, AIBrain, MTF, persistence, execution, and lifecycle regression validation complete.
+- Runtime maturity: canonical numeric guided-MTF/market features now reach AIBrain; existing SQL expectancy statistics populate its consumed setup/regime/symbol context, using the least-supported scope for confidence and retaining zero samples when any required history scope is absent. New executed trades update expectancy once.
+- BACKTEST/PAPER/LIVE alignment: one shared context builder is used by the real decision path without a PAPER-only optimistic path or LIVE authorization bypass.
+- Lifecycle/persistence/execution impact: lifecycle order, table/CSV schemas, execution gates, and order submission behavior are unchanged; scoring diagnostics now distinguish incomplete inputs from genuine neutral values, and below-threshold scores expose `low_score`.
+- Known critical risks: current MTF evidence has no universal numeric volatility-fit or regime-alignment representation, so those inputs remain explicitly incomplete when no canonical numeric value is present. Pre-patch expectancy rows may retain duplicate-writer distortion and are not repaired automatically. Fresh isolated PAPER evidence is required before any readiness conclusion.
+- Last audit date: 2026-09-08. Live readiness verdict: NOT LIVE READY.
+
 ## PR #344 M0 blocker correction (2026-09-06)
 - Current version: dev reject-label canonical attribution and bounded watchdog backlog escalation patch; no schema or strategy change.
 - Current phase: focused PAPER operational-integrity tests pass; fresh PAPER runtime validation remains required.
