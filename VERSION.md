@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Issue #354 Telegram read-only remote-control adapter (2026-09-09)
+- Current version: feature/354-remote-control Phase-3 Telegram parser, authorization, replay, and audit boundary; no polling/webhook/network transport.
+- Current phase: read-only remote-control transport hardening.
+- Runtime maturity: Telegram updates can normalize only `/status`, `/health`, `/report`, `/rejects`, `/labels`, `/errors`, and `/help` into predefined internal command names; no command execution is performed by the adapter.
+- BACKTEST/PAPER/LIVE alignment: no trading, lifecycle, score, RR, execution, campaign, or runtime command behavior changed.
+- Lifecycle/persistence/execution impact: controller-owned SQLite replay/audit storage gains additive `remote_control_audit`; Telegram `update_id` is atomically claimed as `telegram:<update_id>` before acceptance. No campaign/runtime DB is accessed.
+- Known critical risks: executor wiring for the new read-only commands is intentionally not implemented; no Telegram polling/webhook integration exists yet.
+- Last audit date: 2026-09-09. Live readiness verdict: NOT LIVE READY.
+
 ## PR #344 M0 blocker correction (2026-09-06)
 - Current version: dev reject-label canonical attribution and bounded watchdog backlog escalation patch; no schema or strategy change.
 - Current phase: focused PAPER operational-integrity tests pass; fresh PAPER runtime validation remains required.

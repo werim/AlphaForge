@@ -15,6 +15,14 @@ from alphaforge.remote_control.commands import (
     parse_remote_command,
 )
 from alphaforge.remote_control.freshness import current_utc_time, validate_message_freshness
+from alphaforge.remote_control.telegram_adapter import (
+    ALLOWED_TELEGRAM_COMMANDS,
+    TelegramRemoteControlAdapterResult,
+    TelegramRemoteControlConfig,
+    TelegramRemoteControlRequest,
+    parse_telegram_command,
+    process_telegram_update,
+)
 
 
 class RemoteControlReplayStore(Protocol):

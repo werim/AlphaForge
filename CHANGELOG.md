@@ -1,3 +1,26 @@
+# Issue #354 Telegram read-only remote-control adapter — 2026-09-09
+
+### Added
+- Pure Telegram update adapter for read-only remote-control commands: `/status`, `/health`, `/report`, `/rejects`, `/labels`, `/errors`, and `/help`.
+- Explicit Telegram numeric `user_id` and optional `chat_id` allowlist authorization.
+- Additive `remote_control_audit` table in the controller-owned SQLite replay/audit store.
+- Focused regressions for authorization, duplicate `update_id`, malformed updates, unsupported commands, injection-like arguments, token non-disclosure, and no subprocess/network invocation.
+
+### Changed
+- Telegram replay protection claims `telegram:<update_id>` through the existing SQLite replay store before accepting a command.
+
+### Fixed
+- None; this is a new transport boundary.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Mail/local command behavior and executor dispatch remain unchanged.
+
+### Known Issues
+- Telegram polling/webhook/network integration and executor wiring for the additional read-only commands are intentionally out of scope. LIVE remains NOT READY.
+
 # PR #344 M0 reject identity and watchdog blockers — 2026-09-06
 
 ### Added

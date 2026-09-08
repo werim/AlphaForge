@@ -1,3 +1,25 @@
+# Issue #354 Telegram read-only remote-control adapter — 2026-09-09
+
+## Why the patch was needed and root cause
+Phase 3 remote control had an email/local command path and a SQLite replay store, but no Telegram update boundary. Adding Telegram directly to execution would risk trusting display names, accepting arguments, or replaying updates. The smallest safe step is a pure adapter that validates caller-supplied Telegram update payloads, authorizes only numeric identities, claims replay IDs through controller-owned SQLite state, and audits accepted/rejected outcomes before any later executor integration exists.
+
+## Files and behavior changed
+`src/alphaforge/remote_control/telegram_adapter.py` converts a Telegram update dict into a normalized `RemoteControlCommand` for exactly seven read-only operations: `STATUS`, `HEALTH`, `REPORT`, `REJECTS`, `LABELS`, `ERRORS`, and `HELP`. It accepts only slash commands with no arguments or whitespace and maps text to predefined internal names. The adapter does not know campaign DB paths and does not call `burnin_ops`, subprocesses, Telegram APIs, sockets, or runtime code.
+
+`src/alphaforge/remote_control/audit.py` adds an additive `remote_control_audit` table beside the existing `replay_message_ids` table. Telegram accepted and rejected attempts record `transport=telegram`, `update_id` when parseable, the numeric authorized identity string when parseable, normalized command when known, accepted/rejected result, rejection reason, and timestamp. Replay protection stores Telegram IDs as `telegram:<update_id>` and duplicates fail closed as `DUPLICATE_UPDATE_ID` without returning an accepted request.
+
+`tests/test_remote_control_telegram_adapter.py` covers valid `/status`, valid `/health`, all allowed commands, unauthorized user, unauthorized chat when configured, duplicate update ID, malformed update shapes/IDs/text, unknown command, argument/injection-like rejection, bot-token non-persistence, and no subprocess/network boundary.
+
+## Runtime, lifecycle, persistence, schema, compatibility, and risk
+No trading, BACKTEST/PAPER/LIVE decision logic, lifecycle state, score, RR, execution-cost behavior, campaign table, CSV export, or runtime command behavior changed. The only schema change is additive and limited to the remote-control replay/audit SQLite store supplied by the caller. Mail/local behavior remains compatible and still supports only the previously wired `AF STATUS` and `AF HEALTH` executor routes.
+
+No Telegram bot token is accepted by the adapter API or persisted. Telegram usernames, display names, and chat usernames are ignored for authorization. Caller-supplied configuration must provide a non-empty user allowlist, chat allowlist, or both; when both are present, both must match. Malformed and unauthorized attempts do not poison replay state, while authenticated duplicate updates do not execute or produce an accepted request.
+
+## Validation and remaining limitations
+Focused validation used the standard-library runner because this isolated worktree has no `.venv/bin/pytest` and `.venv` was not touched: `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:tests /opt/homebrew/bin/python3.11 -m unittest tests.test_remote_control_commands tests.test_remote_control_audit tests.test_remote_control_controller tests.test_remote_control_envelope tests.test_remote_control_freshness tests.test_remote_control_mail_adapter tests.test_remote_control_telegram_adapter` — 90 tests passed.
+
+No campaign/runtime database, `POSTM0FIX.db`, network transport, subprocess executor, real Telegram call, real AlphaForge command, running process, launchctl, SSH, or runtime state was accessed. Remaining limitation: polling/webhook ingestion and executor-backed responses for `REPORT`, `REJECTS`, `LABELS`, `ERRORS`, and `HELP` are intentionally not implemented in this step. LIVE remains NOT READY.
+
 # PR #344 M0 reject identity and watchdog blockers — 2026-09-06
 
 ## Why the patch was needed and root cause
