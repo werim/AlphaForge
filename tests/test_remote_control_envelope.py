@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from alphaforge.remote_control.audit import SQLiteReplayStore
+from alphaforge.remote_control.auth import is_sender_allowed
 from alphaforge.remote_control.commands import RemoteControlResult
 from alphaforge.remote_control.envelope import RemoteControlEmailEnvelope, run_remote_control_envelope
 from alphaforge.remote_control.freshness import FUTURE_CLOCK_TOLERANCE, MAX_COMMAND_AGE
@@ -16,6 +17,7 @@ from test_remote_control_commands import FakeReplayStore, make_config_file
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 FRESH_AT = NOW.isoformat()
+ALLOWED_SENDERS = ("sender@example.com",)
 
 
 def fixed_clock() -> datetime:
@@ -54,6 +56,7 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                     config_path=make_config_file(tmp),
                     executor=executor,
                     replay_store=FakeReplayStore(),
+                    allowed_senders=ALLOWED_SENDERS,
                     clock=fixed_clock,
                 )
             subprocess_run.assert_not_called()
@@ -72,6 +75,7 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                     config_path=config_path,
                     executor=executor,
                     replay_store=store,
+                    allowed_senders=ALLOWED_SENDERS,
                     clock=fixed_clock,
                 )
                 with self.assertRaises(ValueError):
@@ -80,6 +84,7 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                         config_path=config_path,
                         executor=executor,
                         replay_store=store,
+                        allowed_senders=ALLOWED_SENDERS,
                         clock=fixed_clock,
                     )
         executor.assert_called_once()
@@ -96,6 +101,7 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                         config_path=make_config_file(tmp),
                         executor=executor,
                         replay_store=store,
+                        allowed_senders=ALLOWED_SENDERS,
                         clock=fixed_clock,
                     )
                 subprocess_run.assert_not_called()
@@ -113,6 +119,7 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                     config_path=make_config_file(tmp),
                     executor=executor,
                     replay_store=store,
+                    allowed_senders=ALLOWED_SENDERS,
                     clock=fixed_clock,
                 )
         self.assertEqual(store.calls, [])
@@ -129,6 +136,7 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                         config_path=make_config_file(tmp),
                         executor=executor,
                         replay_store=store,
+                        allowed_senders=ALLOWED_SENDERS,
                         clock=fixed_clock,
                     )
                 self.assertEqual(store.calls, [])
@@ -145,6 +153,7 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                         config_path=make_config_file(tmp),
                         executor=executor,
                         replay_store=store,
+                        allowed_senders=ALLOWED_SENDERS,
                         clock=fixed_clock,
                     )
                 self.assertEqual(store.calls, [])
@@ -161,6 +170,7 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                         config_path=make_config_file(tmp),
                         executor=executor,
                         replay_store=store,
+                        allowed_senders=ALLOWED_SENDERS,
                         clock=fixed_clock,
                     )
                 self.assertEqual(store.calls, [])
@@ -176,8 +186,65 @@ class RemoteControlEnvelopeTests(unittest.TestCase):
                         config_path=make_config_file(tmp),
                         executor=executor,
                         replay_store=FakeReplayStore(),
+                        allowed_senders=ALLOWED_SENDERS,
                         clock=fixed_clock,
                     )
+                executor.assert_not_called()
+
+    def test_authorized_sender_case_normalized(self):
+        self.assertTrue(is_sender_allowed("SENDER@EXAMPLE.COM", ALLOWED_SENDERS))
+
+    def test_display_name_sender_accepted(self):
+        self.assertTrue(is_sender_allowed("Example User sender@example.com", ALLOWED_SENDERS))
+        self.assertTrue(is_sender_allowed("Example User <sender@example.com>", ALLOWED_SENDERS))
+
+    def test_unauthorized_sender_fails_closed_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = Mock()
+            store = FakeReplayStore()
+            with self.assertRaises(ValueError):
+                run_remote_control_envelope(
+                    make_envelope(sender="other@example.com"),
+                    config_path=make_config_file(tmp),
+                    executor=executor,
+                    replay_store=store,
+                    allowed_senders=ALLOWED_SENDERS,
+                    clock=fixed_clock,
+                )
+        self.assertEqual(store.calls, [])
+        executor.assert_not_called()
+
+    def test_empty_allowlist_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = Mock()
+            store = FakeReplayStore()
+            with self.assertRaises(ValueError):
+                run_remote_control_envelope(
+                    make_envelope(),
+                    config_path=make_config_file(tmp),
+                    executor=executor,
+                    replay_store=store,
+                    allowed_senders=(),
+                    clock=fixed_clock,
+                )
+        self.assertEqual(store.calls, [])
+        executor.assert_not_called()
+
+    def test_malformed_sender_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for sender in ("not-an-email", "sender@", "@example.com", "sender example.com"):
+                executor = Mock()
+                store = FakeReplayStore()
+                with self.subTest(sender=sender), self.assertRaises(ValueError):
+                    run_remote_control_envelope(
+                        make_envelope(sender=sender),
+                        config_path=make_config_file(tmp),
+                        executor=executor,
+                        replay_store=store,
+                        allowed_senders=ALLOWED_SENDERS,
+                        clock=fixed_clock,
+                    )
+                self.assertEqual(store.calls, [])
                 executor.assert_not_called()
 
 
