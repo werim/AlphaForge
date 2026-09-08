@@ -362,7 +362,8 @@ def test_paper_runtime_rejected_rows_use_paper_mode_and_single_final_count(tmp_p
     assert any((str(row.phase).startswith("ai_internal_")) for row in runtime_rows)
 
 
-def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path) -> None:
+def test_eligible_paper_runtime_reject_creates_one_pending_label(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "pending.db"
     engine = init_db(f"sqlite+pysqlite:///{db_path}")
     orchestrator = RuntimeOrchestrator(
@@ -374,20 +375,22 @@ def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path)
                "reason":"LOW_CONFIDENCE","regime":"TRENDING","setup_type":"BREAKOUT","volatility_regime":"NORMAL",
                "decision_timestamp":"2026-01-01T00:00:00Z","execution_ctx":{"spread_pct":.001,"expected_slippage_pct":.001,
                "fee_pct":.001,"funding_rate_pct":0.0,"market_data_latency_ms":10,"liquidity_score":.9}}
+    timestamps = iter(("2026-01-01T00:00:01Z", "2026-01-01T00:00:02Z"))
+    monkeypatch.setattr(runtime_module, "canonical_utc_timestamp", lambda: next(timestamps))
     asyncio.run(orchestrator._persist_reject(payload))
     asyncio.run(orchestrator._persist_reject(payload))
     with engine.connect() as conn:
-        row = conn.execute(text("SELECT signal_id,regime,status,source_provenance_json FROM burnin_pending_reject_labels")).one()
-        reviews = conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id='reject:eligible-1'")).scalar_one()
+        row = conn.execute(text("SELECT reject_decision_id,signal_id,regime,status,source_provenance_json FROM burnin_pending_reject_labels")).one()
+        reviews = conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id=:rid"), {"rid": row.reject_decision_id}).scalar_one()
         observations = conn.execute(text("SELECT evidence_complete,metrics_json,source_provenance_json FROM burnin_observations WHERE decision='REJECTED'")).all()
     assert row.signal_id == "eligible-1" and row.regime == "TRENDING" and row.status == "PENDING"
     assert 'BREAKOUT' in row.source_provenance_json and 'NORMAL' in row.source_provenance_json
     assert reviews == 1
-    assert observations
+    assert len(observations) == 1
     for evidence_complete, metrics_json, provenance_json in observations:
         metrics = json.loads(metrics_json); provenance = json.loads(provenance_json)
         assert evidence_complete == 1
-        assert metrics["reject_decision_id"] == "reject:eligible-1"
+        assert metrics["reject_decision_id"] == row.reject_decision_id
         assert metrics["signal_id"] == "eligible-1"
         assert metrics["runtime_identity"] == "standalone:paper-restart-safe-run"
         assert metrics["primary_reject_reason"] == "LOW_CONFIDENCE"
@@ -400,6 +403,69 @@ def test_eligible_paper_runtime_reject_creates_one_pending_label(tmp_path: Path)
         "burnin_execution_metrics.csv", "burnin_reject_quality.csv", "burnin_calibration.csv",
         "burnin_drawdowns.csv", "burnin_suspension_events.csv",
     }
+
+
+def test_reject_identity_is_campaign_and_run_namespaced(monkeypatch: pytest.MonkeyPatch) -> None:
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None,
+    )
+    apparent_reject = {"signal_id": "candle:BTCUSDT:1m:42", "symbol": "BTCUSDT",
+                       "reason": "LOW_CONFIDENCE"}
+
+    monkeypatch.setenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", "campaign-a")
+    orchestrator._burnin_run_id = "run-0"
+    campaign_a_run_0 = orchestrator._canonical_reject_payload(apparent_reject)["reject_decision_id"]
+    retry = orchestrator._canonical_reject_payload(apparent_reject)["reject_decision_id"]
+    monkeypatch.setenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", "campaign-b")
+    campaign_b_run_0 = orchestrator._canonical_reject_payload(apparent_reject)["reject_decision_id"]
+    forged = orchestrator._canonical_reject_payload(
+        {**apparent_reject, "reject_decision_id": campaign_a_run_0})
+    monkeypatch.setenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", "campaign-a")
+    orchestrator._burnin_run_id = "run-1"
+    campaign_a_run_1 = orchestrator._canonical_reject_payload(apparent_reject)["reject_decision_id"]
+
+    assert retry == campaign_a_run_0
+    assert len({campaign_a_run_0, campaign_b_run_0, campaign_a_run_1}) == 3
+    assert forged["reject_decision_id"] == campaign_b_run_0
+    assert forged["source_reject_decision_id"] == campaign_a_run_0
+
+
+def test_reject_observation_and_pending_label_are_atomic_and_retryable(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'atomic-reject.db'}")
+    with engine.begin() as conn:
+        bootstrap_campaign_schema(conn)
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, reject_forward_horizon_bars=1),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    orchestrator._burnin_run_id = "atomic-run"
+    payload = {
+        "signal_id": "atomic-signal", "symbol": "BTCUSDT", "side": "LONG",
+        "timeframe": "1m", "entry": 100.0, "sl": 90.0, "tp": 120.0,
+        "reason": "LOW_CONFIDENCE", "decision_timestamp": "2026-01-01T00:00:00Z",
+        "execution_ctx": {"spread_pct": .001, "expected_slippage_pct": .001,
+                          "fee_pct": .001, "funding_rate_pct": 0.0,
+                          "market_data_latency_ms": 10},
+    }
+    original = runtime_module.persist_pending_reject_label
+
+    def fail_after_observation(*args, **kwargs):
+        raise RuntimeError("injected pending failure")
+
+    monkeypatch.setattr(runtime_module, "persist_pending_reject_label", fail_after_observation)
+    with pytest.raises(RuntimeError, match="injected pending failure"):
+        asyncio.run(orchestrator._persist_reject(payload))
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_observations")).scalar_one() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels")).scalar_one() == 0
+
+    monkeypatch.setattr(runtime_module, "persist_pending_reject_label", original)
+    asyncio.run(orchestrator._persist_reject(payload))
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_observations WHERE decision='REJECTED'")).scalar_one() == 1
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels")).scalar_one() == 1
 
 
 @pytest.mark.parametrize(("signal_id", "reason", "extra", "expected_reasons"), [
@@ -502,8 +568,8 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
 
     asyncio.run(orchestrator._persist_reject(source))
     with engine.connect() as conn:
-        review = conn.execute(text("SELECT side,raw_rr,effective_rr,payload_json FROM rejected_signal_reviews WHERE reject_decision_id='reject:guided-null'")).one()
-        pending = conn.execute(text("SELECT side,entry,stop,target,source_provenance_json FROM burnin_pending_reject_labels WHERE reject_decision_id='reject:guided-null'")).one()
+        review = conn.execute(text("SELECT side,raw_rr,effective_rr,payload_json FROM rejected_signal_reviews WHERE signal_id='guided-null'")).one()
+        pending = conn.execute(text("SELECT side,entry,stop,target,source_provenance_json FROM burnin_pending_reject_labels WHERE signal_id='guided-null'")).one()
     review_payload = json.loads(review.payload_json)
     provenance = json.loads(pending.source_provenance_json)
     assert review.side is None and review.raw_rr is None and review.effective_rr is None
@@ -546,12 +612,12 @@ def test_standalone_resolver_fetches_each_pending_timeframe(tmp_path: Path) -> N
     orchestrator=RuntimeOrchestrator(config=RuntimeConfig(execution_mode=ExecutionMode.PAPER,reject_forward_horizon_bars=1),ai_brain=_brain(),market_scanner=lambda:None,persistence_engine=engine,reject_candle_provider=provider)
     orchestrator._burnin_run_id='interval-run'
     for tf in ('1m','5m','1h'):
-        orchestrator._persist_pending_reject(orchestrator._canonical_reject_payload({'signal_id':tf,'symbol':'BTCUSDT','side':'LONG','timeframe':tf,'entry':100,'sl':90,'tp':120,'reason':'LOW_CONFIDENCE','decision_timestamp':'2026-01-01T00:00:00Z','execution_ctx':{'spread_pct':.001,'expected_slippage_pct':.001,'fee_pct':.001,'funding_rate_pct':0,'market_data_latency_ms':1}}))
+        asyncio.run(orchestrator._persist_reject({'signal_id':tf,'symbol':'BTCUSDT','side':'LONG','timeframe':tf,'entry':100,'sl':90,'tp':120,'reason':'LOW_CONFIDENCE','decision_timestamp':'2026-01-01T00:00:00Z','execution_ctx':{'spread_pct':.001,'expected_slippage_pct':.001,'fee_pct':.001,'funding_rate_pct':0,'market_data_latency_ms':1}}))
     asyncio.run(orchestrator._resolve_reject_forward_outcomes_once())
     assert set(seen)=={'1m','5m','1h'}
 
 
-def test_standalone_resolver_runs_after_pre_317_sqlite_upgrade_without_duplicates(tmp_path: Path) -> None:
+def test_standalone_resolver_fails_closed_on_pre_317_orphan_and_resolves_new_canonical_label(tmp_path: Path) -> None:
     db_path = tmp_path / "legacy-resolver.db"
     with sqlite3.connect(db_path) as conn:
         conn.execute("CREATE TABLE positions(id INTEGER PRIMARY KEY AUTOINCREMENT,symbol TEXT,qty REAL,status TEXT)")
@@ -591,7 +657,7 @@ def test_standalone_resolver_runs_after_pre_317_sqlite_upgrade_without_duplicate
         "execution_ctx":{"spread_pct":.001,"expected_slippage_pct":.001,"fee_pct":.001,
                          "funding_rate_pct":0,"market_data_latency_ms":1},
     })
-    orchestrator._persist_pending_reject(payload)
+    asyncio.run(orchestrator._persist_reject(payload))
 
     asyncio.run(orchestrator._resolve_reject_forward_outcomes_once())
     restarted = RuntimeOrchestrator(
@@ -602,13 +668,13 @@ def test_standalone_resolver_runs_after_pre_317_sqlite_upgrade_without_duplicate
     asyncio.run(restarted._resolve_reject_forward_outcomes_once())
 
     with engine.connect() as conn:
-        legacy = conn.execute(text("SELECT timeframe,horizon_bars,horizon_seconds FROM burnin_pending_reject_labels WHERE reject_decision_id='legacy'")).one()
-        new = conn.execute(text("SELECT timeframe,horizon_bars,horizon_seconds FROM burnin_pending_reject_labels WHERE reject_decision_id='reject:new'")).one()
+        legacy = conn.execute(text("SELECT timeframe,horizon_bars,horizon_seconds,status,last_error FROM burnin_pending_reject_labels WHERE reject_decision_id='legacy'")).one()
+        new = conn.execute(text("SELECT timeframe,horizon_bars,horizon_seconds FROM burnin_pending_reject_labels WHERE reject_decision_id=:rid"), {"rid": payload["reject_decision_id"]}).one()
         pending_count = conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels")).scalar_one()
         outcome_count = conn.execute(text("SELECT COUNT(*) FROM burnin_reject_outcomes")).scalar_one()
-    assert tuple(legacy) == (None,None,60.0)
+    assert tuple(legacy) == (None,None,60.0,"FAILED","CANONICAL_REJECT_IDENTITY_INVALID:CANONICAL_REJECT_NOT_FOUND")
     assert tuple(new) == ("1m",1,60.0)
-    assert pending_count == 2 and outcome_count == 2
+    assert pending_count == 2 and outcome_count == 1
     assert None in seen and "1m" in seen
 
 
@@ -622,8 +688,8 @@ def test_reject_review_orphan_self_heals_to_one_pending_label_on_retry(tmp_path:
     asyncio.run(orchestrator._persist_reject(payload))
     asyncio.run(orchestrator._persist_reject(payload))
     with engine.connect() as conn:
-        assert conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id='reject:recover'")).scalar_one()==1
-        assert conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE reject_decision_id='reject:recover'")).scalar_one()==1
+        assert conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews WHERE reject_decision_id=:rid"), {"rid": payload["reject_decision_id"]}).scalar_one()==1
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE reject_decision_id=:rid"), {"rid": payload["reject_decision_id"]}).scalar_one()==1
 
 
 def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> None:

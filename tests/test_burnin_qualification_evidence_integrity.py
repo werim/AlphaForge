@@ -50,13 +50,30 @@ def _canonical_accept(conn, run_id, signal_id):
 
 
 def _outcome(conn, run_id, reject_id, *, net=-1.0, subject="GUIDED_CANDIDATE"):
+    campaign_row = conn.execute(
+        "SELECT campaign_id FROM burnin_campaign_runs WHERE burnin_run_id=?", (run_id,)
+    ).fetchone()
+    pending_label_id = None
+    if campaign_row:
+        pending_label_id = persist_pending_reject_label(
+            conn, campaign_id=campaign_row[0], burnin_run_id=run_id,
+            reject_decision_id=reject_id, signal_id=reject_id, symbol="BTCUSDT",
+            side="LONG", decision_timestamp="2026-01-01T00:00:00Z",
+            timeframe="1m", horizon_bars=1, entry=100, stop=90, target=120,
+            execution_cost_assumptions=COSTS, regime="TRENDING",
+            reject_reason="MTF_EXECUTION_NOT_CONFIRMED",
+            source_provenance={"forward_label_subject": subject,
+                               "reject_quality_attributable": subject == "GUIDED_CANDIDATE"},
+        )
     persist_burnin_reject_outcome(
         conn, reject_outcome_id=f"rout_{reject_id}", burnin_run_id=run_id,
         release_id="rel", reject_reason="MTF_EXECUTION_NOT_CONFIRMED",
         symbol="BTCUSDT", regime="TRENDING", forward_label="SL_BEFORE_TP" if net <= 0 else "TP_BEFORE_SL",
         hypothetical_net_r_after_costs=net, avoided_loss=max(0, -net),
         missed_profit=max(0, net), evidence_complete=True,
-        payload={"reject_decision_id": reject_id, "forward_label_subject": subject,
+        payload={"reject_decision_id": reject_id, "pending_label_id": pending_label_id,
+                 "campaign_id": campaign_row[0] if campaign_row else None,
+                 "burnin_run_id": run_id, "forward_label_subject": subject,
                  "reject_quality_attributable": subject == "GUIDED_CANDIDATE"},
     )
 

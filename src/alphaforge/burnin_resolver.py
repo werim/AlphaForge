@@ -2,7 +2,7 @@ from __future__ import annotations
 import json, math, sqlite3, uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping, Sequence
-from alphaforge.burnin import DIAGNOSTIC_OBSERVATION_KIND, canonical_hash, persist_burnin_reject_outcome, persist_burnin_trade_outcome, persist_burnin_observation, utc_now, CRITICAL_COST_FIELDS
+from alphaforge.burnin import DIAGNOSTIC_OBSERVATION_KIND, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, persist_burnin_reject_outcome, persist_burnin_trade_outcome, persist_burnin_observation, utc_now, CRITICAL_COST_FIELDS
 from alphaforge.burnin_campaign import CAMPAIGN_SCHEMA_VERSION, bootstrap_campaign_schema, _exec
 
 
@@ -41,8 +41,83 @@ def _geometry_errors(side, entry, stop, target):
     return sorted(set(errors))
 
 
+def _canonical_reject_identity_error(conn: Any, campaign_id: str, burnin_run_id: str,
+                                     reject_decision_id: str | None) -> str | None:
+    reject_id = str(reject_decision_id or "").strip()
+    if not reject_id:
+        return "MISSING_REJECT_DECISION_ID"
+    standalone_id = f"standalone:{burnin_run_id}"
+    if campaign_id != standalone_id:
+        campaign_runs = _exec(conn, """SELECT COUNT(*) FROM burnin_campaign_runs
+            WHERE campaign_id=:cid AND burnin_run_id=:bid""",
+            {"cid": campaign_id, "bid": burnin_run_id}).fetchone()
+        if not campaign_runs or int(campaign_runs[0] or 0) != 1:
+            return "RUN_NOT_IN_CAMPAIGN"
+    canonical = _exec(conn, f"""SELECT COUNT(*) FROM burnin_observations o
+        WHERE o.burnin_run_id=:bid AND UPPER(COALESCE(o.decision,''))='REJECTED'
+        AND json_extract(o.metrics_json,'$.reject_decision_id')=:rid
+        AND (json_extract(o.metrics_json,'$.campaign_id') IS NULL
+             OR json_extract(o.metrics_json,'$.campaign_id')=:cid)
+        AND {canonical_decision_sql('o')}""",
+        {"cid": campaign_id, "bid": burnin_run_id, "rid": reject_id}).fetchone()
+    if not canonical or int(canonical[0] or 0) != 1:
+        return "CANONICAL_REJECT_NOT_FOUND"
+    return None
+
+
+def _persist_reject_identity_diagnostic(conn: Any, *, campaign_id: str,
+                                        burnin_run_id: str,
+                                        reject_decision_id: str | None,
+                                        signal_id: str | None,
+                                        decision_timestamp: str | None,
+                                        symbol: str | None, timeframe: str | None,
+                                        regime: str | None, reject_reason: str | None,
+                                        source_provenance: Mapping[str, Any],
+                                        identity_error: str) -> None:
+    run = _exec(conn, "SELECT release_id FROM burnin_runs WHERE burnin_run_id=:bid",
+                {"bid": burnin_run_id}).fetchone()
+    if not run:
+        return
+    identity = {"campaign_id": campaign_id, "burnin_run_id": burnin_run_id,
+                "reject_decision_id": reject_decision_id, "identity_error": identity_error}
+    persist_burnin_observation(
+        conn,
+        observation_id="invalid_reject_identity_" + canonical_hash(identity)[:20],
+        burnin_run_id=burnin_run_id, release_id=run[0], execution_mode="PAPER",
+        observed_at=decision_timestamp or utc_now(), symbol=symbol, interval=timeframe,
+        regime=regime or "UNKNOWN", decision="REJECTED",
+        lifecycle_state="SIGNAL_REJECTED",
+        metrics={"reject_decision_id": reject_decision_id, "signal_id": signal_id,
+                 "reject_reason": reject_reason, "campaign_id": campaign_id,
+                 "canonical_reject_identity_status": "INVALID",
+                 "canonical_reject_identity_error": identity_error,
+                 "reject_quality_attributable": False},
+        source_provenance=source_provenance,
+        missing_fields=[f"canonical_reject_identity:{identity_error}"],
+        observation_kind=DIAGNOSTIC_OBSERVATION_KIND,
+    )
+
+
 def persist_pending_reject_label(conn: Any, *, campaign_id: str, burnin_run_id: str, reject_decision_id: str, signal_id: str|None, symbol: str|None, side: str|None, decision_timestamp: str|None, entry: float|None, stop: float|None, target: float|None, horizon_seconds: float|None=None, horizon_bars: int|None=None, timeframe: str|None=None, execution_cost_assumptions: Mapping[str,Any]|None, regime: str|None, reject_reason: str|None, source_provenance: Mapping[str,Any]) -> str | None:
     bootstrap_campaign_schema(conn)
+    identity_error = _canonical_reject_identity_error(
+        conn, campaign_id, burnin_run_id, reject_decision_id)
+    if identity_error:
+        _persist_reject_identity_diagnostic(
+            conn, campaign_id=campaign_id, burnin_run_id=burnin_run_id,
+            reject_decision_id=reject_decision_id, signal_id=signal_id,
+            decision_timestamp=decision_timestamp, symbol=symbol, timeframe=timeframe,
+            regime=regime, reject_reason=reject_reason,
+            source_provenance=source_provenance, identity_error=identity_error)
+        return None
+    contract_ineligible = _exec(conn, """SELECT 1 FROM burnin_observations
+        WHERE burnin_run_id=:bid
+          AND observation_id LIKE 'incomplete_reject_geometry_%'
+          AND json_extract(metrics_json,'$.reject_decision_id')=:rid
+          AND evidence_complete=0 LIMIT 1""",
+        {"bid": burnin_run_id, "rid": reject_decision_id}).fetchone()
+    if contract_ineligible:
+        return None
     interval_seconds=timeframe_seconds(timeframe)
     if horizon_bars is not None and interval_seconds is not None:
         horizon_seconds=float(horizon_bars)*interval_seconds
@@ -53,11 +128,23 @@ def persist_pending_reject_label(conn: Any, *, campaign_id: str, burnin_run_id: 
     if timeframe is not None and interval_seconds is None: missing.append("timeframe")
     if missing:
         row=_exec(conn,"SELECT release_id FROM burnin_runs WHERE burnin_run_id=:bid",{"bid":burnin_run_id}).fetchone(); release_id=row[0] if row else "UNKNOWN"
-        persist_burnin_observation(conn,observation_id="incomplete_reject_geometry_"+canonical_hash({"reject_decision_id":reject_decision_id})[:20],burnin_run_id=burnin_run_id,release_id=release_id,execution_mode="PAPER",observed_at=decision_timestamp or utc_now(),symbol=symbol,interval=timeframe,regime=regime or "UNKNOWN",decision="REJECTED",lifecycle_state="SIGNAL_REJECTED",metrics={"reject_decision_id":reject_decision_id,"reject_reason":reject_reason,"campaign_id":campaign_id},source_provenance=source_provenance,missing_fields=sorted(set(missing)),observation_kind=DIAGNOSTIC_OBSERVATION_KIND)
+        persist_burnin_observation(conn,observation_id="incomplete_reject_geometry_"+canonical_hash({"campaign_id":campaign_id,"burnin_run_id":burnin_run_id,"reject_decision_id":reject_decision_id})[:20],burnin_run_id=burnin_run_id,release_id=release_id,execution_mode="PAPER",observed_at=decision_timestamp or utc_now(),symbol=symbol,interval=timeframe,regime=regime or "UNKNOWN",decision="REJECTED",lifecycle_state="SIGNAL_REJECTED",metrics={"reject_decision_id":reject_decision_id,"reject_reason":reject_reason,"campaign_id":campaign_id},source_provenance=source_provenance,missing_fields=sorted(set(missing)),observation_kind=DIAGNOSTIC_OBSERVATION_KIND)
         return None
     due_at=datetime.fromtimestamp(_dt(decision_timestamp).timestamp()+float(horizon_seconds),timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
-    pid="prej_"+canonical_hash({"reject_decision_id":reject_decision_id})[:20]
+    pid="prej_"+str(reject_decision_id)
     _exec(conn,"""INSERT OR IGNORE INTO burnin_pending_reject_labels(pending_label_id,campaign_id,burnin_run_id,reject_decision_id,signal_id,symbol,side,decision_timestamp,timeframe,horizon_bars,entry,stop,target,horizon_seconds,execution_cost_assumptions_json,regime,reject_reason,source_provenance_json,due_at,status,created_at,schema_version) VALUES (:pid,:cid,:bid,:rid,:sid,:sym,:side,:ts,:tf,:bars,:entry,:stop,:target,:hor,:costs,:reg,:reason,:prov,:due,'PENDING',:now,:sv)""",{"pid":pid,"cid":campaign_id,"bid":burnin_run_id,"rid":reject_decision_id,"sid":signal_id,"sym":symbol,"side":side,"ts":decision_timestamp,"tf":timeframe,"bars":horizon_bars,"entry":entry,"stop":stop,"target":target,"hor":horizon_seconds,"costs":json.dumps(dict(execution_cost_assumptions or {}),sort_keys=True),"reg":regime,"reason":reject_reason,"prov":json.dumps(dict(source_provenance),sort_keys=True),"due":due_at,"now":utc_now(),"sv":CAMPAIGN_SCHEMA_VERSION})
+    persisted = _exec(conn, """SELECT pending_label_id,campaign_id,burnin_run_id
+        FROM burnin_pending_reject_labels WHERE reject_decision_id=:rid""",
+        {"rid": reject_decision_id}).fetchone()
+    if not persisted or persisted[0] != pid or persisted[1] != campaign_id or persisted[2] != burnin_run_id:
+        _persist_reject_identity_diagnostic(
+            conn, campaign_id=campaign_id, burnin_run_id=burnin_run_id,
+            reject_decision_id=reject_decision_id, signal_id=signal_id,
+            decision_timestamp=decision_timestamp, symbol=symbol, timeframe=timeframe,
+            regime=regime, reject_reason=reject_reason,
+            source_provenance=source_provenance,
+            identity_error="PENDING_LABEL_IDENTITY_CONFLICT")
+        return None
     return pid
 
 
@@ -97,7 +184,7 @@ def _sync_review(conn,r,outcome):
     try:
         payload=json.loads(outcome.get("payload_json") or "{}")
         correct=payload.get("reject_correct") if outcome.get("evidence_complete") and not outcome.get("execution_invalidated") and not outcome.get("ambiguous") else None
-        _exec(conn,"""UPDATE rejected_signal_reviews SET forward_window_bars=:bars,would_have_hit_tp=:tp,would_have_hit_sl=:sl,max_favorable_excursion_pct=:mfe,max_adverse_excursion_pct=:mae,reject_correct=:correct,execution_invalidated=:invalid,outcome_ambiguous=:amb,evidence_complete=:complete WHERE id=(SELECT id FROM rejected_signal_reviews WHERE (reject_decision_id=:rid OR (reject_decision_id IS NULL AND signal_id=:sid)) AND COALESCE(evidence_complete,0) != 1 ORDER BY reject_decision_id IS NULL,id LIMIT 1)""",{"bars":r.get("horizon_bars") or payload.get("forward_window_bars") or (round(float(r.get("horizon_seconds") or 0)/60) or None),"tp":outcome.get("would_tp"),"sl":outcome.get("would_sl"),"mfe":payload.get("mfe_pct"),"mae":payload.get("mae_pct"),"correct":correct,"invalid":outcome.get("execution_invalidated"),"amb":outcome.get("ambiguous"),"complete":outcome.get("evidence_complete"),"rid":r["reject_decision_id"],"sid":r.get("signal_id")})
+        _exec(conn,"""UPDATE rejected_signal_reviews SET forward_window_bars=:bars,would_have_hit_tp=:tp,would_have_hit_sl=:sl,max_favorable_excursion_pct=:mfe,max_adverse_excursion_pct=:mae,reject_correct=:correct,execution_invalidated=:invalid,outcome_ambiguous=:amb,evidence_complete=:complete WHERE id=(SELECT id FROM rejected_signal_reviews WHERE reject_decision_id=:rid AND COALESCE(evidence_complete,0) != 1 ORDER BY id LIMIT 1)""",{"bars":r.get("horizon_bars") or payload.get("forward_window_bars") or (round(float(r.get("horizon_seconds") or 0)/60) or None),"tp":outcome.get("would_tp"),"sl":outcome.get("would_sl"),"mfe":payload.get("mfe_pct"),"mae":payload.get("mae_pct"),"correct":correct,"invalid":outcome.get("execution_invalidated"),"amb":outcome.get("ambiguous"),"complete":outcome.get("evidence_complete"),"rid":r["reject_decision_id"]})
     except Exception as exc:
         if "no such table" not in str(exc).lower() and "no such column" not in str(exc).lower(): raise
 
@@ -108,11 +195,34 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
     counts={"resolved":0,"pending":0,"ambiguous":0,"failed":0,"claimed_elsewhere":0,"canonical":0}
     for row in rows:
         r=dict(row) if isinstance(row,sqlite3.Row) else dict(row._mapping); token=uuid.uuid4().hex; old=r["status"]
+        identity_error = _canonical_reject_identity_error(
+            conn, campaign_id, r["burnin_run_id"], r.get("reject_decision_id"))
+        if identity_error:
+            _exec(conn, """UPDATE burnin_pending_reject_labels
+                SET status='FAILED',evidence_complete=0,resolved_at=:now,
+                    last_error=:error,claim_token=NULL,claimed_at=NULL
+                WHERE pending_label_id=:pid""",
+                {"now": utc_now(), "error": f"CANONICAL_REJECT_IDENTITY_INVALID:{identity_error}",
+                 "pid": r["pending_label_id"]})
+            counts["failed"] += 1
+            continue
         claimed=_exec(conn,"UPDATE burnin_pending_reject_labels SET status='RESOLVING',claim_token=:token,claimed_at=:now WHERE pending_label_id=:pid AND status=:old AND COALESCE(claimed_at,'')=COALESCE(:claimed,'')",{"token":token,"now":now,"pid":r["pending_label_id"],"old":old,"claimed":r.get("claimed_at")}).rowcount
         if not claimed: counts["claimed_elsewhere"]+=1; continue
         existing=_exec(conn,"SELECT * FROM burnin_reject_outcomes WHERE reject_outcome_id=:id",{"id":"rout_"+r["reject_decision_id"]}).fetchone()
         if existing:
-            outcome=dict(existing) if isinstance(existing,sqlite3.Row) else dict(existing._mapping); _sync_review(conn,r,outcome)
+            outcome=dict(existing) if isinstance(existing,sqlite3.Row) else dict(existing._mapping)
+            if not canonical_reject_outcome_link_matches(
+                    outcome, campaign_id=campaign_id, burnin_run_id=r["burnin_run_id"],
+                    reject_decision_id=r["reject_decision_id"],
+                    pending_label_id=r["pending_label_id"]):
+                _exec(conn, """UPDATE burnin_pending_reject_labels
+                    SET status='FAILED',evidence_complete=0,resolved_at=:now,
+                        last_error='CANONICAL_OUTCOME_IDENTITY_CONFLICT'
+                    WHERE pending_label_id=:pid AND claim_token=:token""",
+                    {"now": utc_now(), "pid": r["pending_label_id"], "token": token})
+                counts["failed"] += 1
+                continue
+            _sync_review(conn,r,outcome)
             status="AMBIGUOUS" if outcome.get("ambiguous") else ("RESOLVED" if outcome.get("evidence_complete") else "FAILED")
             _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=COALESCE(resolved_at,:now),last_error=CASE WHEN :ec=1 THEN NULL ELSE COALESCE(last_error,'CANONICAL_INCOMPLETE') END WHERE pending_label_id=:pid AND claim_token=:token",{"s":status,"ec":outcome.get("evidence_complete") or 0,"now":utc_now(),"pid":r["pending_label_id"],"token":token}); counts["canonical"]+=1; continue
         candles=_normalized_candles(_candles_for(candles_by_symbol,r),r)
@@ -142,10 +252,22 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
         attributable=subject != "LEGACY_SCANNER_SHADOW_CANDIDATE" and not infrastructure_reject
         reject_correct=None if invalid or ambiguous or net is None or not complete or not attributable else bool(net<=0)
         market_provenance=next((c.get("source_provenance") for c in observed if c.get("source_provenance")),None)
-        payload={"pending_label_id":r["pending_label_id"],"reject_decision_id":r["reject_decision_id"],"forward_window_bars":r.get("horizon_bars"),"missing_cost_fields":missing,"window_complete":complete,"market_gaps":gaps,"mfe_pct":mfe,"mae_pct":mae,"reject_correct":reject_correct,"execution_cost_assumptions":costs,"execution_cost_unit":costs.get("execution_cost_unit"),"market_data_provenance":market_provenance,"forward_label_subject":subject,"reject_quality_attributable":attributable,"non_attributable_reason":None if attributable else ("INFRASTRUCTURE_UNAVAILABILITY" if infrastructure_reject else "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT")}
+        payload={"pending_label_id":r["pending_label_id"],"reject_decision_id":r["reject_decision_id"],"campaign_id":campaign_id,"burnin_run_id":r["burnin_run_id"],"forward_window_bars":r.get("horizon_bars"),"missing_cost_fields":missing,"window_complete":complete,"market_gaps":gaps,"mfe_pct":mfe,"mae_pct":mae,"reject_correct":reject_correct,"execution_cost_assumptions":costs,"execution_cost_unit":costs.get("execution_cost_unit"),"market_data_provenance":market_provenance,"forward_label_subject":subject,"reject_quality_attributable":attributable,"non_attributable_reason":None if attributable else ("INFRASTRUCTURE_UNAVAILABILITY" if infrastructure_reject else "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT")}
         evidence_complete=bool(complete and not invalid and not ambiguous and net is not None)
         inserted=persist_burnin_reject_outcome(conn,reject_outcome_id="rout_"+r["reject_decision_id"],burnin_run_id=r["burnin_run_id"],release_id=_release(conn,r["burnin_run_id"]),reject_reason=r.get("reject_reason") or "UNKNOWN",symbol=r["symbol"],regime=r.get("regime") or "UNKNOWN",decision_time=r["decision_timestamp"],hypothetical_entry=r["entry"],hypothetical_stop=r["stop"],hypothetical_target=r["target"],forward_label=label,would_tp=label=="TP_BEFORE_SL",would_sl=label=="SL_BEFORE_TP",timeout=label=="TIMEOUT",ambiguous=ambiguous,hypothetical_gross_r=gross,hypothetical_net_r_after_costs=net,avoided_loss=max(0,-net) if net is not None else None,missed_profit=max(0,net) if net is not None else None,execution_invalidated=invalid,evidence_horizon=r["due_at"],evidence_complete=evidence_complete,payload=payload)
-        outcome_row=_exec(conn,"SELECT * FROM burnin_reject_outcomes WHERE reject_outcome_id=:id",{"id":"rout_"+r["reject_decision_id"]}).fetchone(); outcome=dict(outcome_row) if isinstance(outcome_row,sqlite3.Row) else dict(outcome_row._mapping); _sync_review(conn,r,outcome)
+        outcome_row=_exec(conn,"SELECT * FROM burnin_reject_outcomes WHERE reject_outcome_id=:id",{"id":"rout_"+r["reject_decision_id"]}).fetchone(); outcome=dict(outcome_row) if isinstance(outcome_row,sqlite3.Row) else dict(outcome_row._mapping)
+        if not canonical_reject_outcome_link_matches(
+                outcome, campaign_id=campaign_id, burnin_run_id=r["burnin_run_id"],
+                reject_decision_id=r["reject_decision_id"],
+                pending_label_id=r["pending_label_id"]):
+            _exec(conn, """UPDATE burnin_pending_reject_labels
+                SET status='FAILED',evidence_complete=0,resolved_at=:now,
+                    last_error='CANONICAL_OUTCOME_IDENTITY_CONFLICT'
+                WHERE pending_label_id=:pid AND claim_token=:token""",
+                {"now": utc_now(), "pid": r["pending_label_id"], "token": token})
+            counts["failed"] += 1
+            continue
+        _sync_review(conn,r,outcome)
         status="AMBIGUOUS" if outcome.get("ambiguous") else ("RESOLVED" if outcome.get("evidence_complete") else "FAILED"); error=None if status=="RESOLVED" else ("AMBIGUOUS" if ambiguous else "MISSING_COSTS" if invalid else "INCOMPLETE_MARKET_WINDOW")
         _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=:now,last_error=:err WHERE pending_label_id=:pid AND claim_token=:token",{"s":status,"ec":outcome.get("evidence_complete") or 0,"now":utc_now(),"err":error,"pid":r["pending_label_id"],"token":token})
         counts["ambiguous" if status=="AMBIGUOUS" else "resolved" if status=="RESOLVED" else "failed"]+=1

@@ -7,7 +7,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from alphaforge.burnin import LEGACY_REJECT_IDENTITY_MODE, SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, confidence_interval, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now, update_burnin_run_counters
+from alphaforge.burnin import LEGACY_REJECT_IDENTITY_MODE, SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, confidence_interval, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now, update_burnin_run_counters
 from alphaforge.release_gates import latest_valid_operator_ack, release_gate_status, latest_release_snapshot
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 from alphaforge.live_readiness import LiveReadinessEvaluator
@@ -101,6 +101,20 @@ class BurnInQualificationEngine:
             decision_predicate = canonical_decision_sql("o")
             obs_counts = conn.execute(text(f"SELECT SUM(CASE WHEN UPPER(COALESCE(decision,''))='ACCEPTED' THEN 1 ELSE 0 END) AS accepted, SUM(CASE WHEN UPPER(COALESCE(decision,''))='REJECTED' THEN 1 ELSE 0 END) AS rejected, COUNT(*) AS samples FROM burnin_observations o WHERE burnin_run_id=:id AND {decision_predicate}"), {"id": burnin_run_id}).mappings().first() or {}
             canonical_reject_ids={str(r[0]) for r in conn.execute(text(f"SELECT json_extract(metrics_json,'$.reject_decision_id') FROM burnin_observations o WHERE burnin_run_id=:id AND UPPER(COALESCE(decision,''))='REJECTED' AND {decision_predicate}"), {"id":burnin_run_id}).all() if r[0]}
+            pending_reject_identity: dict[str, tuple[str, str]] = {}
+            try:
+                pending_reject_identity = {str(r[0]): (str(r[1]), str(r[2])) for r in conn.execute(text("""SELECT p.reject_decision_id,p.pending_label_id,p.campaign_id
+                    FROM burnin_pending_reject_labels p
+                    JOIN burnin_campaign_runs cr
+                      ON cr.campaign_id=p.campaign_id AND cr.burnin_run_id=p.burnin_run_id
+                    WHERE p.burnin_run_id=:id
+                      AND NOT EXISTS (SELECT 1 FROM burnin_observations diagnostic
+                        WHERE diagnostic.burnin_run_id=p.burnin_run_id
+                          AND diagnostic.observation_id LIKE 'incomplete_reject_geometry_%'
+                          AND json_extract(diagnostic.metrics_json,'$.reject_decision_id')=p.reject_decision_id
+                          AND diagnostic.evidence_complete=0)"""), {"id": burnin_run_id}).all() if r[0]}
+            except SQLAlchemyError:
+                pending_reject_identity = {}
             observation_metrics=[r[0] for r in conn.execute(text("SELECT metrics_json FROM burnin_observations WHERE burnin_run_id=:id"), {"id":burnin_run_id}).all()]
             identity_mode=qualification_reject_identity_mode([phase], observation_metrics)
             samples=int(obs_counts.get("samples") or 0); accepted=int(obs_counts.get("accepted") or 0); rejected_count=int(obs_counts.get("rejected") or 0); closed=len(trades)
@@ -108,8 +122,31 @@ class BurnInQualificationEngine:
             completed_rejects=[r for r in rejects if int(r.get("evidence_complete") or 0)==1 and str(r.get("forward_label") or "").upper() in valid_labels and r.get("hypothetical_net_r_after_costs") is not None]
             diagnostic_ambiguous_rejects=[r for r in completed_rejects if str(r.get("forward_label") or "").upper()=="AMBIGUOUS"]
             incomplete_rejects=[r for r in rejects if r not in completed_rejects]
-            identity_linked_rejects=[r for r in completed_rejects if identity_mode == LEGACY_REJECT_IDENTITY_MODE or reject_decision_id_from_outcome(r) in canonical_reject_ids]
-            attributable_rejects=[r for r in identity_linked_rejects if self._reject_quality_attributable(r)]
+            def identity_linked(row):
+                if identity_mode == LEGACY_REJECT_IDENTITY_MODE:
+                    return True
+                reject_id = reject_decision_id_from_outcome(row)
+                if reject_id not in canonical_reject_ids:
+                    return False
+                try:
+                    payload = json.loads(row.get("payload_json") or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    payload = {}
+                if burnin_run_id.endswith("__aggregate"):
+                    return payload.get("canonical_pending_linked") in (1, True)
+                pending = pending_reject_identity.get(str(reject_id))
+                return bool(pending) and canonical_reject_outcome_link_matches(
+                    row, campaign_id=pending[1], burnin_run_id=burnin_run_id,
+                    reject_decision_id=str(reject_id), pending_label_id=pending[0])
+            identity_linked_rejects=[r for r in completed_rejects if identity_linked(r)]
+            attributable_candidates=[r for r in identity_linked_rejects if self._reject_quality_attributable(r)]
+            if identity_mode == LEGACY_REJECT_IDENTITY_MODE:
+                attributable_rejects=attributable_candidates
+            else:
+                attributable_by_identity={}
+                for row in attributable_candidates:
+                    attributable_by_identity.setdefault(reject_decision_id_from_outcome(row),row)
+                attributable_rejects=list(attributable_by_identity.values())
             qualification_ambiguous_rejects=[r for r in attributable_rejects if str(r.get("forward_label") or "").upper()=="AMBIGUOUS"]
             resolved_identity_count=(len(attributable_rejects) if identity_mode == LEGACY_REJECT_IDENTITY_MODE else len({reject_decision_id_from_outcome(r) for r in attributable_rejects}))
             pending_rejects=max(0, rejected_count-resolved_identity_count)

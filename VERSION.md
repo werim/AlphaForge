@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+## M0 canonical reject-label identity correction (2026-09-08)
+- Current version: prospective canonical reject/pending-label/outcome identity enforcement; no schema, strategy, scoring, or threshold change.
+- Current phase: isolated M0 correctness validation on `dev` including PR #355.
+- Runtime maturity: PAPER reject labels are created only after an explicit canonical `REJECTED` observation exists in the same campaign/run; canonical IDs are internally namespaced, repeated scoring/setup rejects remain idempotent across retries and restart, and retries retain one pending label and one explicitly ownership-linked immutable outcome identity.
+- BACKTEST/PAPER/LIVE alignment: decision logic and execution authorization are unchanged. PAPER burn-in persistence is stricter; LIVE order authorization remains unchanged and fail-closed.
+- Lifecycle coverage: canonical `SIGNAL_REJECTED` evidence precedes pending-label creation. Diagnostic/orphan observations remain auditable but cannot qualify.
+- Execution realism coverage: existing geometry, horizon, candle, and cost semantics are unchanged; legitimately incomplete geometry remains label-ineligible.
+- Known critical risks: historical campaign data is not repaired or migrated and must not be treated as corrected. Fresh isolated PAPER evidence is required before any readiness conclusion.
+- Last audit date: 2026-09-08. Live readiness verdict: NOT LIVE READY.
+
 ## M0 scoring-context wiring correction (2026-09-08)
 - Current version: isolated runtime scoring-context wiring and observability patch; no schema, strategy, or threshold change.
 - Current phase: focused PAPER/LIVE parity, AIBrain, MTF, persistence, execution, and lifecycle regression validation complete.

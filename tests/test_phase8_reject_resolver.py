@@ -1,10 +1,28 @@
 import sqlite3
 import json
+from alphaforge.burnin import persist_burnin_observation
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
-from alphaforge.burnin_resolver import persist_pending_reject_label, resolve_pending_rejects
+from alphaforge.burnin_resolver import persist_pending_reject_label as _persist_pending_reject_label, resolve_pending_rejects
 from alphaforge.persistence import init_db
 
 COSTS={"spread_cost":0.01,"entry_slippage_cost":0.01,"exit_slippage_cost":0.01,"fee_cost":0.01,"funding_cost":0.0,"latency_cost":0.0}
+
+
+def persist_pending_reject_label(conn, **kwargs):
+    """Resolver tests operate on canonical pending labels unless stated otherwise."""
+    run_id = kwargs["burnin_run_id"]
+    reject_id = kwargs["reject_decision_id"]
+    release_id = conn.execute(
+        "SELECT release_id FROM burnin_runs WHERE burnin_run_id=?", (run_id,)
+    ).fetchone()[0]
+    persist_burnin_observation(
+        conn, observation_id=f"test-canonical:{run_id}:{reject_id}",
+        burnin_run_id=run_id, release_id=release_id, execution_mode="PAPER",
+        decision="REJECTED",
+        metrics={"reject_decision_id": reject_id,
+                 "campaign_id": kwargs["campaign_id"]},
+    )
+    return _persist_pending_reject_label(conn, **kwargs)
 
 def setup(tmp_path):
     conn=sqlite3.connect(tmp_path/'a.db'); conn.row_factory=sqlite3.Row
@@ -108,8 +126,8 @@ def test_reject_feedback_labels_reviews_and_is_restart_idempotent(tmp_path):
         conn = sqlite3.connect(db); conn.row_factory = sqlite3.Row
         camp = create_campaign(conn, release_id=signal_id, duration_days=1, symbols=["BTCUSDT"], intervals=["1m"])
         run = start_or_resume_campaign(conn, camp.campaign_id)["burnin_run_id"]
-        conn.execute("INSERT INTO rejected_signal_reviews(signal_id,symbol,setup_type,regime,reject_reason,created_at,payload_json) VALUES(?,?,?,?,?,?,?)",
-                     (signal_id,"BTCUSDT","BREAKOUT","TRENDING","LOW_CONFIDENCE","2026-01-01T00:00:00Z","{}"))
+        conn.execute("INSERT INTO rejected_signal_reviews(reject_decision_id,signal_id,symbol,setup_type,regime,reject_reason,created_at,payload_json) VALUES(?,?,?,?,?,?,?,?)",
+                     (signal_id,signal_id,"BTCUSDT","BREAKOUT","TRENDING","LOW_CONFIDENCE","2026-01-01T00:00:00Z","{}"))
         kwargs=dict(campaign_id=camp.campaign_id,burnin_run_id=run,reject_decision_id=signal_id,signal_id=signal_id,symbol="BTCUSDT",side="LONG",decision_timestamp="2026-01-01T00:00:00Z",entry=100,stop=90,target=120,horizon_seconds=120,execution_cost_assumptions=COSTS,regime="TRENDING",reject_reason="LOW_CONFIDENCE",source_provenance={"provider":"PAPER","bar_seconds":60,"setup_type":"BREAKOUT","volatility_regime":"NORMAL"})
         assert persist_pending_reject_label(conn, **kwargs)
         assert persist_pending_reject_label(conn, **kwargs)
@@ -165,7 +183,7 @@ def test_timeframe_aware_due_at_and_invalid_geometry_audit(tmp_path):
         row=conn.execute("SELECT horizon_seconds,timeframe FROM burnin_pending_reject_labels WHERE reject_decision_id=?",(tf,)).fetchone(); assert tuple(row)==(240*seconds,tf)
     assert persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='zero',signal_id='zero',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=1,entry=100,stop=100,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'}) is None
     assert conn.execute("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE reject_decision_id='zero'").fetchone()[0]==0
-    assert 'zero_risk' in conn.execute("SELECT missing_fields_json FROM burnin_observations WHERE metrics_json LIKE '%zero%'").fetchone()[0]
+    assert 'zero_risk' in conn.execute("SELECT missing_fields_json FROM burnin_observations WHERE observation_id LIKE 'incomplete_reject_geometry_%' AND metrics_json LIKE '%zero%'").fetchone()[0]
 
 
 def test_partial_and_gapped_windows_retry_before_immutable_finalization(tmp_path):

@@ -101,6 +101,23 @@ def reject_decision_id_from_outcome(row: Mapping[str, Any]) -> str | None:
         return None
     return outcome_id[5:].split(":agg:", 1)[0] or None
 
+def canonical_reject_outcome_link_matches(
+    row: Mapping[str, Any], *, campaign_id: str, burnin_run_id: str,
+    reject_decision_id: str, pending_label_id: str,
+) -> bool:
+    """Require the explicit canonical ownership chain; never infer it from an ID."""
+    try:
+        payload = json.loads(row.get("payload_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        str(row.get("burnin_run_id") or "") == str(burnin_run_id)
+        and str(payload.get("campaign_id") or "") == str(campaign_id)
+        and str(payload.get("burnin_run_id") or "") == str(burnin_run_id)
+        and str(payload.get("reject_decision_id") or "") == str(reject_decision_id)
+        and str(payload.get("pending_label_id") or "") == str(pending_label_id)
+    )
+
 def config_hash(config: Mapping[str, Any]) -> str:
     return canonical_hash(dict(config))
 
