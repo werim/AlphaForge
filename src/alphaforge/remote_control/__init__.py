@@ -23,6 +23,10 @@ from alphaforge.remote_control.telegram_adapter import (
     parse_telegram_command,
     process_telegram_update,
 )
+from alphaforge.remote_control.telegram_controller import (
+    build_telegram_help_text,
+    process_telegram_request,
+)
 
 
 class RemoteControlReplayStore(Protocol):
