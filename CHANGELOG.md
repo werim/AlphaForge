@@ -1,3 +1,28 @@
+# M0 canonical reject-label identity correction — 2026-09-08
+
+### Added
+- Same-campaign/run canonical reject validation and explicit invalid-identity diagnostics at pending-label persistence and resolution boundaries.
+- Focused exactly-once, orphan exclusion, cross-scope, retry-idempotency, coverage-bound, and geometry-ineligibility regressions.
+
+### Changed
+- Runtime persists canonical reject evidence before enqueueing its pending label and derives decision IDs from full campaign/run decision context without trusting caller-supplied IDs.
+- Campaign aggregation, qualification, calibration, and reject-label status require explicit pending-label/campaign/run ownership in addition to canonical `(run, reject decision)` linkage.
+
+### Fixed
+- Orphan, diagnostic, cross-run, and cross-campaign pending labels/outcomes can no longer contribute to canonical qualification counts or reject-quality statistics.
+- Resolver retries cannot create multiple attributable outcomes, outcome IDs alone cannot confer attribution, and NULL review identities no longer link through `signal_id` alone.
+- Canonical reject observation retries reuse the canonical decision identity, and aggregate reject denominators count distinct `(run, reject decision)` units.
+- Pending-label IDs are an injective prefix of canonical reject IDs rather than a truncated hash.
+
+### Removed
+- Signal-only canonical reject identity and review-link fallback semantics.
+
+### Breaking Changes
+- None to schema or trading behavior. Legacy orphan pending rows now fail closed and remain diagnostic instead of resolving or qualifying.
+
+### Known Issues
+- Historical campaign data is not migrated or repaired; fresh isolated PAPER evidence is required. LIVE remains NOT READY.
+
 # M0 scoring-context wiring correction — 2026-09-08
 
 ### Added

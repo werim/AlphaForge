@@ -6,6 +6,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from alphaforge.burnin import canonical_decision_sql, canonical_reject_outcome_link_matches, reject_decision_id_from_outcome
+
 REQUIRED = {
     "burnin_observations": {"observation_id", "burnin_run_id", "execution_mode", "decision", "symbol", "evidence_complete", "missing_fields_json", "metrics_json", "source_provenance_json"},
     "rejected_signal_reviews": {"reject_decision_id", "signal_id", "reject_reason", "raw_rr", "effective_rr", "reject_correct", "execution_invalidated", "outcome_ambiguous", "evidence_complete", "max_favorable_excursion_pct", "max_adverse_excursion_pct"},
@@ -79,6 +81,11 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
         f"""SELECT * FROM burnin_observations WHERE burnin_run_id IN ({run_ph})
         AND UPPER(COALESCE(execution_mode,''))='PAPER'
         AND UPPER(COALESCE(decision,''))='REJECTED'""", run_ids)]
+    canonical_observations = [dict(r) for r in conn.execute(
+        f"""SELECT * FROM burnin_observations o WHERE burnin_run_id IN ({run_ph})
+        AND UPPER(COALESCE(execution_mode,''))='PAPER'
+        AND UPPER(COALESCE(decision,''))='REJECTED'
+        AND {canonical_decision_sql('o')}""", run_ids)]
 
     def decoded(value: Any, fallback: Any) -> Any:
         try:
@@ -88,7 +95,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             return fallback
 
     observation_ids = []
-    canonical_observation_counts: dict[str, int] = {}
+    canonical_observation_counts: dict[tuple[str, str], int] = {}
     legacy_unattributed_observations = 0
     incomplete_observation_ids: set[str] = set()
     for row in observations:
@@ -100,14 +107,19 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
             observation_kind = str(metrics.get("observation_kind") or (
                 "DIAGNOSTIC" if str(row.get("observation_id") or "").startswith("incomplete_reject_geometry_")
                 else "CANONICAL_DECISION")).upper()
-            if observation_kind == "CANONICAL_DECISION":
-                canonical_observation_counts[reject_id] = canonical_observation_counts.get(reject_id, 0) + 1
             missing_fields = decoded(row.get("missing_fields_json"), [])
             if (str(row.get("observation_id") or "").startswith("incomplete_reject_geometry_") or
                     row.get("evidence_complete") != 1 or bool(missing_fields)):
                 incomplete_observation_ids.add(str(reject_id))
         else:
             legacy_unattributed_observations += 1
+    canonical_keys = {
+        (str(row["burnin_run_id"]), str(metrics["reject_decision_id"]))
+        for row in canonical_observations
+        for metrics in [decoded(row.get("metrics_json"), {})]
+        if isinstance(metrics, dict) and metrics.get("reject_decision_id")
+    }
+    canonical_observation_counts = {key: 1 for key in canonical_keys}
 
     decision_ids = sorted(set(observation_ids) | {r["reject_decision_id"] for r in p})
     signal_ids = sorted({r["signal_id"] for r in p if r.get("signal_id") is not None})
@@ -164,32 +176,36 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
         if row.get("reject_decision_id") is not None
         and not qualification_attributable(decoded(row.get("payload_json"), {}), row.get("reject_reason"))
     )
-    p = [row for row in all_pending if str(row["reject_decision_id"]) not in non_attributable_ids]
+    attributable_pending = [row for row in all_pending
+                            if str(row["reject_decision_id"]) not in non_attributable_ids]
+    labels_without_one_canonical_reject = sorted(
+        row["reject_decision_id"] for row in attributable_pending
+        if canonical_observation_counts.get(
+            (str(row["burnin_run_id"]), str(row["reject_decision_id"])), 0) != 1
+    )
+    p = [row for row in attributable_pending
+         if (str(row["burnin_run_id"]), str(row["reject_decision_id"])) in canonical_keys]
     reviews = [row for row in all_reviews if (row.get("reject_decision_id") is None
                or str(row["reject_decision_id"]) not in non_attributable_ids)]
     observation_ids = [reject_id for reject_id in observation_ids if reject_id not in non_attributable_ids]
     incomplete_observation_ids.difference_update(non_attributable_ids)
-    canonical_observation_counts = {reject_id: count for reject_id, count in canonical_observation_counts.items()
-                                    if reject_id not in non_attributable_ids}
-    qualification_decision_ids = set(observation_ids) | {str(row["reject_decision_id"]) for row in p}
+    canonical_observation_counts = {key: count for key, count in canonical_observation_counts.items()
+                                    if key[1] not in non_attributable_ids}
+    qualification_decision_ids = {key[1] for key in canonical_observation_counts}
 
     all_outcomes = [dict(r) for r in conn.execute(
         f"SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id IN ({run_ph})", run_ids)]
     outcomes = [row for row in all_outcomes
-                if row["reject_outcome_id"].removeprefix("rout_") not in non_attributable_ids
+                if str(reject_decision_id_from_outcome(row) or "") not in non_attributable_ids
                 and qualification_attributable(decoded(row.get("payload_json"), {}), row.get("reject_reason"))]
-    # Mirror burnin_resolver._sync_review exactly: explicit decision identity
-    # wins; signal identity is eligible only on a legacy NULL-decision review.
-    # Keep the mapping external and read-only rather than backfilling old rows.
+    # Mirror burnin_resolver._sync_review exactly: only explicit decision identity
+    # can link a review. Keep the mapping read-only rather than backfilling old rows.
     review_by_pending: dict[str, dict[str, Any]] = {}
     matched_review_rows: set[int] = set()
     ambiguous_review_links: list[str] = []
     for pending in p:
         exact = [r for r in reviews if r["reject_decision_id"] == pending["reject_decision_id"]]
         candidates = exact
-        if not exact:
-            candidates = [r for r in reviews if r["reject_decision_id"] is None and
-                          r.get("signal_id") == pending.get("signal_id")]
         if len(candidates) == 1:
             review_by_pending[pending["reject_decision_id"]] = candidates[0]
             matched_review_rows.add(int(candidates[0]["id"]))
@@ -205,11 +221,21 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
                 review_by_pending.pop(reject_id, None)
     ambiguous_review_links = sorted(set(ambiguous_review_links))
     matched_review_rows = {int(review["id"]) for review in review_by_pending.values()}
-    expected_outcome = {"rout_" + r["reject_decision_id"]: r for r in p}
-    canonical = [o for o in outcomes if o["reject_outcome_id"] in expected_outcome]
+    expected_outcome = {
+        (str(r["burnin_run_id"]), str(r["reject_decision_id"])): r for r in p}
+    canonical = []
+    for outcome in outcomes:
+        reject_id = reject_decision_id_from_outcome(outcome)
+        pending = expected_outcome.get((str(outcome["burnin_run_id"]), str(reject_id)))
+        if pending and canonical_reject_outcome_link_matches(
+                outcome, campaign_id=str(pending["campaign_id"]),
+                burnin_run_id=str(pending["burnin_run_id"]),
+                reject_decision_id=str(pending["reject_decision_id"]),
+                pending_label_id=str(pending["pending_label_id"])):
+            canonical.append(outcome)
     outcomes_by_decision: dict[str, list[dict[str, Any]]] = {}
     for outcome in canonical:
-        outcomes_by_decision.setdefault(outcome["reject_outcome_id"].removeprefix("rout_"), []).append(outcome)
+        outcomes_by_decision.setdefault(str(reject_decision_id_from_outcome(outcome)), []).append(outcome)
     outcome_by_decision = {rid: rows[0] for rid, rows in outcomes_by_decision.items() if len(rows) == 1}
 
     review_ids = [r["reject_decision_id"] for r in reviews if r["reject_decision_id"] is not None]
@@ -223,11 +249,8 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
                          str(r.get("reject_decision_id") or "") not in incomplete_observation_ids)
     orphan_pending = sum(1 for r in p if r["reject_decision_id"] not in review_by_pending and
                          r["reject_decision_id"] not in ambiguous_review_links)
-    labels_without_one_canonical_reject = sorted(
-        r["reject_decision_id"] for r in p
-        if canonical_observation_counts.get(r["reject_decision_id"], 0) != 1
-    )
-    orphan_outcomes = sum(1 for o in outcomes if o["reject_outcome_id"] not in expected_outcome)
+    orphan_pending += len(labels_without_one_canonical_reject)
+    orphan_outcomes = len(outcomes) - len(canonical)
     states = {s: sum(1 for r in p if str(r["status"]).upper() == s) for s in STATUSES}
     stale = [r for r in p if str(r["status"]).upper() == "RESOLVING" and
              (_iso(r["claimed_at"]) is None or (generated - _iso(r["claimed_at"])).total_seconds() > stale_claim_seconds)]
@@ -284,8 +307,7 @@ def reject_label_status(conn: sqlite3.Connection, identity: str, *, now: str | N
         if not isinstance(costs, dict) or any(costs.get(key) is None for key in required_costs):
             missing_cost_ids.add(rid)
 
-    review_decision_ids = {str(r["reject_decision_id"]) for r in reviews if r.get("reject_decision_id")}
-    denominator_ids = qualification_decision_ids | review_decision_ids
+    denominator_ids = qualification_decision_ids
     pending_counts = {rid: sum(row["reject_decision_id"] == rid for row in p) for rid in denominator_ids}
     # An incomplete-geometry audit row is intentionally part of the reject
     # population, but cannot be label eligible.  All other scoped rejects are

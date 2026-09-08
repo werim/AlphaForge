@@ -20,12 +20,12 @@ def database(tmp_path, *, resolve=True, costs=COSTS, candles=None):
     conn.execute("""INSERT INTO rejected_signal_reviews(reject_decision_id,signal_id,reject_reason,raw_rr,effective_rr,created_at,payload_json)
                     VALUES('reject:1','s1','LOW_CONFIDENCE',2.0,1.8,'2026-01-01T00:00:00Z',?)""",
                  (json.dumps({"campaign_id": campaign.campaign_id}),))
+    add_reject_observation(conn, run, "reject:1")
     persist_pending_reject_label(conn, campaign_id=campaign.campaign_id, burnin_run_id=run,
         reject_decision_id="reject:1", signal_id="s1", symbol="BTCUSDT", side="LONG",
         decision_timestamp="2026-01-01T00:00:00Z", timeframe="1m", horizon_bars=1,
         entry=100, stop=90, target=120, execution_cost_assumptions=costs, regime="TRENDING",
         reject_reason="LOW_CONFIDENCE", source_provenance={"provider": "PAPER"})
-    add_reject_observation(conn, run, "reject:1")
     if resolve:
         resolve_pending_rejects(conn, {"BTCUSDT": candles or [{"timestamp": "2026-01-01T00:01:00Z", "high": 101, "low": 89}]}, now=NOW)
     conn.commit()
@@ -49,6 +49,20 @@ def add_reject_observation(conn, run, reject_id, *, incomplete=False):
         json.dumps({"provider": "PAPER"}), "test"))
 
 
+def add_orphan_pending_from_existing(conn, reject_id, signal_id):
+    original = dict(conn.execute("SELECT * FROM burnin_pending_reject_labels LIMIT 1").fetchone())
+    columns = [key for key in original if key != "id"]
+    values = [original[key] for key in columns]
+    values[columns.index("pending_label_id")] = f"orphan:{reject_id}"
+    values[columns.index("reject_decision_id")] = reject_id
+    values[columns.index("signal_id")] = signal_id
+    values[columns.index("status")] = "PENDING"
+    values[columns.index("evidence_complete")] = 0
+    conn.execute(
+        f"INSERT INTO burnin_pending_reject_labels({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+        values)
+
+
 def test_healthy_complete_pipeline_passes_and_correctness_is_valid(tmp_path):
     _, conn, cid = database(tmp_path)
     result = report(conn, cid)
@@ -57,6 +71,18 @@ def test_healthy_complete_pipeline_passes_and_correctness_is_valid(tmp_path):
     assert quality["reject_accuracy"] == 1.0 and quality["reject_correct_count"] == 1
     assert quality["average_mfe_pct"] == 1.0 and quality["average_mae_pct"] == 11.0
     assert quality["average_raw_rr"] == 2.0 and quality["average_effective_rr"] == 1.8
+
+
+def test_outcome_id_alone_cannot_regain_canonical_status_attribution(tmp_path):
+    _, conn, cid = database(tmp_path)
+    conn.execute("UPDATE burnin_reject_outcomes SET payload_json='{}'")
+
+    result = report(conn, cid)
+
+    assert result["status"] == "FAIL"
+    assert result["integrity"]["reject_outcomes"] == 0
+    assert result["integrity"]["outcomes_without_pending_labels"] == 1
+    assert result["evidence_correctness"]["resolved_without_canonical_outcome"] == 1
 
 
 def test_early_immature_and_zero_outcomes_are_incomplete(tmp_path):
@@ -130,13 +156,14 @@ def test_invalid_non_null_correct_label_fails(tmp_path):
     assert result["status"] == "FAIL" and "INVALID_REJECT_CORRECT_LABEL" in result["reason_codes"]
 
 
-def test_legacy_null_decision_review_links_by_signal_without_mutation(tmp_path):
+def test_null_decision_review_does_not_link_by_signal(tmp_path):
     _, conn, cid = database(tmp_path, resolve=False)
     conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id=NULL")
     result = report(conn, cid)
-    assert result["status"] == "INCOMPLETE"
-    assert result["integrity"]["pending_labels_without_reviews"] == 0
-    assert result["integrity"]["reviews_without_eligible_pending_labels"] == 0
+    assert result["status"] == "FAIL"
+    assert result["integrity"]["pending_labels_without_reviews"] == 1
+    assert result["integrity"]["reviews_without_eligible_pending_labels"] == 1
+    assert {"ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_REVIEW"} <= set(result["reason_codes"])
     assert conn.execute("SELECT reject_decision_id FROM rejected_signal_reviews").fetchone()[0] is None
 
 
@@ -148,7 +175,7 @@ def test_explicit_decision_mismatch_is_not_hidden_by_same_signal(tmp_path):
     assert {"ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_REVIEW"} <= set(result["reason_codes"])
 
 
-def test_multiple_legacy_signal_matches_fail_closed_as_ambiguous(tmp_path):
+def test_multiple_null_identity_reviews_fail_closed_as_orphans(tmp_path):
     _, conn, cid = database(tmp_path, resolve=False)
     conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id=NULL")
     conn.execute("""INSERT INTO rejected_signal_reviews(
@@ -157,11 +184,11 @@ def test_multiple_legacy_signal_matches_fail_closed_as_ambiguous(tmp_path):
                  (json.dumps({"campaign_id": cid}),))
     result = report(conn, cid)
     assert result["status"] == "FAIL"
-    assert {"AMBIGUOUS_REVIEW_LINKAGE", "DUPLICATE_REJECT_IDENTITY"} <= set(result["reason_codes"])
-    assert result["integrity"]["ambiguous_review_linkages"] == 1
+    assert {"ORPHAN_PENDING_LABEL", "ORPHAN_REJECT_REVIEW"} <= set(result["reason_codes"])
+    assert result["integrity"]["ambiguous_review_linkages"] == 0
 
 
-def test_one_legacy_review_cannot_link_to_multiple_pending_decisions(tmp_path):
+def test_null_identity_review_cannot_link_to_pending_decisions(tmp_path):
     _, conn, cid = database(tmp_path, resolve=False)
     conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id=NULL")
     original = dict(conn.execute("SELECT * FROM burnin_pending_reject_labels").fetchone())
@@ -172,18 +199,19 @@ def test_one_legacy_review_cannot_link_to_multiple_pending_decisions(tmp_path):
     conn.execute(f"INSERT INTO burnin_pending_reject_labels({','.join(columns)}) VALUES({','.join('?' for _ in columns)})", values)
     result = report(conn, cid)
     assert result["status"] == "FAIL"
-    assert result["integrity"]["ambiguous_review_linkages"] == 2
-    assert "AMBIGUOUS_REVIEW_LINKAGE" in result["reason_codes"]
+    assert result["integrity"]["ambiguous_review_linkages"] == 0
+    assert "ORPHAN_PENDING_LABEL" in result["reason_codes"]
+    assert "LABELS_WITHOUT_CANONICAL_REJECT" in result["reason_codes"]
 
 
-def test_legacy_linkage_remains_valid_after_resolver_synchronization(tmp_path):
+def test_resolver_does_not_synchronize_review_by_signal_only(tmp_path):
     _, conn, cid = database(tmp_path, resolve=False)
     conn.execute("UPDATE rejected_signal_reviews SET reject_decision_id=NULL")
     resolve_pending_rejects(conn, {"BTCUSDT": [{"timestamp": "2026-01-01T00:01:00Z", "high": 101, "low": 89}]}, now=NOW)
     result = report(conn, cid)
-    assert result["status"] == "PASS"
-    assert result["reject_quality"][0]["reject_accuracy"] == 1.0
-    assert result["reject_quality"][0]["reject_correct_count"] == 1
+    assert result["status"] == "FAIL"
+    assert "ORPHAN_REJECT_REVIEW" in result["reason_codes"]
+    assert result["reject_quality"][0]["reject_accuracy"] is None
     assert conn.execute("SELECT reject_decision_id FROM rejected_signal_reviews").fetchone()[0] is None
 
 
@@ -210,19 +238,14 @@ def test_non_attributable_shadow_label_remains_diagnostic_not_canonical_identity
     assert "ORPHAN_PENDING_LABEL" not in result["reason_codes"]
     assert result["coverage"]["total_rejected_decisions"] == 1
     assert result["integrity"]["pending_labels"] == 1
-    assert result["integrity"]["diagnostic_non_attributable_pending_labels"] == 1
+    assert result["integrity"]["diagnostic_non_attributable_pending_labels"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM burnin_observations WHERE observation_id LIKE 'invalid_reject_identity_%'").fetchone()[0] == 1
 
 
 def test_attributable_label_requires_exactly_one_canonical_reject(tmp_path):
     _, conn, cid = database(tmp_path)
     run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
-    persist_pending_reject_label(conn, campaign_id=cid, burnin_run_id=run,
-        reject_decision_id="guided:orphan", signal_id="guided", symbol="BTCUSDT", side="LONG",
-        decision_timestamp="2026-01-01T00:00:00Z", timeframe="1m", horizon_bars=1,
-        entry=100, stop=90, target=120, execution_cost_assumptions=COSTS,
-        regime="TRENDING", reject_reason="LOW_CONFIDENCE",
-        source_provenance={"forward_label_subject": "GUIDED_CANDIDATE",
-                           "reject_quality_attributable": True})
+    add_orphan_pending_from_existing(conn, "guided:orphan", "guided")
     conn.execute("""INSERT INTO rejected_signal_reviews(
         reject_decision_id,signal_id,reject_reason,created_at,payload_json)
         VALUES('guided:orphan','guided','LOW_CONFIDENCE','2026-01-01T00:00:00Z',?)""",
@@ -248,8 +271,8 @@ def test_attributable_label_requires_exactly_one_canonical_reject(tmp_path):
         source_provenance_json,schema_version FROM burnin_observations
         WHERE observation_id='reject_guided:orphan'""")
     duplicated = report(conn, cid)
-    assert duplicated["status"] == "FAIL"
-    assert "LABELS_WITHOUT_CANONICAL_REJECT" in duplicated["reason_codes"]
+    assert "LABELS_WITHOUT_CANONICAL_REJECT" not in duplicated["reason_codes"]
+    assert duplicated["integrity"]["qualification_labels_without_exactly_one_canonical_reject"] == 0
 
 
 def test_legacy_pre317_database_bootstraps_without_fabricating_geometry(tmp_path):
@@ -281,6 +304,7 @@ def test_complete_denominator_prevents_one_good_label_hiding_unlabelable_rejects
     run = conn.execute("SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=?", (cid,)).fetchone()[0]
     for index in range(5):
         reject_id = f"bad:{index}"
+        add_reject_observation(conn, run, reject_id)
         add_reject_observation(conn, run, reject_id, incomplete=True)
         conn.execute("""INSERT INTO rejected_signal_reviews(
             reject_decision_id,signal_id,reject_reason,created_at,payload_json)

@@ -45,13 +45,12 @@ def test_label_eligibility_uses_contract_failure_not_diagnostic_presence():
     assert metrics['label_ineligible_by_reason']=={'stop':1}
     assert metrics['reject_label_coverage']==0.0
     label_kw=dict(campaign_id='camp',burnin_run_id='r',signal_id='s',symbol='BTC',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=60,execution_cost_assumptions={},regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={})
-    persist_pending_reject_label(c,reject_decision_id='R1',**label_kw)
-    persist_pending_reject_label(c,reject_decision_id='R2',**label_kw)
-    impossible=aggregate_campaign(c,'camp')['metrics']
-    assert impossible['reject_label_coverage']==1.0
-    assert impossible['reject_label_integrity_status']=='FAIL'
-    assert 'UNIQUE_LABELS_EXCEED_ELIGIBLE_REJECTS' in impossible['reject_label_integrity_issues']
-    assert 'LABELS_FOR_INELIGIBLE_REJECTS' in impossible['reject_label_integrity_issues']
+    assert persist_pending_reject_label(c,reject_decision_id='R1',**label_kw)
+    assert persist_pending_reject_label(c,reject_decision_id='R2',**label_kw) is None
+    after_label=aggregate_campaign(c,'camp')['metrics']
+    assert after_label['reject_label_coverage']==1.0
+    assert after_label['eligible_reject_labels_persisted']==1
+    assert after_label['reject_label_integrity_status']=='PASS'
 
 
 def test_layer_thresholds_are_independent_and_identity_sensitive():
@@ -97,17 +96,18 @@ def test_pending_label_exactly_once_and_calibration_excludes_incomplete():
     c.execute("insert into burnin_campaign_runs(campaign_id,burnin_run_id,continuation_sequence,status,started_at,created_at,schema_version) values('camp','r',0,'RUNNING','x','x','v')")
     persist_burnin_observation(c,observation_id='canonical-rid',burnin_run_id='r',release_id='rel',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'rid'})
     kw=dict(campaign_id='camp',burnin_run_id='r',reject_decision_id='rid',signal_id='s',symbol='BTC',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=60,execution_cost_assumptions={},regime='TRENDING',reject_reason='MTF_EXECUTION_NOT_CONFIRMED',source_provenance={'mtf':{'execution':{'ma_delta_strength':.00015}}})
-    assert persist_pending_reject_label(c,**kw)==persist_pending_reject_label(c,**kw)
+    pending_id = persist_pending_reject_label(c,**kw)
+    assert pending_id==persist_pending_reject_label(c,**kw)
     assert c.execute('select count(*) from burnin_pending_reject_labels').fetchone()[0]==1
-    c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_rid','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','TP_BEFORE_SL',1,0,0,.4,0,.4,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':False}),))
+    c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_rid','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','TP_BEFORE_SL',1,0,0,.4,0,.4,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':False,'reject_decision_id':'rid','pending_label_id':pending_id,'campaign_id':'camp','burnin_run_id':'r'}),))
     out=execution_threshold_calibration(c,'camp'); bucket=next(x for x in out if x['bucket']=='0.0001-0.0002')
     assert bucket['count']==1 and bucket['TP_BEFORE_SL']==1 and bucket['reject_correct_pct']==0
     shadow_kw={**kw,'reject_decision_id':'shadow','signal_id':'shadow',
                'source_provenance':{'forward_label_subject':'LEGACY_SCANNER_SHADOW_CANDIDATE',
                                     'mtf':{'execution':{'ma_delta_strength':.00015}}}}
     persist_burnin_observation(c,observation_id='canonical-shadow',burnin_run_id='r',release_id='rel',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'shadow'})
-    persist_pending_reject_label(c,**shadow_kw)
-    c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_shadow','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','SL_BEFORE_TP',0,1,0,-10,10,0,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':True,'forward_label_subject':'LEGACY_SCANNER_SHADOW_CANDIDATE','reject_quality_attributable':False}),))
+    shadow_pending_id = persist_pending_reject_label(c,**shadow_kw)
+    c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_shadow','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','SL_BEFORE_TP',0,1,0,-10,10,0,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':True,'reject_decision_id':'shadow','pending_label_id':shadow_pending_id,'campaign_id':'camp','burnin_run_id':'r','forward_label_subject':'LEGACY_SCANNER_SHADOW_CANDIDATE','reject_quality_attributable':False}),))
     shadow_excluded=next(x for x in execution_threshold_calibration(c,'camp') if x['bucket']=='0.0001-0.0002')
     assert shadow_excluded == bucket
     aggregate=aggregate_campaign(c,'camp')['metrics']
@@ -127,7 +127,7 @@ def test_calibration_keeps_strength_at_or_above_highest_edge():
     c.execute("insert into burnin_campaign_runs(campaign_id,burnin_run_id,continuation_sequence,status,started_at,created_at,schema_version) values('camp','r',0,'RUNNING','x','x','v')")
     persist_burnin_observation(c,observation_id='canonical-overflow',burnin_run_id='r',release_id='rel',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'overflow'})
     kw=dict(campaign_id='camp',burnin_run_id='r',reject_decision_id='overflow',signal_id='s',symbol='BTC',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=60,execution_cost_assumptions={},regime='TRENDING',reject_reason='MTF_EXECUTION_NOT_CONFIRMED',source_provenance={'mtf':{'execution':{'ma_delta_strength':.0007}}})
-    persist_pending_reject_label(c,**kw)
-    c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_overflow','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','SL_BEFORE_TP',0,1,0,-1,1,0,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':True}),))
+    pending_id = persist_pending_reject_label(c,**kw)
+    c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_overflow','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','SL_BEFORE_TP',0,1,0,-1,1,0,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':True,'reject_decision_id':'overflow','pending_label_id':pending_id,'campaign_id':'camp','burnin_run_id':'r'}),))
     overflow=next(x for x in execution_threshold_calibration(c,'camp') if x['bucket']=='>=0.0005')
     assert overflow['count']==1 and overflow['SL_BEFORE_TP']==1

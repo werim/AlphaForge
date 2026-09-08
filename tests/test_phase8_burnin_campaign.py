@@ -210,6 +210,7 @@ def test_aggregate_preserves_legacy_shadow_subject_for_fail_closed_qualification
     db=tmp_path/'shadow-aggregate.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='shadow-aggregate',duration_days=1,symbols=['BTCUSDT'],intervals=['1m'])
     run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_burnin_observation(conn,observation_id='canonical-shadow-id',burnin_run_id=run['burnin_run_id'],release_id='shadow-aggregate',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'shadow-id'})
     persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='shadow-id',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',timeframe='1m',horizon_bars=1,entry=100,stop=90,target=120,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='MTF_EXECUTION_COUNTER_REGIME',source_provenance={'forward_label_subject':'LEGACY_SCANNER_SHADOW_CANDIDATE'})
     persist_burnin_reject_outcome(conn,reject_outcome_id='rout_shadow-id',burnin_run_id=run['burnin_run_id'],release_id='shadow-aggregate',reject_reason='MTF_EXECUTION_COUNTER_REGIME',symbol='BTCUSDT',regime='TRENDING',forward_label='SL_BEFORE_TP',hypothetical_net_r_after_costs=-1,avoided_loss=1,missed_profit=0,payload={})
     conn.commit(); conn.close()
@@ -452,11 +453,12 @@ def test_missing_reject_geometry_no_fabrication_and_not_counted(tmp_path):
     db=tmp_path/'geom.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relg',duration_days=1,symbols=['BTCUSDT'],intervals=['1h'])
     run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_burnin_observation(conn,observation_id='canonical-bad',burnin_run_id=run['burnin_run_id'],release_id='relg',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'bad'})
     pid=persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='bad',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=None,target=None,horizon_seconds=3600,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'})
     conn.commit()
     assert pid is None
     assert conn.execute('select count(*) from burnin_pending_reject_labels').fetchone()[0] == 0
-    obs=conn.execute('select evidence_complete, missing_fields_json from burnin_observations').fetchone()
+    obs=conn.execute("select evidence_complete, missing_fields_json from burnin_observations where observation_id like 'incomplete_reject_geometry_%'").fetchone()
     assert obs[0] == 0 and 'stop' in obs[1] and 'target' in obs[1]
     conn.close()
 import os, asyncio
@@ -563,6 +565,7 @@ def test_maintenance_loop_updates_duration_and_completion(tmp_path):
 def test_resolver_threshold_pauses_campaign(tmp_path):
     db=tmp_path/'fail.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relf',duration_days=1,symbols=['BTCUSDT'],intervals=['1h']); run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_burnin_observation(conn,observation_id='canonical-fail',burnin_run_id=run['burnin_run_id'],release_id='relf',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'fail'})
     persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='fail',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=1,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'}); conn.commit(); conn.close(); e=_engine(db)
     runner=BurnInCampaignRunner(e,camp.campaign_id,lambda s,a,b: (_ for _ in ()).throw(RuntimeError('candle failure')),resolver_failure_threshold=1)
     assert runner.resolver_tick()['status']=='PAUSED'; e.dispose()
@@ -668,6 +671,7 @@ def test_worker_default_runtime_factory_starts_real_builder(monkeypatch, tmp_pat
 def test_resolver_and_maintenance_loops_run_concurrently_with_runtime(tmp_path):
     db=tmp_path/'concurrent.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='relconc',duration_days=1,symbols=['BTCUSDT'],intervals=['1h']); run=start_or_resume_campaign(conn,camp.campaign_id)
+    persist_burnin_observation(conn,observation_id='canonical-conc',burnin_run_id=run['burnin_run_id'],release_id='relconc',execution_mode='PAPER',decision='REJECTED',metrics={'reject_decision_id':'conc'})
     persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='conc',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=90,target=120,horizon_seconds=1,execution_cost_assumptions=COSTS,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER'}); conn.commit(); conn.close(); e=_engine(db)
     class SlowRuntime(_FakeRuntime):
         async def start(self): await asyncio.sleep(0.05); raise RuntimeError('done')
