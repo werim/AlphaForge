@@ -9,6 +9,7 @@
 - Campaign aggregation, qualification, calibration, and reject-label status require explicit pending-label/campaign/run ownership in addition to canonical `(run, reject decision)` linkage.
 
 ### Fixed
+- Repeated scoring rejects now reuse the runtime-owned canonical review identity, and restarted runtimes recognize already-persisted setup decisions by canonical run-scoped evidence.
 - Orphan, diagnostic, cross-run, and cross-campaign pending labels/outcomes can no longer contribute to canonical qualification counts or reject-quality statistics.
 - Resolver retries cannot create multiple attributable outcomes, outcome IDs alone cannot confer attribution, and NULL review identities no longer link through `signal_id` alone.
 - Canonical reject observation retries reuse the canonical decision identity, and aggregate reject denominators count distinct `(run, reject decision)` units.

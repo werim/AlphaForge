@@ -33,7 +33,7 @@ from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import fetch_expectancy_stat_detail, init_db
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
-from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
+from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
@@ -1685,6 +1685,9 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
+        signal_payload["reject_decision_id"] = self._canonical_reject_decision_id({
+            **market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
+        })
         market_ctx, regime_ctx, stats_ctx = self._build_scoring_context(
             signal_payload, market_ctx
         )
@@ -2082,14 +2085,7 @@ class RuntimeOrchestrator:
         campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         supplied_reject_decision_id = result.get("reject_decision_id")
-        reject_decision_id = "reject:" + canonical_hash({
-            "runtime_identity": runtime_identity,
-            "burnin_run_id": self._burnin_run_id,
-            "signal_id": signal_id,
-            "setup_identity": result.get("setup_identity"),
-            "symbol": result.get("symbol"),
-            "decision": "REJECTED",
-        })[:24]
+        reject_decision_id = self._canonical_reject_decision_id(result)
         if supplied_reject_decision_id and str(supplied_reject_decision_id) != reject_decision_id:
             result["source_reject_decision_id"] = str(supplied_reject_decision_id)
         result.update({
@@ -2109,6 +2105,18 @@ class RuntimeOrchestrator:
                                       else result.get("forward_label_subject") or forward_label_subject),
         })
         return result
+
+    def _canonical_reject_decision_id(self, payload: Mapping[str, Any]) -> str:
+        campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
+        runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
+        return "reject:" + canonical_hash({
+            "runtime_identity": runtime_identity,
+            "burnin_run_id": self._burnin_run_id,
+            "signal_id": str(payload.get("signal_id") or ""),
+            "setup_identity": payload.get("setup_identity"),
+            "symbol": payload.get("symbol"),
+            "decision": "REJECTED",
+        })[:24]
 
     def _reject_campaign_id(self) -> str | None:
         if not self._burnin_run_id:
@@ -2304,9 +2312,16 @@ class RuntimeOrchestrator:
         observation_id = self._setup_observation_id(setup_identity, normalized)
         try:
             with engine.connect() as conn:
-                exists = conn.execute(text(
-                    "SELECT 1 FROM burnin_observations WHERE observation_id=:oid"
-                ), {"oid": observation_id}).first()
+                exists = conn.execute(text(f"""SELECT 1 FROM burnin_observations o
+                    WHERE o.burnin_run_id=:bid AND (
+                      o.observation_id=:oid OR (
+                        UPPER(COALESCE(o.decision,''))=:decision
+                        AND json_extract(o.metrics_json,'$.setup_identity')=:setup_identity
+                        AND {canonical_decision_sql('o')}
+                      )) LIMIT 1"""), {
+                    "bid": self._burnin_run_id, "oid": observation_id,
+                    "decision": normalized, "setup_identity": setup_identity,
+                }).first()
         except Exception:
             return False
         if exists:
