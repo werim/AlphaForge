@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -25,6 +26,12 @@ TRUSTED_VALUES = {
     "remote_control_run_id": "RUN-456",
     "authorized_sender": "sender@example.com",
 }
+NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+FRESH_AT = NOW.isoformat()
+
+
+def fixed_clock() -> datetime:
+    return NOW
 
 
 def make_config_file(tmpdir: str, *, include_sender: bool = True) -> Path:
@@ -313,7 +320,9 @@ class RemoteControlCommandTests(unittest.TestCase):
                     replay_store=store,
                     sender="sender@example.com",
                     message_id="<msg-1>",
+                    received_at=FRESH_AT,
                     subject="ignored",
+                    clock=fixed_clock,
                 )
             run.assert_not_called()
         self.assertEqual(store.calls, ["<msg-1>"])
@@ -333,7 +342,9 @@ class RemoteControlCommandTests(unittest.TestCase):
                 replay_store=store,
                 sender="sender@example.com",
                 message_id="<dup-1>",
+                received_at=FRESH_AT,
                 subject="ignored",
+                clock=fixed_clock,
             )
             with self.assertRaises(ValueError):
                 run_remote_control_message(
@@ -343,7 +354,9 @@ class RemoteControlCommandTests(unittest.TestCase):
                     replay_store=store,
                     sender="sender@example.com",
                     message_id="<dup-1>",
+                    received_at=FRESH_AT,
                     subject="ignored",
+                    clock=fixed_clock,
                 )
         self.assertEqual(first.command, "HEALTH")
         self.assertEqual(store.calls, ["<dup-1>", "<dup-1>"])
@@ -355,7 +368,7 @@ class RemoteControlCommandTests(unittest.TestCase):
             executor = Mock()
             store = FakeReplayStore()
             bad_bodies = ("", "   ", "AF STATUS\nAF HEALTH", "A" * 2048)
-            for body in bad_bodies:
+            for index, body in enumerate(bad_bodies):
                 with self.subTest(body=body), self.assertRaises(ValueError):
                     run_remote_control_message(
                         body,
@@ -363,7 +376,9 @@ class RemoteControlCommandTests(unittest.TestCase):
                         executor=executor,
                         replay_store=store,
                         sender="sender@example.com",
-                        message_id="<msg-body>",
+                        message_id=f"<msg-body-{index}>",
+                        received_at=FRESH_AT,
+                        clock=fixed_clock,
                     )
             executor.assert_not_called()
 
@@ -381,6 +396,8 @@ class RemoteControlCommandTests(unittest.TestCase):
                         replay_store=store,
                         sender=sender,
                         message_id="<msg-sender>",
+                        received_at=FRESH_AT,
+                        clock=fixed_clock,
                     )
             executor.assert_not_called()
             self.assertEqual(store.calls, [])
@@ -399,6 +416,8 @@ class RemoteControlCommandTests(unittest.TestCase):
                         replay_store=store,
                         sender="sender@example.com",
                         message_id=message_id,
+                        received_at=FRESH_AT,
+                        clock=fixed_clock,
                     )
             executor.assert_not_called()
             self.assertEqual(store.calls, [])
@@ -416,6 +435,8 @@ class RemoteControlCommandTests(unittest.TestCase):
                     replay_store=store,
                     sender="sender@example.com",
                     message_id="<msg-extra>",
+                    received_at=FRESH_AT,
+                    clock=fixed_clock,
                 )
             executor.assert_not_called()
 
@@ -432,6 +453,8 @@ class RemoteControlCommandTests(unittest.TestCase):
                     replay_store=store,
                     sender="sender@example.com",
                     message_id="<msg-override>",
+                    received_at=FRESH_AT,
+                    clock=fixed_clock,
                 )
             executor.assert_not_called()
 
@@ -454,6 +477,8 @@ class RemoteControlCommandTests(unittest.TestCase):
                 replay_store=store,
                 sender="sender@example.com",
                 message_id="<msg-di>",
+                received_at=FRESH_AT,
+                clock=fixed_clock,
             )
         self.assertEqual(store.calls, ["<msg-di>"])
         executor.assert_called_once()

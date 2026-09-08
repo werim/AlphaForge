@@ -9,7 +9,7 @@ from alphaforge.remote_control import run_remote_control_message
 from alphaforge.remote_control.audit import SQLiteReplayStore
 from alphaforge.remote_control.commands import RemoteControlResult
 
-from test_remote_control_commands import make_config_file
+from test_remote_control_commands import FRESH_AT, fixed_clock, make_config_file
 
 
 class SQLiteReplayStoreTests(unittest.TestCase):
@@ -63,6 +63,8 @@ class SQLiteReplayStoreTests(unittest.TestCase):
                             replay_store=store,
                             sender="sender@example.com",
                             message_id=message_id,
+                            received_at=FRESH_AT,
+                            clock=fixed_clock,
                         )
                 reserve.assert_not_called()
             executor.assert_not_called()
@@ -84,6 +86,8 @@ class SQLiteReplayStoreTests(unittest.TestCase):
                     replay_store=store,
                     sender="sender@example.com",
                     message_id="<msg-status>",
+                    received_at=FRESH_AT,
+                    clock=fixed_clock,
                 )
                 with self.assertRaises(ValueError):
                     run_remote_control_message(
@@ -93,6 +97,8 @@ class SQLiteReplayStoreTests(unittest.TestCase):
                         replay_store=store,
                         sender="sender@example.com",
                         message_id="<msg-status>",
+                        received_at=FRESH_AT,
+                        clock=fixed_clock,
                     )
                 subprocess_run.assert_not_called()
             self.assertEqual(result.command, "STATUS")
