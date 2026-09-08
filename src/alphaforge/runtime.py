@@ -6,6 +6,7 @@ from collections import deque
 import hashlib
 import json
 import logging
+import math
 import os
 import signal
 import time
@@ -29,7 +30,7 @@ from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, 
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
-from alphaforge.persistence import init_db
+from alphaforge.persistence import fetch_expectancy_stat_detail, init_db
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
@@ -337,6 +338,124 @@ class RuntimeOrchestrator:
         if session is not None:
             return session.get_bind()
         return None
+
+    @staticmethod
+    def _finite_numeric(*candidates: tuple[str, Any]) -> tuple[float | None, str | None]:
+        """Return the first canonical finite numeric value without mapping labels."""
+        for source, value in candidates:
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                numeric = float(value)
+                if math.isfinite(numeric):
+                    return numeric, source
+        return None, None
+
+    def _build_scoring_context(
+        self,
+        signal_payload: Mapping[str, Any],
+        market_ctx: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Build AIBrain inputs from canonical runtime/MTF evidence and SQL stats."""
+        scored_market = dict(market_ctx)
+        mtf = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
+        setup = mtf.get("setup") if isinstance(mtf.get("setup"), Mapping) else {}
+        execution = mtf.get("execution") if isinstance(mtf.get("execution"), Mapping) else {}
+        regime = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
+        alignment = mtf.get("alignment") if isinstance(mtf.get("alignment"), Mapping) else {}
+
+        sources: dict[str, str] = {}
+        missing: list[str] = []
+
+        setup_quality, source = self._finite_numeric(
+            ("signal.setup_quality", signal_payload.get("setup_quality")),
+            ("market.setup_quality", market_ctx.get("setup_quality")),
+            ("mtf.setup.setup_quality", setup.get("setup_quality")),
+            ("mtf.setup.structure_quality", setup.get("structure_quality")),
+        )
+        if setup_quality is None:
+            missing.append("setup_quality")
+        else:
+            sources["setup_quality"] = str(source)
+
+        feature_candidates = {
+            "momentum_confirmation": (
+                ("market.momentum_confirmation", market_ctx.get("momentum_confirmation")),
+                ("mtf.execution.momentum_confirmation", execution.get("momentum_confirmation")),
+                ("mtf.execution.ma_delta_strength", execution.get("ma_delta_strength")),
+            ),
+            "liquidity_quality": (
+                ("market.liquidity_quality", market_ctx.get("liquidity_quality")),
+                ("mtf.execution.liquidity_quality", execution.get("liquidity_quality")),
+                ("market.liquidity_score", market_ctx.get("liquidity_score")),
+                ("mtf.execution.liquidity_score", execution.get("liquidity_score")),
+            ),
+            "volatility_fit": (
+                ("market.volatility_fit", market_ctx.get("volatility_fit")),
+                ("mtf.execution.volatility_fit", execution.get("volatility_fit")),
+            ),
+        }
+        for feature, candidates in feature_candidates.items():
+            value, source = self._finite_numeric(*candidates)
+            if value is None:
+                scored_market.pop(feature, None)
+                missing.append(feature)
+            else:
+                scored_market[feature] = value
+                sources[feature] = str(source)
+
+        regime_alignment, source = self._finite_numeric(
+            ("market.regime_alignment", market_ctx.get("regime_alignment")),
+            ("mtf.alignment.alignment", alignment.get("alignment")),
+            ("mtf.regime.alignment", regime.get("alignment")),
+        )
+        regime_ctx: dict[str, Any] = {
+            "regime": regime.get("regime", signal_payload.get("regime")),
+        }
+        if regime_alignment is None:
+            missing.append("regime_alignment")
+        else:
+            regime_ctx["alignment"] = regime_alignment
+            sources["regime_alignment"] = str(source)
+
+        stats_ctx = self._build_stats_context(signal_payload, regime_ctx)
+        diagnostics = {
+            "status": "SCORING_CONTEXT_INCOMPLETE" if missing else "COMPLETE",
+            "missing_inputs": missing,
+            "sources": sources,
+            "sample_size": stats_ctx["sample_size"],
+        }
+        scored_market["scoring_context_diagnostics"] = diagnostics
+        return scored_market, regime_ctx, stats_ctx
+
+    def _build_stats_context(
+        self,
+        signal_payload: Mapping[str, Any],
+        regime_ctx: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Load only the expectancy statistics already consumed by AIBrain."""
+        stats: dict[str, Any] = {"setup": {}, "regime": {}, "symbol": {}, "sample_size": 0}
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            return stats
+        keys = (
+            ("setup", "setup_expectancy_stats", "setup", str(signal_payload.get("setup", "unknown"))),
+            ("regime", "regime_expectancy_stats", "regime", str(regime_ctx.get("regime", "unknown"))),
+            ("symbol", "symbol_expectancy_stats", "symbol", str(signal_payload.get("symbol", "unknown"))),
+        )
+        sample_sizes = {scope: 0 for scope, *_ in keys}
+        with engine.connect() as connection:
+            for scope, table, column, key in keys:
+                detail = fetch_expectancy_stat_detail(connection, table, column, key)
+                if detail is None:
+                    continue
+                expectancy = detail.get("expectancy")
+                if isinstance(expectancy, (int, float)) and not isinstance(expectancy, bool) and math.isfinite(float(expectancy)):
+                    stats[scope][key] = float(expectancy)
+                    sample_sizes[scope] = int(detail.get("sample_size") or 0)
+        # AIBrain applies one confidence value to the equally weighted setup,
+        # regime, and symbol expectations. Use the least-supported scope so a
+        # broad symbol history cannot confer confidence on an unseen setup.
+        stats["sample_size"] = min(sample_sizes.values(), default=0)
+        return stats
 
     def _schedule_agent_shadow(self, legacy_decision: Mapping[str, Any]) -> None:
         """Enqueue an isolated copy without creating a task or blocking legacy flow."""
@@ -1550,8 +1669,9 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
-        regime_ctx = {"alignment": 0.8 if selection.regime_hint != "UNFAVORABLE" else 0.3}
-        stats_ctx: dict[str, Any] = {}
+        market_ctx, regime_ctx, stats_ctx = self._build_scoring_context(
+            signal_payload, market_ctx
+        )
         try:
             score_ctx, order_plan, explanation = self.ai_brain.before_real_order(
                 signal_payload,
@@ -2387,7 +2507,7 @@ class RuntimeOrchestrator:
         execution_ctx = build_execution_context(market_ctx)
         raw_rr = market_ctx.get("rr")
         rr = float(raw_rr) if raw_rr is not None else None
-        return {
+        signal = {
             "symbol": selection.symbol,
             "signal_id": signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
             "mode": str(market_ctx.get("mode", "PAPER")).upper(),
@@ -2404,6 +2524,16 @@ class RuntimeOrchestrator:
             "max_expected_slippage_pct": execution_ctx.get("expected_slippage_pct", 0.002) * 1.2,
             "execution_ctx": execution_ctx,
         }
+        mtf = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
+        setup = mtf.get("setup") if isinstance(mtf.get("setup"), Mapping) else {}
+        setup_quality, _ = RuntimeOrchestrator._finite_numeric(
+            ("market.setup_quality", market_ctx.get("setup_quality")),
+            ("mtf.setup.setup_quality", setup.get("setup_quality")),
+            ("mtf.setup.structure_quality", setup.get("structure_quality")),
+        )
+        if setup_quality is not None:
+            signal["setup_quality"] = setup_quality
+        return signal
 
 
 def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:

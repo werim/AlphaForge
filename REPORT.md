@@ -1,3 +1,27 @@
+# M0 scoring-context wiring correction — 2026-09-08
+
+## Why the patch was needed and root cause
+The real runtime decision path built a signal that omitted available `setup_quality`, derived regime alignment from a fixed favorable/unfavorable constant, and passed an unconditional empty `stats_ctx` to `AIBrain.before_real_order()`. Numeric guided-MTF and canonical market evidence therefore collapsed to AIBrain's established neutral priors, while persisted setup/regime/symbol expectancy rows were ignored. A separate observability gap meant `total_score < min_accept_score` affected acceptance without adding a dedicated reason flag.
+
+## Files changed and exact runtime behavior
+`src/alphaforge/runtime.py` adds a shared scoring-context builder used by the existing real decision path. `_build_signal()` forwards finite numeric setup quality from the market or guided setup layer. The context builder forwards finite numeric momentum, liquidity, and volatility evidence from existing market/MTF fields; it uses numeric regime alignment only when an existing canonical field provides it. Qualitative labels such as `HIGH` and `GOOD` are not converted. Missing inputs remain absent and are reported through `scoring_context_diagnostics.status=SCORING_CONTEXT_INCOMPLETE`, `missing_inputs`, and per-feature source attribution.
+
+The same file adds a bounded stats builder over the existing `fetch_expectancy_stat_detail()` helper and the existing `setup_expectancy_stats`, `regime_expectancy_stats`, and `symbol_expectancy_stats` tables. It supplies only the mappings and `sample_size` already consumed by AIBrain. Because AIBrain applies one confidence value to equally weighted setup, regime, and symbol expectancy, sample size is the least-supported scope; a missing scope therefore remains `sample_size=0` instead of borrowing confidence from broad symbol history. Missing history creates no rows or expectancy values; no loss-streak value is invented.
+
+Review found that `order.after_position_close()` called `AIBrain.after_position_close()`, which already updates all three expectancy tables, and then updated the same tables a second time through `upsert_expectancy_stats()`. This doubled samples and total PnL and could leave expectancy inconsistent after mixed outcomes. `src/alphaforge/order.py` now leaves expectancy ownership with AIBrain so every newly closed executed trade contributes once. Rejected forward outcomes remain outside these tables.
+
+`src/alphaforge/ai_brain.py` adds `low_score` whenever total score is below the unchanged acceptance threshold. Missing scoring fields retain the established conservative neutral prior for compatibility, but `probabilistic.missing_scoring_inputs` and warning `SCORING_CONTEXT_INCOMPLETE` now distinguish that prior from genuine numeric neutral evidence. Low score, low confidence, and negative expectancy-after-costs remain separate flags and their thresholds are unchanged.
+
+`tests/test_m0_scoring_context.py` covers guided numeric propagation through the production runtime call boundary, real MTF raw-strength units without rescaling, missing/qualitative input handling, SQL-backed expectancy loading, partial/no-history behavior, single-update executed-trade persistence, score/probability variability, exact low-score boundary/coexistence, unchanged thresholds, and PAPER/LIVE construction parity.
+
+## Lifecycle, persistence, export, compatibility, migration, and risk
+No lifecycle transition, database table/column, CSV shape, reject-label identity, resolver/provider behavior, execution threshold, `MIN_EFFECTIVE_RR`, `min_signal_score`, `min_confidence`, or LIVE authorization path changed. Existing AIBrain priors are preserved to avoid shifting canonical reject identity. New diagnostics are additive JSON evidence. No migration is performed and no historical runtime/campaign database was read or modified. Pre-patch expectancy rows may contain inflated samples or stale expectancy from the former duplicate writer and must not be treated as repaired by this code change; fresh isolated evidence is required.
+
+Remaining limitation: the current guided-MTF provider exposes canonical numeric structure and execution strength plus liquidity, but not a universal numeric volatility-fit or regime-alignment value. The runtime does not derive arbitrary numbers from boolean/PASS labels, so absent values remain explicitly incomplete. LIVE remains NOT READY; review and isolated PAPER validation are required after merge.
+
+## Tests executed
+The focused scoring-context and execution suite passed 27 tests. The bounded runtime, MTF, AIBrain, execution, persistence, reconciliation, environment, LIVE safety, reject-geometry, backtest/PAPER parity, qualification, and calibration suite passed 216 tests on its final run. One pre-existing wall-clock-sensitive reject-idempotency test failed in the first combined run and then passed alone and in the identical full rerun. `git diff --check` and Python compilation passed. No burn-in, real worker, network, campaign, or existing database command was run.
+
 # PR #344 M0 reject identity and watchdog blockers — 2026-09-06
 
 ## Why the patch was needed and root cause

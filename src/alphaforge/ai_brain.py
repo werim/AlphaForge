@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import hashlib
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -169,6 +170,23 @@ class AIBrain:
             - funding_exec_penalty * 0.04
         )
         total_score = self._clip01((weighted * 0.4) + (calibrated_score * 0.6))
+        scoring_diagnostics = market_ctx.get("scoring_context_diagnostics")
+        missing_inputs = (
+            list(scoring_diagnostics.get("missing_inputs") or [])
+            if isinstance(scoring_diagnostics, Mapping)
+            else [
+                name for name, context in (
+                    ("setup_quality", signal),
+                    ("regime_alignment", regime_ctx),
+                    ("momentum_confirmation", market_ctx),
+                    ("liquidity_quality", market_ctx),
+                    ("volatility_fit", market_ctx),
+                )
+                if not _is_finite_number(
+                    context.get(name if name != "regime_alignment" else "alignment")
+                )
+            ]
+        )
         probabilistic = {
             "p_win": p_win,
             "p_tp_hit": p_tp_hit,
@@ -183,11 +201,16 @@ class AIBrain:
             "sample_size": sample_size,
             "source": "ai_brain_v2_probabilistic",
             "warnings": [],
+            "missing_scoring_inputs": missing_inputs,
         }
+        if missing_inputs:
+            probabilistic["warnings"].append("SCORING_CONTEXT_INCOMPLETE")
         if sample_size <= 0:
             probabilistic["warnings"].append("CONSERVATIVE_PRIOR_NO_HISTORY")
 
         reason_flags: list[str] = []
+        if total_score < self.min_accept_score:
+            reason_flags.append("low_score")
         if expectancy_edge < 0.5:
             reason_flags.append("negative_expectancy_risk")
         if spread_penalty > 0.8:
@@ -472,6 +495,14 @@ def _num(data: Mapping[str, Any], key: str, default: float) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     return default
+
+
+def _is_finite_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
 
 
 def _stable_signal_id(signal: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> str:

@@ -1,3 +1,26 @@
+# M0 scoring-context wiring correction — 2026-09-08
+
+### Added
+- Shared runtime scoring-context and SQL expectancy-context builders with explicit feature-source and missing-input diagnostics.
+- Explicit AIBrain `low_score` reason flag and focused propagation, history, variability, threshold, and PAPER/LIVE parity regressions.
+
+### Changed
+- The real decision path now forwards existing finite numeric guided-MTF/market evidence and existing setup/regime/symbol expectancy statistics instead of hard-coded regime alignment and an empty statistics context.
+- AIBrain confidence uses the least-supported matching expectancy scope rather than borrowing the largest setup/regime/symbol sample count.
+
+### Fixed
+- Available guided numeric inputs no longer collapse to AIBrain's default-like scoring profile, and missing inputs are distinguishable from genuine neutral values.
+- Newly closed executed trades no longer update setup, regime, and symbol expectancy statistics twice through the order close hook.
+
+### Removed
+- The fixed favorable/unfavorable runtime regime-alignment constant and unconditional empty `stats_ctx` from the real decision path.
+
+### Breaking Changes
+- None. No schema, export, lifecycle, threshold, reject-label identity, or LIVE authorization change.
+
+### Known Issues
+- Missing canonical numeric volatility-fit or regime-alignment evidence remains explicitly incomplete; qualitative labels are not numerically mapped. Historical expectancy rows are not repaired automatically. LIVE remains NOT READY.
+
 # PR #344 M0 reject identity and watchdog blockers — 2026-09-06
 
 ### Added
