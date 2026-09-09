@@ -6,6 +6,7 @@
 - Runtime maturity: Telegram `getUpdates`/`sendMessage` transport is available through injectable HTTP primitives. Command acknowledgement and response delivery are separate in-memory results; a failed send yields a capability-backed pending response that can be retried without re-entering authorization or execution. `HELP` advertises only `/status`, `/health`, and `/help`; `STATUS` and `HEALTH` retain trusted runtime mapping.
 - BACKTEST/PAPER/LIVE alignment: no trading, lifecycle, score, RR, execution, campaign, or runtime command behavior changed.
 - Lifecycle/persistence/execution impact: controller-owned SQLite replay/audit storage gains additive `remote_control_audit`; Telegram `update_id` is atomically claimed as `telegram:<update_id>` before acceptance. No campaign/runtime DB is accessed.
+- Identifier contract: Bot API update IDs and poll offsets are integers; adapter, replay/audit, verified-request, and response-delivery identities are normalized strings. Response-only retry preserves that exact normalized identity.
 - Known critical risks: polling offsets and pending responses are not persisted across process restart; `REPORT`, `REJECTS`, `LABELS`, and `ERRORS` executor wiring is intentionally not implemented; no Telegram webhook, daemon, launchctl, or production service installation exists yet.
 - Last audit date: 2026-09-09. Live readiness verdict: NOT LIVE READY.
 

@@ -27,7 +27,7 @@ class TelegramHttpClient(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class TelegramResponseDelivery:
-    update_id: int
+    update_id: str
     chat_id: str
     text: str
     command_acknowledged: bool

@@ -18,9 +18,11 @@
 - Telegram request fields and request argv no longer provide runtime DB, campaign, run, executable, or argv values for STATUS/HEALTH execution.
 - Long-poll offset advances to the last parseable processed `update_id + 1`; duplicate protection remains owned by the replay store.
 - Long-poll command acknowledgement, response delivery, and update offset acknowledgement are explicit: terminal updates advance only after processing, while failed sends return a pending sanitized response for response-only retry.
+- Telegram response deliveries now use the adapter-normalized string `update_id`; raw Bot API update IDs and polling offsets remain integers.
 
 ### Fixed
 - A `sendMessage` failure after successful read-only execution no longer leaves the response outcome implicit; execution remains at-most-once and the failed response is independently retryable in memory.
+- Corrected the response-delivery `update_id` annotation so it matches the verified request value actually assigned by the transport.
 
 ### Removed
 - None.

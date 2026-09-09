@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from alphaforge.remote_control.audit import SQLiteReplayStore
 from alphaforge.remote_control.commands import RemoteControlCommand, RemoteControlConfig, RemoteControlResult
-from alphaforge.remote_control.telegram_adapter import TelegramRemoteControlConfig
+from alphaforge.remote_control.telegram_adapter import TelegramRemoteControlConfig, process_telegram_update
 from alphaforge.remote_control.telegram_transport import (
     TelegramResponseDelivery,
     deliver_telegram_response,
@@ -260,6 +260,8 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
         self.assertEqual(result.command_acknowledged, 1)
         self.assertEqual(len(result.pending_deliveries), 1)
         self.assertEqual(result.pending_deliveries[0].status, "PENDING")
+        self.assertEqual(result.pending_deliveries[0].update_id, "110")
+        self.assertIsInstance(result.pending_deliveries[0].update_id, str)
         self.assertEqual(result.pending_deliveries[0].failure_reason, "SEND_MESSAGE_FAILED")
         self.assertEqual(executor.commands, [RemoteControlCommand(name="STATUS", argv=STATUS_ARGV)])
         self.assertNotIn(BOT_TOKEN, repr(result))
@@ -272,6 +274,7 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
         )
 
         self.assertEqual(delivered.status, "DELIVERED")
+        self.assertEqual(delivered.update_id, result.pending_deliveries[0].update_id)
         self.assertEqual(len(retry_http.send_calls), 1)
         self.assertEqual(executor.commands, [RemoteControlCommand(name="STATUS", argv=STATUS_ARGV)])
 
@@ -289,7 +292,7 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
     def test_fabricated_response_delivery_cannot_target_a_chat(self):
         http = FakeTelegramHttpClient()
         fabricated = TelegramResponseDelivery(
-            update_id=999,
+            update_id="999",
             chat_id="attacker",
             text="fabricated",
             command_acknowledged=True,
@@ -300,6 +303,56 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
             deliver_telegram_response(fabricated, bot_token=BOT_TOKEN, http_client=http)
 
         self.assertEqual(http.send_calls, [])
+
+    def test_adapter_request_and_response_delivery_share_normalized_update_id_type(self):
+        update_id = 9_223_372_036_854_775_937
+        adapter_store = SQLiteReplayStore(Path(self.tmp.name) / "adapter-large-id.sqlite3")
+        self.addCleanup(adapter_store.close)
+        adapter_result = process_telegram_update(
+            make_update(update_id=update_id, text="/status"),
+            config=self.telegram_config,
+            replay_store=adapter_store,
+        )
+
+        poll_result = self.poll_once(
+            FakeTelegramHttpClient(
+                [{"ok": True, "result": [make_update(update_id=update_id, text="/status")]}],
+                fail_send=True,
+            ),
+            FakeRuntimeExecutor(),
+        )
+
+        self.assertTrue(adapter_result.accepted)
+        self.assertIsNotNone(adapter_result.request)
+        self.assertEqual(adapter_result.request.update_id, str(update_id))
+        self.assertEqual(poll_result.pending_deliveries[0].update_id, adapter_result.request.update_id)
+        self.assertIsInstance(poll_result.pending_deliveries[0].update_id, str)
+        self.assertEqual(poll_result.next_offset, update_id + 1)
+
+    def test_negative_and_invalid_update_ids_keep_existing_behavior(self):
+        negative_executor = FakeRuntimeExecutor()
+        negative_result = self.poll_once(
+            FakeTelegramHttpClient(
+                [{"ok": True, "result": [make_update(update_id=-7, text="/health")]}],
+                fail_send=True,
+            ),
+            negative_executor,
+        )
+        invalid_executor = FakeRuntimeExecutor()
+        invalid_result = self.poll_once(
+            FakeTelegramHttpClient(
+                [{"ok": True, "result": [make_update(update_id="not-numeric", text="/status")]}]
+            ),
+            invalid_executor,
+            offset=25,
+        )
+
+        self.assertEqual(negative_result.next_offset, -6)
+        self.assertEqual(negative_result.pending_deliveries[0].update_id, "-7")
+        self.assertEqual(negative_executor.commands, [RemoteControlCommand(name="HEALTH", argv=HEALTH_ARGV)])
+        self.assertEqual(invalid_result.next_offset, 25)
+        self.assertEqual(invalid_result.rejected, 1)
+        self.assertEqual(invalid_executor.commands, [])
 
     def test_adapter_store_exception_is_isolated_and_advances_offset(self):
         http = FakeTelegramHttpClient([{"ok": True, "result": [make_update(update_id=112, text="/status")]}])
