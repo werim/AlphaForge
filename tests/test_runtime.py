@@ -808,11 +808,19 @@ def test_runtime_signal_uses_dynamic_rr_not_fallback_when_present() -> None:
     assert payload["risk_reward"] == pytest.approx(3.25)
 
 
-def test_paper_accept_path_uses_canonical_lifecycle_sequence() -> None:
+def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[dict] = []
+    portfolio_evidence: dict = {}
+    original_evaluate = runtime_module.evaluate_portfolio_risk
+
+    def capture_portfolio_evidence(candidate, snapshot, config, mode):
+        portfolio_evidence.update(snapshot=snapshot, candidate=dict(candidate))
+        return original_evaluate(candidate, snapshot, config, mode)
+
+    monkeypatch.setattr(runtime_module, "evaluate_portfolio_risk", capture_portfolio_evidence)
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -825,6 +833,58 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence() -> None:
     assert lifecycle[0] == "SIGNAL_CREATED"
     assert "ORDER_PLACED" in lifecycle
     assert lifecycle[:4] == ["SIGNAL_CREATED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED"]
+    assert lifecycle.count("ORDER_PLACED") == 1
+    assert lifecycle[-1] == "POSITION_OPENED"
+    assert "ERROR" not in lifecycle
+    assert orchestrator.metrics.executions == 1
+    assert orchestrator._active_positions == {"BTCUSDT": pytest.approx(10.0)}
+    assert portfolio_evidence["snapshot"].equity == pytest.approx(1_000.0)
+    assert portfolio_evidence["snapshot"].available_balance == pytest.approx(1_000.0)
+    assert portfolio_evidence["candidate"]["notional"] == pytest.approx(10.0)
+
+
+def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing() -> None:
+    rejects: list[dict] = []
+    market = {"entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG",
+              "market_ts": 99_999_999_999.0, "volume_24h_usdt": 90_000_000.0,
+              "spread_pct": .0002, "expected_slippage_pct": .0002,
+              "liquidity_score": .9}
+    selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
+                                diagnostics={"inputs": market})
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER,
+                             paper_initial_equity=None,
+                             paper_candidate_notional=None),
+        ai_brain=_AlwaysAcceptBrain(), market_scanner=lambda: None,
+        on_reject_persist=lambda payload: rejects.append(payload),
+    )
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    assert rejects[-1]["reason"] == "UNKNOWN_PORTFOLIO_RISK"
+    assert rejects[-1]["portfolio_diagnostics"]["accounting_source"] == "MISSING"
+    assert rejects[-1]["portfolio_diagnostics"]["snapshot"]["equity"] is None
+    assert orchestrator.metrics.executions == 0
+
+
+def test_effective_rr_gate_still_rejects_before_paper_portfolio_and_execution() -> None:
+    rejects: list[dict] = []
+    market = {"entry": 100.0, "sl": 99.0, "tp": 101.05, "rr": 1.05, "side": "LONG",
+              "market_ts": 99_999_999_999.0, "volume_24h_usdt": 90_000_000.0,
+              "spread_pct": .0002, "expected_slippage_pct": .0002,
+              "liquidity_score": .9}
+    selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
+                                diagnostics={"inputs": market})
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_AlwaysAcceptBrain(), market_scanner=lambda: None,
+        on_reject_persist=lambda payload: rejects.append(payload),
+    )
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    assert rejects[-1]["reason"] == "LOW_EFFECTIVE_RR"
+    assert orchestrator.metrics.executions == 0
 
 
 def test_paper_reject_emits_signal_rejected_after_signal_created() -> None:

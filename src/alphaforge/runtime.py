@@ -104,6 +104,10 @@ class RuntimeConfig:
     max_expected_slippage_pct: float = 0.0020
     paper_fee_bps: float | None = 4.0
     paper_execution_latency_ms: float | None = 50.0
+    # Explicit PAPER-only portfolio evidence. These values never substitute
+    # for unknown LIVE/LIVE_PRECHECK account state.
+    paper_initial_equity: float | None = 1_000.0
+    paper_candidate_notional: float | None = 10.0  # conservative 1% of the default ledger
     market_data_base_url: str = "https://fapi.binance.com"
     regime_timeframe: str = "1h"
     setup_timeframe: str = "15m"
@@ -369,7 +373,6 @@ class RuntimeOrchestrator:
             ("signal.setup_quality", signal_payload.get("setup_quality")),
             ("market.setup_quality", market_ctx.get("setup_quality")),
             ("mtf.setup.setup_quality", setup.get("setup_quality")),
-            ("mtf.setup.structure_quality", setup.get("structure_quality")),
         )
         if setup_quality is None:
             missing.append("setup_quality")
@@ -380,7 +383,6 @@ class RuntimeOrchestrator:
             "momentum_confirmation": (
                 ("market.momentum_confirmation", market_ctx.get("momentum_confirmation")),
                 ("mtf.execution.momentum_confirmation", execution.get("momentum_confirmation")),
-                ("mtf.execution.ma_delta_strength", execution.get("ma_delta_strength")),
             ),
             "liquidity_quality": (
                 ("market.liquidity_quality", market_ctx.get("liquidity_quality")),
@@ -405,6 +407,7 @@ class RuntimeOrchestrator:
         regime_alignment, source = self._finite_numeric(
             ("market.regime_alignment", market_ctx.get("regime_alignment")),
             ("mtf.alignment.alignment", alignment.get("alignment")),
+            ("mtf.regime.regime_alignment", regime.get("regime_alignment")),
             ("mtf.regime.alignment", regime.get("alignment")),
         )
         regime_ctx: dict[str, Any] = {
@@ -1760,22 +1763,37 @@ class RuntimeOrchestrator:
             return
 
         candidate_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
-        if candidate_notional is None:
-            candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
         inferred_equity = market_ctx.get("equity", market_ctx.get("available_balance"))
+        available_balance = market_ctx.get("available_balance", inferred_equity)
+        portfolio_evidence_source = (
+            "MARKET_CONTEXT" if inferred_equity is not None and candidate_notional is not None
+            else "MISSING"
+        )
+        if self.config.execution_mode is ExecutionMode.PAPER:
+            if inferred_equity is None and self.config.paper_initial_equity is not None:
+                inferred_equity = self.config.paper_initial_equity
+                available_balance = self.config.paper_initial_equity
+                portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
+            if candidate_notional is None and self.config.paper_candidate_notional is not None:
+                candidate_notional = self.config.paper_candidate_notional
+                portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
+                market_ctx["notional"] = candidate_notional
+        elif candidate_notional is None:
+            candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
         snapshot = snapshot_from_state(
             mode=self.config.execution_mode.value,
             symbol=selection.symbol,
             side=str(market_ctx.get("side", signal_payload.get("side", "LONG"))),
             candidate_notional=candidate_notional,
             equity=inferred_equity,
-            available_balance=market_ctx.get("available_balance", inferred_equity),
+            available_balance=available_balance,
             open_positions={k: {"notional": v, "side": "LONG"} for k, v in self._active_positions.items()},
             config=self.config,
             now=time.time(),
             cooldown_until=self._symbol_cooldown_until,
         )
         portfolio_decision = evaluate_portfolio_risk({"symbol": selection.symbol, "side": market_ctx.get("side"), "entry": market_ctx.get("entry"), "quantity": market_ctx.get("quantity", market_ctx.get("qty")), "notional": candidate_notional}, snapshot, self.config, mode=self.config.execution_mode.value)
+        portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
         if not portfolio_decision.accepted:
             reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
@@ -1788,7 +1806,10 @@ class RuntimeOrchestrator:
                 self._accepted_setup_identities.add(str(market_ctx["setup_identity"]))
             await self._emit_lifecycle_event(LifecycleState.WAITING_ENTRY_ZONE.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleState.ENTRY_TRIGGERED.value, selection.symbol, {})
-            await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, selection.symbol, {})
+            # PAPER execution emits ORDER_PLACED after its simulated order result;
+            # LIVE_PRECHECK has no execution call, so its no-submit evidence ends here.
+            if self.config.execution_mode is ExecutionMode.LIVE_PRECHECK:
+                await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, selection.symbol, {})
         else:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
@@ -2580,7 +2601,6 @@ class RuntimeOrchestrator:
         setup_quality, _ = RuntimeOrchestrator._finite_numeric(
             ("market.setup_quality", market_ctx.get("setup_quality")),
             ("mtf.setup.setup_quality", setup.get("setup_quality")),
-            ("mtf.setup.structure_quality", setup.get("structure_quality")),
         )
         if setup_quality is not None:
             signal["setup_quality"] = setup_quality

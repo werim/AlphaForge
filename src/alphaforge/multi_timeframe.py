@@ -25,6 +25,39 @@ REGIME_GUIDED_SETUP_PHASES = ("CONTINUATION", "PULLBACK", "REENTRY_READY")
 _TF_SECONDS = {"1m": 60, "15m": 900, "1h": 3600}
 DEFAULT_DIRECTION_THRESHOLD = 0.0005
 DEFAULT_SETUP_DIRECTION_THRESHOLD = 0.0003
+HIGH_VOLATILITY_RETURN = 0.02
+
+
+def normalize_mtf_quality(raw_strength: Any, reference_threshold: Any) -> float | None:
+    """Map a non-negative raw ratio to bounded quality without losing its raw value.
+
+    The directional threshold maps to 0.5; stronger evidence approaches 1.0
+    smoothly. Invalid evidence stays unavailable so downstream gates fail closed.
+    """
+    try:
+        strength = float(raw_strength)
+        threshold = float(reference_threshold)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(strength) or not math.isfinite(threshold) or strength < 0.0 or threshold <= 0.0:
+        return None
+    return max(0.0, min(1.0, strength / (strength + threshold)))
+
+
+def _realized_volatility(candles: list[dict[str, Any]], lookback: int = 20) -> float | None:
+    returns = [
+        abs(float(candles[index]["close"]) / float(candles[index - 1]["close"]) - 1.0)
+        for index in range(1, len(candles))
+        if float(candles[index - 1]["close"])
+    ]
+    return None if not returns else sum(returns[-lookback:]) / min(lookback, len(returns))
+
+
+def _volatility_fit(raw_volatility: float | None) -> float | None:
+    """Score execution volatility against the existing 2% high-vol boundary."""
+    if raw_volatility is None:
+        return None
+    return max(0.0, min(1.0, HIGH_VOLATILITY_RETURN / (HIGH_VOLATILITY_RETURN + raw_volatility)))
 
 
 def _valid_ohlc(candles: list[dict[str, Any]], minimum_rows: int) -> bool:
@@ -86,13 +119,11 @@ def build_regime_context(candles: list[dict[str, Any]], timeframe: str, *, direc
     direction, strength = (_direction(candles, 8, 20, neutral_threshold=threshold)
                            if valid_ohlc else ("UNKNOWN", None))
     complete = direction not in {"UNKNOWN", "NEUTRAL"}
-    returns = ([abs(float(candles[i]["close"]) / float(candles[i-1]["close"]) - 1)
-                for i in range(1, len(candles)) if candles[i-1]["close"]]
-               if valid_ohlc else [])
-    volatility = None if not returns else sum(returns[-20:]) / min(20, len(returns))
+    volatility = _realized_volatility(candles) if valid_ohlc else None
     return {"timeframe": timeframe, "regime": "TRENDING" if complete else ("UNKNOWN" if direction == "UNKNOWN" else "CHOPPY"),
             "direction": direction, "trend_strength": strength, "ma_delta_strength": strength,
-            "direction_threshold": threshold, "volatility_regime": None if volatility is None else ("HIGH" if volatility > .02 else "MODERATE"),
+            "regime_alignment": normalize_mtf_quality(strength, threshold),
+            "direction_threshold": threshold, "volatility_regime": None if volatility is None else ("HIGH" if volatility > HIGH_VOLATILITY_RETURN else "MODERATE"),
             "structure_state": "MA_TREND" if complete else "UNCONFIRMED", "confidence": strength,
             "last_closed_candle_ts": _iso(int(candles[-1]["close_ts"])) if candles else None,
             "last_closed_candle_ms": int(candles[-1]["close_ts"]) if candles else None,
@@ -118,6 +149,7 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *,
             complete = False
         return {"timeframe": timeframe, "setup_type": "TREND_PULLBACK" if complete else None,
             "direction": direction if direction != "NEUTRAL" else "NONE", "structure_quality": quality,
+            "setup_quality": normalize_mtf_quality(quality, threshold),
             "ma_delta_strength": quality, "direction_threshold": threshold,
             "momentum_state": "CONFIRMED" if complete else "UNCONFIRMED", "overextended": overextended,
             "entry_zone": None if not last else [last["low"], last["high"]], "structural_stop": None,
@@ -151,7 +183,8 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *,
             "regime_direction": regime_direction, "phase": phase,
             "generation_mode": "REGIME_GUIDED",
             "candidate_ready": phase in REGIME_GUIDED_SETUP_PHASES,
-            "structure_quality": quality, "recent_direction": recent_direction,
+            "structure_quality": quality, "setup_quality": normalize_mtf_quality(quality, threshold),
+            "recent_direction": recent_direction,
             "recent_direction_strength": recent_strength,
             "ma_delta_strength": quality, "direction_threshold": threshold,
             "momentum_state": ("COUNTER_REGIME_PULLBACK" if phase == "PULLBACK"
@@ -172,6 +205,7 @@ def build_execution_context(candles: list[dict[str, Any]], timeframe: str, marke
     valid_ohlc = _valid_ohlc(candles, 5)
     direction, strength = (_direction(candles, 2, 5, neutral_threshold=threshold)
                            if valid_ohlc else ("UNKNOWN", None))
+    realized_volatility = _realized_volatility(candles, lookback=5) if valid_ohlc else None
     last = candles[-1] if valid_ohlc else None
     trigger = direction in {"LONG", "SHORT"} and len(candles) >= 5
     # MTF execution confirmation is based on market evidence available before
@@ -196,7 +230,11 @@ def build_execution_context(candles: list[dict[str, Any]], timeframe: str, marke
     return {"timeframe": timeframe, "direction": direction, "trigger": "MOMENTUM_CONFIRMED" if trigger else None,
             "trade_side": normalized_side or None, "confirmed_for_side": confirmed_for_side,
             "side_confirmation": side_confirmation,
-            "ma_delta_strength": strength, "direction_threshold": threshold,
+            "ma_delta_strength": strength,
+            "momentum_confirmation": normalize_mtf_quality(strength, threshold),
+            "realized_volatility": realized_volatility,
+            "volatility_fit": _volatility_fit(realized_volatility),
+            "direction_threshold": threshold,
             "spread_pct": market.get("spread_pct"),
             "expected_slippage_pct": market.get("expected_slippage_pct"),
             "market_data_latency_ms": market.get("market_data_latency_ms"),

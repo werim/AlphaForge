@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Issue #357 PAPER acceptance normalization (2026-09-09)
+- Current version: prospective PAPER scoring-unit and portfolio-evidence correction; no schema or acceptance-threshold change.
+- Current phase: implementation and regression validation on `feature/357-paper-acceptance-normalization`; a fresh isolated PAPER campaign is required after merge.
+- Runtime maturity: guided MTF keeps raw MA deltas for diagnostics and supplies separate bounded setup, momentum, regime-alignment, and volatility-fit qualities to AIBrain. PAPER portfolio evaluation receives an explicit $1,000 local ledger and conservative $10 candidate notional when candidate/account evidence is absent.
+- BACKTEST/PAPER/LIVE alignment: scoring feature names retain the shared AIBrain contract; account defaults are applied only in PAPER. LIVE and LIVE_PRECHECK account evidence remains fail-closed and no order-authorization path changed.
+- Lifecycle/execution coverage: score, effective-RR, portfolio-risk, and paper-order gates remain in their existing order. Accepted PAPER execution emits `ORDER_PLACED` exactly once after its simulated result, then `POSITION_OPENED`; missing PAPER defaults still produce `UNKNOWN_PORTFOLIO_RISK` and all reject gates remain enabled.
+- Known critical risks: historical campaigns retain pre-fix evidence and are not migrated. The local PAPER ledger is intentionally static for this immediate blocker; lifecycle PnL accounting remains future work. LIVE remains NOT READY.
+- Last audit date: 2026-09-09. Live readiness verdict: NOT LIVE READY.
+
 ## M0 canonical reject-label identity correction (2026-09-08)
 - Current version: prospective canonical reject/pending-label/outcome identity enforcement; no schema, strategy, scoring, or threshold change.
 - Current phase: isolated M0 correctness validation on `dev` including PR #355.

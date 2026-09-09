@@ -10,7 +10,7 @@ from alphaforge.execution import build_execution_context as build_canonical_exec
 from alphaforge.burnin import (BurnInRun, bootstrap_burnin_schema,
                                canonical_decision_sql, persist_burnin_run)
 from alphaforge.multi_timeframe import (BinanceMTFProvider, build_execution_context,
-                                        build_setup_context, closed_candles,
+                                        build_regime_context, build_setup_context, closed_candles,
                                         evaluate_mtf_alignment)
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 from alphaforge.persistence import init_db
@@ -79,8 +79,29 @@ def test_setup_threshold_default_recovers_observed_directional_strength():
 
     assert setup["direction_threshold"] == .0003
     assert setup["ma_delta_strength"] == pytest.approx(.000491)
+    assert setup["setup_quality"] == pytest.approx(.000491 / (.000491 + .0003))
+    assert 0.5 < setup["setup_quality"] < 1.0
     assert setup["direction"] == "LONG"
     assert setup["phase"] == "CONTINUATION"
+
+
+def test_mtf_normalized_scores_vary_with_raw_strength_and_preserve_raw_values():
+    weak_setup = build_setup_context(
+        _setup_candles_for_delta(.00031), "15m", regime={"direction": "LONG"})
+    strong_setup = build_setup_context(
+        _setup_candles_for_delta(.003), "15m", regime={"direction": "LONG"})
+    regime = build_regime_context(_execution_candles([100 + i * .1 for i in range(20)]), "1h")
+    execution = build_execution_context(
+        _execution_candles([100 + i * .1 for i in range(5)]), "1m",
+        {"spread_pct": .0002, "expected_slippage_pct": .0002,
+         "market_data_latency_ms": 20.0, "liquidity_score": .9}, trade_side="LONG")
+
+    assert weak_setup["ma_delta_strength"] == pytest.approx(.00031)
+    assert strong_setup["ma_delta_strength"] == pytest.approx(.003)
+    assert strong_setup["setup_quality"] > weak_setup["setup_quality"] > .5
+    for value in (strong_setup["setup_quality"], regime["regime_alignment"],
+                  execution["momentum_confirmation"], execution["volatility_fit"]):
+        assert 0.0 <= value <= 1.0
 
 
 def test_same_setup_strength_remains_neutral_at_old_threshold():

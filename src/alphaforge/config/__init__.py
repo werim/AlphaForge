@@ -334,6 +334,11 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         "max_spread_pct": runtime.max_spread_pct,
         "max_abs_funding_rate_pct": runtime.max_abs_funding_rate_pct,
     })
+    if str(mode or runtime.execution_mode).upper() == "PAPER":
+        cfg.update({
+            "PAPER_INITIAL_EQUITY": getattr(runtime, "paper_initial_equity", 1_000.0),
+            "PAPER_CANDIDATE_NOTIONAL": getattr(runtime, "paper_candidate_notional", 10.0),
+        })
     return cfg
 
 def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> AlphaForgeConfig:
