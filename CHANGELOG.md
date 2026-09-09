@@ -8,10 +8,12 @@
 - Telegram controller boundary for `HELP`, `STATUS`, and `HEALTH`, with `HELP` handled in-process and `STATUS`/`HEALTH` delegated only to an injected read-only executor.
 - Safe executor-failure normalization that returns explicit failure text without traceback, filesystem path, or secret disclosure.
 - Adapter-minted verified Telegram request capability required by the execution controller.
+- Trusted STATUS/HEALTH executor adapter that remaps verified Telegram commands through the existing remote-control runtime argv builder before invoking an injected executor.
 
 ### Changed
 - Telegram replay protection claims `telegram:<update_id>` through the existing SQLite replay store before accepting a command.
 - `HELP` now advertises only currently executable Telegram commands: `/status`, `/health`, and `/help`.
+- Telegram request fields and request argv no longer provide runtime DB, campaign, run, executable, or argv values for STATUS/HEALTH execution.
 
 ### Fixed
 - None; this is a new transport boundary.

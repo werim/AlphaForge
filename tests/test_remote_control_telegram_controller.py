@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from alphaforge.remote_control.audit import SQLiteReplayStore
-from alphaforge.remote_control.commands import RemoteControlCommand, RemoteControlResult
+from alphaforge.remote_control.commands import RemoteControlCommand, RemoteControlConfig, RemoteControlResult
 from alphaforge.remote_control.telegram_adapter import (
     TelegramRemoteControlConfig,
     TelegramRemoteControlRequest,
@@ -22,13 +22,48 @@ from alphaforge.remote_control.telegram_controller import (
 from test_remote_control_telegram_adapter import make_update
 
 
+TRUSTED_CONFIG = RemoteControlConfig(
+    db="/trusted/control.db",
+    cid="CID-123",
+    run="RUN-456",
+    authorized_sender="sender@example.com",
+)
+TRUSTED_CONFIG_MAPPING = {
+    "remote_control_db_path": "/trusted/control.db",
+    "remote_control_campaign_id": "CID-123",
+    "remote_control_run_id": "RUN-456",
+}
+STATUS_ARGV = (
+    "burnin_ops",
+    "--db",
+    "/trusted/control.db",
+    "status",
+    "--campaign-id",
+    "CID-123",
+    "--run-id",
+    "RUN-456",
+)
+HEALTH_ARGV = (
+    "burnin_ops",
+    "--db",
+    "/trusted/control.db",
+    "health",
+    "--campaign-id",
+    "CID-123",
+    "--run-id",
+    "RUN-456",
+)
+
+
 class FakeReadOnlyExecutor:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
         self.commands: list[RemoteControlCommand] = []
+        self.kwargs: list[dict] = []
 
-    def __call__(self, command: RemoteControlCommand) -> RemoteControlResult:
+    def __call__(self, command: RemoteControlCommand, **kwargs) -> RemoteControlResult:
         self.commands.append(command)
+        self.kwargs.append(kwargs)
         if self.fail:
             raise RuntimeError("/private/tmp/secret/POSTM0FIX.db traceback")
         return RemoteControlResult(command=command.name, returncode=0, stdout=f"{command.name.lower()} ok", stderr="")
@@ -75,19 +110,39 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
 
     def test_status_calls_fake_executor_exactly_once_with_normalized_operation(self):
         executor = FakeReadOnlyExecutor()
-        result = process_telegram_request(self.request_for("/status"), executor=executor)
+        result = process_telegram_request(self.request_for("/status"), config=TRUSTED_CONFIG, executor=executor)
 
         self.assertEqual(result.command, "STATUS")
         self.assertEqual(result.stdout, "status ok")
-        self.assertEqual(executor.commands, [RemoteControlCommand(name="STATUS", argv=("STATUS",))])
+        self.assertEqual(executor.commands, [RemoteControlCommand(name="STATUS", argv=STATUS_ARGV)])
+        self.assertEqual(executor.kwargs[0]["config"], TRUSTED_CONFIG_MAPPING)
+        self.assertEqual(executor.kwargs[0]["timeout"], 5.0)
 
     def test_health_calls_fake_executor_exactly_once_with_normalized_operation(self):
         executor = FakeReadOnlyExecutor()
-        result = process_telegram_request(self.request_for("/health"), executor=executor)
+        result = process_telegram_request(self.request_for("/health"), config=TRUSTED_CONFIG_MAPPING, executor=executor)
 
         self.assertEqual(result.command, "HEALTH")
         self.assertEqual(result.stdout, "health ok")
-        self.assertEqual(executor.commands, [RemoteControlCommand(name="HEALTH", argv=("HEALTH",))])
+        self.assertEqual(executor.commands, [RemoteControlCommand(name="HEALTH", argv=HEALTH_ARGV)])
+        self.assertEqual(executor.kwargs[0]["config"], TRUSTED_CONFIG_MAPPING)
+
+    def test_telegram_request_data_cannot_alter_trusted_runtime_arguments(self):
+        executor = FakeReadOnlyExecutor()
+        request = self.request_for("/status", update_id=1002)
+        tampered = replace(
+            request,
+            update_id="--db",
+            user_id="POSTM0FIX",
+            chat_id="camp-attacker",
+            authorized_identity="telegram:user_id=POSTM0FIX;chat_id=camp-attacker",
+        )
+        result = process_telegram_request(tampered, config=TRUSTED_CONFIG, executor=executor)
+
+        self.assertEqual(result.command, "STATUS")
+        self.assertEqual(executor.commands, [RemoteControlCommand(name="STATUS", argv=STATUS_ARGV)])
+        self.assertNotIn("POSTM0FIX", repr(executor.commands))
+        self.assertNotIn("camp-attacker", repr(executor.commands))
 
     def test_directly_constructed_unverified_request_cannot_reach_executor(self):
         executor = FakeReadOnlyExecutor()
@@ -98,7 +153,7 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
             authorized_identity="telegram:user_id=42;chat_id=9001",
             command=RemoteControlCommand(name="STATUS", argv=("STATUS",)),
         )
-        result = process_telegram_request(request, executor=executor)  # type: ignore[arg-type]
+        result = process_telegram_request(request, config=TRUSTED_CONFIG, executor=executor)  # type: ignore[arg-type]
 
         self.assertEqual(result.command, "UNSUPPORTED")
         self.assertEqual(result.returncode, 1)
@@ -107,7 +162,7 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
 
     def test_unsupported_command_never_reaches_executor(self):
         executor = FakeReadOnlyExecutor()
-        result = process_telegram_request(self.request_for("/report", update_id=2001), executor=executor)
+        result = process_telegram_request(self.request_for("/report", update_id=2001), config=TRUSTED_CONFIG, executor=executor)
 
         self.assertEqual(result.command, "UNSUPPORTED")
         self.assertEqual(result.returncode, 1)
@@ -116,7 +171,7 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
 
     def test_executor_failure_fails_closed_safely(self):
         executor = FakeReadOnlyExecutor(fail=True)
-        result = process_telegram_request(self.request_for("/status"), executor=executor)
+        result = process_telegram_request(self.request_for("/status"), config=TRUSTED_CONFIG, executor=executor)
 
         self.assertEqual(result.command, "STATUS")
         self.assertEqual(result.returncode, 1)
@@ -179,23 +234,54 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
         executor = FakeReadOnlyExecutor()
         request = self.request_for("/status", update_id=4001)
         tampered = replace(request, command=RemoteControlCommand(name="STATUS", argv=("STATUS", "--db", "POSTM0FIX.db")))
-        result = process_telegram_request(tampered, executor=executor)
+        result = process_telegram_request(tampered, config=TRUSTED_CONFIG, executor=executor)
 
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "UNSUPPORTED_COMMAND")
         self.assertEqual(executor.commands, [])
+
+    def test_missing_trusted_config_fails_before_executor(self):
+        invalid_configs = (
+            None,
+            {},
+            {"remote_control_db_path": "/trusted/control.db"},
+            {
+                "remote_control_db_path": "",
+                "remote_control_campaign_id": "CID-123",
+                "remote_control_run_id": "RUN-456",
+            },
+        )
+        for index, config in enumerate(invalid_configs, start=1):
+            with self.subTest(index=index):
+                executor = FakeReadOnlyExecutor()
+                result = process_telegram_request(
+                    self.request_for("/status", update_id=4500 + index),
+                    config=config,  # type: ignore[arg-type]
+                    executor=executor,
+                )
+                self.assertEqual(result.command, "STATUS")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr, "remote control executor failed safely")
+                self.assertEqual(executor.commands, [])
 
     def test_controller_invokes_no_subprocess_or_network(self):
         executor = FakeReadOnlyExecutor()
         with patch("alphaforge.remote_control.commands.subprocess.run") as subprocess_run, patch(
             "urllib.request.urlopen"
         ) as urlopen, patch("socket.create_connection") as create_connection:
-            result = process_telegram_request(self.request_for("/health"), executor=executor)
+            result = process_telegram_request(self.request_for("/health"), config=TRUSTED_CONFIG, executor=executor)
 
         self.assertEqual(result.command, "HEALTH")
         subprocess_run.assert_not_called()
         urlopen.assert_not_called()
         create_connection.assert_not_called()
+
+    def test_shell_true_is_never_used_by_controller(self):
+        executor = FakeReadOnlyExecutor()
+        result = process_telegram_request(self.request_for("/status", update_id=5001), config=TRUSTED_CONFIG, executor=executor)
+
+        self.assertEqual(result.command, "STATUS")
+        self.assertNotIn("shell", executor.kwargs[0])
 
 
 if __name__ == "__main__":

@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 
-from alphaforge.remote_control.commands import RemoteControlCommand, RemoteControlDispatchResult, RemoteControlResult
+from alphaforge.remote_control.commands import (
+    RemoteControlCommand,
+    RemoteControlConfig,
+    RemoteControlDispatchResult,
+    RemoteControlResult,
+    map_remote_command,
+)
 from alphaforge.remote_control.telegram_adapter import VerifiedTelegramRemoteControlRequest, is_verified_telegram_request
 
 
@@ -15,7 +22,9 @@ SAFE_EXECUTOR_ERROR = "remote control executor failed safely"
 def process_telegram_request(
     request: VerifiedTelegramRemoteControlRequest,
     *,
-    executor: Callable[[RemoteControlCommand], RemoteControlResult] | None = None,
+    config: RemoteControlConfig | Mapping[str, str] | None = None,
+    executor: Callable[..., RemoteControlResult] | None = None,
+    timeout: float = 5.0,
     max_output_chars: int = 4096,
 ) -> RemoteControlDispatchResult:
     if not is_verified_telegram_request(request):
@@ -32,7 +41,9 @@ def process_telegram_request(
         return _safe_failure(command.name, "EXECUTOR_UNAVAILABLE", max_output_chars=max_output_chars)
 
     try:
-        result = executor(command)
+        trusted_config = _trusted_config_values(config)
+        mapped_command = map_remote_command(command.name, trusted_config)
+        result = executor(mapped_command, config=trusted_config, timeout=timeout, max_output_chars=max_output_chars)
     except Exception:
         return _safe_failure(command.name, SAFE_EXECUTOR_ERROR, max_output_chars=max_output_chars)
 
@@ -102,3 +113,25 @@ def _safe_text(value: str, *, max_output_chars: int) -> str:
     if not isinstance(value, str):
         return ""
     return value.replace("\r", " ").replace("\n", " ")[:max_output_chars]
+
+
+def _trusted_config_values(config: RemoteControlConfig | Mapping[str, str] | None) -> dict[str, str]:
+    if isinstance(config, RemoteControlConfig):
+        return {
+            "remote_control_db_path": _required_trusted_text(config.db),
+            "remote_control_campaign_id": _required_trusted_text(config.cid),
+            "remote_control_run_id": _required_trusted_text(config.run),
+        }
+    if not isinstance(config, Mapping):
+        raise ValueError("missing trusted remote control config")
+    return {
+        "remote_control_db_path": _required_trusted_text(config.get("remote_control_db_path")),
+        "remote_control_campaign_id": _required_trusted_text(config.get("remote_control_campaign_id")),
+        "remote_control_run_id": _required_trusted_text(config.get("remote_control_run_id")),
+    }
+
+
+def _required_trusted_text(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("incomplete trusted remote control config")
+    return value.strip()
