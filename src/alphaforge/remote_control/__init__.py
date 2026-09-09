@@ -34,6 +34,11 @@ from alphaforge.remote_control.telegram_transport import (
     deliver_telegram_response,
     poll_telegram_loop,
     poll_telegram_once,
+    retry_pending_telegram_responses,
+)
+from alphaforge.remote_control.telegram_state import (
+    SQLiteTelegramTransportStateStore,
+    StoredTelegramResponseDelivery,
 )
 
 

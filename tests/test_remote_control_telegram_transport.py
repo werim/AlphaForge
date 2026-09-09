@@ -69,7 +69,15 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.telegram_config = TelegramRemoteControlConfig.from_allowlists(allowed_user_ids=(42,), allowed_chat_ids=(9001,))
 
-    def poll_once(self, http_client, executor, *, offset: int | None = None, remote_config=TRUSTED_CONFIG):
+    def poll_once(
+        self,
+        http_client,
+        executor,
+        *,
+        offset: int | None = None,
+        remote_config=TRUSTED_CONFIG,
+        state_store=None,
+    ):
         return poll_telegram_once(
             bot_token=BOT_TOKEN,
             offset=offset,
@@ -79,6 +87,7 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
             executor=executor,
             http_client=http_client,
             poll_timeout=3,
+            state_store=state_store,
         )
 
     def test_valid_authorized_status_flows_to_fake_executor_and_send_message_once(self):

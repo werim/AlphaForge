@@ -1,13 +1,13 @@
 # AlphaForge Version
 
 ## Issue #354 Telegram read-only remote-control adapter (2026-09-09)
-- Current version: feature/354-remote-control Phase-3 Telegram parser, authorization, replay, audit, verified-request capability, trusted STATUS/HEALTH executor adapter, and acknowledgement-aware Telegram long-poll transport boundary; no persistent transport state or service integration.
+- Current version: feature/354-remote-control Phase-3 Telegram parser, authorization, replay, audit, verified-request capability, trusted STATUS/HEALTH executor adapter, and dedicated persistent Telegram transport state; no service integration.
 - Current phase: read-only remote-control transport hardening.
-- Runtime maturity: Telegram `getUpdates`/`sendMessage` transport is available through injectable HTTP primitives. Command acknowledgement and response delivery are separate in-memory results; a failed send yields a capability-backed pending response that can be retried without re-entering authorization or execution. `HELP` advertises only `/status`, `/health`, and `/help`; `STATUS` and `HEALTH` retain trusted runtime mapping.
+- Runtime maturity: Telegram `getUpdates`/`sendMessage` transport is available through injectable HTTP primitives. A dedicated caller-selected SQLite store atomically persists each accepted response with its acknowledged offset before sending. Restart recovery mints validated response-only capabilities from pending rows and cannot access authorization, controller, runtime configuration, or execution. `HELP` advertises only `/status`, `/health`, and `/help`; `STATUS` and `HEALTH` retain trusted runtime mapping.
 - BACKTEST/PAPER/LIVE alignment: no trading, lifecycle, score, RR, execution, campaign, or runtime command behavior changed.
-- Lifecycle/persistence/execution impact: controller-owned SQLite replay/audit storage gains additive `remote_control_audit`; Telegram `update_id` is atomically claimed as `telegram:<update_id>` before acceptance. No campaign/runtime DB is accessed.
+- Lifecycle/persistence/execution impact: controller-owned replay/audit and Telegram transport-state databases remain separate from campaign/runtime databases. Telegram `update_id` is claimed before execution; pending response plus monotonic offset are committed atomically before sending. Command execution is at-most-once; response delivery is at-least-once under caller-driven recovery and may duplicate across the send/local-ack crash window.
 - Identifier contract: Bot API update IDs and poll offsets are integers; adapter, replay/audit, verified-request, and response-delivery identities are normalized strings. Response-only retry preserves that exact normalized identity.
-- Known critical risks: polling offsets and pending responses are not persisted across process restart; `REPORT`, `REJECTS`, `LABELS`, and `ERRORS` executor wiring is intentionally not implemented; no Telegram webhook, daemon, launchctl, or production service installation exists yet.
+- Known critical risks: Telegram and local SQLite cannot share a transaction, so a response accepted by Telegram may be resent if the process stops before durable local acknowledgement. `REPORT`, `REJECTS`, `LABELS`, and `ERRORS` executor wiring is intentionally not implemented; no Telegram webhook, daemon, launchctl, or production service installation exists yet.
 - Last audit date: 2026-09-09. Live readiness verdict: NOT LIVE READY.
 
 ## PR #344 M0 blocker correction (2026-09-06)

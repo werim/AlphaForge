@@ -11,6 +11,10 @@ from typing import Any, Protocol
 from alphaforge.remote_control.commands import RemoteControlConfig, RemoteControlResult
 from alphaforge.remote_control.telegram_adapter import TelegramRemoteControlConfig, process_telegram_update
 from alphaforge.remote_control.telegram_controller import process_telegram_request
+from alphaforge.remote_control.telegram_state import (
+    SQLiteTelegramTransportStateStore,
+    StoredTelegramResponseDelivery,
+)
 
 
 DEFAULT_POLL_TIMEOUT_SECONDS = 10
@@ -97,9 +101,13 @@ def poll_telegram_once(
     http_client: TelegramHttpClient,
     poll_timeout: int = DEFAULT_POLL_TIMEOUT_SECONDS,
     max_message_chars: int = MAX_TELEGRAM_MESSAGE_CHARS,
+    state_store: SQLiteTelegramTransportStateStore | None = None,
 ) -> TelegramPollResult:
     _required_token(bot_token)
-    next_offset = offset
+    try:
+        next_offset = _initialize_offset(offset, state_store)
+    except Exception:
+        return _empty_poll_result(offset, "STATE_LOAD_FAILED")
     updates_seen = 0
     accepted = 0
     rejected = 0
@@ -110,18 +118,10 @@ def poll_telegram_once(
     processing_failures = 0
 
     try:
-        payload = http_client.get_updates(bot_token=bot_token, offset=offset, timeout=poll_timeout)
+        payload = http_client.get_updates(bot_token=bot_token, offset=next_offset, timeout=poll_timeout)
         updates = _telegram_result_list(payload)
     except Exception:
-        return TelegramPollResult(
-            next_offset=next_offset,
-            updates_seen=0,
-            accepted=0,
-            rejected=0,
-            responses_sent=0,
-            send_failures=0,
-            transport_error="GET_UPDATES_FAILED",
-        )
+        return _empty_poll_result(next_offset, "GET_UPDATES_FAILED")
 
     for update in updates:
         updates_seen += 1
@@ -135,11 +135,39 @@ def poll_telegram_once(
         except Exception:
             rejected += 1
             processing_failures += 1
-            next_offset = _acknowledge_update(next_offset, update_id)
+            try:
+                next_offset = _persist_terminal_offset(next_offset, update_id, state_store)
+            except Exception:
+                return _poll_result(
+                    next_offset=next_offset,
+                    updates_seen=updates_seen,
+                    accepted=accepted,
+                    rejected=rejected,
+                    responses_sent=responses_sent,
+                    send_failures=send_failures,
+                    command_acknowledged=command_acknowledged,
+                    pending_deliveries=pending_deliveries,
+                    processing_failures=processing_failures,
+                    transport_error="STATE_PERSIST_FAILED",
+                )
             continue
         if not adapter_result.accepted or adapter_result.request is None:
             rejected += 1
-            next_offset = _acknowledge_update(next_offset, update_id)
+            try:
+                next_offset = _persist_terminal_offset(next_offset, update_id, state_store)
+            except Exception:
+                return _poll_result(
+                    next_offset=next_offset,
+                    updates_seen=updates_seen,
+                    accepted=accepted,
+                    rejected=rejected,
+                    responses_sent=responses_sent,
+                    send_failures=send_failures,
+                    command_acknowledged=command_acknowledged,
+                    pending_deliveries=pending_deliveries,
+                    processing_failures=processing_failures,
+                    transport_error="STATE_PERSIST_FAILED",
+                )
             continue
 
         accepted += 1
@@ -160,14 +188,50 @@ def poll_telegram_once(
             max_message_chars=max_message_chars,
             secrets=_config_secrets(bot_token, remote_config),
         )
-        delivery = TelegramResponseDelivery(
+        delivery = _mint_telegram_response_delivery(
             update_id=adapter_result.request.update_id,
             chat_id=adapter_result.request.chat_id,
             text=text,
-            command_acknowledged=True,
-            status="PENDING",
-            _capability=_DELIVERY_CAPABILITY,
         )
+        acknowledged_offset = _acknowledge_update(next_offset, update_id)
+        if state_store is not None:
+            if acknowledged_offset is None:
+                processing_failures += 1
+                pending_deliveries.append(delivery)
+                return _poll_result(
+                    next_offset=next_offset,
+                    updates_seen=updates_seen,
+                    accepted=accepted,
+                    rejected=rejected,
+                    responses_sent=responses_sent,
+                    send_failures=send_failures,
+                    command_acknowledged=command_acknowledged,
+                    pending_deliveries=pending_deliveries,
+                    processing_failures=processing_failures,
+                    transport_error="INVALID_UPDATE_ID",
+                )
+            try:
+                next_offset = state_store.persist_pending_with_offset(
+                    update_id=delivery.update_id,
+                    chat_id=delivery.chat_id,
+                    text=delivery.text,
+                    next_offset=acknowledged_offset,
+                )
+            except Exception:
+                processing_failures += 1
+                pending_deliveries.append(delivery)
+                return _poll_result(
+                    next_offset=next_offset,
+                    updates_seen=updates_seen,
+                    accepted=accepted,
+                    rejected=rejected,
+                    responses_sent=responses_sent,
+                    send_failures=send_failures,
+                    command_acknowledged=command_acknowledged,
+                    pending_deliveries=pending_deliveries,
+                    processing_failures=processing_failures,
+                    transport_error="STATE_PERSIST_FAILED",
+                )
         delivery = deliver_telegram_response(
             delivery,
             bot_token=bot_token,
@@ -175,12 +239,24 @@ def poll_telegram_once(
         )
         if delivery.status == "DELIVERED":
             responses_sent += 1
+            if state_store is not None:
+                try:
+                    state_store.mark_delivered(delivery.update_id)
+                except Exception:
+                    delivery = _delivery_with_failure(delivery, "DELIVERY_ACK_FAILED")
+                    pending_deliveries.append(delivery)
         else:
             send_failures += 1
             pending_deliveries.append(delivery)
-        next_offset = _acknowledge_update(next_offset, update_id)
+            if state_store is not None:
+                try:
+                    state_store.record_delivery_failure(delivery.update_id)
+                except Exception:
+                    processing_failures += 1
+        if state_store is None:
+            next_offset = acknowledged_offset
 
-    return TelegramPollResult(
+    return _poll_result(
         next_offset=next_offset,
         updates_seen=updates_seen,
         accepted=accepted,
@@ -239,6 +315,39 @@ def deliver_telegram_response(
     )
 
 
+def retry_pending_telegram_responses(
+    *,
+    bot_token: str,
+    http_client: TelegramHttpClient,
+    state_store: SQLiteTelegramTransportStateStore,
+) -> tuple[TelegramResponseDelivery, ...]:
+    """Retry durable responses without access to command-processing dependencies."""
+    _required_token(bot_token)
+    if not isinstance(state_store, SQLiteTelegramTransportStateStore):
+        return ()
+    try:
+        stored_deliveries = state_store.load_pending()
+    except Exception:
+        return ()
+
+    results: list[TelegramResponseDelivery] = []
+    for stored in stored_deliveries:
+        delivery = _restore_telegram_response_delivery(stored)
+        attempted = deliver_telegram_response(delivery, bot_token=bot_token, http_client=http_client)
+        if attempted.status == "DELIVERED":
+            try:
+                state_store.mark_delivered(attempted.update_id)
+            except Exception:
+                attempted = _delivery_with_failure(attempted, "DELIVERY_ACK_FAILED")
+        else:
+            try:
+                state_store.record_delivery_failure(attempted.update_id)
+            except Exception:
+                pass
+        results.append(attempted)
+    return tuple(results)
+
+
 def poll_telegram_loop(
     *,
     bot_token: str,
@@ -253,6 +362,7 @@ def poll_telegram_loop(
     sleep: Callable[[float], None] = time.sleep,
     poll_timeout: int = DEFAULT_POLL_TIMEOUT_SECONDS,
     max_message_chars: int = MAX_TELEGRAM_MESSAGE_CHARS,
+    state_store: SQLiteTelegramTransportStateStore | None = None,
 ) -> list[TelegramPollResult]:
     if iterations < 1:
         raise ValueError("iterations must be positive")
@@ -269,6 +379,7 @@ def poll_telegram_loop(
             http_client=http_client,
             poll_timeout=poll_timeout,
             max_message_chars=max_message_chars,
+            state_store=state_store,
         )
         results.append(result)
         next_offset = result.next_offset
@@ -302,6 +413,104 @@ def _acknowledge_update(offset: int | None, update_id: int | None) -> int | None
     if offset is None:
         return acknowledged_offset
     return max(offset, acknowledged_offset)
+
+
+def _initialize_offset(
+    offset: int | None,
+    state_store: SQLiteTelegramTransportStateStore | None,
+) -> int | None:
+    if state_store is None:
+        return offset
+    if offset is not None:
+        state_store.acknowledge_offset(offset)
+    return state_store.load_offset()
+
+
+def _persist_terminal_offset(
+    offset: int | None,
+    update_id: int | None,
+    state_store: SQLiteTelegramTransportStateStore | None,
+) -> int | None:
+    next_offset = _acknowledge_update(offset, update_id)
+    if state_store is not None and next_offset is not None:
+        return state_store.acknowledge_offset(next_offset)
+    return next_offset
+
+
+def _mint_telegram_response_delivery(*, update_id: str, chat_id: str, text: str) -> TelegramResponseDelivery:
+    return TelegramResponseDelivery(
+        update_id=update_id,
+        chat_id=chat_id,
+        text=text,
+        command_acknowledged=True,
+        status="PENDING",
+        _capability=_DELIVERY_CAPABILITY,
+    )
+
+
+def _restore_telegram_response_delivery(stored: StoredTelegramResponseDelivery) -> TelegramResponseDelivery:
+    if not isinstance(stored, StoredTelegramResponseDelivery):
+        raise ValueError("invalid persisted Telegram delivery")
+    return TelegramResponseDelivery(
+        update_id=stored.update_id,
+        chat_id=stored.chat_id,
+        text=stored.text,
+        command_acknowledged=True,
+        status="PENDING",
+        failure_reason=stored.failure_reason,
+        _capability=_DELIVERY_CAPABILITY,
+    )
+
+
+def _delivery_with_failure(delivery: TelegramResponseDelivery, reason: str) -> TelegramResponseDelivery:
+    return TelegramResponseDelivery(
+        update_id=delivery.update_id,
+        chat_id=delivery.chat_id,
+        text=delivery.text,
+        command_acknowledged=True,
+        status="PENDING",
+        failure_reason=reason,
+        _capability=_DELIVERY_CAPABILITY,
+    )
+
+
+def _empty_poll_result(next_offset: int | None, error: str) -> TelegramPollResult:
+    return TelegramPollResult(
+        next_offset=next_offset,
+        updates_seen=0,
+        accepted=0,
+        rejected=0,
+        responses_sent=0,
+        send_failures=0,
+        transport_error=error,
+    )
+
+
+def _poll_result(
+    *,
+    next_offset: int | None,
+    updates_seen: int,
+    accepted: int,
+    rejected: int,
+    responses_sent: int,
+    send_failures: int,
+    command_acknowledged: int,
+    pending_deliveries: Sequence[TelegramResponseDelivery],
+    processing_failures: int,
+    transport_error: str | None = None,
+) -> TelegramPollResult:
+    return TelegramPollResult(
+        next_offset=next_offset,
+        updates_seen=updates_seen,
+        accepted=accepted,
+        rejected=rejected,
+        responses_sent=responses_sent,
+        send_failures=send_failures,
+        command_acknowledged=command_acknowledged,
+        pending_deliveries=tuple(pending_deliveries),
+        processing_failures=processing_failures,
+        transport_error=transport_error,
+    )
 
 
 def _required_token(bot_token: str) -> str:
