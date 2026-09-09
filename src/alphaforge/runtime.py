@@ -1806,7 +1806,10 @@ class RuntimeOrchestrator:
                 self._accepted_setup_identities.add(str(market_ctx["setup_identity"]))
             await self._emit_lifecycle_event(LifecycleState.WAITING_ENTRY_ZONE.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleState.ENTRY_TRIGGERED.value, selection.symbol, {})
-            await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, selection.symbol, {})
+            # PAPER execution emits ORDER_PLACED after its simulated order result;
+            # LIVE_PRECHECK has no execution call, so its no-submit evidence ends here.
+            if self.config.execution_mode is ExecutionMode.LIVE_PRECHECK:
+                await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, selection.symbol, {})
         else:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})

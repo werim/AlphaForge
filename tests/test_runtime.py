@@ -833,6 +833,9 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest
     assert lifecycle[0] == "SIGNAL_CREATED"
     assert "ORDER_PLACED" in lifecycle
     assert lifecycle[:4] == ["SIGNAL_CREATED", "WAITING_ENTRY_ZONE", "ENTRY_TRIGGERED", "ORDER_PLACED"]
+    assert lifecycle.count("ORDER_PLACED") == 1
+    assert lifecycle[-1] == "POSITION_OPENED"
+    assert "ERROR" not in lifecycle
     assert orchestrator.metrics.executions == 1
     assert orchestrator._active_positions == {"BTCUSDT": pytest.approx(10.0)}
     assert portfolio_evidence["snapshot"].equity == pytest.approx(1_000.0)

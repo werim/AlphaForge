@@ -12,6 +12,7 @@
 ### Fixed
 - Valid guided PAPER candidates no longer fail every score solely because raw fractional MA deltas were interpreted as normalized quality.
 - Scoring success no longer leads inevitably to `UNKNOWN_PORTFOLIO_RISK` when the explicit local PAPER ledger defaults are enabled.
+- Accepted PAPER execution no longer emits `ORDER_PLACED` twice and corrupts the following lifecycle into `ERROR` states.
 
 ### Removed
 - Raw `structure_quality` and `ma_delta_strength` fallbacks from AIBrain scoring slots; the raw fields remain available as diagnostics.
