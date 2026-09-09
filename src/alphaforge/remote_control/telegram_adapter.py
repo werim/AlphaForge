@@ -62,12 +62,25 @@ class TelegramRemoteControlRequest:
     command: RemoteControlCommand
 
 
+_VERIFIED_REQUEST_CAPABILITY = object()
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedTelegramRemoteControlRequest:
+    update_id: str
+    user_id: str
+    chat_id: str
+    authorized_identity: str
+    command: RemoteControlCommand
+    _capability: object
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramRemoteControlAdapterResult:
     accepted: bool
     command: str | None
     rejection_reason: str | None
-    request: TelegramRemoteControlRequest | None = None
+    request: VerifiedTelegramRemoteControlRequest | None = None
 
 
 def process_telegram_update(
@@ -98,12 +111,13 @@ def process_telegram_update(
         if not replay_store.reserve(replay_key):
             raise ValueError("DUPLICATE_UPDATE_ID")
 
-        request = TelegramRemoteControlRequest(
+        request = VerifiedTelegramRemoteControlRequest(
             update_id=update_id,
             user_id=user_id,
             chat_id=chat_id,
             authorized_identity=identity,
             command=RemoteControlCommand(name=command_name, argv=(command_name,)),
+            _capability=_VERIFIED_REQUEST_CAPABILITY,
         )
         replay_store.record_remote_control_audit(
             transport="telegram",
@@ -150,6 +164,13 @@ def parse_telegram_command(text: str) -> str:
     if command is None:
         raise CommandParseError("UNSUPPORTED_COMMAND")
     return command
+
+
+def is_verified_telegram_request(value: object) -> bool:
+    return (
+        isinstance(value, VerifiedTelegramRemoteControlRequest)
+        and value._capability is _VERIFIED_REQUEST_CAPABILITY
+    )
 
 
 def _authorize(

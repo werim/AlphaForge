@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,8 +8,16 @@ from unittest.mock import patch
 
 from alphaforge.remote_control.audit import SQLiteReplayStore
 from alphaforge.remote_control.commands import RemoteControlCommand, RemoteControlResult
-from alphaforge.remote_control.telegram_adapter import ALLOWED_TELEGRAM_COMMANDS, TelegramRemoteControlConfig, process_telegram_update
-from alphaforge.remote_control.telegram_controller import build_telegram_help_text, process_telegram_request
+from alphaforge.remote_control.telegram_adapter import (
+    TelegramRemoteControlConfig,
+    TelegramRemoteControlRequest,
+    process_telegram_update,
+)
+from alphaforge.remote_control.telegram_controller import (
+    EXECUTABLE_TELEGRAM_COMMANDS,
+    build_telegram_help_text,
+    process_telegram_request,
+)
 
 from test_remote_control_telegram_adapter import make_update
 
@@ -52,8 +61,10 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
 
         self.assertEqual(result.command, "HELP")
         self.assertEqual(result.returncode, 0)
-        for command in ALLOWED_TELEGRAM_COMMANDS:
+        for command in EXECUTABLE_TELEGRAM_COMMANDS:
             self.assertIn(command, result.stdout)
+        for planned_command in ("/report", "/rejects", "/labels", "/errors"):
+            self.assertNotIn(planned_command, result.stdout)
         self.assertEqual(result.stdout, build_telegram_help_text())
 
     def test_help_invokes_no_executor(self):
@@ -78,19 +89,25 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
         self.assertEqual(result.stdout, "health ok")
         self.assertEqual(executor.commands, [RemoteControlCommand(name="HEALTH", argv=("HEALTH",))])
 
+    def test_directly_constructed_unverified_request_cannot_reach_executor(self):
+        executor = FakeReadOnlyExecutor()
+        request = TelegramRemoteControlRequest(
+            update_id="9999",
+            user_id="42",
+            chat_id="9001",
+            authorized_identity="telegram:user_id=42;chat_id=9001",
+            command=RemoteControlCommand(name="STATUS", argv=("STATUS",)),
+        )
+        result = process_telegram_request(request, executor=executor)  # type: ignore[arg-type]
+
+        self.assertEqual(result.command, "UNSUPPORTED")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "invalid remote control request")
+        self.assertEqual(executor.commands, [])
+
     def test_unsupported_command_never_reaches_executor(self):
         executor = FakeReadOnlyExecutor()
-        command = RemoteControlCommand(name="REPORT", argv=("REPORT",))
-        result = process_telegram_request(
-            self.request_for("/report", update_id=2001).__class__(
-                update_id="2001",
-                user_id="42",
-                chat_id="9001",
-                authorized_identity="telegram:user_id=42;chat_id=9001",
-                command=command,
-            ),
-            executor=executor,
-        )
+        result = process_telegram_request(self.request_for("/report", update_id=2001), executor=executor)
 
         self.assertEqual(result.command, "UNSUPPORTED")
         self.assertEqual(result.returncode, 1)
@@ -120,16 +137,48 @@ class RemoteControlTelegramControllerTests(unittest.TestCase):
         self.assertEqual(adapter_result.rejection_reason, "UNSUPPORTED_COMMAND")
         self.assertEqual(executor.commands, [])
 
+    def test_duplicate_update_id_cannot_reach_executor(self):
+        executor = FakeReadOnlyExecutor()
+        accepted = process_telegram_update(
+            make_update(update_id=3501, text="/status"),
+            config=self.config,
+            replay_store=self.store,
+        )
+        duplicate = process_telegram_update(
+            make_update(update_id=3501, text="/health"),
+            config=self.config,
+            replay_store=self.store,
+        )
+
+        self.assertTrue(accepted.accepted)
+        self.assertFalse(duplicate.accepted)
+        self.assertIsNone(duplicate.request)
+        self.assertEqual(duplicate.rejection_reason, "DUPLICATE_UPDATE_ID")
+        self.assertEqual(executor.commands, [])
+
+    def test_unauthorized_user_and_chat_cannot_reach_executor(self):
+        executor = FakeReadOnlyExecutor()
+        unauthorized_user = process_telegram_update(
+            make_update(update_id=3601, user_id=7, text="/status"),
+            config=self.config,
+            replay_store=self.store,
+        )
+        unauthorized_chat = process_telegram_update(
+            make_update(update_id=3602, chat_id=123, text="/health"),
+            config=self.config,
+            replay_store=self.store,
+        )
+
+        self.assertFalse(unauthorized_user.accepted)
+        self.assertFalse(unauthorized_chat.accepted)
+        self.assertIsNone(unauthorized_user.request)
+        self.assertIsNone(unauthorized_chat.request)
+        self.assertEqual(executor.commands, [])
+
     def test_rejects_tampered_argv_before_executor(self):
         executor = FakeReadOnlyExecutor()
         request = self.request_for("/status", update_id=4001)
-        tampered = request.__class__(
-            update_id=request.update_id,
-            user_id=request.user_id,
-            chat_id=request.chat_id,
-            authorized_identity=request.authorized_identity,
-            command=RemoteControlCommand(name="STATUS", argv=("STATUS", "--db", "POSTM0FIX.db")),
-        )
+        tampered = replace(request, command=RemoteControlCommand(name="STATUS", argv=("STATUS", "--db", "POSTM0FIX.db")))
         result = process_telegram_request(tampered, executor=executor)
 
         self.assertEqual(result.returncode, 1)

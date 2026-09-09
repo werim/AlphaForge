@@ -3,21 +3,22 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from alphaforge.remote_control.commands import RemoteControlCommand, RemoteControlDispatchResult, RemoteControlResult
-from alphaforge.remote_control.telegram_adapter import ALLOWED_TELEGRAM_COMMANDS, TelegramRemoteControlRequest
+from alphaforge.remote_control.telegram_adapter import VerifiedTelegramRemoteControlRequest, is_verified_telegram_request
 
 
 TELEGRAM_EXECUTOR_COMMANDS = {"STATUS", "HEALTH"}
 TELEGRAM_CONTROLLER_COMMANDS = TELEGRAM_EXECUTOR_COMMANDS | {"HELP"}
+EXECUTABLE_TELEGRAM_COMMANDS = ("/status", "/health", "/help")
 SAFE_EXECUTOR_ERROR = "remote control executor failed safely"
 
 
 def process_telegram_request(
-    request: TelegramRemoteControlRequest,
+    request: VerifiedTelegramRemoteControlRequest,
     *,
     executor: Callable[[RemoteControlCommand], RemoteControlResult] | None = None,
     max_output_chars: int = 4096,
 ) -> RemoteControlDispatchResult:
-    if not isinstance(request, TelegramRemoteControlRequest):
+    if not is_verified_telegram_request(request):
         return _safe_failure("UNKNOWN", "invalid remote control request", max_output_chars=max_output_chars)
 
     command = request.command
@@ -47,7 +48,7 @@ def process_telegram_request(
 
 
 def build_telegram_help_text() -> str:
-    commands = " ".join(ALLOWED_TELEGRAM_COMMANDS.keys())
+    commands = " ".join(EXECUTABLE_TELEGRAM_COMMANDS)
     return f"Supported read-only commands: {commands}"
 
 
