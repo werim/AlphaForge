@@ -5,7 +5,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from alphaforge.remote_control.commands import RemoteControlConfig, RemoteControlResult
@@ -16,12 +16,24 @@ from alphaforge.remote_control.telegram_controller import process_telegram_reque
 DEFAULT_POLL_TIMEOUT_SECONDS = 10
 DEFAULT_HTTP_TIMEOUT_SECONDS = 15
 MAX_TELEGRAM_MESSAGE_CHARS = 3900
+_DELIVERY_CAPABILITY = object()
 
 
 class TelegramHttpClient(Protocol):
     def get_updates(self, *, bot_token: str, offset: int | None, timeout: int) -> Mapping[str, Any]: ...
 
     def send_message(self, *, bot_token: str, chat_id: str, text: str) -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramResponseDelivery:
+    update_id: int
+    chat_id: str
+    text: str
+    command_acknowledged: bool
+    status: str
+    failure_reason: str | None = None
+    _capability: object = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +44,9 @@ class TelegramPollResult:
     rejected: int
     responses_sent: int
     send_failures: int
+    command_acknowledged: int = 0
+    pending_deliveries: tuple[TelegramResponseDelivery, ...] = ()
+    processing_failures: int = 0
     transport_error: str | None = None
 
 
@@ -90,6 +105,9 @@ def poll_telegram_once(
     rejected = 0
     responses_sent = 0
     send_failures = 0
+    command_acknowledged = 0
+    pending_deliveries: list[TelegramResponseDelivery] = []
+    processing_failures = 0
 
     try:
         payload = http_client.get_updates(bot_token=bot_token, offset=offset, timeout=poll_timeout)
@@ -108,42 +126,59 @@ def poll_telegram_once(
     for update in updates:
         updates_seen += 1
         update_id = _update_id(update)
-        if update_id is not None:
-            next_offset = update_id + 1
-
-        adapter_result = process_telegram_update(
-            update if isinstance(update, Mapping) else {},
-            config=telegram_config,
-            replay_store=replay_store,
-        )
+        try:
+            adapter_result = process_telegram_update(
+                update if isinstance(update, Mapping) else {},
+                config=telegram_config,
+                replay_store=replay_store,
+            )
+        except Exception:
+            rejected += 1
+            processing_failures += 1
+            next_offset = _acknowledge_update(next_offset, update_id)
+            continue
         if not adapter_result.accepted or adapter_result.request is None:
             rejected += 1
+            next_offset = _acknowledge_update(next_offset, update_id)
             continue
 
         accepted += 1
-        response = process_telegram_request(
-            adapter_result.request,
-            config=remote_config,
-            executor=executor,
-            max_output_chars=max_message_chars,
-        )
+        try:
+            response = process_telegram_request(
+                adapter_result.request,
+                config=remote_config,
+                executor=executor,
+                max_output_chars=max_message_chars,
+            )
+            response_text = response.formatted
+        except Exception:
+            processing_failures += 1
+            response_text = "REMOTE_CONTROL: FAIL rc=1 | stderr=request failed safely"
+        command_acknowledged += 1
         text = _telegram_safe_text(
-            response.formatted,
+            response_text,
             max_message_chars=max_message_chars,
             secrets=_config_secrets(bot_token, remote_config),
         )
-        try:
-            sent = http_client.send_message(
-                bot_token=bot_token,
-                chat_id=adapter_result.request.chat_id,
-                text=text,
-            )
-            if sent.get("ok") is not True:
-                send_failures += 1
-            else:
-                responses_sent += 1
-        except Exception:
+        delivery = TelegramResponseDelivery(
+            update_id=adapter_result.request.update_id,
+            chat_id=adapter_result.request.chat_id,
+            text=text,
+            command_acknowledged=True,
+            status="PENDING",
+            _capability=_DELIVERY_CAPABILITY,
+        )
+        delivery = deliver_telegram_response(
+            delivery,
+            bot_token=bot_token,
+            http_client=http_client,
+        )
+        if delivery.status == "DELIVERED":
+            responses_sent += 1
+        else:
             send_failures += 1
+            pending_deliveries.append(delivery)
+        next_offset = _acknowledge_update(next_offset, update_id)
 
     return TelegramPollResult(
         next_offset=next_offset,
@@ -152,6 +187,55 @@ def poll_telegram_once(
         rejected=rejected,
         responses_sent=responses_sent,
         send_failures=send_failures,
+        command_acknowledged=command_acknowledged,
+        pending_deliveries=tuple(pending_deliveries),
+        processing_failures=processing_failures,
+    )
+
+
+def deliver_telegram_response(
+    delivery: TelegramResponseDelivery,
+    *,
+    bot_token: str,
+    http_client: TelegramHttpClient,
+) -> TelegramResponseDelivery:
+    """Deliver a prepared response without revisiting authorization or execution."""
+    _required_token(bot_token)
+    if (
+        not isinstance(delivery, TelegramResponseDelivery)
+        or delivery._capability is not _DELIVERY_CAPABILITY
+        or not delivery.command_acknowledged
+    ):
+        raise ValueError("invalid Telegram response delivery")
+    if delivery.status == "DELIVERED":
+        return delivery
+    if delivery.status != "PENDING":
+        raise ValueError("invalid Telegram response delivery status")
+    try:
+        sent = http_client.send_message(
+            bot_token=bot_token,
+            chat_id=delivery.chat_id,
+            text=delivery.text,
+        )
+        if sent.get("ok") is not True:
+            raise ValueError("TELEGRAM_SEND_FAILED")
+    except Exception:
+        return TelegramResponseDelivery(
+            update_id=delivery.update_id,
+            chat_id=delivery.chat_id,
+            text=delivery.text,
+            command_acknowledged=True,
+            status="PENDING",
+            failure_reason="SEND_MESSAGE_FAILED",
+            _capability=_DELIVERY_CAPABILITY,
+        )
+    return TelegramResponseDelivery(
+        update_id=delivery.update_id,
+        chat_id=delivery.chat_id,
+        text=delivery.text,
+        command_acknowledged=True,
+        status="DELIVERED",
+        _capability=_DELIVERY_CAPABILITY,
     )
 
 
@@ -209,6 +293,15 @@ def _update_id(update: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
+
+
+def _acknowledge_update(offset: int | None, update_id: int | None) -> int | None:
+    if update_id is None:
+        return offset
+    acknowledged_offset = update_id + 1
+    if offset is None:
+        return acknowledged_offset
+    return max(offset, acknowledged_offset)
 
 
 def _required_token(bot_token: str) -> str:

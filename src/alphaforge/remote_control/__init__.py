@@ -29,7 +29,9 @@ from alphaforge.remote_control.telegram_controller import (
 )
 from alphaforge.remote_control.telegram_transport import (
     TelegramPollResult,
+    TelegramResponseDelivery,
     UrlLibTelegramHttpClient,
+    deliver_telegram_response,
     poll_telegram_loop,
     poll_telegram_once,
 )

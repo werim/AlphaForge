@@ -10,15 +10,17 @@
 - Adapter-minted verified Telegram request capability required by the execution controller.
 - Trusted STATUS/HEALTH executor adapter that remaps verified Telegram commands through the existing remote-control runtime argv builder before invoking an injected executor.
 - Injectable Telegram long-poll transport primitives for `getUpdates`, sequential adapter/controller processing, bounded response text, and `sendMessage`.
+- Capability-backed in-memory Telegram response-delivery records and a response-only retry primitive that cannot re-enter command execution.
 
 ### Changed
 - Telegram replay protection claims `telegram:<update_id>` through the existing SQLite replay store before accepting a command.
 - `HELP` now advertises only currently executable Telegram commands: `/status`, `/health`, and `/help`.
 - Telegram request fields and request argv no longer provide runtime DB, campaign, run, executable, or argv values for STATUS/HEALTH execution.
 - Long-poll offset advances to the last parseable processed `update_id + 1`; duplicate protection remains owned by the replay store.
+- Long-poll command acknowledgement, response delivery, and update offset acknowledgement are explicit: terminal updates advance only after processing, while failed sends return a pending sanitized response for response-only retry.
 
 ### Fixed
-- None; this is a new transport boundary.
+- A `sendMessage` failure after successful read-only execution no longer leaves the response outcome implicit; execution remains at-most-once and the failed response is independently retryable in memory.
 
 ### Removed
 - None.
@@ -27,7 +29,7 @@
 - None. Mail/local command behavior and executor dispatch remain unchanged.
 
 ### Known Issues
-- Telegram webhook/service integration and executor wiring for `REPORT`, `REJECTS`, `LABELS`, and `ERRORS` are intentionally out of scope. LIVE remains NOT READY.
+- Pending response delivery and polling offsets are not persisted yet. Telegram webhook/service integration and executor wiring for `REPORT`, `REJECTS`, `LABELS`, and `ERRORS` are intentionally out of scope. LIVE remains NOT READY.
 
 # PR #344 M0 reject identity and watchdog blockers — 2026-09-06
 

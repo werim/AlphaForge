@@ -1,12 +1,12 @@
 # AlphaForge Version
 
 ## Issue #354 Telegram read-only remote-control adapter (2026-09-09)
-- Current version: feature/354-remote-control Phase-3 Telegram parser, authorization, replay, audit, verified-request capability, trusted STATUS/HEALTH executor adapter, and injectable Telegram long-poll transport boundary; no webhook/service integration.
+- Current version: feature/354-remote-control Phase-3 Telegram parser, authorization, replay, audit, verified-request capability, trusted STATUS/HEALTH executor adapter, and acknowledgement-aware Telegram long-poll transport boundary; no persistent transport state or service integration.
 - Current phase: read-only remote-control transport hardening.
-- Runtime maturity: Telegram `getUpdates`/`sendMessage` transport is available through injectable HTTP primitives. Updates are processed sequentially through the existing adapter/controller; `HELP` is answered without runtime access and advertises only `/status`, `/health`, and `/help`; `STATUS` and `HEALTH` are remapped from trusted caller-supplied `RemoteControlConfig`/mapping into the existing runtime argv before an injected executor is called.
+- Runtime maturity: Telegram `getUpdates`/`sendMessage` transport is available through injectable HTTP primitives. Command acknowledgement and response delivery are separate in-memory results; a failed send yields a capability-backed pending response that can be retried without re-entering authorization or execution. `HELP` advertises only `/status`, `/health`, and `/help`; `STATUS` and `HEALTH` retain trusted runtime mapping.
 - BACKTEST/PAPER/LIVE alignment: no trading, lifecycle, score, RR, execution, campaign, or runtime command behavior changed.
 - Lifecycle/persistence/execution impact: controller-owned SQLite replay/audit storage gains additive `remote_control_audit`; Telegram `update_id` is atomically claimed as `telegram:<update_id>` before acceptance. No campaign/runtime DB is accessed.
-- Known critical risks: `REPORT`, `REJECTS`, `LABELS`, and `ERRORS` executor wiring is intentionally not implemented; no Telegram webhook, daemon, launchctl, or production service installation exists yet.
+- Known critical risks: polling offsets and pending responses are not persisted across process restart; `REPORT`, `REJECTS`, `LABELS`, and `ERRORS` executor wiring is intentionally not implemented; no Telegram webhook, daemon, launchctl, or production service installation exists yet.
 - Last audit date: 2026-09-09. Live readiness verdict: NOT LIVE READY.
 
 ## PR #344 M0 blocker correction (2026-09-06)

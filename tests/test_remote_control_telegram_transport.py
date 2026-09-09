@@ -8,7 +8,12 @@ from unittest.mock import patch
 from alphaforge.remote_control.audit import SQLiteReplayStore
 from alphaforge.remote_control.commands import RemoteControlCommand, RemoteControlConfig, RemoteControlResult
 from alphaforge.remote_control.telegram_adapter import TelegramRemoteControlConfig
-from alphaforge.remote_control.telegram_transport import poll_telegram_loop, poll_telegram_once
+from alphaforge.remote_control.telegram_transport import (
+    TelegramResponseDelivery,
+    deliver_telegram_response,
+    poll_telegram_loop,
+    poll_telegram_once,
+)
 
 from test_remote_control_telegram_adapter import make_update
 from test_remote_control_telegram_controller import HEALTH_ARGV, STATUS_ARGV, TRUSTED_CONFIG
@@ -85,6 +90,8 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
         self.assertEqual(result.next_offset, 11)
         self.assertEqual(result.accepted, 1)
         self.assertEqual(result.responses_sent, 1)
+        self.assertEqual(result.command_acknowledged, 1)
+        self.assertEqual(result.pending_deliveries, ())
         self.assertEqual(executor.commands, [RemoteControlCommand(name="STATUS", argv=STATUS_ARGV)])
         self.assertEqual(len(http.send_calls), 1)
         self.assertEqual(http.send_calls[0]["chat_id"], "9001")
@@ -98,6 +105,7 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
 
         self.assertEqual(result.next_offset, 21)
         self.assertEqual(result.responses_sent, 1)
+        self.assertEqual(result.command_acknowledged, 1)
         self.assertEqual(executor.commands, [RemoteControlCommand(name="HEALTH", argv=HEALTH_ARGV)])
         self.assertEqual(http.send_calls[0]["chat_id"], "9001")
         self.assertIn("HEALTH: OK", http.send_calls[0]["text"])
@@ -241,14 +249,115 @@ class RemoteControlTelegramTransportTests(unittest.TestCase):
                 self.assertEqual(http.send_calls, [])
 
     def test_send_message_failure_does_not_crash_or_leak_token(self):
-        http = FakeTelegramHttpClient([{"ok": True, "result": [make_update(update_id=110, text="/help")]}], fail_send=True)
+        http = FakeTelegramHttpClient([{"ok": True, "result": [make_update(update_id=110, text="/status")]}], fail_send=True)
         executor = FakeRuntimeExecutor()
 
         result = self.poll_once(http, executor)
 
+        self.assertEqual(result.next_offset, 111)
         self.assertEqual(result.responses_sent, 0)
         self.assertEqual(result.send_failures, 1)
+        self.assertEqual(result.command_acknowledged, 1)
+        self.assertEqual(len(result.pending_deliveries), 1)
+        self.assertEqual(result.pending_deliveries[0].status, "PENDING")
+        self.assertEqual(result.pending_deliveries[0].failure_reason, "SEND_MESSAGE_FAILED")
+        self.assertEqual(executor.commands, [RemoteControlCommand(name="STATUS", argv=STATUS_ARGV)])
         self.assertNotIn(BOT_TOKEN, repr(result))
+
+        retry_http = FakeTelegramHttpClient()
+        delivered = deliver_telegram_response(
+            result.pending_deliveries[0],
+            bot_token=BOT_TOKEN,
+            http_client=retry_http,
+        )
+
+        self.assertEqual(delivered.status, "DELIVERED")
+        self.assertEqual(len(retry_http.send_calls), 1)
+        self.assertEqual(executor.commands, [RemoteControlCommand(name="STATUS", argv=STATUS_ARGV)])
+
+    def test_duplicate_after_send_failure_does_not_execute_twice(self):
+        update = make_update(update_id=111, text="/health")
+        executor = FakeRuntimeExecutor()
+        first = self.poll_once(FakeTelegramHttpClient([{"ok": True, "result": [update]}], fail_send=True), executor)
+        second = self.poll_once(FakeTelegramHttpClient([{"ok": True, "result": [update]}]), executor, offset=None)
+
+        self.assertEqual(first.next_offset, 112)
+        self.assertEqual(second.next_offset, 112)
+        self.assertEqual(second.rejected, 1)
+        self.assertEqual(executor.commands, [RemoteControlCommand(name="HEALTH", argv=HEALTH_ARGV)])
+
+    def test_fabricated_response_delivery_cannot_target_a_chat(self):
+        http = FakeTelegramHttpClient()
+        fabricated = TelegramResponseDelivery(
+            update_id=999,
+            chat_id="attacker",
+            text="fabricated",
+            command_acknowledged=True,
+            status="PENDING",
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid Telegram response delivery"):
+            deliver_telegram_response(fabricated, bot_token=BOT_TOKEN, http_client=http)
+
+        self.assertEqual(http.send_calls, [])
+
+    def test_adapter_store_exception_is_isolated_and_advances_offset(self):
+        http = FakeTelegramHttpClient([{"ok": True, "result": [make_update(update_id=112, text="/status")]}])
+        executor = FakeRuntimeExecutor()
+
+        with patch(
+            "alphaforge.remote_control.telegram_transport.process_telegram_update",
+            side_effect=RuntimeError(f"store failed {BOT_TOKEN} /trusted/control.db"),
+        ):
+            result = self.poll_once(http, executor, offset=100)
+
+        self.assertEqual(result.next_offset, 113)
+        self.assertEqual(result.processing_failures, 1)
+        self.assertEqual(result.rejected, 1)
+        self.assertEqual(executor.commands, [])
+        self.assertEqual(http.send_calls, [])
+        self.assertNotIn(BOT_TOKEN, repr(result))
+        self.assertNotIn("/trusted/control.db", repr(result))
+
+    def test_controller_exception_is_isolated_and_sends_safe_failure(self):
+        http = FakeTelegramHttpClient([{"ok": True, "result": [make_update(update_id=113, text="/status")]}])
+        executor = FakeRuntimeExecutor()
+
+        with patch(
+            "alphaforge.remote_control.telegram_transport.process_telegram_request",
+            side_effect=RuntimeError(f"controller failed {BOT_TOKEN} /trusted/control.db"),
+        ):
+            result = self.poll_once(http, executor)
+
+        self.assertEqual(result.next_offset, 114)
+        self.assertEqual(result.command_acknowledged, 1)
+        self.assertEqual(result.processing_failures, 1)
+        self.assertEqual(result.responses_sent, 1)
+        self.assertEqual(executor.commands, [])
+        self.assertEqual(http.send_calls[0]["text"], "REMOTE_CONTROL: FAIL rc=1 | stderr=request failed safely")
+
+    def test_offset_semantics_cover_terminal_update_outcomes(self):
+        cases = (
+            ("unauthorized", make_update(update_id=140, user_id=7, text="/status"), FakeRuntimeExecutor(), False),
+            ("malformed", {"update_id": 141}, FakeRuntimeExecutor(), False),
+            ("executor_failure", make_update(update_id=142, text="/health"), FakeRuntimeExecutor(fail=True), False),
+            ("send_failure", make_update(update_id=143, text="/status"), FakeRuntimeExecutor(), True),
+        )
+        for name, update, executor, fail_send in cases:
+            with self.subTest(name=name):
+                http = FakeTelegramHttpClient([{"ok": True, "result": [update]}], fail_send=fail_send)
+                result = self.poll_once(http, executor, offset=10)
+                self.assertEqual(result.next_offset, update["update_id"] + 1)
+
+    def test_malformed_update_without_id_does_not_change_offset(self):
+        result = self.poll_once(
+            FakeTelegramHttpClient([{"ok": True, "result": ["malformed"]}]),
+            FakeRuntimeExecutor(),
+            offset=150,
+        )
+
+        self.assertEqual(result.next_offset, 150)
+        self.assertEqual(result.rejected, 1)
 
     def test_retry_backoff_is_bounded_and_injected(self):
         http = FakeTelegramHttpClient(
