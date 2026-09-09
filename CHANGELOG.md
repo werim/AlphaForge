@@ -1,3 +1,27 @@
+# Issue #357 PAPER acceptance normalization — 2026-09-09
+
+### Added
+- Explicit bounded MTF scoring qualities with preserved raw MA-delta and realized-volatility diagnostics.
+- PAPER-only `$1,000` equity/available-balance evidence and conservative `$10` candidate notional, included in PAPER runtime identity.
+- Regression coverage for normalization, score variability, real AIBrain acceptance, effective RR, portfolio evidence, and missing-evidence failure.
+
+### Changed
+- AIBrain scoring context now consumes normalized MTF setup, momentum, regime-alignment, and volatility-fit fields instead of raw directional deltas.
+- PAPER position exposure uses the same explicit notional evaluated by portfolio risk.
+
+### Fixed
+- Valid guided PAPER candidates no longer fail every score solely because raw fractional MA deltas were interpreted as normalized quality.
+- Scoring success no longer leads inevitably to `UNKNOWN_PORTFOLIO_RISK` when the explicit local PAPER ledger defaults are enabled.
+
+### Removed
+- Raw `structure_quality` and `ma_delta_strength` fallbacks from AIBrain scoring slots; the raw fields remain available as diagnostics.
+
+### Breaking Changes
+- No schema or threshold change. PAPER campaign filter identity changes because ledger equity and candidate notional are now explicit inputs; use a fresh campaign.
+
+### Known Issues
+- The PAPER ledger defaults are static and do not yet compound realized PnL. Historical campaign evidence is unchanged. LIVE remains NOT READY.
+
 # M0 canonical reject-label identity correction — 2026-09-08
 
 ### Added

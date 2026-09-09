@@ -1,3 +1,22 @@
+# Issue #357 PAPER acceptance normalization — 2026-09-09
+
+## Why the patch was needed and root cause
+The guided PAPER pipeline forwarded raw moving-average deltas, commonly `0.0002`–`0.005`, through `structure_quality` and `ma_delta_strength` into AIBrain fields whose contract is bounded `0..1` quality evidence. Those unit-mismatched inputs suppressed total score, win probability, confidence, and expectancy after costs for every scored burn-in candidate. A second latent blocker existed immediately after scoring: the exchange-public PAPER scanner supplies no account equity, available balance, or candidate notional, so the unchanged fail-closed portfolio gate would reject otherwise valid candidates as `UNKNOWN_PORTFOLIO_RISK`.
+
+## Files changed and exact behavior
+- `src/alphaforge/multi_timeframe.py`: adds a deterministic scoring adapter. Raw strength and realized-volatility fields remain present. Directional quality uses `raw_strength / (raw_strength + direction_threshold)`, mapping the existing confirmation threshold to `0.5` and asymptotically approaching `1.0`. Volatility fit uses the existing 2% high-volatility boundary as `0.02 / (0.02 + realized_volatility)`. Setup, execution, and regime contexts expose separate normalized fields.
+- `src/alphaforge/runtime.py`: consumes only the explicit normalized MTF fields for AIBrain setup and momentum scoring, and consumes normalized regime alignment. It adds PAPER-only defaults of `$1,000` equity/available balance and `$10` candidate notional, records their provenance, and propagates the chosen notional into paper position accounting. Explicit market/account evidence still takes precedence. Setting either default to `None` preserves fail-closed behavior.
+- `src/alphaforge/config/__init__.py`: includes the two PAPER account parameters in PAPER campaign/runtime filter identity only; LIVE and LIVE_PRECHECK identities are unchanged.
+- `tests/test_multi_timeframe.py`, `tests/test_m0_scoring_context.py`, and `tests/test_runtime.py`: cover bounded normalization, raw diagnostic preservation, score variability, a real AIBrain acceptance, effective-RR rejection, explicit PAPER account evidence, conservative notional propagation, and missing-evidence failure without exchange calls.
+
+## Safety, compatibility, persistence, and lifecycle
+No `min_accept_score`, `min_p_win`, `min_confidence`, `min_effective_rr`, or other threshold changed. No reject gate was disabled, and `UNKNOWN_PORTFOLIO_RISK` remains fail-closed. No LIVE submission, authorization, reconciliation, or account fallback changed. No schema or CSV shape changed and no migration is required. Existing databases and campaign evidence were not accessed or modified during implementation or validation; tests used temporary or in-memory SQLite only. Historical burn-in evidence must not be mixed with a fresh post-fix campaign because PAPER filter identity now includes the explicit ledger assumptions.
+
+## Tests, risks, and recommendation
+Focused MTF/scoring/portfolio/runtime tests passed `114` tests. The broader Phase 8 campaign, environment-filter, calibration, runtime-env, execution, resilience, and reconciliation group passed `112` tests. The unmodified local `.env` intentionally carries campaign-specific values (`MIN_EFFECTIVE_RR=1.1`, unknown expectancy allowed, and relaxed daily caps), so a raw full-suite run completed with `1457 passed, 3 skipped, 9` unrelated expectation failures. Re-running those exact failures with canonical test defaults passed `18/18`. A second full run with canonical globals reached `1465 passed, 3 skipped`; its sole failure was the alias-precedence test because the forced canonical variable necessarily masked the alias under test. This environment conflict is pre-existing and no failing test touches the issue #357 files or behavior.
+
+Smallest safe recommendation: merge only after review, then start a new isolated PAPER campaign. Do not infer LIVE readiness or repair historical campaign data. Remaining limitation: the added PAPER ledger is a static conservative evidence source for the immediate gate; realized PnL is not yet applied to its equity balance.
+
 # M0 canonical reject-label identity correction — 2026-09-08
 
 ## Why the patch was needed and root cause

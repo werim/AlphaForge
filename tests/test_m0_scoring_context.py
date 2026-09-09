@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from alphaforge.ai_brain import AIBrain
 from alphaforge.multi_timeframe import (
     build_execution_context as build_mtf_execution_context,
+    build_regime_context,
     build_setup_context,
 )
 from alphaforge.order import after_position_close
@@ -189,6 +190,51 @@ def test_different_guided_inputs_do_not_collapse_to_default_profile() -> None:
     assert strong.probabilistic["confidence"] > weak.probabilistic["confidence"]
 
 
+def test_high_quality_normalized_paper_candidate_can_pass_ai_scoring() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(execution_mode=ExecutionMode.PAPER, min_signal_score=.25),
+        AIBrain(Session(engine), min_accept_score=.25),
+        lambda: None,
+        persistence_engine=engine,
+    )
+    now = 10_000_000
+
+    def candles(rows: int):
+        values = [100.0 + index * .1 for index in range(rows)]
+        return [
+            {"open_ts": index * 60_000, "open": value, "high": value,
+             "low": value, "close": value, "volume": 1.0,
+             "close_ts": now - (rows - index - 1) * 60_000}
+            for index, value in enumerate(values)
+        ]
+
+    regime_layer = build_regime_context(candles(20), "1h")
+    setup_layer = build_setup_context(candles(12), "15m", regime=regime_layer)
+    execution_layer = build_mtf_execution_context(
+        candles(5), "1m",
+        {"spread_pct": .0002, "expected_slippage_pct": .0002,
+         "market_data_latency_ms": 20.0, "liquidity_score": .91},
+        trade_side="LONG",
+    )
+    market = _guided_market(mtf={
+        "setup": setup_layer,
+        "execution": execution_layer,
+        "regime": regime_layer,
+        "alignment": {"aligned": True},
+    })
+    signal = runtime._build_signal(SimpleNamespace(symbol="BTCUSDT"), market)
+    scored_market, regime, stats = runtime._build_scoring_context(signal, market)
+
+    score = runtime.ai_brain.score_signal(signal, scored_market, regime, stats)
+    order = runtime.ai_brain.choose_order_plan(signal, scored_market, score)
+
+    assert score.accepted is True
+    assert order.decision == "ACCEPTED"
+    assert score.total_score >= runtime.ai_brain.min_accept_score
+    assert score.probabilistic["expectancy_after_costs"] > 0.0
+
+
 def test_below_acceptance_score_has_explicit_low_score_flag() -> None:
     brain = AIBrain(Session(init_db("sqlite+pysqlite:///:memory:")), min_accept_score=0.62)
 
@@ -220,7 +266,7 @@ def test_below_acceptance_score_has_explicit_low_score_flag() -> None:
     assert "negative_expectancy_after_costs" in boundary.reason_flags
 
 
-def test_real_mtf_strength_fields_are_forwarded_without_rescaling() -> None:
+def test_real_mtf_strength_fields_are_normalized_and_raw_diagnostics_survive() -> None:
     now = 10_000_000
 
     def candles(values):
@@ -243,21 +289,30 @@ def test_real_mtf_strength_fields_are_forwarded_without_rescaling() -> None:
          "market_data_latency_ms": 20.0, "liquidity_score": 0.9},
         trade_side="LONG",
     )
+    regime = build_regime_context(
+        candles([100.0 + index * 0.1 for index in range(20)]), "1h"
+    )
     market = _guided_market(
-        regime_alignment=0.8,
-        volatility_fit=0.7,
         mtf={"setup": setup, "execution": execution,
-             "regime": {"regime": "TRENDING"}, "alignment": {"aligned": True}},
+             "regime": regime, "alignment": {"aligned": True}},
     )
     runtime = _runtime()
     signal = runtime._build_signal(SimpleNamespace(symbol="BTCUSDT"), market)
-    scored_market, _, _ = runtime._build_scoring_context(signal, market)
+    scored_market, regime_ctx, _ = runtime._build_scoring_context(signal, market)
 
-    assert signal["setup_quality"] == pytest.approx(setup["structure_quality"])
-    assert scored_market["momentum_confirmation"] == pytest.approx(execution["ma_delta_strength"])
+    assert 0.5 < signal["setup_quality"] <= 1.0
+    assert 0.5 < scored_market["momentum_confirmation"] <= 1.0
+    assert 0.5 < regime_ctx["alignment"] <= 1.0
+    assert 0.0 <= scored_market["volatility_fit"] <= 1.0
+    assert setup["structure_quality"] < 0.01
+    assert setup["ma_delta_strength"] == pytest.approx(setup["structure_quality"])
+    assert execution["ma_delta_strength"] < 0.01
+    assert execution["realized_volatility"] < 0.01
     diagnostics = scored_market["scoring_context_diagnostics"]
     assert diagnostics["sources"]["setup_quality"] == "signal.setup_quality"
-    assert diagnostics["sources"]["momentum_confirmation"] == "mtf.execution.ma_delta_strength"
+    assert diagnostics["sources"]["momentum_confirmation"] == "mtf.execution.momentum_confirmation"
+    assert diagnostics["sources"]["regime_alignment"] == "mtf.regime.regime_alignment"
+    assert diagnostics["sources"]["volatility_fit"] == "mtf.execution.volatility_fit"
 
 
 def test_context_rules_are_identical_for_paper_and_live_and_thresholds_unchanged() -> None:
