@@ -27,6 +27,12 @@ from alphaforge.remote_control.telegram_controller import (
     build_telegram_help_text,
     process_telegram_request,
 )
+from alphaforge.remote_control.telegram_transport import (
+    TelegramPollResult,
+    UrlLibTelegramHttpClient,
+    poll_telegram_loop,
+    poll_telegram_once,
+)
 
 
 class RemoteControlReplayStore(Protocol):
