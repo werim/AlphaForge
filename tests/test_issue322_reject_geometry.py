@@ -92,7 +92,9 @@ def test_real_early_reject_sequence_retains_observational_geometry_without_execu
 
 
 def test_repeated_real_early_reject_is_idempotent(tmp_path) -> None:
-    runtime, engine = _runtime(tmp_path, _candidate("LONG"), "Score below threshold or negative expectancy.")
+    candidate = _candidate("LONG")
+    candidate["market_ts"] = 1_700_000_000.0
+    runtime, engine = _runtime(tmp_path, candidate, "Score below threshold or negative expectancy.")
     asyncio.run(runtime._scan_once())
     asyncio.run(runtime._scan_once())
     with engine.connect() as conn:

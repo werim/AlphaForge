@@ -1,3 +1,29 @@
+# Issue #359 PAPER lifecycle signal-state correction — 2026-09-10
+
+## Why the patch was needed and exact root cause
+Immutable read-only inspection of `data/campaign/POST358.db` confirmed POST358C02's accepted ETHUSDT chain used `runtime:4cd20a1cf2b46861d17db34e` for `SIGNAL_CREATED` and the pending PAPER position, but empty follow-up details caused `_resolve_signal_id()` to generate `runtime:061a99bf08369d23c3d2770d` for `WAITING_ENTRY_ZONE` through `POSITION_OPENED`. Runtime transition state was independently keyed only by symbol. The next ETHUSDT scan therefore compared a distinct signal's `SIGNAL_CREATED` with the prior position's `POSITION_OPENED`, converted the invalid transition to `ERROR`, and passed that event to persistence. Because `ERROR` was absent from the canonical lifecycle contract, normalization returned `None`; `_persist_lifecycle()` correctly treated that as a failed write and terminated the worker with `trade_lifecycle_event_persistence_failed`.
+
+The accepted burn-in observation was also persisted as `ORDER_PLACED` before `_simulate_paper_execution()` and before `burnin_pending_position_outcomes` persistence, so durable decision evidence could claim execution progress that had not yet succeeded. Generic `orders` and `positions` being empty was not a missing campaign-persistence defect: the accepted row was present and `OPEN` in `burnin_pending_position_outcomes`.
+
+## Files changed and exact behavior
+- `src/alphaforge/runtime.py`: resolves signal identity before transition lookup, inherits the current signal for empty follow-up details, recognizes nested execution-decision identity, validates previous state per `signal_id`, and retains symbol state only for reconciliation diagnostics. Invalid transitions become audited `ERROR` payloads containing failure reason, signal, symbol, previous state, and attempted state. Campaign recovery seeds signal-scoped state from persisted open positions. Accepted PAPER observations move after `_execute()` and use `POSITION_OPENED` only after simulated execution, pending-position persistence, and lifecycle emission succeed.
+- `src/alphaforge/lifecycle_contract.py`: keeps `ERROR` canonical but removes it from ordinary incoming lifecycle transitions; compatibility restart from audited error evidence remains explicit.
+- `src/alphaforge/persistence.py`: requires every persisted `ERROR` to carry an explicit signal ID, failure reason, attempted state, and prior state. Empty or incomplete error evidence returns a clear persistence failure.
+- `src/alphaforge/paper_burnin.py`, `src/alphaforge/burnin_qualification.py`, and `src/alphaforge/live_readiness.py`: classify attributed `ERROR` evidence as blocking rather than clean progress. Qualification derives `runtime_error_count` only from explicit run-scoped payload identity, avoiding unrelated historical evidence or cross-run signal reuse.
+- `docs/decision_lifecycle_contract.md`: documents signal-scoped validation, audited errors, and `burnin_pending_position_outcomes` as the attached-campaign PAPER exposure source.
+- Lifecycle, persistence, PAPER reporting, qualification, readiness, and health regressions cover identity continuity, same-symbol independent signals, complete/empty error metadata, blocking error classification, real write failure behavior, observation ordering, and campaign versus generic exposure tables.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: record the lifecycle, persistence, compatibility, validation, and operational consequences.
+
+## Lifecycle, persistence, export, compatibility, and migration
+The accepted PAPER chain is now `SIGNAL_CREATED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED -> POSITION_OPENED` under one signal ID. A later signal on the same symbol begins with no prior state for its distinct ID and may reach `SIGNAL_REJECTED` without disturbing the open signal's chain. Validation is not disabled, invalid transitions are not swallowed, and genuine lifecycle database write failures still raise. `ERROR` uses existing lifecycle columns and JSON payload fields, requires complete audit metadata, increments lifecycle/runtime error evidence, and prevents qualification/readiness success. No schema migration or CSV-shape change is required. Existing runtime/campaign databases and historical rows are not modified.
+
+No scoring formula, decision threshold, effective-RR gate, MTF rule, portfolio-risk gate, or #357 normalization changed. `_execute()`'s LIVE adapter and authorization branch are untouched; shared lifecycle bookkeeping changes do not authorize or perform exchange mutation. Fail-closed trading/account-risk behavior is preserved.
+
+## Tests executed, risks, limitations, and recommendation
+The review-blocker follow-up focused lifecycle, runtime, persistence, PAPER report, qualification, readiness, and health suite passed 134 tests. The broader persistence, campaign, Phase 8/9, runtime-environment, LIVE-authorization, trading-mode, execution, parity, and JOB21 safety suite passed 271 tests. Both runs explicitly restored canonical test defaults (`MIN_EFFECTIVE_RR=1.6`, unknown expectancy blocked); 117 dependency deprecation warnings were non-failing. `git diff --check` passed.
+
+Remaining risk is operational: POST358C02 remains valid immutable failure evidence and cannot demonstrate the prospective repair. Use a fresh isolated PAPER campaign only after review/merge; do not launch from this task and do not infer LIVE readiness. Push the committed issue branch for review, but do not open a PR unless separately requested.
+
 # Issue #357 PAPER acceptance normalization — 2026-09-09
 
 ## Why the patch was needed and root cause

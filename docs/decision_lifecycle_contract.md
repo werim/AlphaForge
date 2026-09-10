@@ -16,6 +16,11 @@ The canonical states are defined in `src/alphaforge/lifecycle_contract.py` and a
 - `POSITION_CLOSED` — the position reached a terminal close outcome; close reason must carry `TP_HIT`, `SL_HIT`, timeout/open-at-end, cancellation, or protective-exit detail where known.
 - `ENTRY_TIMEOUT` — the entry condition/order did not complete within its validity window.
 - `CANCELLED` — the lifecycle was intentionally cancelled before a normal close.
+- `ERROR` — an explicitly audited runtime or invalid-transition incident. It is persistable evidence, not ordinary valid lifecycle progress, and requires a signal ID, failure reason, prior state, and attempted state.
+
+Transition validation is scoped to `signal_id`. Symbol-level state may still be retained for reconciliation diagnostics, but a terminal/open lifecycle for one signal must not prevent a distinct later signal on the same symbol from starting at `SIGNAL_CREATED`.
+
+Every persisted `ERROR` is blocking evidence for PAPER lifecycle classification and live readiness. Burn-in qualification counts errors carrying its explicit run identity. Canonical persistence must reject incomplete `ERROR` rows rather than storing an empty payload, and campaign runtime emission must include its run identity so unrelated historical errors or reused signal IDs are not mixed into a current run.
 
 ## Legacy/internal state mapping
 
@@ -29,6 +34,8 @@ Legacy/internal labels must be mapped explicitly before export or persistence as
 - `TP_HIT`, `SL_HIT`, and `OPEN_AT_END` are terminal close reasons and map to `POSITION_CLOSED` as lifecycle state; the precise close reason must remain in payload/close fields.
 
 New exports must not emit `CREATED` as the first lifecycle state. Unknown lifecycle states must be rejected rather than silently persisted.
+
+Campaign PAPER positions are persisted in `burnin_pending_position_outcomes`. Empty generic `orders` or `positions` tables do not, by themselves, mean that attached-campaign PAPER position evidence is missing.
 
 ## Required fields
 

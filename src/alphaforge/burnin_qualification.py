@@ -76,6 +76,34 @@ class BurnInQualificationEngine:
             return REQUIRED_TABLES.issubset(names)
         except SQLAlchemyError:
             return False
+    def _runtime_error_count(self, conn: Any, burnin_run_id: str) -> int:
+        """Count only lifecycle errors attributable to this run's durable evidence."""
+        inspector = inspect(self.engine)
+        if "trade_lifecycle_events" not in set(inspector.get_table_names()):
+            return 0
+        columns = {column["name"] for column in inspector.get_columns("trade_lifecycle_events")}
+        if not {"id", "signal_id", "payload"}.issubset(columns):
+            return 0
+        state_column = "lifecycle_state" if "lifecycle_state" in columns else "state" if "state" in columns else None
+        if state_column is None:
+            return 0
+        attributed_run_ids = [burnin_run_id]
+        if burnin_run_id.endswith("__aggregate") and "burnin_campaign_runs" in set(inspector.get_table_names()):
+            campaign_id = burnin_run_id.removesuffix("__aggregate")
+            attributed_run_ids.extend(str(row[0]) for row in conn.execute(text(
+                "SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=:campaign_id"
+            ), {"campaign_id": campaign_id}).all())
+        run_params = {f"run_{index}": run_id for index, run_id in enumerate(dict.fromkeys(attributed_run_ids))}
+        run_placeholders = ",".join(f":{name}" for name in run_params)
+        return int(conn.execute(text(f"""
+            SELECT COUNT(DISTINCT event.id)
+            FROM trade_lifecycle_events event
+            WHERE UPPER(COALESCE(event.{state_column}, '')) IN ('ERROR', 'EXECUTION_ERROR')
+              AND json_extract(
+                    CASE WHEN json_valid(event.payload) THEN event.payload ELSE '{{}}' END,
+                    '$.burnin_run_id'
+                  ) IN ({run_placeholders})
+        """), run_params).scalar_one() or 0)
     def evaluate(self, burnin_run_id: str) -> BurnInQualificationSnapshot:
         th=asdict(self.thresholds)
         if not self._has_schema():
@@ -116,6 +144,13 @@ class BurnInQualificationEngine:
             except SQLAlchemyError:
                 pending_reject_identity = {}
             observation_metrics=[r[0] for r in conn.execute(text("SELECT metrics_json FROM burnin_observations WHERE burnin_run_id=:id"), {"id":burnin_run_id}).all()]
+            runtime_error_count = self._runtime_error_count(conn, burnin_run_id)
+            metrics["runtime_error_count"] = runtime_error_count
+            if runtime_error_count > self.thresholds.max_runtime_error_count:
+                blockers.append(
+                    f"RUNTIME_ERROR_CLUSTER:{runtime_error_count}>"
+                    f"{self.thresholds.max_runtime_error_count}"
+                )
             identity_mode=qualification_reject_identity_mode([phase], observation_metrics)
             samples=int(obs_counts.get("samples") or 0); accepted=int(obs_counts.get("accepted") or 0); rejected_count=int(obs_counts.get("rejected") or 0); closed=len(trades)
             valid_labels={"TP_BEFORE_SL","SL_BEFORE_TP","TIMEOUT","AMBIGUOUS"}

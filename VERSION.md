@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+## Issue #359 PAPER lifecycle signal-state correction (2026-09-10)
+- Current version: prospective signal-scoped runtime lifecycle identity and audited `ERROR` persistence correction; no schema or threshold change.
+- Current phase: implementation and bounded regression validation on `feature/359-paper-lifecycle-signal-state`; POST358C02 remains immutable historical evidence.
+- Runtime maturity: one accepted PAPER decision now retains one `signal_id` through create, wait, trigger, simulated order, pending-position persistence, and position-open evidence. Later signals for the same symbol start independent lifecycle chains.
+- BACKTEST/PAPER/LIVE alignment: shared lifecycle validation remains enabled and real persistence failures remain fail-closed. No LIVE adapter, authorization, threshold, scoring, or exchange-mutation behavior changed.
+- Lifecycle/execution coverage: previous state is authoritative per signal; symbol state remains reconciliation diagnostics only. `ERROR` is canonical/persistable only with signal, failure, prior-state, and attempted-state evidence; it is an incident rather than clean lifecycle progress and blocks PAPER classification, burn-in qualification, and live readiness. Accepted PAPER burn-in observations are recorded as `POSITION_OPENED` only after simulated execution and pending-position persistence succeed.
+- Persistence/execution realism coverage: campaign PAPER exposure remains sourced from `burnin_pending_position_outcomes`; generic `orders`/`positions` may legitimately remain empty. No migration or historical rewrite is performed.
+- Known critical risks: historical split-ID and failed-worker rows are not repaired. Fresh isolated PAPER evidence is required before any readiness conclusion. LIVE remains NOT READY.
+- Last audit date: 2026-09-10. Live readiness verdict: NOT LIVE READY.
+
 ## Issue #357 PAPER acceptance normalization (2026-09-09)
 - Current version: prospective PAPER scoring-unit and portfolio-evidence correction; no schema or acceptance-threshold change.
 - Current phase: implementation and regression validation on `feature/357-paper-acceptance-normalization`; a fresh isolated PAPER campaign is required after merge.
