@@ -241,10 +241,15 @@ class LiveReadinessEvaluator:
             by_signal.setdefault(str(row["signal_id"]), []).append(dict(row))
         orphan_signals = [sid for sid, events in by_signal.items() if events and events[0]["lifecycle_state"] != LifecycleEventType.SIGNAL_CREATED.value]
         invalid_transitions = 0
+        lifecycle_errors = 0
         reject_missing = 0
         exit_missing = 0
         terminal_states = {LifecycleEventType.TP_HIT.value, LifecycleEventType.SL_HIT.value, LifecycleEventType.CANCELLED.value, LifecycleEventType.OPEN_AT_END.value, LifecycleEventType.RUNTIME_PROTECTIVE_EXIT.value}
         for events in by_signal.values():
+            lifecycle_errors += sum(
+                str(event["lifecycle_state"]).upper() in {"ERROR", "EXECUTION_ERROR"}
+                for event in events
+            )
             for idx in range(1, len(events)):
                 if str(events[idx]["lifecycle_state"]) not in ALLOWED_LIFECYCLE_TRANSITIONS.get(str(events[idx - 1]["lifecycle_state"]), set()):
                     invalid_transitions += 1
@@ -253,7 +258,7 @@ class LiveReadinessEvaluator:
                 reject_missing += 1
             if any(e["lifecycle_state"] == LifecycleEventType.ENTRY_TRIGGERED.value for e in events) and not any(e["lifecycle_state"] in terminal_states for e in events):
                 exit_missing += 1
-        return [CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"), CheckResult("lifecycle_transitions_valid", invalid_transitions == 0, f"invalid_transitions={invalid_transitions}"), CheckResult("rejected_has_reason", reject_missing == 0, f"missing_reject_reason={reject_missing}"), CheckResult("entry_exit_completeness", exit_missing == 0, f"missing_exit={exit_missing}")]
+        return [CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"), CheckResult("lifecycle_transitions_valid", invalid_transitions == 0, f"invalid_transitions={invalid_transitions}"), CheckResult("lifecycle_error_free", lifecycle_errors == 0, f"lifecycle_errors={lifecycle_errors}"), CheckResult("rejected_has_reason", reject_missing == 0, f"missing_reject_reason={reject_missing}"), CheckResult("entry_exit_completeness", exit_missing == 0, f"missing_exit={exit_missing}")]
 
     def _check_persistence(self, conn: Any) -> list[CheckResult]:
         checks: list[CheckResult] = []

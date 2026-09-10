@@ -1040,15 +1040,40 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
         return False
     now = _utc_now_iso()
     event_id = event.get("event_id") or event.get("id") or f"{event.get('symbol', 'UNKNOWN')}:{canonical_utc_timestamp(event.get('event_ts'))}:{event.get('lifecycle_state') or event.get('state') or 'UNKNOWN'}"
-    signal_id = event.get("signal_id") or f"UNKNOWN_SIGNAL:{event.get('symbol', 'UNKNOWN')}:{canonical_utc_timestamp(event.get('event_ts'))}"
+    explicit_signal_id = str(event.get("signal_id") or "").strip()
+    signal_id = explicit_signal_id or f"UNKNOWN_SIGNAL:{event.get('symbol', 'UNKNOWN')}:{canonical_utc_timestamp(event.get('event_ts'))}"
     raw_lifecycle_state = event.get("lifecycle_state") or event.get("state")
     try:
         lifecycle_state = normalize_lifecycle_event(raw_lifecycle_state)
     except ValueError:
         return None
+    event_details = dict(event.get("payload") or {})
     prev_state = event.get("previous_lifecycle_state")
-    is_valid = validate_transition(prev_state, lifecycle_state) if lifecycle_state else False
-    if not is_valid and prev_state is not None:
+    failure_reason = str(
+        event.get("failure_reason") or event.get("error_reason")
+        or event_details.get("failure_reason") or event_details.get("error_reason") or ""
+    ).strip()
+    invalid_transition = event_details.get("invalid_transition")
+    invalid_transition = invalid_transition if isinstance(invalid_transition, Mapping) else {}
+    attempted_state = str(
+        event.get("attempted_state") or event_details.get("attempted_state")
+        or invalid_transition.get("attempted_lifecycle_state") or ""
+    ).strip()
+    previous_error_state = str(
+        prev_state or event.get("previous_state") or event.get("prior_state")
+        or event_details.get("previous_state") or event_details.get("prior_state")
+        or invalid_transition.get("previous_lifecycle_state") or ""
+    ).strip()
+    if lifecycle_state == "ERROR":
+        if not all((explicit_signal_id, failure_reason, attempted_state, previous_error_state)):
+            return None
+        event_details.update({
+            "signal_id": explicit_signal_id,
+            "failure_reason": failure_reason,
+            "attempted_state": attempted_state,
+            "previous_state": previous_error_state,
+        })
+    elif prev_state is not None and not validate_transition(prev_state, lifecycle_state):
         return None
     payload = {
         "event_id": event_id, "signal_id": signal_id, "order_id": event.get("order_id"), "symbol": event.get("symbol"),
@@ -1059,13 +1084,13 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
         "lifecycle_seq": event.get("lifecycle_seq"),
         "cancel_reason": event.get("cancel_reason"),
         "lifecycle_id": event.get("lifecycle_id") or f"{signal_id}:{canonical_utc_timestamp(event.get('event_ts'))}:{lifecycle_state}",
-        "failure_reason": event.get("failure_reason"),
+        "failure_reason": failure_reason or None,
         "reconciliation_reason": event.get("reconciliation_reason"),
         "incident_payload": json.dumps(event.get("incident_payload", {})),
         "trade_id": event.get("trade_id") or signal_id,
         "state": lifecycle_state or event.get("event_type"),
         "event_type": event.get("event_type") or lifecycle_state,
-        "payload": json.dumps(event.get("payload", {})),
+        "payload": json.dumps(event_details),
     }
     statement_by_event_id = text("""
         INSERT INTO trade_lifecycle_events (

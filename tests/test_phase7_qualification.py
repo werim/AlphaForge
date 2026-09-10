@@ -22,6 +22,21 @@ def _run(e):
         for i in range(6):
             c.execute(text("INSERT INTO burnin_observations(observation_id,burnin_run_id,release_id,observed_at,execution_mode,symbol,decision,evidence_complete,missing_fields_json,metrics_json,source_provenance_json,schema_version) VALUES (:id,'r','rel','2026-01-01T00:00:00Z','PAPER','BTCUSDT','REJECTED',1,'[]','{}','{}','v')"), {"id": f"obs-r-{i}"})
 
+
+def _qualifying_evidence(e):
+    with e.begin() as c:
+        for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
+            c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"o{i}","sym":sym})
+        for i in range(3):
+            c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"rej{i}"})
+        c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
+        c.execute(text("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,calibration_error,status,generated_at,schema_version) VALUES ('r','rel','GLOBAL',3,.01,'PASS','now','v')"))
+        c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE','now','v')"))
+
+
+def _qualifying_thresholds():
+    return BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,minimum_closed_trades=1,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=1,minimum_regime_sample=1,minimum_calibration_sample=1,max_symbol_concentration=.99,max_trade_contribution=.99,max_regime_concentration=1.0,min_lower_confidence_bound_expectancy=.01,require_operator_ack=False,require_phase1_6_gates=False)
+
 def test_missing_costs_block_qualification():
     e=_engine(); _run(e)
     with e.begin() as c:
@@ -42,18 +57,22 @@ def test_qualification_emits_legacy_and_explicit_recovery_status():
 
 def test_positive_lcb_can_qualify_but_live_not_enabled():
     e=_engine(); _run(e)
-    with e.begin() as c:
-        for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
-            c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"o{i}","sym":sym})
-        for i in range(3):
-            c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"rej{i}"})
-        c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
-        c.execute(text("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,calibration_error,status,generated_at,schema_version) VALUES ('r','rel','GLOBAL',3,.01,'PASS','now','v')"))
-        c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE','now','v')"))
-    th=BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,minimum_closed_trades=1,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=1,minimum_regime_sample=1,minimum_calibration_sample=1,max_symbol_concentration=.99,max_trade_contribution=.99,max_regime_concentration=1.0,min_lower_confidence_bound_expectancy=.01,require_operator_ack=False,require_phase1_6_gates=False)
-    snap=BurnInQualificationEngine(e, th).evaluate("r")
+    _qualifying_evidence(e)
+    snap=BurnInQualificationEngine(e, _qualifying_thresholds()).evaluate("r")
     assert snap.status == "CANARY_QUALIFIED"
     assert snap.status not in {"LIVE_REAL_ORDERS_READY","LIVE_ENABLED","PROMOTED_TO_LIVE"}
+
+
+def test_persisted_lifecycle_error_blocks_qualification():
+    e=_engine(); _run(e); _qualifying_evidence(e)
+    with e.begin() as c:
+        c.execute(text("CREATE TABLE trade_lifecycle_events(id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id TEXT, lifecycle_state TEXT, payload TEXT)"))
+        c.execute(text("INSERT INTO trade_lifecycle_events(signal_id,lifecycle_state,payload) VALUES ('error-signal','ERROR',:payload)"), {"payload": json.dumps({"burnin_run_id": "r", "failure_reason": "INVALID_LIFECYCLE_TRANSITION"})})
+        c.execute(text("INSERT INTO trade_lifecycle_events(signal_id,lifecycle_state,payload) VALUES ('historical-error','ERROR',:payload)"), {"payload": json.dumps({"burnin_run_id": "unrelated-run", "failure_reason": "OLD_ERROR"})})
+    snap=BurnInQualificationEngine(e, _qualifying_thresholds()).evaluate("r")
+    assert snap.status != "CANARY_QUALIFIED"
+    assert snap.metrics["runtime_error_count"] == 1
+    assert "RUNTIME_ERROR_CLUSTER:1>0" in snap.blockers
 
 
 def test_unknown_regime_cannot_pass():

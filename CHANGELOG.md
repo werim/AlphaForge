@@ -2,12 +2,13 @@
 
 ### Added
 - Signal-scoped lifecycle state tracking and current-signal inheritance for empty follow-up lifecycle details.
-- Persistable canonical `ERROR` evidence with explicit prior and attempted states for invalid transitions.
-- Regressions for accepted PAPER identity continuity, later same-symbol rejection, audited invalid transitions, pending-position accounting, and accepted-observation ordering.
+- Persistable canonical `ERROR` evidence requiring signal, failure, prior-state, and attempted-state metadata.
+- Regressions for accepted PAPER identity continuity, later same-symbol rejection, audited invalid transitions, blocking error classification/qualification/readiness, health-payload pending-position accounting, and accepted-observation ordering.
 
 ### Changed
 - Symbol-level lifecycle state is retained only for reconciliation diagnostics; transition validation uses `signal_id` state.
 - Accepted PAPER burn-in observation persistence occurs after simulated execution and pending-position persistence and records `POSITION_OPENED` rather than pre-claiming `ORDER_PLACED`.
+- `ERROR` remains auditable but is no longer clean lifecycle progress; attributed errors block PAPER classification, burn-in qualification, and live readiness.
 
 ### Fixed
 - A later same-symbol `SIGNAL_CREATED` no longer attempts `POSITION_OPENED -> SIGNAL_CREATED` against an unrelated accepted signal.

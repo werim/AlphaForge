@@ -2271,12 +2271,31 @@ class RuntimeOrchestrator:
             current_signal_id=current_signal_id,
         )
         previous_state = self._last_lifecycle_state_by_signal.get(signal_id)
-        transition_valid = validate_transition(previous_state, event)
-        lifecycle_state = event if transition_valid else LifecycleState.ERROR.value
-        if not transition_valid:
+        is_error_event = event == LifecycleState.ERROR.value
+        transition_valid = not is_error_event and validate_transition(previous_state, event)
+        lifecycle_state = event if transition_valid or is_error_event else LifecycleState.ERROR.value
+        error_scope = {
+            key: value for key, value in {
+                "burnin_run_id": self._burnin_run_id,
+                "campaign_id": self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID"),
+            }.items() if value
+        }
+        if is_error_event:
             detail_payload = {
                 **detail_payload,
+                **error_scope,
+                "signal_id": signal_id,
+                "attempted_state": detail_payload.get("attempted_state") or event,
+                "previous_state": detail_payload.get("previous_state") or previous_state or "NONE",
+            }
+        elif not transition_valid:
+            detail_payload = {
+                **detail_payload,
+                **error_scope,
                 "failure_reason": "INVALID_LIFECYCLE_TRANSITION",
+                "signal_id": signal_id,
+                "attempted_state": event,
+                "previous_state": previous_state or "NONE",
                 "invalid_transition": {
                     "signal_id": signal_id,
                     "symbol": symbol,
@@ -2317,6 +2336,7 @@ class RuntimeOrchestrator:
             {
                 "signal_id": signal_id,
                 "failure_reason": failure_reason,
+                "attempted_state": phase,
                 "incident_payload": {
                     "exception_type": exc.__class__.__name__,
                     "exception_message": str(exc),

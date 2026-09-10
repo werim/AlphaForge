@@ -80,7 +80,10 @@ def _lifecycle_errors(conn: sqlite3.Connection) -> tuple[int, list[dict[str, Any
     for sid, events in by_signal.items():
         prev: str | None = None
         for state, ts in events:
-            if not validate_transition(prev, state):
+            if state.upper() == "ERROR":
+                errors.append({"signal_id": sid, "previous": prev, "next": state,
+                               "event_ts": ts, "reason": "persisted_lifecycle_error"})
+            elif not validate_transition(prev, state):
                 errors.append({"signal_id": sid, "previous": prev, "next": state, "event_ts": ts})
             prev = state
     return len(errors), errors[:25]

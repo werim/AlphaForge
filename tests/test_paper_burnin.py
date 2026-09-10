@@ -59,6 +59,19 @@ def test_bad_lifecycle_ordering_is_lifecycle_failure(tmp_path):
     assert report["lifecycle_ordering_errors"] == 1
 
 
+def test_persisted_error_is_lifecycle_failure_not_clean_progress(tmp_path):
+    db = _db(tmp_path)
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    with engine.begin() as conn:
+        _insert_decision(conn)
+        _insert_lifecycle(conn, states=("SIGNAL_CREATED", "ERROR"))
+    report = generate_paper_burnin_report(db, tmp_path / "out")
+    assert "LIFECYCLE_INTEGRITY_FAILURE" in report["classification"]
+    assert report["lifecycle_ordering_errors"] == 1
+    assert report["lifecycle_ordering_error_examples"][0]["reason"] == "persisted_lifecycle_error"
+    assert report["incident_count"] == 1
+
+
 def test_missing_execution_context_is_execution_failure(tmp_path):
     db = _db(tmp_path)
     engine = init_db(f"sqlite+pysqlite:///{db}")

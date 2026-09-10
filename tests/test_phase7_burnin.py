@@ -64,10 +64,12 @@ def test_attached_paper_execution_persists_guided_pending_position(tmp_path: Pat
     from sqlalchemy.orm import Session
     from alphaforge.ai_brain import AIBrain
     from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
+    from alphaforge.burnin_ops import bootstrap_ops_schema, health_payload
     from alphaforge.persistence import init_db
     from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
-    engine=init_db(f"sqlite+pysqlite:///{tmp_path / 'attached.sqlite'}")
+    db_path = tmp_path / "attached.sqlite"
+    engine=init_db(f"sqlite+pysqlite:///{db_path}")
     with engine.begin() as conn:
         campaign=create_campaign(conn,release_id='guided',duration_days=7,symbols=['BTCUSDT'],intervals=['1h','15m','1m'])
         run=start_or_resume_campaign(conn,campaign.campaign_id)
@@ -81,11 +83,17 @@ def test_attached_paper_execution_persists_guided_pending_position(tmp_path: Pat
         open_paper_positions=conn.execute(text("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign.campaign_id}).scalar_one()
         generic_orders=conn.execute(text("SELECT COUNT(*) FROM orders")).scalar_one()
         generic_positions=conn.execute(text("SELECT COUNT(*) FROM positions")).scalar_one()
+    raw_conn = sqlite3.connect(db_path)
+    raw_conn.row_factory = sqlite3.Row
+    bootstrap_ops_schema(raw_conn)
+    health = health_payload(raw_conn, campaign.campaign_id, max_heartbeat_age=10**9)
+    raw_conn.close()
     provenance=json.loads(row['source_provenance_json'])
     assert row['signal_id']=='guided-signal' and row['side']=='LONG' and row['status']=='OPEN'
     assert (row['stop'],row['target'])==(99,102)
     assert provenance['setup_phase']=='PULLBACK' and provenance['execution_direction']=='LONG'
     assert open_paper_positions == 1
+    assert health["open_paper_positions"] == open_paper_positions
     assert generic_orders == generic_positions == 0
 
 

@@ -160,6 +160,32 @@ def test_live_readiness_pass_and_persistence() -> None:
         assert conn.execute(text("SELECT COUNT(*) FROM live_readiness_reports")).scalar_one() == 1
 
 
+def test_lifecycle_error_is_an_explicit_readiness_blocker() -> None:
+    engine = _engine()
+    with Session(engine) as session:
+        assert save_trade_lifecycle_event(
+            session,
+            event_id="e-readiness-error",
+            signal_id="s-1",
+            symbol="BTCUSDT",
+            mode="PAPER",
+            lifecycle_state="ERROR",
+            previous_lifecycle_state="SIGNAL_REJECTED",
+            failure_reason="INVALID_LIFECYCLE_TRANSITION",
+            payload={
+                "attempted_state": "ORDER_PLACED",
+                "previous_state": "SIGNAL_REJECTED",
+            },
+            event_ts="2026-01-01T00:00:02Z",
+        ) is True
+        session.commit()
+
+    with engine.connect() as conn:
+        checks = {check.name: check for check in LiveReadinessEvaluator(engine)._check_lifecycle(conn)}
+    assert checks["lifecycle_error_free"].passed is False
+    assert checks["lifecycle_error_free"].details == "lifecycle_errors=1"
+
+
 def test_live_readiness_rejects_missing_runtime_heartbeat() -> None:
     report = _evaluate(_engine(persist_live_heartbeat=False))
     heartbeat = next(check for check in report.checks if check.name == "runtime_heartbeat")
