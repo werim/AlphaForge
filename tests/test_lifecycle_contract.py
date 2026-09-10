@@ -43,6 +43,30 @@ def test_invalid_lifecycle_transitions_are_testable() -> None:
     assert not is_valid_lifecycle_transition(None, "ENTRY_TRIGGERED")
     assert is_valid_lifecycle_transition("SIGNAL_CREATED", "SIGNAL_REJECTED")
     assert not is_valid_lifecycle_transition("SIGNAL_REJECTED", "ORDER_PLACED")
+    assert is_valid_lifecycle_transition("POSITION_OPENED", "ERROR")
+
+
+def test_error_is_a_persistable_audited_lifecycle_state() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        assert save_trade_lifecycle_event(
+            session,
+            event_id="e-error",
+            signal_id="s-error",
+            symbol="ETHUSDT",
+            mode="PAPER",
+            lifecycle_state="ERROR",
+            previous_lifecycle_state="POSITION_OPENED",
+            failure_reason="INVALID_LIFECYCLE_TRANSITION",
+            payload={"invalid_transition": {"attempted_lifecycle_state": "SIGNAL_CREATED"}},
+        ) is True
+        row = session.execute(text(
+            "SELECT lifecycle_state,failure_reason,payload FROM trade_lifecycle_events "
+            "WHERE event_id='e-error'"
+        )).one()
+    assert row.lifecycle_state == "ERROR"
+    assert row.failure_reason == "INVALID_LIFECYCLE_TRANSITION"
+    assert "SIGNAL_CREATED" in row.payload
 
 
 def test_docs_expected_states_match_code_constants() -> None:

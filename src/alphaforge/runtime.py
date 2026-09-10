@@ -272,6 +272,8 @@ class RuntimeOrchestrator:
     _orphan_orders: list[dict[str, Any]] = field(default_factory=list, init=False)
     _orphan_positions: list[dict[str, Any]] = field(default_factory=list, init=False)
     _stale_market_data_symbols: set[str] = field(default_factory=set, init=False)
+    _last_lifecycle_state_by_signal: dict[str, str] = field(default_factory=dict, init=False)
+    _current_signal_id_by_symbol: dict[str, str] = field(default_factory=dict, init=False)
     _last_lifecycle_state_by_symbol: dict[str, str] = field(default_factory=dict, init=False)
     _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
     _active_positions: dict[str, float] = field(default_factory=dict, init=False)
@@ -927,12 +929,16 @@ class RuntimeOrchestrator:
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
             self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
-            open_positions = conn.execute(text("SELECT symbol,notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
+            open_positions = conn.execute(text("SELECT signal_id,symbol,notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
             for position in open_positions:
                 symbol = str(position.get("symbol") or "").upper()
                 if symbol:
                     self._active_positions[symbol] = float(position.get("notional") or 0.0)
                     self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_OPENED.value
+                    signal_id = str(position.get("signal_id") or "").strip()
+                    if signal_id:
+                        self._last_lifecycle_state_by_signal[signal_id] = LifecycleState.POSITION_OPENED.value
+                        self._current_signal_id_by_symbol[symbol] = signal_id
             burnin_campaign_event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACHED", details={"observed": observed, "runtime_instance_id": self.runtime_instance_id, "active_run_id": self._burnin_run_id})
 
     def _start_or_resume_burnin_run(self) -> None:
@@ -1813,13 +1819,30 @@ class RuntimeOrchestrator:
         else:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_PENDING.value, selection.symbol, {})
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
+        accepted_burnin_payload = {
+            "signal_id": signal_id,
+            "setup_identity": market_ctx.get("setup_identity"),
+            "symbol": selection.symbol,
+            "source_exchange": market_ctx.get("source_exchange"),
+            "mode": self.config.execution_mode.value,
+            "decision": "ACCEPTED",
+            "score": getattr(score_ctx, "total_score", None),
+            "rr": signal_payload.get("risk_reward"),
+            "effective_rr": effective_rr,
+            "confidence": order_plan.confidence,
+            "execution_ctx": execution_ctx,
+            "timeframe": self.config.execution_timeframe,
+            "mtf": mtf,
+        }
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
             await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
-            self._persist_burnin_decision({"signal_id": signal_id, "setup_identity": market_ctx.get("setup_identity"), "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
+            self._persist_burnin_decision(
+                accepted_burnin_payload,
+                lifecycle_state=LifecycleState.ORDER_PLACED.value,
+            )
             self._generate_burnin_snapshot(reason="periodic")
             return
 
-        self._persist_burnin_decision({"signal_id": signal_id, "setup_identity": market_ctx.get("setup_identity"), "symbol": selection.symbol, "source_exchange": market_ctx.get("source_exchange"), "mode": self.config.execution_mode.value, "decision": "ACCEPTED", "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "confidence": order_plan.confidence, "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf}, lifecycle_state=LifecycleState.ORDER_PLACED.value)
         self._schedule_agent_shadow({"signal_id": signal_id, "symbol": selection.symbol,
             "mode": self.config.execution_mode.value, "decision": "ACCEPTED",
             "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"),
@@ -1839,6 +1862,11 @@ class RuntimeOrchestrator:
             "stop_price": order_plan.stop_price,
             "confidence": order_plan.confidence,
         }, market_ctx=market_ctx)
+        if self.config.execution_mode == ExecutionMode.PAPER:
+            self._persist_burnin_decision(
+                accepted_burnin_payload,
+                lifecycle_state=LifecycleState.POSITION_OPENED.value,
+            )
 
     def _authoritative_live_authorization(self) -> dict[str, bool]:
         report = self._qualification_report
@@ -2231,10 +2259,31 @@ class RuntimeOrchestrator:
             return resolve_campaign_batch(conn, campaign_id, candles, now=now)
 
     async def _emit_lifecycle_event(self, event: str, symbol: str, details: Mapping[str, Any] | None = None) -> None:
-        previous_state = self._last_lifecycle_state_by_symbol.get(symbol)
-        lifecycle_state = event if validate_transition(previous_state, event) else LifecycleState.ERROR.value
         detail_payload = dict(details or {})
-        signal_id = detail_payload.get("signal_id") or self._resolve_signal_id(symbol, detail_payload)
+        current_signal_id = (
+            None
+            if event == LifecycleState.SIGNAL_CREATED.value
+            else self._current_signal_id_by_symbol.get(symbol)
+        )
+        signal_id = self._resolve_signal_id(
+            symbol,
+            detail_payload,
+            current_signal_id=current_signal_id,
+        )
+        previous_state = self._last_lifecycle_state_by_signal.get(signal_id)
+        transition_valid = validate_transition(previous_state, event)
+        lifecycle_state = event if transition_valid else LifecycleState.ERROR.value
+        if not transition_valid:
+            detail_payload = {
+                **detail_payload,
+                "failure_reason": "INVALID_LIFECYCLE_TRANSITION",
+                "invalid_transition": {
+                    "signal_id": signal_id,
+                    "symbol": symbol,
+                    "previous_lifecycle_state": previous_state,
+                    "attempted_lifecycle_state": event,
+                },
+            }
         event_payload = {
             "lifecycle_event_type": lifecycle_state,
             "lifecycle_state": lifecycle_state,
@@ -2245,6 +2294,8 @@ class RuntimeOrchestrator:
             "previous_lifecycle_state": previous_state,
             "details": detail_payload,
         }
+        self._current_signal_id_by_symbol[symbol] = signal_id
+        self._last_lifecycle_state_by_signal[signal_id] = lifecycle_state
         self._last_lifecycle_state_by_symbol[symbol] = lifecycle_state
         self.metrics.lifecycle_events += 1
         if lifecycle_state == LifecycleState.POSITION_CLOSED.value:
@@ -2278,9 +2329,19 @@ class RuntimeOrchestrator:
         )
 
     @staticmethod
-    def _resolve_signal_id(symbol: str, payload: Mapping[str, Any]) -> str:
+    def _resolve_signal_id(
+        symbol: str,
+        payload: Mapping[str, Any],
+        *,
+        current_signal_id: str | None = None,
+    ) -> str:
         if payload.get("signal_id"):
             return str(payload["signal_id"])
+        decision = payload.get("decision")
+        if isinstance(decision, Mapping) and decision.get("signal_id"):
+            return str(decision["signal_id"])
+        if current_signal_id:
+            return str(current_signal_id)
         candle_identity = RuntimeOrchestrator._execution_candle_decision_identity(symbol, payload)
         if candle_identity is not None:
             return f"runtime:{hashlib.sha256(candle_identity.encode('utf-8')).hexdigest()[:24]}"

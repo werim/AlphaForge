@@ -276,6 +276,32 @@ def test_invalid_lifecycle_transition_explicitly_marked_error() -> None:
     )
     asyncio.run(orchestrator._emit_lifecycle_event("ORDER_PLACED", "BTCUSDT", {}))
     assert events[-1]["lifecycle_event_type"] == "ERROR"
+    assert events[-1]["details"]["failure_reason"] == "INVALID_LIFECYCLE_TRANSITION"
+    assert events[-1]["details"]["invalid_transition"]["attempted_lifecycle_state"] == "ORDER_PLACED"
+
+
+def test_invalid_lifecycle_transition_is_audited_without_persistence_failure(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'invalid-lifecycle.db'}")
+    monkeypatch.setenv("ALPHAFORGE_PERSISTENCE_ENABLED", "1")
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    orchestrator = _build_runtime_from_env(persistence_engine=engine)
+    asyncio.run(orchestrator._emit_lifecycle_event("SIGNAL_CREATED", "ETHUSDT", {"signal_id": "signal-invalid"}))
+    asyncio.run(orchestrator._emit_lifecycle_event("ORDER_PLACED", "ETHUSDT", {}))
+
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT lifecycle_state,failure_reason,payload FROM trade_lifecycle_events "
+            "WHERE signal_id='signal-invalid' ORDER BY id DESC LIMIT 1"
+        )).one()
+    assert row.lifecycle_state == "ERROR"
+    assert row.failure_reason == "INVALID_LIFECYCLE_TRANSITION"
+    assert json.loads(row.payload)["invalid_transition"] == {
+        "signal_id": "signal-invalid",
+        "symbol": "ETHUSDT",
+        "previous_lifecycle_state": "SIGNAL_CREATED",
+        "attempted_lifecycle_state": "ORDER_PLACED",
+    }
 
 
 def test_runtime_risk_gate_rejects_stale_market_data() -> None:
@@ -836,11 +862,132 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest
     assert lifecycle.count("ORDER_PLACED") == 1
     assert lifecycle[-1] == "POSITION_OPENED"
     assert "ERROR" not in lifecycle
+    assert len({e["signal_id"] for e in events}) == 1
     assert orchestrator.metrics.executions == 1
     assert orchestrator._active_positions == {"BTCUSDT": pytest.approx(10.0)}
     assert portfolio_evidence["snapshot"].equity == pytest.approx(1_000.0)
     assert portfolio_evidence["snapshot"].available_balance == pytest.approx(1_000.0)
     assert portfolio_evidence["candidate"]["notional"] == pytest.approx(10.0)
+
+
+def test_new_reject_signal_after_same_symbol_position_open_does_not_crash(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'same-symbol-new-signal.db'}")
+    timestamps = iter(f"2026-09-10T00:00:0{idx}Z" for idx in range(7))
+    monkeypatch.setattr(runtime_module, "canonical_utc_timestamp", lambda raw=None: raw or next(timestamps))
+    monkeypatch.setenv("ALPHAFORGE_PERSISTENCE_ENABLED", "1")
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    orchestrator = _build_runtime_from_env(persistence_engine=engine)
+    for state, details in (
+        ("SIGNAL_CREATED", {"signal_id": "accepted-eth"}),
+        ("WAITING_ENTRY_ZONE", {}),
+        ("ENTRY_TRIGGERED", {}),
+        ("ORDER_PLACED", {}),
+        ("POSITION_OPENED", {}),
+        ("SIGNAL_CREATED", {"signal_id": "rejected-eth"}),
+        ("SIGNAL_REJECTED", {"reason": "DUPLICATE_POSITION"}),
+    ):
+        asyncio.run(orchestrator._emit_lifecycle_event(state, "ETHUSDT", details))
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT signal_id,lifecycle_state FROM trade_lifecycle_events ORDER BY id"
+        )).all()
+    assert rows == [
+        ("accepted-eth", "SIGNAL_CREATED"),
+        ("accepted-eth", "WAITING_ENTRY_ZONE"),
+        ("accepted-eth", "ENTRY_TRIGGERED"),
+        ("accepted-eth", "ORDER_PLACED"),
+        ("accepted-eth", "POSITION_OPENED"),
+        ("rejected-eth", "SIGNAL_CREATED"),
+        ("rejected-eth", "SIGNAL_REJECTED"),
+    ]
+
+
+def test_mtf_reject_starts_new_same_symbol_signal_after_open_position(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[dict] = []
+    rejects: list[dict] = []
+
+    async def persist_reject(_self, payload: dict) -> None:
+        rejects.append(payload)
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_persist_reject", persist_reject)
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+        ),
+        ai_brain=_brain(), market_scanner=lambda: asyncio.sleep(0, result=[]),
+        on_lifecycle_event=lambda event: events.append(event),
+    )
+    for state, details in (
+        ("SIGNAL_CREATED", {"signal_id": "accepted-eth"}),
+        ("WAITING_ENTRY_ZONE", {}),
+        ("ENTRY_TRIGGERED", {}),
+        ("ORDER_PLACED", {}),
+        ("POSITION_OPENED", {}),
+    ):
+        asyncio.run(orchestrator._emit_lifecycle_event(state, "ETHUSDT", details))
+
+    selection = SimpleNamespace(
+        symbol="ETHUSDT",
+        regime_hint="UNKNOWN",
+        diagnostics={"inputs": {
+            "source_exchange": "fixture",
+            "timeframe": "1m",
+            "market_ts": 99_999_999_999.0,
+            "entry": 100.0,
+            "sl": 99.0,
+            "tp": 102.0,
+            "rr": 2.0,
+            "side": "LONG",
+        }},
+    )
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    assert rejects[-1]["reason"] == "MTF_EXECUTION_UNAVAILABLE"
+    assert [event["lifecycle_event_type"] for event in events[-2:]] == [
+        "SIGNAL_CREATED", "SIGNAL_REJECTED",
+    ]
+    assert events[-2]["signal_id"] == events[-1]["signal_id"]
+    assert events[-2]["signal_id"] != "accepted-eth"
+    assert all(event["lifecycle_event_type"] != "ERROR" for event in events)
+
+
+def test_paper_accepted_observation_follows_pending_position_persistence(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
+
+    async def scanner() -> list[dict]:
+        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
+                 "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0,
+                 "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002,
+                 "volatility_pct": 0.4, "trend_strength": 0.9,
+                 "liquidity_score": 0.9, "chop_score": 0.1}]
+
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_persist_pending_paper_position",
+        lambda self, *args, **kwargs: calls.append("pending_position"),
+    )
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_persist_burnin_decision",
+        lambda self, payload, lifecycle_state=None, conn=None:
+            calls.append(("accepted_observation", lifecycle_state)),
+    )
+    monkeypatch.setattr(RuntimeOrchestrator, "_generate_burnin_snapshot", lambda *args, **kwargs: None)
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_AlwaysAcceptBrain(), market_scanner=scanner,
+    )
+    orchestrator._campaign_id = "campaign"
+    orchestrator._burnin_run_id = "run"
+
+    asyncio.run(orchestrator._scan_once())
+
+    assert calls == ["pending_position", ("accepted_observation", "POSITION_OPENED")]
 
 
 def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing() -> None:

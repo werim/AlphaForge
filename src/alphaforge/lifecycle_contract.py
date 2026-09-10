@@ -15,6 +15,7 @@ class CanonicalLifecycleEvent(str, Enum):
     POSITION_CLOSED = "POSITION_CLOSED"
     ENTRY_TIMEOUT = "ENTRY_TIMEOUT"
     CANCELLED = "CANCELLED"
+    ERROR = "ERROR"
 
 
 CANONICAL_LIFECYCLE_EVENTS: tuple[str, ...] = tuple(event.value for event in CanonicalLifecycleEvent)
@@ -37,33 +38,45 @@ CANONICAL_LIFECYCLE_TRANSITIONS: dict[str, set[str]] = {
         CanonicalLifecycleEvent.WAITING_ENTRY_ZONE.value,
         CanonicalLifecycleEvent.ORDER_REJECTED.value,
         CanonicalLifecycleEvent.CANCELLED.value,
+        CanonicalLifecycleEvent.ERROR.value,
     },
     CanonicalLifecycleEvent.WAITING_ENTRY_ZONE.value: {
         CanonicalLifecycleEvent.ENTRY_TRIGGERED.value,
         CanonicalLifecycleEvent.ENTRY_TIMEOUT.value,
         CanonicalLifecycleEvent.CANCELLED.value,
+        CanonicalLifecycleEvent.ERROR.value,
     },
     CanonicalLifecycleEvent.ENTRY_TRIGGERED.value: {
         CanonicalLifecycleEvent.ORDER_PLACED.value,
         CanonicalLifecycleEvent.ORDER_REJECTED.value,
         CanonicalLifecycleEvent.CANCELLED.value,
+        CanonicalLifecycleEvent.ERROR.value,
     },
     CanonicalLifecycleEvent.ORDER_PLACED.value: {
         CanonicalLifecycleEvent.POSITION_OPENED.value,
         CanonicalLifecycleEvent.ORDER_REJECTED.value,
         CanonicalLifecycleEvent.ENTRY_TIMEOUT.value,
         CanonicalLifecycleEvent.CANCELLED.value,
+        CanonicalLifecycleEvent.ERROR.value,
     },
     CanonicalLifecycleEvent.POSITION_OPENED.value: {
         CanonicalLifecycleEvent.POSITION_CLOSED.value,
         CanonicalLifecycleEvent.CANCELLED.value,
+        CanonicalLifecycleEvent.ERROR.value,
     },
-    CanonicalLifecycleEvent.SIGNAL_REJECTED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
-    CanonicalLifecycleEvent.SYMBOL_REJECTED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
-    CanonicalLifecycleEvent.ORDER_REJECTED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
-    CanonicalLifecycleEvent.POSITION_CLOSED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
-    CanonicalLifecycleEvent.ENTRY_TIMEOUT.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
-    CanonicalLifecycleEvent.CANCELLED.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
+    CanonicalLifecycleEvent.SIGNAL_REJECTED.value: {
+        CanonicalLifecycleEvent.SIGNAL_CREATED.value, CanonicalLifecycleEvent.ERROR.value},
+    CanonicalLifecycleEvent.SYMBOL_REJECTED.value: {
+        CanonicalLifecycleEvent.SIGNAL_CREATED.value, CanonicalLifecycleEvent.ERROR.value},
+    CanonicalLifecycleEvent.ORDER_REJECTED.value: {
+        CanonicalLifecycleEvent.SIGNAL_CREATED.value, CanonicalLifecycleEvent.ERROR.value},
+    CanonicalLifecycleEvent.POSITION_CLOSED.value: {
+        CanonicalLifecycleEvent.SIGNAL_CREATED.value, CanonicalLifecycleEvent.ERROR.value},
+    CanonicalLifecycleEvent.ENTRY_TIMEOUT.value: {
+        CanonicalLifecycleEvent.SIGNAL_CREATED.value, CanonicalLifecycleEvent.ERROR.value},
+    CanonicalLifecycleEvent.CANCELLED.value: {
+        CanonicalLifecycleEvent.SIGNAL_CREATED.value, CanonicalLifecycleEvent.ERROR.value},
+    CanonicalLifecycleEvent.ERROR.value: {CanonicalLifecycleEvent.SIGNAL_CREATED.value},
 }
 
 
@@ -87,6 +100,9 @@ def is_canonical_lifecycle_event(raw: str | None) -> bool:
 def is_valid_lifecycle_transition(previous_state: str | None, next_state: str) -> bool:
     next_canonical = normalize_lifecycle_event(next_state)
     if previous_state is None:
-        return next_canonical == CanonicalLifecycleEvent.SIGNAL_CREATED.value
+        return next_canonical in {
+            CanonicalLifecycleEvent.SIGNAL_CREATED.value,
+            CanonicalLifecycleEvent.ERROR.value,
+        }
     previous_canonical = normalize_lifecycle_event(previous_state)
     return next_canonical in CANONICAL_LIFECYCLE_TRANSITIONS.get(previous_canonical, set())

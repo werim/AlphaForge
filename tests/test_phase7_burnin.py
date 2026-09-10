@@ -78,10 +78,15 @@ def test_attached_paper_execution_persists_guided_pending_position(tmp_path: Pat
     asyncio.run(orch._execute('BTCUSDT',{'signal_id':'guided-signal','order_type':'MARKET'},{'source_exchange':'binance','side':'LONG','entry':100,'sl':99,'tp':102,'rr':2,'execution_ctx':execution_ctx,'mtf':mtf}))
     with engine.connect() as conn:
         row=conn.execute(text("SELECT signal_id,side,stop,target,source_provenance_json,status FROM burnin_pending_position_outcomes")).mappings().one()
+        open_paper_positions=conn.execute(text("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign.campaign_id}).scalar_one()
+        generic_orders=conn.execute(text("SELECT COUNT(*) FROM orders")).scalar_one()
+        generic_positions=conn.execute(text("SELECT COUNT(*) FROM positions")).scalar_one()
     provenance=json.loads(row['source_provenance_json'])
     assert row['signal_id']=='guided-signal' and row['side']=='LONG' and row['status']=='OPEN'
     assert (row['stop'],row['target'])==(99,102)
     assert provenance['setup_phase']=='PULLBACK' and provenance['execution_direction']=='LONG'
+    assert open_paper_positions == 1
+    assert generic_orders == generic_positions == 0
 
 
 def test_position_closed_creates_one_realized_burnin_outcome(tmp_path: Path):

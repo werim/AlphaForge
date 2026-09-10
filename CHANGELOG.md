@@ -1,3 +1,28 @@
+# Issue #359 PAPER lifecycle signal-state correction — 2026-09-10
+
+### Added
+- Signal-scoped lifecycle state tracking and current-signal inheritance for empty follow-up lifecycle details.
+- Persistable canonical `ERROR` evidence with explicit prior and attempted states for invalid transitions.
+- Regressions for accepted PAPER identity continuity, later same-symbol rejection, audited invalid transitions, pending-position accounting, and accepted-observation ordering.
+
+### Changed
+- Symbol-level lifecycle state is retained only for reconciliation diagnostics; transition validation uses `signal_id` state.
+- Accepted PAPER burn-in observation persistence occurs after simulated execution and pending-position persistence and records `POSITION_OPENED` rather than pre-claiming `ORDER_PLACED`.
+
+### Fixed
+- A later same-symbol `SIGNAL_CREATED` no longer attempts `POSITION_OPENED -> SIGNAL_CREATED` against an unrelated accepted signal.
+- Empty accepted lifecycle details no longer invent a second signal ID.
+- Audited invalid transitions no longer become an unpersistable `ERROR` that terminates the worker with `trade_lifecycle_event_persistence_failed`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. No schema migration, threshold, scoring, or LIVE mutation change.
+
+### Known Issues
+- POST358C02 and other historical lifecycle rows are unchanged; fresh PAPER evidence is required. LIVE remains NOT READY.
+
 # Issue #357 PAPER acceptance normalization — 2026-09-09
 
 ### Added
