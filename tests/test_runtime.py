@@ -21,6 +21,7 @@ from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_reco
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, create_campaign
 from alphaforge.burnin import export_burnin_evidence
 import alphaforge.runtime as runtime_module
+import alphaforge.runtime_state as runtime_state_module
 
 
 def _brain() -> AIBrain:
@@ -1332,6 +1333,52 @@ def test_recovery_scope_blocks_authoritative_execution_exposure(tmp_path: Path, 
     result = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id="fresh")
     assert result["blocked"]
     assert result["scope"] == "GLOBAL_EXECUTION_RISK"
+
+
+def test_clean_same_campaign_recycled_pid_allows_recovery_and_passes_snapshot_start_time(monkeypatch, tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'clean-recycled-pid.sqlite3'}")
+    with engine.begin() as conn:
+        campaign = create_campaign(conn, release_id="release", duration_days=1, symbols=[], intervals=[])
+    started_at = "2026-09-01T00:00:00Z"
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="CLEAN_SHUTDOWN",
+        instance_id="old", startup_id="old", process_id=26495, campaign_id=campaign.campaign_id,
+        last_start_time=started_at, active_position_count=2, pending_order_count=2,
+    ))
+    observed = {}
+
+    def recycled(_pid, *, expected_command_parts=(), expected_started_at=None):
+        observed.update(command=expected_command_parts, started_at=expected_started_at)
+        return False
+
+    monkeypatch.setattr(runtime_state_module, "process_is_alive", recycled)
+    decision = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id=campaign.campaign_id)
+    assert decision["blocked"] is False
+    assert decision["previous_process_alive"] is False
+    assert observed == {"command": ("alphaforge", campaign.campaign_id), "started_at": started_at}
+
+
+def test_clean_same_campaign_matching_worker_blocks_recovery(monkeypatch, tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'clean-matching-worker.sqlite3'}")
+    with engine.begin() as conn:
+        campaign = create_campaign(conn, release_id="release", duration_days=1, symbols=[], intervals=[])
+    started_at = "2026-09-01T00:00:00Z"
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER", requested_mode="PAPER", actual_mode="PAPER", runtime_status="CLEAN_SHUTDOWN",
+        instance_id="old", startup_id="old", process_id=26495, campaign_id=campaign.campaign_id,
+        last_start_time=started_at, active_position_count=2, pending_order_count=2,
+    ))
+
+    def matching(_pid, *, expected_command_parts=(), expected_started_at=None):
+        assert expected_command_parts == ("alphaforge", campaign.campaign_id)
+        assert expected_started_at == started_at
+        return True
+
+    monkeypatch.setattr(runtime_state_module, "process_is_alive", matching)
+    decision = evaluate_runtime_recovery(engine, mode="PAPER", campaign_id=campaign.campaign_id)
+    assert decision["blocked"] is True
+    assert decision["previous_process_alive"] is True
+    assert decision["reason"] == "RUNTIME_RECOVERY_REQUIRED"
 
 
 def test_verified_zero_exposure_paper_recovery_supersedes_unscoped_history(tmp_path: Path) -> None:

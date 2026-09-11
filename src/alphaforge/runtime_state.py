@@ -241,7 +241,10 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
                 query_errors.append(err); campaign_state_query_errors.append(err); availability["campaign_state_available"] = False
     if latest and latest.get("process_id"):
         expected = ("alphaforge", str(latest["campaign_id"])) if latest.get("campaign_id") else ()
-        process_alive = process_is_alive(latest["process_id"], expected_command_parts=expected)
+        process_alive = process_is_alive(
+            latest["process_id"], expected_command_parts=expected,
+            expected_started_at=latest.get("last_start_time"),
+        )
     prior_unclean = bool(latest and str(latest.get("runtime_status") or "").upper() not in clean_statuses)
     prior_campaign = (latest or {}).get("campaign_id")
     same_campaign = bool(campaign_id and prior_campaign and campaign_id == prior_campaign)
