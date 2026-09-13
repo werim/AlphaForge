@@ -28,7 +28,7 @@ from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
-from alphaforge.reconciliation import ReconciliationEngine, persist_findings, summarize_findings
+from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
 from alphaforge.persistence import fetch_expectancy_stat_detail, init_db
 from alphaforge.adaptive_learning import record_rejected_signal_review
@@ -38,7 +38,7 @@ from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
 from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
-from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, save_exchange_reconciliation_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe
+from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
 from alphaforge.agents.phase_b import register_phase_b_handlers
@@ -267,6 +267,8 @@ class RuntimeOrchestrator:
     _fatal_task_name: str | None = field(default=None, init=False)
     _unknown_exchange_state: bool = field(default=False, init=False)
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
+    _reconciliation_persistence_unhealthy: bool = field(default=False, init=False)
+    _pending_reconciliation_persistence_failures: list[dict[str, Any]] = field(default_factory=list, init=False)
     _exchange_read_only_status: str = field(default="UNKNOWN", init=False)
     _unreconciled_symbols: set[str] = field(default_factory=set, init=False)
     _orphan_orders: list[dict[str, Any]] = field(default_factory=list, init=False)
@@ -1877,6 +1879,7 @@ class RuntimeOrchestrator:
         )
         reconciliation_passed = bool(
             self._reconciliation_status == "CLEAN"
+            and not self._reconciliation_persistence_unhealthy
             and not self._unknown_exchange_state
             and not self._unreconciled_symbols
             and not self._orphan_orders
@@ -2473,6 +2476,8 @@ class RuntimeOrchestrator:
 
     def _evaluate_runtime_risk(self, symbol: str, market_ctx: Mapping[str, Any]) -> str | None:
         now = time.time()
+        if self._reconciliation_persistence_unhealthy:
+            return "RECONCILIATION_PERSISTENCE_FAILED"
         if self._fail_closed_reason:
             return self._fail_closed_reason
         if self._recovery_required:
@@ -2561,6 +2566,8 @@ class RuntimeOrchestrator:
             self.shutdown()
 
     async def _reconcile_runtime_state(self) -> None:
+        # A CLEAN observation is not tradable until its evidence commits.
+        self._reconciliation_persistence_unhealthy = True
         if self.config.execution_mode == ExecutionMode.BACKTEST:
             self._unknown_exchange_state = False
             self._exchange_read_only_status = "NOT_REQUIRED_BACKTEST"
@@ -2588,7 +2595,7 @@ class RuntimeOrchestrator:
                 self._unknown_exchange_state = not complete
                 self._exchange_read_only_status = "AVAILABLE" if complete else "UNAVAILABLE"
                 if complete and self._fail_closed_reason in {
-                    "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE"
+                    "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RECONCILIATION_PERSISTENCE_FAILED"
                 }:
                     self._fail_closed_reason = None
                 if not complete:
@@ -2616,9 +2623,36 @@ class RuntimeOrchestrator:
                 self._reconciliation_status = "CLEAN"
         engine = self._resolve_persistence_engine()
         if engine is not None:
-            persist_findings(engine, findings)
-            save_exchange_reconciliation_event(engine, instance_id=self.runtime_instance_id, startup_id=self.startup_id, mode=self.config.execution_mode.value, status=self._reconciliation_status, mismatch_count=len(findings), orphan_order_count=len(self._orphan_orders), orphan_position_count=len(self._orphan_positions), exchange_read_only_status=self._exchange_read_only_status, diagnostics=snapshot_source)
-            self._persist_runtime_state_snapshot("RECONCILED" if not self._fail_closed_reason else "RECOVERY_REQUIRED")
+            identity_payload = {
+                "instance_id": self.runtime_instance_id, "startup_id": self.startup_id,
+                "mode": self.config.execution_mode.value, "source": snapshot_source,
+                "status": self._reconciliation_status, "exchange_read_only_status": self._exchange_read_only_status,
+                "findings": [{"type": f.finding_type, "symbol": f.symbol, "ref": f.lifecycle_ref,
+                              "evidence": f.evidence, "fail_closed": f.fail_closed} for f in findings],
+            }
+            cycle_id = "recon:v1:" + hashlib.sha256(json.dumps(identity_payload, sort_keys=True, default=str).encode()).hexdigest()
+            state = self._build_runtime_state_snapshot(status="RECONCILED" if not self._fail_closed_reason else "RECOVERY_REQUIRED")
+            if self._pending_reconciliation_persistence_failures and not self._fail_closed_reason:
+                state.last_error = None
+            try:
+                persist_reconciliation_cycle(engine, cycle_id=cycle_id, findings=findings, snapshot=state,
+                                             diagnostics=snapshot_source,
+                                             pending_failures=self._pending_reconciliation_persistence_failures)
+            except ReconciliationPersistenceFailure as exc:
+                self._reconciliation_status = "PERSISTENCE_FAILED"
+                self._fail_closed_reason = "RECONCILIATION_PERSISTENCE_FAILED"
+                self._last_error = str(exc)
+                self._pending_reconciliation_persistence_failures.append({
+                    "cycle_id": f"recon-failure:{uuid.uuid4().hex}", "failed_cycle_id": cycle_id,
+                    "timestamp": canonical_utc_timestamp(), "reason": str(exc),
+                })
+                logger.error("reconciliation_persistence_failed cycle_id=%s reason=%s", cycle_id, exc)
+                return
+            had_persistence_failure = bool(self._pending_reconciliation_persistence_failures)
+            self._pending_reconciliation_persistence_failures.clear()
+            if had_persistence_failure and not self._fail_closed_reason:
+                self._last_error = None
+        self._reconciliation_persistence_unhealthy = False
         for finding in findings:
             if not finding.fail_closed:
                 continue

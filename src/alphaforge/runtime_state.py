@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-import json, os, uuid
+import json, os, sqlite3, time, uuid
 from typing import Any, Mapping
 
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.engine import Engine
 
 from alphaforge.contracts import canonical_utc_timestamp
@@ -120,7 +121,12 @@ def ensure_runtime_state_schema(engine: Engine) -> None:
         conn.execute(text("""CREATE TABLE IF NOT EXISTS exchange_reconciliation_events (
           id INTEGER PRIMARY KEY AUTOINCREMENT, event_ts TEXT, instance_id TEXT, startup_id TEXT,
           mode TEXT, status TEXT, mismatch_count INTEGER, orphan_order_count INTEGER,
-          orphan_position_count INTEGER, exchange_read_only_status TEXT, diagnostics_json TEXT)"""))
+          orphan_position_count INTEGER, exchange_read_only_status TEXT, diagnostics_json TEXT,
+          cycle_id TEXT)"""))
+        event_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(exchange_reconciliation_events)"))}
+        if "cycle_id" not in event_columns:
+            conn.execute(text("ALTER TABLE exchange_reconciliation_events ADD COLUMN cycle_id TEXT"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_exchange_reconciliation_cycle_id ON exchange_reconciliation_events(cycle_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_runtime_state_latest ON runtime_state_snapshots(timestamp DESC, id DESC)"))
         # Existing production databases predate lineage columns.  Additive migration
         # preserves the append-only snapshot history and is safe on SQLite.
@@ -303,6 +309,72 @@ def save_exchange_reconciliation_event(engine: Engine, *, instance_id: str, star
     ensure_runtime_state_schema(engine)
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO exchange_reconciliation_events(event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json) VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d)"), {"ts": canonical_utc_timestamp(),"i":instance_id,"s":startup_id,"m":mode,"st":status,"mc":mismatch_count,"oo":orphan_order_count,"op":orphan_position_count,"ro":exchange_read_only_status,"d":json.dumps(dict(diagnostics or {}), sort_keys=True, default=str)})
+
+
+class ReconciliationPersistenceFailure(RuntimeError):
+    """The reconciliation evidence transaction exhausted its SQLite lock budget."""
+
+
+def _sqlite_busy(exc: OperationalError) -> bool:
+    original = exc.orig
+    code = getattr(original, "sqlite_errorcode", None)
+    return (isinstance(code, int) and code & 0xff == sqlite3.SQLITE_BUSY) or "database is locked" in str(original).lower()
+
+
+def persist_reconciliation_cycle(engine: Engine, *, cycle_id: str, findings: list[Any], snapshot: RuntimeStateSnapshot,
+                                 diagnostics: Mapping[str, Any], pending_failures: list[Mapping[str, Any]] | None = None) -> bool:
+    """Commit one observed result, its findings and state together; return False for an existing cycle."""
+    deadline = time.monotonic() + 0.75
+    backoffs = (0.025, 0.05, 0.1)
+    for attempt in range(4):
+        try:
+            with engine.begin() as conn:
+                old_timeout = None
+                try:
+                    if engine.dialect.name == "sqlite":
+                        old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                        conn.exec_driver_sql("PRAGMA busy_timeout=50")
+                        conn.exec_driver_sql("BEGIN IMMEDIATE")
+                    for failure in pending_failures or []:
+                        conn.execute(text("""INSERT INTO exchange_reconciliation_events
+                        (event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json,cycle_id)
+                        VALUES (:ts,:i,:s,:m,'PERSISTENCE_FAILED',NULL,NULL,NULL,:ro,:d,:cycle)
+                        ON CONFLICT(cycle_id) DO NOTHING"""), {
+                            "ts": failure["timestamp"], "i": snapshot.instance_id, "s": snapshot.startup_id,
+                            "m": snapshot.mode, "ro": snapshot.exchange_read_only_status,
+                            "d": json.dumps(dict(failure), sort_keys=True, default=str), "cycle": failure["cycle_id"],
+                        })
+                    result = conn.execute(text("""INSERT INTO exchange_reconciliation_events
+                    (event_ts,instance_id,startup_id,mode,status,mismatch_count,orphan_order_count,orphan_position_count,exchange_read_only_status,diagnostics_json,cycle_id)
+                    VALUES (:ts,:i,:s,:m,:st,:mc,:oo,:op,:ro,:d,:cycle)
+                    ON CONFLICT(cycle_id) DO NOTHING"""), {
+                        "ts": canonical_utc_timestamp(), "i": snapshot.instance_id, "s": snapshot.startup_id,
+                        "m": snapshot.mode, "st": snapshot.reconciliation_status, "mc": len(findings),
+                        "oo": snapshot.orphan_order_count, "op": snapshot.orphan_position_count,
+                        "ro": snapshot.exchange_read_only_status,
+                        "d": json.dumps(dict(diagnostics), sort_keys=True, default=str), "cycle": cycle_id,
+                    })
+                    if result.rowcount:
+                        for finding in findings:
+                            conn.execute(text("""INSERT INTO reconciliation_incidents
+                            (incident_type,severity,symbol,lifecycle_ref,remediation_status,operator_acknowledged,fail_closed,forensic_payload)
+                            VALUES (:incident_type,:severity,:symbol,:lifecycle_ref,:remediation_status,:operator_acknowledged,:fail_closed,:forensic_payload)"""), finding.to_incident_row())
+                        rec = snapshot.to_record()
+                        rec["created_at"] = canonical_utc_timestamp()
+                        columns = ",".join(rec)
+                        values = ",".join(f":{key}" for key in rec)
+                        conn.execute(text(f"INSERT INTO runtime_state_snapshots ({columns}) VALUES ({values})"), rec)
+                    return bool(result.rowcount)
+                finally:
+                    if old_timeout is not None:
+                        conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+        except OperationalError as exc:
+            if engine.dialect.name != "sqlite" or not _sqlite_busy(exc):
+                raise
+            if attempt == 3 or time.monotonic() >= deadline:
+                raise ReconciliationPersistenceFailure(f"SQLITE_BUSY reconciliation persistence after {attempt + 1} attempts; cycle_id={cycle_id}") from exc
+            time.sleep(min(backoffs[attempt], max(0.0, deadline - time.monotonic())))
+    raise AssertionError("unreachable")
 
 
 def persist_historical_paper_recovery_without_provider(engine: Engine, *, prior_snapshot: Mapping[str, Any] | None, diagnostics: Mapping[str, Any]) -> None:

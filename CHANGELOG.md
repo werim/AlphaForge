@@ -4892,3 +4892,23 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 - Identity-less geometry provider failures now persist as bounded, SQL-idempotent diagnostic observations and do not count as canonical accepted/rejected decisions.
 - Identified invalid candles retain stable canonical reject identity across runtime restarts.
 - Runtime candle polling suppression now stores only the latest timestamp per market key instead of an unbounded historical set.
+# Reconciliation SQLite contention correction — 2026-09-13
+
+### Added
+- Deterministic, unique reconciliation cycle IDs and file-backed two-connection contention/idempotency regressions.
+- Explicit fail-closed reconciliation persistence failure status, log, and deferred durable failure event.
+
+### Changed
+- Runtime reconciliation findings, exchange event, and matching state snapshot now commit atomically with a bounded SQLite-lock-only retry.
+
+### Fixed
+- A recovered transient SQLite lock no longer terminates the reconciliation task or fails its campaign; duplicate retries no longer append duplicate events.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Additive nullable event-table column and unique index; legacy rows and CSV exports are unchanged.
+
+### Known Issues
+- A continuously locked database cannot accept durable failure evidence until a later successful transaction. Other SQLite writer paths remain outside this patch. LIVE remains NOT READY.

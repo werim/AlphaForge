@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Reconciliation SQLite contention correction (2026-09-13)
+- Current version/phase: narrow reconciliation-persistence hardening; focused and relevant regression validation complete.
+- Runtime maturity: one observed reconciliation result commits its findings, exchange event, and corresponding state snapshot together. A recovered SQLite writer lock keeps the reconciliation task and campaign running; exhausted contention blocks trading and queues explicit failure evidence for the next successful commit.
+- BACKTEST/PAPER/LIVE alignment: the same persistence boundary and fail-closed gate apply to every runtime mode; decision, strategy, threshold, and execution semantics are unchanged.
+- Lifecycle/execution coverage: lifecycle transitions and order execution are unchanged. Reconciliation health now gates decisions until persistence succeeds.
+- Persistence coverage: additive nullable `cycle_id` plus unique index on exchange reconciliation events; existing rows and exports remain compatible. Four attempts within a 750 ms deadline use a fresh `BEGIN IMMEDIATE` transaction, a 50 ms SQLite lock wait, and 25/50/100 ms backoffs only for `SQLITE_BUSY` or `database is locked`.
+- Known critical risks: a persistent database lock prevents durable failure evidence until a later successful commit; the runtime logs and retains an in-memory failure meanwhile. Other SQLite writers remain outside this patch. LIVE remains NOT READY.
+- Last audit date: 2026-09-13. Live readiness verdict: NOT LIVE READY.
+
 ## Issue #359 PAPER lifecycle signal-state correction (2026-09-10)
 - Current version: prospective signal-scoped runtime lifecycle identity and audited `ERROR` persistence correction; no schema or threshold change.
 - Current phase: implementation and bounded regression validation on `feature/359-paper-lifecycle-signal-state`; POST358C02 remains immutable historical evidence.
