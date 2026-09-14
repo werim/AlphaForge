@@ -18,8 +18,9 @@ from alphaforge.persistence import init_db
 from alphaforge import persistence as persistence_module
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
 from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot, latest_runtime_state_snapshot, build_readonly_reconciliation_probe, persist_verified_paper_recovery
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, create_campaign
+from alphaforge.burnin_campaign import aggregate_campaign, bootstrap_campaign_schema, create_campaign, start_or_resume_campaign
 from alphaforge.burnin import export_burnin_evidence
+from alphaforge.burnin_resolver import resolve_campaign_batch
 import alphaforge.runtime as runtime_module
 import alphaforge.runtime_state as runtime_state_module
 
@@ -430,6 +431,54 @@ def test_eligible_paper_runtime_reject_creates_one_pending_label(
         "burnin_execution_metrics.csv", "burnin_reject_quality.csv", "burnin_calibration.csv",
         "burnin_drawdowns.csv", "burnin_suspension_events.csv",
     }
+
+
+def test_runtime_reject_core_and_forward_evidence_share_decision_id(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "linked-reject.db"
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
+    with engine.begin() as conn:
+        campaign = create_campaign(conn, release_id="reject-identity-test", duration_days=1,
+                                   symbols=["BTCUSDT"], intervals=["1m"])
+        run_id = start_or_resume_campaign(conn, campaign.campaign_id)["burnin_run_id"]
+    monkeypatch.setenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", campaign.campaign_id)
+    monkeypatch.setenv("EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("ALPHAFORGE_RUNTIME_SAFE_SCANNER", "1")
+    orchestrator = _build_runtime_from_env(persistence_engine=engine)
+    orchestrator._burnin_run_id = run_id
+    orchestrator.config.reject_forward_horizon_bars = 1
+    payload = {
+        "signal_id": "runtime:linked-reject", "symbol": "BTCUSDT", "side": "LONG",
+        "timeframe": "1m", "entry": 100.0, "sl": 90.0, "tp": 120.0,
+        "reason": "LOW_CONFIDENCE", "forward_label_subject": "GUIDED_CANDIDATE",
+        "decision_timestamp": "2026-01-01T00:00:00Z",
+        "execution_ctx": {"spread_pct": .001, "expected_slippage_pct": .001,
+                          "fee_pct": .001, "funding_rate_pct": 0.0, "latency_ms": 10},
+    }
+    asyncio.run(orchestrator._persist_reject(payload))
+    asyncio.run(orchestrator._persist_reject(payload))
+    with engine.begin() as conn:
+        decisions = conn.execute(text("SELECT decision_id FROM order_decisions WHERE signal_id=:sid AND phase='final' AND decision='REJECTED'"), {"sid": payload["signal_id"]}).all()
+        reviews = conn.execute(text("SELECT reject_decision_id FROM rejected_signal_reviews WHERE signal_id=:sid"), {"sid": payload["signal_id"]}).all()
+        pending = conn.execute(text("SELECT reject_decision_id FROM burnin_pending_reject_labels WHERE signal_id=:sid"), {"sid": payload["signal_id"]}).all()
+        assert len(decisions) == len(reviews) == len(pending) == 1
+        reject_id = decisions[0][0]
+        assert reject_id.startswith("reject:")
+        assert reviews[0][0] == pending[0][0] == reject_id
+        metrics = aggregate_campaign(conn, campaign.campaign_id)["metrics"]
+        assert metrics["canonical_rejected_decisions"] == 1
+        assert metrics["eligible_reject_labels_persisted"] == 1
+        assert metrics["reject_label_coverage"] == 1.0
+        candles = {"BTCUSDT": [{"timestamp": "2026-01-01T00:01:00Z",
+                               "high": 121.0, "low": 99.0}]}
+        assert resolve_campaign_batch(conn, campaign.campaign_id, candles,
+                                      now="2026-01-01T00:02:00Z")["resolved"] == 1
+        outcome = conn.execute(text("SELECT reject_outcome_id,payload_json FROM burnin_reject_outcomes")).one()
+        assert outcome.reject_outcome_id == "rout_" + reject_id
+        assert json.loads(outcome.payload_json)["reject_decision_id"] == reject_id
+        assert resolve_campaign_batch(conn, campaign.campaign_id, candles,
+                                      now="2026-01-01T00:02:00Z")["resolved"] == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM burnin_reject_outcomes")).scalar_one() == 1
 
 
 def test_reject_identity_is_campaign_and_run_namespaced(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -4912,3 +4912,22 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 
 ### Known Issues
 - A continuously locked database cannot accept durable failure evidence until a later successful transaction. Other SQLite writer paths remain outside this patch. LIVE remains NOT READY.
+# Runtime reject decision identity correction — 2026-09-13
+
+### Added
+- Temporary-DB regression for cross-table reject identity, attributable coverage, resolution, and replay.
+
+### Changed
+- New runtime final reject artifacts use the existing campaign/run-scoped reject ID as `order_decisions.decision_id`.
+
+### Fixed
+- Final runtime reject decisions no longer diverge from their reviews and pending labels solely because the callback omitted `decision_id`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- No schema change. Consumers that assume new runtime final reject IDs equal `<signal_id>:REJECTED` must use the stored `decision_id` instead.
+
+### Known Issues
+- Historical split identities need audited offline repair; non-attributable legacy-shadow labels remain excluded. LIVE remains NOT READY.

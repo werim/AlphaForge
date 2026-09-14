@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## Runtime reject decision identity correction (2026-09-13)
+- Current version/phase: prospective runtime reject identity handoff; 303 focused and adjacent regression tests pass.
+- Runtime maturity: the final `order_decisions.decision_id` now uses the run-scoped `reject_decision_id` already carried by the review, canonical burn-in observation, pending label, and resolved outcome. Accepted decisions and reject criteria are unchanged.
+- BACKTEST/PAPER/LIVE alignment: the shared final reject artifact accepts the runtime-provided identity in configured modes; standalone callers retain the prior default. No decision or execution gate changes.
+- Lifecycle/execution coverage: `SIGNAL_CREATED -> SIGNAL_REJECTED` and execution-cost assumptions are unchanged.
+- Persistence coverage: no schema or export-format change. Existing campaign DBs retain old split IDs; repair requires an offline, audited backfill after the campaign stops.
+- Known critical risks: the read-only campaign audit found all 82 current labels marked non-attributable legacy shadows; historical split identities also remain. This patch cannot make those labels qualify. LIVE remains NOT READY.
+- Last audit date: 2026-09-13. Live readiness verdict: NOT LIVE READY.
+
 ## Reconciliation SQLite contention correction (2026-09-13)
 - Current version/phase: narrow reconciliation-persistence hardening; focused and relevant regression validation complete.
 - Runtime maturity: one observed reconciliation result commits its findings, exchange event, and corresponding state snapshot together. A recovered SQLite writer lock keeps the reconciliation task and campaign running; exhausted contention blocks trading and queues explicit failure evidence for the next successful commit.
