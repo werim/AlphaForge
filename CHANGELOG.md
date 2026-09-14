@@ -1,3 +1,24 @@
+# Adaptive Decision Calibration Engine shadow foundation — 2026-09-14
+
+### Added
+- Separate SQLite shadow observation, calibration snapshot, immutable proposal-event, and retrospective decision tables; deterministic hierarchical accepted/rejected net-R calibration and guarded score/effective-RR proposals.
+- Isolated tests for canonical attribution, health freezes, sample/confidence gates, fallback, replay, hysteresis/cooldown, and shared decision invariance.
+
+### Changed
+- None in BACKTEST, PAPER, LIVE, burn-in qualification, or runtime thresholds.
+
+### Fixed
+- No production-path fix; unlinked forward outcomes are explicitly diagnostic in the shadow ledger.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. The output database is separate and has a new `adaptive_shadow_v1` schema; campaign databases and CSV exports are unchanged.
+
+### Known Issues
+- Analysis is retrospective/in-sample; the CLI cannot relax without explicit healthy evidence. MTF and hard execution/risk gates stay static. Per-trade drawdown contribution is unavailable. LIVE remains NOT READY.
+
 # Issue #359 PAPER lifecycle signal-state correction — 2026-09-10
 
 ### Added
@@ -4913,6 +4934,8 @@ All notable documented repository-level changes are summarized from `REPORT.md`.
 ### Known Issues
 - A continuously locked database cannot accept durable failure evidence until a later successful transaction. Other SQLite writer paths remain outside this patch. LIVE remains NOT READY.
 # Runtime reject decision identity correction — 2026-09-13
+
+CI #1601 follow-up (2026-09-14): `runtime._persist_reject` now passes the canonical reject ID when present and preserves the artifact writer's existing `<signal_id>:REJECTED` fallback for callers without one. Added a regression assertion for the fallback; no schema, qualification, resolver, lifecycle, or execution change. Full-suite validation has 9 unrelated backtest trade-quality/threshold/parity failures.
 
 ### Added
 - Temporary-DB regression for cross-table reject identity, attributable coverage, resolution, and replay.

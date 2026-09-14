@@ -1,6 +1,15 @@
 # AlphaForge Version
 
+# Adaptive Decision Calibration Engine foundation (2026-09-14)
+- Current version/phase: `adaptive_shadow_v1`, offline Phase 1 foundation; no runtime threshold mutation.
+- Runtime maturity: retrospective, in-sample shadow proposals only. Canonical accepted and rejected PAPER campaign outcomes share one cost-adjusted net-R framework. Unresolved gates and orphan outcomes remain diagnostic.
+- BACKTEST/PAPER/LIVE alignment: shared decision code and thresholds are untouched; BACKTEST score units are explicitly excluded from numeric score proposals. PAPER/LIVE have no calibration call site.
+- Lifecycle/execution coverage: closed accepted trades and complete forward rejects are linked to canonical decisions; open/no-fill/cancel/incomplete evidence is recorded but cannot justify loosening. Costs and hold/MAE/MFE context are retained when present. Per-trade drawdown attribution remains unavailable.
+- Known critical risks: historical evidence is in-sample and non-causal; normal-approximation confidence bounds cannot prove independence or regime stability. Health must be explicitly evidenced; the CLI defaults to no loosening. MTF/execution gates have no numeric shadow override. Historical campaign databases are not migrated or backfilled.
+- Last audit date: 2026-09-14. Live readiness verdict: NOT LIVE READY.
+
 ## Runtime reject decision identity correction (2026-09-13)
+- CI #1601 compatibility follow-up (2026-09-14): callback uses a supplied canonical reject ID and retains the artifact writer's `<signal_id>:REJECTED` fallback for direct callers without one. No schema, lifecycle, qualification, or execution change. Full pytest: 1,498 passed, 3 skipped, 9 unrelated backtest trade-quality/threshold/parity failures.
 - Current version/phase: prospective runtime reject identity handoff; 303 focused and adjacent regression tests pass.
 - Runtime maturity: the final `order_decisions.decision_id` now uses the run-scoped `reject_decision_id` already carried by the review, canonical burn-in observation, pending label, and resolved outcome. Accepted decisions and reject criteria are unchanged.
 - BACKTEST/PAPER/LIVE alignment: the shared final reject artifact accepts the runtime-provided identity in configured modes; standalone callers retain the prior default. No decision or execution gate changes.
