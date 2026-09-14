@@ -25,7 +25,7 @@ def test_explicit_persistence_dependencies_override_env_for_all_runtime_consumer
     runtime.on_reject_persist({"signal_id": "canonical-reject", "symbol": "BTCUSDT", "phase": "final", "reason": "LOW_CONFIDENCE", "confidence": .1, "score": .1, "rr": 1.0, "execution_ctx": {"evidence_status": "UNAVAILABLE"}})
     with engine.connect() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE signal_id='canonical-signal'")).scalar_one() == 1
-        assert conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE signal_id='canonical-reject' AND decision='REJECTED'")).scalar_one() == 1
+        assert conn.execute(text("SELECT decision_id FROM order_decisions WHERE signal_id='canonical-reject' AND decision='REJECTED'")).scalar_one() == "canonical-reject:REJECTED"
     assert not env_db.exists()
     engine.dispose()
 

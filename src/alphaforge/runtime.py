@@ -2818,7 +2818,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         with SessionLocal() as session:
             persisted = save_rejected_decision_artifact(
                 session,
-                decision_id=payload["reject_decision_id"],
+                decision_id=payload.get("reject_decision_id"),
                 mode=mode.value,
                 phase=payload.get("phase", "final"),
                 signal_id=payload.get("signal_id"),
