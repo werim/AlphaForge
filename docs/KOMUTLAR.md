@@ -622,8 +622,8 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id CAMP_ID
 macOS / Linux:
 
 ```bash
-RELEASE_ID="1309MBK01"
-
+RELEASE_ID="POST363"
+DB="data/campaign/$RELEASE_ID.db"
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   preflight \
