@@ -622,7 +622,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id CAMP_ID
 macOS / Linux:
 
 ```bash
-RELEASE_ID="0209MAC02"
+RELEASE_ID="1309MBK01"
 
 python -m alphaforge.burnin_ops \
   --db "$DB" \
@@ -805,7 +805,7 @@ python -m alphaforge.burnin_ops \
 ```bash
 python -m alphaforge.burnin_ops \
   --db "$DB" \
-  watch \
+  status \
   --campaign-id "$CID"
 ```
 
@@ -816,7 +816,7 @@ macOS / Linux örneği, 60 saniyede bir:
 ```bash
 while true; do
   date
-  python -m alphaforge.burnin_ops --db "$DB" watch --campaign-id "$CID"
+  python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CID"
   sleep 60
 done
 ```
@@ -1328,6 +1328,184 @@ AND closed_at IS NULL;
 SQL
 ```
 
+## SQL tüm kampanya 
+Kampanya bilgileri:
+
+```bash
+sqlite3 -header -column data/campaign/POSTDBFX.db "
+-- ============================================================
+-- 1) CAMPAIGN / RUN SUMMARY
+-- ============================================================
+SELECT
+    c.campaign_id,
+    c.release_id,
+    c.status AS campaign_status,
+    r.burnin_run_id,
+    r.status AS run_status,
+    r.started_at,
+    r.ended_at,
+    r.observed_duration_seconds
+FROM burnin_campaigns c
+LEFT JOIN burnin_campaign_runs r
+  ON r.campaign_id = c.campaign_id
+WHERE c.campaign_id = 'camp_bd9dc5aeadac0b59';
+
+-- ============================================================
+-- 2) ACCEPTED TRADE OUTCOMES — REALIZED EVIDENCE
+-- ============================================================
+SELECT
+    symbol,
+    regime,
+    side,
+    COUNT(*) AS n,
+    SUM(CASE WHEN tp_hit = 1 THEN 1 ELSE 0 END) AS tp,
+    SUM(CASE WHEN sl_hit = 1 THEN 1 ELSE 0 END) AS sl,
+    ROUND(AVG(net_pnl_pct), 6) AS avg_net_pnl_pct,
+    ROUND(SUM(net_pnl_pct), 6) AS total_net_pnl_pct,
+    ROUND(AVG(actual_slippage_pct), 6) AS avg_actual_slippage_pct,
+    ROUND(AVG(spread_pct), 6) AS avg_spread_pct,
+    ROUND(AVG(effective_rr), 4) AS avg_effective_rr
+FROM closed_trade_reviews
+WHERE created_at >= (
+    SELECT started_at
+    FROM burnin_campaign_runs
+    WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
+    ORDER BY started_at
+    LIMIT 1
+)
+GROUP BY symbol, regime, side
+ORDER BY total_net_pnl_pct DESC;
+
+-- ============================================================
+-- 3) REJECT FORWARD OUTCOMES — DIAGNOSTIC QUALITY
+-- ============================================================
+SELECT
+    reject_reason,
+    symbol,
+    regime,
+    COUNT(*) AS n,
+    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
+    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
+    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
+    SUM(CASE WHEN timeout = 1 THEN 1 ELSE 0 END) AS timeout,
+    ROUND(
+      100.0 * SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END)
+      / NULLIF(SUM(CASE WHEN ambiguous = 0 THEN 1 ELSE 0 END), 0),
+      1
+    ) AS tp_pct_non_ambiguous,
+    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
+    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r,
+    SUM(CASE WHEN execution_invalidated = 1 THEN 1 ELSE 0 END) AS execution_invalidated
+FROM burnin_reject_outcomes
+WHERE burnin_run_id = 'camp_bd9dc5aeadac0b59_run_0000'
+GROUP BY reject_reason, symbol, regime
+ORDER BY total_net_r DESC;
+
+-- ============================================================
+-- 4) REJECT REASON TOP-LEVEL SUMMARY
+-- ============================================================
+SELECT
+    reject_reason,
+    COUNT(*) AS n,
+    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
+    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
+    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
+    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
+    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r
+FROM burnin_reject_outcomes
+WHERE burnin_run_id = 'camp_bd9dc5aeadac0b59_run_0000'
+GROUP BY reject_reason
+ORDER BY total_net_r DESC;
+
+-- ============================================================
+-- 5) REJECT ATTRIBUTION / PROVENANCE
+-- ============================================================
+SELECT
+    COALESCE(
+      json_extract(source_provenance_json, '$.forward_label_subject'),
+      'UNKNOWN'
+    ) AS subject,
+    COALESCE(
+      json_extract(source_provenance_json, '$.reject_quality_attributable'),
+      0
+    ) AS attributable,
+    status,
+    COUNT(*) AS n
+FROM burnin_pending_reject_labels
+WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
+GROUP BY subject, attributable, status
+ORDER BY attributable DESC, subject, status;
+
+-- ============================================================
+-- 6) IDENTITY INTEGRITY
+-- ============================================================
+SELECT
+    COUNT(*) AS pending_labels,
+    SUM(
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM rejected_signal_reviews r
+        WHERE r.reject_decision_id = p.reject_decision_id
+      ) THEN 1 ELSE 0 END
+    ) AS linked_reviews,
+    SUM(
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM order_decisions d
+        WHERE d.decision_id = p.reject_decision_id
+      ) THEN 1 ELSE 0 END
+    ) AS linked_core_decisions
+FROM burnin_pending_reject_labels p
+WHERE p.campaign_id = 'camp_bd9dc5aeadac0b59';
+
+-- ============================================================
+-- 7) RESOLVER / PROVIDER FAILURE CLASSIFICATION
+-- ============================================================
+SELECT
+    event_type,
+    COUNT(*) AS n,
+    MIN(event_time) AS first_seen,
+    MAX(event_time) AS last_seen
+FROM burnin_campaign_events
+WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
+  AND (
+       event_type LIKE '%RESOLVER%'
+       OR event_type LIKE '%PROVIDER%'
+       OR event_type LIKE '%FAIL%'
+  )
+GROUP BY event_type
+ORDER BY n DESC;
+
+-- ============================================================
+-- 8) EXACT RESOLVER FAILURE PATTERN
+-- ============================================================
+SELECT
+    json_extract(details_json, '$.error') AS error,
+    COUNT(*) AS n
+FROM burnin_campaign_events
+WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
+  AND event_type = 'RESOLVER_BATCH_FAILED'
+GROUP BY error
+ORDER BY n DESC;
+
+-- ============================================================
+-- 9) REJECT LABEL FINAL STATUS
+-- ============================================================
+SELECT
+    status,
+    COUNT(*) AS n,
+    SUM(CASE WHEN evidence_complete = 1 THEN 1 ELSE 0 END) AS complete
+FROM burnin_pending_reject_labels
+WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
+GROUP BY status
+ORDER BY n DESC;
+
+-- ============================================================
+-- 10) DB HEALTH
+-- ============================================================
+PRAGMA quick_check;
+"
+```
 ---
 
 # Süreç ve Hata Teşhisi
