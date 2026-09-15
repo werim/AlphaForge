@@ -322,7 +322,8 @@ def _sqlite_busy(exc: OperationalError) -> bool:
 
 
 def persist_reconciliation_cycle(engine: Engine, *, cycle_id: str, findings: list[Any], snapshot: RuntimeStateSnapshot,
-                                 diagnostics: Mapping[str, Any], pending_failures: list[Mapping[str, Any]] | None = None) -> bool:
+                                 diagnostics: Mapping[str, Any], pending_failures: list[Mapping[str, Any]] | None = None,
+                                 recovery_transition: Mapping[str, Any] | None = None) -> bool:
     """Commit one observed result, its findings and state together; return False for an existing cycle."""
     deadline = time.monotonic() + 0.75
     backoffs = (0.025, 0.05, 0.1)
@@ -355,6 +356,13 @@ def persist_reconciliation_cycle(engine: Engine, *, cycle_id: str, findings: lis
                         "d": json.dumps(dict(diagnostics), sort_keys=True, default=str), "cycle": cycle_id,
                     })
                     if result.rowcount:
+                        if recovery_transition is not None:
+                            conn.execute(text("INSERT INTO runtime_recovery_events(event_ts,instance_id,startup_id,mode,status,reason,diagnostics_json) VALUES (:ts,:i,:s,:m,'RECOVERED',:reason,:d)"), {
+                                "ts": canonical_utc_timestamp(), "i": snapshot.instance_id,
+                                "s": snapshot.startup_id, "m": snapshot.mode,
+                                "reason": "CLEAN_RECONCILIATION_COMMITTED",
+                                "d": json.dumps(dict(recovery_transition), sort_keys=True, default=str),
+                            })
                         for finding in findings:
                             conn.execute(text("""INSERT INTO reconciliation_incidents
                             (incident_type,severity,symbol,lifecycle_ref,remediation_status,operator_acknowledged,fail_closed,forensic_payload)

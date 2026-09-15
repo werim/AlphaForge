@@ -783,7 +783,8 @@ def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Seq
             return {"status": "LAUNCHED", "campaign_id": campaign.campaign_id, "burnin_run_id": start["burnin_run_id"], "worker_pid": proc.pid, "attachment": attach, "evidence_locations": {"preflight": pf["evidence_locations"], "database": db, "artifacts": f"artifacts/burnin/{campaign.campaign_id}"}}
         engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
         try:
-            runner = BurnInCampaignRunner(engine, campaign.campaign_id, BinanceReadOnlyCandleProvider(base_url=load_config_from_env().exchange.binance.market_data_base_url))
+            runtime_settings = load_config_from_env()
+            runner = BurnInCampaignRunner(engine, campaign.campaign_id, BinanceReadOnlyCandleProvider(base_url=runtime_settings.exchange.binance.market_data_base_url), provider_transient_outage_grace_seconds=runtime_settings.runtime.provider_transient_outage_grace_seconds)
             result = asyncio.run(runner.run_foreground())
             return {"status": "FOREGROUND_STOPPED", "campaign_id": campaign.campaign_id, "burnin_run_id": start["burnin_run_id"], "runner": result}
         finally:
@@ -798,11 +799,30 @@ def launch_campaign(db: str, release_id: str, duration_days: float, symbols: Seq
 def _counts(conn: sqlite3.Connection, campaign_id: str) -> dict[str, int]:
     def cnt(sql: str, params: tuple[Any, ...] = ()) -> int:
         return int(conn.execute(sql, params).fetchone()[0] or 0)
+    last_recovery = cnt("SELECT COALESCE(MAX(id),0) FROM burnin_campaign_events WHERE campaign_id=? AND event_type IN ('RESOLVER_BATCH','RESOLVER_PROVIDER_RECOVERED','CAMPAIGN_RESUMED')", (campaign_id,))
+    def failure_details(raw: str | None) -> dict[str, Any]:
+        try:
+            decoded = json.loads(raw or "{}")
+            return decoded if isinstance(decoded, dict) else {"error": "MALFORMED_PROVIDER_FAILURE_EVIDENCE"}
+        except (TypeError, ValueError):
+            return {"error": "MALFORMED_PROVIDER_FAILURE_EVIDENCE"}
+    active_failures = [failure_details(row[0]) for row in conn.execute(
+        "SELECT details_json FROM burnin_campaign_events WHERE campaign_id=? AND id>? AND event_type='RESOLVER_BATCH_FAILED' ORDER BY id",
+        (campaign_id, last_recovery)).fetchall()]
+    provider_failures = [item for item in active_failures if item.get("failure_class") in {"TRANSIENT_TRANSPORT", "PERMANENT_AUTH_OR_PROTOCOL"}
+                         or "PROVIDER" in str(item.get("error") or "").upper()
+                         or "MARKET_DATA" in str(item.get("error") or "").upper()]
+    transient_grace = bool(active_failures and len(provider_failures) == len(active_failures) and all(
+        item.get("failure_class") == "TRANSIENT_TRANSPORT"
+        and item.get("transient_elapsed_seconds") is not None
+        and float(item["transient_elapsed_seconds"]) < float(item.get("grace_seconds") or 0)
+        for item in active_failures))
     return {
         "pending_reject_labels": cnt("SELECT COUNT(*) FROM burnin_pending_reject_labels WHERE campaign_id=? AND status IN ('PENDING','READY')", (campaign_id,)),
         "open_positions": cnt("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=? AND status='OPEN'", (campaign_id,)),
-        "resolver_failures": cnt("SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? AND event_type='RESOLVER_BATCH_FAILED'", (campaign_id,)),
-        "provider_failures": cnt("SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? AND (event_type LIKE '%PROVIDER%' OR details_json LIKE '%PROVIDER%' OR details_json LIKE '%MARKET_DATA%')", (campaign_id,)),
+        "resolver_failures": len(active_failures),
+        "provider_failures": len(provider_failures),
+        "transient_provider_grace_active": int(transient_grace),
         "qualification_failures": cnt("SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? AND event_type LIKE '%QUALIFICATION%' AND details_json LIKE '%error%'", (campaign_id,)),
     }
 
@@ -1011,18 +1031,20 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         unhealthy.append(str(campaign.get("campaign_status")))
     if counts["open_positions"] > max_open_positions:
         unhealthy.append("UNRESOLVED_POSITION_EXCESS")
-    if counts["provider_failures"] >= 3:
+    if counts["provider_failures"] >= 3 and not counts["transient_provider_grace_active"]:
         unhealthy.append("REPEATED_PROVIDER_FAILURES")
     if counts["qualification_failures"]:
         unhealthy.append("QUALIFICATION_SNAPSHOT_FAILURE")
-    if counts["resolver_failures"]:
+    if counts["resolver_failures"] and not counts["transient_provider_grace_active"]:
         unhealthy.append("RESOLVER_FAILURES")
     if stale_resolving_claims:
         unhealthy.append("STALE_RESOLVING_CLAIMS")
     warnings: list[str] = []
+    if counts["transient_provider_grace_active"]:
+        warnings.append("TRANSIENT_PROVIDER_RECOVERY")
     if backlog_growth:
         warnings.append("RESOLVER_BACKLOG_GROWTH")
-    if sustained_backlog_growth:
+    if sustained_backlog_growth and not counts["transient_provider_grace_active"]:
         unhealthy.append("RESOLVER_BACKLOG_SUSTAINED_GROWTH")
     if evidence_regression:
         unhealthy.append("EVIDENCE_COMPLETENESS_REGRESSION")
@@ -1062,7 +1084,7 @@ def watch_once(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
         failures.append("DB_WRITE_FAILURE")
     if failures:
         persist_incident(conn, campaign_id, "WATCHDOG_FAILURE", {"failures": failures, "health": health})
-        if not cleaned_dead_worker:
+        if not cleaned_dead_worker and (get_campaign(conn, campaign_id) or {}).get("campaign_status") in {"STARTING", "RUNNING"}:
             campaign = get_campaign(conn, campaign_id) or {}
             run_id = campaign.get("active_run_id")
             terminal_at = campaign.get("last_heartbeat_at") or utc_now()

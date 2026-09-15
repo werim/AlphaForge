@@ -36,7 +36,8 @@ from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
+from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
@@ -147,6 +148,7 @@ class RuntimeConfig:
     live_trading_enabled: bool = False
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
+    provider_transient_outage_grace_seconds: float = 300.0
     require_exchange_connectivity_for_live: bool = True
     required_live_exchanges: tuple[str, ...] = ("binance",)
     exchange_connectivity_timeout_sec: float = 2.0
@@ -268,6 +270,11 @@ class RuntimeOrchestrator:
     _unknown_exchange_state: bool = field(default=False, init=False)
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
     _reconciliation_persistence_unhealthy: bool = field(default=False, init=False)
+    _provider_failure_class: str | None = field(default=None, init=False)
+    _transient_provider_outage_started_monotonic: float | None = field(default=None, init=False)
+    _provider_failure_count: int = field(default=0, init=False)
+    _resolver_provider_unavailable: bool = field(default=False, init=False)
+    _resolver_provider_recovery_pending: bool = field(default=False, init=False)
     _pending_reconciliation_persistence_failures: list[dict[str, Any]] = field(default_factory=list, init=False)
     _exchange_read_only_status: str = field(default="UNKNOWN", init=False)
     _unreconciled_symbols: set[str] = field(default_factory=set, init=False)
@@ -559,6 +566,8 @@ class RuntimeOrchestrator:
             or self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}
         ):
             return
+        if runtime_state == "OPERATING" and self._execution_reconciliation_blocked():
+            runtime_state = "RECOVERY_REQUIRED"
         save_runtime_heartbeat(
             engine,
             runtime_instance_id=self.runtime_instance_id,
@@ -637,11 +646,14 @@ class RuntimeOrchestrator:
             flags.append("EXCHANGE_STATE_UNKNOWN")
         if self._exchange_read_only_status == "LOCAL_ONLY":
             flags.append("LOCAL_ONLY_DIAGNOSTIC_RECONCILIATION")
+        effective_status = status or self._runtime_status
+        if effective_status == "OPERATING" and self._execution_reconciliation_blocked():
+            effective_status = "RECOVERY_REQUIRED"
         return RuntimeStateSnapshot(
             mode=self.config.execution_mode.value,
             requested_mode=self.config.execution_mode.value,
             actual_mode=self.config.execution_mode.value,
-            runtime_status=status or self._runtime_status,
+            runtime_status=effective_status,
             heartbeat_age_sec=hb_age,
             instance_id=self.runtime_instance_id,
             startup_id=self.startup_id,
@@ -673,8 +685,40 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count},
         )
+
+    def _execution_reconciliation_blocked(self) -> bool:
+        if self.config.execution_mode == ExecutionMode.BACKTEST:
+            return False
+        return bool(self._reconciliation_persistence_unhealthy or self._fail_closed_reason
+                    or self._recovery_required or self._unknown_exchange_state
+                    or self._resolver_provider_unavailable or self._resolver_provider_recovery_pending
+                    or self._exchange_read_only_status == "UNAVAILABLE"
+                    or self._reconciliation_status in {"EXCHANGE_STATE_UNKNOWN", "DIRTY", "PERSISTENCE_FAILED"})
+
+    def _mark_resolver_provider_failure(self) -> None:
+        self._resolver_provider_unavailable = True
+        self._resolver_provider_recovery_pending = False
+        self._fail_closed_reason = self._fail_closed_reason or "RESOLVER_PROVIDER_UNAVAILABLE"
+        self._runtime_status = "RECOVERY_REQUIRED"
+
+    def _mark_resolver_provider_recovered(self) -> None:
+        if self._resolver_provider_unavailable:
+            self._resolver_provider_unavailable = False
+            self._resolver_provider_recovery_pending = True
+            self._runtime_status = "RECOVERY_REQUIRED"
+
+    def _pause_for_provider_failure(self, reason: str) -> None:
+        engine = self._resolve_persistence_engine()
+        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        if engine is not None and campaign_id and self.config.execution_mode == ExecutionMode.PAPER:
+            with engine.begin() as conn:
+                pause_campaign_for_provider_failure(conn, campaign_id, reason=reason,
+                    details={"failure_class": self._provider_failure_class,
+                             "failure_count": self._provider_failure_count,
+                             "grace_seconds": self.config.provider_transient_outage_grace_seconds})
+        self.shutdown()
 
     def _persist_runtime_state_snapshot(self, status: str | None = None) -> None:
         engine = self._resolve_persistence_engine()
@@ -1179,7 +1223,10 @@ class RuntimeOrchestrator:
             return
         try:
             with engine.begin() as conn:
-                update_burnin_run_counters(conn, self._burnin_run_id, status=status, end_time=canonical_utc_timestamp())
+                current = conn.execute(text("SELECT status FROM burnin_runs WHERE burnin_run_id=:bid"), {"bid": self._burnin_run_id}).scalar_one_or_none()
+                update_burnin_run_counters(conn, self._burnin_run_id,
+                    status=status if current == "RUNNING" else None,
+                    end_time=canonical_utc_timestamp() if current == "RUNNING" else None)
         except Exception as exc:
             self._burnin_evidence_incomplete = True
             self._fail_closed_reason = "PHASE7_BURNIN_COUNTER_UPDATE_FAILED"
@@ -1857,13 +1904,15 @@ class RuntimeOrchestrator:
             "regime": signal_payload.get("regime", market_ctx.get("regime")),
             "effective_rr": effective_rr, "confidence": order_plan.confidence,
             "execution_ctx": execution_ctx})
-        await self._execute(symbol=selection.symbol, decision={
+        executed = await self._execute(symbol=selection.symbol, decision={
             "signal_id": signal_id,
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
             "stop_price": order_plan.stop_price,
             "confidence": order_plan.confidence,
         }, market_ctx=market_ctx)
+        if executed is False:
+            return
         if self.config.execution_mode == ExecutionMode.PAPER:
             self._persist_burnin_decision(
                 accepted_burnin_payload,
@@ -1913,12 +1962,19 @@ class RuntimeOrchestrator:
             },
         )
 
-    async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> None:
+    async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> bool | None:
         self._assert_campaign_candidate(symbol, market_ctx.get("source_exchange"), "PAPER_EXECUTION")
         if self._kill_switch_active():
             raise RuntimeError("KILL_SWITCH_ACTIVE")
         mode = self.config.execution_mode
         if mode == ExecutionMode.PAPER:
+            # The earlier decision gate can become stale across scoring and
+            # lifecycle awaits. No await occurs between this check and fill.
+            if self._execution_reconciliation_blocked():
+                reason = self._fail_closed_reason or "EXCHANGE_STATE_UNKNOWN"
+                await self._emit_lifecycle_event(LifecycleState.CANCELLED.value, symbol,
+                    {"reason": reason, "signal_id": decision.get("signal_id"), "execution_attempted": False})
+                return False
             result = self._simulate_paper_execution(symbol, decision, market_ctx)
         elif mode == ExecutionMode.LIVE_PRECHECK:
             result = {"mode": mode.value, "status": "no_submit_verified", "symbol": symbol}
@@ -2561,9 +2617,33 @@ class RuntimeOrchestrator:
         try:
             await asyncio.wait_for(self._reconcile_runtime_state(), timeout=self.config.reconciliation_timeout_sec)
         except asyncio.TimeoutError:
+            self._unknown_exchange_state = True
+            self._exchange_read_only_status = "UNAVAILABLE"
+            self._reconciliation_status = "EXCHANGE_STATE_UNKNOWN"
+            self._fail_closed_reason = "EXCHANGE_STATE_UNKNOWN"
+            self._provider_failure_class = TRANSIENT_TRANSPORT
+            self._provider_failure_count += 1
+            if self._transient_provider_outage_started_monotonic is None:
+                self._transient_provider_outage_started_monotonic = time.monotonic()
+            self._runtime_status = "RECOVERY_REQUIRED"
             await self._record_incident("GLOBAL", LifecycleEventType.RECONCILIATION_REPAIR.value, "reconciliation_timeout")
-            self.metrics.reconciliation_fail_closed += 1
-            self.shutdown()
+            engine = self._resolve_persistence_engine()
+            if engine is not None:
+                self._reconciliation_persistence_unhealthy = True
+                state = self._build_runtime_state_snapshot(status="RECOVERY_REQUIRED")
+                try:
+                    persist_reconciliation_cycle(engine, cycle_id=f"recon:timeout:{uuid.uuid4().hex}",
+                        findings=[], snapshot=state, diagnostics={"evidence_status": "INCOMPLETE",
+                            "failure_class": TRANSIENT_TRANSPORT, "errors": ["reconciliation_timeout"]},
+                        pending_failures=self._pending_reconciliation_persistence_failures)
+                except ReconciliationPersistenceFailure as exc:
+                    self._pending_reconciliation_persistence_failures.append({"cycle_id": f"recon-failure:{uuid.uuid4().hex}",
+                        "failed_cycle_id": "recon:timeout", "timestamp": canonical_utc_timestamp(), "reason": str(exc)})
+                    return
+                self._pending_reconciliation_persistence_failures.clear()
+                self._reconciliation_persistence_unhealthy = False
+            if time.monotonic() - self._transient_provider_outage_started_monotonic >= self.config.provider_transient_outage_grace_seconds:
+                self._pause_for_provider_failure("PROVIDER_TRANSIENT_OUTAGE_GRACE_EXPIRED")
 
     async def _reconcile_runtime_state(self) -> None:
         # A CLEAN observation is not tradable until its evidence commits.
@@ -2590,19 +2670,37 @@ class RuntimeOrchestrator:
                     self._fail_closed_reason = "EXCHANGE_RECONCILIATION_UNAVAILABLE"
                     snapshot_source = {"orders": [], "positions": [], "fills": [], "evidence_status": "INCOMPLETE", "blocking_reason": "EXCHANGE_RECONCILIATION_UNAVAILABLE"}
             else:
-                snapshot_source = dict(provider.snapshot())
+                try:
+                    snapshot_source = dict(provider.snapshot())
+                except Exception as exc:
+                    if self.config.execution_mode == ExecutionMode.LIVE:
+                        raise
+                    snapshot_source = {"orders": [], "positions": [], "fills": [],
+                        "evidence_status": "INCOMPLETE", "errors": [exc.__class__.__name__],
+                        "failure_class": classify_provider_exception(exc),
+                        "input_source": "READ_ONLY_PROVIDER_FAILURE"}
                 complete = str(snapshot_source.get("evidence_status") or "INCOMPLETE").upper() == "COMPLETE"
-                self._unknown_exchange_state = not complete
+                previous_unknown = bool(self._unknown_exchange_state or self._transient_provider_outage_started_monotonic is not None or self._resolver_provider_recovery_pending)
+                self._unknown_exchange_state = not complete or previous_unknown
                 self._exchange_read_only_status = "AVAILABLE" if complete else "UNAVAILABLE"
                 if complete and self._fail_closed_reason in {
-                    "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RECONCILIATION_PERSISTENCE_FAILED"
-                }:
+                    "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RECONCILIATION_PERSISTENCE_FAILED", "RESOLVER_PROVIDER_UNAVAILABLE"
+                } and not self._resolver_provider_unavailable:
                     self._fail_closed_reason = None
+                if complete and self._resolver_provider_unavailable:
+                    self._fail_closed_reason = "RESOLVER_PROVIDER_UNAVAILABLE"
                 if not complete:
                     if self.config.execution_mode == ExecutionMode.LIVE:
                         raise RuntimeError("LIVE mode blocked: reconciliation evidence incomplete")
+                    self._provider_failure_class = classify_reconciliation_snapshot(snapshot_source)
+                    self._provider_failure_count += 1
+                    if self._provider_failure_class == TRANSIENT_TRANSPORT and self._transient_provider_outage_started_monotonic is None:
+                        self._transient_provider_outage_started_monotonic = time.monotonic()
                     self._fail_closed_reason = "EXCHANGE_STATE_UNKNOWN"
                     self._reconciliation_status = "EXCHANGE_STATE_UNKNOWN"
+                    self._runtime_status = "RECOVERY_REQUIRED"
+                elif previous_unknown and not self._resolver_provider_unavailable:
+                    snapshot_source["recovery_transition"] = "CLEAN_RECONCILIATION_COMMITTED"
         else:
             snapshot_source = {"orders": [], "positions": [], "fills": []}
         snapshot = self._reconciliation_engine.snapshot_from_source(snapshot_source)
@@ -2617,12 +2715,18 @@ class RuntimeOrchestrator:
         self._unreconciled_symbols = {str(f.symbol) for f in findings if getattr(f, "fail_closed", False)}
         if findings and self._fail_closed_reason is None:
             self._fail_closed_reason = "ORPHAN_ORDER_DETECTED" if self._orphan_orders else ("ORPHAN_POSITION_DETECTED" if self._orphan_positions else "UNRECONCILED_POSITION")
+        if self._exchange_read_only_status == "AVAILABLE" and self._fail_closed_reason:
+            self._reconciliation_status = "DIRTY"
         if not self._fail_closed_reason:
             self._unknown_exchange_state = False
             if self.config.execution_mode != ExecutionMode.BACKTEST:
                 self._reconciliation_status = "CLEAN"
         engine = self._resolve_persistence_engine()
         if engine is not None:
+            if self._reconciliation_status == "EXCHANGE_STATE_UNKNOWN" or snapshot_source.get("recovery_transition"):
+                # Do not deduplicate repeated failures or the recovery commit
+                # against an earlier provider snapshot with identical payload.
+                snapshot_source["reconciliation_attempt_id"] = uuid.uuid4().hex
             identity_payload = {
                 "instance_id": self.runtime_instance_id, "startup_id": self.startup_id,
                 "mode": self.config.execution_mode.value, "source": snapshot_source,
@@ -2637,10 +2741,15 @@ class RuntimeOrchestrator:
             try:
                 persist_reconciliation_cycle(engine, cycle_id=cycle_id, findings=findings, snapshot=state,
                                              diagnostics=snapshot_source,
-                                             pending_failures=self._pending_reconciliation_persistence_failures)
+                                             pending_failures=self._pending_reconciliation_persistence_failures,
+                                             recovery_transition={"cycle_id": cycle_id, "provider_failure_count": self._provider_failure_count,
+                                                 "previous_failure_class": self._provider_failure_class}
+                                                 if snapshot_source.get("recovery_transition") and state.reconciliation_status == "CLEAN" else None)
             except ReconciliationPersistenceFailure as exc:
                 self._reconciliation_status = "PERSISTENCE_FAILED"
                 self._fail_closed_reason = "RECONCILIATION_PERSISTENCE_FAILED"
+                if self.config.execution_mode != ExecutionMode.BACKTEST:
+                    self._unknown_exchange_state = True
                 self._last_error = str(exc)
                 self._pending_reconciliation_persistence_failures.append({
                     "cycle_id": f"recon-failure:{uuid.uuid4().hex}", "failed_cycle_id": cycle_id,
@@ -2653,6 +2762,22 @@ class RuntimeOrchestrator:
             if had_persistence_failure and not self._fail_closed_reason:
                 self._last_error = None
         self._reconciliation_persistence_unhealthy = False
+        if self._exchange_read_only_status == "AVAILABLE":
+            self._provider_failure_class = None
+            self._provider_failure_count = 0
+            self._transient_provider_outage_started_monotonic = None
+        if self._reconciliation_status == "CLEAN" and not self._fail_closed_reason:
+            self._resolver_provider_recovery_pending = False
+        if self._reconciliation_status == "CLEAN" and not self._fail_closed_reason:
+            self._runtime_status = "OPERATING"
+        elif self._provider_failure_class == PERMANENT_AUTH_OR_PROTOCOL:
+            self._pause_for_provider_failure("PROVIDER_PERMANENT_FAILURE")
+        elif self._provider_failure_class == UNKNOWN and self._provider_failure_count >= 3:
+            self._pause_for_provider_failure("PROVIDER_UNKNOWN_FAILURE_THRESHOLD")
+        elif (self._provider_failure_class == TRANSIENT_TRANSPORT
+              and self._transient_provider_outage_started_monotonic is not None
+              and time.monotonic() - self._transient_provider_outage_started_monotonic >= self.config.provider_transient_outage_grace_seconds):
+            self._pause_for_provider_failure("PROVIDER_TRANSIENT_OUTAGE_GRACE_EXPIRED")
         for finding in findings:
             if not finding.fail_closed:
                 continue
@@ -2745,7 +2870,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms, market_data_base_url=cfg.exchange.binance.market_data_base_url, regime_timeframe=cfg.runtime.regime_timeframe, setup_timeframe=cfg.runtime.setup_timeframe, execution_timeframe=cfg.runtime.execution_timeframe, mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled, regime_direction_threshold=cfg.runtime.regime_direction_threshold, setup_direction_threshold=cfg.runtime.setup_direction_threshold, execution_direction_threshold=cfg.runtime.execution_direction_threshold, paper_decision_timeframe=cfg.runtime.execution_timeframe, require_mtf_alignment=False)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, provider_transient_outage_grace_seconds=cfg.runtime.provider_transient_outage_grace_seconds, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms, market_data_base_url=cfg.exchange.binance.market_data_base_url, regime_timeframe=cfg.runtime.regime_timeframe, setup_timeframe=cfg.runtime.setup_timeframe, execution_timeframe=cfg.runtime.execution_timeframe, mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled, regime_direction_threshold=cfg.runtime.regime_direction_threshold, setup_direction_threshold=cfg.runtime.setup_direction_threshold, execution_direction_threshold=cfg.runtime.execution_direction_threshold, paper_decision_timeframe=cfg.runtime.execution_timeframe, require_mtf_alignment=False)
     config.agent_graph_enabled = cfg.runtime.agent_graph_enabled
     config.agent_graph_shadow = cfg.runtime.agent_graph_shadow
     config.agent_graph_max_steps = cfg.runtime.agent_graph_max_steps

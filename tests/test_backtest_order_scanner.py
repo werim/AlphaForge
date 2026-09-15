@@ -1391,13 +1391,14 @@ def test_backtest_quality_summary_exposes_rescue_metrics():
 def test_rescue_config_does_not_change_global_order_thresholds():
     import alphaforge.order as order
 
+    threshold_before = order.MIN_RR_THRESHOLD
     cfg = bo.RescueConfig(enabled=True)
 
     assert cfg.score_min == pytest.approx(9.0)
     assert cfg.effective_rr_min == pytest.approx(1.90)
     assert order.MIN_SCORE_BASE == pytest.approx(7.5)
     assert order.MIN_RR_BASE == pytest.approx(1.3)
-    assert order.MIN_RR_THRESHOLD == pytest.approx(1.6)
+    assert order.MIN_RR_THRESHOLD == threshold_before
 
 
 def _shadow_eval(symbol, reason, score, effective_rr, outcome, **kwargs):

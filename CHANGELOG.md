@@ -1,3 +1,58 @@
+# Autonomous qualification harness — 2026-09-15
+
+### SOAK release-gate follow-up
+- Added 30-second continuous safety/resource samples, 300-second public scan cadence, actual elapsed duration, JSONL resource evidence, and growth flags. The first complete public six-hour run returned `NEEDS_FIX` after two empty scans despite safe continuous samples.
+- Fixed the SOAK heartbeat cadence so freshness can be checked against the existing 120-second operational limit. FAST qualification and production recovery semantics are unchanged.
+- Fixed an overstrict fixed database-growth cap that would count required append-only audit rows as a leak; SOAK now compares DB growth with its persisted sample count.
+- Added regression checks for continuous heartbeat/resolver/lineage evidence and abnormal queue/RSS accumulation.
+- Added persisted public market-data probe and explicit recovery events with exact SQLite IDs. An isolated empty feed scan must recover by the next five-minute probe; consecutive or unresolved gaps still fail the release gate. Added regressions for both cases. The scanner currently hides the underlying error, so empty probe cause remains `UNKNOWN`.
+- Verified 12 focused tests, 1,535 full-suite tests with 3 skips in an isolated checkout, and fresh FAST PASS after the feed-gap fix. The second real six-hour public SOAK passed after 21,602.472 seconds, 720 safe samples, all 15 scheduled faults, one explicitly recovered feed gap, and no lineage, exit, persistence, or resource-growth anomaly.
+
+### Added
+- PAPER-only FAST and 6–24 hour SOAK qualification modes with per-run temporary database/artifact isolation and public market-data probes between scheduled faults.
+- Deterministic injection and evidence reporting for 15 provider, persistence, resolver, heartbeat, lifecycle, continuation, and replay faults.
+- JSON and Markdown reports with exact evidence references, invariant results, recovery latency, worker lifecycle, and campaign lineage.
+
+### Changed
+- Nine backtest/trade-quality regressions now provide the policy values they assert instead of inheriting operator `.env` overrides.
+
+### Fixed
+- Qualification scenario failures now produce `NEEDS_FIX` evidence and automatic teardown rather than requiring manual campaign debugging.
+- Previously documented backtest/trade-quality failures are classified and made environment-independent; the full suite is clean.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. No runtime state-machine, schema, migration, production database, or order-submission change.
+
+### Known Issues
+- Accelerated FAST does not prove wall-clock soak stability. Public SOAK depends on external availability; optional synthetic SOAK cannot validate it. Persistent SQLite writer loss delays durable evidence. LIVE remains NOT READY.
+
+# POST363 transient provider outage recovery — 2026-09-14
+
+### Added
+- `ALPHAFORGE_PROVIDER_TRANSIENT_OUTAGE_GRACE_SECONDS` (default 300) and explicit transient, permanent, and unknown provider-failure classes.
+- Recovery and expiry regressions for read-only reconciliation, resolver, active PAPER exposure, final execution, watchdog, and continuation state.
+
+### Changed
+- Transient provider failures keep PAPER workers probing while execution is blocked; auth/protocol failures escalate immediately. Unknown failures retain bounded escalation.
+- Watchdog provider counts reset after successful resolver evidence and do not turn an in-grace outage into a failure from historical attempts.
+
+### Fixed
+- Resolver-only outages now reach the runtime fail-closed gate; idle resolvers probe before claiming recovery.
+- A committed CLEAN reconciliation is required to clear unknown exchange state and resolver recovery pending state. Runtime snapshots and heartbeats report `RECOVERY_REQUIRED` while blocked.
+- Provider expiry pauses campaign, run, and campaign-run mapping in one transaction; repeated failure attempts carry unique audit identities.
+
+### Removed
+- The three-consecutive-failure pause rule for known transient resolver transport errors.
+
+### Breaking Changes
+- None. No database schema, migration, historical-row rewrite, or CSV export change.
+
+### Known Issues
+- Persistently unavailable SQLite storage delays durable attempt evidence until a later successful transaction. POST363 remains historical evidence; no automatic restart or LIVE-readiness claim.
+
 # Adaptive Decision Calibration Engine shadow foundation — 2026-09-14
 
 ### Added

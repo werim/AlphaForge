@@ -1,5 +1,25 @@
 # AlphaForge Version
 
+## Autonomous qualification harness (2026-09-15)
+- SOAK release-gate follow-up: 30-second heartbeat/reconciliation/resolver and safety/resource sampling, public scans every 300 seconds, explicit feed-gap/recovery events, actual wall-clock duration, and RSS high-water, database/artifact, queue/backlog, SQLite-lock, and latency trend evidence. The completed isolated public six-hour SOAK passed the PAPER release gate.
+- Current version/phase: isolated PAPER-only end-to-end qualification for the POST363 transient-provider recovery baseline.
+- Runtime maturity: FAST deterministically exercises 15 provider, persistence, heartbeat, resolver, restart, and replay faults; SOAK schedules the same matrix across a configurable 6–24 hour run while the production public market scanner, clean reconciliation, and heartbeat paths continue probing. Every scenario uses a fresh database, campaign/run, runtime identity, and artifact directory.
+- BACKTEST/PAPER/LIVE alignment: qualification executes production PAPER safety paths with live submission disabled. BACKTEST and LIVE behavior are unchanged; the harness cannot authorize exchange mutation.
+- Lifecycle/execution coverage: unknown exchange state blocks new and in-flight PAPER execution, transient recovery requires a committed CLEAN reconciliation, terminal state is checked across all campaign lineage tables, and every harness worker has a persisted exit reason.
+- Persistence/execution realism: machine and human reports link each fault to exact isolated SQLite evidence; reconciliation lock recovery, replay identity, reject parity, qualification readability, and export checksums are verified. No schema or migration change.
+- Validation: initial focused relevant suite 325 passed; updated SOAK sampling/feed-gap regressions 12 passed; updated full suite in an isolated test checkout 1,535 passed and 3 skipped; fresh FAST qualification PASS. The final public SOAK at `/private/tmp/alphaforge-autonomous-qualification/alphaforge-qualification-z54y1qgr` passed after 21,602.472 wall-clock seconds: 720 safe samples, 15 scheduled fault scenarios, one explicitly recovered public feed gap, no unexplained exit, persistence gap, lineage drift, or resource-growth flag.
+- Known critical risks: FAST is accelerated; public SOAK depends on external exchange availability, while its optional synthetic mode cannot prove that availability. Signed-account reconciliation remains deterministic and isolated from production credentials. A persistent database writer outage delays durable evidence. LIVE remains NOT READY.
+- Last audit date: 2026-09-15. Live readiness verdict: NOT LIVE READY.
+
+## POST363 transient provider outage recovery (2026-09-14)
+- Current version/phase: prospective PAPER burn-in recovery correction; POST363 evidence remains unchanged and no campaign was restarted.
+- Runtime maturity: known transient read-only transport failures block execution immediately while reconciliation and resolver probing continue for the configured 300-second grace. Auth/protocol failures pause immediately; unknown failures retain a three-attempt escalation.
+- BACKTEST/PAPER/LIVE alignment: BACKTEST is unchanged. PAPER uses the new recovery gate and final execution recheck; LIVE order authorization and fail-closed behavior remain unchanged.
+- Lifecycle/execution coverage: an in-flight PAPER decision is cancelled if the final execution boundary sees an outage. Active exposure stays unresolved until authenticated CLEAN reconciliation commits.
+- Persistence/execution realism: existing reconciliation, recovery, campaign event, and continuation tables carry failure attempts and explicit recovery/terminal evidence. No schema or export migration is required.
+- Known critical risks: an indefinitely unavailable SQLite writer cannot durably record new attempts; resolver attempts are retained in memory for the next successful writer transaction. No production worker or exchange validation was performed. LIVE remains NOT READY.
+- Last audit date: 2026-09-14. Live readiness verdict: NOT LIVE READY.
+
 # Adaptive Decision Calibration Engine foundation (2026-09-14)
 - Current version/phase: `adaptive_shadow_v1`, offline Phase 1 foundation; no runtime threshold mutation.
 - Runtime maturity: retrospective, in-sample shadow proposals only. Canonical accepted and rejected PAPER campaign outcomes share one cost-adjusted net-R framework. Unresolved gates and orphan outcomes remain diagnostic.

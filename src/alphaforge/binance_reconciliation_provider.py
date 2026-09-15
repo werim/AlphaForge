@@ -18,6 +18,8 @@ import urllib.parse
 from urllib import error
 from typing import Any, Callable, Mapping
 
+from alphaforge.provider_failures import classify_provider_exception
+
 
 class ReconciliationAuthError(RuntimeError):
     pass
@@ -207,7 +209,7 @@ class BinanceReadonlyReconciliationProvider:
             return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources, position_warnings, endpoint_statuses) | {
                 "orphan_orders": len(orders), "orphan_positions": active, "duplicate_fills": 0,
                 "evidence_status": "COMPLETE", "errors": [], "failed_endpoint": None,
-                "failed_symbol": None, "unknown_unreconciled_symbols": [],
+                "failed_symbol": None, "unknown_unreconciled_symbols": [], "failure_class": None,
             }
         except Exception as exc:  # fail closed while preserving completed evidence
             if isinstance(exc, ReconciliationExposureError):
@@ -216,6 +218,7 @@ class BinanceReadonlyReconciliationProvider:
             return self._snapshot_base(retrieved_at, positions, orders, fills, coverage, selected, sources, position_warnings, endpoint_statuses) | {
                 "orphan_orders": None, "orphan_positions": None, "duplicate_fills": None,
                 "evidence_status": "INCOMPLETE", "errors": [self._sanitize_error(exc)],
+                "failure_class": classify_provider_exception(exc),
                 "failed_endpoint": failed_endpoint, "failed_symbol": failed_symbol,
                 "unknown_unreconciled_symbols": unknown,
             }

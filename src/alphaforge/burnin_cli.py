@@ -87,7 +87,7 @@ def main(argv=None) -> int:
         if args.cmd=='worker':
             engine=init_db(f"sqlite+pysqlite:///{db}")
             try:
-                runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider())
+                runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider(), provider_transient_outage_grace_seconds=load_config_from_env().runtime.provider_transient_outage_grace_seconds)
                 if args.once:
                     with engine.begin() as conn: bootstrap_campaign_schema(conn)
                     res=runner.resolver_tick(); _print(res,args.json); return 0 if res.get('status') in {'OK','PAUSED'} else 1
@@ -126,7 +126,7 @@ def main(argv=None) -> int:
                     out=_launch_detached_worker(db,args.campaign_id); _print({**res, **out},args.json); return 0
                 engine=init_db(f"sqlite+pysqlite:///{db}")
                 try:
-                    runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider())
+                    runner=BurnInCampaignRunner(engine,args.campaign_id,_candle_provider(), provider_transient_outage_grace_seconds=load_config_from_env().runtime.provider_transient_outage_grace_seconds)
                     import asyncio; out=asyncio.run(runner.run_foreground()); _print({**res, **out},args.json); return 0
                 finally: engine.dispose()
             if args.cmd=='pause': pause_campaign(conn,args.campaign_id); conn.commit(); _print({'status':'PAUSED','campaign_id':args.campaign_id},args.json); return 0

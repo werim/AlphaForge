@@ -128,6 +128,7 @@ class RuntimeSettings:
     allow_live_orders: bool = False
     reconciliation_interval_sec: float = 5.0
     reconciliation_timeout_sec: float = 2.0
+    provider_transient_outage_grace_seconds: float = 300.0
     require_exchange_connectivity_for_live: bool = True
     required_live_exchanges: tuple[str, ...] = ("binance",)
     exchange_connectivity_timeout_sec: float = 2.0
@@ -417,6 +418,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         allow_live_orders=val("ALPHAFORGE_ALLOW_LIVE_ORDERS"),
         reconciliation_interval_sec=val("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC"),
         reconciliation_timeout_sec=val("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"),
+        provider_transient_outage_grace_seconds=val("ALPHAFORGE_PROVIDER_TRANSIENT_OUTAGE_GRACE_SECONDS"),
         require_exchange_connectivity_for_live=_bool_env(env, "ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", True),
         required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
         exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),

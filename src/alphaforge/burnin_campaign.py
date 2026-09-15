@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import argparse, asyncio, contextlib, csv, hashlib, json, os, sqlite3, subprocess, sys, time
-from datetime import datetime, timezone
+import argparse, asyncio, contextlib, csv, hashlib, json, os, sqlite3, subprocess, sys, time, uuid
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -15,6 +15,7 @@ from alphaforge.burnin import LEGACY_REJECT_IDENTITY_MODE, BurnInRun, bootstrap_
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
 from alphaforge.config import runtime_filter_config
 from alphaforge.process_liveness import process_is_alive
+from alphaforge.provider_failures import classify_provider_exception, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
 DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
@@ -326,12 +327,25 @@ def terminalize_active_campaign_run(conn: Any, campaign_id: str, *, run_status: 
     run_id, ts = c.get("active_run_id"), utc_now()
     existing = _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND burnin_run_id IS :bid AND event_type=:event AND details_json LIKE :reason LIMIT 1", {"cid": campaign_id, "bid": run_id, "event": event_type, "reason": f'%"reason": "{reason}"%' }).fetchone()
     if run_id:
-        _exec(conn, "UPDATE burnin_runs SET status=:status, end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'", {"status": run_status, "bid": run_id, "ts": ts})
-        _exec(conn, "UPDATE burnin_campaign_runs SET status=:status, ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'", {"status": run_status, "cid": campaign_id, "bid": run_id, "ts": ts})
+        _exec(conn, "UPDATE burnin_runs SET status=:status, end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status IN ('STARTING','RUNNING')", {"status": run_status, "bid": run_id, "ts": ts})
+        _exec(conn, "UPDATE burnin_campaign_runs SET status=:status, ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status IN ('STARTING','RUNNING')", {"status": run_status, "cid": campaign_id, "bid": run_id, "ts": ts})
     metadata = ", worker_pid=NULL, worker_started_at=NULL" if clear_worker_metadata else ""
     _exec(conn, f"UPDATE burnin_campaigns SET campaign_status=:status, last_error=:reason{metadata} WHERE campaign_id=:cid", {"status": campaign_status, "reason": reason, "cid": campaign_id})
     if not existing:
         event(conn, campaign_id, event_type, burnin_run_id=run_id, details={"reason": reason, "campaign_id": campaign_id, "burnin_run_id": run_id, **dict(details or {})})
+
+
+def pause_campaign_for_provider_failure(conn: Any, campaign_id: str, *, reason: str,
+                                        details: Mapping[str, Any]) -> None:
+    """Pause all continuation rows together while the attached worker exits."""
+    campaign = get_campaign(conn, campaign_id)
+    if not campaign or campaign.get("campaign_status") not in {"STARTING", "RUNNING"}:
+        return
+    terminalize_active_campaign_run(
+        conn, campaign_id, run_status="PAUSED", campaign_status="PAUSED",
+        reason=reason, event_type="CAMPAIGN_PAUSED", details=details,
+        clear_worker_metadata=False,
+    )
 
 
 def fail_active_campaign_run(conn: Any, campaign_id: str, reason: str, *, details: Mapping[str, Any] | None = None) -> None:
@@ -771,8 +785,8 @@ class BinanceReadOnlyCandleProvider:
 
 class BurnInCampaignRunner:
     """Operational campaign worker loop for resolver/maintenance progress without enabling LIVE."""
-    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
-        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0
+    def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
+        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0
 
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
@@ -800,14 +814,20 @@ class BurnInCampaignRunner:
         self._last_qualification_monotonic = time.monotonic()
         return result
 
-    def _best_effort_failure_event(self, original: BaseException) -> None:
+    def _best_effort_failure_event(self, original: BaseException, failure_class: str, elapsed: float | None) -> None:
+        self._pending_resolver_failure_events.append({"attempt_id": uuid.uuid4().hex, "error": str(original), "failure_count": self.resolver_failure_count, "failure_class": failure_class, "transient_elapsed_seconds": elapsed, "grace_seconds": self.provider_transient_outage_grace_seconds})
         try:
             _with_fresh_lock_retry(self.engine, lambda conn: (
                 bootstrap_campaign_schema(conn),
-                event(conn, self.campaign_id, "RESOLVER_BATCH_FAILED", details={"error": str(original), "failure_count": self.resolver_failure_count}),
+                self._persist_pending_failure_events(conn),
             ))
+            self._pending_resolver_failure_events.clear()
         except Exception as event_exc:
             print(f"AlphaForge resolver failure event unavailable ({event_exc!r}); original={original!r}", file=sys.stderr, flush=True)
+
+    def _persist_pending_failure_events(self, conn: Any) -> None:
+        for details in self._pending_resolver_failure_events:
+            event(conn, self.campaign_id, "RESOLVER_BATCH_FAILED", details=details)
 
     def resolver_tick(self) -> dict[str, Any]:
         from alphaforge.burnin_resolver import resolve_campaign_batch, resolve_campaign_positions
@@ -826,32 +846,63 @@ class BurnInCampaignRunner:
                 r = _row_dict(row)
                 try: candles[(r["symbol"],"position",r["trade_id"])] = self.candle_provider(r["symbol"], r["entry_time"], resolution_time, "1m")
                 except TypeError: candles[(r["symbol"],"position",r["trade_id"])] = self.candle_provider(r["symbol"], r["entry_time"], resolution_time)
+            if self._provider_failure_active and not due and not positions:
+                # An idle resolver still needs a real read after an outage;
+                # an empty batch alone cannot prove the candle provider recovered.
+                with self.engine.connect() as conn:
+                    symbols = (get_campaign(conn, self.campaign_id) or {}).get("symbols") or []
+                if not symbols:
+                    raise ProviderFailure("PROVIDER_FAILURE:NO_PROBE_SYMBOL")
+                probe_start = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
+                try: self.candle_provider(symbols[0], probe_start, resolution_time, "1m")
+                except TypeError: self.candle_provider(symbols[0], probe_start, resolution_time)
             def persist_resolution(conn: Any) -> tuple[dict[str, int], dict[str, int]]:
+                self._persist_pending_failure_events(conn)
                 counts = resolve_campaign_batch(conn, self.campaign_id, candles, now=utc_now())
                 position_counts = resolve_campaign_positions(conn, self.campaign_id, candles, now=resolution_time)
                 event(conn, self.campaign_id, "RESOLVER_BATCH", details={"counts": counts, "position_counts": position_counts})
                 return counts, position_counts
             counts, position_counts = _with_fresh_lock_retry(self.engine, persist_resolution)
+            self._pending_resolver_failure_events.clear()
             q = self._qualify_if_due()
             if q is not None:
                 _with_fresh_lock_retry(self.engine, lambda conn: event(conn, self.campaign_id, "RESOLVER_QUALIFICATION_TRIGGERED", details=q))
+            recovered = self._provider_failure_active
+            if recovered:
+                _with_fresh_lock_retry(self.engine, lambda conn: event(conn, self.campaign_id, "RESOLVER_PROVIDER_RECOVERED", details={"failure_count": self.resolver_failure_count}))
             self.resolver_failure_count = 0
-            return {"status": "OK", "resolver_counts": counts, "position_counts": position_counts, "qualification": q}
+            self._provider_failure_active = False
+            self._transient_failure_started_monotonic = None
+            return {"status": "OK", "resolver_counts": counts, "position_counts": position_counts, "qualification": q, "provider_recovered": recovered}
         except Exception as exc:
             if isinstance(exc, OperationalError) and not _is_sqlite_lock_error(exc):
                 raise
             self.resolver_failure_count += 1
-            self._best_effort_failure_event(exc)
+            failure_class = classify_provider_exception(exc)
+            if failure_class == TRANSIENT_TRANSPORT and self._transient_failure_started_monotonic is None:
+                self._transient_failure_started_monotonic = time.monotonic()
+            elapsed = (time.monotonic() - self._transient_failure_started_monotonic
+                       if failure_class == TRANSIENT_TRANSPORT and self._transient_failure_started_monotonic is not None else None)
+            self._best_effort_failure_event(exc, failure_class, elapsed)
             if _is_sqlite_lock_error(exc):
                 print(f"AlphaForge resolver cycle skipped after SQLite lock retries: {exc}", file=sys.stderr, flush=True)
                 return {"status": "LOCK_RETRY_EXHAUSTED", "error": str(exc), "failure_count": self.resolver_failure_count}
-            with self.engine.begin() as conn:
-                if self.resolver_failure_count >= self.resolver_failure_threshold:
-                    _exec(conn, "UPDATE burnin_campaigns SET campaign_status='PAUSED', last_error=:err WHERE campaign_id=:cid", {"cid": self.campaign_id, "err": "RESOLVER_FAILURE_THRESHOLD"})
-                    event(conn, self.campaign_id, "CAMPAIGN_PAUSED", details={"reason": "RESOLVER_FAILURE_THRESHOLD"})
-            if self.resolver_failure_count >= self.resolver_failure_threshold:
-                return {"status": "PAUSED", "error": str(exc), "failure_count": self.resolver_failure_count}
-            return {"status": "FAILED", "error": str(exc), "failure_count": self.resolver_failure_count}
+            self._provider_failure_active = True
+            expired = failure_class == TRANSIENT_TRANSPORT and elapsed is not None and elapsed >= self.provider_transient_outage_grace_seconds
+            permanent = failure_class == PERMANENT_AUTH_OR_PROTOCOL
+            threshold = failure_class != TRANSIENT_TRANSPORT and self.resolver_failure_count >= self.resolver_failure_threshold
+            if expired or permanent or threshold:
+                reason = ("PROVIDER_TRANSIENT_OUTAGE_GRACE_EXPIRED" if expired else
+                          "PROVIDER_PERMANENT_FAILURE" if permanent else "RESOLVER_FAILURE_THRESHOLD")
+                def persist_pause(conn: Any) -> None:
+                    self._persist_pending_failure_events(conn)
+                    pause_campaign_for_provider_failure(conn, self.campaign_id, reason=reason,
+                        details={"failure_class": failure_class, "failure_count": self.resolver_failure_count,
+                                 "transient_elapsed_seconds": elapsed, "grace_seconds": self.provider_transient_outage_grace_seconds})
+                _with_fresh_lock_retry(self.engine, persist_pause)
+                self._pending_resolver_failure_events.clear()
+                return {"status": "PAUSED", "error": str(exc), "failure_count": self.resolver_failure_count, "failure_class": failure_class}
+            return {"status": "RETRYING" if failure_class == TRANSIENT_TRANSPORT else "FAILED", "error": str(exc), "failure_count": self.resolver_failure_count, "failure_class": failure_class}
 
     async def _resolver_loop(self) -> None:
         assert self._stop_event is not None
@@ -861,6 +912,14 @@ class BurnInCampaignRunner:
             # them off the runtime event loop so scanner/runtime heartbeats can
             # continue even while a resolver cycle exhausts its lock budget.
             result = await asyncio.to_thread(self.resolver_tick)
+            runtime = self._attached_runtime
+            if runtime is not None:
+                if result.get("provider_recovered"):
+                    callback = getattr(runtime, "_mark_resolver_provider_recovered", None)
+                    if callable(callback): callback()
+                elif result.get("failure_class"):
+                    callback = getattr(runtime, "_mark_resolver_provider_failure", None)
+                    if callable(callback): callback()
             if result.get("status") == "PAUSED":
                 self._stop_event.set(); return
 
@@ -934,6 +993,7 @@ class BurnInCampaignRunner:
             attach = getattr(runtime, "_attach_phase8_campaign", None)
             if callable(attach): attach(self.campaign_id)
             else: raise RuntimeError("PHASE8_RUNTIME_ATTACH_UNAVAILABLE")
+            self._attached_runtime = runtime
             tasks.append(asyncio.create_task(runtime.start(), name="phase8_runtime_start"))
             tasks.append(asyncio.create_task(self._resolver_loop(), name="phase8_resolver_loop"))
             tasks.append(asyncio.create_task(self._maintenance_loop(), name="phase8_maintenance_loop"))
@@ -964,6 +1024,7 @@ class BurnInCampaignRunner:
                     )
             raise
         finally:
+            self._attached_runtime = None
             if self._stop_event is not None: self._stop_event.set()
             for task in tasks:
                 if not task.done(): task.cancel()

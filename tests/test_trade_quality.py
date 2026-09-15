@@ -20,7 +20,7 @@ def test_rr_too_low_rejected():
 
 def test_expectancy_missing_rejected():
     c=base_candidate(); c.expectancy=None
-    assert evaluate_trade_quality(c, base_market(), {}, {}).reject_reason=="EXPECTANCY_MISSING"
+    assert evaluate_trade_quality(c, base_market(), {}, {"BLOCK_UNKNOWN_EXPECTANCY":True}).reject_reason=="EXPECTANCY_MISSING"
 
 def test_negative_expectancy_rejected():
     c=base_candidate(); c.expectancy=-0.1
@@ -70,11 +70,11 @@ def test_symbol_cooldown_rejected():
 
 def test_daily_symbol_limit_rejected():
     rs={"trades_today_by_symbol":{"BTCUSDT":2}}
-    assert evaluate_trade_quality(base_candidate(), base_market(), rs, {}).reject_reason=="DAILY_SYMBOL_TRADE_LIMIT"
+    assert evaluate_trade_quality(base_candidate(), base_market(), rs, {"MAX_TRADES_PER_SYMBOL_PER_DAY":2}).reject_reason=="DAILY_SYMBOL_TRADE_LIMIT"
 
 def test_daily_global_limit_rejected():
     rs={"global_trades_today":10}
-    assert evaluate_trade_quality(base_candidate(), base_market(), rs, {}).reject_reason=="DAILY_GLOBAL_TRADE_LIMIT"
+    assert evaluate_trade_quality(base_candidate(), base_market(), rs, {"MAX_TRADES_GLOBAL_PER_DAY":10}).reject_reason=="DAILY_GLOBAL_TRADE_LIMIT"
 
 def test_symbol_loss_streak_block():
     rs={"symbol_loss_block_until":{"BTCUSDT":2_000_000}}
@@ -135,7 +135,7 @@ def test_stop_too_wide_high_score_softened_with_risk_scale():
 
 def test_stop_too_wide_high_score_low_effective_rr_stays_rejected():
     c = base_candidate(); c.score = 10.0; c.rr = 2.5; c.sl = 98.0
-    d = evaluate_trade_quality(c, {**base_market(), "effective_rr": 1.5}, {}, {})
+    d = evaluate_trade_quality(c, {**base_market(), "effective_rr": 1.5}, {}, {"MIN_EFFECTIVE_RR":1.6})
     assert d.reject_reason == "RR_TOO_LOW"
 
 
