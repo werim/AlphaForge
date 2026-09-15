@@ -1,5 +1,7 @@
 # AlphaForge Komut Rehberi
 
+> **Son şema/CLI doğrulaması:** 2026-09-15, `dev` branch. Aşağıdaki campaign/PAPER komutlarında `burnin_ops` kanonik arayüzü esas alınır.
+
 Bu sayfa AlphaForge'u kurmak, güncellemek, test etmek, BACKTEST/PAPER çalıştırmak, dashboard açmak ve çok günlük PAPER burn-in kampanyasını yönetmek için doğrulanmış komutları tek yerde toplar.
 
 > **Güvenlik:** AlphaForge varsayılan olarak LIVE-ready değildir. Bu rehber PAPER ve BACKTEST işletimine odaklanır. LIVE modu veya gerçek emir yolu, yerel readiness kanıtları ve bütün fail-closed güvenlik kapıları geçmeden açılmamalıdır.
@@ -604,6 +606,8 @@ python -m alphaforge.burnin_ops report --help
 python -m alphaforge.burnin_ops finalize --help
 python -m alphaforge.burnin_ops diagnose-db --help
 python -m alphaforge.burnin_ops db-doctor --help
+python -m alphaforge.burnin_ops recover-runtime --help
+python -m alphaforge.burnin_ops reject-label-status --help
 python -m alphaforge.db_doctor --help
 ```
 
@@ -622,7 +626,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id CAMP_ID
 macOS / Linux:
 
 ```bash
-RELEASE_ID="POST363"
+RELEASE_ID="POSHARNESS01"
 DB="data/campaign/$RELEASE_ID.db"
 python -m alphaforge.burnin_ops \
   --db "$DB" \
@@ -802,10 +806,22 @@ python -m alphaforge.burnin_ops \
 
 ## 17. Watch
 
+Tek operasyon kontrol çevrimi:
+
 ```bash
 python -m alphaforge.burnin_ops \
   --db "$DB" \
-  status \
+  watch \
+  --campaign-id "$CID"
+```
+
+JSON:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  watch \
   --campaign-id "$CID"
 ```
 
@@ -1164,9 +1180,9 @@ sqlite3 "$DB" <<SQL
 .headers on
 .mode column
 SELECT *
-FROM burnin_runs
+FROM burnin_campaign_runs
 WHERE campaign_id = '$CID'
-ORDER BY id DESC;
+ORDER BY continuation_sequence DESC, id DESC;
 SQL
 ```
 
@@ -1275,7 +1291,7 @@ SELECT
 FROM burnin_observations
 WHERE burnin_run_id IN (
     SELECT burnin_run_id
-    FROM burnin_runs
+    FROM burnin_campaign_runs
     WHERE campaign_id = '$CID'
 )
 GROUP BY decision
@@ -1295,7 +1311,7 @@ SELECT
 FROM burnin_reject_outcomes
 WHERE burnin_run_id IN (
     SELECT burnin_run_id
-    FROM burnin_runs
+    FROM burnin_campaign_runs
     WHERE campaign_id = '$CID'
 )
 GROUP BY reject_reason
@@ -1321,7 +1337,7 @@ SELECT COUNT(*) AS open_trade_outcomes
 FROM burnin_trade_outcomes
 WHERE burnin_run_id IN (
     SELECT burnin_run_id
-    FROM burnin_runs
+    FROM burnin_campaign_runs
     WHERE campaign_id = '$CID'
 )
 AND closed_at IS NULL;
@@ -1931,3 +1947,822 @@ python -m alphaforge.burnin_ops --db "$DB" --json reject-label-status --runtime-
 `INCOMPLETE` means the database is not structurally contradictory but maturity/provider evidence is insufficient. Incomplete geometry or costs and FAILED, AMBIGUOUS, execution-invalidated, immature, overdue, stale-claim, or no-outcome populations are explicit reason codes, so one good row cannot hide them. `FAIL` means a structural violation such as missing eligible label ownership, duplicate ownership/identity/outcome, ambiguous linkage, orphan evidence, impossible correctness state, invalid finalized evidence, or RESOLVED without a canonical outcome. Both results block Phase C. The command scopes by explicit campaign continuation membership or the exact `standalone:<burnin_run_id>`; it never infers unrelated history. It never repairs, deletes, updates, or fabricates evidence.
 
 Future-due `PENDING`, `READY`, and `RESOLVING` labels emit `IMMATURE_LABELS_PRESENT`; PASS requires `mature_coverage_ratio` to equal `1.0`. `coverage.legacy_unattributed_observations` reports pre-identity observations separately from `total_rejected_decisions`: these rows block Phase C as INCOMPLETE but are not guessed to be distinct rejects. Pending/outcome contradictions and unknown statuses are structural FAIL results.
+---
+
+# Güncel Campaign / PAPER Operasyon Paketi — 2026-09-15
+
+Bu bölüm mevcut `dev` branch'teki güncel campaign şemasına göre hazırlanmıştır.
+Campaign continuation üyeliği için kanonik tablo `burnin_campaign_runs`'dır.
+PAPER pozisyon sonuçları campaign-native olarak `burnin_pending_position_outcomes`,
+reject forward-outcome kimlikleri ise `burnin_pending_reject_labels` ve
+`burnin_reject_outcomes` üzerinden izlenir.
+
+> **SQL güvenliği:** Aşağıdaki sorgular salt-okuma içindir. Campaign durumunu,
+> qualification sonucunu veya evidence kayıtlarını SQL ile elle değiştirme.
+
+## A. Güncel yeni `burnin_ops` fonksiyonları
+
+### A.1 Database diagnosis — READ ONLY
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  diagnose-db \
+  --max-heartbeat-age 120
+```
+
+Bu komut mevcut kampanya, continuation, worker, runtime snapshot, open position,
+pending reject label ve reconciliation durumunu değiştirmeden teşhis eder.
+
+### A.2 DB doctor
+
+Sadece kontrol:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  db-doctor \
+  --check-only
+```
+
+Gerekli additive schema düzeltmelerini uygula:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  db-doctor \
+  --apply
+```
+
+`--apply` öncesi çalışan kampanyanın durumunu ve backup politikasını doğrula.
+
+### A.3 Reject forward-outcome integrity gate
+
+Campaign PAPER:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  reject-label-status \
+  --campaign-id "$CID"
+```
+
+Standalone PAPER:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  reject-label-status \
+  --runtime-identity "standalone:$BURNIN_RUN_ID"
+```
+
+İsteğe bağlı stale claim eşiği:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  reject-label-status \
+  --campaign-id "$CID" \
+  --stale-claim-seconds 300
+```
+
+Yorum:
+
+- `PASS`: scoped reject denominator ve mature outcome bütünlüğü tutarlı.
+- `INCOMPLETE`: yapısal çelişki yok, fakat maturity/provider/evidence eksik.
+- `FAIL`: duplicate/orphan/identity/finalized-evidence gibi yapısal ihlal var.
+
+### A.4 Runtime recovery
+
+Önce teşhis:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  diagnose-db \
+  --max-heartbeat-age 120
+```
+
+Sonra yalnız gerçekten recovery gereken campaign için:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  recover-runtime \
+  --campaign-id "$CID"
+```
+
+Dead `RECOVERY_REQUIRED` continuation'ı ancak complete zero-exposure doğrulaması
+varsa terminalize etmek için explicit seçenek:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  recover-runtime \
+  --campaign-id "$CID" \
+  --terminalize-zero-exposure
+```
+
+Bu seçenek normal campaign stop komutu değildir.
+
+### A.5 Config / reconciliation hızlı kontrolleri
+
+```bash
+python -m alphaforge.config_check
+python -m alphaforge.config_fix --json
+python -m alphaforge.binance_reconciliation_check --symbols BTCUSDT ETHUSDT
+```
+
+`config_fix` varsayılan dry-run davranışını koruyorsa çıktıyı incelemeden mutation
+varsayma. Binance credential değerlerini terminale yazdırma.
+
+---
+
+# B. Campaign çalışma durumu — SQL
+
+Aşağıdaki örneklerde:
+
+```bash
+DB="data/campaign/POST_AUTONOMOUS.db"
+CID="camp_xxxxxxxxxxxxxxxx"
+```
+
+kendi gerçek değerlerinle değiştir.
+
+## B.1 Campaign + active continuation tek satır özet
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    c.campaign_id,
+    c.release_id,
+    c.campaign_status,
+    c.active_run_id,
+    c.worker_pid,
+    c.restart_count,
+    c.created_at,
+    c.started_at,
+    c.completed_at,
+    c.expected_duration_seconds,
+    c.observed_duration_seconds,
+    c.last_heartbeat_at,
+    c.last_error,
+    c.qualification_status,
+    c.latest_qualification_id,
+    c.evidence_completeness_status,
+    r.continuation_sequence,
+    r.status AS active_run_status,
+    r.started_at AS active_run_started_at,
+    r.ended_at AS active_run_ended_at
+FROM burnin_campaigns c
+LEFT JOIN burnin_campaign_runs r
+  ON r.campaign_id = c.campaign_id
+ AND r.burnin_run_id = c.active_run_id
+WHERE c.campaign_id = '$CID';
+"
+```
+
+## B.2 Tüm continuation geçmişi
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    continuation_sequence,
+    burnin_run_id,
+    status,
+    started_at,
+    ended_at,
+    created_at
+FROM burnin_campaign_runs
+WHERE campaign_id = '$CID'
+ORDER BY continuation_sequence;
+"
+```
+
+Beklenti:
+
+- `continuation_sequence` unique olmalı.
+- Aynı anda birden fazla `RUNNING` continuation olmamalı.
+- `active_run_id`, çalışan continuation ile eşleşmeli.
+
+## B.3 Son 50 campaign event
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    id,
+    event_time,
+    event_type,
+    burnin_run_id,
+    details_json
+FROM burnin_campaign_events
+WHERE campaign_id = '$CID'
+ORDER BY id DESC
+LIMIT 50;
+"
+```
+
+## B.4 Resolver / provider / failure event özeti
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    event_type,
+    COUNT(*) AS n,
+    MIN(event_time) AS first_seen,
+    MAX(event_time) AS last_seen
+FROM burnin_campaign_events
+WHERE campaign_id = '$CID'
+  AND (
+       event_type LIKE '%RESOLVER%'
+       OR event_type LIKE '%PROVIDER%'
+       OR event_type LIKE '%FAIL%'
+       OR event_type LIKE '%ERROR%'
+  )
+GROUP BY event_type
+ORDER BY n DESC, event_type;
+"
+```
+
+## B.5 Resolver batch hata metinleri
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    COALESCE(json_extract(details_json, '$.error'), 'NO_ERROR_FIELD') AS error,
+    COUNT(*) AS n,
+    MIN(event_time) AS first_seen,
+    MAX(event_time) AS last_seen
+FROM burnin_campaign_events
+WHERE campaign_id = '$CID'
+  AND event_type = 'RESOLVER_BATCH_FAILED'
+GROUP BY error
+ORDER BY n DESC;
+"
+```
+
+---
+
+# C. PAPER accepted trade çalışma ve sonuç istatistikleri
+
+## C.1 Açık / kapanmış campaign PAPER pozisyonları
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    status,
+    COUNT(*) AS n,
+    ROUND(SUM(COALESCE(notional,0)), 2) AS notional_sum,
+    ROUND(SUM(COALESCE(net_pnl,0)), 6) AS net_pnl_sum,
+    ROUND(SUM(COALESCE(net_r,0)), 6) AS net_r_sum
+FROM burnin_pending_position_outcomes
+WHERE campaign_id = '$CID'
+GROUP BY status
+ORDER BY status;
+"
+```
+
+## C.2 Açık pozisyon detayları
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    pending_position_id,
+    trade_id,
+    burnin_run_id,
+    symbol,
+    side,
+    regime,
+    entry_time,
+    planned_entry,
+    simulated_fill,
+    stop,
+    target,
+    quantity,
+    notional,
+    entry_spread,
+    entry_slippage,
+    entry_fee,
+    status
+FROM burnin_pending_position_outcomes
+WHERE campaign_id = '$CID'
+  AND status = 'OPEN'
+ORDER BY entry_time;
+"
+```
+
+## C.3 Kapanmış PAPER sonuç özeti
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    COUNT(*) AS closed_trades,
+    SUM(CASE WHEN net_r > 0 THEN 1 ELSE 0 END) AS winners,
+    SUM(CASE WHEN net_r < 0 THEN 1 ELSE 0 END) AS losers,
+    ROUND(
+      100.0 * SUM(CASE WHEN net_r > 0 THEN 1 ELSE 0 END)
+      / NULLIF(COUNT(*),0),
+      1
+    ) AS win_pct,
+    ROUND(AVG(net_r), 4) AS avg_net_r,
+    ROUND(SUM(net_r), 4) AS total_net_r,
+    ROUND(AVG(net_pnl), 6) AS avg_net_pnl,
+    ROUND(SUM(net_pnl), 6) AS total_net_pnl,
+    ROUND(AVG(total_execution_cost), 6) AS avg_execution_cost,
+    ROUND(SUM(total_execution_cost), 6) AS total_execution_cost,
+    ROUND(AVG(entry_spread + COALESCE(exit_spread,0)), 6) AS avg_roundtrip_spread,
+    ROUND(AVG(entry_slippage + COALESCE(exit_slippage,0)), 6) AS avg_roundtrip_slippage,
+    ROUND(AVG(hold_duration_seconds), 1) AS avg_hold_seconds
+FROM burnin_pending_position_outcomes
+WHERE campaign_id = '$CID'
+  AND status <> 'OPEN'
+  AND resolved_at IS NOT NULL;
+"
+```
+
+## C.4 Sonuçları sembol / side / regime bazında
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    symbol,
+    side,
+    COALESCE(regime,'UNKNOWN') AS regime,
+    COUNT(*) AS n,
+    SUM(CASE WHEN net_r > 0 THEN 1 ELSE 0 END) AS winners,
+    SUM(CASE WHEN net_r < 0 THEN 1 ELSE 0 END) AS losers,
+    ROUND(AVG(net_r), 4) AS avg_net_r,
+    ROUND(SUM(net_r), 4) AS total_net_r,
+    ROUND(AVG(total_execution_cost), 6) AS avg_execution_cost,
+    ROUND(AVG(mfe), 6) AS avg_mfe,
+    ROUND(AVG(mae), 6) AS avg_mae
+FROM burnin_pending_position_outcomes
+WHERE campaign_id = '$CID'
+  AND status <> 'OPEN'
+  AND resolved_at IS NOT NULL
+GROUP BY symbol, side, COALESCE(regime,'UNKNOWN')
+ORDER BY total_net_r DESC;
+"
+```
+
+## C.5 Exit reason dağılımı
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    COALESCE(exit_reason,'UNKNOWN') AS exit_reason,
+    COUNT(*) AS n,
+    ROUND(AVG(net_r),4) AS avg_net_r,
+    ROUND(SUM(net_r),4) AS total_net_r
+FROM burnin_pending_position_outcomes
+WHERE campaign_id = '$CID'
+  AND status <> 'OPEN'
+GROUP BY COALESCE(exit_reason,'UNKNOWN')
+ORDER BY n DESC;
+"
+```
+
+## C.6 Execution-cost drag
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    COUNT(*) AS n,
+    ROUND(AVG(entry_spread), 8) AS avg_entry_spread,
+    ROUND(AVG(entry_slippage), 8) AS avg_entry_slippage,
+    ROUND(AVG(entry_fee), 8) AS avg_entry_fee,
+    ROUND(AVG(exit_spread), 8) AS avg_exit_spread,
+    ROUND(AVG(exit_slippage), 8) AS avg_exit_slippage,
+    ROUND(AVG(exit_fee), 8) AS avg_exit_fee,
+    ROUND(AVG(funding), 8) AS avg_funding,
+    ROUND(AVG(latency_impact_penalty), 8) AS avg_latency_penalty,
+    ROUND(AVG(total_execution_cost), 8) AS avg_total_execution_cost,
+    ROUND(SUM(total_execution_cost), 8) AS total_execution_cost
+FROM burnin_pending_position_outcomes
+WHERE campaign_id = '$CID'
+  AND status <> 'OPEN'
+  AND resolved_at IS NOT NULL;
+"
+```
+
+---
+
+# D. Reject forward-outcome istatistikleri
+
+## D.1 Label durumları
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    status,
+    COUNT(*) AS n,
+    SUM(CASE WHEN evidence_complete = 1 THEN 1 ELSE 0 END) AS evidence_complete,
+    MIN(due_at) AS oldest_due_at,
+    MAX(due_at) AS newest_due_at
+FROM burnin_pending_reject_labels
+WHERE campaign_id = '$CID'
+GROUP BY status
+ORDER BY n DESC;
+"
+```
+
+## D.2 Reject reason + label maturity
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    COALESCE(reject_reason,'UNKNOWN') AS reject_reason,
+    status,
+    COUNT(*) AS n,
+    SUM(CASE WHEN evidence_complete = 1 THEN 1 ELSE 0 END) AS complete
+FROM burnin_pending_reject_labels
+WHERE campaign_id = '$CID'
+GROUP BY COALESCE(reject_reason,'UNKNOWN'), status
+ORDER BY n DESC, reject_reason;
+"
+```
+
+## D.3 Reject attribution / provenance
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    COALESCE(
+      json_extract(source_provenance_json, '$.forward_label_subject'),
+      'UNKNOWN'
+    ) AS subject,
+    COALESCE(
+      json_extract(source_provenance_json, '$.reject_quality_attributable'),
+      0
+    ) AS attributable,
+    status,
+    COUNT(*) AS n
+FROM burnin_pending_reject_labels
+WHERE campaign_id = '$CID'
+GROUP BY subject, attributable, status
+ORDER BY attributable DESC, subject, status;
+"
+```
+
+## D.4 Reject forward-outcome sonuçları — bütün continuation'lar
+
+```bash
+sqlite3 -header -column "$DB" "
+WITH campaign_runs AS (
+    SELECT burnin_run_id
+    FROM burnin_campaign_runs
+    WHERE campaign_id = '$CID'
+)
+SELECT
+    COALESCE(reject_reason,'UNKNOWN') AS reject_reason,
+    symbol,
+    COALESCE(regime,'UNKNOWN') AS regime,
+    COUNT(*) AS n,
+    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
+    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
+    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
+    SUM(CASE WHEN timeout = 1 THEN 1 ELSE 0 END) AS timeout,
+    SUM(CASE WHEN execution_invalidated = 1 THEN 1 ELSE 0 END) AS execution_invalidated,
+    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
+    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r
+FROM burnin_reject_outcomes
+WHERE burnin_run_id IN (SELECT burnin_run_id FROM campaign_runs)
+GROUP BY COALESCE(reject_reason,'UNKNOWN'), symbol, COALESCE(regime,'UNKNOWN')
+ORDER BY total_net_r DESC;
+"
+```
+
+## D.5 Reject reason top-level kalite özeti
+
+```bash
+sqlite3 -header -column "$DB" "
+WITH campaign_runs AS (
+    SELECT burnin_run_id
+    FROM burnin_campaign_runs
+    WHERE campaign_id = '$CID'
+)
+SELECT
+    COALESCE(reject_reason,'UNKNOWN') AS reject_reason,
+    COUNT(*) AS n,
+    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
+    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
+    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
+    SUM(CASE WHEN execution_invalidated = 1 THEN 1 ELSE 0 END) AS execution_invalidated,
+    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
+    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r
+FROM burnin_reject_outcomes
+WHERE burnin_run_id IN (SELECT burnin_run_id FROM campaign_runs)
+GROUP BY COALESCE(reject_reason,'UNKNOWN')
+ORDER BY total_net_r DESC;
+"
+```
+
+> Reject outcome'da `total_net_r > 0`, otomatik olarak “bu reject yanlıştı” anlamına gelmez.
+> Execution invalidation, ambiguity, attribution ve sample size birlikte değerlendirilmelidir.
+
+---
+
+# E. Identity / lineage / coverage kontrolleri
+
+## E.1 Pending label → rejected review / core decision bağlantısı
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    COUNT(*) AS labels,
+    SUM(
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM rejected_signal_reviews r
+        WHERE r.reject_decision_id = p.reject_decision_id
+      ) THEN 1 ELSE 0 END
+    ) AS linked_reviews,
+    SUM(
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM order_decisions d
+        WHERE d.decision_id = p.reject_decision_id
+      ) THEN 1 ELSE 0 END
+    ) AS linked_core_decisions
+FROM burnin_pending_reject_labels p
+WHERE p.campaign_id = '$CID';
+"
+```
+
+## E.2 Duplicate reject label identity
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    reject_decision_id,
+    COUNT(*) AS n
+FROM burnin_pending_reject_labels
+WHERE campaign_id = '$CID'
+GROUP BY reject_decision_id
+HAVING COUNT(*) > 1
+ORDER BY n DESC;
+"
+```
+
+Beklenen: **0 satır**.
+
+## E.3 Duplicate continuation sequence / run identity
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT 'continuation_sequence' AS kind, continuation_sequence AS identity, COUNT(*) AS n
+FROM burnin_campaign_runs
+WHERE campaign_id = '$CID'
+GROUP BY continuation_sequence
+HAVING COUNT(*) > 1
+
+UNION ALL
+
+SELECT 'burnin_run_id' AS kind, burnin_run_id AS identity, COUNT(*) AS n
+FROM burnin_campaign_runs
+WHERE campaign_id = '$CID'
+GROUP BY burnin_run_id
+HAVING COUNT(*) > 1;
+"
+```
+
+Beklenen: **0 satır**.
+
+---
+
+# F. Qualification snapshot
+
+Önce şemayı gör:
+
+```bash
+sqlite3 "$DB" ".schema burnin_qualification_snapshots"
+```
+
+Son snapshot:
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT *
+FROM burnin_qualification_snapshots
+WHERE campaign_id = '$CID'
+ORDER BY id DESC
+LIMIT 1;
+"
+```
+
+Campaign tablosundaki pointer ile karşılaştır:
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    campaign_id,
+    campaign_status,
+    qualification_status,
+    latest_qualification_id,
+    evidence_completeness_status,
+    observed_duration_seconds
+FROM burnin_campaigns
+WHERE campaign_id = '$CID';
+"
+```
+
+Qualification snapshot'ın eski olması tek başına runtime hatası değildir. Status çıktısındaki
+snapshot age/fresh/stale alanlarıyla birlikte yorumla.
+
+---
+
+# G. Runtime snapshot / reconciliation
+
+Önce şema:
+
+```bash
+sqlite3 "$DB" ".schema runtime_state_snapshots"
+```
+
+Son campaign runtime snapshot:
+
+```bash
+sqlite3 -header -column "$DB" "
+SELECT
+    id,
+    timestamp,
+    campaign_id,
+    burnin_run_id,
+    release_id,
+    active_position_count,
+    pending_order_count,
+    orphan_position_count,
+    orphan_order_count,
+    unknown_exchange_state,
+    recovery_action_required,
+    reconciliation_status,
+    exchange_read_only_status
+FROM runtime_state_snapshots
+WHERE campaign_id = '$CID'
+ORDER BY id DESC
+LIMIT 5;
+"
+```
+
+---
+
+# H. Tek komutluk campaign istatistik paketi
+
+Günlük operasyon için en kullanışlı özet:
+
+```bash
+sqlite3 -header -column "$DB" "
+-- CAMPAIGN
+SELECT
+    campaign_id,
+    release_id,
+    campaign_status,
+    active_run_id,
+    worker_pid,
+    restart_count,
+    observed_duration_seconds,
+    last_heartbeat_at,
+    last_error,
+    qualification_status,
+    evidence_completeness_status
+FROM burnin_campaigns
+WHERE campaign_id = '$CID';
+
+-- CONTINUATIONS
+SELECT
+    continuation_sequence,
+    burnin_run_id,
+    status,
+    started_at,
+    ended_at
+FROM burnin_campaign_runs
+WHERE campaign_id = '$CID'
+ORDER BY continuation_sequence;
+
+-- PAPER POSITIONS
+SELECT
+    status,
+    COUNT(*) AS n,
+    ROUND(SUM(COALESCE(net_r,0)),4) AS total_net_r
+FROM burnin_pending_position_outcomes
+WHERE campaign_id = '$CID'
+GROUP BY status;
+
+-- CLOSED PAPER RESULT
+SELECT
+    COUNT(*) AS closed_n,
+    SUM(CASE WHEN net_r > 0 THEN 1 ELSE 0 END) AS wins,
+    SUM(CASE WHEN net_r < 0 THEN 1 ELSE 0 END) AS losses,
+    ROUND(AVG(net_r),4) AS avg_net_r,
+    ROUND(SUM(net_r),4) AS total_net_r,
+    ROUND(SUM(total_execution_cost),6) AS execution_cost
+FROM burnin_pending_position_outcomes
+WHERE campaign_id = '$CID'
+  AND status <> 'OPEN'
+  AND resolved_at IS NOT NULL;
+
+-- REJECT LABELS
+SELECT
+    status,
+    COUNT(*) AS n,
+    SUM(CASE WHEN evidence_complete=1 THEN 1 ELSE 0 END) AS complete
+FROM burnin_pending_reject_labels
+WHERE campaign_id = '$CID'
+GROUP BY status;
+
+-- FAILURES
+SELECT
+    event_type,
+    COUNT(*) AS n,
+    MAX(event_time) AS last_seen
+FROM burnin_campaign_events
+WHERE campaign_id = '$CID'
+  AND (
+       event_type LIKE '%FAIL%'
+       OR event_type LIKE '%ERROR%'
+       OR event_type LIKE '%RESOLVER%'
+       OR event_type LIKE '%PROVIDER%'
+  )
+GROUP BY event_type
+ORDER BY n DESC;
+
+PRAGMA quick_check;
+"
+```
+
+---
+
+# I. POST autonomous organization harness sonrası önerilen kontrol sırası
+
+Harness `HEALTHY` döndükten sonra:
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" --json watch --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" --json reject-label-status --campaign-id "$CID"
+sqlite3 "$DB" "PRAGMA quick_check;"
+```
+
+İstatistiksel yorum sırası:
+
+1. Worker/runtime canlı mı?
+2. Config drift / contamination / evidence regression var mı?
+3. Accepted ve rejected kararlar persist ediliyor mu?
+4. Accepted trade gerçekten PAPER pozisyona dönüşüyor mu?
+5. Closed trade sonuçları net-R ve execution cost ile oluşuyor mu?
+6. Reject label'lar `PENDING -> RESOLVED` olgunlaşıyor mu?
+7. Resolver/provider failures sıfır mı?
+8. Qualification snapshot fresh olduğunda campaign aggregate ile eşleşiyor mu?
+9. Ancak yeterli sample sonrasında expectancy / reject quality / concentration yorumlanır.
+
+`n=2`, `n=4` gibi çok küçük örneklerde acceptance rate, win rate veya reject quality
+üzerinden threshold tuning yapılmaz.
+
+---
+
+# J. Şema keşfi — sorgu yazmadan önce
+
+Tablolar:
+
+```bash
+sqlite3 "$DB" ".tables"
+```
+
+Campaign tabloları:
+
+```bash
+sqlite3 "$DB" "
+SELECT name
+FROM sqlite_master
+WHERE type='table'
+  AND (
+       name LIKE 'burnin_%'
+       OR name LIKE 'runtime_%'
+       OR name IN ('order_decisions','rejected_signal_reviews','closed_trade_reviews')
+  )
+ORDER BY name;
+"
+```
+
+Kolonlar:
+
+```bash
+sqlite3 "$DB" "PRAGMA table_info(burnin_campaigns);"
+sqlite3 "$DB" "PRAGMA table_info(burnin_campaign_runs);"
+sqlite3 "$DB" "PRAGMA table_info(burnin_pending_position_outcomes);"
+sqlite3 "$DB" "PRAGMA table_info(burnin_pending_reject_labels);"
+sqlite3 "$DB" "PRAGMA table_info(burnin_reject_outcomes);"
+sqlite3 "$DB" "PRAGMA table_info(burnin_qualification_snapshots);"
+sqlite3 "$DB" "PRAGMA table_info(runtime_state_snapshots);"
+```
+
+Bir sorgu eski branch veya eski DB şeması nedeniyle `no such column/table` verirse,
+SQL'i zorla uyarlamadan önce bu `PRAGMA table_info(...)` çıktısını kontrol et.
