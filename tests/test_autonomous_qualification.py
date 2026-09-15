@@ -88,6 +88,131 @@ def test_soak_uses_scheduled_faults_and_same_invariants_without_wall_clock_wait(
     soak = next(item for item in report["faults_injected"] if item["name"] == "soak_normal_market_data")
     assert soak["verdict"] == "PASS"
     assert soak["observed_behavior"]["probe_count"] == len(sleeps)
+    assert soak["observed_behavior"]["heartbeat_fresh_probes"] == len(sleeps)
+    assert soak["observed_behavior"]["resolver_ok_probes"] == len(sleeps)
+    assert soak["observed_behavior"]["lineage_ok_probes"] == len(sleeps)
+    assert soak["invariant_checks"]["continuous_safety_invariants"] is True
+    assert soak["invariant_checks"]["resource_growth_bounded"] is True
+    assert report["soak_resources"]["sample_count"] == len(sleeps)
+    assert report["soak_sample_invariant_failures"] == []
+    assert Path(report["soak_resources"]["sample_artifact"]).is_file()
+
+
+def test_soak_audits_and_recovers_isolated_empty_public_feed_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = AutonomousQualificationHarness(
+        mode="SOAK", output_root=tmp_path, soak_hours=6,
+        market_data_source="PUBLIC", sleep=lambda _seconds: None,
+    )
+    scans = 0
+    def public_scan() -> list[dict[str, str]]:
+        nonlocal scans
+        scans += 1
+        return [] if scans in {2, 5} else [{"symbol": "BTCUSDT"}]
+    monkeypatch.setattr(harness, "_normal_market_data", public_scan)
+    report = harness.run()
+    soak = next(item for item in report["faults_injected"] if item["name"] == "soak_normal_market_data")
+    observed = soak["observed_behavior"]
+    assert report["overall_verdict"] == "PASS"
+    assert observed["empty_market_data_probes"] == 2
+    assert observed["max_consecutive_empty_market_data_probes"] == 1
+    assert len(observed["market_data_recoveries"]) == 2
+    assert all(item["db_event_id"] > 0 for item in observed["market_data_probes"])
+    assert all(item["db_event_id"] > 0 for item in observed["market_data_recoveries"])
+    assert soak["invariant_checks"]["empty_market_data_never_executed"] is True
+
+
+def test_consecutive_public_feed_gaps_fail_release_gate(tmp_path: Path) -> None:
+    harness = AutonomousQualificationHarness(
+        mode="SOAK", output_root=tmp_path, soak_hours=6,
+        market_data_source="PUBLIC", sleep=lambda _seconds: None,
+    )
+    ctx = harness._new_context("market_data_probe_regression", qualification_targets=True)
+    try:
+        harness._record_market_data_probe(ctx, [{"symbol": "BTCUSDT"}], 0.1)
+        harness._record_market_data_probe(ctx, [], 0.1)
+        harness._record_market_data_probe(ctx, [], 0.1)
+        harness._record_market_data_probe(ctx, [{"symbol": "BTCUSDT"}], 0.1)
+        assert harness._market_data_max_empty_streak == 2
+        assert len(harness._market_data_recoveries) == 1
+        assert harness._market_data_recoveries[0]["empty_probe_count"] == 2
+        with harness.engine.connect() as conn:
+            assert conn.exec_driver_sql(
+                "SELECT COUNT(*) FROM burnin_campaign_events WHERE campaign_id=? "
+                "AND event_type='QUALIFICATION_MARKET_DATA_PROBE'", (ctx.campaign_id,)
+            ).scalar_one() == 4
+    finally:
+        harness._terminalize(ctx)
+        harness.close()
+
+
+def test_soak_rejects_sustained_public_feed_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = AutonomousQualificationHarness(
+        mode="SOAK", output_root=tmp_path, soak_hours=6,
+        market_data_source="PUBLIC", sleep=lambda _seconds: None,
+    )
+    scans = 0
+    def public_scan() -> list[dict[str, str]]:
+        nonlocal scans
+        scans += 1
+        return [] if scans in {2, 3} else [{"symbol": "BTCUSDT"}]
+    monkeypatch.setattr(harness, "_normal_market_data", public_scan)
+    report = harness.run()
+    soak = next(item for item in report["faults_injected"] if item["name"] == "soak_normal_market_data")
+    assert report["overall_verdict"] == "NEEDS_FIX"
+    assert soak["invariant_checks"]["normal_market_data_observed"] is False
+    assert soak["invariant_checks"]["empty_market_data_never_executed"] is True
+    assert soak["observed_behavior"]["max_consecutive_empty_market_data_probes"] == 2
+
+
+def test_resource_gate_flags_sustained_accumulation(tmp_path: Path) -> None:
+    harness = AutonomousQualificationHarness(mode="SOAK", output_root=tmp_path,
+                                             soak_hours=6, sleep=lambda _seconds: None)
+    try:
+        harness._soak_samples = [
+            {"elapsed_seconds": index * 30,
+             "rss_high_water_bytes": 80 * 1024 * 1024 + index * 1024 * 1024,
+             "db_bytes": 1_000_000 + index * 100,
+             "artifact_bytes": index * 100,
+             "queue_depths": {"shadow": index, "reconciliation_deferred": 0},
+             "pending_resolver_backlog": index, "pending_reject_backlog": 0,
+             "sqlite_lock_retry_exhaustions": 0,
+             "reconciliation_latency_seconds": 0.002,
+             "scan_latency_seconds": None}
+            for index in range(40)
+        ]
+        flags = harness._soak_resource_summary()["growth_flags"]
+        assert "SUSTAINED_MONOTONIC_RSS_GROWTH" in flags
+        assert "UNBOUNDED_QUEUE_OR_BACKLOG" in flags
+    finally:
+        harness.close()
+
+
+def test_resource_gate_allows_bounded_audit_growth_but_flags_excess(tmp_path: Path) -> None:
+    harness = AutonomousQualificationHarness(mode="SOAK", output_root=tmp_path,
+                                             soak_hours=6, sleep=lambda _seconds: None)
+    try:
+        def samples(bytes_per_probe: int) -> list[dict[str, object]]:
+            return [
+                {"elapsed_seconds": index * 30, "rss_high_water_bytes": 80 * 1024 * 1024,
+                 "db_bytes": 1_000_000 + index * bytes_per_probe,
+                 "artifact_bytes": index * 100,
+                 "queue_depths": {"shadow": 0, "reconciliation_deferred": 0},
+                 "pending_resolver_backlog": 0, "pending_reject_backlog": 0,
+                 "sqlite_lock_retry_exhaustions": 0,
+                 "reconciliation_latency_seconds": 0.002,
+                 "scan_latency_seconds": None}
+                for index in range(720)
+            ]
+        harness._soak_samples = samples(100 * 1024)
+        assert "DB_GROWTH_ABOVE_AUDIT_BUDGET" not in harness._soak_resource_summary()["growth_flags"]
+        harness._soak_samples = samples(250 * 1024)
+        assert "DB_GROWTH_ABOVE_AUDIT_BUDGET" in harness._soak_resource_summary()["growth_flags"]
+    finally:
+        harness.close()
 
 
 def test_cli_rejects_short_soak_as_blocked(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

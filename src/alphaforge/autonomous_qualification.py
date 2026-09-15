@@ -10,6 +10,8 @@ import io
 import json
 import os
 import socket
+import resource
+import sys
 import sqlite3
 import tempfile
 import threading
@@ -39,6 +41,7 @@ from alphaforge.burnin_campaign import (
     qualify_campaign,
     start_or_resume_campaign,
     terminalize_active_campaign_run,
+    update_campaign_heartbeat,
 )
 from alphaforge.burnin_ops import bootstrap_ops_schema, health_payload
 from alphaforge.burnin_resolver import persist_pending_position
@@ -101,7 +104,7 @@ class AutonomousQualificationHarness:
     def __init__(self, *, mode: str = "FAST", output_root: str | Path | None = None,
                  soak_hours: float = 6.0, sleep: Callable[[float], None] = time.sleep,
                  market_data_source: str = "SYNTHETIC",
-                 soak_probe_interval_seconds: float = 300.0) -> None:
+                 soak_probe_interval_seconds: float = 30.0) -> None:
         self.mode = mode.upper()
         if self.mode not in {"FAST", "SOAK"}:
             raise ValueError("mode must be FAST or SOAK")
@@ -114,13 +117,26 @@ class AutonomousQualificationHarness:
             raise ValueError("market_data_source must be PUBLIC or SYNTHETIC")
         self.soak_probe_interval_seconds = max(1.0, float(soak_probe_interval_seconds))
         self._soak_observed = {"probe_count": 0, "market_data_rows": 0,
-                               "empty_market_data_probes": 0, "reconciliation_clean_probes": 0}
+                               "empty_market_data_probes": 0, "reconciliation_clean_probes": 0,
+                               "resolver_ok_probes": 0, "heartbeat_fresh_probes": 0,
+                               "lineage_ok_probes": 0, "worker_alive_probes": 0,
+                               "safe_status_probes": 0}
+        self._market_data_probes: list[dict[str, Any]] = []
+        self._market_data_empty_streak = 0
+        self._market_data_max_empty_streak = 0
+        self._market_data_outage_started: float | None = None
+        self._market_data_recoveries: list[dict[str, Any]] = []
+        self._soak_samples: list[dict[str, Any]] = []
+        self._soak_monitor_errors: list[str] = []
+        self._run_started_monotonic: float | None = None
+        self._enforce_wall_clock = sleep is time.sleep
         parent = Path(output_root).expanduser().resolve() if output_root else None
         if parent is not None:
             parent.mkdir(parents=True, exist_ok=True)
         self.run_dir = Path(tempfile.mkdtemp(prefix="alphaforge-qualification-", dir=parent))
         self.artifact_dir = self.run_dir / "artifacts"
         self.artifact_dir.mkdir()
+        self._soak_samples_path = self.artifact_dir / "soak-resource-samples.jsonl"
         self.db_path = self.run_dir / "qualification.sqlite3"
         if self.db_path.exists():
             raise RuntimeError("qualification database must be new")
@@ -139,13 +155,16 @@ class AutonomousQualificationHarness:
                 "SELECT id FROM burnin_campaign_events WHERE campaign_id=:cid ORDER BY id DESC LIMIT 1"
             ), {"cid": campaign_id}).scalar_one())
 
-    def _new_context(self, scenario: str, provider: Any | None = None, *, grace: float = 300.0) -> HarnessContext:
+    def _new_context(self, scenario: str, provider: Any | None = None, *, grace: float = 300.0,
+                     qualification_targets: bool = False) -> HarnessContext:
         release_id = f"AQH-{self.run_id[-8:]}-{scenario}"
         with self.engine.begin() as conn:
             campaign = create_campaign(
                 conn, release_id=release_id, duration_days=1 / 86400,
-                symbols=["BTCUSDT"], intervals=["1m"], target_decisions=0,
-                target_closed_trades=0, target_reject_forward_outcomes=0,
+                symbols=["BTCUSDT"], intervals=["1m"],
+                target_decisions=500 if qualification_targets else 0,
+                target_closed_trades=30 if qualification_targets else 0,
+                target_reject_forward_outcomes=50 if qualification_targets else 0,
                 source_provenance={"provider": "BINANCE_READ_ONLY_QUALIFICATION",
                                    "exchange": "BINANCE", "order_submission": "DISABLED",
                                    "qualification_run_id": self.run_id},
@@ -635,46 +654,247 @@ class AutonomousQualificationHarness:
         config.exchange.hyperliquid.enabled = False
         return asyncio.run(scan_exchange_markets(config))
 
+    def _record_market_data_probe(self, ctx: HarnessContext, rows: list[dict[str, Any]],
+                                  scan_latency: float) -> None:
+        """Audit feed gaps without inventing an error hidden by the public scanner."""
+        now = time.monotonic()
+        available = bool(rows)
+        status = "AVAILABLE" if available else "UNAVAILABLE_UNKNOWN_CAUSE"
+        probe = {"at": utc_now(), "probe_index": len(self._market_data_probes),
+                 "row_count": len(rows), "status": status, "classification": UNKNOWN if not available else None,
+                 "latency_seconds": round(scan_latency, 6)}
+        probe["db_event_id"] = self._record_event(ctx.campaign_id, "QUALIFICATION_MARKET_DATA_PROBE", probe)
+        if available:
+            if self._market_data_outage_started is not None:
+                recovery = {"recovered_at": probe["at"],
+                            "latency_seconds": round(now - self._market_data_outage_started, 3),
+                            "empty_probe_count": self._market_data_empty_streak,
+                            "probe_index": probe["probe_index"]}
+                recovery["db_event_id"] = self._record_event(
+                    ctx.campaign_id, "QUALIFICATION_MARKET_DATA_RECOVERED", recovery
+                )
+                self._market_data_recoveries.append(recovery)
+            self._market_data_empty_streak = 0
+            self._market_data_outage_started = None
+        else:
+            if self._market_data_outage_started is None:
+                self._market_data_outage_started = now
+            self._market_data_empty_streak += 1
+            self._market_data_max_empty_streak = max(
+                self._market_data_max_empty_streak, self._market_data_empty_streak
+            )
+        self._market_data_probes.append(probe)
+
+    @staticmethod
+    def _rss_high_water_bytes() -> int:
+        value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return value if sys.platform == "darwin" else value * 1024
+
+    def _soak_resource_sample(self, ctx: HarnessContext, *, scan_latency: float | None,
+                              reconciliation_latency: float, resolver_status: str) -> dict[str, Any]:
+        with self.engine.connect() as conn:
+            heartbeat = conn.execute(text(
+                "SELECT heartbeat_ts,runtime_state FROM runtime_heartbeats "
+                "WHERE runtime_instance_id=:rid ORDER BY id DESC LIMIT 1"
+            ), {"rid": ctx.runtime.runtime_instance_id}).mappings().one()
+            pending_positions = int(conn.execute(text(
+                "SELECT COUNT(*) FROM burnin_pending_position_outcomes "
+                "WHERE campaign_id=:cid AND status='OPEN'"
+            ), {"cid": ctx.campaign_id}).scalar_one())
+            pending_rejects = int(conn.execute(text(
+                "SELECT COUNT(*) FROM burnin_pending_reject_labels "
+                "WHERE campaign_id=:cid AND status IN ('PENDING','READY','RESOLVING')"
+            ), {"cid": ctx.campaign_id}).scalar_one())
+            rejected = int(conn.execute(text(
+                "SELECT COUNT(*) FROM burnin_observations "
+                "WHERE burnin_run_id=:bid AND decision='REJECTED'"
+            ), {"bid": ctx.burnin_run_id}).scalar_one())
+            sqlite_lock_exhaustions = int(conn.execute(text(
+                "SELECT COUNT(*) FROM exchange_reconciliation_events "
+                "WHERE status='PERSISTENCE_FAILED'"
+            )).scalar_one())
+        heartbeat_age = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(
+            str(heartbeat["heartbeat_ts"]).replace("Z", "+00:00")
+        )).total_seconds())
+        lineage_ok, lineage = self._lineage(ctx.campaign_id)
+        snapshot = ctx.runtime._build_runtime_state_snapshot(status="OPERATING")
+        safe_status = not (
+            snapshot.runtime_status == "OPERATING" and (
+                snapshot.exchange_read_only_status == "UNAVAILABLE"
+                or snapshot.reconciliation_status == "EXCHANGE_STATE_UNKNOWN"
+                or snapshot.fail_closed_reason is not None
+            )
+        )
+        db_bytes = sum(path.stat().st_size for path in self.run_dir.glob("qualification.sqlite3*"))
+        artifact_bytes = sum(path.stat().st_size for path in self.artifact_dir.rglob("*") if path.is_file())
+        sample = {
+            "at": utc_now(), "elapsed_seconds": round(time.monotonic() - (self._run_started_monotonic or time.monotonic()), 3),
+            "rss_high_water_bytes": self._rss_high_water_bytes(), "db_bytes": db_bytes,
+            "artifact_bytes": artifact_bytes,
+            "queue_depths": {
+                "shadow": ctx.runtime.metrics.agent_shadow_queue_depth,
+                "reconciliation_deferred": len(ctx.runtime._pending_reconciliation_persistence_failures),
+            },
+            "pending_resolver_backlog": pending_positions,
+            "pending_reject_backlog": pending_rejects,
+            "sqlite_lock_retry_exhaustions": sqlite_lock_exhaustions,
+            "reconciliation_latency_seconds": round(reconciliation_latency, 6),
+            "scan_latency_seconds": None if scan_latency is None else round(scan_latency, 6),
+            "heartbeat_age_seconds": round(heartbeat_age, 3),
+            "reconciliation_status": snapshot.reconciliation_status,
+            "exchange_read_only_status": snapshot.exchange_read_only_status,
+            "runtime_status": snapshot.runtime_status,
+            "resolver_status": resolver_status,
+            "paper_executions": ctx.runtime.metrics.executions,
+            "lineage": lineage,
+            "invariants": {
+                "worker_alive": not ctx.runtime._stop_event.is_set(),
+                "heartbeat_fresh": heartbeat_age <= 120.0,
+                "reconciliation_clean": snapshot.reconciliation_status == "CLEAN",
+                "resolver_healthy": resolver_status == "OK",
+                "lineage_consistent": lineage_ok and lineage["campaign"] == lineage["run"] == lineage["campaign_run"] == "RUNNING",
+                "reject_persistence_parity": rejected == ctx.runtime.metrics.rejects_persisted,
+                "execution_safe_status": safe_status,
+                "queue_bounded": max(ctx.runtime.metrics.agent_shadow_queue_depth,
+                                     len(ctx.runtime._pending_reconciliation_persistence_failures)) <= 32,
+            },
+        }
+        self._soak_samples.append(sample)
+        with self._soak_samples_path.open("a") as handle:
+            handle.write(json.dumps(sample, sort_keys=True, default=str) + "\n")
+        return sample
+
+    def _soak_resource_summary(self) -> dict[str, Any]:
+        samples = self._soak_samples
+        if not samples:
+            return {"sample_count": 0, "growth_flags": ["NO_RESOURCE_SAMPLES"]}
+        def trend(key: str) -> dict[str, int]:
+            values = [int(item[key]) for item in samples]
+            return {"first": values[0], "last": values[-1], "peak": max(values),
+                    "growth": values[-1] - values[0]}
+        rss = trend("rss_high_water_bytes")
+        db = trend("db_bytes")
+        artifacts = trend("artifact_bytes")
+        queues = [max(item["queue_depths"].values()) for item in samples]
+        backlog = [item["pending_resolver_backlog"] + item["pending_reject_backlog"] for item in samples]
+        scans = [item["scan_latency_seconds"] for item in samples if item["scan_latency_seconds"] is not None]
+        reconciliation = [item["reconciliation_latency_seconds"] for item in samples]
+        last_hour = [item for item in samples if item["elapsed_seconds"] >= samples[-1]["elapsed_seconds"] - 3600]
+        flags: list[str] = []
+        # Audit rows are intentionally appended at every SOAK probe. A fixed
+        # DB-size cap would fail healthy long runs for doing the right thing.
+        db_growth_budget = max(64 * 1024 * 1024, 160 * 1024 * len(samples))
+        if rss["growth"] > 128 * 1024 * 1024:
+            flags.append("RSS_GROWTH_OVER_128_MIB")
+        if db["growth"] > db_growth_budget:
+            flags.append("DB_GROWTH_ABOVE_AUDIT_BUDGET")
+        if artifacts["growth"] > 64 * 1024 * 1024:
+            flags.append("ARTIFACT_GROWTH_OVER_64_MIB")
+        if len(last_hour) >= 12 and all(
+            later["rss_high_water_bytes"] > earlier["rss_high_water_bytes"]
+            for earlier, later in zip(last_hour[-12:], last_hour[-11:])
+        ) and last_hour[-1]["rss_high_water_bytes"] - last_hour[-12]["rss_high_water_bytes"] > 8 * 1024 * 1024:
+            flags.append("SUSTAINED_MONOTONIC_RSS_GROWTH")
+        if max(queues) > 32 or max(backlog) > 32:
+            flags.append("UNBOUNDED_QUEUE_OR_BACKLOG")
+        return {"sample_count": len(samples), "sample_artifact": str(self._soak_samples_path),
+                "rss_high_water_bytes": rss, "db_bytes": db, "artifact_bytes": artifacts,
+                "db_growth_budget_bytes": db_growth_budget,
+                "queue_peak": max(queues), "backlog_peak": max(backlog),
+                "sqlite_lock_retry_exhaustions": samples[-1]["sqlite_lock_retry_exhaustions"],
+                "reconciliation_latency_seconds": {"mean": round(sum(reconciliation) / len(reconciliation), 6),
+                                                  "max": max(reconciliation)},
+                "scan_latency_seconds": {"count": len(scans),
+                                         "mean": None if not scans else round(sum(scans) / len(scans), 6),
+                                         "max": None if not scans else max(scans)},
+                "growth_flags": flags}
+
     def _soak_wait(self, duration_seconds: float, ctx: HarnessContext) -> None:
         segments = max(1, ceil(duration_seconds / self.soak_probe_interval_seconds))
-        remaining = duration_seconds
-        for _ in range(segments):
-            rows = self._normal_market_data()
+        interval_started = time.monotonic()
+        resolver = BurnInCampaignRunner(
+            self.engine, ctx.campaign_id, lambda *_args: [],
+            provider_transient_outage_grace_seconds=300,
+        )
+        for index in range(segments):
+            scan_latency = None
+            rows: list[dict[str, Any]] | None = None
+            if self._soak_observed["probe_count"] % 10 == 0:
+                scan_started = time.monotonic()
+                rows = self._normal_market_data()
+                scan_latency = time.monotonic() - scan_started
+                self._record_market_data_probe(ctx, rows, scan_latency)
+                self._soak_observed["market_data_rows"] += len(rows)
+                self._soak_observed["empty_market_data_probes"] += int(not rows)
+            reconciliation_started = time.monotonic()
             asyncio.run(ctx.runtime._run_reconciliation_once())
+            reconciliation_latency = time.monotonic() - reconciliation_started
+            resolver_result = resolver.resolver_tick()
             snapshot = ctx.runtime._build_runtime_state_snapshot(status="OPERATING")
             ctx.runtime._persist_runtime_state_snapshot(snapshot.runtime_status)
             ctx.runtime._persist_runtime_heartbeat(runtime_state=snapshot.runtime_status)
+            with self.engine.begin() as conn:
+                update_campaign_heartbeat(conn, ctx.campaign_id)
+            sample = self._soak_resource_sample(
+                ctx, scan_latency=scan_latency, reconciliation_latency=reconciliation_latency,
+                resolver_status=str(resolver_result.get("status") or "UNKNOWN"),
+            )
             self._soak_observed["probe_count"] += 1
-            self._soak_observed["market_data_rows"] += len(rows)
-            self._soak_observed["empty_market_data_probes"] += int(not rows)
             self._soak_observed["reconciliation_clean_probes"] += int(
                 snapshot.reconciliation_status == "CLEAN"
             )
-            delay = min(self.soak_probe_interval_seconds, remaining)
+            for key, check in (
+                ("resolver_ok_probes", "resolver_healthy"),
+                ("heartbeat_fresh_probes", "heartbeat_fresh"),
+                ("lineage_ok_probes", "lineage_consistent"),
+                ("worker_alive_probes", "worker_alive"),
+                ("safe_status_probes", "execution_safe_status"),
+            ):
+                self._soak_observed[key] += int(sample["invariants"][check])
+            target = interval_started + duration_seconds * (index + 1) / segments
+            delay = max(0.0, target - time.monotonic()) if self._enforce_wall_clock else duration_seconds / segments
             self._sleep(delay)
-            remaining -= delay
 
     def _finish_soak_operation(self, ctx: HarnessContext, injected_at: str,
                                started_monotonic: float) -> ScenarioResult:
         observed = {**self._soak_observed, "market_data_source": self.market_data_source}
+        observed["market_data_probes"] = list(self._market_data_probes)
+        observed["market_data_recoveries"] = list(self._market_data_recoveries)
+        observed["max_consecutive_empty_market_data_probes"] = self._market_data_max_empty_streak
+        resources = self._soak_resource_summary()
+        observed["resources"] = resources
+        observed["monitor_errors"] = list(self._soak_monitor_errors)
+        all_samples_safe = all(all(sample["invariants"].values()) for sample in self._soak_samples)
         checks = {
-            "normal_market_data_observed": self._soak_observed["probe_count"] > 0
-                                           and self._soak_observed["empty_market_data_probes"] == 0,
+            "normal_market_data_observed": self._soak_observed["market_data_rows"] > 0
+                                           and self._market_data_empty_streak == 0
+                                           and self._market_data_max_empty_streak <= 1
+                                           and self._soak_observed["empty_market_data_probes"]
+                                           <= max(1, len(self._market_data_probes) // 20),
+            "empty_market_data_never_executed": all(
+                sample["paper_executions"] == 0 for sample in self._soak_samples
+            ),
             "clean_reconciliation_between_faults": self._soak_observed["reconciliation_clean_probes"]
                                                     == self._soak_observed["probe_count"],
             "soak_worker_alive": not ctx.runtime._stop_event.is_set(),
+            "continuous_safety_invariants": all_samples_safe,
+            "resource_growth_bounded": not resources["growth_flags"],
+            "no_monitor_errors": not self._soak_monitor_errors,
+            "actual_wall_clock_duration": (not self._enforce_wall_clock
+                                           or time.monotonic() - started_monotonic >= self.soak_hours * 3600),
         }
         recovered_at = utc_now()
         self._terminalize(ctx, "QUALIFICATION_SOAK_COMPLETE")
         return self._finish_result(
             ctx, name="soak_normal_market_data", injected_at=injected_at,
             recovered_at=recovered_at, classification=UNKNOWN,
-            expected=["normal market data remains available between scheduled faults",
+            expected=["public feed gaps recover by the next five-minute probe, with no PAPER execution",
                       "clean reconciliation and heartbeat continue"],
             observed=observed, checks=checks, started_monotonic=started_monotonic,
         )
 
     def run(self) -> dict[str, Any]:
+        self._run_started_monotonic = time.monotonic()
         env_keys = ("ALPHAFORGE_EXECUTION_MODE", "EXECUTION_MODE", "ALPHAFORGE_ALLOW_LIVE_ORDERS",
                     "LIVE_ORDER_SUBMISSION", "ALPHAFORGE_DB_URL", "ALPHAFORGE_BURNIN_DATABASE_PATH")
         old_env = {key: os.environ.get(key) for key in env_keys}
@@ -689,6 +909,7 @@ class AutonomousQualificationHarness:
             if self.mode == "SOAK":
                 soak_ctx = self._new_context(
                     "soak_normal_market_data", self._provider({"fault": None}),
+                    qualification_targets=True,
                 )
             provider_cases = (
                 ("transient_dns_gaierror", "gaierror", TRANSIENT_TRANSPORT, False),
@@ -772,6 +993,9 @@ class AutonomousQualificationHarness:
             "schema_version": "autonomous_qualification_v1", "overall_verdict": verdict,
             "qualification_run_id": self.run_id, "mode": self.mode,
             "started_at": self.started_at, "completed_at": utc_now(),
+            "actual_wall_clock_duration_seconds": round(
+                time.monotonic() - (self._run_started_monotonic or time.monotonic()), 3
+            ),
             "isolation": {"database": str(self.db_path), "artifact_directory": str(self.artifact_dir),
                           "database_created_for_run": True, "paper_only": True,
                           "live_order_submission": False, "production_db_discovery": False,
@@ -793,6 +1017,12 @@ class AutonomousQualificationHarness:
             "cross_scenario_evidence": {"watchdog_and_export_consistency": watchdog_observed,
                                         "reject_persistence": reject_observed},
             "evidence_references": {result.name: result.db_evidence for result in self.results},
+            "soak_resources": self._soak_resource_summary() if self.mode == "SOAK" else None,
+            "soak_sample_invariant_failures": [
+                {"sample": index, "at": sample["at"], "check": name}
+                for index, sample in enumerate(self._soak_samples)
+                for name, passed in sample["invariants"].items() if not passed
+            ],
             "remaining_risks": [
                 "FAST uses deterministic accelerated time and does not prove wall-clock soak stability.",
                 ("SOAK public market-data probes depend on external exchange availability."
@@ -814,6 +1044,7 @@ class AutonomousQualificationHarness:
         lines = ["# AlphaForge Autonomous Qualification", "",
                  f"- Overall verdict: **{report['overall_verdict']}**",
                  f"- Mode: `{report['mode']}`", f"- Run: `{report['qualification_run_id']}`",
+                 f"- Actual wall-clock duration: {report['actual_wall_clock_duration_seconds']} seconds",
                  f"- Database: `{report['isolation']['database']}`",
                  f"- Artifacts: `{report['isolation']['artifact_directory']}`", "",
                  "## Fault injection results", "",
@@ -840,6 +1071,17 @@ class AutonomousQualificationHarness:
                       f"- Persistence gaps: {len(report['persistence_gaps'])}",
                       f"- Campaign/run lineage consistent: {report['campaign_run_lineage_consistency']}", "",
                       "## Evidence references", ""])
+        if report["soak_resources"] is not None:
+            resources = report["soak_resources"]
+            lines.extend(["", "## SOAK resource stability", "",
+                          f"- Samples: {resources['sample_count']}",
+                          f"- RSS high-water growth: {resources['rss_high_water_bytes']['growth']} bytes",
+                          f"- Database growth: {resources['db_bytes']['growth']} bytes",
+                          f"- Artifact growth: {resources['artifact_bytes']['growth']} bytes",
+                          f"- Peak queue depth: {resources['queue_peak']}",
+                          f"- Peak resolver/reject backlog: {resources['backlog_peak']}",
+                          f"- Growth flags: {', '.join(resources['growth_flags']) or 'none'}",
+                          f"- Sample log: `{resources['sample_artifact']}`", ""])
         for scenario, refs in report["evidence_references"].items():
             lines.append(f"- `{scenario}`: " + (", ".join(f"`{ref}`" for ref in refs) if refs else "none"))
         lines.extend(["", "## Remaining risks", ""])
