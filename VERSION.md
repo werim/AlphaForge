@@ -1,5 +1,15 @@
 # AlphaForge Version
 
+## Autonomous qualification harness (2026-09-15)
+- Current version/phase: isolated PAPER-only end-to-end qualification for the POST363 transient-provider recovery baseline.
+- Runtime maturity: FAST deterministically exercises 15 provider, persistence, heartbeat, resolver, restart, and replay faults; SOAK schedules the same matrix across a configurable 6–24 hour run while the production public market scanner, clean reconciliation, and heartbeat paths continue probing. Every scenario uses a fresh database, campaign/run, runtime identity, and artifact directory.
+- BACKTEST/PAPER/LIVE alignment: qualification executes production PAPER safety paths with live submission disabled. BACKTEST and LIVE behavior are unchanged; the harness cannot authorize exchange mutation.
+- Lifecycle/execution coverage: unknown exchange state blocks new and in-flight PAPER execution, transient recovery requires a committed CLEAN reconciliation, terminal state is checked across all campaign lineage tables, and every harness worker has a persisted exit reason.
+- Persistence/execution realism: machine and human reports link each fault to exact isolated SQLite evidence; reconciliation lock recovery, replay identity, reject parity, qualification readability, and export checksums are verified. No schema or migration change.
+- Validation: focused relevant suite 325 passed; full suite 1,530 passed and 3 skipped; final FAST qualification PASS with 15 faults, no invariant failures, persistence gaps, unexplained exits, or lineage inconsistencies.
+- Known critical risks: FAST is accelerated; public SOAK depends on external exchange availability, while its optional synthetic mode cannot prove that availability. Signed-account reconciliation remains deterministic and isolated from production credentials. A persistent database writer outage delays durable evidence. LIVE remains NOT READY.
+- Last audit date: 2026-09-15. Live readiness verdict: NOT LIVE READY.
+
 ## POST363 transient provider outage recovery (2026-09-14)
 - Current version/phase: prospective PAPER burn-in recovery correction; POST363 evidence remains unchanged and no campaign was restarted.
 - Runtime maturity: known transient read-only transport failures block execution immediately while reconciliation and resolver probing continue for the configured 300-second grace. Auth/protocol failures pause immediately; unknown failures retain a three-attempt escalation.

@@ -114,7 +114,8 @@ def test_major_reject_reason_classes_are_non_empty() -> None:
     ]
     for expected, candidate_payload, market_overrides, stats in cases:
         candidate = OrderCandidate(**candidate_payload)
-        decision = evaluate_trade_quality(candidate, {"volatility_regime": "normal", **market_overrides}, stats, {})
+        decision = evaluate_trade_quality(candidate, {"volatility_regime": "normal", **market_overrides}, stats,
+                                          {"BLOCK_UNKNOWN_EXPECTANCY": True})
         assert decision.reject_reason == expected
         assert decision.reject_reason not in {"", "UNKNOWN"}
 

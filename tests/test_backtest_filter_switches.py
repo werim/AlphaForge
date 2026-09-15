@@ -58,8 +58,9 @@ def test_backtest_trade_quality_switches_are_real_decision_gates():
         ("DAILY_SYMBOL_TRADE_LIMIT", _candidate(), {"volatility_regime": "normal"}, {"trades_today_by_symbol": {"BTCUSDT": 2}}),
     ]
     for reason, candidate, market, stats in cases:
-        enabled = evaluate_trade_quality(candidate, market, stats, {"MODE": "BACKTEST"})
-        disabled = evaluate_trade_quality(candidate, market, stats, {"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": [reason]})
+        canonical = {"MODE": "BACKTEST", "MAX_TRADES_PER_SYMBOL_PER_DAY": 2}
+        enabled = evaluate_trade_quality(candidate, market, stats, canonical)
+        disabled = evaluate_trade_quality(candidate, market, stats, {**canonical, "DISABLED_BACKTEST_FILTERS": [reason]})
         assert enabled.reject_reason == reason
         assert disabled.reject_reason != reason
         assert reason in disabled.diagnostics["bypassed_reject_reasons"]

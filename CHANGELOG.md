@@ -1,3 +1,26 @@
+# Autonomous qualification harness — 2026-09-15
+
+### Added
+- PAPER-only FAST and 6–24 hour SOAK qualification modes with per-run temporary database/artifact isolation and public market-data probes between scheduled faults.
+- Deterministic injection and evidence reporting for 15 provider, persistence, resolver, heartbeat, lifecycle, continuation, and replay faults.
+- JSON and Markdown reports with exact evidence references, invariant results, recovery latency, worker lifecycle, and campaign lineage.
+
+### Changed
+- Nine backtest/trade-quality regressions now provide the policy values they assert instead of inheriting operator `.env` overrides.
+
+### Fixed
+- Qualification scenario failures now produce `NEEDS_FIX` evidence and automatic teardown rather than requiring manual campaign debugging.
+- Previously documented backtest/trade-quality failures are classified and made environment-independent; the full suite is clean.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. No runtime state-machine, schema, migration, production database, or order-submission change.
+
+### Known Issues
+- Accelerated FAST does not prove wall-clock soak stability. Public SOAK depends on external availability; optional synthetic SOAK cannot validate it. Persistent SQLite writer loss delays durable evidence. LIVE remains NOT READY.
+
 # POST363 transient provider outage recovery — 2026-09-14
 
 ### Added

@@ -1,3 +1,25 @@
+# Autonomous qualification harness — 2026-09-15
+
+## Why the patch was needed
+The POST363 recovery patch had focused regression coverage but no single autonomous entry point that could create isolated evidence, inject the complete operational fault matrix, enforce cross-table/runtime invariants, and explain a failed qualification without an operator manually inspecting campaign state. Historical test reports also carried nine backtest/trade-quality failures whose relationship to the recovery work had not been independently classified.
+
+## Files and architecture
+`src/alphaforge/autonomous_qualification.py` adds a PAPER-only FAST/SOAK command. Every invocation creates one unique temporary qualification database and artifact directory, then creates an independent campaign/run/runtime context for each fault. It calls the existing provider, runtime reconciliation, final execution gate, resolver, watchdog, atomic campaign terminalizer, qualification, and export code. It never discovers a campaign database, reuses a runtime instance, starts a worker process, or enables live order submission. Scenario exceptions become `NEEDS_FIX` report evidence and all active contexts are terminalized during automatic teardown.
+
+`tests/test_autonomous_qualification.py` covers isolation beside a sentinel `POST363.db`, unique paths and identities, complete machine/human reports, SOAK duration bounds and scheduling, and BLOCKED CLI behavior. `tests/test_backtest_filter_switches.py`, `tests/test_backtest_order_scanner.py`, `tests/test_backtest_paper_pre_submit_parity.py`, `tests/test_phase123_foundations.py`, and `tests/test_trade_quality.py` now pass policy values explicitly instead of inheriting an operator `.env`. `docs/AUTONOMOUS_QUALIFICATION_HARNESS.md` documents commands, architecture, fault/invariant matrices, evidence, and the nine-failure classification.
+
+## Behavior, persistence, lifecycle, and compatibility
+FAST runs an accelerated deterministic matrix for DNS/`gaierror`, `URLError`, timeout, connection reset, HTTP 429/5xx, permanent authentication, malformed responses, grace expiry, SQLite contention, stale heartbeat, delayed resolver data, unavailable reconciliation, supported worker continuation, and duplicate persistence replay. SOAK schedules the same matrix over 6–24 hours and keeps the production public market scanner, clean reconciliation, persisted state snapshots, and heartbeats active between injections. Its explicit synthetic market-data option supports offline test execution.
+
+Every fault result contains injection/recovery timestamps, provider class, expectation, observation, invariant checks, exact SQLite table/ID references, verdict, and recovery latency. Reports expose worker lifecycle, state-transition anomalies, persistence gaps, campaign lineage, reject parity, qualification/export consistency, and remaining risks. The harness uses the existing schema and persistence structures; no database migration or historical rewrite is required. Product lifecycle, execution, thresholds, reconciliation, and provider-recovery behavior are unchanged by this harness.
+
+The nine prior failures are all classified as obsolete tests. Each asserted a canonical default while allowing a repository/operator environment value to change the production policy. Explicit test inputs preserve the intended assertions and all nine pass in the ordinary environment. They are neither POST363 blockers nor product defects.
+
+## Validation and qualification result
+The focused harness and recovery-relevant suite passed 325 tests. The complete suite passed 1,530 tests with 3 skips and no failures. The final FAST run at `/private/tmp/alphaforge-autonomous-qualification/alphaforge-qualification-pttmnnwi` passed all 15 injected faults and 17 total scenario/cross-scenario checks. It reported zero invariant failures, zero persistence gaps, zero unexplained worker exits, and consistent campaign/run/mapping lineage. The injected SQLite lock produced the expected logged `SQLITE_BUSY` persistence failure before recovery evidence committed.
+
+Remaining risk is bounded: accelerated FAST does not prove 6–24 hour stability; public SOAK depends on external exchange availability, and synthetic SOAK cannot prove it. Signed-account reconciliation stays deterministic because the isolated harness never consumes production credentials. A persistent SQLite writer outage still delays durable attempt evidence until storage recovers, while the runtime remains fail-closed. No LIVE readiness conclusion follows. Review and merge the harness, then use a newly created qualification workspace for each run.
+
 # POST363 transient provider outage recovery — 2026-09-14
 
 ## Why and root cause

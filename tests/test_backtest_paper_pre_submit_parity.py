@@ -74,13 +74,13 @@ def test_backtest_paper_parity_low_score():
 def test_backtest_paper_parity_low_effective_rr():
     market = _market(rr=1.15, spread_pct=0.003, expectancy=0.2)
     market["execution_ctx"] = build_execution_context(market)
-    backtest, paper, backtest_ctx, paper_ctx = _pair(market, config={"MIN_RR": 1.1, "MAX_SPREAD_PCT": 0.02})
+    backtest, paper, backtest_ctx, paper_ctx = _pair(market, config={"MIN_RR": 1.1, "MIN_EFFECTIVE_RR": 1.6, "MAX_SPREAD_PCT": 0.02})
     assert backtest["status"] == paper["status"] == "rejected"
     assert backtest["reject_reason"] == paper["reject_reason"] == "RR_TOO_LOW"
 
 
 def test_backtest_paper_parity_expectancy_missing():
-    backtest, paper, backtest_ctx, paper_ctx = _pair(_market(expectancy=None))
+    backtest, paper, backtest_ctx, paper_ctx = _pair(_market(expectancy=None), config={"BLOCK_UNKNOWN_EXPECTANCY": True})
     assert backtest["status"] == paper["status"] == "rejected"
     assert backtest["reject_reason"] == paper["reject_reason"] == "EXPECTANCY_MISSING"
 
