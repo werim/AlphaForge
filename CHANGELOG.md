@@ -1,3 +1,27 @@
+# POST363 transient provider outage recovery — 2026-09-14
+
+### Added
+- `ALPHAFORGE_PROVIDER_TRANSIENT_OUTAGE_GRACE_SECONDS` (default 300) and explicit transient, permanent, and unknown provider-failure classes.
+- Recovery and expiry regressions for read-only reconciliation, resolver, active PAPER exposure, final execution, watchdog, and continuation state.
+
+### Changed
+- Transient provider failures keep PAPER workers probing while execution is blocked; auth/protocol failures escalate immediately. Unknown failures retain bounded escalation.
+- Watchdog provider counts reset after successful resolver evidence and do not turn an in-grace outage into a failure from historical attempts.
+
+### Fixed
+- Resolver-only outages now reach the runtime fail-closed gate; idle resolvers probe before claiming recovery.
+- A committed CLEAN reconciliation is required to clear unknown exchange state and resolver recovery pending state. Runtime snapshots and heartbeats report `RECOVERY_REQUIRED` while blocked.
+- Provider expiry pauses campaign, run, and campaign-run mapping in one transaction; repeated failure attempts carry unique audit identities.
+
+### Removed
+- The three-consecutive-failure pause rule for known transient resolver transport errors.
+
+### Breaking Changes
+- None. No database schema, migration, historical-row rewrite, or CSV export change.
+
+### Known Issues
+- Persistently unavailable SQLite storage delays durable attempt evidence until a later successful transaction. POST363 remains historical evidence; no automatic restart or LIVE-readiness claim.
+
 # Adaptive Decision Calibration Engine shadow foundation — 2026-09-14
 
 ### Added

@@ -1,5 +1,14 @@
 # AlphaForge Version
 
+## POST363 transient provider outage recovery (2026-09-14)
+- Current version/phase: prospective PAPER burn-in recovery correction; POST363 evidence remains unchanged and no campaign was restarted.
+- Runtime maturity: known transient read-only transport failures block execution immediately while reconciliation and resolver probing continue for the configured 300-second grace. Auth/protocol failures pause immediately; unknown failures retain a three-attempt escalation.
+- BACKTEST/PAPER/LIVE alignment: BACKTEST is unchanged. PAPER uses the new recovery gate and final execution recheck; LIVE order authorization and fail-closed behavior remain unchanged.
+- Lifecycle/execution coverage: an in-flight PAPER decision is cancelled if the final execution boundary sees an outage. Active exposure stays unresolved until authenticated CLEAN reconciliation commits.
+- Persistence/execution realism: existing reconciliation, recovery, campaign event, and continuation tables carry failure attempts and explicit recovery/terminal evidence. No schema or export migration is required.
+- Known critical risks: an indefinitely unavailable SQLite writer cannot durably record new attempts; resolver attempts are retained in memory for the next successful writer transaction. No production worker or exchange validation was performed. LIVE remains NOT READY.
+- Last audit date: 2026-09-14. Live readiness verdict: NOT LIVE READY.
+
 # Adaptive Decision Calibration Engine foundation (2026-09-14)
 - Current version/phase: `adaptive_shadow_v1`, offline Phase 1 foundation; no runtime threshold mutation.
 - Runtime maturity: retrospective, in-sample shadow proposals only. Canonical accepted and rejected PAPER campaign outcomes share one cost-adjusted net-R framework. Unresolved gates and orphan outcomes remain diagnostic.
