@@ -15,7 +15,7 @@ from alphaforge.burnin import LEGACY_REJECT_IDENTITY_MODE, BurnInRun, bootstrap_
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
 from alphaforge.config import runtime_filter_config
 from alphaforge.process_liveness import process_is_alive
-from alphaforge.provider_failures import classify_provider_exception, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL
+from alphaforge.provider_failures import classify_provider_exception, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, RETRYABLE_MARKET_DATA
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
 DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
@@ -749,6 +749,7 @@ def check_campaign_completion(conn: Any, campaign_id: str) -> dict[str, Any]:
 
 class CampaignCandleProviderError(RuntimeError): pass
 class MarketDataUnavailable(CampaignCandleProviderError): pass
+class MarketDataImmature(CampaignCandleProviderError): pass
 class MarketDataStale(CampaignCandleProviderError): pass
 class ProviderFailure(CampaignCandleProviderError): pass
 
@@ -759,7 +760,7 @@ class BinanceReadOnlyCandleProvider:
         self.source_provenance = {"provider": "BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE", "market_type": "USD_M_FUTURES", "interval": interval, "base_url": self.base_url, "order_submission": "DISABLED"}
 
     def __call__(self, symbol: str, start: str, end: str, interval: str | None = None) -> list[dict[str, Any]]:
-        from alphaforge.historical_market_data import fetch_binance_klines_paginated, HistoricalDataError
+        from alphaforge.historical_market_data import fetch_binance_klines_paginated, HistoricalDataError, HistoricalDataImmatureError
         start_dt = _parse_utc(start); end_dt = _parse_utc(end)
         if start_dt is None or end_dt is None or end_dt <= start_dt:
             raise MarketDataUnavailable("MARKET_DATA_UNAVAILABLE")
@@ -767,7 +768,9 @@ class BinanceReadOnlyCandleProvider:
         end_ms = int(end_dt.timestamp() * 1000)
         try:
             resolved_interval=interval or self.interval
-            candles = fetch_binance_klines_paginated(symbol, resolved_interval, start_ms, end_ms, fetcher=self.fetcher, base_url=self.base_url)
+            candles = fetch_binance_klines_paginated(symbol, resolved_interval, start_ms, end_ms, fetcher=self.fetcher, base_url=self.base_url, closed_only=True)
+        except HistoricalDataImmatureError as exc:
+            raise MarketDataImmature(f"MARKET_DATA_IMMATURE:{exc}") from exc
         except HistoricalDataError as exc:
             msg = str(exc)
             if "No candles" in msg or "shorter than one complete candle" in msg:
@@ -877,8 +880,15 @@ class BurnInCampaignRunner:
         except Exception as exc:
             if isinstance(exc, OperationalError) and not _is_sqlite_lock_error(exc):
                 raise
-            self.resolver_failure_count += 1
             failure_class = classify_provider_exception(exc)
+            if failure_class == RETRYABLE_MARKET_DATA:
+                try:
+                    _with_fresh_lock_retry(self.engine, lambda conn: event(conn, self.campaign_id,
+                        "RESOLVER_BATCH_DEFERRED", details={"reason": "IMMATURE_CANDLE", "error": str(exc)}))
+                except Exception as event_exc:
+                    print(f"AlphaForge resolver deferred event unavailable ({event_exc!r})", file=sys.stderr, flush=True)
+                return {"status": "RETRYING", "error": str(exc), "defer_reason": "IMMATURE_CANDLE"}
+            self.resolver_failure_count += 1
             if failure_class == TRANSIENT_TRANSPORT and self._transient_failure_started_monotonic is None:
                 self._transient_failure_started_monotonic = time.monotonic()
             elapsed = (time.monotonic() - self._transient_failure_started_monotonic

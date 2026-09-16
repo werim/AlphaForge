@@ -92,7 +92,7 @@ def test_canonical_provider_uses_configured_market_data_endpoint():
         interval='1m', base_url='https://market-data.example/',
         fetcher=lambda url: calls.append(url) or [[1767225660000,'100','101','99','100','10']],
     )
-    provider('BTCUSDT','2026-01-01T00:00:00Z','2026-01-01T00:01:00Z')
+    provider('BTCUSDT','2026-01-01T00:00:00Z','2026-01-01T00:02:00Z')
     assert calls[0].startswith('https://market-data.example/fapi/v1/klines?')
     assert provider.source_provenance['base_url'] == 'https://market-data.example'
 

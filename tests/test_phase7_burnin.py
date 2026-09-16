@@ -79,7 +79,7 @@ def test_attached_paper_execution_persists_guided_pending_position(tmp_path: Pat
     mtf={'regime':{'regime':'LONG'},'setup':{'phase':'PULLBACK'},'execution':{'direction':'LONG'}}
     asyncio.run(orch._execute('BTCUSDT',{'signal_id':'guided-signal','order_type':'MARKET'},{'source_exchange':'binance','side':'LONG','entry':100,'sl':99,'tp':102,'rr':2,'execution_ctx':execution_ctx,'mtf':mtf}))
     with engine.connect() as conn:
-        row=conn.execute(text("SELECT signal_id,side,stop,target,source_provenance_json,status FROM burnin_pending_position_outcomes")).mappings().one()
+        row=conn.execute(text("SELECT signal_id,side,stop,target,quantity,notional,simulated_fill,source_provenance_json,status FROM burnin_pending_position_outcomes")).mappings().one()
         open_paper_positions=conn.execute(text("SELECT COUNT(*) FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign.campaign_id}).scalar_one()
         generic_orders=conn.execute(text("SELECT COUNT(*) FROM orders")).scalar_one()
         generic_positions=conn.execute(text("SELECT COUNT(*) FROM positions")).scalar_one()
@@ -91,6 +91,9 @@ def test_attached_paper_execution_persists_guided_pending_position(tmp_path: Pat
     provenance=json.loads(row['source_provenance_json'])
     assert row['signal_id']=='guided-signal' and row['side']=='LONG' and row['status']=='OPEN'
     assert (row['stop'],row['target'])==(99,102)
+    assert row['notional'] == 10.0
+    assert abs(row['quantity'] - row['notional']/row['simulated_fill']) < 1e-12
+    assert orch._active_positions['BTCUSDT'] == 10.0
     assert provenance['setup_phase']=='PULLBACK' and provenance['execution_direction']=='LONG'
     assert open_paper_positions == 1
     assert health["open_paper_positions"] == open_paper_positions

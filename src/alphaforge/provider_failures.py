@@ -11,6 +11,7 @@ from typing import Any, Mapping
 TRANSIENT_TRANSPORT = "TRANSIENT_TRANSPORT"
 PERMANENT_AUTH_OR_PROTOCOL = "PERMANENT_AUTH_OR_PROTOCOL"
 UNKNOWN = "UNKNOWN"
+RETRYABLE_MARKET_DATA = "RETRYABLE_MARKET_DATA"
 
 _NETWORK_ERRNOS = {errno.ECONNABORTED, errno.ECONNREFUSED, errno.ECONNRESET,
                    errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ETIMEDOUT,
@@ -28,11 +29,15 @@ def classify_provider_exception(exc: BaseException) -> str:
                     else PERMANENT_AUTH_OR_PROTOCOL)
         if isinstance(current, ssl.SSLError):
             return PERMANENT_AUTH_OR_PROTOCOL
+        if current.__class__.__name__ in {"MarketDataImmature", "HistoricalDataImmatureError"}:
+            return RETRYABLE_MARKET_DATA
         if current.__class__.__name__ == "ReconciliationPayloadError" and isinstance(current.__cause__, error.HTTPError):
             current = current.__cause__
             continue
         if current.__class__.__name__ in {"ReconciliationAuthError", "ReconciliationPayloadError",
-                                          "ReconciliationScopeError", "HistoricalDataError"}:
+                                          "ReconciliationScopeError"}:
+            return PERMANENT_AUTH_OR_PROTOCOL
+        if current.__class__.__name__ == "HistoricalDataError" and "UNSUPPORTED_TIMEFRAME" in str(current):
             return PERMANENT_AUTH_OR_PROTOCOL
         if isinstance(current, (socket.gaierror, TimeoutError, ConnectionError)):
             return TRANSIENT_TRANSPORT

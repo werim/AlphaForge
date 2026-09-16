@@ -288,21 +288,36 @@ def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_p
     if not row: raise KeyError('position not found')
     r=dict(row) if isinstance(row, sqlite3.Row) else dict(row._mapping)
     if r.get('status') == 'CLOSED': return {'status':'IDEMPOTENT','trade_id':trade_id}
-    fill=float(r.get('simulated_fill') or r.get('planned_entry')); qty=float(r.get('quantity') or 1); side=_side(r.get('side')); sign=-1 if side=='SHORT' else 1
-    gross_pnl=(float(exit_price)-fill)*qty*sign; risk=abs(fill-float(r.get('stop') or fill)) or 1.0; gross_r=(float(exit_price)-fill)*sign/risk
+    fill=float(r.get('simulated_fill') or r.get('planned_entry')); qty=float(r['quantity']); side=_side(r.get('side')); sign=-1 if side=='SHORT' else 1
+    risk_per_unit=abs(fill-float(r['stop'])) if r.get('stop') is not None else 0.0
+    risk_usd=risk_per_unit*qty
+    gross_pnl=(float(exit_price)-fill)*qty*sign
+    gross_r=gross_pnl/risk_usd if risk_usd > 0 else None
     missing=[k for k in ('exit_spread','exit_slippage','exit_fee','funding','latency_impact_penalty') if exit_costs.get(k) is None]
-    total=None if missing else sum(float(exit_costs.get(k) or 0) for k in ('exit_spread','exit_slippage','exit_fee','funding','latency_impact_penalty')) + float(r.get('entry_spread') or 0)+float(r.get('entry_slippage') or 0)+float(r.get('entry_fee') or 0)
+    missing += [k for k in ('entry_spread','entry_slippage','entry_fee') if r.get(k) is None]
+    if risk_usd <= 0: missing.append('risk_usd')
     try: provenance=json.loads(r.get('source_provenance_json') or '{}')
     except (TypeError,json.JSONDecodeError): provenance={}
-    net_r=None if total is None else gross_r-total
+    raw_costs={
+        'spread_cost': None if r.get('entry_spread') is None or exit_costs.get('exit_spread') is None else float(r['entry_spread'])+float(exit_costs['exit_spread']),
+        'entry_slippage_cost': r.get('entry_slippage'),
+        'exit_slippage_cost': exit_costs.get('exit_slippage'),
+        'fee_cost': None if r.get('entry_fee') is None or exit_costs.get('exit_fee') is None else float(r['entry_fee'])+float(exit_costs['exit_fee']),
+        'funding_cost': exit_costs.get('funding'),
+        'latency_cost': exit_costs.get('latency_impact_penalty'),
+        'volatility_penalty': exit_costs.get('volatility_penalty'),
+        'liquidity_penalty': exit_costs.get('liquidity_penalty'),
+    }
+    multiplier=risk_usd if provenance.get('execution_cost_unit') == 'R' else 1.0
+    costs_usd={key: None if value is None else float(value)*multiplier for key,value in raw_costs.items()}
+    total=None if missing else sum(float(value or 0) for value in costs_usd.values())
     net_pnl=None if total is None else gross_pnl-total
-    if total is not None and provenance.get('execution_cost_unit') == 'R':
-        net_pnl=gross_pnl-(total*risk*qty)
+    net_r=None if net_pnl is None or risk_usd <= 0 else net_pnl/risk_usd
     hold=(_dt(exit_time)-_dt(r['entry_time'])).total_seconds()
     evidence_missing=[*missing, *(['ambiguous_intrabar_sequence'] if ambiguous else [])]
     _exec(conn,"""UPDATE burnin_pending_position_outcomes SET status='CLOSED',exit_time=:xt,exit_price=:xp,exit_reason=:xr,gross_pnl=:gp,gross_r=:gr,exit_spread=:es,exit_slippage=:esl,exit_fee=:ef,funding=:fu,latency_impact_penalty=:li,total_execution_cost=:tc,net_pnl=:np,net_r=:nr,hold_duration_seconds=:hold,mfe=:mfe,mae=:mae,evidence_complete=:ec,missing_fields_json=:mf,resolved_at=:now WHERE trade_id=:tid""",{"tid":trade_id,"xt":exit_time,"xp":exit_price,"xr":exit_reason,"gp":gross_pnl,"gr":gross_r,"es":exit_costs.get('exit_spread'),"esl":exit_costs.get('exit_slippage'),"ef":exit_costs.get('exit_fee'),"fu":exit_costs.get('funding'),"li":exit_costs.get('latency_impact_penalty'),"tc":total,"np":net_pnl,"nr":net_r,"hold":hold,"mfe":mfe,"mae":mae,"ec":0 if evidence_missing else 1,"mf":json.dumps(evidence_missing),"now":utc_now()})
-    outcome_payload={'pending_position_id':r['pending_position_id'],'signal_id':r.get('signal_id'),'source_provenance':provenance,'phase':provenance.get('setup_phase'),'execution':provenance.get('execution_direction'),'ambiguous_intrabar_sequence':ambiguous}
-    persist_burnin_trade_outcome(conn,outcome_id='tout_'+trade_id,burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),trade_id=trade_id,symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',closed_at=exit_time,gross_r=gross_r,gross_pnl=gross_pnl,costs={'spread_cost':None if exit_costs.get('exit_spread') is None else (r.get('entry_spread') or 0)+exit_costs.get('exit_spread'),'entry_slippage_cost':r.get('entry_slippage'),'exit_slippage_cost':exit_costs.get('exit_slippage'),'fee_cost':None if exit_costs.get('exit_fee') is None else (r.get('entry_fee') or 0)+exit_costs.get('exit_fee'),'funding_cost':exit_costs.get('funding'),'latency_cost':exit_costs.get('latency_impact_penalty'),'volatility_penalty':exit_costs.get('volatility_penalty'),'liquidity_penalty':exit_costs.get('liquidity_penalty')},net_r=net_r,net_pnl=net_pnl,effective_rr_at_entry=provenance.get('effective_rr_at_entry'),realized_effective_rr=net_r,hold_duration_seconds=hold,mfe=mfe,mae=mae,exit_reason=exit_reason,payload=outcome_payload)
+    outcome_payload={'pending_position_id':r['pending_position_id'],'signal_id':r.get('signal_id'),'source_provenance':provenance,'phase':provenance.get('setup_phase'),'execution':provenance.get('execution_direction'),'ambiguous_intrabar_sequence':ambiguous,'quantity':qty,'notional':r.get('notional'),'simulated_fill':fill,'cost_unit':'USD'}
+    persist_burnin_trade_outcome(conn,outcome_id='tout_'+trade_id,burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),trade_id=trade_id,symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',closed_at=exit_time,gross_r=gross_r,gross_pnl=gross_pnl,costs=costs_usd,net_r=net_r,net_pnl=net_pnl,effective_rr_at_entry=provenance.get('effective_rr_at_entry'),realized_effective_rr=net_r,hold_duration_seconds=hold,mfe=mfe,mae=mae,exit_reason=exit_reason,payload=outcome_payload)
     if ambiguous:
         _exec(conn,"UPDATE burnin_trade_outcomes SET evidence_complete=0,missing_cost_fields_json=:mf WHERE outcome_id=:oid",{'mf':json.dumps(evidence_missing),'oid':'tout_'+trade_id})
     return {'status':'CLOSED','trade_id':trade_id,'evidence_complete':not evidence_missing,'net_r':net_r,'exit_reason':exit_reason}
@@ -339,10 +354,13 @@ def resolve_campaign_positions(conn: Any, campaign_id: str, candles_by_trade: Ma
         try: provenance=json.loads(r.get('source_provenance_json') or '{}')
         except (TypeError,json.JSONDecodeError): provenance={}
         model=provenance.get('execution_cost_model') if isinstance(provenance.get('execution_cost_model'),Mapping) else {}
+        risk_usd=abs(fill-stop)*float(r['quantity'])
         def half(name):
             value=model.get(name)
             return None if value is None else float(value)/2.0
         exit_costs={'exit_spread':half('spread_penalty'),'exit_slippage':half('slippage_penalty'),'exit_fee':half('fee_penalty'),'funding':model.get('funding_penalty'),'latency_impact_penalty':model.get('latency_penalty'),'volatility_penalty':model.get('volatility_penalty'),'liquidity_penalty':model.get('liquidity_penalty')}
+        if provenance.get('execution_cost_model_unit') == 'R' and provenance.get('execution_cost_unit') == 'USD':
+            exit_costs={key: None if value is None else float(value)*risk_usd for key,value in exit_costs.items()}
         ts,sl,tp=terminal; ambiguous=bool(sl and tp); reason='AMBIGUOUS_INTRABAR' if ambiguous else ('SL_HIT' if sl else 'TP_HIT'); price=stop if sl else target
         resolve_position_closure(conn,trade_id=r['trade_id'],exit_time=ts.isoformat().replace('+00:00','Z'),exit_price=price,exit_reason=reason,exit_costs=exit_costs,mfe=max(favorable,default=0.0),mae=max(adverse,default=0.0),ambiguous=ambiguous)
         counts['closed']+=1; counts['ambiguous' if ambiguous else 'sl' if sl else 'tp']+=1

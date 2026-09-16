@@ -15,6 +15,10 @@ class HistoricalDataError(RuntimeError):
     pass
 
 
+class HistoricalDataImmatureError(HistoricalDataError):
+    """A recently closed candle is not available yet; the read can be retried."""
+
+
 SUPPORTED_INTERVAL_MS: dict[str, int] = {
     "1m": 60_000,
     "5m": 300_000,
@@ -68,10 +72,10 @@ def _floor_to_step(value: int, step: int) -> int:
     return (value // step) * step
 
 
-def expected_candle_count(start_ms: int, end_ms: int, interval: str) -> int:
+def expected_candle_count(start_ms: int, end_ms: int, interval: str, *, closed_only: bool = False) -> int:
     step = _interval_ms(interval, source_function="expected_candle_count")
     first_expected = _ceil_to_step(start_ms, step)
-    last_expected = _floor_to_step(end_ms, step)
+    last_expected = _floor_to_step(end_ms, step) - (step if closed_only else 0)
     if last_expected < first_expected:
         return 0
     return ((last_expected - first_expected) // step) + 1
@@ -81,8 +85,8 @@ def _format_ms(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 
-def _coverage_error(reason: str, candles: list[HistoricalCandle], start_ms: int, end_ms: int, step: int, symbol: str, interval: str) -> HistoricalDataError:
-    expected = expected_candle_count(start_ms, end_ms, interval)
+def _coverage_error(reason: str, candles: list[HistoricalCandle], start_ms: int, end_ms: int, step: int, symbol: str, interval: str, *, closed_only: bool = False, immature: bool = False) -> HistoricalDataError:
+    expected = expected_candle_count(start_ms, end_ms, interval, closed_only=closed_only)
     actual = len(candles)
     actual_first = candles[0].timestamp if candles else None
     actual_last = candles[-1].timestamp if candles else None
@@ -94,21 +98,22 @@ def _coverage_error(reason: str, candles: list[HistoricalCandle], start_ms: int,
         f"actual_first={_format_ms(actual_first) if actual_first is not None else None} "
         f"actual_last={_format_ms(actual_last) if actual_last is not None else None}"
     )
-    return HistoricalDataError(details)
+    return HistoricalDataImmatureError(details) if immature else HistoricalDataError(details)
 
 
-def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, end_ms: int, fetcher: Callable[[str], Any] | None = None, *, base_url: str = "https://fapi.binance.com") -> list[HistoricalCandle]:
+def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, end_ms: int, fetcher: Callable[[str], Any] | None = None, *, base_url: str = "https://fapi.binance.com", closed_only: bool = False) -> list[HistoricalCandle]:
     symbol = validate_single_binance_symbol(symbol)
     fetch = fetcher or _fetch_json
     step = _interval_ms(interval, source_function="fetch_binance_klines_paginated")
+    fetch_end_ms = _floor_to_step(end_ms, step) - step if closed_only else end_ms
     cursor = start_ms
     out: list[HistoricalCandle] = []
     seen: set[int] = set()
     max_pages = 10_000
     for _ in range(max_pages):
-        if cursor > end_ms:
+        if cursor > fetch_end_ms:
             break
-        params = urlencode({"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": end_ms, "limit": 1500})
+        params = urlencode({"symbol": symbol, "interval": interval, "startTime": cursor, "endTime": fetch_end_ms, "limit": 1500})
         rows = fetch(f"{base_url.rstrip('/')}/fapi/v1/klines?{params}")
         if not rows:
             break
@@ -117,12 +122,16 @@ def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, en
         for r in rows:
             ts = int(r[0])
             last_ts = ts
-            if ts in seen:
+            if ts in seen or ts > fetch_end_ms:
                 continue
             seen.add(ts)
             out.append(HistoricalCandle(ts, float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])))
             page_new += 1
         if last_ts is None:
+            break
+        if closed_only and page_new == 0 and last_ts > fetch_end_ms:
+            # Some providers return the open/current candle despite endTime.
+            # Coverage validation decides whether the closed window is ready.
             break
         nxt = last_ts + step
         if nxt <= cursor or page_new == 0:
@@ -132,28 +141,29 @@ def fetch_binance_klines_paginated(symbol: str, interval: str, start_ms: int, en
         raise HistoricalDataError("Exceeded pagination limit")
 
     out.sort(key=lambda c: c.timestamp)
-    _validate_coverage(out, start_ms, end_ms, step, symbol, interval)
+    _validate_coverage(out, start_ms, end_ms, step, symbol, interval, closed_only=closed_only)
     return out
 
 
-def _validate_coverage(candles: list[HistoricalCandle], start_ms: int, end_ms: int, step: int, symbol: str, interval: str) -> None:
-    expected = expected_candle_count(start_ms, end_ms, interval)
+def _validate_coverage(candles: list[HistoricalCandle], start_ms: int, end_ms: int, step: int, symbol: str, interval: str, *, closed_only: bool = False) -> None:
+    expected = expected_candle_count(start_ms, end_ms, interval, closed_only=closed_only)
     first_expected = _ceil_to_step(start_ms, step)
-    last_expected = _floor_to_step(end_ms, step)
+    last_expected = _floor_to_step(end_ms, step) - (step if closed_only else 0)
+    recent_boundary = closed_only and end_ms >= int(datetime.now(timezone.utc).timestamp() * 1000) - 2 * step
     if expected <= 0:
-        raise _coverage_error("Requested range is shorter than one complete candle boundary", candles, start_ms, end_ms, step, symbol, interval)
+        raise _coverage_error("Requested range is shorter than one complete candle boundary", candles, start_ms, end_ms, step, symbol, interval, closed_only=closed_only, immature=recent_boundary)
     if not candles:
-        raise _coverage_error("No candles returned by Binance", candles, start_ms, end_ms, step, symbol, interval)
+        raise _coverage_error("No candles returned by Binance", candles, start_ms, end_ms, step, symbol, interval, closed_only=closed_only, immature=recent_boundary)
     if candles[0].timestamp > first_expected:
-        raise _coverage_error("Historical coverage starts after requested start boundary", candles, start_ms, end_ms, step, symbol, interval)
+        raise _coverage_error("Historical coverage starts after requested start boundary", candles, start_ms, end_ms, step, symbol, interval, closed_only=closed_only)
     if candles[-1].timestamp < last_expected:
-        raise _coverage_error("Historical coverage ends before requested end boundary", candles, start_ms, end_ms, step, symbol, interval)
+        raise _coverage_error("Historical coverage ends before requested end boundary", candles, start_ms, end_ms, step, symbol, interval, closed_only=closed_only, immature=recent_boundary)
     for i in range(1, len(candles)):
         gap = candles[i].timestamp - candles[i - 1].timestamp
         if gap != step:
-            raise _coverage_error(f"Historical gap detected at {candles[i-1].timestamp}->{candles[i].timestamp}", candles, start_ms, end_ms, step, symbol, interval)
+            raise _coverage_error(f"Historical gap detected at {candles[i-1].timestamp}->{candles[i].timestamp}", candles, start_ms, end_ms, step, symbol, interval, closed_only=closed_only)
     if len(candles) < expected:
-        raise _coverage_error("Insufficient candles returned by Binance", candles, start_ms, end_ms, step, symbol, interval)
+        raise _coverage_error("Insufficient candles returned by Binance", candles, start_ms, end_ms, step, symbol, interval, closed_only=closed_only)
 
 
 def fetch_historical_funding_rates(symbol: str, start_ms: int, end_ms: int, fetcher: Callable[[str], Any] | None = None) -> list[tuple[int, float]]:

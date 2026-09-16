@@ -1991,8 +1991,9 @@ class RuntimeOrchestrator:
         order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
         result_status = str(result.get("status", "")).lower()
         campaign_attached = bool(self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID"))
+        paper_notional = None
         if mode == ExecutionMode.PAPER and campaign_attached and result_status not in {"rejected", "exchange_reject", "timeout", "error", "missing_ack"}:
-            self._persist_pending_paper_position(symbol, order_id, decision, market_ctx, result)
+            paper_notional = self._persist_pending_paper_position(symbol, order_id, decision, market_ctx, result)
         self._pending_orders[symbol] = {"order_id": order_id, "symbol": symbol, "status": result.get("status", "UNKNOWN"), "created_at": canonical_utc_timestamp()}
         await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
         if result_status == "no_submit_verified":
@@ -2008,10 +2009,10 @@ class RuntimeOrchestrator:
             return
         await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
         self._generate_burnin_snapshot(reason="periodic")
-        self._active_positions[symbol] = float(market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
+        self._active_positions[symbol] = float(paper_notional or market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
-    def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> float:
         campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
         engine = self._resolve_persistence_engine()
         if not campaign_id or not self._burnin_run_id or engine is None:
@@ -2024,13 +2025,29 @@ class RuntimeOrchestrator:
         regime = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
         fill = float(result.get("fill_price") or market_ctx.get("entry"))
         planned_entry = float(market_ctx.get("entry"))
-        quantity = float(market_ctx.get("quantity") or market_ctx.get("qty") or 1.0)
-        notional = float(market_ctx.get("notional") or market_ctx.get("notional_usdt") or fill * quantity)
+        requested_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
+        if requested_notional is None:
+            requested_quantity = market_ctx.get("quantity") or market_ctx.get("qty")
+            if requested_quantity is None:
+                requested_notional = self.config.paper_candidate_notional
+                if requested_notional is None:
+                    raise RuntimeError("PAPER_POSITION_SIZE_UNAVAILABLE")
+            else:
+                requested_notional = fill * float(requested_quantity)
+        notional = float(requested_notional)
+        if not math.isfinite(fill) or fill <= 0 or not math.isfinite(notional) or notional <= 0:
+            raise RuntimeError("PAPER_POSITION_SIZE_INVALID")
+        quantity = notional / fill
+        stop = float(market_ctx.get("sl"))
+        risk_usd = abs(fill - stop) * quantity
+        if not math.isfinite(risk_usd) or risk_usd <= 0:
+            raise RuntimeError("PAPER_POSITION_RISK_INVALID")
         provenance = {
             "provider": self.scanner_source or "UNKNOWN",
             "source_exchange": market_ctx.get("source_exchange"),
             "execution_timeframe": self.config.execution_timeframe,
-            "execution_cost_unit": "R",
+            "execution_cost_unit": "USD",
+            "execution_cost_model_unit": "R",
             "execution_cost_model": dict(model.__dict__),
             "effective_rr_at_entry": self._effective_rr_from_execution(market_ctx.get("rr"), execution_ctx),
             "setup_phase": setup.get("phase"),
@@ -2043,11 +2060,12 @@ class RuntimeOrchestrator:
                 signal_id=decision.get("signal_id"), symbol=symbol, side=market_ctx.get("side"),
                 entry_time=canonical_utc_timestamp(), planned_entry=planned_entry, simulated_fill=fill,
                 stop=market_ctx.get("sl"), target=market_ctx.get("tp"), quantity=quantity,
-                notional=notional, entry_spread=model.spread_penalty / 2.0,
-                entry_slippage=model.slippage_penalty / 2.0, entry_fee=model.fee_penalty / 2.0,
+                notional=notional, entry_spread=model.spread_penalty * risk_usd / 2.0,
+                entry_slippage=model.slippage_penalty * risk_usd / 2.0, entry_fee=model.fee_penalty * risk_usd / 2.0,
                 regime=regime.get("regime") or market_ctx.get("regime") or "UNKNOWN",
                 source_provenance=provenance,
             )
+        return notional
 
     def _sync_resolved_paper_positions(self) -> None:
         if self.config.execution_mode != ExecutionMode.PAPER or not self._campaign_id:
