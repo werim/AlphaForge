@@ -685,7 +685,7 @@ macOS / Linux:
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   launch \
-  --release-id "$RELEASE_ID" \
+  --release-id "$RID" \
   --duration-days 7 \
   --symbols BTCUSDT,ETHUSDT \
   --intervals 1h \
@@ -779,6 +779,72 @@ PowerShell:
 python -m alphaforge.burnin_ops --db $DB status --campaign-id $CID
 ```
 
+SQL:
+
+Current campaign için tek sorguda accepted closed PAPER trades vs resolved rejected forward outcomes:
+sqlite3 -header -column "$DB" <<'SQL'
+WITH accepted AS (
+    SELECT
+        'ACCEPTED_CLOSED' AS cohort,
+        COUNT(*) AS n,
+        SUM(CASE WHEN net_r > 0 THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN net_r < 0 THEN 1 ELSE 0 END) AS losses,
+        ROUND(
+            100.0 * SUM(CASE WHEN net_r > 0 THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(*), 0),
+            1
+        ) AS win_pct,
+        ROUND(AVG(gross_r), 4) AS avg_gross_r,
+        ROUND(AVG(net_r), 4) AS avg_net_r,
+        ROUND(SUM(net_r), 4) AS total_net_r,
+        ROUND(AVG(total_execution_cost), 6) AS avg_execution_cost
+    FROM burnin_trade_outcomes
+    WHERE burnin_run_id = '"$RUN_ID"'
+      AND closed_at IS NOT NULL
+      AND evidence_complete = 1
+),
+rejected AS (
+    SELECT
+        'REJECTED_RESOLVED' AS cohort,
+        COUNT(*) AS n,
+        SUM(CASE WHEN hypothetical_net_r_after_costs > 0 THEN 1 ELSE 0 END) AS wins,
+        SUM(CASE WHEN hypothetical_net_r_after_costs < 0 THEN 1 ELSE 0 END) AS losses,
+        ROUND(
+            100.0 * SUM(CASE WHEN hypothetical_net_r_after_costs > 0 THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(*), 0),
+            1
+        ) AS win_pct,
+        ROUND(AVG(hypothetical_gross_r), 4) AS avg_gross_r,
+        ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
+        ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r,
+        NULL AS avg_execution_cost
+    FROM burnin_reject_outcomes
+    WHERE burnin_run_id = '"$RUN_ID"'
+      AND evidence_complete = 1
+      AND hypothetical_net_r_after_costs IS NOT NULL
+)
+SELECT * FROM accepted
+UNION ALL
+SELECT * FROM rejected;
+SQL
+---
+Rejectleri ayrıca TP / SL / timeout / ambiguous görmek için:
+sqlite3 -header -column "$DB" <<'SQL'
+SELECT
+    reject_reason,
+    COUNT(*) AS n,
+    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
+    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
+    SUM(CASE WHEN timeout = 1 THEN 1 ELSE 0 END) AS timeout,
+    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
+    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
+    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r
+FROM burnin_reject_outcomes
+WHERE burnin_run_id = '"$RUN_ID"'
+  AND evidence_complete = 1
+GROUP BY reject_reason
+ORDER BY n DESC;
+SQL
 ---
 
 ## 16. Health kontrolü
