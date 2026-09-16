@@ -1,3 +1,26 @@
+# Reject persistence canonical parity — 2026-09-16
+
+### Added
+- Database-backed canonical reject-count restoration for campaign attach, standalone burn-in start, runtime restart, and heartbeat publication.
+- Focused regressions for duplicate and distinct rejects, restart restoration, heartbeat parity, and DB-backed execution metrics.
+
+### Changed
+- Autonomous qualification parity checks now count only canonical burn-in decision observations.
+- Burn-in execution snapshots derive `execution_rejects` from the active run's canonical persisted observations rather than mutable process state.
+
+### Fixed
+- Replaying the same canonical `reject_decision_id` no longer inflates `rejects_persisted`.
+- PAPER restart/resume no longer resets heartbeat reject evidence to zero or carries an invocation counter forward as canonical evidence.
+
+### Removed
+- Invocation-count semantics from `rejects_persisted`; retry attempts remain observable through existing logs/callback behavior but are not qualification evidence.
+
+### Breaking Changes
+- No schema or strategy behavior change. Consumers that incorrectly interpreted `rejects_persisted` as an attempt counter must use their own diagnostic attempt telemetry.
+
+### Known Issues
+- Historical heartbeats retain their evidence-at-time values and are not rewritten. POSTRSLVRFX remains immutable. LIVE remains NOT READY.
+
 # Burn-in evidence identity and qualified closed-outcome correction — 2026-09-16
 
 ### Added

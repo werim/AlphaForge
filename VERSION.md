@@ -1,3 +1,13 @@
+# Reject persistence canonical parity — 2026-09-16
+
+- Current version/phase: `reject_parity_v1`, pre-long-PAPER burn-in evidence hardening.
+- Runtime maturity: `rejects_persisted` is now the database-derived count of unique canonical persisted rejects for the attached campaign, restored on attach/start/restart and refreshed before heartbeat publication. Standalone non-burn-in runtimes count unique successfully persisted canonical reject IDs within the process.
+- BACKTEST/PAPER/LIVE alignment: reject decisions, reasons, thresholds, and execution behavior are unchanged. PAPER heartbeat and execution metrics no longer expose persistence-attempt counts as canonical evidence.
+- Lifecycle/execution coverage: rejected lifecycle rows, reviews, burn-in observations, and pending forward labels retain their existing idempotent persistence contracts. Qualification sample logic remains DB-backed and does not use heartbeat counters.
+- Persistence/schema: no schema migration or historical rewrite. The stopped POSTRSLVRFX source DB and sidecars were hash-verified unchanged after copy-only forensic inspection.
+- Known critical risks: this fixes the demonstrated counter contract but does not infer which two historical call paths replayed POSTRSLVRFX rejects; callbacks and in-memory diagnostic logs may still observe retries. LIVE remains NOT READY.
+- Last audit date: 2026-09-16. PAPER verdict: safe to start a fresh post-merge long campaign; do not resume or rewrite historical campaigns. Live readiness verdict: NOT LIVE READY.
+
 # Burn-in evidence identity and qualification cohort correction (2026-09-16)
 - Current version/phase: prospective `dev` burn-in operations evidence-integrity correction; historical `data/campaign/1609t01.db` remained read-only and `camp_a955d6d821c775a4` was not resumed.
 - Runtime maturity: preflight, campaign creation, and continuation start now fail closed when a release token is a canonical campaign, run, or aggregate identity. Qualification explicitly separates operational closures from complete, cost-valid closed outcomes.

@@ -252,6 +252,7 @@ class RuntimeOrchestrator:
     _agent_trace_repository: AgentTraceRepository | None = field(default=None, init=False)
     _agent_persistence_stats: AgentPersistenceStats = field(default_factory=AgentPersistenceStats, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
+    _persisted_reject_decision_ids: set[str] = field(default_factory=set, init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
     runtime_instance_id: str = field(default_factory=lambda: f"runtime:{uuid.uuid4().hex}", init=False)
     startup_id: str = field(default_factory=lambda: f"startup:{uuid.uuid4().hex}", init=False)
@@ -568,6 +569,8 @@ class RuntimeOrchestrator:
             return
         if runtime_state == "OPERATING" and self._execution_reconciliation_blocked():
             runtime_state = "RECOVERY_REQUIRED"
+        if self.config.execution_mode == ExecutionMode.PAPER and self._burnin_run_id:
+            self._restore_rejects_persisted()
         save_runtime_heartbeat(
             engine,
             runtime_instance_id=self.runtime_instance_id,
@@ -986,6 +989,7 @@ class RuntimeOrchestrator:
                         self._last_lifecycle_state_by_signal[signal_id] = LifecycleState.POSITION_OPENED.value
                         self._current_signal_id_by_symbol[symbol] = signal_id
             burnin_campaign_event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACHED", details={"observed": observed, "runtime_instance_id": self.runtime_instance_id, "active_run_id": self._burnin_run_id})
+            self._restore_rejects_persisted(conn=conn)
 
     def _start_or_resume_burnin_run(self) -> None:
         if self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK} or self._burnin_run_id:
@@ -1045,6 +1049,7 @@ class RuntimeOrchestrator:
                     intervals=intervals,
                 )
                 persist_burnin_run(conn, run)
+            self._restore_rejects_persisted()
         except Exception as exc:
             self._burnin_evidence_incomplete = True
             self._fail_closed_reason = "PHASE7_BURNIN_PERSISTENCE_FAILURE"
@@ -1178,7 +1183,9 @@ class RuntimeOrchestrator:
         now = canonical_utc_timestamp()
         try:
             with engine.begin() as conn:
-                conn.execute(text("""INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,status,generated_at,schema_version) VALUES (:bid,:rel,'CURRENT',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,:rejects,:stale,:recon,:status,:ts,'phase7_burnin_v1')"""), {"bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "rejects": self.metrics.rejects_persisted, "stale": len(self._stale_market_data_symbols), "recon": self._reconciliation_status, "status": "STABLE" if self._reconciliation_status == "CLEAN" else "INSUFFICIENT_EVIDENCE", "ts": now})
+                canonical_run_rejects = self._canonical_persisted_reject_count(
+                    conn, campaign_scope=False)
+                conn.execute(text("""INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,status,generated_at,schema_version) VALUES (:bid,:rel,'CURRENT',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,:rejects,:stale,:recon,:status,:ts,'phase7_burnin_v1')"""), {"bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "rejects": canonical_run_rejects, "stale": len(self._stale_market_data_symbols), "recon": self._reconciliation_status, "status": "STABLE" if self._reconciliation_status == "CLEAN" else "INSUFFICIENT_EVIDENCE", "ts": now})
                 conn.execute(text("""INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_pct,consecutive_losses,rolling_expectancy,resolved,payload_json,schema_version) VALUES (:id,:bid,:rel,NULL,NULL,0,0,NULL,1,:payload,'phase7_burnin_v1')"""), {"id": f"dd:{self._burnin_run_id}:{now}", "bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "payload": json.dumps({"runtime_status": self._runtime_status})})
         except Exception as exc:
             self._burnin_evidence_incomplete = True
@@ -2148,6 +2155,7 @@ class RuntimeOrchestrator:
         payload = self._canonical_reject_payload(payload)
         self._reject_log.append(payload)
         engine = self._resolve_persistence_engine()
+        canonical_persisted_count: int | None = None
         if engine is not None:
             with engine.begin() as conn:
                 if not record_rejected_signal_review(conn, reject_decision_id=payload["reject_decision_id"], signal_id=payload["signal_id"], symbol=payload.get("symbol"), setup_type=payload.get("setup_type"), regime=payload.get("regime"), side=payload.get("side"), reject_reason=payload.get("reason"), score=payload.get("score"), raw_rr=payload.get("rr"), effective_rr=payload.get("effective_rr"), volume_24h_usdt=payload.get("volume_24h_usdt"), spread_pct=payload.get("spread_pct"), expected_slippage_pct=payload.get("expected_slippage_pct"), funding_rate_pct=payload.get("funding_rate_pct"), liquidity_score=payload.get("liquidity_score"), volatility_regime=payload.get("volatility_regime"), payload_json=payload):
@@ -2156,16 +2164,61 @@ class RuntimeOrchestrator:
                     {**payload, "decision": "REJECTED"},
                     lifecycle_state=LifecycleState.SIGNAL_REJECTED.value, conn=conn)
                 self._persist_pending_reject(payload, conn=conn)
+                if self._burnin_run_id:
+                    canonical_persisted_count = self._canonical_persisted_reject_count(conn)
         else:
             self._persist_burnin_decision(
                 {**payload, "decision": "REJECTED"},
                 lifecycle_state=LifecycleState.SIGNAL_REJECTED.value)
-        self.metrics.rejects_persisted += 1
+        if engine is not None:
+            self._persisted_reject_decision_ids.add(str(payload["reject_decision_id"]))
+            self.metrics.rejects_persisted = (
+                canonical_persisted_count
+                if canonical_persisted_count is not None
+                else len(self._persisted_reject_decision_ids)
+            )
         if self.on_reject_persist is not None:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
         self._schedule_agent_shadow(payload)
+
+    def _canonical_persisted_reject_count(self, conn: Any, *, campaign_scope: bool = True) -> int:
+        """Count canonical durable rejects in the runtime's evidence scope."""
+        if not self._burnin_run_id:
+            return len(self._persisted_reject_decision_ids)
+        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        params: dict[str, Any]
+        if campaign_scope and campaign_id:
+            scope = ("o.burnin_run_id IN (SELECT burnin_run_id FROM burnin_campaign_runs "
+                     "WHERE campaign_id=:campaign_id)")
+            params = {"campaign_id": campaign_id}
+        else:
+            scope = "o.burnin_run_id=:burnin_run_id"
+            params = {"burnin_run_id": self._burnin_run_id}
+        return int(conn.execute(text(f"""
+            SELECT COUNT(*)
+            FROM burnin_observations o
+            WHERE {scope}
+              AND UPPER(COALESCE(o.decision, ''))='REJECTED'
+              AND {canonical_decision_sql('o')}
+        """), params).scalar_one() or 0)
+
+    def _restore_rejects_persisted(self, *, conn: Any | None = None) -> int:
+        """Restore the heartbeat counter from canonical DB evidence after attach/restart."""
+        if not self._burnin_run_id:
+            self.metrics.rejects_persisted = len(self._persisted_reject_decision_ids)
+            return self.metrics.rejects_persisted
+        if conn is not None:
+            count = self._canonical_persisted_reject_count(conn)
+        else:
+            engine = self._resolve_persistence_engine()
+            if engine is None:
+                return self.metrics.rejects_persisted
+            with engine.connect() as owned_conn:
+                count = self._canonical_persisted_reject_count(owned_conn)
+        self.metrics.rejects_persisted = count
+        return count
 
     def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")

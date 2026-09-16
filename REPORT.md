@@ -1,3 +1,34 @@
+# Reject persistence canonical parity hardening — 2026-09-16
+
+## Why the patch was needed
+POSTRSLVRFX retained 463 unique canonical rejected decisions while its latest runtime heartbeat reported `rejects_persisted=465`. A later campaign converged correctly, so the investigation treated the mismatch as a contract question rather than assuming a currently reproducible storage defect. Copy-only forensic inspection reproduced 463/465 and verified the source database, WAL, and SHM hashes were unchanged. The heartbeat first reached 463 and later advanced to 465 while final canonical evidence remained 463.
+
+## Root cause and intended semantics
+`RuntimeOrchestrator._persist_reject()` canonicalizes a reject and writes three idempotent evidence surfaces: `record_rejected_signal_review()` upserts on unique `reject_decision_id`; `_persist_burnin_decision()` uses a deterministic reject observation ID; and `_persist_pending_reject()` uses a canonical pending-label ID with `INSERT OR IGNORE`. After those writes, the runtime unconditionally executed `self.metrics.rejects_persisted += 1`. The metric therefore counted successful method invocations, including idempotent replays, while autonomous qualification and SOAK checks contractually compared it with canonical persisted reject rows. Runtime attach/restart also left the metric at its process default instead of reconstructing it from durable evidence.
+
+Canonical parity is the intended semantics. Qualification, campaign aggregation, dashboard health, and autonomous parity checks all treat rejects as unique canonical decisions, not write attempts. The exact historical source of the two replayed calls cannot be recovered from final idempotent rows alone, but the old unconditional increment is sufficient to explain and reproduce the surplus.
+
+## Files changed and behavior
+- `src/alphaforge/runtime.py`: replaces unconditional increments with a canonical SQL count over mapped campaign runs (or the active standalone run), restores that count on campaign attach/burn-in start/restart, and refreshes it before PAPER heartbeats. Non-burn-in modes retain a unique process-local set only after successful review persistence. Burn-in execution snapshots query the active run's canonical count directly instead of trusting process memory.
+- `src/alphaforge/autonomous_qualification.py`: parity scenarios and SOAK samples use `canonical_decision_sql()` rather than raw `decision='REJECTED'` rows.
+- `tests/test_runtime.py`: adds duplicate, distinct, restart, heartbeat, and DB-versus-process regressions.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: record the contract, compatibility, validation, and operational disposition.
+
+## Consumer and persistence audit
+`runtime_heartbeats.payload_json.rejects_persisted` and `burnin_ops.health_payload()` now expose campaign-scoped canonical parity. Autonomous qualification compares the same canonical predicate. `burnin_execution_metrics.execution_rejects` is run-scoped and database-derived; Phase 7 qualification uses it only in the stale-data execution-quality ratio, never as a canonical reject sample or trade sample count. Campaign qualification and dashboard totals continue to derive directly from canonical observations. Live-readiness reject checks use persisted order/lifecycle evidence and do not consume the heartbeat counter. No strategy, scoring, MTF, RR, execution, fill, lifecycle, or forward-outcome behavior changed.
+
+The review upsert, canonical burn-in observation, and pending reject label remain durable and idempotent. Repeated persistence can still invoke callbacks and update process diagnostics, but it cannot increase the canonical metric without a new canonical database row. Campaign scope follows `burnin_campaign_runs`, so restart/continuation restoration includes every mapped source run and excludes aggregate materializations.
+
+## Tests executed
+- New focused reject-parity selection: 9 passed.
+- Runtime/heartbeat/autonomous qualification recheck: 92 passed.
+- Relevant runtime, heartbeat, autonomous qualification, burn-in ops, campaign, reject resolver, Phase 7 qualification, and live-readiness suites: 322 passed.
+- Full suite: 1,555 passed, 3 skipped, 120 dependency deprecation warnings.
+- Python compilation and `git diff --check` passed.
+
+## Compatibility, migration, risks, and recommendation
+No schema migration or historical backfill is required. Historical heartbeat rows remain immutable and retain their original 465 value; canonical evidence remains 463. The patch does not identify the precise historical pair of replay call sites because idempotent final rows intentionally collapse them, and it does not rename callback or log semantics. After review/merge and deployment, a fresh long PAPER campaign is safe and is the correct prospective validation; no historical campaign should be resumed or rewritten. This does not establish LIVE readiness.
+
 # Burn-in release namespace and qualified closed-outcome correction — 2026-09-16
 
 ## Why the patch was needed
