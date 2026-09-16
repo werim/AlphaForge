@@ -7,7 +7,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from alphaforge.burnin import LEGACY_REJECT_IDENTITY_MODE, SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, confidence_interval, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now, update_burnin_run_counters
+from alphaforge.burnin import CRITICAL_COST_FIELDS, LEGACY_REJECT_IDENTITY_MODE, SCHEMA_VERSION, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, confidence_interval, qualification_reject_identity_mode, reject_decision_id_from_outcome, utc_now, update_burnin_run_counters
 from alphaforge.release_gates import latest_valid_operator_ack, release_gate_status, latest_release_snapshot
 from alphaforge.runtime_state import latest_runtime_state_snapshot
 from alphaforge.live_readiness import LiveReadinessEvaluator
@@ -104,6 +104,19 @@ class BurnInQualificationEngine:
                     '$.burnin_run_id'
                   ) IN ({run_placeholders})
         """), run_params).scalar_one() or 0)
+    @staticmethod
+    def _qualification_trade_complete(row: Any) -> bool:
+        if int(row.get("evidence_complete") or 0) != 1:
+            return False
+        if row.get("closed_at") is None or row.get("gross_r") is None or row.get("net_r") is None or row.get("total_execution_cost") is None:
+            return False
+        if any(row.get(field) is None for field in CRITICAL_COST_FIELDS):
+            return False
+        try:
+            missing = json.loads(row.get("missing_cost_fields_json"))
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(missing, list) and not missing
     def evaluate(self, burnin_run_id: str) -> BurnInQualificationSnapshot:
         th=asdict(self.thresholds)
         if not self._has_schema():
@@ -152,7 +165,10 @@ class BurnInQualificationEngine:
                     f"{self.thresholds.max_runtime_error_count}"
                 )
             identity_mode=qualification_reject_identity_mode([phase], observation_metrics)
-            samples=int(obs_counts.get("samples") or 0); accepted=int(obs_counts.get("accepted") or 0); rejected_count=int(obs_counts.get("rejected") or 0); closed=len(trades)
+            samples=int(obs_counts.get("samples") or 0); accepted=int(obs_counts.get("accepted") or 0); rejected_count=int(obs_counts.get("rejected") or 0)
+            operational_closed=len(trades)
+            qualification_trades=[r for r in trades if self._qualification_trade_complete(r)]
+            qualified_closed=len(qualification_trades)
             valid_labels={"TP_BEFORE_SL","SL_BEFORE_TP","TIMEOUT","AMBIGUOUS"}
             completed_rejects=[r for r in rejects if int(r.get("evidence_complete") or 0)==1 and str(r.get("forward_label") or "").upper() in valid_labels and r.get("hypothetical_net_r_after_costs") is not None]
             diagnostic_ambiguous_rejects=[r for r in completed_rejects if str(r.get("forward_label") or "").upper()=="AMBIGUOUS"]
@@ -186,21 +202,23 @@ class BurnInQualificationEngine:
             resolved_identity_count=(len(attributable_rejects) if identity_mode == LEGACY_REJECT_IDENTITY_MODE else len({reject_decision_id_from_outcome(r) for r in attributable_rejects}))
             pending_rejects=max(0, rejected_count-resolved_identity_count)
             rejected_fwd=len(attributable_rejects)
-            persisted_mismatch = any(int(run.get(k) or 0) != int(v or 0) for k,v in {"sample_count":samples,"accepted_count":accepted,"rejected_count":rejected_count,"closed_trade_count":closed}.items())
+            persisted_mismatch = any(int(run.get(k) or 0) != int(v or 0) for k,v in {"sample_count":samples,"accepted_count":accepted,"rejected_count":rejected_count,"closed_trade_count":operational_closed}.items())
             if persisted_mismatch:
                 blockers.append("BURNIN_COUNTER_RECONCILIATION_FAILED")
             sample_status="PASS"
-            for name,obs,limit in [("MINIMUM_DURATION",float(run.get("observed_duration_seconds") or 0),self.thresholds.minimum_duration_seconds),("MINIMUM_TOTAL_DECISIONS",samples,self.thresholds.minimum_total_decisions),("MINIMUM_ACCEPTED_TRADES",accepted,self.thresholds.minimum_accepted_trades),("MINIMUM_CLOSED_TRADES",closed,self.thresholds.minimum_closed_trades),("MINIMUM_REJECTED_FORWARD_OUTCOMES",rejected_fwd,self.thresholds.minimum_rejected_forward_outcomes)]:
+            for name,obs,limit in [("MINIMUM_DURATION",float(run.get("observed_duration_seconds") or 0),self.thresholds.minimum_duration_seconds),("MINIMUM_TOTAL_DECISIONS",samples,self.thresholds.minimum_total_decisions),("MINIMUM_ACCEPTED_TRADES",accepted,self.thresholds.minimum_accepted_trades),("MINIMUM_CLOSED_TRADES",qualified_closed,self.thresholds.minimum_closed_trades),("MINIMUM_REJECTED_FORWARD_OUTCOMES",rejected_fwd,self.thresholds.minimum_rejected_forward_outcomes)]:
                 if obs < limit: sample_status="INSUFFICIENT"; blockers.append(f"{name}:{obs}<{limit}")
-            metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=closed,open_trade_count=max(0,accepted-closed),completed_rejected_forward_outcomes=len(attributable_rejects),diagnostic_completed_rejected_forward_outcomes=len(completed_rejects),identity_linked_rejected_forward_outcomes=len(identity_linked_rejects),attributable_rejected_forward_outcomes=len(attributable_rejects),non_attributable_rejected_forward_outcomes=len(completed_rejects)-len(attributable_rejects),orphan_rejected_forward_outcomes=len(completed_rejects)-len(identity_linked_rejects),qualification_reject_identity_unit="CANONICAL_DECISION",qualification_reject_identity_mode=identity_mode,pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(qualification_ambiguous_rejects),diagnostic_ambiguous_rejected_forward_outcomes=len(diagnostic_ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=derived.get("observed_duration_seconds") or run.get("observed_duration_seconds"))
-            self._compute_expectancy(trades, blockers, metrics)
+            metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=qualified_closed,qualified_closed_trade_count=qualified_closed,operational_closed_trade_count=operational_closed,incomplete_closed_trade_count=operational_closed-qualified_closed,open_trade_count=max(0,accepted-operational_closed),completed_rejected_forward_outcomes=len(attributable_rejects),diagnostic_completed_rejected_forward_outcomes=len(completed_rejects),identity_linked_rejected_forward_outcomes=len(identity_linked_rejects),attributable_rejected_forward_outcomes=len(attributable_rejects),non_attributable_rejected_forward_outcomes=len(completed_rejects)-len(attributable_rejects),orphan_rejected_forward_outcomes=len(completed_rejects)-len(identity_linked_rejects),qualification_reject_identity_unit="CANONICAL_DECISION",qualification_reject_identity_mode=identity_mode,pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(qualification_ambiguous_rejects),diagnostic_ambiguous_rejected_forward_outcomes=len(diagnostic_ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=derived.get("observed_duration_seconds") or run.get("observed_duration_seconds"))
+            incomplete_trade_count=operational_closed-qualified_closed
+            if incomplete_trade_count: blockers.append(f"INCOMPLETE_COST_EVIDENCE:{incomplete_trade_count}")
+            self._compute_expectancy(qualification_trades, blockers, metrics)
             expectancy_status="PASS" if (metrics.get("lower_confidence_bound_expectancy") is not None and metrics["lower_confidence_bound_expectancy"]>=self.thresholds.min_lower_confidence_bound_expectancy and not any(b.startswith("INCOMPLETE_COST") or b=="COST_DRAG_EXCESSIVE_OR_MISSING" for b in blockers)) else "FAIL"
             regime_status=self._check_regimes(regimes, blockers, metrics)
-            reject_status=self._compute_reject_quality(attributable_rejects, trades, blockers, metrics)
+            reject_status=self._compute_reject_quality(attributable_rejects, qualification_trades, blockers, metrics)
             cal_status=self._compute_calibration(cal, blockers, metrics)
             dd_status=self._compute_drawdown(dds, blockers, metrics)
             exec_status=self._compute_execution(execm, blockers, metrics)
-            conc_status=self._compute_concentration(trades, blockers, metrics)
+            conc_status=self._compute_concentration(qualification_trades, blockers, metrics)
             rec_status=self._check_reconciliation(blockers, metrics)
             self._check_phase_gates(release_id, blockers, metrics)
             evidence_status="PASS" if not any(b in {"BURNIN_SCHEMA_OR_EVIDENCE_MISSING"} or b.startswith("MISSING_PROVENANCE") or b.startswith("INCOMPLETE_COST") for b in blockers) else "FAIL"
@@ -215,9 +233,7 @@ class BurnInQualificationEngine:
                 self.persist_suspension(conn,snap,suspension)
             return snap
     def _compute_expectancy(self,trades,blockers,metrics):
-        complete=[r for r in trades if int(r.get("evidence_complete") or 0)==1 and r.get("net_r") is not None]
-        incomplete=len(trades)-len(complete)
-        if incomplete: blockers.append(f"INCOMPLETE_COST_EVIDENCE:{incomplete}")
+        complete=list(trades)
         netrs=sorted(float(r["net_r"]) for r in complete); mean,lcb,ucb=confidence_interval(netrs)
         wins=[v for v in netrs if v>0]; losses=[v for v in netrs if v<0]
         pos=sum(wins); neg=abs(sum(losses)); median=(None if not netrs else (netrs[len(netrs)//2] if len(netrs)%2 else (netrs[len(netrs)//2-1]+netrs[len(netrs)//2])/2))
@@ -294,7 +310,7 @@ class BurnInQualificationEngine:
         blockers.extend(reasons)
         return "PASS" if not reasons else "FAIL"
     def _compute_concentration(self,trades,blockers,metrics):
-        complete=[r for r in trades if r.get("net_r") is not None]
+        complete=list(trades)
         total=sum(max(0.0,float(r.get("net_pnl") if r.get("net_pnl") is not None else r.get("net_r") or 0)) for r in complete)
         bysym={}; byreg={}; bycluster={}; top=0.0
         for r in complete:

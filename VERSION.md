@@ -1,3 +1,13 @@
+# Burn-in evidence identity and qualification cohort correction (2026-09-16)
+- Current version/phase: prospective `dev` burn-in operations evidence-integrity correction; historical `data/campaign/1609t01.db` remained read-only and `camp_a955d6d821c775a4` was not resumed.
+- Runtime maturity: preflight, campaign creation, and continuation start now fail closed when a release token is a canonical campaign, run, or aggregate identity. Qualification explicitly separates operational closures from complete, cost-valid closed outcomes.
+- BACKTEST/PAPER/LIVE alignment: decision logic, MTF, RR, scoring, costs, fills, and order authorization are unchanged. The release namespace guard applies to PAPER burn-in operations; qualification consumers use the complete evidence cohort.
+- Lifecycle coverage: `AMBIGUOUS_INTRABAR` remains CLOSED operationally, persisted with `evidence_complete=0`, and excluded from qualification sample, expectancy, LCB, harmful-accept, and concentration calculations.
+- Persistence/execution realism: no schema, migration, export, or aggregate-hash change. Existing rows are neither rewritten nor deleted. Operational and qualification counts are exposed separately.
+- Validation: 145 focused tests passed; 250 broader campaign/audit/resolver/runtime/dashboard tests passed; full suite 1,550 passed and 3 skipped.
+- Known critical risks: historical invalid-release campaigns remain immutable and non-resumable. A fresh PAPER campaign with a valid release token is required for new qualification evidence. LIVE remains NOT READY.
+- Last audit date: 2026-09-16. Live readiness verdict: NOT LIVE READY.
+
 # AlphaForge Version
 
 ## Autonomous qualification harness (2026-09-15)

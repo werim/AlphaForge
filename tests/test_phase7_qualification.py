@@ -26,7 +26,7 @@ def _run(e):
 def _qualifying_evidence(e):
     with e.begin() as c:
         for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
-            c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"o{i}","sym":sym})
+            c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,closed_at,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING','2026-01-01T01:00:00Z',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"o{i}","sym":sym})
         for i in range(3):
             c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"rej{i}"})
         c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
@@ -40,7 +40,7 @@ def _qualifying_thresholds():
 def test_missing_costs_block_qualification():
     e=_engine(); _run(e)
     with e.begin() as c:
-        c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,gross_r,net_r,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES ('o','r','rel','BTCUSDT','TRENDING',1.0,1.0,0,'[\"fee_cost\"]','{}','v')"))
+        c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,closed_at,gross_r,net_r,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES ('o','r','rel','BTCUSDT','TRENDING','2026-01-01T01:00:00Z',1.0,1.0,0,'[\"fee_cost\"]','{}','v')"))
     snap=BurnInQualificationEngine(e, BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,minimum_closed_trades=1,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,minimum_calibration_sample=0,require_operator_ack=False,require_phase1_6_gates=False)).evaluate("r")
     assert snap.status != "CANARY_QUALIFIED"
     assert any("INCOMPLETE_COST_EVIDENCE" in b for b in snap.blockers)
@@ -127,7 +127,7 @@ def test_all_required_phase7_and_phase6_evidence_canary_qualified():
     persist_release_snapshot(e, ReleaseGateSnapshot(release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now", canary_ready=True, rollback_verified=True, runbook_verified=True, operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[], evidence={"full_tests":{"status":"PASS"}}))
     with e.begin() as c:
         for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
-            c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"all-o{i}","sym":sym})
+            c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,closed_at,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING','2026-01-01T01:00:00Z',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"all-o{i}","sym":sym})
         for i in range(3):
             c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"all-r{i}"})
         c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))

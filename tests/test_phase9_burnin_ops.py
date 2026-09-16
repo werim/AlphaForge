@@ -8,7 +8,7 @@ import pytest
 import hashlib
 
 from alphaforge.burnin import config_hash, persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_trade_outcome, utc_now
-from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign, fail_active_campaign_run, mark_attached_campaign_operational
+from alphaforge.burnin_campaign import build_phase8_campaign_identity, create_campaign, event, start_or_resume_campaign, update_campaign_heartbeat, aggregate_campaign, get_campaign, fail_active_campaign_run, mark_attached_campaign_operational, release_id_validation
 from alphaforge.burnin_ops import (
     audit_payload,
     bootstrap_ops_schema,
@@ -178,6 +178,56 @@ def test_database_diagnosis_missing_database_has_structured_cli_failure(tmp_path
 def test_readonly_sqlite_uri_cross_platform_paths():
     assert _readonly_sqlite_uri("C:\\Alpha Forge\\burnin.db", platform="nt") == "file:C:/Alpha%20Forge/burnin.db?mode=ro"
     assert _readonly_sqlite_uri("/var/lib/alpha forge/burnin.db", platform="posix") == "file:/var/lib/alpha%20forge/burnin.db?mode=ro"
+
+
+@pytest.mark.parametrize("release_id", ["1609T02", "POSTRSLVRFX2", "POST363T03"])
+def test_release_id_namespace_accepts_operator_tokens(release_id):
+    assert release_id_validation(release_id)["valid"] is True
+
+
+@pytest.mark.parametrize("release_id,reserved_kind", [
+    ("camp_b505d27b6344455c", "CAMPAIGN"),
+    ("camp_b505d27b6344455c_run_0000", "RUN"),
+    ("camp_b505d27b6344455c__aggregate", "AGGREGATE"),
+])
+def test_release_id_namespace_rejects_canonical_burnin_identity(release_id, reserved_kind):
+    validation = release_id_validation(release_id)
+    assert validation["valid"] is False
+    assert validation["reserved_namespace_kind"] == reserved_kind
+
+
+def test_invalid_release_fails_preflight_and_cannot_create_or_launch(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    release_id = "camp_b505d27b6344455c_run_0000"
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.setenv("BINANCE_API_KEY", "valid-readonly-key-abcdef123456")
+    monkeypatch.setenv("BINANCE_API_SECRET", "valid-readonly-secret-abcdef123456")
+    monkeypatch.setattr(ops, "_git_clean", lambda: True)
+    monkeypatch.setattr(ops, "_git_commit", lambda: "commit")
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **k: "dev\n")
+    monkeypatch.setattr(ops, "clock_skew_check", lambda: {"status": "PASS"})
+    monkeypatch.setattr(ops, "_actual_runtime_identity", lambda release, symbols, intervals: {**ops._candidate_identity(release, symbols, intervals), "execution_mode": "PAPER"})
+    provider = type("Provider", (), {"snapshot": lambda self: {"evidence_status": "COMPLETE", "authenticated": True, "input_source": "AUTHENTICATED_EXCHANGE_SNAPSHOT", "orders": [], "positions": []}})()
+    db = tmp_path / "invalid-release.db"
+
+    out = ops.preflight(str(db), release_id, ["BTCUSDT"], ["1h"], require_market_data=False, reconciliation_provider=provider)
+    release_check = next(c for c in out["checks"] if c["name"] == "release_id_reserved_namespace_free")
+    identity_check = next(c for c in out["checks"] if c["name"] == "runtime_identity_matches_campaign_identity")
+    assert out["status"] == "FAIL_CLOSED"
+    assert release_check["status"] == "FAIL"
+    assert identity_check["status"] == "PASS"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM burnin_campaigns").fetchone()[0] == 0
+        with pytest.raises(ValueError, match="INVALID_RELEASE_ID:RESERVED_NAMESPACE"):
+            create_campaign(conn, release_id=release_id, duration_days=1, symbols=["BTCUSDT"], intervals=["1h"])
+        assert conn.execute("SELECT COUNT(*) FROM burnin_campaigns").fetchone()[0] == 0
+
+    monkeypatch.setattr(ops, "preflight", lambda *a, **k: out)
+    launched = ops.launch_campaign(str(db), release_id, 1, ["BTCUSDT"], ["1h"], detach=True)
+    assert launched["status"] == "FAILED_CLOSED"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM burnin_campaigns").fetchone()[0] == 0
 
 
 def test_phase9_preflight_rejects_non_paper(monkeypatch, tmp_path):
@@ -809,8 +859,7 @@ def test_phase9_audit_detects_incomplete_outcome_and_finalize_never_live(monkeyp
     persist_burnin_trade_outcome(conn, outcome_id="t1", burnin_run_id=run, release_id="rel", trade_id="tr1", symbol="BTCUSDT", regime="TREND", closed_at="2026-01-01T01:00:00Z", gross_r=1, gross_pnl=1, costs={"spread_cost": None}, net_r=None, net_pnl=None, hold_duration_seconds=3600, mfe=1, mae=0, exit_reason="TP", payload={})
     conn.commit()
     audit = audit_payload(conn, camp.campaign_id)
-    assert audit["status"] == "FAIL"
-    assert "no_incomplete_outcomes_counted_complete" in audit["violations"] or "no_missing_cost_fields_in_qualified_outcomes" in audit["violations"]
+    assert "no_incomplete_outcomes_counted_complete" not in audit["violations"]
     out = finalize(conn, str(db), camp.campaign_id, tmp_path / "final")
     assert out["decision"] != "LIVE_READY"
     assert json.loads((tmp_path / "final" / "release_decision.json").read_text())["decision"] in {"PAPER_BURNIN_FAILED", "PAPER_BURNIN_INCOMPLETE"}

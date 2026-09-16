@@ -1,3 +1,40 @@
+# Burn-in release namespace and qualified closed-outcome correction — 2026-09-16
+
+## Why the patch was needed
+Read-only forensic inspection of `data/campaign/1609t01.db` confirmed two independent evidence-integrity defects in campaign `camp_a955d6d821c775a4`. Its release token was the canonical run identity `camp_b505d27b6344455c_run_0000`, yet preflight passed. The same campaign had 20 operationally closed outcomes but only 19 qualification-complete outcomes; the latest blocker incorrectly recorded `MINIMUM_CLOSED_TRADES:20<30`. The database was not modified and the campaign was not resumed.
+
+## Root causes and exact count path
+`burnin_ops.preflight()` passed the caller value to both `_candidate_identity()` and `_actual_runtime_identity()`. `_actual_runtime_identity()` temporarily assigned that value to `ALPHAFORGE_RELEASE_ID`, so `runtime_identity_matches_campaign_identity` proved only equality between two derivations of the same input, not that the input belonged to the release namespace. No independent semantic release-token validator existed at preflight, campaign creation, or continuation start.
+
+For closed outcomes, `materialize_campaign_aggregate()` correctly copied both auditable rows and `aggregate_campaign()` correctly reported 19 rows with `closed_at IS NOT NULL AND evidence_complete=1`. `BurnInQualificationEngine.evaluate()` then loaded the aggregate trade rows and assigned `closed=len(trades)`, producing 20. That value fed `MINIMUM_CLOSED_TRADES`, `metrics.closed_trade_count`, and open-count arithmetic. Expectancy had a narrower `evidence_complete/net_r` filter, while harmful-accept and concentration calculations consumed the unfiltered trade list. The historical latest snapshot therefore stored 20 even though the canonical aggregate and dashboard reported 19.
+
+## Files changed and exact behavior
+- `src/alphaforge/burnin_campaign.py`: adds precise canonical campaign/run/aggregate release-namespace recognition, optional target-database identity collision checks, and fail-closed guards before campaign creation and continuation start.
+- `src/alphaforge/burnin_ops.py`: adds critical preflight checks `release_id_reserved_namespace_free` and `release_id_database_identity_collision_free`; invalid tokens use a hashed invalid-release artifact directory and cannot reach launch. The integrity audit now verifies that a qualification snapshot count equals the eligible cohort instead of treating the mere presence of an auditable incomplete closure as corruption.
+- `src/alphaforge/burnin_qualification.py`: constructs one qualification-eligible closed-trade cohort and uses it for the minimum count, expectancy, LCB, harmful-accept, and concentration calculations. It reports `operational_closed_trade_count`, `qualified_closed_trade_count`, and `incomplete_closed_trade_count` separately while retaining qualification-facing `closed_trade_count` as the qualified count. Persisted run-counter reconciliation remains operational and compares against all durable closure rows.
+- `src/alphaforge/dashboard/queries.py`: aligns the dashboard closed count with complete, cost-valid closed evidence.
+- `tests/test_phase9_burnin_ops.py`, `tests/test_burnin_qualification_evidence_integrity.py`, and `tests/test_phase7_qualification.py`: add namespace, fail-closed launch/create, ambiguous-outcome cohort, audit, expectancy/LCB, dashboard, and hash-stability coverage; legacy raw fixtures now carry explicit closure timestamps.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: document behavior, compatibility, tests, and operational disposition.
+
+## Release-ID validation rule
+Valid release tokens must be non-empty and must not match a canonical AlphaForge identity: `camp_[0-9a-f]{16}`, `camp_[0-9a-f]{16}_run_[0-9]{4,}`, or `camp_[0-9a-f]{16}__aggregate`. `1609T02`, `POSTRSLVRFX2`, and `POST363T03` remain valid. The validator also rejects an exact collision with a known `burnin_campaigns.campaign_id` or `burnin_runs.burnin_run_id` in the target database. Invalid values are never rewritten; the operator must supply a valid release token.
+
+## Qualified closed-trade definition and consumer audit
+A qualification-eligible closed outcome has a non-null `closed_at`, `evidence_complete=1`, an empty `missing_cost_fields_json` list, non-null `gross_r`, `net_r`, and `total_execution_cost`, and non-null spread, entry-slippage, exit-slippage, fee, funding, and latency costs. Operational closure remains the durable outcome-row count. The minimum sample gate, mean net R, confidence interval/LCB, harmful accepted-trade rate, and concentration metrics now share the eligible cohort. Regime, calibration, and drawdown checks consume their dedicated persisted evidence tables; no repository code derives those rows from `burnin_trade_outcomes`, so the ambiguous outcome has no closed-outcome path into those tables.
+
+## Lifecycle, persistence, export, hash, and compatibility impact
+`AMBIGUOUS_INTRABAR` remains operationally CLOSED, durable, exportable, and auditable with diagnostic gross/net values permitted by the existing contract. It remains `evidence_complete=0` with `ambiguous_intrabar_sequence` missing evidence and cannot qualify. No lifecycle state, schema, CSV shape, strategy threshold, MTF rule, RR rule, score, fill, slippage, spread, fee, funding, or execution assumption changed. Aggregate evidence hashing was not edited. Read-only inspection reconfirmed the stable historical hash `f433c8778e0ea805b97fabda5eb35bf40b9ba56d884fc635e556d95a54aa519f`.
+
+## Tests executed
+- Focused burn-in ops, qualification, evidence-integrity, and position-resolver suites: 145 passed.
+- Broader campaign, JOB21 audit, reject resolver, runtime, paper burn-in, dashboard, and control-center suites: 250 passed with dependency deprecation warnings only.
+- Full suite: 1,550 passed, 3 skipped, 120 dependency deprecation warnings.
+- `git diff --check` and Python syntax compilation passed.
+- A disposable `/private/tmp` backup of `1609t01.db` produced `MINIMUM_CLOSED_TRADES:19<30`, operational/qualified/incomplete counts `20/19/1`, and the unchanged aggregate hash `f433c8778e0ea805b97fabda5eb35bf40b9ba56d884fc635e556d95a54aa519f`.
+
+## Risks, migration, remaining limitations, and push recommendation
+No schema migration or historical backfill is required. Existing snapshots retain their evidence-at-time semantics and are not rewritten. The historical campaign has both an invalid release namespace and pre-fix qualification snapshots, so it must remain paused/immutable and must not be resumed. A fresh PAPER campaign with a valid release token is required before any new burn-in qualification or canary conclusion. Review and merge the narrow patch on `dev`; do not claim LIVE readiness.
+
 # Autonomous qualification harness — 2026-09-15
 
 ## SOAK release-gate follow-up

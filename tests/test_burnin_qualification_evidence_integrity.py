@@ -5,10 +5,10 @@ import sqlite3
 
 from sqlalchemy import create_engine, text
 
-from alphaforge.burnin import BurnInRun, persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_run
-from alphaforge.burnin_campaign import aggregate_campaign, BurnInCampaignRunner, create_campaign, start_or_resume_campaign
+from alphaforge.burnin import BurnInRun, persist_burnin_observation, persist_burnin_reject_outcome, persist_burnin_run, persist_burnin_trade_outcome
+from alphaforge.burnin_campaign import aggregate_campaign, BurnInCampaignRunner, create_campaign, qualify_campaign, start_or_resume_campaign
 from alphaforge.burnin_qualification import BurnInQualificationEngine, BurnInThresholds
-from alphaforge.burnin_ops import bootstrap_ops_schema, finalize, health_payload
+from alphaforge.burnin_ops import audit_payload, bootstrap_ops_schema, finalize, health_payload
 from alphaforge.burnin_resolver import persist_pending_reject_label
 from alphaforge.dashboard.queries import fetch_phase8_campaign
 
@@ -76,6 +76,70 @@ def _outcome(conn, run_id, reject_id, *, net=-1.0, subject="GUIDED_CANDIDATE"):
                  "burnin_run_id": run_id, "forward_label_subject": subject,
                  "reject_quality_attributable": subject == "GUIDED_CANDIDATE"},
     )
+
+
+def test_ambiguous_closed_outcome_is_auditable_but_not_qualification_evidence(tmp_path):
+    db, conn, campaign_id, run_id = _campaign(tmp_path)
+    _canonical_accept(conn, run_id, "complete")
+    _canonical_accept(conn, run_id, "ambiguous")
+    persist_burnin_trade_outcome(
+        conn, outcome_id="tout_complete", burnin_run_id=run_id, release_id="rel",
+        trade_id="complete", symbol="BTCUSDT", regime="TRENDING",
+        closed_at="2026-01-01T01:00:00Z", gross_r=1.0, gross_pnl=1.0,
+        costs=COSTS, net_r=0.96, net_pnl=0.96, exit_reason="TP_HIT",
+    )
+    persist_burnin_trade_outcome(
+        conn, outcome_id="tout_ambiguous", burnin_run_id=run_id, release_id="rel",
+        trade_id="ambiguous", symbol="ETHUSDT", regime="TRENDING",
+        closed_at="2026-01-01T01:00:00Z", gross_r=-10.0, gross_pnl=-10.0,
+        costs=COSTS, net_r=-10.04, net_pnl=-10.04, exit_reason="AMBIGUOUS_INTRABAR",
+    )
+    conn.execute(
+        "UPDATE burnin_trade_outcomes SET evidence_complete=0, missing_cost_fields_json=? WHERE outcome_id='tout_ambiguous'",
+        (json.dumps(["ambiguous_intrabar_sequence"]),),
+    )
+    operational = conn.execute("SELECT COUNT(*) FROM burnin_trade_outcomes WHERE burnin_run_id=? AND closed_at IS NOT NULL", (run_id,)).fetchone()[0]
+    before = aggregate_campaign(conn, campaign_id)
+    assert operational == 2
+    assert before["metrics"]["closed_trade_count"] == 1
+    assert before["evidence_hash"] == aggregate_campaign(conn, campaign_id)["evidence_hash"]
+    conn.commit(); conn.close()
+
+    engine = create_engine(f"sqlite+pysqlite:///{db}", future=True)
+    thresholds = BurnInThresholds(
+        minimum_duration_seconds=0, minimum_total_decisions=0,
+        minimum_accepted_trades=0, minimum_closed_trades=2,
+        minimum_rejected_forward_outcomes=0, minimum_regime_coverage=0,
+        minimum_calibration_sample=0, max_symbol_concentration=1.0,
+        max_trade_contribution=1.0, max_regime_concentration=1.0,
+        min_lower_confidence_bound_expectancy=-100,
+        require_operator_ack=False, require_phase1_6_gates=False,
+    )
+    result = qualify_campaign(engine, campaign_id, thresholds)
+    with engine.connect() as sql:
+        snapshot = sql.execute(text("SELECT blockers_json,metrics_json FROM burnin_qualification_snapshots WHERE qualification_id=:qid"), {"qid": result["qualification_id"]}).mappings().one()
+        row = sql.execute(text("SELECT exit_reason,evidence_complete,missing_cost_fields_json,net_r FROM burnin_trade_outcomes WHERE burnin_run_id=:rid AND outcome_id='tout_ambiguous'"), {"rid": run_id}).mappings().one()
+    dashboard = fetch_phase8_campaign(engine, campaign_id)
+    engine.dispose()
+    blockers = json.loads(snapshot["blockers_json"]); metrics = json.loads(snapshot["metrics_json"])
+    assert "MINIMUM_CLOSED_TRADES:1<2" in blockers
+    assert metrics["operational_closed_trade_count"] == 2
+    assert metrics["qualified_closed_trade_count"] == metrics["closed_trade_count"] == 1
+    assert metrics["mean_net_r"] == metrics["lower_confidence_bound_expectancy"] == 0.96
+    assert dashboard["closed_trades"] == 1
+    assert row["exit_reason"] == "AMBIGUOUS_INTRABAR" and row["evidence_complete"] == 0
+    assert json.loads(row["missing_cost_fields_json"]) == ["ambiguous_intrabar_sequence"]
+    assert row["net_r"] == -10.04
+    with sqlite3.connect(db) as audit_conn:
+        audit_conn.row_factory = sqlite3.Row
+        audit = audit_payload(audit_conn, campaign_id)
+    incomplete_check = next(c for c in audit["checks"] if c["name"] == "no_incomplete_outcomes_counted_complete")
+    assert incomplete_check["status"] == "PASS"
+    assert incomplete_check["details"] == {"eligible_closed_outcomes": 1, "latest_qualification_closed_outcomes": 1}
+    after_conn = sqlite3.connect(db); after_conn.row_factory = sqlite3.Row
+    after = aggregate_campaign(after_conn, campaign_id)
+    after_conn.close()
+    assert after["evidence_hash"] == before["evidence_hash"]
 
 
 def test_identity_aware_zero_rejects_fail_closed_for_orphan_outcomes(tmp_path):

@@ -1,3 +1,29 @@
+# Burn-in evidence identity and qualified closed-outcome correction — 2026-09-16
+
+### Added
+- Critical release-token namespace and target-database identity-collision checks at preflight, campaign creation, and continuation start.
+- Explicit operational, qualified, and incomplete closed-outcome counters in qualification metrics.
+- Focused regressions for valid release tokens, canonical identity rejection, fail-closed create/launch behavior, ambiguous intrabar evidence exclusion, auditability, expectancy/LCB isolation, dashboard alignment, and hash reproducibility.
+
+### Changed
+- Minimum closed-trade qualification, expectancy, LCB, harmful-accept, and concentration calculations now share the complete, cost-valid closed-outcome cohort.
+- Integrity audit distinguishes retained incomplete evidence from an incomplete row being counted as complete.
+- Invalid release attempts use a hashed invalid-release preflight artifact directory rather than propagating the invalid identity into the directory name.
+
+### Fixed
+- Canonical campaign, run, and aggregate identities can no longer pass as release tokens merely because candidate and runtime hashes agree.
+- `MINIMUM_CLOSED_TRADES` no longer counts `AMBIGUOUS_INTRABAR` or other incomplete/cost-incomplete closed outcomes.
+- Dashboard and qualification closed counts use the same complete-evidence contract.
+
+### Removed
+- None. Historical and incomplete evidence remains durable and exportable.
+
+### Breaking Changes
+- No schema or API migration. Operators must replace any release token in the reserved canonical burn-in namespace; such campaigns now fail closed and cannot be started or resumed.
+
+### Known Issues
+- Historical pre-fix snapshots are not rewritten. `camp_a955d6d821c775a4` must remain immutable; a fresh PAPER campaign is required for prospective qualification. LIVE remains NOT READY.
+
 # Autonomous qualification harness — 2026-09-15
 
 ### SOAK release-gate follow-up
