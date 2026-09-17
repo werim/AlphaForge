@@ -1,3 +1,55 @@
+# Phase9 detached burn-in worker attachment race correction — 2026-09-17
+
+## Why the patch was needed
+The real macOS `1709MAC04` detached PAPER launches recorded `worker_alive=true`, `worker_not_exited=true`, and a fresh heartbeat, yet Phase9 returned `WORKER_EXITED_BEFORE_ATTACHMENT` with `worker_exit_code=null`. The parent persisted `PHASE9_CAMPAIGN_FAILED` before the starting worker could persist `PHASE8_CAMPAIGN_ATTACHED`; the worker then encountered the invalidated campaign state, persisted `PHASE8_CAMPAIGN_ATTACH_FAILED`, and terminated with `WORKER_UNCAUGHT_EXCEPTION`. Both continuations failed without a runtime-state snapshot.
+
+## Confirmed root cause
+`verify_worker_attachment()` called `_campaign_worker_alive(campaign)` twice in one polling iteration. The first result populated the persisted `checks["worker_alive"]`; after computing `worker_exit_code`, a second independent liveness/identity probe drove the exit branch. A True first result followed by a False second result therefore produced internally contradictory evidence and fabricated a worker-exit classification despite `Popen.poll() is None`.
+
+The command-identity string difference was not the root cause. The current expected part `alphaforge.burnin` is a substring of the canonical `alphaforge.burnin_cli` argv, and the process-liveness implementation uses substring matching. This patch leaves that established identity contract unchanged and preserves command, campaign, process-start-time, and PID-reuse validation.
+
+## Files changed
+- `src/alphaforge/burnin_ops.py`: snapshots worker liveness once per attachment iteration, reuses that value in checks, classifies immediate exit only from a real non-null `Popen.poll()` exit code, and passes the recovery drill's real subprocess handle into attachment verification.
+- `tests/test_phase9_burnin_ops.py`: adds regressions for one probe per iteration, the former True/False TOCTOU sequence, live-child identity uncertainty, exact timeout classification, missing runtime-instance evidence, positive run mismatch, delayed parent/worker attachment, recovery subprocess propagation, genuine exit-code behavior, and successful complete attachment.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: record runtime behavior, lifecycle and persistence impact, compatibility, validation, migration, and operational guidance.
+
+## Before behavior
+One iteration could persist `worker_alive=true` and `worker_not_exited=true`, then call the liveness probe again and return `WORKER_EXITED_BEFORE_ATTACHMENT` with `worker_exit_code=null`. The parent immediately marked the campaign and active continuation failed, clearing worker metadata before the child completed its Phase8 attachment. The recovery-drill path also launched a real subprocess but did not provide its `Popen` object to the verifier.
+
+## After behavior
+Each iteration captures:
+
+- one identity-aware `worker_alive` value;
+- one `worker_exit_code = process.poll()` value when a real subprocess is available.
+
+Those exact values populate checks and drive the iteration. Complete attach event, runtime-instance ID, matching active run, fresh heartbeat, live identity, and no exit still produce `ATTACHED`. A non-null poll result still produces `WORKER_EXITED_BEFORE_ATTACHMENT` immediately. When poll is null, missing or uncertain ownership/attachment evidence remains `WAITING`; timeout produces `WORKER_ATTACHMENT_TIMEOUT` unless a positively observed run mismatch already produced `WORKER_IDENTITY_MISMATCH`. Recovery verification now receives the subprocess handle and can distinguish a genuine exit from uncertainty.
+
+## Lifecycle, persistence, schema, and compatibility impact
+Trading lifecycle and semantics are unchanged. No strategy threshold, RR rule, score, MTF behavior, PAPER sizing, cost model, position-management rule, LIVE path, reconciliation behavior, or campaign qualification criterion changed.
+
+The startup lifecycle remains fail-closed:
+
+- complete, current evidence permits the parent to transition STARTING to RUNNING;
+- genuine subprocess exit terminalizes the startup as failed;
+- positive attached-run mismatch terminalizes as identity mismatch;
+- incomplete evidence cannot attach and ultimately times out.
+
+No schema, CSV export, artifact layout, or database migration changed. No historical evidence was rewritten or sanitized. `1709MAC04` must remain preserved as the authoritative failed pre-fix evidence. Compatibility risk is limited to operators or tests that incorrectly depended on an identity/liveness false result being labeled as a proven process exit when no subprocess exit code existed; it is now accurately labeled as attachment timeout.
+
+## Tests executed and results
+- Focused attachment selection: 9 passed.
+- Requested affected modules (`test_phase9_burnin_ops.py`, `test_process_liveness.py`, `test_phase8_burnin_campaign.py`): 189 passed.
+- Broader burn-in, runtime, runtime-state, configuration, PAPER, qualification, process-liveness, and control-center set: 368 passed with 40 existing dependency deprecation warnings.
+- Full `.venv/bin/python -m pytest -q`: 1,712 passed, 3 skipped, 120 existing dependency deprecation warnings in 279.72 seconds.
+- `git diff --check`: passed before documentation and will be repeated in the final audit.
+
+One intermediate affected-module run exposed a nondeterministic expectation in a newly added test: campaign creation already had a heartbeat with the same second-level timestamp as worker start. The fixture was made explicit, and the repeated affected-module, broader, and full-suite runs are green. This was test-fixture correction, not a runtime regression.
+
+## Risks, limitations, migration, and recommendation
+Process identity remains fail-closed: an unreadable or mismatched command/start-time probe cannot satisfy attachment even while a known child is running. That uncertainty now waits and times out rather than masquerading as an exit. `WORKER_IDENTITY_MISMATCH` is reserved for a positively observed attach event belonging to the wrong active run. Campaign identity remains enforced by campaign-scoped queries; runtime identity remains mandatory through non-empty `runtime_instance_id` evidence.
+
+Migration is not required. Review and merge the fix branch through the normal process; do not merge from this task directly. After merge, use clean release ID `1709MAC05` for a fresh detached PAPER validation if no external release registry has claimed it. Do not launch or resume `1709MAC04`, modify its database, or infer LIVE readiness from this orchestration fix.
+
 # PAPER executable-fill RR geometry and correlated-major exposure — 2026-09-17
 
 ## Why the patch was needed and root cause

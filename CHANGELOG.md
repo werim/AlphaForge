@@ -1,3 +1,28 @@
+# Phase9 detached worker attachment snapshot correction — 2026-09-17
+
+### Added
+- Regression coverage for one liveness probe per poll, the former True/False TOCTOU sequence, live-child attachment delay and identity uncertainty, complete attachment, missing runtime identity, wrong active-run identity, genuine subprocess exit, timeout classification, and recovery subprocess propagation.
+
+### Changed
+- Phase9 attachment polling now uses one coherent worker-liveness and subprocess-exit snapshot per iteration.
+- Recovery-drill attachment verification now receives the real launched `Popen` object.
+
+### Fixed
+- A second liveness probe can no longer contradict persisted `worker_alive=true` / `worker_not_exited=true` checks and fabricate `WORKER_EXITED_BEFORE_ATTACHMENT`.
+- A child with `process.poll() is None` now remains waiting for attachment evidence until success or timeout instead of being classified as exited from transient liveness/identity uncertainty.
+- Timeout without a positive exit or positive run-identity mismatch now remains `WORKER_ATTACHMENT_TIMEOUT`.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. No trading semantics, schema, export, migration, or historical evidence changed.
+
+### Known Issues
+- Identity-aware liveness can remain unavailable or false when OS command/start-time evidence cannot be established; attachment stays fail-closed and times out.
+- The existing `alphaforge.burnin` substring command match remains unchanged because it also matches the canonical `alphaforge.burnin_cli` entrypoint and was not the demonstrated cause.
+- `1709MAC04` remains immutable historical failure evidence. A fresh post-merge detached PAPER run should use `1709MAC05` if that release ID remains unclaimed. LIVE remains NOT READY.
+
 # PAPER executable-fill RR geometry and correlation buckets — 2026-09-17
 
 ### Added

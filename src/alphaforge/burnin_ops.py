@@ -663,9 +663,10 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
         attach = _latest_attach(conn, campaign_id, since=launch_started_at, run_id=active_run_id)
         details = _event_details(attach)
         heartbeat = campaign.get("last_heartbeat_at")
+        worker_alive = _campaign_worker_alive(campaign)
         worker_exit_code = process.poll() if process is not None else None
         checks = {
-            "worker_alive": _campaign_worker_alive(campaign),
+            "worker_alive": worker_alive,
             "worker_not_exited": worker_exit_code is None,
             "attach_event_after_launch": attach is not None,
             "runtime_instance_evidence": bool(details.get("runtime_instance_id")),
@@ -675,7 +676,7 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
         last = {"status": "ATTACHED" if all(checks.values()) else "WAITING", "checks": checks, "worker_pid": pid, "worker_exit_code": worker_exit_code, "runtime_instance_id": details.get("runtime_instance_id"), "active_run_id": active_run_id, "heartbeat": heartbeat}
         if all(checks.values()):
             return last
-        if worker_exit_code is not None or (pid and not _campaign_worker_alive(campaign)):
+        if worker_exit_code is not None:
             last["status"] = "FAILED"
             last["reason"] = "WORKER_EXITED_BEFORE_ATTACHMENT"
             break
@@ -1586,7 +1587,7 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     proc = _launch_worker(db, campaign_id)
     conn.execute("UPDATE burnin_campaigns SET worker_pid=?, worker_started_at=? WHERE campaign_id=?", (proc.pid, worker_started_at, campaign_id))
     conn.commit()
-    attach = verify_worker_attachment(conn, campaign_id, worker_started_at=worker_started_at, launch_started_at=worker_started_at, timeout_seconds=attach_timeout_seconds)
+    attach = verify_worker_attachment(conn, campaign_id, worker_started_at=worker_started_at, launch_started_at=worker_started_at, timeout_seconds=attach_timeout_seconds, process=proc)
     current = get_campaign(conn, campaign_id) or {}
     runs_after = _run_source_ids(conn, campaign_id)
     source_after = {rid: _source_row_ids_and_hash(conn, rid) for rid in runs_before}

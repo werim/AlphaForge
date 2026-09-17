@@ -1,3 +1,15 @@
+# Phase9 detached worker attachment snapshot correction — 2026-09-17
+
+- Current version/phase: proposed clean release `1709MAC05`, prospective Phase9 detached PAPER startup correction on `fix/burnin-worker-attachment-race`.
+- Runtime maturity: each attachment polling iteration now uses one coherent campaign-worker liveness result and one `Popen.poll()` result for checks and classification. A live child with incomplete or temporarily uncertain attachment evidence remains waiting until attachment or timeout; only an observed subprocess exit code produces `WORKER_EXITED_BEFORE_ATTACHMENT`.
+- BACKTEST/PAPER/LIVE alignment: trading decisions, thresholds, sizing, execution costs, reconciliation, and position management are unchanged. The fix is limited to Phase9 detached worker attachment orchestration and recovery-drill subprocess evidence.
+- Lifecycle coverage: genuine pre-attachment exits still fail immediately; positive active-run mismatch still fails as `WORKER_IDENTITY_MISMATCH`; missing attach, heartbeat, runtime-instance, run-match, or worker-identity evidence remains fail-closed as `WORKER_ATTACHMENT_TIMEOUT` when no exit is proven.
+- Persistence/execution realism: no schema, export, migration, or historical-row change. Phase9 no longer persists checks showing an alive/not-exited worker and then classifies the same polling observation as exited because of a second probe.
+- Validation: 9 focused attachment regressions passed; 189 requested Phase9/process-liveness/Phase8 tests passed; 368 broader burn-in/runtime/control-center tests passed with 40 dependency deprecation warnings; the full suite passed 1,712 tests with 3 skips and 120 dependency deprecation warnings.
+- Known critical risks: OS identity probing remains intentionally fail-closed and can withhold attachment if start-time or command ownership cannot be established. The existing substring command match remains unchanged because `alphaforge.burnin` matches the canonical `alphaforge.burnin_cli` command and was not the demonstrated cause. No real PAPER or LIVE campaign was launched.
+- Evidence preservation: release `1709MAC04` and its failed campaign artifacts remain immutable historical failure evidence; no local historical campaign database was modified.
+- Last audit date: 2026-09-17. PAPER verdict: safe for review and a fresh post-merge detached PAPER validation under `1709MAC05`; do not resume or rewrite `1709MAC04`. Live readiness verdict: NOT LIVE READY.
+
 # PAPER executable-fill RR geometry correction — 2026-09-17
 
 - Current version/phase: `paper_executable_rr_v1`, prospective PAPER execution-realism correction.

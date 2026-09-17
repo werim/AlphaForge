@@ -543,7 +543,235 @@ def test_detached_launch_waits_for_attach_and_fails_without_attach(monkeypatch, 
     conn.execute("UPDATE burnin_campaigns SET worker_pid=124, worker_started_at=? WHERE campaign_id=?", (utc_now(), camp2.campaign_id))
     conn.commit()
     failed = verify_worker_attachment(conn, camp2.campaign_id, worker_started_at=utc_now(), launch_started_at=utc_now(), timeout_seconds=0.01)
-    assert failed["status"] == "FAILED"
+    assert failed["status"] == "FAILED" and failed["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+
+
+def test_attachment_poll_uses_one_coherent_liveness_snapshot(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    worker_started = utc_now()
+    conn.execute(
+        "UPDATE burnin_campaigns SET campaign_status='STARTING', worker_pid=321, "
+        "worker_started_at=?, last_heartbeat_at=? WHERE campaign_id=?",
+        (worker_started, worker_started, camp.campaign_id),
+    )
+    conn.execute("UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
+    conn.commit()
+
+    observations = iter((True, False))
+    probe_count = 0
+
+    def liveness_snapshot(_campaign):
+        nonlocal probe_count
+        probe_count += 1
+        return next(observations)
+
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops, "_campaign_worker_alive", liveness_snapshot)
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(poll=lambda: None),
+    )
+
+    assert probe_count == 1
+    assert out["checks"]["worker_alive"] is True
+    assert out["checks"]["worker_not_exited"] is True
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+
+
+def test_live_popen_identity_uncertainty_times_out_without_fabricated_exit(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, _run = _campaign(conn)
+    worker_started = utc_now()
+    conn.execute(
+        "UPDATE burnin_campaigns SET campaign_status='STARTING', worker_pid=322, "
+        "worker_started_at=?, last_heartbeat_at=? WHERE campaign_id=?",
+        (worker_started, worker_started, camp.campaign_id),
+    )
+    conn.commit()
+
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops, "_campaign_worker_alive", lambda _campaign: False)
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(poll=lambda: None),
+    )
+
+    assert out["checks"] == {
+        "worker_alive": False,
+        "worker_not_exited": True,
+        "attach_event_after_launch": False,
+        "runtime_instance_evidence": False,
+        "heartbeat_newer_than_worker_started": True,
+        "active_run_id_matches_attach": False,
+    }
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+    assert out["worker_exit_code"] is None
+
+
+def test_attachment_with_wrong_active_run_fails_closed_as_identity_mismatch(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, _run = _campaign(conn)
+    worker_started = utc_now()
+    conn.execute(
+        "UPDATE burnin_campaigns SET campaign_status='STARTING', worker_pid=323, "
+        "worker_started_at=?, last_heartbeat_at=? WHERE campaign_id=?",
+        (worker_started, worker_started, camp.campaign_id),
+    )
+    event(
+        conn,
+        camp.campaign_id,
+        "PHASE8_CAMPAIGN_ATTACHED",
+        burnin_run_id="wrong-run",
+        details={"runtime_instance_id": "runtime:wrong", "active_run_id": "wrong-run"},
+    )
+    conn.commit()
+    monkeypatch.setattr(ops, "_campaign_worker_alive", lambda _campaign: True)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=1,
+        process=SimpleNamespace(poll=lambda: None),
+    )
+
+    assert out["reason"] == "WORKER_IDENTITY_MISMATCH"
+    assert out["active_run_id"] != out["attached_run_id"]
+    assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "FAILED"
+
+
+def test_attachment_without_runtime_instance_evidence_times_out_fail_closed(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    worker_started = utc_now()
+    conn.execute(
+        "UPDATE burnin_campaigns SET campaign_status='STARTING', worker_pid=324, "
+        "worker_started_at=?, last_heartbeat_at=? WHERE campaign_id=?",
+        (worker_started, worker_started, camp.campaign_id),
+    )
+    event(
+        conn,
+        camp.campaign_id,
+        "PHASE8_CAMPAIGN_ATTACHED",
+        burnin_run_id=run,
+        details={"active_run_id": run},
+    )
+    conn.commit()
+
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops, "_campaign_worker_alive", lambda _campaign: True)
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(poll=lambda: None),
+    )
+
+    assert out["checks"]["attach_event_after_launch"] is True
+    assert out["checks"]["active_run_id_matches_attach"] is True
+    assert out["checks"]["runtime_instance_evidence"] is False
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+    assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "FAILED"
+
+
+def test_detached_parent_waits_for_live_worker_attachment(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _patch_launch_preflight(monkeypatch)
+    db = str(tmp_path / "delayed-attach.db")
+    proc = SimpleNamespace(pid=777, poll=lambda: None)
+    ready = False
+    emitted = False
+    real_latest_attach_any = ops._latest_attach_any
+
+    def delayed_attach(conn, campaign_id, since=None):
+        nonlocal emitted
+        if ready and not emitted:
+            campaign = get_campaign(conn, campaign_id)
+            heartbeat = utc_now()
+            event(
+                conn,
+                campaign_id,
+                "PHASE8_CAMPAIGN_ATTACHED",
+                burnin_run_id=campaign["active_run_id"],
+                details={
+                    "runtime_instance_id": "runtime:delayed",
+                    "active_run_id": campaign["active_run_id"],
+                },
+            )
+            conn.execute(
+                "UPDATE burnin_campaigns SET last_heartbeat_at=? WHERE campaign_id=?",
+                (heartbeat, campaign_id),
+            )
+            conn.commit()
+            emitted = True
+        return real_latest_attach_any(conn, campaign_id, since=since)
+
+    def worker_progress(_seconds):
+        nonlocal ready
+        ready = True
+
+    monkeypatch.setattr(ops, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(ops, "_launch_worker", lambda *_args, **_kwargs: proc)
+    monkeypatch.setattr(ops, "_latest_attach_any", delayed_attach)
+    monkeypatch.setattr(ops.time, "sleep", worker_progress)
+
+    out = launch_campaign(
+        db,
+        "rel-delayed-attach",
+        3,
+        ["BTCUSDT"],
+        ["1h"],
+        detach=True,
+        attach_timeout_seconds=1,
+    )
+
+    assert out["status"] == "LAUNCHED"
+    assert out["attachment"]["status"] == "ATTACHED"
+    assert all(out["attachment"]["checks"].values())
+    check = sqlite3.connect(db)
+    check.row_factory = sqlite3.Row
+    campaign = check.execute(
+        "SELECT campaign_status, last_error, worker_pid FROM burnin_campaigns"
+    ).fetchone()
+    assert tuple(campaign) == ("RUNNING", None, 777)
+    assert check.execute(
+        "SELECT COUNT(*) FROM burnin_campaign_events WHERE event_type='PHASE8_CAMPAIGN_ATTACHED'"
+    ).fetchone()[0] == 1
+    assert check.execute(
+        "SELECT COUNT(*) FROM burnin_campaign_events WHERE event_type='PHASE9_CAMPAIGN_FAILED'"
+    ).fetchone()[0] == 0
+    check.close()
 
 
 def test_foreground_launch_invokes_runner(monkeypatch, tmp_path):
@@ -645,8 +873,14 @@ def test_recovery_drill_starts_new_worker_and_preserves_exact_pending_ids(monkey
 
     class P(SimpleNamespace):
         pid = 501
-    monkeypatch.setattr(ops, "_launch_worker", lambda db, cid: P())
-    monkeypatch.setattr(ops, "verify_worker_attachment", lambda *a, **k: {"status": "ATTACHED", "runtime_instance_id": "rt"})
+    proc = P()
+
+    def attached(*_args, **kwargs):
+        assert kwargs["process"] is proc
+        return {"status": "ATTACHED", "runtime_instance_id": "rt"}
+
+    monkeypatch.setattr(ops, "_launch_worker", lambda db, cid: proc)
+    monkeypatch.setattr(ops, "verify_worker_attachment", attached)
     monkeypatch.setattr(ops, "qualify_campaign", lambda *a, **k: {"status": "stub"})
     out = recovery_drill(conn, camp.campaign_id, attach_timeout_seconds=0.01)
     assert out["checks"]["exactly_one_new_continuation"]
@@ -1365,9 +1599,12 @@ def test_worker_exit_during_attachment_is_detected_without_timeout(monkeypatch, 
     conn.execute("UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?", (run,))
     conn.commit()
     import alphaforge.burnin_ops as ops
-    monkeypatch.setattr(ops, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(ops, "_campaign_worker_alive", lambda _campaign: True)
     out = verify_worker_attachment(conn, camp.campaign_id, worker_started_at=utc_now(), launch_started_at=utc_now(), timeout_seconds=60, process=SimpleNamespace(poll=lambda: 9))
     assert out["reason"] == "WORKER_EXITED_BEFORE_ATTACHMENT"
+    assert out["worker_exit_code"] == 9
+    assert out["checks"]["worker_alive"] is True
+    assert out["checks"]["worker_not_exited"] is False
     row = conn.execute("SELECT campaign_status,worker_pid,last_error FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()
     assert row["campaign_status"] == "FAILED" and row["worker_pid"] is None
 
