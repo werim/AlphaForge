@@ -1,3 +1,15 @@
+# PAPER executable-fill RR geometry correction — 2026-09-17
+
+- Current version/phase: `paper_executable_rr_v1`, prospective PAPER execution-realism correction.
+- Runtime maturity: the final PAPER acceptance gate now derives `expected_fill` from the same adverse-slippage function used by the simulator, recomputes `executable_raw_rr` from fill/SL/TP geometry, and subtracts only costs not already embedded in the entry fill. A 1.20 candidate RR is no longer sufficient when a tight stop makes executable RR fall below `MIN_EFFECTIVE_RR`.
+- BACKTEST/PAPER/LIVE alignment: PAPER and runtime pre-submit evidence use executable geometry. The legacy generic effective-RR helper and the separate `order.py` BACKTEST decision surface remain unchanged; full canonicalization across every non-runtime consumer is a follow-up risk, not hidden by threshold changes.
+- Lifecycle coverage: accepted/rejected lifecycle ordering is unchanged. Low executable geometry is persisted as `LOW_EFFECTIVE_RR` before `WAITING_ENTRY_ZONE` or execution. TP/SL resolution continues to compute gross R from actual simulated fill and fixed exit geometry.
+- Persistence/execution realism: no schema migration or historical rewrite. Decision metrics and pending-position provenance add candidate RR, expected fill, executable raw RR, residual penalty, and fill-slippage evidence. Entry slippage embedded in fill is not charged again as an additive realized cost; modelled exit slippage remains charged.
+- Correlation exposure: BTC and ETH families now share a direction-aware `CRYPTO_MAJOR` bucket. Same-direction positions count toward configured correlation limits; opposite-direction exposure does not. No correlation threshold was tuned, and the default limit of two correlated positions still permits one BTC/ETH pair.
+- Validation: 134 affected runtime, portfolio, resolver, parity, and live-readiness tests passed. An isolated full suite passed 1,566 tests with 3 skips and 120 dependency deprecation warnings. Dedicated regressions cover the observed ETH 0.1724R geometry, tight/normal stops, LONG/SHORT symmetry, TP gross R, and BTC/ETH same-side rejection when the configured limit is one.
+- Known critical risks: a fresh PAPER campaign is required to validate outcome distributions prospectively. The environment path for `MAX_CORRELATED_POSITIONS` remains reserved/not wired, so changing the default correlation limit requires a separate explicit policy/config patch. LIVE remains NOT READY.
+- Last audit date: 2026-09-17. PAPER verdict: merge and start a fresh campaign; do not mutate or resume historical evidence. Live readiness verdict: NOT LIVE READY.
+
 # Reject persistence canonical parity — 2026-09-16
 
 - Current version/phase: `reject_parity_v1`, pre-long-PAPER burn-in evidence hardening.

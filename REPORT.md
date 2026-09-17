@@ -1,3 +1,37 @@
+# PAPER executable-fill RR geometry and correlated-major exposure — 2026-09-17
+
+## Why the patch was needed and root cause
+Campaign `camp_e5fd9a3b1c8b62f5` exposed accepted PAPER candidates near 1.20 theoretical RR whose TP outcomes realized only about 0.17R–0.98R gross. The runtime read candidate RR from scanner/generated geometry and `_effective_rr_from_execution()` subtracted additive penalties from that theoretical value. After acceptance, `_simulate_paper_execution()` moved LONG fills up and SHORT fills down by the configured PAPER slippage, while `_persist_pending_paper_position()` retained the original SL/TP. `resolve_position_closure()` correctly divided gross PnL by the larger fill-to-stop risk distance. Qualification and realization therefore described different geometry.
+
+The supplied ETH LONG reproduces the mismatch exactly: entry 2414.07 with two-basis-point adverse slippage produces fill 2414.552814; fixed SL 2413.52 gives 1.032814 risk, fixed TP 2414.730838 gives 0.178024 reward, and executable raw RR is approximately 0.1724. The resolver's gross-R formula was correct; the pre-acceptance effective-RR numerator and denominator were not recomputed from the executable fill.
+
+Correlation inspection found a second gap. `portfolio_risk.correlation_group_for_symbol()` put BTC and ETH in separate major groups, and runtime `_active_positions` discarded side, reconstructing every open position as LONG for portfolio evaluation. The configured correlation-count/notional guards therefore could not represent BTC/ETH same-direction concentration reliably.
+
+## Files and exact behavior changed
+- `src/alphaforge/runtime.py`: adds one expected-fill function shared by PAPER qualification and simulation; computes candidate RR, expected fill, executable raw RR, remaining execution penalty, and effective RR before the final threshold gate; persists those values in append-only decision metrics and pending-position provenance; preserves active PAPER side through open/attach/recovery/close; and records embedded entry slippage as zero additive cost so it is not charged twice. The residual penalty still includes modelled exit slippage plus spread, fee, funding, latency, liquidity, and volatility penalties not encoded in entry fill.
+- `src/alphaforge/portfolio_risk.py`: combines BTC and ETH families into `CRYPTO_MAJOR` and counts only same-direction (or conservatively unknown-direction) positions toward the candidate's correlated exposure.
+- `tests/test_paper_rr_geometry.py`: covers tight and normal stops, LONG/SHORT symmetry, exact ETH reproduction, final accept/reject behavior, resolver TP gross R, and runtime correlation rejection.
+- `tests/test_phase4_portfolio_risk.py`: covers shared BTC/ETH grouping, same-direction rejection, and opposite-direction non-counting.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: record behavior, evidence, compatibility, validation, and remaining risk.
+
+## Runtime, lifecycle, persistence, and compatibility impact
+The final gate now enforces `effective_rr = executable_raw_rr - remaining_execution_penalty`. For PAPER, `executable_raw_rr` uses the exact rounded simulated fill. Invalid post-fill geometry produces zero executable RR and fails the existing threshold. No TP was raised, no SL was widened, and no score or RR threshold was loosened.
+
+Lifecycle ordering is unchanged. A geometry failure becomes the existing durable `LOW_EFFECTIVE_RR` reject before `WAITING_ENTRY_ZONE`, `ENTRY_TRIGGERED`, or order placement. TP/SL resolution remains fill-based, so TP `gross_r` equals fill-adjusted reward divided by fill-adjusted risk. Only net cost accounting changes: entry slippage already represented by the fill is no longer deducted again, while exit slippage remains explicit.
+
+No table, column, CSV shape, migration, or historical row changed. New fields live inside existing JSON metrics/provenance. Historical campaigns retain their evidence-at-time semantics and were not opened for mutation. Prospective accepted/rejected distributions will change, so validation must use a fresh PAPER campaign rather than resuming the affected campaign.
+
+## Correlation assessment
+BTC and ETH same-direction positions should share a risk bucket because the observed synchronized losses demonstrate common market-beta concentration. The patch routes them through the existing auditable hard-reject mechanism rather than inventing an unpersisted size multiplier. Opposite-direction exposure is not counted as same-direction concentration. No threshold was tuned: the runtime default of two correlated positions still permits one BTC/ETH pair, while `max_correlated_positions=1` rejects the second position. The environment registry currently lists `MAX_CORRELATED_POSITIONS` as reserved/not wired; selecting a stricter production value should be a separate explicit risk-policy/configuration change after this RR correction.
+
+## Tests executed, risks, and recommendation
+- Affected runtime, portfolio, resolver, burn-in, BACKTEST/PAPER parity, and live-readiness security selection: 134 passed.
+- Python compilation passed for the changed runtime and portfolio modules.
+- Isolated full suite: 1,566 passed, 3 skipped, with 120 existing dependency deprecation warnings in 269.27 seconds.
+- `git diff --check` passed before the isolated full-suite run.
+
+Remaining limitations are the unchanged non-runtime/BACKTEST effective-RR consumer, the unwired environment correlation limit, and lack of prospective post-fix campaign outcomes. Review and merge the minimal patch, start a fresh PAPER campaign, and compare accepted executable RR with realized gross R. Do not mutate historical databases or infer LIVE readiness.
+
 # Reject persistence canonical parity hardening — 2026-09-16
 
 ## Why the patch was needed

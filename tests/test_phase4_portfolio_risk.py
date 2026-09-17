@@ -38,6 +38,34 @@ def test_portfolio_risk_accepts_clean_and_groups_conservatively():
     assert correlation_group_for_symbol("NEWCOINUSDT") == "UNKNOWN_CONSERVATIVE"
 
 
+def test_btc_eth_same_direction_share_correlation_guard_but_hedge_does_not():
+    assert correlation_group_for_symbol("BTCUSDT") == correlation_group_for_symbol("ETHUSDT")
+    same_side = _snapshot(
+        symbol="ETHUSDT", side="LONG",
+        open_positions={"BTCUSDT": {"notional": 500, "side": "LONG"}},
+        config={"max_correlated_positions": 1},
+    )
+    hedge = _snapshot(
+        symbol="ETHUSDT", side="SHORT",
+        open_positions={"BTCUSDT": {"notional": 500, "side": "LONG"}},
+        config={"max_correlated_positions": 1},
+    )
+
+    rejected = evaluate_portfolio_risk(
+        {"symbol": "ETHUSDT", "side": "LONG", "entry": 100, "quantity": 1},
+        same_side, {"reject_unknown_portfolio_risk": True},
+    )
+    accepted_hedge = evaluate_portfolio_risk(
+        {"symbol": "ETHUSDT", "side": "SHORT", "entry": 100, "quantity": 1},
+        hedge, {"reject_unknown_portfolio_risk": True},
+    )
+
+    assert same_side.correlated_position_count == 1
+    assert rejected.reject_reason == "CORRELATION_OVEREXPOSURE"
+    assert hedge.correlated_position_count == 0
+    assert accepted_hedge.accepted
+
+
 def test_portfolio_reject_persists_to_order_decisions(tmp_path):
     engine = init_db(f"sqlite+pysqlite:///{tmp_path/'p.db'}")
     Session = sessionmaker(bind=engine, future=True)

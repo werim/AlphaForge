@@ -78,8 +78,7 @@ def correlation_group_for_symbol(symbol: str, override: Mapping[str, str] | None
         if base.endswith(q) and len(base) > len(q):
             base = base[:-len(q)]
             break
-    if base in {"BTC", "WBTC"}: return "CRYPTO_MAJOR_BTC"
-    if base in {"ETH", "STETH", "WETH"}: return "CRYPTO_MAJOR_ETH"
+    if base in {"BTC", "WBTC", "ETH", "STETH", "WETH"}: return "CRYPTO_MAJOR"
     if base in {"DOGE", "SHIB", "PEPE", "BONK", "FLOKI", "WIF"}: return "CRYPTO_MEME_LOW_LIQUIDITY"
     if base in {"SOL", "AVAX", "BNB", "XRP", "ADA", "LINK", "DOT", "MATIC", "ARB", "OP"}: return "CRYPTO_HIGH_BETA_ALT"
     if base in {"USDT", "USDC", "DAI", "USD", "EUR"}: return "STABLE_FIAT"
@@ -91,6 +90,7 @@ def snapshot_from_state(*, mode: str, symbol: str, side: str = "LONG", candidate
     positions = open_positions or {}
     total = 0.0; sym = 0.0; long = 0.0; short = 0.0; group_exp = 0.0; group_count = 0
     group = correlation_group_for_symbol(symbol, correlation_overrides)
+    candidate_side = str(side or "LONG").upper()
     for psym, pdata in positions.items():
         if isinstance(pdata, Mapping):
             notional = _num(pdata.get("notional") or pdata.get("notional_usdt"), None)
@@ -102,7 +102,8 @@ def snapshot_from_state(*, mode: str, symbol: str, side: str = "LONG", candidate
         if str(psym).upper() == str(symbol).upper(): sym += abs(notional)
         if pside == "SHORT": short += abs(notional)
         else: long += abs(notional)
-        if correlation_group_for_symbol(psym, correlation_overrides) == group:
+        same_direction = pside == candidate_side or pside not in {"LONG", "SHORT"}
+        if correlation_group_for_symbol(psym, correlation_overrides) == group and same_direction:
             group_exp += abs(notional); group_count += 1
     ts = now_iso()
     cooldown_remaining = None
@@ -111,7 +112,7 @@ def snapshot_from_state(*, mode: str, symbol: str, side: str = "LONG", candidate
     daily_loss_pct = None if equity in (None, 0) or daily_realized_pnl is None else max(0.0, -float(daily_realized_pnl) / float(equity))
     gross = long + short
     net = long - short
-    return PortfolioRiskSnapshot(mode=mode, timestamp=ts, equity=equity, available_balance=available_balance, open_position_count=len(positions), max_open_positions=cfgget("max_open_positions", cfgget("max_concurrent_positions")), concurrent_position_count=len(positions), max_concurrent_positions=cfgget("max_concurrent_positions"), total_notional_exposure=total, max_notional_exposure=cfgget("max_notional_exposure"), symbol_notional_exposure=sym, max_symbol_notional=cfgget("max_symbol_notional"), side_exposure_long=long, side_exposure_short=short, net_exposure=net, gross_exposure=gross, leverage_estimate=None if equity in (None, 0) else gross / float(equity), symbol_cooldown_remaining_sec=cooldown_remaining, trades_today_symbol=trades_today_symbol, trades_today_global=trades_today_global, daily_realized_pnl=daily_realized_pnl, daily_loss_pct=daily_loss_pct, max_daily_loss_pct=cfgget("max_daily_loss_pct"), rolling_drawdown_pct=rolling_drawdown_pct, max_rolling_drawdown_pct=cfgget("max_rolling_drawdown_pct"), consecutive_loss_count=consecutive_loss_count, loss_cluster_active=(consecutive_loss_count or 0) >= int(cfgget("max_consecutive_losses", 999999) or 999999), correlation_group=group, correlation_group_exposure=group_exp, max_correlation_group_exposure=cfgget("max_correlation_group_exposure"), correlated_position_count=group_count, max_correlated_positions=cfgget("max_correlated_positions"), diagnostics_json=json.dumps({"candidate_notional": candidate_notional, "candidate_side": side}))
+    return PortfolioRiskSnapshot(mode=mode, timestamp=ts, equity=equity, available_balance=available_balance, open_position_count=len(positions), max_open_positions=cfgget("max_open_positions", cfgget("max_concurrent_positions")), concurrent_position_count=len(positions), max_concurrent_positions=cfgget("max_concurrent_positions"), total_notional_exposure=total, max_notional_exposure=cfgget("max_notional_exposure"), symbol_notional_exposure=sym, max_symbol_notional=cfgget("max_symbol_notional"), side_exposure_long=long, side_exposure_short=short, net_exposure=net, gross_exposure=gross, leverage_estimate=None if equity in (None, 0) else gross / float(equity), symbol_cooldown_remaining_sec=cooldown_remaining, trades_today_symbol=trades_today_symbol, trades_today_global=trades_today_global, daily_realized_pnl=daily_realized_pnl, daily_loss_pct=daily_loss_pct, max_daily_loss_pct=cfgget("max_daily_loss_pct"), rolling_drawdown_pct=rolling_drawdown_pct, max_rolling_drawdown_pct=cfgget("max_rolling_drawdown_pct"), consecutive_loss_count=consecutive_loss_count, loss_cluster_active=(consecutive_loss_count or 0) >= int(cfgget("max_consecutive_losses", 999999) or 999999), correlation_group=group, correlation_group_exposure=group_exp, max_correlation_group_exposure=cfgget("max_correlation_group_exposure"), correlated_position_count=group_count, max_correlated_positions=cfgget("max_correlated_positions"), diagnostics_json=json.dumps({"candidate_notional": candidate_notional, "candidate_side": candidate_side, "correlation_direction": candidate_side}))
 
 
 def evaluate_portfolio_risk(candidate: Mapping[str, Any] | Any, portfolio_snapshot: PortfolioRiskSnapshot, config: Mapping[str, Any] | Any | None = None, mode: str = "PAPER") -> PortfolioRiskDecision:

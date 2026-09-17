@@ -1,3 +1,28 @@
+# PAPER executable-fill RR geometry and correlation buckets — 2026-09-17
+
+### Added
+- Persisted PAPER decision/provenance evidence for candidate RR, expected fill, executable raw RR, residual execution penalty, and whether entry slippage is embedded in fill.
+- Regressions for two-basis-point tight-stop collapse, normal-width preservation, LONG/SHORT symmetry, the observed ETH 0.1724R TP geometry, realized TP gross R, and a configured BTC/ETH same-direction correlation reject.
+
+### Changed
+- PAPER qualification and simulation now share one adverse-fill calculation.
+- Effective RR now starts from fill-adjusted reward/risk geometry and subtracts costs not represented by the entry fill; modelled exit slippage remains a residual cost.
+- BTC/WBTC and ETH/STETH/WETH share a direction-aware `CRYPTO_MAJOR` correlation bucket, and runtime active-position state retains PAPER side information.
+
+### Fixed
+- Tight-stop PAPER candidates can no longer pass `MIN_EFFECTIVE_RR` on theoretical geometry and later realize a much smaller TP gross R solely because simulated adverse entry slippage moved the fill.
+- Embedded entry slippage is no longer charged a second time in resolved PAPER net results.
+- Same-direction BTC and ETH positions can now trigger the existing `CORRELATION_OVEREXPOSURE` guard when configured limits are reached.
+
+### Removed
+- Separate BTC-only and ETH-only major-asset correlation buckets.
+
+### Breaking Changes
+- No schema migration or historical mutation. Prospective PAPER decisions may reject trades that passed under theoretical RR accounting. Correlation diagnostics now report `CRYPTO_MAJOR` for BTC/ETH-family symbols.
+
+### Known Issues
+- The default `max_correlated_positions=2` still permits one BTC/ETH pair; no risk threshold was tuned. The environment-level `MAX_CORRELATED_POSITIONS` setting remains reserved/not wired. BACKTEST consumers outside the runtime path still use their existing effective-RR calculation. LIVE remains NOT READY.
+
 # Reject persistence canonical parity — 2026-09-16
 
 ### Added
