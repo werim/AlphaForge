@@ -18,6 +18,7 @@ from alphaforge.burnin_campaign import (
     update_campaign_heartbeat, _exec,
     fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity,
     identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS,
+    release_id_validation,
 )
 from alphaforge.config import load_config_from_env, load_reconciliation_settings
 from alphaforge.config_audit import audit_config
@@ -454,7 +455,10 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
     cfg = load_config_from_env()
     checks: list[dict[str, Any]] = []
     blockers: list[str] = []
-    out = Path(output_dir or f"artifacts/burnin/preflight_{release_id}")
+    release_validation = release_id_validation(release_id)
+    default_output = (f"artifacts/burnin/preflight_{release_id}" if release_validation["valid"]
+                      else f"artifacts/burnin/preflight_invalid_release_{canonical_hash(release_id)[:12]}")
+    out = Path(output_dir or default_output)
 
     def add(name: str, status: str, details: Any = "", *, critical: bool = True) -> None:
         checks.append({"name": name, "status": status, "details": details, "critical": critical})
@@ -463,6 +467,7 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
 
     env_audit = audit_config()
     dotenv = dotenv_status()
+    add("release_id_reserved_namespace_free", "PASS" if release_validation["valid"] else "FAIL", release_validation)
     add("env_contract_valid", "PASS" if env_audit["status"] != "FAIL" else "FAIL", {"errors": env_audit["errors"], "warnings": env_audit["warnings"]})
     add("dotenv_loaded", "PASS", {"path": dotenv.path, "loaded": dotenv.loaded})
     add("no_duplicate_env_keys", "PASS" if not env_audit["duplicate_template_variables"] else "FAIL", env_audit["duplicate_template_variables"])
@@ -530,9 +535,12 @@ def preflight(db: str, release_id: str, symbols: Sequence[str], intervals: Seque
         add("database_writable", "PASS", canonical_db)
         schema = validate_required_schema(conn)
         add("schema_current", "PASS" if schema.schema_status == "VALID" else "FAIL", {**schema.as_dict(), "campaign_schema": CAMPAIGN_SCHEMA_VERSION, "ops_schema": PHASE9_SCHEMA_VERSION})
+        database_release_validation = release_id_validation(release_id, conn)
+        add("release_id_database_identity_collision_free", "PASS" if not database_release_validation["database_identity_collisions"] else "FAIL", database_release_validation)
     except Exception as exc:
         add("database_writable", "FAIL", str(exc))
         add("schema_current", "UNAVAILABLE", "database unavailable")
+        add("release_id_database_identity_collision_free", "UNAVAILABLE", "database unavailable")
 
     ident = _candidate_identity(release_id, symbols, intervals)
     cid = "camp_" + canonical_hash({"release_id": release_id, "config_hash": ident["config_hash"], "strategy_config_hash": ident["strategy_config_hash"], "universe_hash": ident["universe_hash"]})[:16]
@@ -1647,7 +1655,16 @@ def audit_payload(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
     if run_ids:
         ph = ",".join("?" for _ in run_ids)
         chk("no_entry_only_records_counted_as_closed_trades", conn.execute(f"SELECT COUNT(*) FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph}) AND closed_at IS NULL AND evidence_complete=1", run_ids).fetchone()[0] == 0)
-        chk("no_incomplete_outcomes_counted_complete", conn.execute(f"SELECT COUNT(*) FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph}) AND closed_at IS NOT NULL AND evidence_complete=0", run_ids).fetchone()[0] == 0)
+        qualified_closed = conn.execute(f"SELECT COUNT(*) FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph}) AND closed_at IS NOT NULL AND evidence_complete=1 AND json_valid(missing_cost_fields_json) AND json_type(missing_cost_fields_json)='array' AND json_array_length(missing_cost_fields_json)=0 AND total_execution_cost IS NOT NULL AND net_r IS NOT NULL AND spread_cost IS NOT NULL AND entry_slippage_cost IS NOT NULL AND exit_slippage_cost IS NOT NULL AND fee_cost IS NOT NULL AND funding_cost IS NOT NULL AND latency_cost IS NOT NULL", run_ids).fetchone()[0]
+        latest_qualification = conn.execute("SELECT metrics_json FROM burnin_qualification_snapshots WHERE campaign_id=? ORDER BY id DESC LIMIT 1", (campaign_id,)).fetchone()
+        latest_qualified_closed = None
+        if latest_qualification is not None:
+            try:
+                latest_metrics = json.loads(latest_qualification["metrics_json"] or "{}")
+                latest_qualified_closed = latest_metrics.get("qualified_closed_trade_count", latest_metrics.get("closed_trade_count"))
+            except (TypeError, json.JSONDecodeError):
+                latest_qualified_closed = None
+        chk("no_incomplete_outcomes_counted_complete", latest_qualification is None or latest_qualified_closed is None or latest_qualified_closed == qualified_closed, {"eligible_closed_outcomes": qualified_closed, "latest_qualification_closed_outcomes": latest_qualified_closed})
         chk("no_missing_cost_fields_in_qualified_outcomes", conn.execute(f"SELECT COUNT(*) FROM burnin_trade_outcomes WHERE burnin_run_id IN ({ph}) AND evidence_complete=1 AND (total_execution_cost IS NULL OR net_r IS NULL)", run_ids).fetchone()[0] == 0)
         bad_pre_decision = 0
         bad_dual_hit = 0

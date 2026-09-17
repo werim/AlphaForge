@@ -1,3 +1,77 @@
+# PAPER executable-fill RR geometry and correlation buckets — 2026-09-17
+
+### Added
+- Persisted PAPER decision/provenance evidence for candidate RR, expected fill, executable raw RR, residual execution penalty, and whether entry slippage is embedded in fill.
+- Regressions for two-basis-point tight-stop collapse, normal-width preservation, LONG/SHORT symmetry, the observed ETH 0.1724R TP geometry, realized TP gross R, and a configured BTC/ETH same-direction correlation reject.
+
+### Changed
+- PAPER qualification and simulation now share one adverse-fill calculation.
+- Effective RR now starts from fill-adjusted reward/risk geometry and subtracts costs not represented by the entry fill; modelled exit slippage remains a residual cost.
+- BTC/WBTC and ETH/STETH/WETH share a direction-aware `CRYPTO_MAJOR` correlation bucket, and runtime active-position state retains PAPER side information.
+
+### Fixed
+- Tight-stop PAPER candidates can no longer pass `MIN_EFFECTIVE_RR` on theoretical geometry and later realize a much smaller TP gross R solely because simulated adverse entry slippage moved the fill.
+- Embedded entry slippage is no longer charged a second time in resolved PAPER net results.
+- Same-direction BTC and ETH positions can now trigger the existing `CORRELATION_OVEREXPOSURE` guard when configured limits are reached.
+
+### Removed
+- Separate BTC-only and ETH-only major-asset correlation buckets.
+
+### Breaking Changes
+- No schema migration or historical mutation. Prospective PAPER decisions may reject trades that passed under theoretical RR accounting. Correlation diagnostics now report `CRYPTO_MAJOR` for BTC/ETH-family symbols.
+
+### Known Issues
+- The default `max_correlated_positions=2` still permits one BTC/ETH pair; no risk threshold was tuned. The environment-level `MAX_CORRELATED_POSITIONS` setting remains reserved/not wired. BACKTEST consumers outside the runtime path still use their existing effective-RR calculation. LIVE remains NOT READY.
+
+# Reject persistence canonical parity — 2026-09-16
+
+### Added
+- Database-backed canonical reject-count restoration for campaign attach, standalone burn-in start, runtime restart, and heartbeat publication.
+- Focused regressions for duplicate and distinct rejects, restart restoration, heartbeat parity, and DB-backed execution metrics.
+
+### Changed
+- Autonomous qualification parity checks now count only canonical burn-in decision observations.
+- Burn-in execution snapshots derive `execution_rejects` from the active run's canonical persisted observations rather than mutable process state.
+
+### Fixed
+- Replaying the same canonical `reject_decision_id` no longer inflates `rejects_persisted`.
+- PAPER restart/resume no longer resets heartbeat reject evidence to zero or carries an invocation counter forward as canonical evidence.
+
+### Removed
+- Invocation-count semantics from `rejects_persisted`; retry attempts remain observable through existing logs/callback behavior but are not qualification evidence.
+
+### Breaking Changes
+- No schema or strategy behavior change. Consumers that incorrectly interpreted `rejects_persisted` as an attempt counter must use their own diagnostic attempt telemetry.
+
+### Known Issues
+- Historical heartbeats retain their evidence-at-time values and are not rewritten. POSTRSLVRFX remains immutable. LIVE remains NOT READY.
+
+# Burn-in evidence identity and qualified closed-outcome correction — 2026-09-16
+
+### Added
+- Critical release-token namespace and target-database identity-collision checks at preflight, campaign creation, and continuation start.
+- Explicit operational, qualified, and incomplete closed-outcome counters in qualification metrics.
+- Focused regressions for valid release tokens, canonical identity rejection, fail-closed create/launch behavior, ambiguous intrabar evidence exclusion, auditability, expectancy/LCB isolation, dashboard alignment, and hash reproducibility.
+
+### Changed
+- Minimum closed-trade qualification, expectancy, LCB, harmful-accept, and concentration calculations now share the complete, cost-valid closed-outcome cohort.
+- Integrity audit distinguishes retained incomplete evidence from an incomplete row being counted as complete.
+- Invalid release attempts use a hashed invalid-release preflight artifact directory rather than propagating the invalid identity into the directory name.
+
+### Fixed
+- Canonical campaign, run, and aggregate identities can no longer pass as release tokens merely because candidate and runtime hashes agree.
+- `MINIMUM_CLOSED_TRADES` no longer counts `AMBIGUOUS_INTRABAR` or other incomplete/cost-incomplete closed outcomes.
+- Dashboard and qualification closed counts use the same complete-evidence contract.
+
+### Removed
+- None. Historical and incomplete evidence remains durable and exportable.
+
+### Breaking Changes
+- No schema or API migration. Operators must replace any release token in the reserved canonical burn-in namespace; such campaigns now fail closed and cannot be started or resumed.
+
+### Known Issues
+- Historical pre-fix snapshots are not rewritten. `camp_a955d6d821c775a4` must remain immutable; a fresh PAPER campaign is required for prospective qualification. LIVE remains NOT READY.
+
 # Autonomous qualification harness — 2026-09-15
 
 ### SOAK release-gate follow-up

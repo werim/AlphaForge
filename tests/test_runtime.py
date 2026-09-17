@@ -19,7 +19,7 @@ from alphaforge import persistence as persistence_module
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator, _build_runtime_from_env, execution_mode_from_env
 from alphaforge.runtime_state import RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot, latest_runtime_state_snapshot, build_readonly_reconciliation_probe, persist_verified_paper_recovery
 from alphaforge.burnin_campaign import aggregate_campaign, bootstrap_campaign_schema, create_campaign, start_or_resume_campaign
-from alphaforge.burnin import export_burnin_evidence
+from alphaforge.burnin import canonical_decision_sql, export_burnin_evidence
 from alphaforge.burnin_resolver import resolve_campaign_batch
 import alphaforge.runtime as runtime_module
 import alphaforge.runtime_state as runtime_state_module
@@ -431,6 +431,135 @@ def test_eligible_paper_runtime_reject_creates_one_pending_label(
         "burnin_execution_metrics.csv", "burnin_reject_quality.csv", "burnin_calibration.csv",
         "burnin_drawdowns.csv", "burnin_suspension_events.csv",
     }
+
+
+def _canonical_reject_fixture(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> tuple[object, RuntimeOrchestrator, str, str]:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / (name + '.db')}")
+    with engine.begin() as conn:
+        campaign = create_campaign(
+            conn, release_id=f"{name}-release", duration_days=1,
+            symbols=["BTCUSDT"], intervals=["1m"],
+        )
+        run_id = start_or_resume_campaign(conn, campaign.campaign_id)["burnin_run_id"]
+    monkeypatch.setenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", campaign.campaign_id)
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER, reject_forward_horizon_bars=1),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    runtime._campaign_id = campaign.campaign_id
+    runtime._burnin_run_id = run_id
+    runtime.metrics.persistence_enabled = True
+    return engine, runtime, campaign.campaign_id, run_id
+
+
+def _canonical_reject_payload(signal_id: str) -> dict[str, object]:
+    return {
+        "signal_id": signal_id, "symbol": "BTCUSDT", "side": "LONG",
+        "timeframe": "1m", "entry": 100.0, "sl": 90.0, "tp": 120.0,
+        "reason": "LOW_CONFIDENCE", "regime": "TRENDING",
+        "setup_type": "BREAKOUT", "decision_timestamp": "2026-01-01T00:00:00Z",
+        "execution_ctx": {
+            "spread_pct": .001, "expected_slippage_pct": .001, "fee_pct": .001,
+            "funding_rate_pct": 0.0, "market_data_latency_ms": 1,
+            "liquidity_score": .9,
+        },
+    }
+
+
+def _canonical_rejected_count(engine: object, campaign_id: str) -> int:
+    with engine.connect() as conn:
+        return int(conn.execute(text(f"""
+            SELECT COUNT(*) FROM burnin_observations o
+            WHERE o.burnin_run_id IN (
+                SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id=:cid
+            ) AND UPPER(COALESCE(o.decision, ''))='REJECTED'
+              AND {canonical_decision_sql('o')}
+        """), {"cid": campaign_id}).scalar_one())
+
+
+def test_same_canonical_reject_persisted_twice_counts_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, campaign_id, _ = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "same-reject")
+    payload = _canonical_reject_payload("runtime:same-reject")
+
+    asyncio.run(runtime._persist_reject(payload))
+    asyncio.run(runtime._persist_reject(payload))
+
+    assert runtime.metrics.rejects_persisted == 1
+    assert _canonical_rejected_count(engine, campaign_id) == 1
+
+
+def test_two_distinct_canonical_rejects_count_twice(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, campaign_id, _ = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "distinct-rejects")
+
+    asyncio.run(runtime._persist_reject(_canonical_reject_payload("runtime:reject-one")))
+    asyncio.run(runtime._persist_reject(_canonical_reject_payload("runtime:reject-two")))
+
+    assert runtime.metrics.rejects_persisted == 2
+    assert _canonical_rejected_count(engine, campaign_id) == 2
+
+
+def test_rejects_persisted_restores_from_campaign_on_runtime_restart(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, campaign_id, run_id = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "restart-rejects")
+    asyncio.run(runtime._persist_reject(_canonical_reject_payload("runtime:before-restart")))
+
+    restarted = RuntimeOrchestrator(
+        config=runtime.config, ai_brain=_brain(), market_scanner=lambda: None,
+        persistence_engine=engine,
+    )
+    restarted._campaign_id = campaign_id
+    restarted._burnin_run_id = run_id
+
+    assert restarted.metrics.rejects_persisted == 0
+    assert restarted._restore_rejects_persisted() == 1
+    assert restarted.metrics.rejects_persisted == 1
+
+
+def test_runtime_heartbeat_rejects_persisted_matches_canonical_db_count(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, campaign_id, _ = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "heartbeat-rejects")
+    payload = _canonical_reject_payload("runtime:heartbeat-reject")
+    asyncio.run(runtime._persist_reject(payload))
+    asyncio.run(runtime._persist_reject(payload))
+    runtime.metrics.rejects_persisted = 99
+
+    runtime._persist_runtime_heartbeat()
+
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT payload_json FROM runtime_heartbeats
+            WHERE runtime_instance_id=:rid ORDER BY id DESC LIMIT 1
+        """), {"rid": runtime.runtime_instance_id}).scalar_one()
+    assert json.loads(row)["rejects_persisted"] == 1
+    assert _canonical_rejected_count(engine, campaign_id) == 1
+
+
+def test_execution_reject_metric_uses_db_canonical_count_not_process_counter(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, campaign_id, _ = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "db-backed-rejects")
+    payload = _canonical_reject_payload("runtime:db-backed-reject")
+    asyncio.run(runtime._persist_reject(payload))
+    asyncio.run(runtime._persist_reject(payload))
+    runtime.metrics.rejects_persisted = 99
+
+    runtime._persist_burnin_periodic_metrics()
+
+    with engine.connect() as conn:
+        execution_rejects = int(conn.execute(text("""
+            SELECT execution_rejects FROM burnin_execution_metrics
+            WHERE burnin_run_id=:bid ORDER BY id DESC LIMIT 1
+        """), {"bid": runtime._burnin_run_id}).scalar_one())
+    assert execution_rejects == 1
+    assert _canonical_rejected_count(engine, campaign_id) == 1
 
 
 def test_runtime_reject_core_and_forward_evidence_share_decision_id(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparse, asyncio, contextlib, csv, hashlib, json, os, sqlite3, subprocess, sys, time, uuid
+import argparse, asyncio, contextlib, csv, hashlib, json, os, re, sqlite3, subprocess, sys, time, uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -18,6 +18,9 @@ from alphaforge.process_liveness import process_is_alive
 from alphaforge.provider_failures import classify_provider_exception, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, RETRYABLE_MARKET_DATA
 
 CAMPAIGN_SCHEMA_VERSION = "phase8_campaign_v1"
+CANONICAL_CAMPAIGN_ID_RE = re.compile(r"^camp_[0-9a-f]{16}$")
+CANONICAL_BURNIN_RUN_ID_RE = re.compile(r"^camp_[0-9a-f]{16}_run_[0-9]{4,}$")
+CANONICAL_CAMPAIGN_AGGREGATE_ID_RE = re.compile(r"^camp_[0-9a-f]{16}__aggregate$")
 DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS = 2.0
 CAMPAIGN_STATUSES = {"CREATED","STARTING","RUNNING","PAUSED","RECOVERY_REQUIRED","COMPLETED","FAILED","QUALIFIED","SUSPENDED"}
 ATTACHMENT_IDENTITY_FIELDS = ("release_id", "config_hash", "strategy_config_hash", "universe_hash", "execution_mode", "git_commit")
@@ -190,8 +193,42 @@ def git_commit() -> str:
 def campaign_id_for(release_id: str, payload: Mapping[str, Any]) -> str:
     return "camp_" + canonical_hash({"release_id": release_id, **payload})[:16]
 
+def release_id_validation(release_id: str, conn: Any | None = None) -> dict[str, Any]:
+    """Validate that an operator release token cannot impersonate burn-in identity."""
+    value = str(release_id or "")
+    reserved_kind = None
+    for kind, pattern in (
+        ("CAMPAIGN", CANONICAL_CAMPAIGN_ID_RE),
+        ("RUN", CANONICAL_BURNIN_RUN_ID_RE),
+        ("AGGREGATE", CANONICAL_CAMPAIGN_AGGREGATE_ID_RE),
+    ):
+        if pattern.fullmatch(value):
+            reserved_kind = kind
+            break
+    collisions: list[dict[str, str]] = []
+    if conn is not None:
+        for table, column in (("burnin_campaigns", "campaign_id"), ("burnin_runs", "burnin_run_id")):
+            row = _exec(conn, f"SELECT {column} FROM {table} WHERE {column}=:release_id LIMIT 1", {"release_id": value}).fetchone()
+            if row is not None:
+                collisions.append({"table": table, "column": column, "identity": value})
+    return {
+        "release_id": value,
+        "valid": bool(value) and reserved_kind is None and not collisions,
+        "reserved_namespace_kind": reserved_kind,
+        "database_identity_collisions": collisions,
+    }
+
+def require_valid_release_id(release_id: str, conn: Any | None = None) -> None:
+    validation = release_id_validation(release_id, conn)
+    if not validation["valid"]:
+        reason = ("RESERVED_NAMESPACE" if validation["reserved_namespace_kind"] else
+                  "DATABASE_IDENTITY_COLLISION" if validation["database_identity_collisions"] else "EMPTY")
+        raise ValueError(f"INVALID_RELEASE_ID:{reason}")
+
 def create_campaign(conn: Any, *, release_id: str, duration_days: float, symbols: Sequence[str], intervals: Sequence[str], config: Mapping[str,Any]|None=None, strategy_config: Mapping[str,Any]|None=None, source_provenance: Mapping[str,Any]|None=None, execution_cost_config: Mapping[str,Any]|None=None, runtime_config: Any | None=None, paper_slippage_bps: float | None = None, paper_source_exchanges: Sequence[str] | None = None, target_decisions:int=500, target_closed_trades:int=30, target_reject_forward_outcomes:int=50) -> BurnInCampaign:
+    require_valid_release_id(release_id)
     bootstrap_campaign_schema(conn)
+    require_valid_release_id(release_id, conn)
     prov=dict(source_provenance or {"provider":"BINANCE_READ_ONLY_KLINES", "exchange": "BINANCE",
                                     "order_submission": "DISABLED", "source":"operator"})
     if not prov: raise ValueError("missing provenance")
@@ -298,6 +335,7 @@ def mark_attached_campaign_operational(conn: Any, campaign_id: str, run_id: str,
 def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False, config_hash: str|None=None, strategy_config_hash: str|None=None, universe_hash: str|None=None) -> dict[str,Any]:
     bootstrap_campaign_schema(conn); c=get_campaign(conn,campaign_id)
     if not c: raise KeyError("campaign not found")
+    require_valid_release_id(str(c.get("release_id") or ""), conn)
     pid = c.get("worker_pid")
     if pid:
         if process_is_alive(pid, expected_command_parts=("alphaforge.burnin", campaign_id), expected_started_at=c.get("worker_started_at")):

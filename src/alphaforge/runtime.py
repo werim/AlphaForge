@@ -252,6 +252,7 @@ class RuntimeOrchestrator:
     _agent_trace_repository: AgentTraceRepository | None = field(default=None, init=False)
     _agent_persistence_stats: AgentPersistenceStats = field(default_factory=AgentPersistenceStats, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
+    _persisted_reject_decision_ids: set[str] = field(default_factory=set, init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
     runtime_instance_id: str = field(default_factory=lambda: f"runtime:{uuid.uuid4().hex}", init=False)
     startup_id: str = field(default_factory=lambda: f"startup:{uuid.uuid4().hex}", init=False)
@@ -286,6 +287,7 @@ class RuntimeOrchestrator:
     _last_lifecycle_state_by_symbol: dict[str, str] = field(default_factory=dict, init=False)
     _symbol_cooldown_until: dict[str, float] = field(default_factory=dict, init=False)
     _active_positions: dict[str, float] = field(default_factory=dict, init=False)
+    _active_position_sides: dict[str, str] = field(default_factory=dict, init=False)
     _incident_counters: dict[str, int] = field(default_factory=dict, init=False)
     _qualification_report: QualificationReport | None = field(default=None, init=False)
     _reconciliation_engine: ReconciliationEngine = field(default_factory=ReconciliationEngine, init=False)
@@ -568,6 +570,8 @@ class RuntimeOrchestrator:
             return
         if runtime_state == "OPERATING" and self._execution_reconciliation_blocked():
             runtime_state = "RECOVERY_REQUIRED"
+        if self.config.execution_mode == ExecutionMode.PAPER and self._burnin_run_id:
+            self._restore_rejects_persisted()
         save_runtime_heartbeat(
             engine,
             runtime_instance_id=self.runtime_instance_id,
@@ -760,7 +764,9 @@ class RuntimeOrchestrator:
         now = time.time()
         with engine.connect() as conn:
             for row in load_active_positions(conn):
-                self._active_positions[str(row['symbol'])] = float(row.get('qty') or 0.0)
+                symbol = str(row['symbol'])
+                self._active_positions[symbol] = float(row.get('qty') or 0.0)
+                self._active_position_sides[symbol] = str(row.get('side') or 'UNKNOWN').upper()
             for row in load_pending_orders(conn):
                 self._pending_orders[str(row['symbol'])] = dict(row)
             for row in conn.execute(text("SELECT symbol, cooldown_remaining_sec FROM cooldown_states WHERE cooldown_remaining_sec > 0")).mappings():
@@ -975,17 +981,19 @@ class RuntimeOrchestrator:
                 self._fail_closed_reason = reason
                 raise RuntimeError(reason)
             self._burnin_run_id = campaign.get("active_run_id") or self._burnin_run_id
-            open_positions = conn.execute(text("SELECT signal_id,symbol,notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
+            open_positions = conn.execute(text("SELECT signal_id,symbol,side,notional FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": campaign_id}).mappings().all()
             for position in open_positions:
                 symbol = str(position.get("symbol") or "").upper()
                 if symbol:
                     self._active_positions[symbol] = float(position.get("notional") or 0.0)
+                    self._active_position_sides[symbol] = str(position.get("side") or "UNKNOWN").upper()
                     self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_OPENED.value
                     signal_id = str(position.get("signal_id") or "").strip()
                     if signal_id:
                         self._last_lifecycle_state_by_signal[signal_id] = LifecycleState.POSITION_OPENED.value
                         self._current_signal_id_by_symbol[symbol] = signal_id
             burnin_campaign_event(conn, campaign_id, "PHASE8_CAMPAIGN_ATTACHED", details={"observed": observed, "runtime_instance_id": self.runtime_instance_id, "active_run_id": self._burnin_run_id})
+            self._restore_rejects_persisted(conn=conn)
 
     def _start_or_resume_burnin_run(self) -> None:
         if self.config.execution_mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE_PRECHECK} or self._burnin_run_id:
@@ -1045,6 +1053,7 @@ class RuntimeOrchestrator:
                     intervals=intervals,
                 )
                 persist_burnin_run(conn, run)
+            self._restore_rejects_persisted()
         except Exception as exc:
             self._burnin_evidence_incomplete = True
             self._fail_closed_reason = "PHASE7_BURNIN_PERSISTENCE_FAILURE"
@@ -1088,8 +1097,10 @@ class RuntimeOrchestrator:
             def persist(target: Any) -> None:
                 campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
                 runtime_identity = campaign_id or f"standalone:{self._burnin_run_id}"
-                metrics = {k: payload.get(k) for k in ("score", "rr", "effective_rr", "confidence",
-                    "spread_pct", "expected_slippage_pct", "latency_ms", "funding_rate_pct")}
+                metrics = {k: payload.get(k) for k in ("score", "rr", "candidate_rr",
+                    "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
+                    "effective_rr", "confidence", "spread_pct", "expected_slippage_pct",
+                    "latency_ms", "funding_rate_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
                                 "setup_identity": payload.get("setup_identity"),
@@ -1178,7 +1189,9 @@ class RuntimeOrchestrator:
         now = canonical_utc_timestamp()
         try:
             with engine.begin() as conn:
-                conn.execute(text("""INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,status,generated_at,schema_version) VALUES (:bid,:rel,'CURRENT',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,:rejects,:stale,:recon,:status,:ts,'phase7_burnin_v1')"""), {"bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "rejects": self.metrics.rejects_persisted, "stale": len(self._stale_market_data_symbols), "recon": self._reconciliation_status, "status": "STABLE" if self._reconciliation_status == "CLEAN" else "INSUFFICIENT_EVIDENCE", "ts": now})
+                canonical_run_rejects = self._canonical_persisted_reject_count(
+                    conn, campaign_scope=False)
+                conn.execute(text("""INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,status,generated_at,schema_version) VALUES (:bid,:rel,'CURRENT',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,0,:rejects,:stale,:recon,:status,:ts,'phase7_burnin_v1')"""), {"bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "rejects": canonical_run_rejects, "stale": len(self._stale_market_data_symbols), "recon": self._reconciliation_status, "status": "STABLE" if self._reconciliation_status == "CLEAN" else "INSUFFICIENT_EVIDENCE", "ts": now})
                 conn.execute(text("""INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_pct,consecutive_losses,rolling_expectancy,resolved,payload_json,schema_version) VALUES (:id,:bid,:rel,NULL,NULL,0,0,NULL,1,:payload,'phase7_burnin_v1')"""), {"id": f"dd:{self._burnin_run_id}:{now}", "bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "payload": json.dumps({"runtime_status": self._runtime_status})})
         except Exception as exc:
             self._burnin_evidence_incomplete = True
@@ -1360,6 +1373,10 @@ class RuntimeOrchestrator:
         score_ctx = self.ai_brain.score_signal(signal_payload, market_ctx, regime_ctx, stats_ctx)
         order_plan = self.ai_brain.choose_order_plan(signal_payload, market_ctx, score_ctx)
         explanation = self.ai_brain.explain_decision(signal_payload, score_ctx, order_plan)
+        raw_rr = signal_payload.get("risk_reward", signal_payload.get("rr", 0.0))
+        rr_metrics = self._execution_rr_metrics(
+            raw_rr, market_ctx, market_ctx.get("execution_ctx", market_ctx),
+        )
         return {
             "decision": order_plan.decision,
             "reason": order_plan.reason,
@@ -1367,8 +1384,10 @@ class RuntimeOrchestrator:
             "confidence": float(order_plan.confidence),
             "score": float(getattr(score_ctx, "total_score", 0.0) or 0.0),
             "reject_reason": canonical_reject_reason(order_plan.reason) if order_plan.decision != "ACCEPTED" else "",
-            "raw_rr": float(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)) or 0.0),
-            "effective_rr": self._effective_rr_from_execution(signal_payload.get("risk_reward", signal_payload.get("rr", 0.0)), market_ctx.get("execution_ctx", market_ctx)),
+            "raw_rr": float(raw_rr or 0.0),
+            "executable_raw_rr": rr_metrics["executable_raw_rr"],
+            "expected_fill": rr_metrics["expected_fill"],
+            "effective_rr": rr_metrics["effective_rr"],
             "explanation": explanation,
         }
 
@@ -1377,6 +1396,75 @@ class RuntimeOrchestrator:
         rr = float(raw_rr or 0.0)
         model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
         return round(max(rr - model.total_penalty, 0.0), 6)
+
+    @staticmethod
+    def _fill_adjusted_raw_rr(*, side: Any, fill: Any, stop: Any, target: Any) -> float | None:
+        try:
+            fill_price = float(fill)
+            stop_price = float(stop)
+            target_price = float(target)
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in (fill_price, stop_price, target_price)):
+            return None
+        normalized_side = str(side or "").strip().upper()
+        if normalized_side == "LONG":
+            risk_distance = fill_price - stop_price
+            reward_distance = target_price - fill_price
+        elif normalized_side == "SHORT":
+            risk_distance = stop_price - fill_price
+            reward_distance = fill_price - target_price
+        else:
+            return None
+        if risk_distance <= 0 or reward_distance <= 0:
+            return 0.0
+        return reward_distance / risk_distance
+
+    def _expected_fill_price(self, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float | None, float | None]:
+        try:
+            entry = float(market_ctx.get("entry"))
+        except (TypeError, ValueError):
+            return None, None
+        if not math.isfinite(entry) or entry <= 0:
+            return None, None
+        if self.config.execution_mode is ExecutionMode.PAPER:
+            slippage_pct = max(float(self.paper_slippage_bps), 0.0) / 10_000.0
+        else:
+            try:
+                slippage_pct = max(float(execution_ctx.get("expected_slippage_pct") or 0.0), 0.0)
+            except (TypeError, ValueError):
+                return None, None
+        side = str(market_ctx.get("side") or "LONG").strip().upper()
+        if side not in {"LONG", "SHORT"}:
+            return None, None
+        fill = entry * (1.0 + slippage_pct if side == "LONG" else 1.0 - slippage_pct)
+        return round(fill, 8), slippage_pct
+
+    def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, float | None]:
+        candidate_rr = float(raw_rr or 0.0)
+        expected_fill, fill_slippage_pct = self._expected_fill_price(market_ctx, execution_ctx)
+        executable_raw_rr = self._fill_adjusted_raw_rr(
+            side=market_ctx.get("side"), fill=expected_fill,
+            stop=market_ctx.get("sl"), target=market_ctx.get("tp"),
+        )
+        model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
+        if executable_raw_rr is None:
+            executable_raw_rr = candidate_rr
+            remaining_penalty = model.total_penalty
+        else:
+            # Entry slippage is already represented by expected_fill. Keep only
+            # costs that the simulated/executable fill does not encode,
+            # including the modelled exit-slippage half.
+            remaining_penalty = max(model.total_penalty - model.slippage_penalty / 2.0, 0.0)
+        effective_rr = max(executable_raw_rr - remaining_penalty, 0.0)
+        return {
+            "candidate_rr": round(candidate_rr, 6),
+            "expected_fill": expected_fill,
+            "fill_slippage_pct": fill_slippage_pct,
+            "executable_raw_rr": round(executable_raw_rr, 6),
+            "remaining_execution_penalty": round(remaining_penalty, 6),
+            "effective_rr": round(effective_rr, 6),
+        }
 
     def _build_mode_parity_evidence(self, *, min_sample_count: int = 3) -> dict[str, Any]:
         samples = list(self._qualification_samples[: max(0, int(min_sample_count))])
@@ -1729,7 +1817,9 @@ class RuntimeOrchestrator:
                                              selection.symbol, reject_payload)
             return
         raw_rr = market_ctx.get("rr")
-        effective_rr = self._effective_rr_from_execution(raw_rr, execution_ctx)
+        rr_metrics = self._execution_rr_metrics(raw_rr, market_ctx, execution_ctx)
+        effective_rr = float(rr_metrics["effective_rr"] or 0.0)
+        market_ctx.update(rr_metrics)
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if self._kill_switch_active():
@@ -1842,7 +1932,7 @@ class RuntimeOrchestrator:
             candidate_notional=candidate_notional,
             equity=inferred_equity,
             available_balance=available_balance,
-            open_positions={k: {"notional": v, "side": "LONG"} for k, v in self._active_positions.items()},
+            open_positions={k: {"notional": v, "side": self._active_position_sides.get(k, "UNKNOWN")} for k, v in self._active_positions.items()},
             config=self.config,
             now=time.time(),
             cooldown_until=self._symbol_cooldown_until,
@@ -1877,6 +1967,10 @@ class RuntimeOrchestrator:
             "decision": "ACCEPTED",
             "score": getattr(score_ctx, "total_score", None),
             "rr": signal_payload.get("risk_reward"),
+            "candidate_rr": rr_metrics["candidate_rr"],
+            "expected_fill": rr_metrics["expected_fill"],
+            "executable_raw_rr": rr_metrics["executable_raw_rr"],
+            "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
             "effective_rr": effective_rr,
             "confidence": order_plan.confidence,
             "execution_ctx": execution_ctx,
@@ -2010,6 +2104,7 @@ class RuntimeOrchestrator:
         await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
         self._generate_burnin_snapshot(reason="periodic")
         self._active_positions[symbol] = float(paper_notional or market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
+        self._active_position_sides[symbol] = str(market_ctx.get("side") or "UNKNOWN").upper()
         self._symbol_cooldown_until[symbol] = time.time() + self.config.symbol_cooldown_sec
 
     def _persist_pending_paper_position(self, symbol: str, trade_id: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any], result: Mapping[str, Any]) -> float:
@@ -2049,7 +2144,16 @@ class RuntimeOrchestrator:
             "execution_cost_unit": "USD",
             "execution_cost_model_unit": "R",
             "execution_cost_model": dict(model.__dict__),
-            "effective_rr_at_entry": self._effective_rr_from_execution(market_ctx.get("rr"), execution_ctx),
+            "entry_slippage_embedded_in_fill": True,
+            "fill_slippage_pct": market_ctx.get("fill_slippage_pct"),
+            "candidate_rr": market_ctx.get("candidate_rr", market_ctx.get("rr")),
+            "expected_fill": market_ctx.get("expected_fill", fill),
+            "executable_raw_rr": market_ctx.get("executable_raw_rr"),
+            "remaining_execution_penalty": market_ctx.get("remaining_execution_penalty"),
+            "effective_rr_at_entry": market_ctx.get(
+                "effective_rr",
+                self._execution_rr_metrics(market_ctx.get("rr"), market_ctx, execution_ctx)["effective_rr"],
+            ),
             "setup_phase": setup.get("phase"),
             "execution_direction": execution.get("direction"),
             "mtf": mtf,
@@ -2061,7 +2165,7 @@ class RuntimeOrchestrator:
                 entry_time=canonical_utc_timestamp(), planned_entry=planned_entry, simulated_fill=fill,
                 stop=market_ctx.get("sl"), target=market_ctx.get("tp"), quantity=quantity,
                 notional=notional, entry_spread=model.spread_penalty * risk_usd / 2.0,
-                entry_slippage=model.slippage_penalty * risk_usd / 2.0, entry_fee=model.fee_penalty * risk_usd / 2.0,
+                entry_slippage=0.0, entry_fee=model.fee_penalty * risk_usd / 2.0,
                 regime=regime.get("regime") or market_ctx.get("regime") or "UNKNOWN",
                 source_provenance=provenance,
             )
@@ -2077,6 +2181,7 @@ class RuntimeOrchestrator:
             open_symbols = {str(row[0]).upper() for row in conn.execute(text("SELECT symbol FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN'"), {"cid": self._campaign_id}).fetchall()}
         for symbol in set(self._active_positions) - open_symbols:
             self._active_positions.pop(symbol, None)
+            self._active_position_sides.pop(symbol, None)
             self._pending_orders.pop(symbol, None)
             self._symbol_cooldown_until.pop(symbol, None)
             self._last_lifecycle_state_by_symbol[symbol] = LifecycleState.POSITION_CLOSED.value
@@ -2126,17 +2231,17 @@ class RuntimeOrchestrator:
             session.commit()
 
     def _simulate_paper_execution(self, symbol: str, decision: Mapping[str, Any], market_ctx: Mapping[str, Any]) -> dict[str, Any]:
-        entry = float(market_ctx.get("entry", 0.0) or 0.0)
-        slip = self.paper_slippage_bps / 10_000.0
-        side = str(market_ctx.get("side", "LONG"))
-        fill = entry * (1 + slip) if side.upper() == "LONG" else entry * (1 - slip)
+        execution_ctx = dict(market_ctx.get("execution_ctx") or {})
+        fill, slip = self._expected_fill_price(market_ctx, execution_ctx)
+        if fill is None or slip is None:
+            raise RuntimeError("PAPER_EXECUTABLE_FILL_UNAVAILABLE")
         return {
             "mode": ExecutionMode.PAPER.value,
             "symbol": symbol,
             "status": "filled",
             "order_type": decision.get("order_type", "MARKET"),
             "expected_slippage_pct": slip,
-            "fill_price": round(fill, 8),
+            "fill_price": fill,
         }
 
     async def _persist_reject(self, payload: dict[str, Any]) -> None:
@@ -2148,6 +2253,7 @@ class RuntimeOrchestrator:
         payload = self._canonical_reject_payload(payload)
         self._reject_log.append(payload)
         engine = self._resolve_persistence_engine()
+        canonical_persisted_count: int | None = None
         if engine is not None:
             with engine.begin() as conn:
                 if not record_rejected_signal_review(conn, reject_decision_id=payload["reject_decision_id"], signal_id=payload["signal_id"], symbol=payload.get("symbol"), setup_type=payload.get("setup_type"), regime=payload.get("regime"), side=payload.get("side"), reject_reason=payload.get("reason"), score=payload.get("score"), raw_rr=payload.get("rr"), effective_rr=payload.get("effective_rr"), volume_24h_usdt=payload.get("volume_24h_usdt"), spread_pct=payload.get("spread_pct"), expected_slippage_pct=payload.get("expected_slippage_pct"), funding_rate_pct=payload.get("funding_rate_pct"), liquidity_score=payload.get("liquidity_score"), volatility_regime=payload.get("volatility_regime"), payload_json=payload):
@@ -2156,16 +2262,61 @@ class RuntimeOrchestrator:
                     {**payload, "decision": "REJECTED"},
                     lifecycle_state=LifecycleState.SIGNAL_REJECTED.value, conn=conn)
                 self._persist_pending_reject(payload, conn=conn)
+                if self._burnin_run_id:
+                    canonical_persisted_count = self._canonical_persisted_reject_count(conn)
         else:
             self._persist_burnin_decision(
                 {**payload, "decision": "REJECTED"},
                 lifecycle_state=LifecycleState.SIGNAL_REJECTED.value)
-        self.metrics.rejects_persisted += 1
+        if engine is not None:
+            self._persisted_reject_decision_ids.add(str(payload["reject_decision_id"]))
+            self.metrics.rejects_persisted = (
+                canonical_persisted_count
+                if canonical_persisted_count is not None
+                else len(self._persisted_reject_decision_ids)
+            )
         if self.on_reject_persist is not None:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
         self._schedule_agent_shadow(payload)
+
+    def _canonical_persisted_reject_count(self, conn: Any, *, campaign_scope: bool = True) -> int:
+        """Count canonical durable rejects in the runtime's evidence scope."""
+        if not self._burnin_run_id:
+            return len(self._persisted_reject_decision_ids)
+        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        params: dict[str, Any]
+        if campaign_scope and campaign_id:
+            scope = ("o.burnin_run_id IN (SELECT burnin_run_id FROM burnin_campaign_runs "
+                     "WHERE campaign_id=:campaign_id)")
+            params = {"campaign_id": campaign_id}
+        else:
+            scope = "o.burnin_run_id=:burnin_run_id"
+            params = {"burnin_run_id": self._burnin_run_id}
+        return int(conn.execute(text(f"""
+            SELECT COUNT(*)
+            FROM burnin_observations o
+            WHERE {scope}
+              AND UPPER(COALESCE(o.decision, ''))='REJECTED'
+              AND {canonical_decision_sql('o')}
+        """), params).scalar_one() or 0)
+
+    def _restore_rejects_persisted(self, *, conn: Any | None = None) -> int:
+        """Restore the heartbeat counter from canonical DB evidence after attach/restart."""
+        if not self._burnin_run_id:
+            self.metrics.rejects_persisted = len(self._persisted_reject_decision_ids)
+            return self.metrics.rejects_persisted
+        if conn is not None:
+            count = self._canonical_persisted_reject_count(conn)
+        else:
+            engine = self._resolve_persistence_engine()
+            if engine is None:
+                return self.metrics.rejects_persisted
+            with engine.connect() as owned_conn:
+                count = self._canonical_persisted_reject_count(owned_conn)
+        self.metrics.rejects_persisted = count
+        return count
 
     def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")

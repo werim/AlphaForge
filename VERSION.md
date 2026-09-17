@@ -1,3 +1,35 @@
+# PAPER executable-fill RR geometry correction — 2026-09-17
+
+- Current version/phase: `paper_executable_rr_v1`, prospective PAPER execution-realism correction.
+- Runtime maturity: the final PAPER acceptance gate now derives `expected_fill` from the same adverse-slippage function used by the simulator, recomputes `executable_raw_rr` from fill/SL/TP geometry, and subtracts only costs not already embedded in the entry fill. A 1.20 candidate RR is no longer sufficient when a tight stop makes executable RR fall below `MIN_EFFECTIVE_RR`.
+- BACKTEST/PAPER/LIVE alignment: PAPER and runtime pre-submit evidence use executable geometry. The legacy generic effective-RR helper and the separate `order.py` BACKTEST decision surface remain unchanged; full canonicalization across every non-runtime consumer is a follow-up risk, not hidden by threshold changes.
+- Lifecycle coverage: accepted/rejected lifecycle ordering is unchanged. Low executable geometry is persisted as `LOW_EFFECTIVE_RR` before `WAITING_ENTRY_ZONE` or execution. TP/SL resolution continues to compute gross R from actual simulated fill and fixed exit geometry.
+- Persistence/execution realism: no schema migration or historical rewrite. Decision metrics and pending-position provenance add candidate RR, expected fill, executable raw RR, residual penalty, and fill-slippage evidence. Entry slippage embedded in fill is not charged again as an additive realized cost; modelled exit slippage remains charged.
+- Correlation exposure: BTC and ETH families now share a direction-aware `CRYPTO_MAJOR` bucket. Same-direction positions count toward configured correlation limits; opposite-direction exposure does not. No correlation threshold was tuned, and the default limit of two correlated positions still permits one BTC/ETH pair.
+- Validation: 134 affected runtime, portfolio, resolver, parity, and live-readiness tests passed. An isolated full suite passed 1,566 tests with 3 skips and 120 dependency deprecation warnings. Dedicated regressions cover the observed ETH 0.1724R geometry, tight/normal stops, LONG/SHORT symmetry, TP gross R, and BTC/ETH same-side rejection when the configured limit is one.
+- Known critical risks: a fresh PAPER campaign is required to validate outcome distributions prospectively. The environment path for `MAX_CORRELATED_POSITIONS` remains reserved/not wired, so changing the default correlation limit requires a separate explicit policy/config patch. LIVE remains NOT READY.
+- Last audit date: 2026-09-17. PAPER verdict: merge and start a fresh campaign; do not mutate or resume historical evidence. Live readiness verdict: NOT LIVE READY.
+
+# Reject persistence canonical parity — 2026-09-16
+
+- Current version/phase: `reject_parity_v1`, pre-long-PAPER burn-in evidence hardening.
+- Runtime maturity: `rejects_persisted` is now the database-derived count of unique canonical persisted rejects for the attached campaign, restored on attach/start/restart and refreshed before heartbeat publication. Standalone non-burn-in runtimes count unique successfully persisted canonical reject IDs within the process.
+- BACKTEST/PAPER/LIVE alignment: reject decisions, reasons, thresholds, and execution behavior are unchanged. PAPER heartbeat and execution metrics no longer expose persistence-attempt counts as canonical evidence.
+- Lifecycle/execution coverage: rejected lifecycle rows, reviews, burn-in observations, and pending forward labels retain their existing idempotent persistence contracts. Qualification sample logic remains DB-backed and does not use heartbeat counters.
+- Persistence/schema: no schema migration or historical rewrite. The stopped POSTRSLVRFX source DB and sidecars were hash-verified unchanged after copy-only forensic inspection.
+- Known critical risks: this fixes the demonstrated counter contract but does not infer which two historical call paths replayed POSTRSLVRFX rejects; callbacks and in-memory diagnostic logs may still observe retries. LIVE remains NOT READY.
+- Last audit date: 2026-09-16. PAPER verdict: safe to start a fresh post-merge long campaign; do not resume or rewrite historical campaigns. Live readiness verdict: NOT LIVE READY.
+
+# Burn-in evidence identity and qualification cohort correction (2026-09-16)
+- Current version/phase: prospective `dev` burn-in operations evidence-integrity correction; historical `data/campaign/1609t01.db` remained read-only and `camp_a955d6d821c775a4` was not resumed.
+- Runtime maturity: preflight, campaign creation, and continuation start now fail closed when a release token is a canonical campaign, run, or aggregate identity. Qualification explicitly separates operational closures from complete, cost-valid closed outcomes.
+- BACKTEST/PAPER/LIVE alignment: decision logic, MTF, RR, scoring, costs, fills, and order authorization are unchanged. The release namespace guard applies to PAPER burn-in operations; qualification consumers use the complete evidence cohort.
+- Lifecycle coverage: `AMBIGUOUS_INTRABAR` remains CLOSED operationally, persisted with `evidence_complete=0`, and excluded from qualification sample, expectancy, LCB, harmful-accept, and concentration calculations.
+- Persistence/execution realism: no schema, migration, export, or aggregate-hash change. Existing rows are neither rewritten nor deleted. Operational and qualification counts are exposed separately.
+- Validation: 145 focused tests passed; 250 broader campaign/audit/resolver/runtime/dashboard tests passed; full suite 1,550 passed and 3 skipped.
+- Known critical risks: historical invalid-release campaigns remain immutable and non-resumable. A fresh PAPER campaign with a valid release token is required for new qualification evidence. LIVE remains NOT READY.
+- Last audit date: 2026-09-16. Live readiness verdict: NOT LIVE READY.
+
 # AlphaForge Version
 
 ## Autonomous qualification harness (2026-09-15)

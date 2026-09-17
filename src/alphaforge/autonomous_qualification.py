@@ -30,7 +30,7 @@ from alphaforge.binance_reconciliation_provider import (
     BinanceReadonlyReconciliationConfig,
     BinanceReadonlyReconciliationProvider,
 )
-from alphaforge.burnin import utc_now
+from alphaforge.burnin import canonical_decision_sql, utc_now
 from alphaforge.burnin_campaign import (
     BurnInCampaignRunner,
     ProviderFailure,
@@ -631,9 +631,11 @@ class AutonomousQualificationHarness:
                               "market_data_latency_ms": 1, "liquidity_score": .9}}
         asyncio.run(ctx.runtime._persist_reject(payload))
         with self.engine.connect() as conn:
-            rejected = int(conn.execute(text(
-                "SELECT COUNT(*) FROM burnin_observations WHERE burnin_run_id=:bid AND decision='REJECTED'"
-            ), {"bid": ctx.burnin_run_id}).scalar_one())
+            rejected = int(conn.execute(text(f"""
+                SELECT COUNT(*) FROM burnin_observations o
+                WHERE burnin_run_id=:bid AND decision='REJECTED'
+                  AND {canonical_decision_sql('o')}
+            """), {"bid": ctx.burnin_run_id}).scalar_one())
             reviews = int(conn.execute(text(
                 "SELECT COUNT(*) FROM rejected_signal_reviews WHERE signal_id='qualification:reject'"
             )).scalar_one())
@@ -705,10 +707,11 @@ class AutonomousQualificationHarness:
                 "SELECT COUNT(*) FROM burnin_pending_reject_labels "
                 "WHERE campaign_id=:cid AND status IN ('PENDING','READY','RESOLVING')"
             ), {"cid": ctx.campaign_id}).scalar_one())
-            rejected = int(conn.execute(text(
-                "SELECT COUNT(*) FROM burnin_observations "
-                "WHERE burnin_run_id=:bid AND decision='REJECTED'"
-            ), {"bid": ctx.burnin_run_id}).scalar_one())
+            rejected = int(conn.execute(text(f"""
+                SELECT COUNT(*) FROM burnin_observations o
+                WHERE burnin_run_id=:bid AND decision='REJECTED'
+                  AND {canonical_decision_sql('o')}
+            """), {"bid": ctx.burnin_run_id}).scalar_one())
             sqlite_lock_exhaustions = int(conn.execute(text(
                 "SELECT COUNT(*) FROM exchange_reconciliation_events "
                 "WHERE status='PERSISTENCE_FAILED'"

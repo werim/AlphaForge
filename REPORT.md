@@ -1,3 +1,105 @@
+# PAPER executable-fill RR geometry and correlated-major exposure — 2026-09-17
+
+## Why the patch was needed and root cause
+Campaign `camp_e5fd9a3b1c8b62f5` exposed accepted PAPER candidates near 1.20 theoretical RR whose TP outcomes realized only about 0.17R–0.98R gross. The runtime read candidate RR from scanner/generated geometry and `_effective_rr_from_execution()` subtracted additive penalties from that theoretical value. After acceptance, `_simulate_paper_execution()` moved LONG fills up and SHORT fills down by the configured PAPER slippage, while `_persist_pending_paper_position()` retained the original SL/TP. `resolve_position_closure()` correctly divided gross PnL by the larger fill-to-stop risk distance. Qualification and realization therefore described different geometry.
+
+The supplied ETH LONG reproduces the mismatch exactly: entry 2414.07 with two-basis-point adverse slippage produces fill 2414.552814; fixed SL 2413.52 gives 1.032814 risk, fixed TP 2414.730838 gives 0.178024 reward, and executable raw RR is approximately 0.1724. The resolver's gross-R formula was correct; the pre-acceptance effective-RR numerator and denominator were not recomputed from the executable fill.
+
+Correlation inspection found a second gap. `portfolio_risk.correlation_group_for_symbol()` put BTC and ETH in separate major groups, and runtime `_active_positions` discarded side, reconstructing every open position as LONG for portfolio evaluation. The configured correlation-count/notional guards therefore could not represent BTC/ETH same-direction concentration reliably.
+
+## Files and exact behavior changed
+- `src/alphaforge/runtime.py`: adds one expected-fill function shared by PAPER qualification and simulation; computes candidate RR, expected fill, executable raw RR, remaining execution penalty, and effective RR before the final threshold gate; persists those values in append-only decision metrics and pending-position provenance; preserves active PAPER side through open/attach/recovery/close; and records embedded entry slippage as zero additive cost so it is not charged twice. The residual penalty still includes modelled exit slippage plus spread, fee, funding, latency, liquidity, and volatility penalties not encoded in entry fill.
+- `src/alphaforge/portfolio_risk.py`: combines BTC and ETH families into `CRYPTO_MAJOR` and counts only same-direction (or conservatively unknown-direction) positions toward the candidate's correlated exposure.
+- `tests/test_paper_rr_geometry.py`: covers tight and normal stops, LONG/SHORT symmetry, exact ETH reproduction, final accept/reject behavior, resolver TP gross R, and runtime correlation rejection.
+- `tests/test_phase4_portfolio_risk.py`: covers shared BTC/ETH grouping, same-direction rejection, and opposite-direction non-counting.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: record behavior, evidence, compatibility, validation, and remaining risk.
+
+## Runtime, lifecycle, persistence, and compatibility impact
+The final gate now enforces `effective_rr = executable_raw_rr - remaining_execution_penalty`. For PAPER, `executable_raw_rr` uses the exact rounded simulated fill. Invalid post-fill geometry produces zero executable RR and fails the existing threshold. No TP was raised, no SL was widened, and no score or RR threshold was loosened.
+
+Lifecycle ordering is unchanged. A geometry failure becomes the existing durable `LOW_EFFECTIVE_RR` reject before `WAITING_ENTRY_ZONE`, `ENTRY_TRIGGERED`, or order placement. TP/SL resolution remains fill-based, so TP `gross_r` equals fill-adjusted reward divided by fill-adjusted risk. Only net cost accounting changes: entry slippage already represented by the fill is no longer deducted again, while exit slippage remains explicit.
+
+No table, column, CSV shape, migration, or historical row changed. New fields live inside existing JSON metrics/provenance. Historical campaigns retain their evidence-at-time semantics and were not opened for mutation. Prospective accepted/rejected distributions will change, so validation must use a fresh PAPER campaign rather than resuming the affected campaign.
+
+## Correlation assessment
+BTC and ETH same-direction positions should share a risk bucket because the observed synchronized losses demonstrate common market-beta concentration. The patch routes them through the existing auditable hard-reject mechanism rather than inventing an unpersisted size multiplier. Opposite-direction exposure is not counted as same-direction concentration. No threshold was tuned: the runtime default of two correlated positions still permits one BTC/ETH pair, while `max_correlated_positions=1` rejects the second position. The environment registry currently lists `MAX_CORRELATED_POSITIONS` as reserved/not wired; selecting a stricter production value should be a separate explicit risk-policy/configuration change after this RR correction.
+
+## Tests executed, risks, and recommendation
+- Affected runtime, portfolio, resolver, burn-in, BACKTEST/PAPER parity, and live-readiness security selection: 134 passed.
+- Python compilation passed for the changed runtime and portfolio modules.
+- Isolated full suite: 1,566 passed, 3 skipped, with 120 existing dependency deprecation warnings in 269.27 seconds.
+- `git diff --check` passed before the isolated full-suite run.
+
+Remaining limitations are the unchanged non-runtime/BACKTEST effective-RR consumer, the unwired environment correlation limit, and lack of prospective post-fix campaign outcomes. Review and merge the minimal patch, start a fresh PAPER campaign, and compare accepted executable RR with realized gross R. Do not mutate historical databases or infer LIVE readiness.
+
+# Reject persistence canonical parity hardening — 2026-09-16
+
+## Why the patch was needed
+POSTRSLVRFX retained 463 unique canonical rejected decisions while its latest runtime heartbeat reported `rejects_persisted=465`. A later campaign converged correctly, so the investigation treated the mismatch as a contract question rather than assuming a currently reproducible storage defect. Copy-only forensic inspection reproduced 463/465 and verified the source database, WAL, and SHM hashes were unchanged. The heartbeat first reached 463 and later advanced to 465 while final canonical evidence remained 463.
+
+## Root cause and intended semantics
+`RuntimeOrchestrator._persist_reject()` canonicalizes a reject and writes three idempotent evidence surfaces: `record_rejected_signal_review()` upserts on unique `reject_decision_id`; `_persist_burnin_decision()` uses a deterministic reject observation ID; and `_persist_pending_reject()` uses a canonical pending-label ID with `INSERT OR IGNORE`. After those writes, the runtime unconditionally executed `self.metrics.rejects_persisted += 1`. The metric therefore counted successful method invocations, including idempotent replays, while autonomous qualification and SOAK checks contractually compared it with canonical persisted reject rows. Runtime attach/restart also left the metric at its process default instead of reconstructing it from durable evidence.
+
+Canonical parity is the intended semantics. Qualification, campaign aggregation, dashboard health, and autonomous parity checks all treat rejects as unique canonical decisions, not write attempts. The exact historical source of the two replayed calls cannot be recovered from final idempotent rows alone, but the old unconditional increment is sufficient to explain and reproduce the surplus.
+
+## Files changed and behavior
+- `src/alphaforge/runtime.py`: replaces unconditional increments with a canonical SQL count over mapped campaign runs (or the active standalone run), restores that count on campaign attach/burn-in start/restart, and refreshes it before PAPER heartbeats. Non-burn-in modes retain a unique process-local set only after successful review persistence. Burn-in execution snapshots query the active run's canonical count directly instead of trusting process memory.
+- `src/alphaforge/autonomous_qualification.py`: parity scenarios and SOAK samples use `canonical_decision_sql()` rather than raw `decision='REJECTED'` rows.
+- `tests/test_runtime.py`: adds duplicate, distinct, restart, heartbeat, and DB-versus-process regressions.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: record the contract, compatibility, validation, and operational disposition.
+
+## Consumer and persistence audit
+`runtime_heartbeats.payload_json.rejects_persisted` and `burnin_ops.health_payload()` now expose campaign-scoped canonical parity. Autonomous qualification compares the same canonical predicate. `burnin_execution_metrics.execution_rejects` is run-scoped and database-derived; Phase 7 qualification uses it only in the stale-data execution-quality ratio, never as a canonical reject sample or trade sample count. Campaign qualification and dashboard totals continue to derive directly from canonical observations. Live-readiness reject checks use persisted order/lifecycle evidence and do not consume the heartbeat counter. No strategy, scoring, MTF, RR, execution, fill, lifecycle, or forward-outcome behavior changed.
+
+The review upsert, canonical burn-in observation, and pending reject label remain durable and idempotent. Repeated persistence can still invoke callbacks and update process diagnostics, but it cannot increase the canonical metric without a new canonical database row. Campaign scope follows `burnin_campaign_runs`, so restart/continuation restoration includes every mapped source run and excludes aggregate materializations.
+
+## Tests executed
+- New focused reject-parity selection: 9 passed.
+- Runtime/heartbeat/autonomous qualification recheck: 92 passed.
+- Relevant runtime, heartbeat, autonomous qualification, burn-in ops, campaign, reject resolver, Phase 7 qualification, and live-readiness suites: 322 passed.
+- Full suite: 1,555 passed, 3 skipped, 120 dependency deprecation warnings.
+- Python compilation and `git diff --check` passed.
+
+## Compatibility, migration, risks, and recommendation
+No schema migration or historical backfill is required. Historical heartbeat rows remain immutable and retain their original 465 value; canonical evidence remains 463. The patch does not identify the precise historical pair of replay call sites because idempotent final rows intentionally collapse them, and it does not rename callback or log semantics. After review/merge and deployment, a fresh long PAPER campaign is safe and is the correct prospective validation; no historical campaign should be resumed or rewritten. This does not establish LIVE readiness.
+
+# Burn-in release namespace and qualified closed-outcome correction — 2026-09-16
+
+## Why the patch was needed
+Read-only forensic inspection of `data/campaign/1609t01.db` confirmed two independent evidence-integrity defects in campaign `camp_a955d6d821c775a4`. Its release token was the canonical run identity `camp_b505d27b6344455c_run_0000`, yet preflight passed. The same campaign had 20 operationally closed outcomes but only 19 qualification-complete outcomes; the latest blocker incorrectly recorded `MINIMUM_CLOSED_TRADES:20<30`. The database was not modified and the campaign was not resumed.
+
+## Root causes and exact count path
+`burnin_ops.preflight()` passed the caller value to both `_candidate_identity()` and `_actual_runtime_identity()`. `_actual_runtime_identity()` temporarily assigned that value to `ALPHAFORGE_RELEASE_ID`, so `runtime_identity_matches_campaign_identity` proved only equality between two derivations of the same input, not that the input belonged to the release namespace. No independent semantic release-token validator existed at preflight, campaign creation, or continuation start.
+
+For closed outcomes, `materialize_campaign_aggregate()` correctly copied both auditable rows and `aggregate_campaign()` correctly reported 19 rows with `closed_at IS NOT NULL AND evidence_complete=1`. `BurnInQualificationEngine.evaluate()` then loaded the aggregate trade rows and assigned `closed=len(trades)`, producing 20. That value fed `MINIMUM_CLOSED_TRADES`, `metrics.closed_trade_count`, and open-count arithmetic. Expectancy had a narrower `evidence_complete/net_r` filter, while harmful-accept and concentration calculations consumed the unfiltered trade list. The historical latest snapshot therefore stored 20 even though the canonical aggregate and dashboard reported 19.
+
+## Files changed and exact behavior
+- `src/alphaforge/burnin_campaign.py`: adds precise canonical campaign/run/aggregate release-namespace recognition, optional target-database identity collision checks, and fail-closed guards before campaign creation and continuation start.
+- `src/alphaforge/burnin_ops.py`: adds critical preflight checks `release_id_reserved_namespace_free` and `release_id_database_identity_collision_free`; invalid tokens use a hashed invalid-release artifact directory and cannot reach launch. The integrity audit now verifies that a qualification snapshot count equals the eligible cohort instead of treating the mere presence of an auditable incomplete closure as corruption.
+- `src/alphaforge/burnin_qualification.py`: constructs one qualification-eligible closed-trade cohort and uses it for the minimum count, expectancy, LCB, harmful-accept, and concentration calculations. It reports `operational_closed_trade_count`, `qualified_closed_trade_count`, and `incomplete_closed_trade_count` separately while retaining qualification-facing `closed_trade_count` as the qualified count. Persisted run-counter reconciliation remains operational and compares against all durable closure rows.
+- `src/alphaforge/dashboard/queries.py`: aligns the dashboard closed count with complete, cost-valid closed evidence.
+- `tests/test_phase9_burnin_ops.py`, `tests/test_burnin_qualification_evidence_integrity.py`, and `tests/test_phase7_qualification.py`: add namespace, fail-closed launch/create, ambiguous-outcome cohort, audit, expectancy/LCB, dashboard, and hash-stability coverage; legacy raw fixtures now carry explicit closure timestamps.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: document behavior, compatibility, tests, and operational disposition.
+
+## Release-ID validation rule
+Valid release tokens must be non-empty and must not match a canonical AlphaForge identity: `camp_[0-9a-f]{16}`, `camp_[0-9a-f]{16}_run_[0-9]{4,}`, or `camp_[0-9a-f]{16}__aggregate`. `1609T02`, `POSTRSLVRFX2`, and `POST363T03` remain valid. The validator also rejects an exact collision with a known `burnin_campaigns.campaign_id` or `burnin_runs.burnin_run_id` in the target database. Invalid values are never rewritten; the operator must supply a valid release token.
+
+## Qualified closed-trade definition and consumer audit
+A qualification-eligible closed outcome has a non-null `closed_at`, `evidence_complete=1`, an empty `missing_cost_fields_json` list, non-null `gross_r`, `net_r`, and `total_execution_cost`, and non-null spread, entry-slippage, exit-slippage, fee, funding, and latency costs. Operational closure remains the durable outcome-row count. The minimum sample gate, mean net R, confidence interval/LCB, harmful accepted-trade rate, and concentration metrics now share the eligible cohort. Regime, calibration, and drawdown checks consume their dedicated persisted evidence tables; no repository code derives those rows from `burnin_trade_outcomes`, so the ambiguous outcome has no closed-outcome path into those tables.
+
+## Lifecycle, persistence, export, hash, and compatibility impact
+`AMBIGUOUS_INTRABAR` remains operationally CLOSED, durable, exportable, and auditable with diagnostic gross/net values permitted by the existing contract. It remains `evidence_complete=0` with `ambiguous_intrabar_sequence` missing evidence and cannot qualify. No lifecycle state, schema, CSV shape, strategy threshold, MTF rule, RR rule, score, fill, slippage, spread, fee, funding, or execution assumption changed. Aggregate evidence hashing was not edited. Read-only inspection reconfirmed the stable historical hash `f433c8778e0ea805b97fabda5eb35bf40b9ba56d884fc635e556d95a54aa519f`.
+
+## Tests executed
+- Focused burn-in ops, qualification, evidence-integrity, and position-resolver suites: 145 passed.
+- Broader campaign, JOB21 audit, reject resolver, runtime, paper burn-in, dashboard, and control-center suites: 250 passed with dependency deprecation warnings only.
+- Full suite: 1,550 passed, 3 skipped, 120 dependency deprecation warnings.
+- `git diff --check` and Python syntax compilation passed.
+- A disposable `/private/tmp` backup of `1609t01.db` produced `MINIMUM_CLOSED_TRADES:19<30`, operational/qualified/incomplete counts `20/19/1`, and the unchanged aggregate hash `f433c8778e0ea805b97fabda5eb35bf40b9ba56d884fc635e556d95a54aa519f`.
+
+## Risks, migration, remaining limitations, and push recommendation
+No schema migration or historical backfill is required. Existing snapshots retain their evidence-at-time semantics and are not rewritten. The historical campaign has both an invalid release namespace and pre-fix qualification snapshots, so it must remain paused/immutable and must not be resumed. A fresh PAPER campaign with a valid release token is required before any new burn-in qualification or canary conclusion. Review and merge the narrow patch on `dev`; do not claim LIVE readiness.
+
 # Autonomous qualification harness — 2026-09-15
 
 ## SOAK release-gate follow-up

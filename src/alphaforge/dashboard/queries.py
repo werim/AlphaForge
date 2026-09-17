@@ -351,7 +351,7 @@ def fetch_phase8_campaign(engine: Engine, campaign_id: str | None = None) -> dic
     decisions=count_table("burnin_observations","COUNT(*)",canonical,"o")
     accepted=count_table("burnin_observations","COUNT(*)",f"AND UPPER(COALESCE(o.decision,''))='ACCEPTED' {canonical}","o")
     rejected=count_table("burnin_observations","COUNT(*)",f"AND UPPER(COALESCE(o.decision,''))='REJECTED' {canonical}","o")
-    closed=count_table("burnin_trade_outcomes","COUNT(*)","AND closed_at IS NOT NULL AND evidence_complete=1")
+    closed=count_table("burnin_trade_outcomes","COUNT(*)","AND closed_at IS NOT NULL AND evidence_complete=1 AND json_valid(missing_cost_fields_json) AND json_type(missing_cost_fields_json)='array' AND json_array_length(missing_cost_fields_json)=0 AND total_execution_cost IS NOT NULL AND net_r IS NOT NULL AND spread_cost IS NOT NULL AND entry_slippage_cost IS NOT NULL AND exit_slippage_cost IS NOT NULL AND fee_cost IS NOT NULL AND funding_cost IS NOT NULL AND latency_cost IS NOT NULL")
     pending_rejects=None
     pending_positions=None
     if _has_table(engine,"burnin_pending_reject_labels"):
