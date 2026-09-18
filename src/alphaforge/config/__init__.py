@@ -93,6 +93,7 @@ class RuntimeSettings:
     regime_direction_threshold: float = 0.0005
     setup_direction_threshold: float = 0.0003
     execution_direction_threshold: float = 0.0005
+    enable_state_direction_resolution: bool = False
     paper_decision_timeframe: str = "1m"  # deprecated compatibility mirror
     max_abs_funding_rate_pct: float = 0.0010
     min_liquidity_usd: float = 5_000_000.0
@@ -318,6 +319,7 @@ def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) 
         "BLOCK_UNKNOWN_EXPECTANCY": getattr(runtime, "block_unknown_expectancy", True),
         "BLOCK_CHOP_MARKET": getattr(runtime, "block_chop_market", True),
         "REQUIRE_REGIME_ALIGNMENT": getattr(runtime, "require_regime_alignment", True),
+        "ENABLE_STATE_DIRECTION_RESOLUTION": getattr(runtime, "enable_state_direction_resolution", False),
         "ENABLE_ORDERBOOK_FILTER": getattr(runtime, "enable_orderbook_filter", False),
         "STOP_TOO_WIDE_HARD_REJECT": getattr(runtime, "stop_too_wide_hard_reject", True),
         "STOP_TOO_WIDE_SOFT_SCORE_MIN": getattr(runtime, "stop_too_wide_soft_score_min", 9.0),
@@ -389,6 +391,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         regime_direction_threshold=val("ALPHAFORGE_REGIME_DIRECTION_THRESHOLD"),
         setup_direction_threshold=val("ALPHAFORGE_SETUP_DIRECTION_THRESHOLD"),
         execution_direction_threshold=val("ALPHAFORGE_EXECUTION_DIRECTION_THRESHOLD"),
+        enable_state_direction_resolution=val("ALPHAFORGE_ENABLE_STATE_DIRECTION_RESOLUTION"),
         paper_decision_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
         max_abs_funding_rate_pct=val("ALPHAFORGE_MAX_ABS_FUNDING_RATE_PCT"),
         min_liquidity_usd=val("MIN_LIQUIDITY_USD"),

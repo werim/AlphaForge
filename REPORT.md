@@ -467,6 +467,25 @@ There is no schema, export, lifecycle, or migration change and no historical row
 ## Validation and remaining risk
 Focused constructor, effective-RR, fail-closed volatility, latency-unit/source, and closed-candle propagation regressions pass. The wider execution/scanner/runtime/MTF suite passes 142 tests; four existing failures are caused by repository `.env` values overriding test-local endpoint/database settings, not by these paths. Test environment isolation remains a separate finding.
 
+# Feature-gated market-state direction resolution — 2026-09-18
+
+## Repository and runtime baseline
+The patch was made on clean branch `codex/fix-paper-env-template-contract` at `7afad28`. After fetching, the branch was 56 commits behind and zero commits ahead of `origin/dev`. No AlphaForge/PAPER/burn-in process was running. The repository runtime database reported `STOPPED` and retained its original size and modification timestamp throughout validation. No campaign was restarted, resumed, or modified.
+
+## Decision-chain change
+The production chain remains scanner → selector → canonical 1m geometry/execution context → closed-candle 1h regime, 15m setup, and 1m execution evidence → risk/scoring → PAPER execution. With the new flag disabled, the existing strict three-layer direction match is unchanged. With it enabled, a confirmed 1m execution direction is the base signal; matching 1h and 15m directions resolve the final LONG/SHORT state even when it opposes the base direction, while a 1h/15m conflict resolves to NO_TRADE.
+
+All state inputs must be complete closed candles at or before the decision timestamp and within the existing age limit. Future, stale, incomplete, neutral, or unconfirmed evidence remains fail-closed. A direction flip is permitted only when canonical entry/SL/TP geometry is finite and correctly ordered; SL and TP are then mirrored around entry. Missing or invalid geometry rejects with `MTF_STATE_GEOMETRY_UNAVAILABLE`.
+
+## Evidence, compatibility, and isolation
+MTF and burn-in evidence now records `base_exec_direction`, `resolved_state`, `final_direction`, and `override_reason`. No SQLite schema or CSV migration is required because these fields live in existing JSON evidence payloads. The feature defaults off in all environment templates and participates in both runtime config and campaign strategy identity, preventing an enabled run from silently attaching to a campaign created for legacy behavior.
+
+## Validation
+MTF, canonical-calibration, environment-wiring, and canonical-filter tests passed 165/165. Runtime, campaign, and PAPER parity regressions passed 110/110 with three unrelated LIVE-start cases explicitly deselected after a prior run showed they stop at the repository's existing missing read-only Binance credential gate before reaching their assertions. Source compilation and diff validation passed. The runtime DB remained unchanged. Production/PAPER was not started.
+
+## Recommendation
+Rebase or port the patch onto current `origin/dev` before review because the working branch is 56 commits behind. Then run CI with declared dependencies and start a fresh isolated PAPER campaign only after explicit operator review. Do not infer LIVE readiness.
+
 # Canonical PAPER env-template contract — 2026-09-02
 
 ## Need and root cause

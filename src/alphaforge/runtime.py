@@ -117,6 +117,7 @@ class RuntimeConfig:
     regime_direction_threshold: float = 0.0005
     setup_direction_threshold: float = 0.0003
     execution_direction_threshold: float = 0.0005
+    enable_state_direction_resolution: bool = False
     paper_decision_timeframe: str = "1m"  # deprecated alias
     require_mtf_alignment: bool = False
     max_abs_funding_rate_pct: float = 0.0010
@@ -1107,7 +1108,12 @@ class RuntimeOrchestrator:
                                 "campaign_id": campaign_id, "runtime_identity": runtime_identity,
                                 "geometry_status": payload.get("geometry_status"),
                                 "geometry_reason": payload.get("geometry_reason"),
-                                "geometry_source": payload.get("geometry_source"), "mtf": payload.get("mtf")})
+                                "geometry_source": payload.get("geometry_source"),
+                                "mtf": payload.get("mtf"),
+                                "base_exec_direction": payload.get("base_exec_direction"),
+                                "resolved_state": payload.get("resolved_state"),
+                                "final_direction": payload.get("final_direction"),
+                                "override_reason": payload.get("override_reason")})
                 if str(payload.get("decision") or "").upper() == "REJECTED":
                     metrics.update({
                         "primary_reject_reason": payload.get("primary_reject_reason"),
@@ -1623,6 +1629,67 @@ class RuntimeOrchestrator:
         self._fail_closed_reason = "CAMPAIGN_UNIVERSE_RUNTIME_MISMATCH"
         raise RuntimeError(self._fail_closed_reason)
 
+    @staticmethod
+    def _apply_state_direction_geometry(market_ctx: dict[str, Any], final_direction: str) -> str | None:
+        """Bind an evidenced state direction to the canonical pre-entry geometry."""
+        base_direction = str(market_ctx.get("side") or "").strip().upper()
+        final_direction = str(final_direction or "").strip().upper()
+        if final_direction not in {"LONG", "SHORT"}:
+            return "MTF_STATE_NO_TRADE"
+        if base_direction == final_direction:
+            return None
+        try:
+            entry = float(market_ctx.get("entry"))
+            stop_key = "sl" if market_ctx.get("sl") is not None else "stop"
+            target_key = "tp" if market_ctx.get("tp") is not None else "target"
+            stop = float(market_ctx.get(stop_key))
+            target = float(market_ctx.get(target_key))
+        except (TypeError, ValueError):
+            return "MTF_STATE_GEOMETRY_UNAVAILABLE"
+        if not all(math.isfinite(value) and value > 0 for value in (entry, stop, target)):
+            return "MTF_STATE_GEOMETRY_UNAVAILABLE"
+        valid_base_geometry = ((base_direction == "LONG" and stop < entry < target)
+                               or (base_direction == "SHORT" and target < entry < stop))
+        if not valid_base_geometry:
+            return "MTF_STATE_GEOMETRY_UNAVAILABLE"
+        mirrored_stop, mirrored_target = (2 * entry - stop), (2 * entry - target)
+
+        if not all(
+            math.isfinite(value) and value > 0
+            for value in (mirrored_stop, mirrored_target)
+        ):
+            return "MTF_STATE_GEOMETRY_UNAVAILABLE"
+
+        valid_final_geometry = (
+            (
+                final_direction == "LONG"
+                and mirrored_stop < entry < mirrored_target
+            )
+            or (
+                final_direction == "SHORT"
+                and mirrored_target < entry < mirrored_stop
+            )
+        )
+        if not valid_final_geometry:
+            return "MTF_STATE_GEOMETRY_UNAVAILABLE"
+
+        market_ctx.update({
+            "side": final_direction,
+            stop_key: mirrored_stop,
+            target_key: mirrored_target,
+            "state_direction_geometry_override": True,
+        })
+        # Keep aliases synchronized when providers supplied both forms.
+        if "sl" in market_ctx and stop_key != "sl":
+            market_ctx["sl"] = mirrored_stop
+        if "stop" in market_ctx and stop_key != "stop":
+            market_ctx["stop"] = mirrored_stop
+        if "tp" in market_ctx and target_key != "tp":
+            market_ctx["tp"] = mirrored_target
+        if "target" in market_ctx and target_key != "target":
+            market_ctx["target"] = mirrored_target
+        return None
+
     async def _process_symbol(self, selection: SymbolSelectionResult) -> None:
         market_ctx = dict(selection.diagnostics.get("inputs", {}))
         self._assert_campaign_candidate(selection.symbol, market_ctx.get("source_exchange"),
@@ -1676,7 +1743,8 @@ class RuntimeOrchestrator:
                 decision_ms = int(float(market_ctx.get("market_ts") or time.time()) * 1000)
                 mtf = await self.mtf_context_provider.build(selection.symbol, market_ctx, execution_ctx=execution_ctx, decision_ts_ms=decision_ms,
                     regime_timeframe=self.config.regime_timeframe, setup_timeframe=self.config.setup_timeframe,
-                    execution_timeframe=self.config.execution_timeframe)
+                    execution_timeframe=self.config.execution_timeframe,
+                    state_direction_resolution_enabled=self.config.enable_state_direction_resolution)
                 market_ctx["mtf"] = mtf
                 self.metrics.mtf_contexts_built += 1
             elif source_exchange != "binance":
@@ -1704,6 +1772,10 @@ class RuntimeOrchestrator:
                 market_ctx["setup_identity"] = setup_identity
                 mtf = {**dict(mtf or {}), "setup_identity": setup_identity}
                 market_ctx["mtf"] = mtf
+            base_exec_direction = str(
+                alignment.get("base_exec_direction") or candidate_side
+            ).strip().upper()
+
             if guided:
                 metric_name = {"CONTINUATION": "mtf_setup_continuation",
                                "PULLBACK": "mtf_setup_pullback",
@@ -1745,13 +1817,35 @@ class RuntimeOrchestrator:
                     market_ctx["execution_ctx"] = execution_ctx
                     self.metrics.mtf_guided_candidates_generated += 1
                     self.metrics.mtf_legacy_candidates_shadowed += int(legacy_conflict)
-            elif alignment.get("aligned") and candidate_side in {"LONG", "SHORT"} and aligned_side != candidate_side:
+            elif (
+                alignment.get("aligned")
+                and candidate_side in {"LONG", "SHORT"}
+                and (
+                    (
+                        self.config.enable_state_direction_resolution
+                        and base_exec_direction != candidate_side
+                    )
+                    or (
+                        not self.config.enable_state_direction_resolution
+                        and aligned_side != candidate_side
+                    )
+                )
+            ):
+                if self.config.enable_state_direction_resolution:
+                    alignment = {
+                        **alignment,
+                        "direction": None,
+                        "final_direction": "NO_TRADE",
+                        "override_reason": "BASE_EXEC_GEOMETRY_MISMATCH",
+                    }
                 # Compatibility path for legacy/custom providers that return
                 # alignment evidence without the additive generation contract.
                 alignment = {**alignment, "aligned": False,
                     "reasons": list(dict.fromkeys([*(alignment.get("reasons") or []), "MTF_DIRECTION_MISMATCH"]))}
                 mtf = {**dict(mtf or {}), "alignment": alignment}
                 market_ctx["mtf"] = mtf
+            for field_name in ("base_exec_direction", "resolved_state", "final_direction", "override_reason"):
+                market_ctx[field_name] = alignment.get(field_name)
             if not alignment.get("aligned"):
                 reasons = list(alignment.get("reasons") or ["MTF_EXECUTION_UNAVAILABLE"])
                 if (geometry_required
@@ -1796,6 +1890,68 @@ class RuntimeOrchestrator:
             if setup_identity is not None and self._setup_decision_recorded(
                     setup_identity, decision="ACCEPTED"):
                 return
+            if self.config.enable_state_direction_resolution and not guided:
+                geometry_reason = self._apply_state_direction_geometry(
+                    market_ctx,
+                    aligned_side,
+                )
+                if geometry_reason:
+                    alignment = {
+                        **alignment,
+                        "aligned": False,
+                        "direction": None,
+                        "final_direction": "NO_TRADE",
+                        "override_reason": geometry_reason,
+                        "reasons": list(
+                            dict.fromkeys([
+                                *(alignment.get("reasons") or []),
+                                geometry_reason,
+                            ])
+                        ),
+                    }
+                    mtf = {**dict(mtf or {}), "alignment": alignment}
+                    market_ctx.update(
+                        mtf=mtf,
+                        final_direction="NO_TRADE",
+                        override_reason=geometry_reason,
+                    )
+
+                    self.metrics.mtf_alignment_reject += 1
+
+                    await self._emit_lifecycle_event(
+                        LifecycleState.SIGNAL_CREATED.value,
+                        selection.symbol,
+                        {"reason": "", "signal_id": signal_id},
+                    )
+
+                    reject_payload = {
+                        **market_ctx,
+                        "signal_id": signal_id,
+                        "symbol": selection.symbol,
+                        "mode": self.config.execution_mode.value,
+                        "phase": "final",
+                        "decision": "REJECTED",
+                        "reason": geometry_reason,
+                        "reject_reason": geometry_reason,
+                        "primary_reject_reason": geometry_reason,
+                        "reject_reasons": [geometry_reason],
+                        "confidence": 0.0,
+                        "score": None,
+                        "rr": market_ctx.get("rr"),
+                        "effective_rr": None,
+                        "explanation": "mtf_state_direction_geometry_gate",
+                        "execution_ctx": execution_ctx,
+                        "timeframe": self.config.execution_timeframe,
+                        "mtf": mtf,
+                    }
+
+                    await self._persist_reject(reject_payload)
+                    await self._emit_lifecycle_event(
+                        LifecycleState.SIGNAL_REJECTED.value,
+                        selection.symbol,
+                        reject_payload,
+                    )
+                    return
             self.metrics.mtf_alignment_pass += 1
         if geometry_required and str(market_ctx.get("geometry_status") or "").upper() != "COMPLETE":
             reason = str(market_ctx.get("geometry_reason") or "GEOMETRY_INCOMPLETE").upper()
@@ -1976,6 +2132,10 @@ class RuntimeOrchestrator:
             "execution_ctx": execution_ctx,
             "timeframe": self.config.execution_timeframe,
             "mtf": mtf,
+            "base_exec_direction": market_ctx.get("base_exec_direction"),
+            "resolved_state": market_ctx.get("resolved_state"),
+            "final_direction": market_ctx.get("final_direction"),
+            "override_reason": market_ctx.get("override_reason"),
         }
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
             await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
@@ -1997,7 +2157,11 @@ class RuntimeOrchestrator:
             "tp": signal_payload.get("take_profit", market_ctx.get("tp")),
             "regime": signal_payload.get("regime", market_ctx.get("regime")),
             "effective_rr": effective_rr, "confidence": order_plan.confidence,
-            "execution_ctx": execution_ctx})
+            "execution_ctx": execution_ctx,
+            "base_exec_direction": market_ctx.get("base_exec_direction"),
+            "resolved_state": market_ctx.get("resolved_state"),
+            "final_direction": market_ctx.get("final_direction"),
+            "override_reason": market_ctx.get("override_reason")})
         executed = await self._execute(symbol=selection.symbol, decision={
             "signal_id": signal_id,
             "order_type": order_plan.order_type,
@@ -3039,7 +3203,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, provider_transient_outage_grace_seconds=cfg.runtime.provider_transient_outage_grace_seconds, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms, market_data_base_url=cfg.exchange.binance.market_data_base_url, regime_timeframe=cfg.runtime.regime_timeframe, setup_timeframe=cfg.runtime.setup_timeframe, execution_timeframe=cfg.runtime.execution_timeframe, mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled, regime_direction_threshold=cfg.runtime.regime_direction_threshold, setup_direction_threshold=cfg.runtime.setup_direction_threshold, execution_direction_threshold=cfg.runtime.execution_direction_threshold, paper_decision_timeframe=cfg.runtime.execution_timeframe, require_mtf_alignment=False)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, provider_transient_outage_grace_seconds=cfg.runtime.provider_transient_outage_grace_seconds, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms, market_data_base_url=cfg.exchange.binance.market_data_base_url, regime_timeframe=cfg.runtime.regime_timeframe, setup_timeframe=cfg.runtime.setup_timeframe, execution_timeframe=cfg.runtime.execution_timeframe, mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled, regime_direction_threshold=cfg.runtime.regime_direction_threshold, setup_direction_threshold=cfg.runtime.setup_direction_threshold, execution_direction_threshold=cfg.runtime.execution_direction_threshold, enable_state_direction_resolution=cfg.runtime.enable_state_direction_resolution, paper_decision_timeframe=cfg.runtime.execution_timeframe, require_mtf_alignment=False)
     config.agent_graph_enabled = cfg.runtime.agent_graph_enabled
     config.agent_graph_shadow = cfg.runtime.agent_graph_shadow
     config.agent_graph_max_steps = cfg.runtime.agent_graph_max_steps

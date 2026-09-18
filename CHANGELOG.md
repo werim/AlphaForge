@@ -431,6 +431,26 @@
 ### Known Issues
 - Repository `.env` loading can override pytest-local endpoint/database values in four wider-suite tests; public HTTP RTT remains transport evidence rather than order submit/ack latency.
 
+## Feature-gated market-state direction resolution — 2026-09-18
+
+### Added
+- An opt-in closed-candle state resolver that maps the same confirmed 1m execution direction through 1h regime and 15m setup consensus to LONG, SHORT, or NO_TRADE.
+- Decision evidence fields `base_exec_direction`, `resolved_state`, `final_direction`, and `override_reason` for rejects, accepted burn-in observations, and agent-shadow payloads.
+- Unit, runtime-integration, campaign-identity, lookahead, and backward-compatibility regression coverage.
+
+### Changed
+- When explicitly enabled, a state-driven direction flip mirrors valid SL/TP geometry around the unchanged entry before scoring, risk checks, or execution.
+- The feature flag is included in runtime filter and campaign strategy identity.
+
+### Fixed
+- Setup/regime evidence can now act as an explicit market state rather than only as a same-direction filter, without weakening the closed-candle freshness gate.
+
+### Breaking Changes
+- None. `ALPHAFORGE_ENABLE_STATE_DIRECTION_RESOLUTION` defaults to `false`; existing campaigns and direction behavior are unchanged.
+
+### Known Issues
+- The resolver uses deterministic 1h/15m directional consensus; outcome-based state policy calibration remains future work and must use a new isolated PAPER campaign.
+
 ## Canonical PAPER env-template contract — 2026-09-02
 
 ### Added
