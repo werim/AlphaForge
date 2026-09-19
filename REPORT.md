@@ -1,3 +1,66 @@
+# BACKTEST authoritative AIBrain scoring boundary surgery report — 2026-09-20
+
+## Root cause and scope
+
+BACKTEST previously set score and expectancy with local breakout/range arithmetic in `_build_market_ctx`, then evaluated generic order filters. PAPER instead normalizes market/MTF evidence in `RuntimeOrchestrator._build_scoring_context` and sends it to `AIBrain.before_real_order`. The two score meanings, scales, feature sources, and reject reasons differed.
+
+`RuntimeOrchestrator._build_stats_context` reads aggregate expectancy tables without an as-of timestamp column. Those statistics are valid for the running PAPER process but cannot safely be consumed for a historical full-period BACKTEST because later closed outcomes could affect earlier decisions.
+
+## Files changed
+
+- `src/alphaforge/scoring_context.py`: pure shared signal construction and AIBrain context normalization, extracted from the PAPER runtime.
+- `src/alphaforge/ai_brain.py`: explicit `for_stateless_scoring()` factory; it reuses the existing score formula without persistence access.
+- `src/alphaforge/runtime.py`: delegates existing PAPER signal/context construction to the shared pure component; behavior is preserved.
+- `backtest_order.py`: derives setup/regime/execution features only from candles through the decision index, invokes the shared normalizer and AIBrain scorer, preserves unavailable history, and uses the authoritative score/reason before existing defensive BACKTEST gates.
+- `tests/test_backtest_authoritative_scoring.py`: shared-score parity, variability, no-look-ahead, no-network, unavailable-funding, and zero-history assertions.
+
+## Safety and limitations
+
+No score formula was copied into BACKTEST; the implementation calls `AIBrain.score_signal`. No SQL stats, exchange client, socket, wall-clock value, or future candle is used by BACKTEST scoring. Existing PAPER calls still use their same AIBrain object and now invoke identical extracted normalization.
+
+No schema, migration, export layout, threshold tuning, campaign data, PAPER execution, or LIVE authorization behavior changed. BACKTEST's existing downstream quality/effective-RR/portfolio gates remain defensive and can reject an AIBrain-accepted candidate; this patch does not manufacture accepted trades.
+
+The missing timestamp-bounded expectancy contract is deliberately not hidden. BACKTEST passes `sample_size=0` and empty setup/regime/symbol histories, which is AIBrain's existing conservative-prior behavior. Historical MTF data is reconstructed from the supplied interval only; it is not represented as an exchange MTF snapshot.
+
+## Tests executed
+
+- `.venv/bin/python -m pytest -q tests/test_backtest_authoritative_scoring.py tests/test_m0_scoring_context.py tests/test_backtest_order_scanner.py tests/test_backtest_paper_pre_submit_parity.py` — 165 passed.
+- Python compilation of changed scoring/runtime/BACKTEST files — passed.
+- `git diff --check` — passed.
+
+# BACKTEST decision-pipeline parity correction surgery report — 2026-09-20
+
+## Why the patch was needed and confirmed root cause
+
+`backtest_order.main()` treated `--offline` differently from the normal BACKTEST scan. The normal selector/decision loop was guarded by `if not args.offline`; when offline had no candidates it injected one manual `CandidateOrder`, simulated it, and appended a second manually authored `LOW_EFFECTIVE_RR` reject. Those rows bypassed candidate construction, shared quality/reject decisions, portfolio gates, and their normal lifecycle evidence. The fallback also supplied synthetic score/RR/expectancy/execution values.
+
+The normal path had a second concrete defect: `scan_symbol_backtest()` referenced an undefined `decision` while attaching `BacktestPortfolioState`. A real BACKTEST scan always supplies that state, so it raised `NameError` before normal decision/lifecycle handling could complete.
+
+## Files changed
+
+- `backtest_order.py`: routes offline fixtures through the existing selector and `scan_symbol_backtest()` loop; removes the hand-authored fallback order/reject/lifecycle data; replaces the undefined portfolio-handoff variable with `shared_decision.candidate` and guards the invalid-candidate case.
+- `tests/test_backtest_order_scanner.py`: adds the portfolio-handoff regression and an offline end-to-end regression proving no network access, no `OFFLINE_FIXTURE` rows, persisted rejects with reasons, and unavailable funding not exported as a numeric zero.
+- `VERSION.md`, `REPORT.md`, `CHANGELOG.md`: records behavior, evidence, risks, and no-migration/no-historical-data-mutation scope.
+
+## Runtime, lifecycle, persistence, and compatibility impact
+
+BACKTEST offline now follows the same existing BACKTEST sequence as historical scans: selector → `_build_market_ctx` → `evaluate_signal_decision`/`run_order_cycle` parity check → `process_backtest_result` → persistence/export. Rejected candidates retain `SIGNAL_CREATED -> SIGNAL_REJECTED` and concrete `reject_reason`; accepted candidates retain the existing simulated entry/order/position transitions. This patch does not alter the PAPER runtime, LIVE runtime, trading thresholds, exchange adapters, schema, CSV layout, migrations, or production campaign data.
+
+Historical execution context remains evidence-labelled: funding has no historical source in the fixture and stays unavailable/null rather than becoming `0.0`. Existing candle-derived volume and explicitly labelled spread estimates are preserved; no microstructure value is invented.
+
+## Tests executed
+
+- `.venv/bin/python -m pytest -q tests/test_backtest_order_scanner.py tests/test_backtest_paper_pre_submit_parity.py` — 151 passed.
+- `.venv/bin/python -m py_compile backtest_order.py` — passed.
+- `git diff --check` — passed.
+- Offline command check: `backtest_order.py --offline` completed without a network path; its export contained 56 lifecycle events (`SIGNAL_CREATED`, `SIGNAL_REJECTED`) and 28 concrete `LOW_SCORE` rejects, with no manual fixture rows.
+
+## Risks, limitations, migration, and recommendation
+
+No migration or campaign repair is required. The removed fallback means an offline fixture may legitimately contain only rejects; that is valid evidence and must not be converted into an artificial accepted trade.
+
+The remaining parity gap is genuine: the normal BACKTEST market-context score/expectancy is deterministic candle-geometry logic, while the PAPER runtime's authoritative decision scoring is `AIBrain` with its runtime scoring/regime/stats contexts. This patch removes the demonstrated offline simulator bypass but does not claim full scorer identity. Do not infer LIVE readiness. Review before merge; do not start a PAPER campaign or rewrite existing campaign data based on this patch.
+
 # State Direction Shadow Evaluation surgery report — 2026-09-19
 
 ## Why and root cause

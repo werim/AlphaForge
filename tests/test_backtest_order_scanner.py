@@ -41,10 +41,49 @@ def test_scan_creates_virtual_candidate(monkeypatch):
             side = "LONG"; entry = ctx.market_ctx["entry"]; sl = ctx.market_ctx["sl"]; tp = ctx.market_ctx["tp"]; rr = ctx.market_ctx["rr"]; setup_type = "BREAKOUT_UP"; setup_reason = "CLOSE_ABOVE_PREV_HIGH"; regime = ctx.market_ctx["regime"]; score = ctx.market_ctx["score"]; order_type = "LIMIT"
         return {"status": "executed", "candidate": _C()}
     monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, _fake_cycle))
+    monkeypatch.setattr(bo, "_historical_authoritative_score", lambda *_args, **_kwargs: {"score": .9, "expectancy": .2, "expectancy_bucket": "HIGH", "accepted": True, "reject_reason": "", "diagnostics": {}})
     candles = [bo.Candle(1, 104, 104, 103.6, 104.0, 100), bo.Candle(2, 104, 104, 103.6, 104.0, 100), bo.Candle(3, 100.0, 105.5, 104.5, 105.0, 100)]
     c = bo.scan_symbol_backtest("AAAUSDT", candles, 2, {"mode": "BACKTEST", "symbol_meta": {"quoteVolume": 100000000, "fundingRate": 0.00001}})
     assert c is not None
     assert c.score > 0
+
+
+def test_scan_with_portfolio_state_uses_shared_decision_candidate():
+    candles = [
+        bo.Candle(1, 100, 101, 99, 100, 1000),
+        bo.Candle(2, 100, 101, 99, 100, 1000),
+        bo.Candle(3, 100, 106, 99, 105, 1000),
+    ]
+    context = {
+        "balance": 1000.0,
+        "risk_pct": 1.0,
+        "symbol_meta": {"quoteVolume": 100_000_000.0, "fundingRate": 0.00001},
+        "portfolio_state": bo.BacktestPortfolioState(initial_equity=1000.0),
+        "portfolio_config": {},
+    }
+
+    assert bo.scan_symbol_backtest("BTCUSDT", candles, 2, context) is None
+    assert context["last_result"]["status"] == "rejected"
+    assert context["last_result"]["reject_reason"] == "LOW_CONFIDENCE"
+
+
+def test_offline_main_uses_decision_pipeline_without_network_or_manual_rows(tmp_path: Path, monkeypatch):
+    output_dir = tmp_path / "offline"
+    monkeypatch.delenv("ALPHAFORGE_DATABASE_URL", raising=False)
+    monkeypatch.delenv("ALPHAFORGE_DB_URL", raising=False)
+    monkeypatch.setattr(bo, "fetch_json", lambda _url: pytest.fail("offline backtest attempted network access"))
+    monkeypatch.setattr(bo.sys, "argv", ["backtest_order.py", "--offline", "--output-dir", str(output_dir)])
+
+    bo.main()
+
+    lifecycle_rows = list(csv.DictReader((output_dir / "order_lifecycle.csv").open()))
+    rejected_rows = list(csv.DictReader((output_dir / "rejected_orders.csv").open()))
+    assert lifecycle_rows
+    assert rejected_rows
+    assert {row["lifecycle_state"] for row in lifecycle_rows} >= {"SIGNAL_CREATED", "SIGNAL_REJECTED"}
+    assert all(row["reject_reason"] for row in rejected_rows)
+    assert all("OFFLINE_FIXTURE" not in str(row) for row in lifecycle_rows + rejected_rows)
+    assert all(row["funding_rate_pct"] != "0.0" for row in lifecycle_rows)
 
 
 def test_scan_routes_non_breakout_bar_through_order_cycle(monkeypatch):

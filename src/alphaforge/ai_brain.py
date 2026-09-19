@@ -67,8 +67,8 @@ class AIBrain:
     persisted features, and expectancy statistics.
     """
 
-    def __init__(self, session: Session | None = None, *, session_factory: sessionmaker[Session] | None = None, min_accept_score: float = 0.62) -> None:
-        if session is None and session_factory is None:
+    def __init__(self, session: Session | None = None, *, session_factory: sessionmaker[Session] | None = None, min_accept_score: float = 0.62, allow_stateless_scoring: bool = False) -> None:
+        if session is None and session_factory is None and not allow_stateless_scoring:
             raise ValueError("AIBrain requires session or session_factory")
         self.session = session
         self.session_factory = session_factory
@@ -77,6 +77,11 @@ class AIBrain:
         self.min_p_win = 0.45
         self.max_p_fakeout = 0.60
         self.min_execution_success = 0.50
+
+    @classmethod
+    def for_stateless_scoring(cls, *, min_accept_score: float = 0.62) -> "AIBrain":
+        """Construct the pure scorer without a persistence session."""
+        return cls(min_accept_score=min_accept_score, allow_stateless_scoring=True)
 
     # ---- Scoring ---------------------------------------------------------
     def score_signal(
