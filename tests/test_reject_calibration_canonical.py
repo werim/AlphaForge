@@ -64,16 +64,41 @@ def test_layer_thresholds_are_independent_and_identity_sensitive():
     defaults = RuntimeConfig()
     assert (defaults.regime_direction_threshold, defaults.setup_direction_threshold,
             defaults.execution_direction_threshold) == (.0005, .0003, .0005)
-    base=dict(regime_direction_threshold=.0005,setup_direction_threshold=.0003,
-              execution_direction_threshold=.0005)
-    a=build_phase8_campaign_identity(RuntimeConfig(**base),symbols=['BTC'],intervals=['1m'],paper_source_exchanges=['binance'])
-    for field, value in [('regime_direction_threshold', .0004),
-                         ('setup_direction_threshold', .0004),
-                         ('execution_direction_threshold', .0004)]:
+
+    base = dict(
+        regime_direction_threshold=.0005,
+        setup_direction_threshold=.0003,
+        execution_direction_threshold=.0005,
+    )
+    a = build_phase8_campaign_identity(
+        RuntimeConfig(**base),
+        symbols=['BTC'],
+        intervals=['1m'],
+        paper_source_exchanges=['binance'],
+    )
+
+    for field, value in [
+        ('regime_direction_threshold', .0004),
+        ('setup_direction_threshold', .0004),
+        ('execution_direction_threshold', .0004),
+    ]:
         changed = build_phase8_campaign_identity(
-            RuntimeConfig(**{**base, field: value}), symbols=['BTC'], intervals=['1m'],
-            paper_source_exchanges=['binance'])
+            RuntimeConfig(**{**base, field: value}),
+            symbols=['BTC'],
+            intervals=['1m'],
+            paper_source_exchanges=['binance'],
+        )
         assert a['strategy_config_hash'] != changed['strategy_config_hash']
+
+    state_enabled = build_phase8_campaign_identity(
+        RuntimeConfig(**base, enable_state_direction_resolution=True),
+        symbols=['BTC'],
+        intervals=['1m'],
+        paper_source_exchanges=['binance'],
+    )
+    assert a['config_hash'] != state_enabled['config_hash']
+    assert a['strategy_config_hash'] != state_enabled['strategy_config_hash']
+    assert state_enabled['strategy_payload']['enable_state_direction_resolution'] is True
 
 
 def test_guided_generation_mode_is_campaign_identity_sensitive():

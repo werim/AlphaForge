@@ -1,3 +1,31 @@
+# State Direction Shadow Evaluation — 2026-09-19
+
+### Added
+- Separate adaptive-store tables for deterministic state-direction shadow decisions and outcomes.
+- PAPER-only, default-false observational runtime hook and grouped ACTUAL-vs-shadow report.
+- Pure forward evaluator shared by campaign and shadow resolution.
+- Focused regressions for non-mutation, store failure, isolation, replay idempotency, invalid mirrors, evidence closure, REGIME_GUIDED authority, costs, and reports.
+
+### Changed
+- Adaptive shadow schema version advances to `adaptive_shadow_v2`.
+- Campaign reject resolution now delegates TP/SL/timeout/ambiguity/MFE/MAE calculation to the shared pure evaluator.
+- Explicitly open candles are excluded from forward evaluation.
+
+### Fixed
+- Shadow effective RR is recomputed from shadow geometry through the canonical execution-cost model instead of trusting candidate RR.
+- State-direction observation can no longer require campaign/qualification tables or mutate actual runtime context.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for campaign/runtime schemas or trading behavior. The separate adaptive shadow database gains additive tables.
+
+### Known Issues
+- Shadow outcomes require explicit offline resolution with complete closed candles.
+- Structure-valid opposite-side geometry requires an explicit evidenced structure geometry; otherwise mirrored geometry remains diagnostic.
+- No automatic threshold tuning, promotion, PAPER launch, or LIVE enablement is included. LIVE remains NOT READY.
+
 # Phase9 detached worker attachment snapshot correction — 2026-09-17
 
 ### Added
@@ -430,6 +458,26 @@
 
 ### Known Issues
 - Repository `.env` loading can override pytest-local endpoint/database values in four wider-suite tests; public HTTP RTT remains transport evidence rather than order submit/ack latency.
+
+## Feature-gated market-state direction resolution — 2026-09-18
+
+### Added
+- An opt-in closed-candle state resolver that maps the same confirmed 1m execution direction through 1h regime and 15m setup consensus to LONG, SHORT, or NO_TRADE.
+- Decision evidence fields `base_exec_direction`, `resolved_state`, `final_direction`, and `override_reason` for rejects, accepted burn-in observations, and agent-shadow payloads.
+- Unit, runtime-integration, campaign-identity, lookahead, and backward-compatibility regression coverage.
+
+### Changed
+- When explicitly enabled, a state-driven direction flip mirrors valid SL/TP geometry around the unchanged entry before scoring, risk checks, or execution.
+- The feature flag is included in runtime filter and campaign strategy identity.
+
+### Fixed
+- Setup/regime evidence can now act as an explicit market state rather than only as a same-direction filter, without weakening the closed-candle freshness gate.
+
+### Breaking Changes
+- None. `ALPHAFORGE_ENABLE_STATE_DIRECTION_RESOLUTION` defaults to `false`; existing campaigns and direction behavior are unchanged.
+
+### Known Issues
+- The resolver uses deterministic 1h/15m directional consensus; outcome-based state policy calibration remains future work and must use a new isolated PAPER campaign.
 
 ## Canonical PAPER env-template contract — 2026-09-02
 

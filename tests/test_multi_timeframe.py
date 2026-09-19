@@ -30,6 +30,48 @@ def test_perfect_long_and_short_alignment():
         result = evaluate_mtf_alignment(*aligned(direction), decision_ts_ms=NOW)
         assert result["aligned"] and result["direction"] == direction
 
+
+def test_state_direction_resolution_can_flip_same_exec_signal_or_no_trade():
+    execution = context("1m", "LONG", trigger="CONFIRMED")
+    cases = [
+        ("LONG", "LONG", "LONG", "STATE_CONFIRMS_BASE_EXEC"),
+        ("SHORT", "SHORT", "SHORT", "STATE_OVERRIDES_BASE_EXEC"),
+        ("LONG", "SHORT", "NO_TRADE", "STATE_CONFLICT_NO_TRADE"),
+    ]
+    for regime_direction, setup_direction, expected, reason in cases:
+        result = evaluate_mtf_alignment(
+            context("1h", regime_direction), context("15m", setup_direction), execution,
+            decision_ts_ms=NOW, state_direction_resolution_enabled=True,
+        )
+        assert result["base_exec_direction"] == "LONG"
+        assert result["final_direction"] == expected
+        assert result["override_reason"] == reason
+        assert result["aligned"] is (expected != "NO_TRADE")
+    assert "MTF_STATE_NO_TRADE" in result["reasons"]
+
+
+def test_state_direction_resolution_is_disabled_by_default():
+    result = evaluate_mtf_alignment(
+        context("1h", "SHORT"), context("15m", "SHORT"),
+        context("1m", "LONG", trigger="CONFIRMED"), decision_ts_ms=NOW,
+    )
+    assert result["aligned"] is False
+    assert result["final_direction"] == "NO_TRADE"
+    assert result["override_reason"] == "LEGACY_ALIGNMENT_REJECTED"
+    assert result["reasons"] == ["MTF_SETUP_EXECUTION_MISMATCH"]
+
+
+def test_state_direction_resolution_cannot_use_future_context():
+    result = evaluate_mtf_alignment(
+        context("1h", "SHORT", close=NOW + 1),
+        context("15m", "SHORT", close=NOW + 1),
+        context("1m", "LONG", close=NOW, trigger="CONFIRMED"),
+        decision_ts_ms=NOW, state_direction_resolution_enabled=True,
+    )
+    assert result["aligned"] is False
+    assert result["final_direction"] == "NO_TRADE"
+    assert "MTF_CONTEXT_STALE" in result["reasons"]
+
 def test_regime_setup_and_execution_mismatches_are_specific():
     r, s, e = aligned("SHORT")
     r["direction"] = "LONG"
@@ -556,6 +598,21 @@ def test_counter_regime_candidate_remains_forward_labelled_with_mtf_provenance(t
     assert provenance["forward_label_side"] == "LONG"
     assert orchestrator.metrics.mtf_execution_counter_regime == 1
     assert orchestrator.metrics.mtf_direction_mismatch == 1
+class _StateDirectionProvider:
+    def __init__(self, regime_direction, setup_direction):
+        self.regime_direction = regime_direction
+        self.setup_direction = setup_direction
+
+    async def build(self, *_args, decision_ts_ms, state_direction_resolution_enabled=False, **_kwargs):
+        regime = context("1h", self.regime_direction, close=decision_ts_ms)
+        setup = context("15m", self.setup_direction, close=decision_ts_ms)
+        execution = context("1m", "LONG", close=decision_ts_ms, trigger="CONFIRMED")
+        alignment = evaluate_mtf_alignment(
+            regime, setup, execution, decision_ts_ms=decision_ts_ms,
+            state_direction_resolution_enabled=state_direction_resolution_enabled,
+        )
+        return {"provider": "TEST_CLOSED_CANDLES", "regime": regime, "setup": setup,
+                "execution": execution, "alignment": alignment}
 
 
 def test_paper_neutral_execution_rejects_before_ai_brain():
@@ -581,6 +638,40 @@ def test_paper_neutral_execution_rejects_before_ai_brain():
     assert "MTF_EXECUTION_UNAVAILABLE" not in rejects[-1]["mtf"]["alignment"]["reasons"]
     assert orchestrator.metrics.mtf_execution_not_confirmed == 1
     assert orchestrator.metrics.mtf_execution_missing == 0
+
+
+@pytest.mark.parametrize(("regime_direction", "setup_direction", "expected_side", "expected_reason"), [
+    ("LONG", "LONG", "LONG", "SPREAD_TOO_HIGH"),
+    ("SHORT", "SHORT", "SHORT", "SPREAD_TOO_HIGH"),
+    ("LONG", "SHORT", "LONG", "MTF_STATE_NO_TRADE"),
+])
+def test_runtime_state_direction_resolution_changes_direction_and_audit(
+        regime_direction, setup_direction, expected_side, expected_reason):
+    rejects = []
+    candidate = {"symbol": "BTCUSDT", "source_exchange": "binance", "side": "LONG",
+        "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0,
+        "spread_pct": .02, "market_data_latency_ms": 20.0, "liquidity_score": .9,
+        "volume_24h_usdt": 100_000_000, "market_ts": time.time()}
+    selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="FAVORABLE",
+                                diagnostics={"inputs": candidate})
+    orchestrator = RuntimeOrchestrator(RuntimeConfig(
+        execution_mode=ExecutionMode.PAPER, require_mtf_alignment=True,
+        enable_state_direction_resolution=True, max_spread_pct=.001,
+    ), SimpleNamespace(), lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_StateDirectionProvider(regime_direction, setup_direction),
+        on_reject_persist=lambda payload: rejects.append(payload))
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    evidence = rejects[-1]
+    assert evidence["reason"] == expected_reason
+    assert evidence["side"] == expected_side
+    assert evidence["base_exec_direction"] == "LONG"
+    assert evidence["resolved_state"] == f"REGIME_{regime_direction}__SETUP_{setup_direction}"
+    assert evidence["final_direction"] == ("NO_TRADE" if expected_reason == "MTF_STATE_NO_TRADE" else expected_side)
+    if expected_side == "SHORT":
+        assert evidence["sl"] == 101.0 and evidence["tp"] == 98.0
+        assert evidence["override_reason"] == "STATE_OVERRIDES_BASE_EXEC"
 
 
 @pytest.mark.parametrize(("mtf_side", "geometry_side", "expected_reason"), [

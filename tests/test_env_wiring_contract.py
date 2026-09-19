@@ -113,3 +113,10 @@ def test_remaining_reserved_entries_have_reviewable_reasons():
     reserved = [row for row in ENV_CONTRACT if row.classification == "RESERVED"]
     assert reserved
     assert all(row.unsupported_reason in allowed for row in reserved)
+
+
+def test_state_direction_resolution_flag_is_wired_and_defaults_off(monkeypatch):
+    monkeypatch.delenv("ALPHAFORGE_ENABLE_STATE_DIRECTION_RESOLUTION", raising=False)
+    assert load_config_from_env().runtime.enable_state_direction_resolution is False
+    monkeypatch.setenv("ALPHAFORGE_ENABLE_STATE_DIRECTION_RESOLUTION", "true")
+    assert load_config_from_env().runtime.enable_state_direction_resolution is True
