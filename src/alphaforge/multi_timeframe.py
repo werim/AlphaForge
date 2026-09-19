@@ -18,6 +18,7 @@ MTF_REJECT_REASONS = (
     "MTF_DIRECTION_MISMATCH", "MTF_NO_VALID_SETUP", "MTF_EXECUTION_NOT_CONFIRMED",
     "MTF_EXECUTION_COUNTER_REGIME", "MTF_GUIDED_SETUP_SIDE_MISMATCH",
     "MTF_GUIDED_GEOMETRY_UNAVAILABLE",
+    "MTF_STATE_NO_TRADE", "MTF_STATE_GEOMETRY_UNAVAILABLE",
 )
 
 REGIME_GUIDED_SETUP_PHASES = ("CONTINUATION", "PULLBACK", "REENTRY_READY")
@@ -248,70 +249,230 @@ def build_execution_context(candles: list[dict[str, Any]], timeframe: str, marke
 
 def evaluate_mtf_alignment(regime: Mapping[str, Any] | None, setup: Mapping[str, Any] | None,
                            execution: Mapping[str, Any] | None, *, decision_ts_ms: int,
-                           max_age_intervals: int = 2) -> dict[str, Any]:
-    contexts = (("regime", regime, "MTF_REGIME_UNAVAILABLE"), ("setup", setup, "MTF_SETUP_UNAVAILABLE"),
-                ("execution", execution, "MTF_EXECUTION_UNAVAILABLE"))
+                           max_age_intervals: int = 2,
+                           state_direction_resolution_enabled: bool = False) -> dict[str, Any]:
+    contexts = (
+        ("regime", regime, "MTF_REGIME_UNAVAILABLE"),
+        ("setup", setup, "MTF_SETUP_UNAVAILABLE"),
+        ("execution", execution, "MTF_EXECUTION_UNAVAILABLE"),
+    )
     reasons: list[str] = []
+
     for _, ctx, missing_reason in contexts:
         if not isinstance(ctx, Mapping) or ctx.get("evidence_status") != "COMPLETE":
             reasons.append(missing_reason)
             continue
-        tf, close_ms = str(ctx.get("timeframe") or ""), ctx.get("last_closed_candle_ms")
+
+        tf = str(ctx.get("timeframe") or "")
+        close_ms = ctx.get("last_closed_candle_ms")
+
         if tf not in _TF_SECONDS or not isinstance(close_ms, int) or close_ms > decision_ts_ms:
             reasons.append("MTF_CONTEXT_STALE")
         elif decision_ts_ms - close_ms > max_age_intervals * _TF_SECONDS[tf] * 1000:
             reasons.append("MTF_CONTEXT_STALE")
+
     rd = None if not regime else regime.get("direction")
     sd = None if not setup else setup.get("direction")
     ed = None if not execution else execution.get("direction")
-    guided = bool(setup and (setup.get("generation_mode") == "REGIME_GUIDED" or setup.get("phase")))
+
+    base_exec_direction = ed if ed in {"LONG", "SHORT"} else "NO_TRADE"
+    resolved_state = f"REGIME_{rd or 'UNKNOWN'}__SETUP_{sd or 'UNKNOWN'}"
+
+    # Current-dev REGIME_GUIDED semantics take precedence.
+    #
+    # In guided mode the observed 15m direction is diagnostic only.
+    # trade_side is selected by the 1h regime, and execution confirms that side.
+    # Do not reinterpret the diagnostic 15m direction as an opposite trade side.
+    guided = bool(
+        setup
+        and (
+            setup.get("generation_mode") == "REGIME_GUIDED"
+            or setup.get("phase")
+        )
+    )
+
     if guided:
         phase = str((setup or {}).get("phase") or "INVALID").upper()
         setup_side = (setup or {}).get("trade_side")
+
         if phase not in REGIME_GUIDED_SETUP_PHASES:
             reasons.append("MTF_NO_VALID_SETUP")
+
         if rd in {"LONG", "SHORT"} and setup_side != rd:
             reasons.append("MTF_GUIDED_SETUP_SIDE_MISMATCH")
+
         if execution and not execution.get("trigger"):
             reasons.append("MTF_EXECUTION_NOT_CONFIRMED")
         elif rd in {"LONG", "SHORT"} and ed in {"LONG", "SHORT"} and rd != ed:
             reasons.append("MTF_EXECUTION_COUNTER_REGIME")
-        elif execution and "confirmed_for_side" in execution and not execution.get("confirmed_for_side"):
+        elif (
+            execution
+            and "confirmed_for_side" in execution
+            and not execution.get("confirmed_for_side")
+        ):
             reasons.append("MTF_EXECUTION_NOT_CONFIRMED")
-        execution_confirmed = bool(execution and (
-            execution.get("confirmed_for_side")
-            if "confirmed_for_side" in execution
-            else execution.get("trigger") and ed == rd
-        ))
-        valid = (rd in {"LONG", "SHORT"} and setup_side == rd
-                 and phase in REGIME_GUIDED_SETUP_PHASES and execution_confirmed)
+
+        execution_confirmed = bool(
+            execution
+            and (
+                execution.get("confirmed_for_side")
+                if "confirmed_for_side" in execution
+                else execution.get("trigger") and ed == rd
+            )
+        )
+
+        valid = (
+            rd in {"LONG", "SHORT"}
+            and setup_side == rd
+            and phase in REGIME_GUIDED_SETUP_PHASES
+            and execution_confirmed
+        )
+
         reasons = list(dict.fromkeys(reasons))
-        return {"aligned": not reasons and valid, "direction": rd if not reasons and valid else None,
-                "generation_mode": "REGIME_GUIDED", "setup_phase": phase,
-                "regime_alignment": "PASS" if not any(r in {"MTF_REGIME_UNAVAILABLE", "MTF_CONTEXT_STALE"} for r in reasons) else "FAIL",
-                "setup_alignment": "PASS" if not any("SETUP" in r for r in reasons) else "FAIL",
-                "execution_alignment": "PASS" if not any("EXECUTION" in r for r in reasons) else "FAIL",
-                "reasons": reasons, "timeframes": {"regime": (regime or {}).get("timeframe"),
-                "setup": (setup or {}).get("timeframe"), "execution": (execution or {}).get("timeframe")}}
+        final_direction = rd if not reasons and valid else "NO_TRADE"
+
+        return {
+            "aligned": not reasons and valid,
+            "direction": rd if not reasons and valid else None,
+            "base_exec_direction": base_exec_direction,
+            "resolved_state": resolved_state,
+            "final_direction": final_direction,
+            "override_reason": (
+                "GUIDED_ALIGNMENT_CONFIRMED"
+                if not reasons and valid
+                else f"GUIDED_ALIGNMENT_REJECTED:{reasons[0]}"
+                if reasons
+                else "GUIDED_ALIGNMENT_REJECTED"
+            ),
+            "generation_mode": "REGIME_GUIDED",
+            "setup_phase": phase,
+            "regime_alignment": (
+                "PASS"
+                if not any(
+                    r in {"MTF_REGIME_UNAVAILABLE", "MTF_CONTEXT_STALE"}
+                    for r in reasons
+                )
+                else "FAIL"
+            ),
+            "setup_alignment": (
+                "PASS" if not any("SETUP" in r for r in reasons) else "FAIL"
+            ),
+            "execution_alignment": (
+                "PASS" if not any("EXECUTION" in r for r in reasons) else "FAIL"
+            ),
+            "reasons": reasons,
+            "timeframes": {
+                "regime": (regime or {}).get("timeframe"),
+                "setup": (setup or {}).get("timeframe"),
+                "execution": (execution or {}).get("timeframe"),
+            },
+        }
+
+    # Legacy MTF path: state-direction resolution may replace strict
+    # rd == sd == ed alignment when explicitly enabled.
     if sd in {"NONE", "NEUTRAL"}:
         reasons.append("MTF_NO_VALID_SETUP")
-    if rd in {"LONG", "SHORT"} and sd in {"LONG", "SHORT"} and rd != sd:
-        reasons.append("MTF_REGIME_SETUP_MISMATCH")
-    if sd in {"LONG", "SHORT"} and ed in {"LONG", "SHORT"} and sd != ed:
-        reasons.append("MTF_SETUP_EXECUTION_MISMATCH")
+
     if execution and not execution.get("trigger"):
         reasons.append("MTF_EXECUTION_NOT_CONFIRMED")
-    valid = rd == sd == ed and rd in {"LONG", "SHORT"}
-    if not valid and not reasons and all(x is not None for x in (rd, sd, ed)):
-        reasons.append("MTF_DIRECTION_MISMATCH")
-    reasons = list(dict.fromkeys(reasons))
-    return {"aligned": not reasons and valid, "direction": rd if not reasons and valid else None,
-            "regime_alignment": "PASS" if not any(r.startswith("MTF_REGIME") for r in reasons) else "FAIL",
-            "setup_alignment": "PASS" if not any("SETUP" in r for r in reasons) else "FAIL",
-            "execution_alignment": "PASS" if not any("EXECUTION" in r for r in reasons) else "FAIL",
-            "reasons": reasons, "timeframes": {"regime": (regime or {}).get("timeframe"),
-            "setup": (setup or {}).get("timeframe"), "execution": (execution or {}).get("timeframe")}}
 
+    if state_direction_resolution_enabled:
+        state_direction = (
+            rd
+            if rd == sd and rd in {"LONG", "SHORT"}
+            else "NO_TRADE"
+        )
+
+        if (
+            rd in {"LONG", "SHORT"}
+            and sd in {"LONG", "SHORT"}
+            and rd != sd
+        ):
+            reasons.append("MTF_STATE_NO_TRADE")
+
+        final_direction = (
+            state_direction
+            if base_exec_direction in {"LONG", "SHORT"}
+            else "NO_TRADE"
+        )
+
+        valid = (
+            final_direction in {"LONG", "SHORT"}
+            and base_exec_direction in {"LONG", "SHORT"}
+        )
+
+        if final_direction == "NO_TRADE":
+            override_reason = "STATE_CONFLICT_NO_TRADE"
+        elif final_direction != base_exec_direction:
+            override_reason = "STATE_OVERRIDES_BASE_EXEC"
+        else:
+            override_reason = "STATE_CONFIRMS_BASE_EXEC"
+
+    else:
+        if (
+            rd in {"LONG", "SHORT"}
+            and sd in {"LONG", "SHORT"}
+            and rd != sd
+        ):
+            reasons.append("MTF_REGIME_SETUP_MISMATCH")
+
+        if (
+            sd in {"LONG", "SHORT"}
+            and ed in {"LONG", "SHORT"}
+            and sd != ed
+        ):
+            reasons.append("MTF_SETUP_EXECUTION_MISMATCH")
+
+        valid = rd == sd == ed and rd in {"LONG", "SHORT"}
+
+        if (
+            not valid
+            and not reasons
+            and all(x is not None for x in (rd, sd, ed))
+        ):
+            reasons.append("MTF_DIRECTION_MISMATCH")
+
+        final_direction = rd if valid else "NO_TRADE"
+        override_reason = (
+            "LEGACY_ALIGNMENT_CONFIRMED"
+            if valid
+            else "LEGACY_ALIGNMENT_REJECTED"
+        )
+
+    reasons = list(dict.fromkeys(reasons))
+
+    if (
+        state_direction_resolution_enabled
+        and reasons
+        and "MTF_STATE_NO_TRADE" not in reasons
+    ):
+        override_reason = f"STATE_EVIDENCE_REJECTED:{reasons[0]}"
+
+    return {
+        "aligned": not reasons and valid,
+        "direction": final_direction if not reasons and valid else None,
+        "base_exec_direction": base_exec_direction,
+        "resolved_state": resolved_state,
+        "final_direction": final_direction if not reasons and valid else "NO_TRADE",
+        "override_reason": override_reason,
+        "regime_alignment": (
+            "PASS"
+            if not any(r.startswith("MTF_REGIME") for r in reasons)
+            else "FAIL"
+        ),
+        "setup_alignment": (
+            "PASS" if not any("SETUP" in r for r in reasons) else "FAIL"
+        ),
+        "execution_alignment": (
+            "PASS" if not any("EXECUTION" in r for r in reasons) else "FAIL"
+        ),
+        "reasons": reasons,
+        "timeframes": {
+            "regime": (regime or {}).get("timeframe"),
+            "setup": (setup or {}).get("timeframe"),
+            "execution": (execution or {}).get("timeframe"),
+        },
+    }
 
 @dataclass
 class BinanceMTFProvider:
@@ -329,7 +490,8 @@ class BinanceMTFProvider:
             return json.loads(response.read().decode("utf-8"))
 
     async def build(self, symbol: str, market: Mapping[str, Any], *, execution_ctx: Mapping[str, Any], decision_ts_ms: int,
-                    regime_timeframe: str, setup_timeframe: str, execution_timeframe: str) -> dict[str, Any]:
+                    regime_timeframe: str, setup_timeframe: str, execution_timeframe: str,
+                    state_direction_resolution_enabled: bool = False) -> dict[str, Any]:
         layers = (("regime", regime_timeframe), ("setup", setup_timeframe), ("execution", execution_timeframe))
         async def one(layer: str, tf: str) -> tuple[str, list[dict[str, Any]]]:
             boundary = (decision_ts_ms // (_TF_SECONDS[tf] * 1000)) * (_TF_SECONDS[tf] * 1000) - 1
@@ -351,7 +513,13 @@ class BinanceMTFProvider:
         execution = build_execution_context(values.get("execution", []), execution_timeframe, execution_ctx,
             trade_side=regime.get("direction") if self.guided_signal_generation_enabled else None,
             direction_threshold=self.execution_direction_threshold)
-        alignment = evaluate_mtf_alignment(regime, setup, execution, decision_ts_ms=decision_ts_ms)
+        alignment = evaluate_mtf_alignment(
+            regime,
+            setup,
+            execution,
+            decision_ts_ms=decision_ts_ms,
+            state_direction_resolution_enabled=state_direction_resolution_enabled,
+        )
         generation: dict[str, Any] = {"mode": "LEGACY_VETO", "evidence_status": "NOT_APPLICABLE",
                                       "candidate": None, "reason": None}
         if self.guided_signal_generation_enabled:

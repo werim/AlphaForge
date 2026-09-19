@@ -1,3 +1,33 @@
+# State Direction Shadow Evaluation surgery report — 2026-09-19
+
+## Why and root cause
+The dormant state-direction resolver could describe an alternate direction, but there was no isolated, replay-safe way to measure what it would have done against the exact actual decision. Reusing burn-in pending/outcome tables would have contaminated campaign and qualification evidence, while trusting candidate RR after a mirrored direction would have preserved stale geometry economics.
+
+## Files and architecture
+- `src/alphaforge/adaptive_decision_calibration.py`: advances the separate adaptive store to `adaptive_shadow_v2` and adds dedicated state-direction decision/outcome tables; the calibration-specific `adaptive_shadow_decisions` table remains unchanged.
+- `src/alphaforge/state_direction_shadow.py`: pure geometry/evidence builder, deterministic SQLite store, forward resolver, and read-only grouped comparison report.
+- `src/alphaforge/burnin_resolver.py`: extracts the canonical TP/SL/timeout/ambiguity/MFE/MAE calculation into `evaluate_forward_outcome`; existing campaign resolution now calls it. Explicitly open candles are excluded.
+- `src/alphaforge/runtime.py`: adds a default-false, PAPER-only, non-fatal observation hook outside `RuntimeConfig` and campaign identity.
+- `tests/test_state_direction_shadow.py`: isolation, non-mutation, failure safety, mirror validation, closed-window evidence, guided authority, idempotency, reporting, and execution-path regressions.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: operational behavior, isolation, compatibility, validation, and remaining risks.
+
+The default store is `data/runtime/alphaforge_adaptive_shadow.db`, configurable with `ALPHAFORGE_ADAPTIVE_SHADOW_DB_PATH`. Enabling uses `ALPHAFORGE_ENABLE_STATE_DIRECTION_SHADOW_EVALUATION=true`; neither value enters strategy/campaign hashes.
+
+## Behavior, lifecycle, persistence, and compatibility
+Actual runtime context is copied before evaluation. Same-side, mirrored, structure-valid, and unavailable geometry are distinguished; mirrored geometry can never become structure-valid. Shadow RR is re-derived from geometry and passed through the existing execution-cost breakdown. Store/evaluation exceptions are logged and cannot change the actual decision or execution path.
+
+No lifecycle state, canonical observation, pending reject label, reject/trade outcome, campaign count, qualification result, config hash, strategy hash, or campaign identity is written by the shadow layer. The store refuses a database containing campaign tables. Decision and outcome IDs are deterministic and upserted, so replay/restart does not duplicate evidence. No campaign migration or historical rewrite is required; existing adaptive-store users receive additive tables through idempotent bootstrap.
+
+## Tests executed
+- Focused: 91 passed across adaptive calibration, multi-timeframe, new shadow coverage, execution-cost breakdown, and reject resolver/idempotency.
+- Broader relevant pass: 37 passed across PAPER burn-in, execution layer, position resolver, and qualification evidence integrity.
+- Targeted Python compilation passed. `git diff --check` passed. Ruff was unavailable in the local virtual environment.
+
+## Risks and recommendation
+Forward resolution remains an explicit offline operation; runtime collection alone does not fetch future candles. Missing, open, future, stale, gapped, ambiguous, geometry-invalid, or cost-incomplete evidence fails closed. Opposite-side structure-valid geometry requires explicit evidenced structure geometry; otherwise the diagnostic mirror is used or marked unavailable. No tuning or promotion logic exists.
+
+Review the patch; do not push or merge without instruction. Do not start a PAPER campaign. LIVE remains NOT READY.
+
 # Phase9 detached burn-in worker attachment race correction — 2026-09-17
 
 ## Why the patch was needed
@@ -466,6 +496,25 @@ There is no schema, export, lifecycle, or migration change and no historical row
 
 ## Validation and remaining risk
 Focused constructor, effective-RR, fail-closed volatility, latency-unit/source, and closed-candle propagation regressions pass. The wider execution/scanner/runtime/MTF suite passes 142 tests; four existing failures are caused by repository `.env` values overriding test-local endpoint/database settings, not by these paths. Test environment isolation remains a separate finding.
+
+# Feature-gated market-state direction resolution — 2026-09-18
+
+## Repository and runtime baseline
+The patch was made on clean branch `codex/fix-paper-env-template-contract` at `7afad28`. After fetching, the branch was 56 commits behind and zero commits ahead of `origin/dev`. No AlphaForge/PAPER/burn-in process was running. The repository runtime database reported `STOPPED` and retained its original size and modification timestamp throughout validation. No campaign was restarted, resumed, or modified.
+
+## Decision-chain change
+The production chain remains scanner → selector → canonical 1m geometry/execution context → closed-candle 1h regime, 15m setup, and 1m execution evidence → risk/scoring → PAPER execution. With the new flag disabled, the existing strict three-layer direction match is unchanged. With it enabled, a confirmed 1m execution direction is the base signal; matching 1h and 15m directions resolve the final LONG/SHORT state even when it opposes the base direction, while a 1h/15m conflict resolves to NO_TRADE.
+
+All state inputs must be complete closed candles at or before the decision timestamp and within the existing age limit. Future, stale, incomplete, neutral, or unconfirmed evidence remains fail-closed. A direction flip is permitted only when canonical entry/SL/TP geometry is finite and correctly ordered; SL and TP are then mirrored around entry. Missing or invalid geometry rejects with `MTF_STATE_GEOMETRY_UNAVAILABLE`.
+
+## Evidence, compatibility, and isolation
+MTF and burn-in evidence now records `base_exec_direction`, `resolved_state`, `final_direction`, and `override_reason`. No SQLite schema or CSV migration is required because these fields live in existing JSON evidence payloads. The feature defaults off in all environment templates and participates in both runtime config and campaign strategy identity, preventing an enabled run from silently attaching to a campaign created for legacy behavior.
+
+## Validation
+MTF, canonical-calibration, environment-wiring, and canonical-filter tests passed 165/165. Runtime, campaign, and PAPER parity regressions passed 110/110 with three unrelated LIVE-start cases explicitly deselected after a prior run showed they stop at the repository's existing missing read-only Binance credential gate before reaching their assertions. Source compilation and diff validation passed. The runtime DB remained unchanged. Production/PAPER was not started.
+
+## Recommendation
+Rebase or port the patch onto current `origin/dev` before review because the working branch is 56 commits behind. Then run CI with declared dependencies and start a fresh isolated PAPER campaign only after explicit operator review. Do not infer LIVE readiness.
 
 # Canonical PAPER env-template contract — 2026-09-02
 

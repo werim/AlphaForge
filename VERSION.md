@@ -1,3 +1,15 @@
+# State Direction Shadow Evaluation — 2026-09-19
+
+- Current version/phase: `adaptive_shadow_v2`, observational PAPER-only evaluation on `feature/state-direction-shadow-evaluation`; production state-direction resolution remains default false.
+- Runtime maturity: the existing separate adaptive SQLite store now records deterministic state-direction decisions and outcomes without entering canonical campaign evidence. Actual ACCEPT/REJECT, side, geometry, order flow, reject reason, execution count, qualification, and campaign identity remain authoritative and unchanged.
+- BACKTEST/PAPER/LIVE alignment: the observational hook is enabled only for PAPER through `ALPHAFORGE_ENABLE_STATE_DIRECTION_SHADOW_EVALUATION` (default false). REGIME_GUIDED semantics remain authoritative. BACKTEST and LIVE behavior are unchanged.
+- Lifecycle coverage: shadow rows are written only after the actual decision is finalized. They do not create or alter lifecycle transitions, pending campaign labels, trade outcomes, or qualification samples.
+- Execution realism/persistence: raw RR is derived from shadow entry/SL/TP, then the canonical execution-cost breakdown supplies effective RR and cost drag. The canonical burn-in forward evaluator now supplies TP/SL/timeout/ambiguity/MFE/MAE mechanics to both campaign and shadow callers. Mirrored geometry is diagnostic and never classified as structure-valid.
+- Storage: default observational path is `data/runtime/alphaforge_adaptive_shadow.db`; campaign tables are refused. Added `state_direction_shadow_decisions` and `state_direction_shadow_outcomes` with deterministic upserts. No campaign schema or historical campaign database is migrated.
+- Validation: 91 focused adaptive/MTF/shadow/cost/resolver tests passed; one broader relevant PAPER/execution/position-resolver/qualification pass passed 37 tests; targeted Python compilation and `git diff --check` passed. Ruff is not installed in the repository environment.
+- Known critical risks: forward outcomes require an explicit offline resolver invocation and trustworthy closed-candle input; structure-valid opposite-side geometry is supported only when an evidenced structure geometry is supplied. No automatic tuning or promotion exists. No PAPER or LIVE campaign was launched.
+- Last audit date: 2026-09-19. PAPER verdict: observational feature is reviewable but must remain disabled until an operator deliberately supplies the separate shadow path. Live readiness verdict: NOT LIVE READY.
+
 # Phase9 detached worker attachment snapshot correction — 2026-09-17
 
 - Current version/phase: proposed clean release `1709MAC05`, prospective Phase9 detached PAPER startup correction on `fix/burnin-worker-attachment-race`.

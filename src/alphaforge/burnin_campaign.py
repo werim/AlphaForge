@@ -150,6 +150,9 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         "mtf_guided_signal_generation_enabled": bool(
             getattr(runtime_config, "mtf_guided_signal_generation_enabled", True)
         ),
+        "enable_state_direction_resolution": bool(
+            getattr(runtime_config, "enable_state_direction_resolution", False)
+        ),
     }
     effective_paper_slippage_bps = paper_slippage_bps if paper_slippage_bps is not None else getattr(runtime_config, "paper_slippage_bps", DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS)
     execution_cost_payload = {
