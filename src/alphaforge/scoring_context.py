@@ -20,7 +20,8 @@ def finite_numeric(*candidates: tuple[str, Any]) -> tuple[float | None, str | No
     return None, None
 
 
-def build_signal_payload(symbol: str, market_ctx: Mapping[str, Any], *, signal_id: str, default_mode: str) -> dict[str, Any]:
+def build_signal_payload(symbol: str, market_ctx: Mapping[str, Any], *, signal_id: str,
+                         default_mode: str, regime_fallback: Any = None) -> dict[str, Any]:
     execution_ctx = build_execution_context(market_ctx)
     raw_rr = market_ctx.get("rr")
     rr = float(raw_rr) if raw_rr is not None else None
@@ -32,7 +33,7 @@ def build_signal_payload(symbol: str, market_ctx: Mapping[str, Any], *, signal_i
         "stop_loss": market_ctx.get("sl", market_ctx.get("stop")),
         "take_profit": market_ctx.get("tp", market_ctx.get("target")),
         "setup": market_ctx.get("setup", market_ctx.get("setup_type")),
-        "regime": market_ctx.get("regime"), "risk_reward": rr,
+        "regime": market_ctx.get("regime", regime_fallback), "risk_reward": rr,
         "max_spread_bps": 12.0, "max_funding_rate": 0.0008,
         "max_expected_slippage_pct": execution_ctx.get("expected_slippage_pct", 0.002) * 1.2,
         "execution_ctx": execution_ctx,

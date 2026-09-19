@@ -1,11 +1,11 @@
 # BACKTEST authoritative AIBrain scoring boundary — 2026-09-20
 
 - Current version/phase: prospective deterministic BACKTEST scoring-parity increment; no PAPER/LIVE campaign, order, schema, or historical-data mutation.
-- Runtime maturity: PAPER and BACKTEST now share `scoring_context` normalization and the exact `AIBrain.score_signal` / order-plan semantics. BACKTEST uses a stateless scorer and closed candles through the candidate timestamp only.
+- Runtime maturity: PAPER and BACKTEST now share `scoring_context` normalization and the exact `AIBrain.score_signal` / order-plan semantics. The extraction preserves PAPER's selection-regime fallback. BACKTEST uses a stateless scorer and closed candles through the candidate timestamp only.
 - Expectancy integrity: runtime SQL expectancy tables are not timestamp-bounded. BACKTEST therefore uses AIBrain's existing zero-history context instead of reading full-run aggregate stats, preventing future-outcome leakage. The resulting lower confidence is explicit.
 - Execution realism: historical candle-derived setup/momentum/volatility, derived liquidity, and labelled spread/slippage inputs feed the shared scorer. Funding, orderbook, latency, and historical expectancy remain unavailable unless evidenced; no numeric zero is fabricated.
 - Known critical risks: BACKTEST cannot reproduce PAPER's true multi-timeframe exchange snapshots, configured PAPER latency/fill assumptions, or timestamp-bounded expectancy cohorts from the current datasets. It has semantic scorer parity, not complete data parity. LIVE verdict: NOT LIVE READY.
-- Validation: 165 focused AIBrain/context/BACKTEST lifecycle-parity tests passed; compilation and diff checks passed.
+- Validation: 241 requested P0 BACKTEST/runtime tests passed before review; 91 focused scorer/runtime tests passed after the fallback-regression correction; diff checks passed.
 
 # BACKTEST decision-pipeline parity correction — 2026-09-20
 

@@ -8,7 +8,7 @@ BACKTEST previously set score and expectancy with local breakout/range arithmeti
 
 ## Files changed
 
-- `src/alphaforge/scoring_context.py`: pure shared signal construction and AIBrain context normalization, extracted from the PAPER runtime.
+- `src/alphaforge/scoring_context.py`: pure shared signal construction and AIBrain context normalization, extracted from the PAPER runtime while retaining its selection-regime fallback.
 - `src/alphaforge/ai_brain.py`: explicit `for_stateless_scoring()` factory; it reuses the existing score formula without persistence access.
 - `src/alphaforge/runtime.py`: delegates existing PAPER signal/context construction to the shared pure component; behavior is preserved.
 - `backtest_order.py`: derives setup/regime/execution features only from candles through the decision index, invokes the shared normalizer and AIBrain scorer, preserves unavailable history, and uses the authoritative score/reason before existing defensive BACKTEST gates.
@@ -25,6 +25,7 @@ The missing timestamp-bounded expectancy contract is deliberately not hidden. BA
 ## Tests executed
 
 - `.venv/bin/python -m pytest -q tests/test_backtest_authoritative_scoring.py tests/test_m0_scoring_context.py tests/test_backtest_order_scanner.py tests/test_backtest_paper_pre_submit_parity.py` — 165 passed.
+- `.venv/bin/python -m pytest -q tests/test_m0_scoring_context.py tests/test_backtest_authoritative_scoring.py tests/test_runtime.py tests/test_runtime_live_authorization.py` — 91 passed after restoring the unchanged PAPER regime fallback.
 - Python compilation of changed scoring/runtime/BACKTEST files — passed.
 - `git diff --check` — passed.
 

@@ -8,6 +8,7 @@
 
 ### Fixed
 - Removed local breakout/range score and expectancy arithmetic as BACKTEST's authoritative pre-submit score source.
+- Preserved PAPER signal construction's `selection.regime_hint` fallback in the shared payload helper.
 
 ### Removed
 - Full-run SQL expectancy lookup from BACKTEST consideration; unbounded aggregates are unsafe historical inputs.

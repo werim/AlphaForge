@@ -71,6 +71,18 @@ def test_guided_numeric_scoring_features_are_propagated() -> None:
     assert scored_market["scoring_context_diagnostics"]["status"] == "COMPLETE"
 
 
+def test_signal_payload_preserves_selection_regime_fallback() -> None:
+    runtime = _runtime()
+
+    signal = runtime._build_signal(
+        SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND"),
+        {"entry": 100.0, "rr": 2.0},
+        signal_id="regime-fallback",
+    )
+
+    assert signal["regime"] == "TREND"
+
+
 def test_missing_or_qualitative_features_are_conservative_and_observable() -> None:
     runtime = _runtime()
     market = _guided_market(

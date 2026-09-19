@@ -3140,6 +3140,7 @@ class RuntimeOrchestrator:
             selection.symbol, market_ctx,
             signal_id=signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
             default_mode="PAPER",
+            regime_fallback=getattr(selection, "regime_hint", None),
         )
 
 
