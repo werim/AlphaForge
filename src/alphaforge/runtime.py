@@ -46,6 +46,7 @@ from alphaforge.agents.phase_b import register_phase_b_handlers
 from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
     bootstrap_agent_schema, create_agent_shadow_engine)
 from alphaforge.multi_timeframe import BinanceMTFProvider
+from alphaforge.state_direction_shadow import StateDirectionShadowStore, build_state_direction_shadow_draft
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
@@ -241,6 +242,8 @@ class RuntimeOrchestrator:
     reject_candle_provider: Callable[[str, str, str], Any] | None = None
     on_lifecycle_event: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     on_reject_persist: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
+    state_direction_shadow_enabled: bool = False
+    state_direction_shadow_store: StateDirectionShadowStore | None = None
     paper_slippage_bps: float = 2.0
     persistence_engine: Engine | None = None
     control_store: RuntimeControlStore | None = None
@@ -254,6 +257,7 @@ class RuntimeOrchestrator:
     _agent_persistence_stats: AgentPersistenceStats = field(default_factory=AgentPersistenceStats, init=False)
     _reject_log: deque[dict[str, Any]] = field(init=False)
     _persisted_reject_decision_ids: set[str] = field(default_factory=set, init=False)
+    _state_direction_shadow_drafts: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics, init=False)
     runtime_instance_id: str = field(default_factory=lambda: f"runtime:{uuid.uuid4().hex}", init=False)
     startup_id: str = field(default_factory=lambda: f"startup:{uuid.uuid4().hex}", init=False)
@@ -348,6 +352,47 @@ class RuntimeOrchestrator:
 
     def __post_init__(self) -> None:
         self._reject_log = deque(maxlen=max(1, self.config.max_reject_log_entries))
+
+    def _prepare_state_direction_shadow(
+        self, *, symbol: str, signal_id: str, market_ctx: Mapping[str, Any],
+        mtf: Mapping[str, Any], execution_ctx: Mapping[str, Any],
+    ) -> None:
+        if (
+            not self.state_direction_shadow_enabled
+            or self.config.execution_mode is not ExecutionMode.PAPER
+            or self.config.enable_state_direction_resolution
+        ):
+            return
+        try:
+            draft = build_state_direction_shadow_draft(
+                symbol=symbol, signal_id=signal_id, market_ctx=dict(market_ctx),
+                mtf=dict(mtf), execution_ctx=dict(execution_ctx),
+                horizon_bars=self.config.reject_forward_horizon_bars,
+            )
+            if draft is not None:
+                self._state_direction_shadow_drafts[signal_id] = draft
+        except Exception as exc:
+            logger.exception("state_direction_shadow_evaluation_failed", exc_info=exc)
+
+    def _record_state_direction_shadow(
+        self, payload: Mapping[str, Any], *, actual_decision: str,
+    ) -> None:
+        signal_id = str(payload.get("signal_id") or "")
+        draft = self._state_direction_shadow_drafts.pop(signal_id, None)
+        if draft is None or self.state_direction_shadow_store is None:
+            return
+        try:
+            self.state_direction_shadow_store.record(
+                draft,
+                actual_decision=actual_decision,
+                actual_side=payload.get("side"),
+                actual_reject_reason=(
+                    payload.get("reject_reason") or payload.get("reason")
+                    if actual_decision != "ACCEPTED" else None
+                ),
+            )
+        except Exception as exc:
+            logger.exception("state_direction_shadow_persistence_failed", exc_info=exc)
 
     def _resolve_persistence_engine(self) -> Engine | None:
         if self.persistence_engine is not None:
@@ -1865,6 +1910,9 @@ class RuntimeOrchestrator:
                     signal_id = f"runtime:{hashlib.sha256(setup_identity.encode('utf-8')).hexdigest()[:24]}"
                 else:
                     reject_decision_id = None
+                self._prepare_state_direction_shadow(
+                    symbol=selection.symbol, signal_id=signal_id, market_ctx=market_ctx,
+                    mtf=dict(mtf or {}), execution_ctx=execution_ctx)
                 self.metrics.mtf_alignment_reject += 1
                 self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
                 self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
@@ -1890,6 +1938,9 @@ class RuntimeOrchestrator:
             if setup_identity is not None and self._setup_decision_recorded(
                     setup_identity, decision="ACCEPTED"):
                 return
+            self._prepare_state_direction_shadow(
+                symbol=selection.symbol, signal_id=signal_id, market_ctx=market_ctx,
+                mtf=dict(mtf or {}), execution_ctx=execution_ctx)
             if self.config.enable_state_direction_resolution and not guided:
                 geometry_reason = self._apply_state_direction_geometry(
                     market_ctx,
@@ -2137,6 +2188,10 @@ class RuntimeOrchestrator:
             "final_direction": market_ctx.get("final_direction"),
             "override_reason": market_ctx.get("override_reason"),
         }
+        self._record_state_direction_shadow(
+            {**accepted_burnin_payload, "side": market_ctx.get("side"),
+             "entry": market_ctx.get("entry"), "sl": market_ctx.get("sl"),
+             "tp": market_ctx.get("tp")}, actual_decision="ACCEPTED")
         if self.config.execution_mode == ExecutionMode.LIVE_PRECHECK:
             await self._persist_live_precheck_evidence(selection.symbol, signal_payload, market_ctx, regime_ctx, stats_ctx, score_ctx, order_plan, explanation, effective_rr)
             self._persist_burnin_decision(
@@ -2443,6 +2498,7 @@ class RuntimeOrchestrator:
             maybe_coro = self.on_reject_persist(payload)
             if asyncio.iscoroutine(maybe_coro):
                 await maybe_coro
+        self._record_state_direction_shadow(payload, actual_decision="REJECTED")
         self._schedule_agent_shadow(payload)
 
     def _canonical_persisted_reject_count(self, conn: Any, *, campaign_scope: bool = True) -> int:
@@ -3330,6 +3386,15 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
                 )
             )
 
+    state_direction_shadow_enabled = (
+        mode is ExecutionMode.PAPER
+        and str(os.getenv(
+            "ALPHAFORGE_ENABLE_STATE_DIRECTION_SHADOW_EVALUATION", "false"
+        )).strip().lower() in {"1", "true", "yes", "on"}
+    )
+    state_direction_shadow_store = StateDirectionShadowStore(os.getenv(
+        "ALPHAFORGE_ADAPTIVE_SHADOW_DB_PATH", "data/runtime/alphaforge_adaptive_shadow.db"
+    )) if state_direction_shadow_enabled else None
     orchestrator = RuntimeOrchestrator(
         config=config,
         ai_brain=brain,
@@ -3340,6 +3405,8 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         live_reconciliation_provider=live_reconciliation_provider,
         on_lifecycle_event=_persist_lifecycle,
         on_reject_persist=_persist_reject,
+        state_direction_shadow_enabled=state_direction_shadow_enabled,
+        state_direction_shadow_store=state_direction_shadow_store,
         persistence_engine=engine,
         control_store=RuntimeControlStore(engine),
     )

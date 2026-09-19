@@ -157,6 +157,8 @@ def _normalized_candles(candles,r):
     unique={}
     for c in candles:
         try:
+            if c.get("is_closed") is False or c.get("closed") is False:
+                continue
             ts=_dt(c.get("timestamp") or c.get("open_time") or c.get("time")); high=float(c["high"]); low=float(c["low"])
             if math.isfinite(high) and math.isfinite(low) and high >= low and _dt(r["decision_timestamp"]) < ts <= _dt(r["due_at"]): unique[ts]=dict(c,timestamp=ts.isoformat())
         except (TypeError,ValueError,KeyError): continue
@@ -225,21 +227,19 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
             _sync_review(conn,r,outcome)
             status="AMBIGUOUS" if outcome.get("ambiguous") else ("RESOLVED" if outcome.get("evidence_complete") else "FAILED")
             _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=COALESCE(resolved_at,:now),last_error=CASE WHEN :ec=1 THEN NULL ELSE COALESCE(last_error,'CANONICAL_INCOMPLETE') END WHERE pending_label_id=:pid AND claim_token=:token",{"s":status,"ec":outcome.get("evidence_complete") or 0,"now":utc_now(),"pid":r["pending_label_id"],"token":token}); counts["canonical"]+=1; continue
-        candles=_normalized_candles(_candles_for(candles_by_symbol,r),r)
+        raw_candles=_candles_for(candles_by_symbol,r)
+        candles=_normalized_candles(raw_candles,r)
         if not candles:
             _exec(conn,"UPDATE burnin_pending_reject_labels SET status='PENDING',claim_token=NULL,claimed_at=NULL,last_error='NO_CANDLES_IN_MARKET_WINDOW' WHERE pending_label_id=:pid AND claim_token=:token",{"pid":r["pending_label_id"],"token":token}); counts["pending"]+=1; continue
-        label="TIMEOUT"; ambiguous=False; gross=0.0; terminal=None; entry=float(r["entry"]); sign=-1 if _side(r["side"])=="SHORT" else 1
-        for i,c in enumerate(candles):
-            sl,tp=_hit(r["side"],float(c["high"]),float(c["low"]),float(r["stop"]),float(r["target"]))
-            if sl and tp: label="AMBIGUOUS"; ambiguous=True; gross=None; terminal=i; break
-            if tp: label="TP_BEFORE_SL"; gross=abs((float(r["target"])-entry)/(entry-float(r["stop"]))); terminal=i; break
-            if sl: label="SL_BEFORE_TP"; gross=-1.0; terminal=i; break
-        observed=candles if terminal is None else candles[:terminal+1]
-        favorable=[((float(c["high"])-entry)/entry if sign>0 else (entry-float(c["low"]))/entry)*100 for c in observed]
-        adverse=[((entry-float(c["low"]))/entry if sign>0 else (float(c["high"])-entry)/entry)*100 for c in observed]
-        mfe=max(favorable,default=0.0); mae=max(adverse,default=0.0); complete,gaps=_window_complete(candles,r,terminal)
+        evaluated=evaluate_forward_outcome(side=r["side"],entry=r["entry"],stop=r["stop"],
+            target=r["target"],decision_timestamp=r["decision_timestamp"],due_at=r["due_at"],
+            timeframe=r.get("timeframe"),horizon_bars=r.get("horizon_bars"),candles=raw_candles)
+        label=evaluated["forward_label"]; ambiguous=evaluated["ambiguous"]
+        gross=evaluated["gross_r"]; mfe=evaluated["mfe"]; mae=evaluated["mae"]
+        complete=evaluated["window_complete"]; gaps=evaluated["market_gaps"]
+        observed=candles if evaluated["terminal_index"] is None else candles[:evaluated["terminal_index"]+1]
         if not complete:
-            diagnostic=json.dumps({"market_gaps":gaps,"observed_bars":len(observed),"required_bars":r.get("horizon_bars")},sort_keys=True)
+            diagnostic=json.dumps({"market_gaps":gaps,"observed_bars":evaluated["observed_bars"],"required_bars":r.get("horizon_bars")},sort_keys=True)
             _exec(conn,"UPDATE burnin_pending_reject_labels SET status='PENDING',claim_token=NULL,claimed_at=NULL,evidence_complete=0,last_error=:err WHERE pending_label_id=:pid AND claim_token=:token",{"err":"INCOMPLETE_MARKET_WINDOW:"+diagnostic,"pid":r["pending_label_id"],"token":token}); counts["pending"]+=1; continue
         costs=json.loads(r.get("execution_cost_assumptions_json") or "{}"); missing=[f for f in CRITICAL_COST_FIELDS if costs.get(f) is None]
         invalid=bool(missing); total=None if invalid or gross is None else sum(float(costs[f]) for f in CRITICAL_COST_FIELDS); net=None if total is None else gross-total
@@ -375,3 +375,48 @@ def resolve_pending_rejects(conn: Any, candles_by_symbol: Mapping[str, Sequence[
         return {"resolved":0,"pending":0,"ambiguous":0,"failed":0}
     cid = row[0] if isinstance(row, sqlite3.Row) else row[0]
     return resolve_campaign_batch(conn, cid, candles_by_symbol, now=now)
+def evaluate_forward_outcome(*, side: str, entry: Any, stop: Any, target: Any,
+                             decision_timestamp: str, due_at: str,
+                             timeframe: str | None, horizon_bars: int | None,
+                             candles: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Pure canonical TP/SL/timeout evaluator; persistence belongs to callers."""
+    errors = _geometry_errors(side, entry, stop, target)
+    if errors:
+        return {"forward_label": None, "mfe": None, "mae": None,
+                "gross_r": None, "ambiguous": False, "evidence_complete": False,
+                "window_complete": False,
+                "terminal_index": None,
+                "market_gaps": [], "missing_fields": errors, "observed_bars": 0}
+    row = {"side": side, "entry": float(entry), "stop": float(stop),
+           "target": float(target), "decision_timestamp": decision_timestamp,
+           "due_at": due_at, "timeframe": timeframe, "horizon_bars": horizon_bars}
+    normalized = _normalized_candles(candles, row)
+    label = "TIMEOUT"
+    ambiguous = False
+    gross = 0.0
+    terminal = None
+    sign = -1 if _side(side) == "SHORT" else 1
+    for index, candle in enumerate(normalized):
+        sl_hit, tp_hit = _hit(side, float(candle["high"]), float(candle["low"]),
+                              float(stop), float(target))
+        if sl_hit and tp_hit:
+            label, ambiguous, gross, terminal = "AMBIGUOUS", True, None, index
+            break
+        if tp_hit:
+            label = "TP_BEFORE_SL"
+            gross = abs((float(target) - float(entry)) / (float(entry) - float(stop)))
+            terminal = index
+            break
+        if sl_hit:
+            label, gross, terminal = "SL_BEFORE_TP", -1.0, index
+            break
+    observed = normalized if terminal is None else normalized[:terminal + 1]
+    favorable = [((float(c["high"])-float(entry))/float(entry) if sign > 0 else (float(entry)-float(c["low"]))/float(entry))*100 for c in observed]
+    adverse = [((float(entry)-float(c["low"]))/float(entry) if sign > 0 else (float(c["high"])-float(entry))/float(entry))*100 for c in observed]
+    complete, gaps = _window_complete(normalized, row, terminal)
+    return {"forward_label": label, "mfe": max(favorable, default=0.0),
+            "mae": max(adverse, default=0.0), "gross_r": gross,
+            "ambiguous": ambiguous, "evidence_complete": bool(complete and not ambiguous),
+            "window_complete": complete,
+            "terminal_index": terminal,
+            "market_gaps": gaps, "missing_fields": [], "observed_bars": len(observed)}

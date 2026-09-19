@@ -1,3 +1,31 @@
+# State Direction Shadow Evaluation — 2026-09-19
+
+### Added
+- Separate adaptive-store tables for deterministic state-direction shadow decisions and outcomes.
+- PAPER-only, default-false observational runtime hook and grouped ACTUAL-vs-shadow report.
+- Pure forward evaluator shared by campaign and shadow resolution.
+- Focused regressions for non-mutation, store failure, isolation, replay idempotency, invalid mirrors, evidence closure, REGIME_GUIDED authority, costs, and reports.
+
+### Changed
+- Adaptive shadow schema version advances to `adaptive_shadow_v2`.
+- Campaign reject resolution now delegates TP/SL/timeout/ambiguity/MFE/MAE calculation to the shared pure evaluator.
+- Explicitly open candles are excluded from forward evaluation.
+
+### Fixed
+- Shadow effective RR is recomputed from shadow geometry through the canonical execution-cost model instead of trusting candidate RR.
+- State-direction observation can no longer require campaign/qualification tables or mutate actual runtime context.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None for campaign/runtime schemas or trading behavior. The separate adaptive shadow database gains additive tables.
+
+### Known Issues
+- Shadow outcomes require explicit offline resolution with complete closed candles.
+- Structure-valid opposite-side geometry requires an explicit evidenced structure geometry; otherwise mirrored geometry remains diagnostic.
+- No automatic threshold tuning, promotion, PAPER launch, or LIVE enablement is included. LIVE remains NOT READY.
+
 # Phase9 detached worker attachment snapshot correction — 2026-09-17
 
 ### Added

@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 from alphaforge.burnin import canonical_decision_sql, canonical_hash, confidence_interval, utc_now
 
-SCHEMA_VERSION = "adaptive_shadow_v1"
+SCHEMA_VERSION = "adaptive_shadow_v2"
 MIN_SAMPLE = 30
 RECENT_WINDOW = 20
 LONG_WINDOW = 100
@@ -54,6 +54,30 @@ DDL = (
       calibration_key TEXT, reason_or_gate TEXT NOT NULL, observed_net_r REAL,
       retrospective_in_sample INTEGER NOT NULL DEFAULT 1, context_json TEXT NOT NULL,
       updated_at TEXT NOT NULL, schema_version TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS state_direction_shadow_decisions (
+      shadow_decision_id TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
+      symbol TEXT NOT NULL, decision_timestamp TEXT NOT NULL,
+      signal_id TEXT, base_exec_direction TEXT, regime_direction TEXT,
+      setup_direction TEXT, resolved_state TEXT NOT NULL,
+      shadow_final_direction TEXT NOT NULL, shadow_reason TEXT NOT NULL,
+      actual_decision TEXT NOT NULL, actual_side TEXT, actual_reject_reason TEXT,
+      entry REAL, base_sl REAL, base_tp REAL, shadow_geometry_type TEXT NOT NULL,
+      shadow_sl REAL, shadow_tp REAL, geometry_valid INTEGER NOT NULL,
+      spread REAL, expected_slippage REAL, latency REAL, fee_assumption REAL,
+      funding_assumption REAL, raw_rr_if_executed REAL,
+      effective_rr_if_executed REAL, execution_costs_json TEXT NOT NULL,
+      regime TEXT, setup_phase TEXT, timeframe TEXT, horizon_bars INTEGER,
+      due_at TEXT, source_provenance_json TEXT NOT NULL,
+      evidence_complete INTEGER NOT NULL, updated_at TEXT NOT NULL,
+      schema_version TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS state_direction_shadow_outcomes (
+      shadow_outcome_id TEXT PRIMARY KEY, shadow_decision_id TEXT NOT NULL UNIQUE,
+      outcome_status TEXT NOT NULL, forward_label TEXT, mfe REAL, mae REAL,
+      gross_r REAL, cost_adjusted_net_r REAL, total_cost_drag REAL,
+      avoided_loss REAL, missed_profit REAL, ambiguous INTEGER NOT NULL,
+      evidence_complete INTEGER NOT NULL, resolved_at TEXT,
+      evidence_json TEXT NOT NULL, schema_version TEXT NOT NULL,
+      FOREIGN KEY(shadow_decision_id) REFERENCES state_direction_shadow_decisions(shadow_decision_id))""",
 )
 
 
