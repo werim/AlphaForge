@@ -33,3 +33,4 @@ alphadb.session.sql
 .env.backup.*
 config/runtime_overrides.json
 .DS_Store
+.venv_old/
