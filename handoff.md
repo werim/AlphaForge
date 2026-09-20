@@ -2,6 +2,7 @@
 
 - PR #366 — state-direction shadow evaluation — MERGED
 - PR #367 — BACKTEST lifecycle/scoring parity — MERGED
+- PR #368 — timestamp-bounded expectancy evidence — MERGED
 
 ## COMPLETED P0
 
@@ -12,6 +13,7 @@ BACKTEST/PAPER lifecycle + authoritative scoring parity is complete at code-path
 - BACKTEST uses authoritative AIBrain scoring semantics
 - shared scoring normalization exists
 - historical scoring is timestamp-bounded
+- timestamp-bounded expectancy evidence is complete
 - no LIVE exchange/network dependency introduced
 - PAPER/LIVE scoring semantics preserved
 
@@ -19,7 +21,6 @@ BACKTEST/PAPER lifecycle + authoritative scoring parity is complete at code-path
 
 Still unavailable or incomplete historically:
 
-- timestamp-bounded expectancy cohorts
 - historical orderbook snapshots
 - historical funding snapshots
 - true historical MTF source snapshots
@@ -27,7 +28,7 @@ Still unavailable or incomplete historically:
 
 ## NEXT P0
 
-timestamp-bounded historical expectancy + execution-context contract
+prospective timestamped execution-context capture
 
 ## WORKING RULE
 
