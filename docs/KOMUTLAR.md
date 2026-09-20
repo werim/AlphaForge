@@ -1,3 +1,11 @@
+## LIVE readiness observer v1 (read-only)
+
+```bash
+python -m alphaforge.live_readiness --db data/campaign/G6MANUAL01.db --campaign-id camp_xxx --json --output-dir artifacts/live_readiness/camp_xxx
+```
+
+This is observational only. It is not a LIVE authorization mechanism and not an execution controller; it opens the target SQLite database read-only and never starts, stops, or modifies a campaign.
+
 # AlphaForge Komut Rehberi
 
 > **Son şema/CLI doğrulaması:** 2026-09-15, `dev` branch. Aşağıdaki campaign/PAPER komutlarında `burnin_ops` kanonik arayüzü esas alınır.

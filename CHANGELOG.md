@@ -1,3 +1,8 @@
+# Live Readiness Agent v1
+
+## Added
+- Read-only deterministic LIVE readiness evidence gates and CLI.
+
 # BACKTEST authoritative AIBrain scoring boundary — 2026-09-20
 
 ### Added

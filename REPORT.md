@@ -1,3 +1,7 @@
+# Live Readiness Agent v1
+
+Read-only readiness reporting was added in an isolated path. Target campaign SQLite databases are opened with `mode=ro` plus a deny-write authorizer; the report is emitted only as a separate artifact.
+
 # BACKTEST authoritative AIBrain scoring boundary surgery report — 2026-09-20
 
 ## Timestamp-bounded expectancy evidence increment

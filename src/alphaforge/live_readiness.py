@@ -436,3 +436,8 @@ class LiveReadinessEvaluator:
                     value = pattern.sub(r"\1[REDACTED]", value)
             return value
         return clean(dict(runtime_snapshot))
+
+if __name__ == "__main__":
+    # v1 is isolated from this legacy evaluator's persistence API.
+    from alphaforge.live_readiness_agent import main as _read_only_main
+    raise SystemExit(_read_only_main())
