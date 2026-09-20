@@ -120,3 +120,27 @@ def test_state_direction_resolution_flag_is_wired_and_defaults_off(monkeypatch):
     assert load_config_from_env().runtime.enable_state_direction_resolution is False
     monkeypatch.setenv("ALPHAFORGE_ENABLE_STATE_DIRECTION_RESOLUTION", "true")
     assert load_config_from_env().runtime.enable_state_direction_resolution is True
+
+
+def test_state_direction_shadow_flag_is_registered_paper_only_and_identity_neutral():
+    name = "ALPHAFORGE_ENABLE_STATE_DIRECTION_SHADOW_EVALUATION"
+    setting = next(item for item in CONFIG_REGISTRY if item.env_name == name)
+    assert setting.value_type == "bool"
+    assert setting.default is False
+    assert setting.applies_to == ("PAPER",)
+    assert effective_config_values(env={name: "true"})[name]["value"] is True
+
+    report = audit_config(env={name: "true"})
+    assert name not in report["unknown_process_variables"]
+
+    paper_off = load_config_from_env(env={"ALPHAFORGE_EXECUTION_MODE": "PAPER", name: "false"})
+    paper_on = load_config_from_env(env={"ALPHAFORGE_EXECUTION_MODE": "PAPER", name: "true"})
+    off_identity = build_phase8_campaign_identity(paper_off.runtime, ["BTCUSDT"], ["1h"], release_id="rel")
+    on_identity = build_phase8_campaign_identity(paper_on.runtime, ["BTCUSDT"], ["1h"], release_id="rel")
+    assert off_identity["config_hash"] == on_identity["config_hash"]
+    assert off_identity["strategy_config_hash"] == on_identity["strategy_config_hash"]
+    assert name not in off_identity["config_payload"]
+    assert name not in off_identity["strategy_payload"]
+
+    stale = audit_config(env={"ALPHAFORGE_ENABLE_LIVE_EXECUTION": "false"})
+    assert "ALPHAFORGE_ENABLE_LIVE_EXECUTION" in stale["unknown_process_variables"]
