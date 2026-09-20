@@ -15,6 +15,10 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 from alphaforge.execution import build_execution_context, build_execution_cost_breakdown, normalize_pct_input
+from alphaforge.ai_brain import AIBrain, score_reject_reason
+from alphaforge.adaptive_learning import classify_expectancy_bucket
+from alphaforge.multi_timeframe import build_execution_context as build_historical_execution_context, build_regime_context, build_setup_context
+from alphaforge.scoring_context import build_signal_payload, empty_stats_context, normalize_scoring_context
 from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import decision_filter_config, effective_config_values
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
@@ -786,6 +790,53 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
         "panic_score": panic_score,
         "selector_diagnostics": diagnostics,
     }
+
+
+def _historical_authoritative_score(symbol: str, candles: List[Candle], idx: int, market_ctx: Mapping[str, Any], *, min_accept_score: float) -> dict[str, Any]:
+    """Score only closed candles at or before the candidate timestamp.
+
+    BACKTEST deliberately supplies no SQL expectancy history: current aggregate
+    tables are not timestamp-bounded, so reading them would leak later outcomes.
+    AIBrain's existing zero-history confidence semantics remain authoritative.
+    """
+    decision_ts = int(candles[idx].timestamp)
+    historical = [
+        {"open_ts": int(c.timestamp), "close_ts": int(c.timestamp), "open": c.open,
+         "high": c.high, "low": c.low, "close": c.close, "volume": c.volume}
+        for c in candles[:idx + 1]
+        if int(c.timestamp) <= decision_ts
+    ]
+    timeframe = str(market_ctx.get("timeframe", "1m"))
+    regime = build_regime_context(historical[-20:], timeframe)
+    setup = build_setup_context(historical[-12:], timeframe, regime=regime)
+    execution = build_historical_execution_context(
+        historical[-5:], timeframe,
+        {**dict(market_ctx), "market_data_latency_ms": market_ctx.get("market_data_latency_ms")},
+        trade_side=str(market_ctx.get("side") or ""),
+    )
+    scoring_market = {**dict(market_ctx), "mode": "BACKTEST", "mtf": {
+        "regime": regime, "setup": setup, "execution": execution,
+        "alignment": {"alignment": regime.get("regime_alignment")},
+    }}
+    signal = build_signal_payload(symbol, scoring_market, signal_id=f"{symbol}:{decision_ts}", default_mode="BACKTEST")
+    normalized_market, regime_ctx, stats_ctx = normalize_scoring_context(
+        signal, scoring_market, stats_ctx=empty_stats_context(),
+    )
+    brain = AIBrain.for_stateless_scoring(min_accept_score=min_accept_score)
+    score_ctx = brain.score_signal(signal, normalized_market, regime_ctx, stats_ctx)
+    order_plan = brain.choose_order_plan(signal, normalized_market, score_ctx)
+    expectancy = score_ctx.probabilistic["expectancy_after_costs"]
+    return {
+        "score": score_ctx.total_score, "expectancy": expectancy,
+        "expectancy_bucket": classify_expectancy_bucket(expectancy),
+        "accepted": order_plan.decision == "ACCEPTED",
+        "reject_reason": "" if order_plan.decision == "ACCEPTED" else score_reject_reason(score_ctx),
+        "diagnostics": {"authoritative_score": score_ctx.total_score, "authoritative_reason_flags": score_ctx.reason_flags,
+                        "authoritative_components": score_ctx.components, "authoritative_penalties": score_ctx.penalties,
+                        "authoritative_probabilistic": score_ctx.probabilistic,
+                        "historical_scoring_context": normalized_market["scoring_context_diagnostics"],
+                        "historical_stats": "UNAVAILABLE_ZERO_HISTORY_NO_ASOF_STATS"},
+    }
 def parse_ts(value: str) -> int:
     if value.isdigit():
         return int(value)
@@ -908,6 +959,14 @@ def scan_symbol_backtest(
     mctx = _build_market_ctx(now, prev, context.get("symbol_meta", {}), candles[max(0, idx - 20):idx + 1])
     if "min_effective_rr" in context:
         mctx["MIN_EFFECTIVE_RR"] = context["min_effective_rr"]
+    authoritative = _historical_authoritative_score(
+        symbol, candles, idx, mctx,
+        min_accept_score=float(context.get("ai_min_accept_score", 0.62)),
+    )
+    mctx.update({
+        "score": authoritative["score"], "expectancy": authoritative["expectancy"],
+        "expectancy_bucket": authoritative["expectancy_bucket"],
+    })
     ctx = OrderExecutionContext(
         mode=TradingMode.BACKTEST,
         timestamp=now.timestamp,
@@ -917,11 +976,18 @@ def scan_symbol_backtest(
         market_ctx=mctx,
     )
     disabled_filters = tuple(context.get("disabled_backtest_filters", ()))
+    shared_config = {
+        "MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": disabled_filters,
+        # AIBrain scores are normalized 0..1; this is its existing PAPER
+        # acceptance threshold, not a BACKTEST threshold relaxation.
+        "MIN_TRADE_SCORE": float(context.get("ai_min_accept_score", 0.62)),
+        **dict(context.get("portfolio_config", {})),
+    }
     try:
         from alphaforge.order import evaluate_signal_decision
         shared_decision = evaluate_signal_decision(
             mctx,
-            {"DISABLED_BACKTEST_FILTERS": disabled_filters},
+            shared_config,
             {
                 "balance": context.get("balance", 1000),
                 "risk_pct": context.get("risk_pct", 1.0),
@@ -931,9 +997,10 @@ def scan_symbol_backtest(
             TradingMode.BACKTEST,
         )
         portfolio_state = context.get("portfolio_state")
-        if isinstance(portfolio_state, BacktestPortfolioState):
-            candidate_notional = portfolio_state.notional_for(entry=decision.entry, balance=context.get("balance"), risk_pct=context.get("risk_pct"), notional=mctx.get("notional"))
-            portfolio_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=decision.side, config=context.get("portfolio_config", {}), timestamp=now.timestamp, candidate_notional=candidate_notional)
+        if isinstance(portfolio_state, BacktestPortfolioState) and shared_decision.candidate is not None:
+            decision_candidate = shared_decision.candidate
+            candidate_notional = portfolio_state.notional_for(entry=decision_candidate.entry, balance=context.get("balance"), risk_pct=context.get("risk_pct"), notional=mctx.get("notional"))
+            portfolio_snapshot = portfolio_state.snapshot(mode="BACKTEST", symbol=symbol, side=decision_candidate.side, config=context.get("portfolio_config", {}), timestamp=now.timestamp, candidate_notional=candidate_notional)
             mctx.update({"equity": portfolio_snapshot.equity, "available_balance": portfolio_snapshot.available_balance, "notional": candidate_notional})
             ctx.storage["open_positions"] = {pid: {"notional": pos.notional, "side": pos.side} for pid, pos in portfolio_state.open_positions.items()}
             ctx.storage["daily_realized_pnl"] = portfolio_snapshot.daily_realized_pnl
@@ -941,14 +1008,23 @@ def scan_symbol_backtest(
             ctx.storage["trades_today_global"] = portfolio_snapshot.trades_today_global
             ctx.storage["consecutive_loss_count"] = portfolio_snapshot.consecutive_loss_count
             ctx.storage["rolling_drawdown_pct"] = portfolio_snapshot.rolling_drawdown_pct
-        runtime_result = run_order_cycle(ctx, config={"MODE": "BACKTEST", "DISABLED_BACKTEST_FILTERS": disabled_filters, **dict(context.get("portfolio_config", {}))}, recent_stats=context.get("recent_stats", {}))
+        runtime_result = run_order_cycle(ctx, config=shared_config, recent_stats=context.get("recent_stats", {}))
     except TypeError:
         # Test doubles and older call sites may not accept the newer config kwarg;
         # production runtime still receives the real BACKTEST filter switches above.
         runtime_result = run_order_cycle(ctx, recent_stats=context.get("recent_stats", {}))
     boundary_status = "executed" if shared_decision.decision == "ACCEPT" else "rejected"
     runtime_status = "executed" if runtime_result.get("status") == "executed" else "rejected"
-    if runtime_status != boundary_status:
+    if not authoritative["accepted"]:
+        result = {
+            "status": "rejected", "accepted": False, "candidate": shared_decision.candidate,
+            "reason": authoritative["reject_reason"], "reject_reason": authoritative["reject_reason"],
+            "rejection_reason": authoritative["reject_reason"],
+            "diagnostics": {**shared_decision.diagnostics, **authoritative["diagnostics"],
+                            "score": authoritative["score"], "expectancy": authoritative["expectancy"]},
+            "decision_result": shared_decision,
+        }
+    elif runtime_status != boundary_status:
         result = {
             "status": "rejected",
             "accepted": False,
@@ -973,7 +1049,7 @@ def scan_symbol_backtest(
             "reason": shared_decision.reject_reason,
             "reject_reason": shared_decision.reject_reason,
             "rejection_reason": shared_decision.reject_reason,
-            "diagnostics": shared_decision.diagnostics,
+            "diagnostics": {**shared_decision.diagnostics, **authoritative["diagnostics"]},
             "decision_result": shared_decision,
         }
     context["last_result"] = result
@@ -4974,9 +5050,8 @@ def main():
     }
     portfolio_state = BacktestPortfolioState(initial_equity=float(args.balance))
     rejection_counts: Dict[str, int] = {}
-    if not args.offline:
-        for symbol, candles in candles_by_symbol.items():
-            for i in range(len(candles)):
+    for symbol, candles in candles_by_symbol.items():
+        for i in range(len(candles)):
                 symbol_meta = symbol_meta_by_symbol.get(symbol, {})
                 if i < 2:
                     continue
@@ -5060,6 +5135,7 @@ def main():
                     "symbol_meta": symbol_meta,
                     "disabled_backtest_filters": disabled_filters,
                     "min_effective_rr": getattr(getattr(cfg, "runtime", cfg), "min_effective_rr", 1.60),
+                    "ai_min_accept_score": getattr(getattr(cfg, "runtime", cfg), "min_signal_score", 0.62),
                     "portfolio_state": portfolio_state,
                     "portfolio_config": portfolio_config,
                 }
@@ -5095,96 +5171,6 @@ def main():
                 )
                 if cand:
                     candidates.append(cand)
-    if args.offline and not candidates and candles_by_symbol:
-        symbol = next(iter(candles_by_symbol.keys()))
-        fixture_candles = candles_by_symbol[symbol]
-        c0 = fixture_candles[5]
-        mctx = _build_market_ctx(
-            fixture_candles[6],
-            fixture_candles[5],
-            {"quoteVolume": 100000000.0},
-            fixture_candles[:7],
-        )
-        mctx["MIN_EFFECTIVE_RR"] = getattr(getattr(cfg, "runtime", cfg), "min_effective_rr", 1.60)
-        synthetic = CandidateOrder(
-            c0.timestamp,
-            symbol,
-            "LONG",
-            c0.close,
-            c0.close - 0.5,
-            c0.close + (c0.close - (c0.close - 0.5)) * mctx["rr"],
-            mctx["rr"],
-            "BREAKOUT_UP",
-            "OFFLINE_FIXTURE",
-            "TREND",
-            mctx["score"],
-            "LIMIT",
-            expectancy_bucket=mctx.get("expectancy_bucket", "UNKNOWN"),
-        )
-        candidates.append(synthetic)
-        lifecycle.extend(
-            simulate_candidate(
-                synthetic,
-                fixture_candles,
-                5,
-                args.balance,
-                args.risk_pct,
-                market_ctx={
-                    "volume_24h_usdt": 100000000.0,
-                    "spread_pct": 0.2,
-                    "liquidity_score": 0.8,
-                    "expected_slippage_pct": 0.001,
-                    "volatility_regime": "NORMAL",
-                },
-            )
-        )
-        rejected.append(
-            {
-                "timestamp": fixture_candles[8].timestamp,
-                "symbol": symbol,
-                "side": "LONG",
-                "setup_type": "BREAKOUT_UP",
-                "setup_reason": "OFFLINE_FIXTURE",
-                "regime": "TREND",
-                "score": 4.0,
-                "rr": 0.9,
-                "expectancy": -0.1,
-                "quality_score": 0.1,
-                "reject_reason": "LOW_EFFECTIVE_RR",
-                "diagnostics": json.dumps({"offline": True}, sort_keys=True),
-                "entry": fixture_candles[8].close,
-                "sl": fixture_candles[8].close - 0.5,
-                "tp": fixture_candles[8].close + 0.3,
-                "spread_pct": 0.2,
-                "liquidity_score": 0.8,
-                "volatility_score": 0.2,
-                "expected_slippage_pct": 0.001,
-                **_low_score_rescue_watch_fields("LOW_EFFECTIVE_RR", {}),
-            }
-        )
-        lifecycle.append(
-            LifecycleRow(
-                timestamp=fixture_candles[8].timestamp,
-                symbol=symbol,
-                side="LONG",
-                setup_type="BREAKOUT_UP",
-                setup_reason="OFFLINE_FIXTURE",
-                regime="TREND",
-                score=4.0,
-                rr=0.9,
-                entry=fixture_candles[8].close,
-                sl=fixture_candles[8].close - 0.5,
-                tp=fixture_candles[8].close + 0.3,
-                status_before="SIGNAL_CREATED",
-                status_after="SIGNAL_REJECTED",
-                reject_reason="LOW_EFFECTIVE_RR",
-                order_type="N/A",
-                volume_24h_usdt=100000000.0,
-                spread_pct=0.2,
-                liquidity_score=0.8,
-                expected_slippage_pct=0.001,
-            )
-        )
     candidate_rows = [{**asdict(x), "quality_score": "", "accepted": True, "reject_reason": "", "raw_rr": x.rr, "effective_rr": x.rr, "min_required_score": "", "trend_strength": "", "volatility_pct": "", "range_position": "", "spread_pct": "", "slippage_pct": "", "liquidity_score": "", "first_blocking_gate": "", "all_failed_gates": "[]"} for x in candidates]
     rejected_shadow: List[RejectedShadowEvaluation] = []
     for row in rejected:

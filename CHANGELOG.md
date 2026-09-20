@@ -1,3 +1,45 @@
+# BACKTEST authoritative AIBrain scoring boundary — 2026-09-20
+
+### Added
+- Pure shared AIBrain signal/context normalization and stateless scorer coverage for deterministic BACKTEST.
+
+### Changed
+- BACKTEST now derives its pre-submit score and primary scoring reject reason through the PAPER AIBrain formula using timestamp-bounded historical candles.
+
+### Fixed
+- Removed local breakout/range score and expectancy arithmetic as BACKTEST's authoritative pre-submit score source.
+- Preserved PAPER signal construction's `selection.regime_hint` fallback in the shared payload helper.
+
+### Removed
+- Full-run SQL expectancy lookup from BACKTEST consideration; unbounded aggregates are unsafe historical inputs.
+
+### Breaking Changes
+- BACKTEST score is now the PAPER AIBrain 0..1 score. Existing downstream BACKTEST quality gates consume the matching AIBrain acceptance threshold.
+
+### Known Issues
+- Historical MTF/orderbook/funding/latency and as-of expectancy evidence remain unavailable unless supplied with timestamped provenance. LIVE remains NOT READY.
+
+# BACKTEST decision-pipeline parity correction — 2026-09-20
+
+### Added
+- Regression coverage for BACKTEST portfolio-state handoff and offline decision/lifecycle evidence without network access.
+
+### Changed
+- Offline BACKTEST fixtures now use the existing selector, decision, reject, portfolio, lifecycle, persistence, and export path.
+
+### Fixed
+- Removed the manual offline accepted/rejected rows that bypassed decision logic and fabricated score/RR/expectancy/execution evidence.
+- Fixed the BACKTEST portfolio handoff's undefined `decision` reference.
+
+### Removed
+- The `OFFLINE_FIXTURE` candidate/reject/lifecycle fallback and its hard-coded `LOW_EFFECTIVE_RR` evidence.
+
+### Breaking Changes
+- Offline fixtures can now correctly produce no accepted trades; consumers must use persisted accepted/rejected lifecycle evidence rather than expect a synthetic trade.
+
+### Known Issues
+- BACKTEST candle-derived scoring is not yet identical to the PAPER runtime AIBrain scorer. Historical funding remains unavailable when no source exists. LIVE remains NOT READY.
+
 # State Direction Shadow Evaluation — 2026-09-19
 
 ### Added

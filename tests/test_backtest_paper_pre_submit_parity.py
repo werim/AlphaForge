@@ -240,6 +240,7 @@ def test_backtest_scan_fails_closed_when_runtime_would_ignore_boundary(monkeypat
 
     monkeypatch.setattr(order_mod, "evaluate_signal_decision", fake_boundary)
     monkeypatch.setattr(bo, "_order_runtime", lambda: (_Ctx, _Mode, fake_cycle))
+    monkeypatch.setattr(bo, "_historical_authoritative_score", lambda *_args, **_kwargs: {"score": .9, "expectancy": .2, "expectancy_bucket": "HIGH", "accepted": True, "reject_reason": "", "diagnostics": {}})
     candles = [bo.Candle(1, 1, 1.1, 0.9, 1.0, 1), bo.Candle(2, 1, 1.1, 0.9, 1.0, 1), bo.Candle(3, 1.05, 1.3, 1.0, 1.2, 1)]
     ctx = {"mode": "BACKTEST"}
     assert bo.scan_symbol_backtest("AAAUSDT", candles, 2, ctx) is None

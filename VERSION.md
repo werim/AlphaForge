@@ -1,3 +1,23 @@
+# BACKTEST authoritative AIBrain scoring boundary — 2026-09-20
+
+- Current version/phase: prospective deterministic BACKTEST scoring-parity increment; no PAPER/LIVE campaign, order, schema, or historical-data mutation.
+- Runtime maturity: PAPER and BACKTEST now share `scoring_context` normalization and the exact `AIBrain.score_signal` / order-plan semantics. The extraction preserves PAPER's selection-regime fallback. BACKTEST uses a stateless scorer and closed candles through the candidate timestamp only.
+- Expectancy integrity: runtime SQL expectancy tables are not timestamp-bounded. BACKTEST therefore uses AIBrain's existing zero-history context instead of reading full-run aggregate stats, preventing future-outcome leakage. The resulting lower confidence is explicit.
+- Execution realism: historical candle-derived setup/momentum/volatility, derived liquidity, and labelled spread/slippage inputs feed the shared scorer. Funding, orderbook, latency, and historical expectancy remain unavailable unless evidenced; no numeric zero is fabricated.
+- Known critical risks: BACKTEST cannot reproduce PAPER's true multi-timeframe exchange snapshots, configured PAPER latency/fill assumptions, or timestamp-bounded expectancy cohorts from the current datasets. It has semantic scorer parity, not complete data parity. LIVE verdict: NOT LIVE READY.
+- Validation: 241 requested P0 BACKTEST/runtime tests passed before review; 91 focused scorer/runtime tests passed after the fallback-regression correction; diff checks passed.
+
+# BACKTEST decision-pipeline parity correction — 2026-09-20
+
+- Current version/phase: prospective BACKTEST lifecycle-evidence correction on `feature/state-direction-shadow-evaluation`; no PAPER campaign or LIVE action was started.
+- Runtime maturity: BACKTEST now sends the deterministic offline fixture through its established selector, shared pre-submit decision boundary, quality/reject gates, portfolio state, lifecycle persistence, and export path. It no longer injects a hand-authored accepted order and reject row.
+- BACKTEST/PAPER/LIVE alignment: BACKTEST continues to use `evaluate_signal_decision` plus `run_order_cycle` for candidate construction, quality gates, effective-RR evidence, and fail-closed parity. PAPER/LIVE runtime code and safety gates were not changed. BACKTEST makes no LIVE exchange/order call; offline mode makes no network call.
+- Lifecycle coverage: candidate decisions persist `SIGNAL_CREATED -> SIGNAL_REJECTED` when rejected; accepted candidates continue through `SIGNAL_ACCEPTED -> WAITING_ENTRY_ZONE -> ENTRY_TRIGGERED -> ORDER_PLACED -> POSITION_OPENED -> POSITION_CLOSED | OPEN_AT_END` via the existing simulator.
+- Persistence/execution realism: manually fabricated offline `score`, `rr`, `expectancy`, execution fields, and `LOW_EFFECTIVE_RR` reject evidence were removed. Historical funding remains explicitly unavailable when no historical value exists; no zero was fabricated. No schema, migration, or historical campaign data changed.
+- Validation: 151 focused BACKTEST/shared-decision parity tests passed; Python compilation and diff whitespace checks passed.
+- Known critical risks: BACKTEST market context still derives score/expectancy from deterministic candle geometry rather than the production runtime's AIBrain scoring context; historical spread is an explicitly labelled estimate when no historical quote data exists. This patch does not establish full PAPER-runtime scorer parity. LIVE verdict: NOT LIVE READY.
+- Last audit date: 2026-09-20. PAPER verdict: unchanged. LIVE verdict: NOT LIVE READY.
+
 # State Direction Shadow Evaluation — 2026-09-19
 
 - Current version/phase: `adaptive_shadow_v2`, observational PAPER-only evaluation on `feature/state-direction-shadow-evaluation`; production state-direction resolution remains default false.

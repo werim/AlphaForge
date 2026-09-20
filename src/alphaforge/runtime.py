@@ -22,6 +22,7 @@ from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
 from alphaforge.execution import build_execution_context, build_execution_cost_model
+from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_control import RuntimeControlStore
@@ -405,12 +406,7 @@ class RuntimeOrchestrator:
     @staticmethod
     def _finite_numeric(*candidates: tuple[str, Any]) -> tuple[float | None, str | None]:
         """Return the first canonical finite numeric value without mapping labels."""
-        for source, value in candidates:
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                numeric = float(value)
-                if math.isfinite(numeric):
-                    return numeric, source
-        return None, None
+        return finite_numeric(*candidates)
 
     def _build_scoring_context(
         self,
@@ -418,74 +414,9 @@ class RuntimeOrchestrator:
         market_ctx: Mapping[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """Build AIBrain inputs from canonical runtime/MTF evidence and SQL stats."""
-        scored_market = dict(market_ctx)
-        mtf = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
-        setup = mtf.get("setup") if isinstance(mtf.get("setup"), Mapping) else {}
-        execution = mtf.get("execution") if isinstance(mtf.get("execution"), Mapping) else {}
-        regime = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
-        alignment = mtf.get("alignment") if isinstance(mtf.get("alignment"), Mapping) else {}
-
-        sources: dict[str, str] = {}
-        missing: list[str] = []
-
-        setup_quality, source = self._finite_numeric(
-            ("signal.setup_quality", signal_payload.get("setup_quality")),
-            ("market.setup_quality", market_ctx.get("setup_quality")),
-            ("mtf.setup.setup_quality", setup.get("setup_quality")),
-        )
-        if setup_quality is None:
-            missing.append("setup_quality")
-        else:
-            sources["setup_quality"] = str(source)
-
-        feature_candidates = {
-            "momentum_confirmation": (
-                ("market.momentum_confirmation", market_ctx.get("momentum_confirmation")),
-                ("mtf.execution.momentum_confirmation", execution.get("momentum_confirmation")),
-            ),
-            "liquidity_quality": (
-                ("market.liquidity_quality", market_ctx.get("liquidity_quality")),
-                ("mtf.execution.liquidity_quality", execution.get("liquidity_quality")),
-                ("market.liquidity_score", market_ctx.get("liquidity_score")),
-                ("mtf.execution.liquidity_score", execution.get("liquidity_score")),
-            ),
-            "volatility_fit": (
-                ("market.volatility_fit", market_ctx.get("volatility_fit")),
-                ("mtf.execution.volatility_fit", execution.get("volatility_fit")),
-            ),
-        }
-        for feature, candidates in feature_candidates.items():
-            value, source = self._finite_numeric(*candidates)
-            if value is None:
-                scored_market.pop(feature, None)
-                missing.append(feature)
-            else:
-                scored_market[feature] = value
-                sources[feature] = str(source)
-
-        regime_alignment, source = self._finite_numeric(
-            ("market.regime_alignment", market_ctx.get("regime_alignment")),
-            ("mtf.alignment.alignment", alignment.get("alignment")),
-            ("mtf.regime.regime_alignment", regime.get("regime_alignment")),
-            ("mtf.regime.alignment", regime.get("alignment")),
-        )
-        regime_ctx: dict[str, Any] = {
-            "regime": regime.get("regime", signal_payload.get("regime")),
-        }
-        if regime_alignment is None:
-            missing.append("regime_alignment")
-        else:
-            regime_ctx["alignment"] = regime_alignment
-            sources["regime_alignment"] = str(source)
-
+        scored_market, regime_ctx, _ = normalize_scoring_context(signal_payload, market_ctx)
         stats_ctx = self._build_stats_context(signal_payload, regime_ctx)
-        diagnostics = {
-            "status": "SCORING_CONTEXT_INCOMPLETE" if missing else "COMPLETE",
-            "missing_inputs": missing,
-            "sources": sources,
-            "sample_size": stats_ctx["sample_size"],
-        }
-        scored_market["scoring_context_diagnostics"] = diagnostics
+        scored_market["scoring_context_diagnostics"]["sample_size"] = stats_ctx["sample_size"]
         return scored_market, regime_ctx, stats_ctx
 
     def _build_stats_context(
@@ -3205,35 +3136,12 @@ class RuntimeOrchestrator:
 
     @staticmethod
     def _build_signal(selection: SymbolSelectionResult, market_ctx: Mapping[str, Any], *, signal_id: str | None = None) -> dict[str, Any]:
-        execution_ctx = build_execution_context(market_ctx)
-        raw_rr = market_ctx.get("rr")
-        rr = float(raw_rr) if raw_rr is not None else None
-        signal = {
-            "symbol": selection.symbol,
-            "signal_id": signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
-            "mode": str(market_ctx.get("mode", "PAPER")).upper(),
-            "side": market_ctx.get("side", "LONG"),
-            "timeframe": market_ctx.get("timeframe", "1m"),
-            "entry_price": float(market_ctx.get("entry", 0.0) or 0.0),
-            "stop_loss": market_ctx.get("sl", market_ctx.get("stop")),
-            "take_profit": market_ctx.get("tp", market_ctx.get("target")),
-            "setup": market_ctx.get("setup", market_ctx.get("setup_type")),
-            "regime": market_ctx.get("regime", getattr(selection, "regime_hint", None)),
-            "risk_reward": rr,
-            "max_spread_bps": 12.0,
-            "max_funding_rate": 0.0008,
-            "max_expected_slippage_pct": execution_ctx.get("expected_slippage_pct", 0.002) * 1.2,
-            "execution_ctx": execution_ctx,
-        }
-        mtf = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
-        setup = mtf.get("setup") if isinstance(mtf.get("setup"), Mapping) else {}
-        setup_quality, _ = RuntimeOrchestrator._finite_numeric(
-            ("market.setup_quality", market_ctx.get("setup_quality")),
-            ("mtf.setup.setup_quality", setup.get("setup_quality")),
+        return build_signal_payload(
+            selection.symbol, market_ctx,
+            signal_id=signal_id or RuntimeOrchestrator._resolve_signal_id(selection.symbol, market_ctx),
+            default_mode="PAPER",
+            regime_fallback=getattr(selection, "regime_hint", None),
         )
-        if setup_quality is not None:
-            signal["setup_quality"] = setup_quality
-        return signal
 
 
 def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
