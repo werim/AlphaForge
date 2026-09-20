@@ -1,3 +1,37 @@
+# PAPER pre-MTF selector ordering surgery report — 2026-09-21
+
+## Why the patch was needed and root cause
+
+`exchange_market_scanner._scan_binance()` converts absolute Binance 24h `priceChangePercent` to `trend_strength = min(1, change_pct / 0.02)` and derives `chop_score = 1 - trend_strength`. `RuntimeOrchestrator._scan_once()` then called `select_symbols()` before `_process_symbol()`. The selector hard-rejected `chop_score > 0.72` as `TOO_CHOPPY` and the related lack of clean trend/range edge as `WEAK_TREND_AND_NO_RANGE_EDGE`. For the observed BTC/ETH values, both rows were removed, so `symbols_selected`, `_process_symbol`, MTF contexts, AIBrain calls, canonical decisions, and persisted order decisions all remained zero.
+
+This was an architectural ordering defect. The selector observations came from a coarse 24h absolute-movement proxy, while PAPER already has authoritative closed-candle 1h regime, 15m setup, and 1m execution evidence. Chop/regime concepts also exist downstream: MTF can reject alignment or setup state, and `evaluate_trade_quality()` enforces `BLOCK_CHOP_MARKET` from pattern evidence plus `REQUIRE_REGIME_ALIGNMENT`. The weak-trend selector label is not duplicated verbatim downstream, but its strategy judgment is superseded by richer MTF setup/regime evidence.
+
+## Files changed and exact behavior
+
+- `src/alphaforge/symbol_selector.py`: adds an internal `advisory_reasons` selector option. Advisory observations stay in diagnostics and warnings, and `TOO_CHOPPY` retains its existing one-point symbol-score penalty, but advisory reasons do not set `tradable=false`. Default behavior is unchanged.
+- `src/alphaforge/runtime.py`: supplies the two advisory reasons only when mode is PAPER, MTF alignment is required, and MTF-guided generation is enabled. Adds a separate per-scan advisory summary and heartbeat/log field.
+- `src/alphaforge/runtime_heartbeat.py`: permits `top_selection_advisory_reasons` in the sanitized heartbeat payload.
+- `tests/test_runtime.py`, `tests/test_multi_timeframe.py`, and `tests/test_runtime_heartbeat.py`: add realistic BTC evidence, MTF reachability, authoritative MTF rejection, hard safety rejection, BACKTEST stability, and advisory persistence coverage.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: document the prospective behavior and operational constraints.
+
+## Runtime, lifecycle, persistence, and compatibility impact
+
+PAPER MTF-guided candidates are no longer vetoed solely by coarse `TOO_CHOPPY` or `WEAK_TREND_AND_NO_RANGE_EDGE` observations. Low volume, wide spread, low liquidity, excessive volatility, evidenced panic/spoof/fakeout, funding anomaly, correlation overexposure, and configured orderbook alignment remain hard selector rejects. Invalid Binance price/book data remains fail-closed in the scanner. Downstream MTF alignment, AIBrain score, chop pattern, regime alignment, expectancy, raw and effective RR, execution costs, portfolio controls, and order authorization remain unchanged and authoritative.
+
+Selector safety failures still produce `NO_TRADABLE_SYMBOLS_AFTER_SELECTION`. Advisory candidates can enter `_process_symbol()` and then persist normal canonical rejects and lifecycle events. No schema, migration, CSV/export, historical row, active position, campaign identity, state-direction resolution, or state-direction shadow behavior changed. The PAPER-only state-direction shadow remains non-authoritative; LIVE authorization and mutation paths are unchanged. BACKTEST retains its hard selector filters and existing filter-switch semantics.
+
+## Tests executed
+
+- `python -m pytest -q tests/test_runtime.py::test_paper_mtf_selector_keeps_coarse_chop_as_observable_advisory tests/test_runtime.py::test_paper_mtf_selector_still_hard_rejects_true_execution_safety_failure tests/test_runtime.py::test_backtest_selector_retains_coarse_chop_hard_reject_semantics tests/test_multi_timeframe.py::test_paper_coarse_selector_chop_can_reach_authoritative_mtf_reject tests/test_symbol_selector.py tests/test_backtest_filter_switches.py tests/test_runtime_heartbeat.py tests/test_env_filters_canonical.py` — 34 passed.
+- `python -m pytest -q --disable-warnings tests/test_exchange_market_scanner.py` — 17 passed.
+- Broader selector, runtime, MTF, trade-quality, execution, BACKTEST parity, env/config, heartbeat, LIVE authorization, state-direction shadow, Phase 8 campaign, and PAPER burn-in suite — 447 passed.
+- `python -m py_compile src/alphaforge/symbol_selector.py src/alphaforge/runtime.py src/alphaforge/runtime_heartbeat.py` — passed.
+- `git diff --check` — passed.
+
+## Risks, limitations, migration, and recommendation
+
+No threshold tuning or trade-count objective is included. Advisory evidence ranks candidates lower but can increase MTF analysis load when the previous coarse proxy rejected them; canonical gates may still reject every candidate. The production effect requires a fresh PAPER campaign with a new release ID, SQLite database, and campaign ID. `POST360S02`, `camp_b0ed3d95a2a809b4`, and `data/campaign/POST360S02.db` were not read, written, resumed, attached, migrated, or used by tests. Review and merge the narrow patch, then perform read-only verification and launch a fresh campaign under a new identity. Do not claim LIVE readiness.
+
 # Live Readiness Agent v1
 
 Read-only readiness reporting was added in an isolated path. Target campaign SQLite databases are opened with `mode=ro` plus a deny-write authorizer; the report is emitted only as a separate artifact.

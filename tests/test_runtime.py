@@ -1615,3 +1615,119 @@ def test_synthetic_reconciled_snapshot_is_not_a_running_worker_and_real_runtime_
     ))
     latest = latest_runtime_state_snapshot(engine)
     assert latest["instance_id"] == "real" and latest["runtime_status"] == "OPERATING"
+
+
+def _observed_coarse_chop_candidate(**overrides):
+    candidate = {
+        "symbol": "BTCUSDT",
+        "source_exchange": "binance",
+        "volume_24h_usdt": 7_625_253_360.2,
+        "spread_pct": 1.2365196175849023e-06,
+        "liquidity_score": 1.0,
+        "volatility_pct": 0.00163,
+        "trend_strength": 0.0815,
+        "chop_score": 0.9185,
+        "funding_rate_pct": 4.312e-05,
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def test_paper_mtf_selector_keeps_coarse_chop_as_observable_advisory(monkeypatch):
+    processed = []
+
+    async def scanner():
+        return [_observed_coarse_chop_candidate()]
+
+    async def process(_self, selection):
+        processed.append(selection)
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_guided_signal_generation_enabled=True,
+        ),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+    )
+
+    asyncio.run(orchestrator._scan_once())
+
+    assert orchestrator.metrics.symbols_selected == 1
+    assert len(processed) == 1
+    assert processed[0].reject_reasons == []
+    assert processed[0].diagnostics["advisory_reasons"] == [
+        "TOO_CHOPPY",
+        "WEAK_TREND_AND_NO_RANGE_EDGE",
+    ]
+    assert set(processed[0].warnings) >= {
+        "advisory_too_choppy",
+        "advisory_weak_trend_and_no_range_edge",
+    }
+    assert orchestrator._last_scan_rejection_summary == {}
+    assert orchestrator._last_scan_advisory_summary == {
+        "TOO_CHOPPY": 1,
+        "WEAK_TREND_AND_NO_RANGE_EDGE": 1,
+    }
+    assert orchestrator._last_scan_gate_blockers == []
+
+
+def test_paper_mtf_selector_still_hard_rejects_true_execution_safety_failure(monkeypatch):
+    processed = []
+
+    async def scanner():
+        return [_observed_coarse_chop_candidate(liquidity_score=0.1)]
+
+    async def process(_self, selection):
+        processed.append(selection)
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_guided_signal_generation_enabled=True,
+        ),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+    )
+
+    asyncio.run(orchestrator._scan_once())
+
+    assert processed == []
+    assert orchestrator.metrics.symbols_selected == 0
+    assert orchestrator._last_scan_rejection_summary == {"LOW_LIQUIDITY": 1}
+    assert orchestrator._last_scan_gate_blockers == ["NO_TRADABLE_SYMBOLS_AFTER_SELECTION"]
+
+
+def test_backtest_selector_retains_coarse_chop_hard_reject_semantics(monkeypatch):
+    processed = []
+
+    async def scanner():
+        return [_observed_coarse_chop_candidate()]
+
+    async def process(_self, selection):
+        processed.append(selection)
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.BACKTEST,
+            require_mtf_alignment=True,
+            mtf_guided_signal_generation_enabled=True,
+        ),
+        ai_brain=_brain(),
+        market_scanner=scanner,
+    )
+
+    asyncio.run(orchestrator._scan_once())
+
+    assert processed == []
+    assert orchestrator.metrics.symbols_selected == 0
+    assert orchestrator._last_scan_rejection_summary == {
+        "TOO_CHOPPY": 1,
+        "WEAK_TREND_AND_NO_RANGE_EDGE": 1,
+    }
+    assert orchestrator._last_scan_advisory_summary == {}

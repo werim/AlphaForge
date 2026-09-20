@@ -96,6 +96,7 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> str:
         "mtf_setup_overextended",
         "mtf_setup_invalid",
         "top_selection_reject_reasons",
+        "top_selection_advisory_reasons",
         "decision_gate_blockers",
         "agent_shadow_queue_depth",
         "agent_shadow_dropped",

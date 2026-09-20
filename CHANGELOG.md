@@ -1,3 +1,25 @@
+# PAPER pre-MTF selector ordering correction — 2026-09-21
+
+### Added
+- PAPER heartbeat diagnostics now expose `top_selection_advisory_reasons` separately from hard selector rejects.
+- Regressions for realistic BTC coarse-chop evidence, MTF reachability and rejection, retained liquidity safety, BACKTEST stability, and sanitized heartbeat evidence.
+
+### Changed
+- In PAPER with required MTF alignment and MTF-guided generation, `TOO_CHOPPY` and `WEAK_TREND_AND_NO_RANGE_EDGE` from the coarse 24h selector proxy are advisory rather than pre-MTF vetoes.
+- The existing `TOO_CHOPPY` ranking penalty remains active.
+
+### Fixed
+- Liquid, tight-spread BTC/ETH candidates can no longer be eliminated solely by 24h absolute price movement before the canonical 1h/15m/1m pipeline runs.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. BACKTEST and LIVE selector semantics, downstream thresholds, persistence schemas, and exports are unchanged.
+
+### Known Issues
+- A fresh PAPER campaign is required to validate prospective behavior; `POST360S02` remains immutable and is not post-change qualification evidence. LIVE remains NOT READY.
+
 # Live Readiness Agent v1
 
 ## Added

@@ -724,3 +724,45 @@ def test_non_binance_source_is_not_evaluated_with_binance_provider():
     assert provider.execution_ctx is None
     assert rejects[-1]["reason"] == "MTF_EXECUTION_UNAVAILABLE"
     assert rejects[-1]["mtf"]["provenance_error"] == "UNSUPPORTED_MTF_PROVIDER"
+
+
+def test_paper_coarse_selector_chop_can_reach_authoritative_mtf_reject():
+    rejects = []
+
+    async def scanner():
+        return [{
+            "symbol": "BTCUSDT",
+            "source_exchange": "binance",
+            "volume_24h_usdt": 7_625_253_360.2,
+            "spread_pct": 1.2365196175849023e-06,
+            "liquidity_score": 1.0,
+            "volatility_pct": 0.00163,
+            "trend_strength": 0.0815,
+            "chop_score": 0.9185,
+            "funding_rate_pct": 4.312e-05,
+            "market_ts": time.time(),
+        }]
+
+    orchestrator = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_guided_signal_generation_enabled=True,
+        ),
+        SimpleNamespace(),
+        scanner,
+        mtf_context_provider=_CounterRegimeGuidedProvider(),
+        on_reject_persist=lambda payload: rejects.append(payload),
+    )
+
+    asyncio.run(orchestrator._scan_once())
+
+    assert orchestrator.metrics.symbols_selected == 1
+    assert orchestrator.metrics.mtf_contexts_built == 1
+    assert orchestrator.metrics.mtf_alignment_reject == 1
+    assert rejects[-1]["reason"] == "MTF_EXECUTION_COUNTER_REGIME"
+    assert orchestrator._last_scan_rejection_summary == {}
+    assert orchestrator._last_scan_advisory_summary == {
+        "TOO_CHOPPY": 1,
+        "WEAK_TREND_AND_NO_RANGE_EDGE": 1,
+    }
