@@ -33,3 +33,12 @@ prospective timestamped execution-context capture
 ## WORKING RULE
 
 Before implementation, define an explicit as-of SQL/data contract that prevents future-outcome leakage.
+
+## LIVE READINESS AGENT V1 CONTINUATION (2026-09-20)
+
+- `feat/live-readiness-agent-v1` contains a read-only gate engine and focused tests.
+- The paused campaign `camp_76d8ac53157c1337` is immutable historical evidence; no new PAPER work reuses it.
+- Offline smoke and fixed 30-day BTCUSDT/ETHUSDT 1h historical BACKTESTs completed in disposable `/private/tmp` outputs.
+- Historical run: 1,436 candidates, 0 accepted, 1,436 rejected; quality profile `FAIL`; evidence is insufficient for readiness.
+- Permanent G0–G10 verification protocol is in `docs/TEST_PROTOCOL.md`.
+- Remaining P0: CI evidence, a fresh G6 PAPER smoke campaign, then separate G7 evidence campaign; neither may be created until operator requests it.

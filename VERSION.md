@@ -1,3 +1,7 @@
+# Live Readiness Agent v1
+
+- Added a read-only, evidence-only readiness gate engine. It cannot authorize LIVE.
+
 # BACKTEST authoritative AIBrain scoring boundary — 2026-09-20
 
 - Current increment: timestamp-bounded expectancy evidence. New resolved accepted/reject evidence is append-only, keyed to first-class decision identity and decision/resolution time. BACKTEST reads it only with `decision_time <= T AND resolved_at <= T`; absent evidence retains the existing conservative AIBrain prior. PAPER/LIVE scorer and execution behavior are unchanged. Historical execution data is not backfilled or fabricated. LIVE verdict: NOT LIVE READY.
