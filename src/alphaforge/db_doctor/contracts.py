@@ -13,7 +13,7 @@ REAL_COLUMNS = ("score", "rr", "effective_rr")
 INTEGER_COLUMNS = ("execution_ctx_missing", "lifecycle_seq", "order_intent_id")
 WRITER_COLUMNS = frozenset(TEXT_COLUMNS[:-1] + REAL_COLUMNS + INTEGER_COLUMNS[:-1])
 UNIQUE_IDENTITIES = (("event_id",), ("signal_id", "event_ts", "lifecycle_state"))
-CURRENT_REVISION = "0008_database_doctor_lifecycle_contract"
+CURRENT_REVISION = "0009_timestamp_bounded_expectancy_evidence"
 
 
 from dataclasses import dataclass
@@ -48,6 +48,7 @@ TABLE:c("lifecycle","REQUIRED",columns=("id",)+tuple(sorted(WRITER_COLUMNS))),
 for n,cols in {"fills":("id","fill_id","order_id","qty","price"),"paper_events":("id","event_id","event_type","created_at"),"backtest_runs":("id","run_id","started_at"),"backtest_events":("id","event_id","run_id","event_type"),"symbol_snapshots":("id","symbol","snapshot_ts"),"exchange_symbols":("id","symbol","market_type","status")}.items(): CONTRACTS[n]=c("core",columns=cols,owners=("ALEMBIC","ORM_METADATA") if n=="exchange_symbols" else ("INIT_DB",),sources=("alembic/versions/0001_phase1_init.py","src/alphaforge/models/schema.py:ExchangeSymbol") if n=="exchange_symbols" else ("src/alphaforge/persistence.py:init_db",))
 for n in ("burnin_runs","burnin_observations","burnin_trade_outcomes","burnin_reject_outcomes","burnin_regime_metrics","burnin_execution_metrics","burnin_calibration_metrics","burnin_drawdown_events"): CONTRACTS[n]=c("burnin","CONDITIONAL","EVIDENCE_ONLY",("id","schema_version"),("BURNIN_BOOTSTRAP",),("src/alphaforge/burnin.py:ensure_burnin_schema",))
 for n in ("burnin_campaigns","burnin_campaign_runs","burnin_campaign_events","burnin_pending_reject_labels","burnin_pending_position_outcomes"): CONTRACTS[n]=c("campaign","CONDITIONAL","EVIDENCE_ONLY",("id","schema_version"),("CAMPAIGN_BOOTSTRAP",),("src/alphaforge/burnin_campaign.py:ensure_campaign_schema",))
+CONTRACTS["expectancy_evidence"]=c("adaptive_expectancy","CONDITIONAL","EVIDENCE_ONLY",("evidence_id","source_decision_id","decision_time","resolved_at","net_r"),("EXPECTANCY_EVIDENCE",),("src/alphaforge/expectancy_evidence.py",))
 for n in ("burnin_preflight_reports","burnin_health_history","burnin_ops_incidents","burnin_integrity_audits","burnin_source_evidence_hashes"): CONTRACTS[n]=c("campaign","CONDITIONAL","EVIDENCE_ONLY",("id","schema_version"),("OPS_BOOTSTRAP",),("src/alphaforge/burnin_ops.py:ensure_ops_schema",))
 for n in ("closed_trade_reviews","rejected_signal_reviews","adaptive_stats","setup_expectancy_stats","regime_expectancy_stats","symbol_expectancy_stats"): CONTRACTS[n]=c("adaptive_expectancy",role="EVIDENCE_ONLY",columns=("id",) if n in ("closed_trade_reviews","rejected_signal_reviews","adaptive_stats") else (n.split("_expectancy_stats")[0],"samples","expectancy"))
 for n in ("adaptive_threshold_stats","expectancy_stats"): CONTRACTS[n]=c("adaptive_expectancy",role="EVIDENCE_ONLY",owners=("ORM_METADATA",),sources=("src/alphaforge/models/ai_schema.py",))

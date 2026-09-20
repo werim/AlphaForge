@@ -1,6 +1,15 @@
 # BACKTEST authoritative AIBrain scoring boundary — 2026-09-20
 
 ### Added
+- Append-only `expectancy_evidence` and a timestamp-bounded BACKTEST as-of reader. Resolved PAPER accepted/reject outcomes write forward-only evidence; legacy rows are not backfilled.
+
+### Changed
+- BACKTEST may pass timestamp-safe evidence into the existing AIBrain scoring context. PAPER/LIVE scoring and execution paths are unchanged.
+
+### Known Issues
+- Historical orderbook, funding, latency, fills, and any evidence without a proven source-decision link remain unavailable rather than inferred.
+
+### Added
 - Pure shared AIBrain signal/context normalization and stateless scorer coverage for deterministic BACKTEST.
 
 ### Changed

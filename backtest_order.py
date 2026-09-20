@@ -19,6 +19,7 @@ from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.adaptive_learning import classify_expectancy_bucket
 from alphaforge.multi_timeframe import build_execution_context as build_historical_execution_context, build_regime_context, build_setup_context
 from alphaforge.scoring_context import build_signal_payload, empty_stats_context, normalize_scoring_context
+from alphaforge.expectancy_evidence import fetch_expectancy_as_of
 from alphaforge.config import load_config_from_env
 from alphaforge.config_registry import decision_filter_config, effective_config_values
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
@@ -792,12 +793,12 @@ def _build_symbol_market_data(symbol_meta: Mapping[str, Any], candles: List[Cand
     }
 
 
-def _historical_authoritative_score(symbol: str, candles: List[Candle], idx: int, market_ctx: Mapping[str, Any], *, min_accept_score: float) -> dict[str, Any]:
+def _historical_authoritative_score(symbol: str, candles: List[Candle], idx: int, market_ctx: Mapping[str, Any], *, min_accept_score: float, expectancy_bind: Any | None = None, expectancy_scope: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Score only closed candles at or before the candidate timestamp.
 
-    BACKTEST deliberately supplies no SQL expectancy history: current aggregate
-    tables are not timestamp-bounded, so reading them would leak later outcomes.
-    AIBrain's existing zero-history confidence semantics remain authoritative.
+    Current aggregate tables are deliberately never read.  When resolved raw
+    evidence is available, the as-of reader supplies AIBrain's existing stats
+    shape; otherwise its zero-history prior remains authoritative.
     """
     decision_ts = int(candles[idx].timestamp)
     historical = [
@@ -819,9 +820,16 @@ def _historical_authoritative_score(symbol: str, candles: List[Candle], idx: int
         "alignment": {"alignment": regime.get("regime_alignment")},
     }}
     signal = build_signal_payload(symbol, scoring_market, signal_id=f"{symbol}:{decision_ts}", default_mode="BACKTEST")
-    normalized_market, regime_ctx, stats_ctx = normalize_scoring_context(
-        signal, scoring_market, stats_ctx=empty_stats_context(),
-    )
+    scope = dict(expectancy_scope or {})
+    stats_ctx = empty_stats_context()
+    if expectancy_bind is not None:
+        stats_ctx = fetch_expectancy_as_of(
+            expectancy_bind, as_of=decision_ts, symbol=symbol,
+            setup_type=signal.get("setup"), regime=signal.get("regime"),
+            run_id=scope.get("run_id"), campaign_id=scope.get("campaign_id"),
+            release_id=scope.get("release_id"),
+        )
+    normalized_market, regime_ctx, stats_ctx = normalize_scoring_context(signal, scoring_market, stats_ctx=stats_ctx)
     brain = AIBrain.for_stateless_scoring(min_accept_score=min_accept_score)
     score_ctx = brain.score_signal(signal, normalized_market, regime_ctx, stats_ctx)
     order_plan = brain.choose_order_plan(signal, normalized_market, score_ctx)
@@ -835,7 +843,7 @@ def _historical_authoritative_score(symbol: str, candles: List[Candle], idx: int
                         "authoritative_components": score_ctx.components, "authoritative_penalties": score_ctx.penalties,
                         "authoritative_probabilistic": score_ctx.probabilistic,
                         "historical_scoring_context": normalized_market["scoring_context_diagnostics"],
-                        "historical_stats": "UNAVAILABLE_ZERO_HISTORY_NO_ASOF_STATS"},
+                        "historical_stats": "AS_OF_EVIDENCE" if stats_ctx.get("sample_size") else "UNAVAILABLE_ZERO_HISTORY_NO_ASOF_STATS"},
     }
 def parse_ts(value: str) -> int:
     if value.isdigit():
@@ -962,6 +970,8 @@ def scan_symbol_backtest(
     authoritative = _historical_authoritative_score(
         symbol, candles, idx, mctx,
         min_accept_score=float(context.get("ai_min_accept_score", 0.62)),
+        expectancy_bind=context.get("expectancy_bind"),
+        expectancy_scope=context.get("expectancy_scope"),
     )
     mctx.update({
         "score": authoritative["score"], "expectancy": authoritative["expectancy"],
@@ -5049,6 +5059,15 @@ def main():
         "reject_unknown_portfolio_risk": True,
     }
     portfolio_state = BacktestPortfolioState(initial_equity=float(args.balance))
+    backtest_database_url = os.getenv("ALPHAFORGE_DATABASE_URL") or os.getenv("ALPHAFORGE_DB_URL") or f"sqlite+pysqlite:///{Path(args.output_dir) / 'alphaforge_backtest.db'}"
+    backtest_run_id = os.getenv("ALPHAFORGE_RUN_ID") or Path(args.output_dir).name
+    backtest_profile_name = os.getenv("ALPHAFORGE_PROFILE_NAME") or Path(args.output_dir).name
+    expectancy_session = Session(init_db(backtest_database_url))
+    expectancy_scope = {
+        "run_id": os.getenv("ALPHAFORGE_EXPECTANCY_RUN_ID"),
+        "campaign_id": os.getenv("ALPHAFORGE_EXPECTANCY_CAMPAIGN_ID"),
+        "release_id": os.getenv("ALPHAFORGE_EXPECTANCY_RELEASE_ID"),
+    }
     rejection_counts: Dict[str, int] = {}
     for symbol, candles in candles_by_symbol.items():
         for i in range(len(candles)):
@@ -5138,6 +5157,8 @@ def main():
                     "ai_min_accept_score": getattr(getattr(cfg, "runtime", cfg), "min_signal_score", 0.62),
                     "portfolio_state": portfolio_state,
                     "portfolio_config": portfolio_config,
+                    "expectancy_bind": expectancy_session,
+                    "expectancy_scope": expectancy_scope,
                 }
                 _ = scan_symbol_backtest(symbol, candles, i, scan_ctx)
                 result = scan_ctx.get("last_result", {})
@@ -5211,9 +5232,7 @@ def main():
         }
         adaptive_scope_stats.append(scope_payload)
     _attach_rejected_shadow_to_lifecycle(lifecycle, rejected_shadow)
-    backtest_database_url = os.getenv("ALPHAFORGE_DATABASE_URL") or os.getenv("ALPHAFORGE_DB_URL") or f"sqlite+pysqlite:///{Path(args.output_dir) / 'alphaforge_backtest.db'}"
-    backtest_run_id = os.getenv("ALPHAFORGE_RUN_ID") or Path(args.output_dir).name
-    backtest_profile_name = os.getenv("ALPHAFORGE_PROFILE_NAME") or Path(args.output_dir).name
+    expectancy_session.close()
     persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle, database_url=backtest_database_url, run_id=backtest_run_id, profile_name=backtest_profile_name)
     persisted_decision_evidence_rows = _decision_evidence_rows(backtest_database_url, run_id=backtest_run_id)
     forward_eval_rows = build_forward_evaluation_rows(

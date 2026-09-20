@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.persistence import init_db
+from alphaforge.expectancy_evidence import record_expectancy_evidence
 from alphaforge.scoring_context import build_signal_payload, empty_stats_context, normalize_scoring_context
 
 
@@ -47,3 +48,26 @@ def test_historical_score_is_variable_timestamp_bounded_and_offline(monkeypatch)
     assert at_decision["score"] != weak["score"]
     assert market["funding_rate_pct"] is None
     assert at_decision["diagnostics"]["historical_stats"] == "UNAVAILABLE_ZERO_HISTORY_NO_ASOF_STATS"
+
+
+def test_historical_score_uses_only_timestamp_safe_evidence() -> None:
+    candles, market = _market()
+    with Session(init_db("sqlite+pysqlite:///:memory:")) as session:
+        assert record_expectancy_evidence(
+            session, evidence_id="known", source_decision_id="decision:known",
+            evidence_type="ACCEPTED_TRADE", decision_time=0, resolved_at=600_000,
+            symbol="BTCUSDT", side="LONG", setup_type=None, regime=None,
+            reject_reason=None, net_r=1.0, run_id="run", campaign_id="camp", release_id="release",
+        )
+        assert record_expectancy_evidence(
+            session, evidence_id="future", source_decision_id="decision:future",
+            evidence_type="ACCEPTED_TRADE", decision_time=0, resolved_at=9_999_999,
+            symbol="BTCUSDT", side="LONG", setup_type=None, regime=None,
+            reject_reason=None, net_r=-10.0, run_id="run", campaign_id="camp", release_id="release",
+        )
+        session.commit()
+        scored = bo._historical_authoritative_score(
+            "BTCUSDT", candles, 20, market, min_accept_score=.62, expectancy_bind=session,
+            expectancy_scope={"run_id": "run", "campaign_id": "camp", "release_id": "release"},
+        )
+    assert scored["diagnostics"]["historical_stats"] == "AS_OF_EVIDENCE"

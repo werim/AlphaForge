@@ -14,6 +14,7 @@ from sqlalchemy.engine.url import make_url
 from alphaforge.contracts import canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.burnin import DDL as PHASE7_BURNIN_DDL
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
+from alphaforge.expectancy_evidence import EXPECTANCY_EVIDENCE_DDL, EXPECTANCY_EVIDENCE_INDEX_DDL
 
 
 
@@ -309,6 +310,8 @@ def init_db(database_url: str | None = None) -> Engine:
             created_at TEXT
         )
         """,
+        EXPECTANCY_EVIDENCE_DDL,
+        *EXPECTANCY_EVIDENCE_INDEX_DDL,
         """
         CREATE TABLE IF NOT EXISTS closed_trade_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

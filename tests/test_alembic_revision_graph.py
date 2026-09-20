@@ -54,8 +54,8 @@ def test_alembic_script_directory_loads_and_resolves_heads() -> None:
     config = Config(str(REPO_ROOT / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0008_database_doctor_lifecycle_contract"]
-    assert script.get_current_head() == "0008_database_doctor_lifecycle_contract"
+    assert script.get_heads() == ["0009_timestamp_bounded_expectancy_evidence"]
+    assert script.get_current_head() == "0009_timestamp_bounded_expectancy_evidence"
 
 
 def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Path) -> None:
@@ -73,7 +73,13 @@ def test_alembic_upgrade_head_succeeds_on_temporary_sqlite_database(tmp_path: Pa
 
     with sqlite3.connect(db_path) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"config_snapshots", "timesfm_forecast_evidence", "timesfm_forward_outcome_labels"}.issubset(tables)
+        assert {"config_snapshots", "timesfm_forecast_evidence", "timesfm_forward_outcome_labels", "expectancy_evidence"}.issubset(tables)
+        evidence_columns = {row[1] for row in conn.execute("PRAGMA table_info('expectancy_evidence')")}
+        assert {"evidence_id", "source_decision_id", "decision_time", "resolved_at", "net_r"}.issubset(evidence_columns)
+        evidence_index = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='ix_expectancy_evidence_as_of'"
+        ).fetchone()
+        assert evidence_index is not None
         index_row = conn.execute(
             """
             SELECT name FROM sqlite_master
@@ -185,7 +191,7 @@ def test_alembic_upgrade_head_is_idempotent_on_partially_initialized_sqlite_data
         }
         assert triggers == empty_database_triggers
         assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
-            "0008_database_doctor_lifecycle_contract",
+            "0009_timestamp_bounded_expectancy_evidence",
         )
 
 

@@ -2098,6 +2098,7 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         accepted_burnin_payload = {
             "signal_id": signal_id,
+            "decision_time": canonical_utc_timestamp(),
             "setup_identity": market_ctx.get("setup_identity"),
             "symbol": selection.symbol,
             "source_exchange": market_ctx.get("source_exchange"),
@@ -2150,6 +2151,7 @@ class RuntimeOrchestrator:
             "override_reason": market_ctx.get("override_reason")})
         executed = await self._execute(symbol=selection.symbol, decision={
             "signal_id": signal_id,
+            "decision_time": accepted_burnin_payload["decision_time"],
             "order_type": order_plan.order_type,
             "limit_price": order_plan.limit_price,
             "stop_price": order_plan.stop_price,
@@ -2309,9 +2311,18 @@ class RuntimeOrchestrator:
             "mtf": mtf,
         }
         with engine.begin() as conn:
+            decision_rows = conn.execute(text("""
+                SELECT decision_id FROM order_decisions
+                WHERE signal_id=:signal_id AND decision='ACCEPTED'
+                  AND mode='PAPER' AND phase='ai_internal_real'
+            """), {"signal_id": decision.get("signal_id")}).fetchall()
+            decision_ids = {str(row[0]) for row in decision_rows if row[0]}
+            source_decision_id = next(iter(decision_ids)) if len(decision_ids) == 1 else None
             persist_pending_position(
                 conn, trade_id=trade_id, campaign_id=campaign_id, burnin_run_id=self._burnin_run_id,
-                signal_id=decision.get("signal_id"), symbol=symbol, side=market_ctx.get("side"),
+                signal_id=decision.get("signal_id"), source_decision_id=source_decision_id,
+                decision_time=decision.get("decision_time"), symbol=symbol, side=market_ctx.get("side"),
+                setup_type=market_ctx.get("setup") or market_ctx.get("setup_type") or setup.get("phase"),
                 entry_time=canonical_utc_timestamp(), planned_entry=planned_entry, simulated_fill=fill,
                 stop=market_ctx.get("sl"), target=market_ctx.get("tp"), quantity=quantity,
                 notional=notional, entry_spread=model.spread_penalty * risk_usd / 2.0,

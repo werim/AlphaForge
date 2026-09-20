@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping, Sequence
 from alphaforge.burnin import DIAGNOSTIC_OBSERVATION_KIND, canonical_decision_sql, canonical_hash, canonical_reject_outcome_link_matches, persist_burnin_reject_outcome, persist_burnin_trade_outcome, persist_burnin_observation, utc_now, CRITICAL_COST_FIELDS
 from alphaforge.burnin_campaign import CAMPAIGN_SCHEMA_VERSION, bootstrap_campaign_schema, _exec
+from alphaforge.expectancy_evidence import record_expectancy_evidence
 
 
 def _dt(v): return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
@@ -269,7 +270,9 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
             continue
         _sync_review(conn,r,outcome)
         status="AMBIGUOUS" if outcome.get("ambiguous") else ("RESOLVED" if outcome.get("evidence_complete") else "FAILED"); error=None if status=="RESOLVED" else ("AMBIGUOUS" if ambiguous else "MISSING_COSTS" if invalid else "INCOMPLETE_MARKET_WINDOW")
-        _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=:now,last_error=:err WHERE pending_label_id=:pid AND claim_token=:token",{"s":status,"ec":outcome.get("evidence_complete") or 0,"now":utc_now(),"err":error,"pid":r["pending_label_id"],"token":token})
+        resolved_at=utc_now()
+        _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=:now,last_error=:err WHERE pending_label_id=:pid AND claim_token=:token",{"s":status,"ec":outcome.get("evidence_complete") or 0,"now":resolved_at,"err":error,"pid":r["pending_label_id"],"token":token})
+        record_expectancy_evidence(conn,evidence_id='reject:'+r['reject_decision_id'],source_decision_id=r.get('reject_decision_id'),evidence_type='REJECT_FORWARD',decision_time=r.get('decision_timestamp'),resolved_at=resolved_at,symbol=r.get('symbol'),side=r.get('side'),setup_type=None,regime=r.get('regime'),reject_reason=r.get('reject_reason'),net_r=net,run_id=r.get('burnin_run_id'),campaign_id=campaign_id,release_id=_release(conn,r['burnin_run_id']),evidence_complete=status=='RESOLVED')
         counts["ambiguous" if status=="AMBIGUOUS" else "resolved" if status=="RESOLVED" else "failed"]+=1
     return counts
 
@@ -279,8 +282,8 @@ def _release(conn,bid):
 
 def persist_pending_position(conn: Any, **kw) -> str:
     bootstrap_campaign_schema(conn); pid='ppos_'+canonical_hash({'trade_id':kw['trade_id']})[:20]
-    vals={**kw,'pid':pid,'prov':json.dumps(dict(kw.get('source_provenance') or {}),sort_keys=True),'now':utc_now(),'sv':CAMPAIGN_SCHEMA_VERSION}
-    _exec(conn,"""INSERT OR IGNORE INTO burnin_pending_position_outcomes(pending_position_id,trade_id,campaign_id,burnin_run_id,signal_id,symbol,side,entry_time,planned_entry,simulated_fill,stop,target,quantity,notional,entry_spread,entry_slippage,entry_fee,regime,source_provenance_json,status,created_at,schema_version) VALUES (:pid,:trade_id,:campaign_id,:burnin_run_id,:signal_id,:symbol,:side,:entry_time,:planned_entry,:simulated_fill,:stop,:target,:quantity,:notional,:entry_spread,:entry_slippage,:entry_fee,:regime,:prov,'OPEN',:now,:sv)""", vals)
+    vals={**kw,'source_decision_id':kw.get('source_decision_id'),'decision_time':kw.get('decision_time'),'setup_type':kw.get('setup_type'),'pid':pid,'prov':json.dumps(dict(kw.get('source_provenance') or {}),sort_keys=True),'now':utc_now(),'sv':CAMPAIGN_SCHEMA_VERSION}
+    _exec(conn,"""INSERT OR IGNORE INTO burnin_pending_position_outcomes(pending_position_id,trade_id,campaign_id,burnin_run_id,signal_id,source_decision_id,decision_time,symbol,side,setup_type,entry_time,planned_entry,simulated_fill,stop,target,quantity,notional,entry_spread,entry_slippage,entry_fee,regime,source_provenance_json,status,created_at,schema_version) VALUES (:pid,:trade_id,:campaign_id,:burnin_run_id,:signal_id,:source_decision_id,:decision_time,:symbol,:side,:setup_type,:entry_time,:planned_entry,:simulated_fill,:stop,:target,:quantity,:notional,:entry_spread,:entry_slippage,:entry_fee,:regime,:prov,'OPEN',:now,:sv)""", vals)
     return pid
 
 def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_price: float, exit_reason: str, exit_costs: Mapping[str,Any], mfe: float|None=None, mae: float|None=None, ambiguous: bool=False) -> dict[str,Any]:
@@ -315,9 +318,11 @@ def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_p
     net_r=None if net_pnl is None or risk_usd <= 0 else net_pnl/risk_usd
     hold=(_dt(exit_time)-_dt(r['entry_time'])).total_seconds()
     evidence_missing=[*missing, *(['ambiguous_intrabar_sequence'] if ambiguous else [])]
-    _exec(conn,"""UPDATE burnin_pending_position_outcomes SET status='CLOSED',exit_time=:xt,exit_price=:xp,exit_reason=:xr,gross_pnl=:gp,gross_r=:gr,exit_spread=:es,exit_slippage=:esl,exit_fee=:ef,funding=:fu,latency_impact_penalty=:li,total_execution_cost=:tc,net_pnl=:np,net_r=:nr,hold_duration_seconds=:hold,mfe=:mfe,mae=:mae,evidence_complete=:ec,missing_fields_json=:mf,resolved_at=:now WHERE trade_id=:tid""",{"tid":trade_id,"xt":exit_time,"xp":exit_price,"xr":exit_reason,"gp":gross_pnl,"gr":gross_r,"es":exit_costs.get('exit_spread'),"esl":exit_costs.get('exit_slippage'),"ef":exit_costs.get('exit_fee'),"fu":exit_costs.get('funding'),"li":exit_costs.get('latency_impact_penalty'),"tc":total,"np":net_pnl,"nr":net_r,"hold":hold,"mfe":mfe,"mae":mae,"ec":0 if evidence_missing else 1,"mf":json.dumps(evidence_missing),"now":utc_now()})
+    resolved_at=utc_now()
+    _exec(conn,"""UPDATE burnin_pending_position_outcomes SET status='CLOSED',exit_time=:xt,exit_price=:xp,exit_reason=:xr,gross_pnl=:gp,gross_r=:gr,exit_spread=:es,exit_slippage=:esl,exit_fee=:ef,funding=:fu,latency_impact_penalty=:li,total_execution_cost=:tc,net_pnl=:np,net_r=:nr,hold_duration_seconds=:hold,mfe=:mfe,mae=:mae,evidence_complete=:ec,missing_fields_json=:mf,resolved_at=:now WHERE trade_id=:tid""",{"tid":trade_id,"xt":exit_time,"xp":exit_price,"xr":exit_reason,"gp":gross_pnl,"gr":gross_r,"es":exit_costs.get('exit_spread'),"esl":exit_costs.get('exit_slippage'),"ef":exit_costs.get('exit_fee'),"fu":exit_costs.get('funding'),"li":exit_costs.get('latency_impact_penalty'),"tc":total,"np":net_pnl,"nr":net_r,"hold":hold,"mfe":mfe,"mae":mae,"ec":0 if evidence_missing else 1,"mf":json.dumps(evidence_missing),"now":resolved_at})
     outcome_payload={'pending_position_id':r['pending_position_id'],'signal_id':r.get('signal_id'),'source_provenance':provenance,'phase':provenance.get('setup_phase'),'execution':provenance.get('execution_direction'),'ambiguous_intrabar_sequence':ambiguous,'quantity':qty,'notional':r.get('notional'),'simulated_fill':fill,'cost_unit':'USD'}
     persist_burnin_trade_outcome(conn,outcome_id='tout_'+trade_id,burnin_run_id=r['burnin_run_id'],release_id=_release(conn,r['burnin_run_id']),trade_id=trade_id,symbol=r['symbol'],regime=r.get('regime') or 'UNKNOWN',closed_at=exit_time,gross_r=gross_r,gross_pnl=gross_pnl,costs=costs_usd,net_r=net_r,net_pnl=net_pnl,effective_rr_at_entry=provenance.get('effective_rr_at_entry'),realized_effective_rr=net_r,hold_duration_seconds=hold,mfe=mfe,mae=mae,exit_reason=exit_reason,payload=outcome_payload)
+    record_expectancy_evidence(conn,evidence_id='accepted:'+trade_id,source_decision_id=r.get('source_decision_id'),evidence_type='ACCEPTED_TRADE',decision_time=r.get('decision_time'),resolved_at=resolved_at,symbol=r.get('symbol'),side=r.get('side'),setup_type=r.get('setup_type'),regime=r.get('regime'),reject_reason=None,net_r=net_r,run_id=r.get('burnin_run_id'),campaign_id=r.get('campaign_id'),release_id=_release(conn,r['burnin_run_id']),evidence_complete=not evidence_missing)
     if ambiguous:
         _exec(conn,"UPDATE burnin_trade_outcomes SET evidence_complete=0,missing_cost_fields_json=:mf WHERE outcome_id=:oid",{'mf':json.dumps(evidence_missing),'oid':'tout_'+trade_id})
     return {'status':'CLOSED','trade_id':trade_id,'evidence_complete':not evidence_missing,'net_r':net_r,'exit_reason':exit_reason}
