@@ -1858,14 +1858,14 @@ for name in ("BINANCE_API_KEY", "BINANCE_BASE_URL"):
 
 ## Phase 9 operational acceptance (PAPER only, 2026-07-23)
 
-`diagnose-db` is database read-only. `config_check` and the default `config_fix` dry-run do not mutate configuration. **Preflight is not read-only:** it may create or update local database evidence. None of these commands submit or cancel exchange orders. Keep canonical `ALPHAFORGE_EXECUTION_MODE=PAPER`, remove the deprecated `EXECUTION_MODE` alias, and keep `ALPHAFORGE_ENABLE_LIVE_EXECUTION=false`. REST-only reconciliation does **not** require a websocket; runtime/streaming websocket requirements remain strict.
+`diagnose-db` is database read-only. `config_check` and the default `config_fix` dry-run do not mutate configuration. **Preflight is not read-only:** it may create or update local database evidence. None of these commands submit or cancel exchange orders. Keep canonical `ALPHAFORGE_EXECUTION_MODE=PAPER`, remove the deprecated `EXECUTION_MODE` alias, and keep `ALPHAFORGE_ENABLE_LIVE_TRADING=false`. REST-only reconciliation does **not** require a websocket; runtime/streaming websocket requirements remain strict.
 
 ### PowerShell
 
 ```powershell
 $env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
 Remove-Item Env:EXECUTION_MODE -ErrorAction SilentlyContinue
-$env:ALPHAFORGE_ENABLE_LIVE_EXECUTION = "false"
+$env:ALPHAFORGE_ENABLE_LIVE_TRADING = "false"
 $DB = "data/runtime/alphaforge_runtime.db"
 $RELEASE_ID = "phase9-$(git rev-parse --short HEAD)"
 $CID = "<campaign_id-from-launch-output>"
@@ -1893,7 +1893,7 @@ python -m alphaforge.burnin_ops --db $DB --json finalize --campaign-id $CID --ou
 ```bash
 export ALPHAFORGE_EXECUTION_MODE=PAPER
 unset EXECUTION_MODE
-export ALPHAFORGE_ENABLE_LIVE_EXECUTION=false
+export ALPHAFORGE_ENABLE_LIVE_TRADING=false
 DB="data/runtime/alphaforge_runtime.db"
 RELEASE_ID="phase9-$(git rev-parse --short HEAD)"
 CID='<campaign_id-from-launch-output>'
