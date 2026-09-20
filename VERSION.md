@@ -1,3 +1,14 @@
+# PAPER pre-MTF selector ordering correction — 2026-09-21
+
+- Current version/phase: prospective PAPER-only selector-ordering fix on `fix/paper-selector-pre-mtf-gate`; no campaign was launched or resumed.
+- Runtime maturity: liquid, tight-spread PAPER candidates in MTF-guided mode retain coarse Binance 24h `TOO_CHOPPY` and `WEAK_TREND_AND_NO_RANGE_EDGE` observations as advisories and can reach the canonical 1h/15m/1m pipeline.
+- BACKTEST/PAPER/LIVE alignment: BACKTEST selector filters keep their existing hard-reject and experiment-switch semantics. LIVE behavior and authorization are unchanged. PAPER without authoritative MTF guidance is unchanged.
+- Lifecycle coverage: selector safety rejects remain pre-signal; candidates passed for analysis can still become canonical `SIGNAL_REJECTED` decisions through MTF, AIBrain, quality, expectancy, RR, execution-cost, and portfolio gates.
+- Execution realism: volume, spread, liquidity, funding, provider validity, and other evidenced execution-safety checks remain hard pre-MTF constraints. Coarse chop keeps its ranking penalty. No threshold was loosened.
+- Persistence/observability: no schema, migration, export, or historical-row change. Runtime heartbeats add `top_selection_advisory_reasons`; hard rejects remain separate in `top_selection_reject_reasons`.
+- Validation: 34 focused tests, 17 exchange-scanner tests, and 447 broader adjacent tests passed; changed Python files compiled; `git diff --check` passed.
+- Known critical risks: a fresh PAPER campaign is required for prospective production evidence. The active `POST360S02` campaign and `data/campaign/POST360S02.db` were untouched and must not be resumed as post-change qualification evidence. Last audit date: 2026-09-21. LIVE verdict: NOT LIVE READY.
+
 # Live Readiness Agent v1
 
 - Added a read-only, evidence-only readiness gate engine. It cannot authorize LIVE.

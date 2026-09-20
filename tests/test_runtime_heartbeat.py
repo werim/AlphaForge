@@ -88,6 +88,7 @@ def test_payload_json_preserves_mtf_observability_counters(tmp_path) -> None:
         "mtf_setup_no_setup": 21,
         "mtf_setup_overextended": 5,
         "mtf_setup_invalid": 2,
+        "top_selection_advisory_reasons": {"TOO_CHOPPY": 2},
     }
     save_runtime_heartbeat(
         engine,

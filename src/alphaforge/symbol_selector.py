@@ -60,12 +60,17 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
     reject_reasons: list[str] = []
 
     disabled = {str(r).upper() for r in cfg.get("disabled_backtest_filters", [])}
+    advisory = {str(r).upper() for r in cfg.get("advisory_reasons", [])}
     bypassed_reject_reasons: list[str] = []
+    advisory_reasons: list[str] = []
 
     def _append_reject(reason: str) -> None:
         normalized = str(reason).upper()
         if normalized in disabled:
             bypassed_reject_reasons.append(normalized)
+        elif normalized in advisory:
+            advisory_reasons.append(normalized)
+            warnings.append(f"advisory_{normalized.lower()}")
         else:
             reject_reasons.append(normalized)
 
@@ -144,7 +149,7 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
         + volatility_score * 0.15
         + trend_score * 0.2
     )
-    if "TOO_CHOPPY" in reject_reasons:
+    if "TOO_CHOPPY" in {*reject_reasons, *advisory_reasons}:
         symbol_score -= 1.0
     if "PANIC_CONDITIONS" in reject_reasons:
         symbol_score -= 1.5
@@ -163,6 +168,7 @@ def select_symbol(symbol: str, market_data: dict, config: dict | None = None) ->
     diagnostics.update(
         {
             "disabled_filters": sorted(disabled),
+            "advisory_reasons": advisory_reasons,
             "bypassed_reject_reasons": bypassed_reject_reasons,
             "disabled_filter_bypass_count": len(bypassed_reject_reasons),
             "filter_switch_experiment_active": bool(disabled),

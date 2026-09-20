@@ -300,6 +300,7 @@ class RuntimeOrchestrator:
     _pending_orders: dict[str, dict[str, Any]] = field(default_factory=dict, init=False)
     _last_repair_signature: set[str] = field(default_factory=set, init=False)
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
+    _last_scan_advisory_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
     _live_order_submission_enabled: bool = field(default=False, init=False)
     _mutation_trap_active: bool = field(default=False, init=False)
@@ -588,6 +589,7 @@ class RuntimeOrchestrator:
                 "mtf_setup_overextended": self.metrics.mtf_setup_overextended,
                 "mtf_setup_invalid": self.metrics.mtf_setup_invalid,
                 "top_selection_reject_reasons": dict(sorted(self._last_scan_rejection_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
+                "top_selection_advisory_reasons": dict(sorted(self._last_scan_advisory_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
                 "decision_gate_blockers": self._last_scan_gate_blockers,
                 "agent_shadow_queue_depth": self.metrics.agent_shadow_queue_depth,
                 "agent_shadow_dropped": self.metrics.agent_shadow_dropped,
@@ -1543,13 +1545,30 @@ class RuntimeOrchestrator:
             for candidate in candidates:
                 deduplicated.setdefault(str(candidate.get("symbol") or "").upper(), candidate)
             candidates = list(deduplicated.values())
-        pre_selection = select_symbols(candidates, {**self._canonical_filter_config(), "include_rejected": True})
+        selector_config = {**self._canonical_filter_config(), "include_rejected": True}
+        if (
+            self.config.execution_mode is ExecutionMode.PAPER
+            and self.config.require_mtf_alignment
+            and self.config.mtf_guided_signal_generation_enabled
+        ):
+            # Binance selector trend/chop fields are coarse 24h absolute-change
+            # proxies. Preserve them for ranking and diagnostics, but let the
+            # canonical 1h/15m/1m stack make the PAPER regime/setup decision.
+            selector_config["advisory_reasons"] = (
+                "TOO_CHOPPY",
+                "WEAK_TREND_AND_NO_RANGE_EDGE",
+            )
+        pre_selection = select_symbols(candidates, selector_config)
         selected = [row for row in pre_selection if row.tradable][: self.config.max_symbols_per_scan]
         reject_reasons: dict[str, int] = {}
+        advisory_reasons: dict[str, int] = {}
         for row in pre_selection:
             for reason in row.reject_reasons:
                 reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
+            for reason in row.diagnostics.get("advisory_reasons", []):
+                advisory_reasons[reason] = advisory_reasons.get(reason, 0) + 1
         self._last_scan_rejection_summary = reject_reasons
+        self._last_scan_advisory_summary = advisory_reasons
         if not candidates:
             self._last_scan_gate_blockers = ["NO_MARKET_CANDIDATES"]
         elif not selected:
@@ -2923,10 +2942,11 @@ class RuntimeOrchestrator:
                 self._persist_runtime_heartbeat()
                 self._persist_runtime_state_snapshot("OPERATING")
                 logger.info(
-                    "runtime_heartbeat=%s persistence_enabled=%s top_selection_reject_reasons=%s decision_gate_blockers=%s",
+                    "runtime_heartbeat=%s persistence_enabled=%s top_selection_reject_reasons=%s top_selection_advisory_reasons=%s decision_gate_blockers=%s",
                     self.metrics,
                     self.metrics.persistence_enabled,
                     dict(sorted(self._last_scan_rejection_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
+                    dict(sorted(self._last_scan_advisory_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
                     self._last_scan_gate_blockers,
                 )
                 await asyncio.sleep(self.config.heartbeat_interval_sec)
