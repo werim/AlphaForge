@@ -1,5 +1,13 @@
 # BACKTEST authoritative AIBrain scoring boundary surgery report — 2026-09-20
 
+## Timestamp-bounded expectancy evidence increment
+
+The old cumulative expectancy tables remain excluded from BACKTEST. `expectancy_evidence` is a new append-only resolved-result contract: `source_decision_id`, `decision_time`, `resolved_at`, cohort dimensions, net R, and run/campaign/release identity. The reader applies `decision_time <= T`, `resolved_at IS NOT NULL`, and `resolved_at <= T`, with optional exact scope filters; `created_at` is audit-only. Accepted evidence is emitted only when a pending PAPER position with a proven `order_decisions` link closes. Reject evidence is emitted only when its canonical forward label resolves. No historical campaign row is changed or backfilled.
+
+`backtest_order.py` supplies the reader's existing stats shape to stateless AIBrain scoring; empty history remains its unchanged conservative prior. PAPER and LIVE scoring, thresholds, exchange behavior, and execution costs are unchanged. Historical orderbook/depth, funding, latency, and fills remain explicitly unavailable unless independently persisted.
+
+Focused validation: 26 tests across as-of reader boundaries/scope/no-network, BACKTEST scoring, campaign resolvers, and Alembic graph; 84 PAPER runtime/RR regressions passed; `git diff --check` passed.
+
 ## Root cause and scope
 
 BACKTEST previously set score and expectancy with local breakout/range arithmetic in `_build_market_ctx`, then evaluated generic order filters. PAPER instead normalizes market/MTF evidence in `RuntimeOrchestrator._build_scoring_context` and sends it to `AIBrain.before_real_order`. The two score meanings, scales, feature sources, and reject reasons differed.

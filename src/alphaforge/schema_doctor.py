@@ -27,7 +27,7 @@ KNOWN_MIGRATION_CHECKSUMS = {
     SCHEMA_VERSION: MIGRATION_CHECKSUM,
 }
 
-KNOWN_ALEMBIC_HEADS = frozenset({"0005_core_identifier_normalization", "0006_reject_label_identity_timeframe", "0007_repair_runtime_lifecycle_schema", "0008_database_doctor_lifecycle_contract"})
+KNOWN_ALEMBIC_HEADS = frozenset({"0005_core_identifier_normalization", "0006_reject_label_identity_timeframe", "0007_repair_runtime_lifecycle_schema", "0008_database_doctor_lifecycle_contract", "0009_timestamp_bounded_expectancy_evidence"})
 
 POSITION_ACTIVE = frozenset({"OPEN", "POSITION_OPENED", "ACTIVE"})
 POSITION_TERMINAL = frozenset({"CLOSED", "POSITION_CLOSED", "EXITED", "CANCELLED"})

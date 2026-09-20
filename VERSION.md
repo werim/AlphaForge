@@ -1,5 +1,7 @@
 # BACKTEST authoritative AIBrain scoring boundary — 2026-09-20
 
+- Current increment: timestamp-bounded expectancy evidence. New resolved accepted/reject evidence is append-only, keyed to first-class decision identity and decision/resolution time. BACKTEST reads it only with `decision_time <= T AND resolved_at <= T`; absent evidence retains the existing conservative AIBrain prior. PAPER/LIVE scorer and execution behavior are unchanged. Historical execution data is not backfilled or fabricated. LIVE verdict: NOT LIVE READY.
+
 - Current version/phase: prospective deterministic BACKTEST scoring-parity increment; no PAPER/LIVE campaign, order, schema, or historical-data mutation.
 - Runtime maturity: PAPER and BACKTEST now share `scoring_context` normalization and the exact `AIBrain.score_signal` / order-plan semantics. The extraction preserves PAPER's selection-regime fallback. BACKTEST uses a stateless scorer and closed candles through the candidate timestamp only.
 - Expectancy integrity: runtime SQL expectancy tables are not timestamp-bounded. BACKTEST therefore uses AIBrain's existing zero-history context instead of reading full-run aggregate stats, preventing future-outcome leakage. The resulting lower confidence is explicit.
