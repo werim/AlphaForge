@@ -58,7 +58,6 @@ def _runtime(tmp_path, candidate: dict, reason: str) -> tuple[RuntimeOrchestrato
     runtime._burnin_run_id = "issue-322-run"
     return runtime, engine
 
-
 @pytest.mark.parametrize(
     ("side", "reason"),
     [("LONG", "Score below threshold or negative expectancy."),
@@ -399,6 +398,88 @@ def test_zero_risk_geometry_fails_before_ai_and_deduplicates_closed_candle(tmp_p
     asyncio.run(runtime._scan_once())
     with engine.connect() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM rejected_signal_reviews")).scalar_one() == 2
+
+
+
+@pytest.mark.parametrize(
+    ("sequence", "expected", "equal_skips", "replayed_skips"),
+    [
+        ([60_000, "120000", "60000.0", 120_000.0], [60_000, 120_000], 1, 1),
+        ([60_000, "60000.0"], [60_000], 1, 0),
+        ([60_000, "120000", 180_000.0], [60_000, 120_000, 180_000], 0, 0),
+    ],
+)
+def test_execution_candle_processing_is_monotonic_and_normalized(
+    monkeypatch, sequence, expected, equal_skips, replayed_skips,
+) -> None:
+    observed = []
+    candle_values = iter(sequence)
+
+    async def enrich(rows):
+        return [{**rows[0], "execution_candle_open_ts": next(candle_values)}]
+
+    async def process(_self, selection):
+        observed.append(RuntimeOrchestrator._normalize_execution_candle_open_ts(
+            selection.diagnostics["inputs"]["execution_candle_open_ts"]
+        ))
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_EarlyRejectBrain("reject"),
+        market_scanner=lambda: asyncio.sleep(
+            0, result=[_selection_candidate("BTCUSDT", volume=90_000_000)]
+        ),
+        selected_candidate_enricher=enrich,
+    )
+
+    for _ in sequence:
+        asyncio.run(runtime._scan_once())
+
+    assert observed == expected
+    assert runtime.metrics.equal_execution_candles_skipped == equal_skips
+    assert runtime.metrics.replayed_execution_candles_skipped == replayed_skips
+
+
+@pytest.mark.parametrize("malformed", ["not-a-timestamp", "1.5", float("nan"), True])
+def test_malformed_execution_candle_identity_fails_closed(monkeypatch, malformed) -> None:
+    processed = 0
+
+    async def enrich(rows):
+        return [{**rows[0], "execution_candle_open_ts": malformed}]
+
+    async def process(_self, _selection):
+        nonlocal processed
+        processed += 1
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_process_symbol", process)
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_EarlyRejectBrain("reject"),
+        market_scanner=lambda: asyncio.sleep(
+            0, result=[_selection_candidate("BTCUSDT", volume=90_000_000)]
+        ),
+        selected_candidate_enricher=enrich,
+    )
+
+    asyncio.run(runtime._scan_once())
+
+    assert processed == 0
+    assert runtime.metrics.malformed_execution_candles_skipped == 1
+
+
+def test_execution_candle_signal_identity_uses_canonical_timestamp() -> None:
+    base = {"source_exchange": "binance", "timeframe": "1m"}
+    identities = {
+        RuntimeOrchestrator._resolve_signal_id(
+            "BTCUSDT", {**base, "execution_candle_open_ts": value}
+        )
+        for value in (60_000, "60000", "60000.0", 60_000.0)
+    }
+    assert len(identities) == 1
+    assert RuntimeOrchestrator._execution_candle_decision_identity(
+        "BTCUSDT", {**base, "execution_candle_open_ts": "bad"}
+    ) is None
 
 
 def test_geometry_programmer_error_propagates_without_false_scan_progress() -> None:

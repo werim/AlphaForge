@@ -14,7 +14,7 @@ import uuid
 import subprocess
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
@@ -226,6 +226,11 @@ class RuntimeMetrics:
     mtf_setup_no_setup: int = 0
     mtf_setup_overextended: int = 0
     mtf_setup_invalid: int = 0
+    equal_execution_candles_skipped: int = 0
+    replayed_execution_candles_skipped: int = 0
+    malformed_execution_candles_skipped: int = 0
+    finalized_signal_replays_skipped: int = 0
+    final_decision_lookup_failures: int = 0
     persistence_enabled: bool = False
 
 
@@ -588,6 +593,11 @@ class RuntimeOrchestrator:
                 "mtf_setup_no_setup": self.metrics.mtf_setup_no_setup,
                 "mtf_setup_overextended": self.metrics.mtf_setup_overextended,
                 "mtf_setup_invalid": self.metrics.mtf_setup_invalid,
+                "equal_execution_candles_skipped": self.metrics.equal_execution_candles_skipped,
+                "replayed_execution_candles_skipped": self.metrics.replayed_execution_candles_skipped,
+                "malformed_execution_candles_skipped": self.metrics.malformed_execution_candles_skipped,
+                "finalized_signal_replays_skipped": self.metrics.finalized_signal_replays_skipped,
+                "final_decision_lookup_failures": self.metrics.final_decision_lookup_failures,
                 "top_selection_reject_reasons": dict(sorted(self._last_scan_rejection_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
                 "top_selection_advisory_reasons": dict(sorted(self._last_scan_advisory_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
                 "decision_gate_blockers": self._last_scan_gate_blockers,
@@ -1594,12 +1604,26 @@ class RuntimeOrchestrator:
             inputs = symbol_result.diagnostics.get("inputs", {})
             self._assert_campaign_candidate(symbol_result.symbol, inputs.get("source_exchange"),
                                             "BEFORE_PROCESS_SYMBOL")
+            raw_candle_ts = inputs.get("execution_candle_open_ts")
             candle_key = self._execution_candle_market_key(symbol_result.symbol, inputs)
-            candle_ts = inputs.get("execution_candle_open_ts")
-            if candle_key is not None and self._latest_execution_candle_by_market.get(candle_key) == candle_ts:
-                continue
+            candle_ts = self._normalize_execution_candle_open_ts(raw_candle_ts)
+            if raw_candle_ts is not None:
+                if candle_key is None or candle_ts is None:
+                    self.metrics.malformed_execution_candles_skipped += 1
+                    logger.warning(
+                        "execution_candle_identity_invalid symbol=%s source_exchange=%s timeframe=%s",
+                        symbol_result.symbol, inputs.get("source_exchange"), inputs.get("timeframe"),
+                    )
+                    continue
+                latest = self._latest_execution_candle_by_market.get(candle_key)
+                if latest is not None and candle_ts <= latest:
+                    if candle_ts == latest:
+                        self.metrics.equal_execution_candles_skipped += 1
+                    else:
+                        self.metrics.replayed_execution_candles_skipped += 1
+                    continue
             await self._process_symbol(symbol_result)
-            if candle_key is not None:
+            if candle_key is not None and candle_ts is not None:
                 self._latest_execution_candle_by_market[candle_key] = candle_ts
 
     def _assert_campaign_candidate(self, symbol: str, source_exchange: Any, stage: str) -> None:
@@ -1719,6 +1743,11 @@ class RuntimeOrchestrator:
                 )
 
         signal_id = self._resolve_signal_id(selection.symbol, market_ctx)
+        finalized = self._canonical_final_decision_recorded(signal_id)
+        if finalized is not False:
+            if finalized:
+                self.metrics.finalized_signal_replays_skipped += 1
+            return
         execution_ctx = build_execution_context(market_ctx)
         market_ctx["execution_ctx"] = execution_ctx
         legacy_candidate = {key: market_ctx.get(key) for key in (
@@ -2786,16 +2815,85 @@ class RuntimeOrchestrator:
     @staticmethod
     def _execution_candle_decision_identity(symbol: str, payload: Mapping[str, Any]) -> str | None:
         key = RuntimeOrchestrator._execution_candle_market_key(symbol, payload)
-        if key is None:
+        candle_ts = RuntimeOrchestrator._normalize_execution_candle_open_ts(
+            payload.get("execution_candle_open_ts")
+        )
+        if key is None or candle_ts is None:
             return None
-        return "|".join((*key, str(payload["execution_candle_open_ts"])))
+        return "|".join((*key, str(candle_ts)))
 
     @staticmethod
     def _execution_candle_market_key(symbol: str, payload: Mapping[str, Any]) -> tuple[str, str, str] | None:
-        if payload.get("execution_candle_open_ts") is None:
+        if RuntimeOrchestrator._normalize_execution_candle_open_ts(
+                payload.get("execution_candle_open_ts")) is None:
             return None
-        return (str(symbol).upper(), str(payload.get("source_exchange") or "").lower(),
-                str(payload.get("timeframe") or "").lower())
+        normalized_symbol = str(symbol or "").strip().upper()
+        source_exchange = str(payload.get("source_exchange") or "").strip().lower()
+        timeframe = str(payload.get("timeframe") or "").strip().lower()
+        if not all((normalized_symbol, source_exchange, timeframe)):
+            return None
+        return normalized_symbol, source_exchange, timeframe
+
+    @staticmethod
+    def _normalize_execution_candle_open_ts(value: Any) -> int | None:
+        """Normalize an evidenced execution-candle open time to epoch milliseconds."""
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, str):
+            candidate = value.strip()
+            if not candidate:
+                return None
+            if not candidate.lstrip("+-").replace(".", "", 1).isdigit():
+                try:
+                    parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    return None
+                if parsed.tzinfo is None:
+                    return None
+                milliseconds = Decimal(str(parsed.astimezone(timezone.utc).timestamp())) * 1000
+            else:
+                try:
+                    milliseconds = Decimal(candidate)
+                except InvalidOperation:
+                    return None
+        else:
+            try:
+                milliseconds = Decimal(str(value))
+            except (InvalidOperation, TypeError, ValueError):
+                return None
+        if not milliseconds.is_finite() or milliseconds < 0:
+            return None
+        integral = milliseconds.to_integral_value()
+        if milliseconds != integral:
+            return None
+        try:
+            return int(integral)
+        except (OverflowError, ValueError):
+            return None
+
+    def _canonical_final_decision_recorded(self, signal_id: str) -> bool | None:
+        """Return durable PAPER finalization state; lookup failure is fail-closed."""
+        if self.config.execution_mode is not ExecutionMode.PAPER:
+            return False
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            return False
+        try:
+            with engine.connect() as conn:
+                return conn.execute(text("""
+                    SELECT 1 FROM order_decisions
+                    WHERE signal_id=:signal_id
+                      AND UPPER(COALESCE(mode, ''))='PAPER'
+                      AND LOWER(COALESCE(phase, ''))='final'
+                      AND UPPER(COALESCE(decision, '')) IN ('ACCEPTED', 'REJECTED')
+                    LIMIT 1
+                """), {"signal_id": signal_id}).first() is not None
+        except Exception as exc:
+            self.metrics.final_decision_lookup_failures += 1
+            logger.exception(
+                "paper_final_decision_lookup_failed signal_id=%s", signal_id, exc_info=exc,
+            )
+            return None
 
     @staticmethod
     def _setup_opportunity_identity(symbol: str, mtf: Any) -> str | None:

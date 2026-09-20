@@ -1,3 +1,39 @@
+# PAPER execution-candle replay idempotency surgery report — 2026-09-21
+
+## Why the patch was needed and confirmed root cause
+
+`RuntimeOrchestrator._scan_once()` compared the current raw `execution_candle_open_ts` only for equality with one cached latest value. After the cache advanced from candle A to B, replayed A was unequal to B and re-entered `_process_symbol`; the following B then re-entered after A rewound the cache. Canonical final reject persistence remained idempotent, but `SIGNAL_CREATED` had a fresh event timestamp and the state-direction shadow identity included decision time, so both pre-decision evidence paths could duplicate.
+
+Binance enrichment already derives `execution_candle_open_ts` from the selected closed 1m kline. No scanner contradiction or need to change geometry sourcing was found.
+
+## Files changed and exact behavior
+
+- `src/alphaforge/runtime.py`: normalizes execution-candle open times to integer epoch milliseconds; rejects malformed/non-comparable identities; treats the per-market cache as a monotonic high-water mark; and checks durable PAPER `order_decisions` finalization immediately after stable signal-ID resolution and before MTF, lifecycle creation, scoring, or shadow preparation. Adds non-authoritative skip/failure counters to heartbeat payloads.
+- `src/alphaforge/runtime_heartbeat.py`: permits the five new replay diagnostics in the sanitized heartbeat payload.
+- `tests/test_issue322_reject_geometry.py`: covers A/B/A/B, A/A, A/B/C, mixed equivalent timestamp representations, malformed values, and stable canonical signal identity.
+- `tests/test_state_direction_shadow.py`: simulates restart with an empty candle cache and an existing final decision, `SIGNAL_CREATED`, and shadow sample; verifies replay creates none, preserves one final row, and a new candle/signal still finalizes normally.
+- `VERSION.md`, `REPORT.md`, and `CHANGELOG.md`: record behavior, validation, compatibility, and remaining risk.
+
+## Runtime, lifecycle, persistence, and compatibility impact
+
+For one canonical `(symbol, source_exchange, timeframe)` key, only the first valid candle or a strictly newer normalized candle can reach `_process_symbol`. Equal and older values do not change the high-water mark. A present but malformed candle identity fails closed and cannot fabricate freshness. Standard Binance integer-millisecond identity text is unchanged, while equivalent integer/string/integral-float forms now resolve to the same signal ID.
+
+After restart, the in-memory high-water mark may be empty. The PAPER-only durable lookup detects an existing `phase=final` ACCEPTED/REJECTED row for the stable `signal_id` and returns before `SIGNAL_CREATED` or state-direction shadow preparation. The check is limited to `_process_symbol`; it does not intercept execution/lifecycle continuation methods for already accepted orders or positions. Database lookup failure also skips pre-decision processing for that attempt and increments a diagnostic counter.
+
+Canonical final persistence and its upsert identity were not changed. State-direction shadow remains PAPER-only, observational, and non-authoritative. No selector, MTF, score, RR, expectancy, spread, slippage, liquidity, volatility, funding, campaign identity, config hash, LIVE authorization, schema, migration, or export behavior changed.
+
+## Tests executed
+
+- `.venv/bin/python -m pytest -q tests/test_issue322_reject_geometry.py tests/test_state_direction_shadow.py` — 29 passed.
+- Runtime, heartbeat, lifecycle persistence, environment persistence, resilience, and exchange scanner suites — 126 passed.
+- MTF, PAPER burn-in/RR, BACKTEST-PAPER parity, LIVE authorization, runtime control/state/defaults, and fresh persistence contract suites — 94 passed.
+- `.venv/bin/python -m py_compile` for changed Python and focused test files — passed.
+- `git diff --check` — passed before documentation update and will be rerun before commit.
+
+## Risks, limitations, migration, and recommendation
+
+No durable per-market candle watermark is added; the final-decision lookup protects completed canonical signals after restart, while an interrupted signal without a final row remains eligible for recovery through the existing runtime flow. Concurrent independent runtimes are outside this patch and still require the repository's existing single-runtime operational discipline. No migration is required. Review and merge the narrow fix, then validate prospectively only with a fresh PAPER campaign. Do not use or mutate `POST360S03` / `camp_9f4a9001259415e4`, and do not claim LIVE readiness.
+
 # PAPER pre-MTF selector ordering surgery report — 2026-09-21
 
 ## Why the patch was needed and root cause

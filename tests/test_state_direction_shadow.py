@@ -4,13 +4,16 @@ import time
 from types import SimpleNamespace
 
 from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
 
 from alphaforge.burnin import config_hash as burnin_config_hash
 from alphaforge.burnin import canonical_decision_sql
 from alphaforge.burnin_resolver import evaluate_forward_outcome
 from alphaforge.config import runtime_filter_config
 from alphaforge.multi_timeframe import evaluate_mtf_alignment
-from alphaforge.persistence import init_db
+from alphaforge.persistence import (
+    init_db, save_rejected_decision_artifact, save_trade_lifecycle_event,
+)
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 from alphaforge.state_direction_shadow import (
     StateDirectionShadowStore,
@@ -312,6 +315,119 @@ def test_shadow_failure_leaves_actual_reject_geometry_counts_and_identity_unchan
     }) == burnin_config_hash({
         key: getattr(observed[0].config, key) for key in strategy_fields
     })
+
+
+def test_finalized_signal_restart_replay_skips_predecision_side_effects_and_allows_new_candle(
+    tmp_path,
+):
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'restart-replay.db'}")
+    shadow_path = tmp_path / "restart-replay-shadow.db"
+    store = StateDirectionShadowStore(shadow_path)
+    first_market = _market(execution_candle_open_ts=DECISION_MS)
+    first_signal_id = RuntimeOrchestrator._resolve_signal_id("BTCUSDT", first_market)
+    first_draft = build_state_direction_shadow_draft(
+        symbol="BTCUSDT", signal_id=first_signal_id, market_ctx=first_market,
+        mtf=_mtf("SHORT", "SHORT", "LONG"), execution_ctx=_execution_ctx(),
+        horizon_bars=2, observed_at=DECISION_TS,
+    )
+    store.record(
+        first_draft, actual_decision="REJECTED", actual_side="LONG",
+        actual_reject_reason="MTF_EXECUTION_COUNTER_REGIME",
+    )
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO order_decisions
+                (decision_id,signal_id,symbol,mode,phase,decision,created_at)
+            VALUES (:decision_id,:signal_id,'BTCUSDT','PAPER','final','REJECTED',:created_at)
+        """), {
+            "decision_id": f"{first_signal_id}:REJECTED",
+            "signal_id": first_signal_id,
+            "created_at": DECISION_TS,
+        })
+        conn.execute(text("""
+            INSERT INTO trade_lifecycle_events
+                (event_id,signal_id,symbol,mode,lifecycle_state,event_ts)
+            VALUES ('original-created',:signal_id,'BTCUSDT','PAPER','SIGNAL_CREATED',:event_ts)
+        """), {"signal_id": first_signal_id, "event_ts": DECISION_TS})
+
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    def persist_lifecycle(payload):
+        details = dict(payload.get("details") or {})
+        with SessionLocal() as session:
+            assert save_trade_lifecycle_event(
+                session, signal_id=payload["signal_id"], symbol=payload["symbol"],
+                mode=payload["mode"], lifecycle_state=payload["lifecycle_state"],
+                previous_lifecycle_state=payload.get("previous_lifecycle_state"),
+                event_ts=payload["timestamp"], payload=details,
+                reject_reason=details.get("reject_reason") or details.get("reason"),
+            )
+            session.commit()
+
+    def persist_reject(payload):
+        artifact = {
+            **payload,
+            "reject_reason": payload.get("reject_reason") or payload.get("reason"),
+        }
+        with SessionLocal() as session:
+            assert save_rejected_decision_artifact(session, **artifact)
+            session.commit()
+
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER, require_mtf_alignment=True,
+            enable_state_direction_resolution=False,
+        ),
+        ai_brain=SimpleNamespace(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_Provider(aligned=False),
+        persistence_engine=engine, on_lifecycle_event=persist_lifecycle,
+        on_reject_persist=persist_reject,
+        state_direction_shadow_enabled=True, state_direction_shadow_store=store,
+    )
+    runtime._burnin_run_id = "restart-replay-run"
+
+    replayed_market = _market(
+        market_ts=(DECISION_MS + 60_000) / 1000,
+        execution_candle_open_ts=DECISION_MS,
+    )
+    asyncio.run(runtime._process_symbol(_selection(replayed_market)))
+
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM order_decisions WHERE signal_id=:signal_id AND phase='final'"
+        ), {"signal_id": first_signal_id}).scalar_one() == 1
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM trade_lifecycle_events WHERE signal_id=:signal_id "
+            "AND lifecycle_state='SIGNAL_CREATED'"
+        ), {"signal_id": first_signal_id}).scalar_one() == 1
+    with sqlite3.connect(shadow_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM state_direction_shadow_decisions WHERE signal_id=?",
+            (first_signal_id,),
+        ).fetchone()[0] == 1
+    assert runtime.metrics.finalized_signal_replays_skipped == 1
+
+    new_market = _market(
+        market_ts=(DECISION_MS + 120_000) / 1000,
+        execution_candle_open_ts=DECISION_MS + 60_000,
+    )
+    new_signal_id = RuntimeOrchestrator._resolve_signal_id("BTCUSDT", new_market)
+    assert new_signal_id != first_signal_id
+    asyncio.run(runtime._process_symbol(_selection(new_market)))
+
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM order_decisions WHERE phase='final'"
+        )).scalar_one() == 2
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM trade_lifecycle_events WHERE signal_id=:signal_id "
+            "AND lifecycle_state='SIGNAL_CREATED'"
+        ), {"signal_id": new_signal_id}).scalar_one() == 1
+    with sqlite3.connect(shadow_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM state_direction_shadow_decisions"
+        ).fetchone()[0] == 2
 
 
 def test_shadow_enabled_accept_path_does_not_change_execution(tmp_path):
