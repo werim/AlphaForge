@@ -925,10 +925,11 @@ class BurnInCampaignRunner:
             if isinstance(exc, OperationalError) and not _is_sqlite_lock_error(exc):
                 raise
             failure_class = classify_provider_exception(exc)
+            error_text = str(exc)
             if failure_class == RETRYABLE_MARKET_DATA:
                 try:
                     _with_fresh_lock_retry(self.engine, lambda conn: event(conn, self.campaign_id,
-                        "RESOLVER_BATCH_DEFERRED", details={"reason": "IMMATURE_CANDLE", "error": str(exc)}))
+                        "RESOLVER_BATCH_DEFERRED", details={"reason": "IMMATURE_CANDLE", "error": error_text}))
                 except Exception as event_exc:
                     print(f"AlphaForge resolver deferred event unavailable ({event_exc!r})", file=sys.stderr, flush=True)
                 return {"status": "RETRYING", "error": str(exc), "defer_reason": "IMMATURE_CANDLE"}
