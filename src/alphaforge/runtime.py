@@ -41,7 +41,8 @@ from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign a
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
-from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
+from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
+    normalize_mtf_execution_confirmation_mode, runtime_filter_config)
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
 from alphaforge.agents.phase_b import register_phase_b_handlers
 from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
@@ -116,6 +117,7 @@ class RuntimeConfig:
     setup_timeframe: str = "15m"
     execution_timeframe: str = "1m"
     mtf_guided_signal_generation_enabled: bool = True
+    mtf_execution_confirmation_mode: str = "ENFORCE"
     regime_direction_threshold: float = 0.0005
     setup_direction_threshold: float = 0.0003
     execution_direction_threshold: float = 0.0005
@@ -172,6 +174,14 @@ class RuntimeConfig:
     agent_graph_max_pending_runs: int = 64
     agent_graph_database_url: str = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
 
+    def __post_init__(self) -> None:
+        self.mtf_execution_confirmation_mode = normalize_mtf_execution_confirmation_mode(
+            self.mtf_execution_confirmation_mode
+        )
+        if (self.mtf_execution_confirmation_mode == "SHADOW"
+                and str(getattr(self.execution_mode, "value", self.execution_mode)).upper() != "PAPER"):
+            raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
+
 
 @dataclass(slots=True)
 class RuntimeMetrics:
@@ -215,6 +225,7 @@ class RuntimeMetrics:
     mtf_setup_missing: int = 0
     mtf_execution_missing: int = 0
     mtf_execution_not_confirmed: int = 0
+    mtf_execution_confirmation_shadow: int = 0
     mtf_execution_counter_regime: int = 0
     mtf_direction_mismatch: int = 0
     mtf_stale_context: int = 0
@@ -582,6 +593,7 @@ class RuntimeOrchestrator:
                 "mtf_setup_missing": self.metrics.mtf_setup_missing,
                 "mtf_execution_missing": self.metrics.mtf_execution_missing,
                 "mtf_execution_not_confirmed": self.metrics.mtf_execution_not_confirmed,
+                "mtf_execution_confirmation_shadow": self.metrics.mtf_execution_confirmation_shadow,
                 "mtf_execution_counter_regime": self.metrics.mtf_execution_counter_regime,
                 "mtf_direction_mismatch": self.metrics.mtf_direction_mismatch,
                 "mtf_stale_context": self.metrics.mtf_stale_context,
@@ -1101,7 +1113,11 @@ class RuntimeOrchestrator:
                                 "base_exec_direction": payload.get("base_exec_direction"),
                                 "resolved_state": payload.get("resolved_state"),
                                 "final_direction": payload.get("final_direction"),
-                                "override_reason": payload.get("override_reason")})
+                                "override_reason": payload.get("override_reason"),
+                                "mtf_execution_confirmation_mode": payload.get("mtf_execution_confirmation_mode", "ENFORCE"),
+                                "shadow_mtf_execution_reason": payload.get("shadow_mtf_execution_reason"),
+                                "authoritative_reject_reason": payload.get("authoritative_reject_reason"),
+                                "enforce_counterfactual_reject_reason": payload.get("enforce_counterfactual_reject_reason")})
                 if str(payload.get("decision") or "").upper() == "REJECTED":
                     metrics.update({
                         "primary_reject_reason": payload.get("primary_reject_reason"),
@@ -1879,6 +1895,23 @@ class RuntimeOrchestrator:
                         self._persist_geometry_diagnostic(selection.symbol, market_ctx, geometry_reason)
                         return
                     reasons = list(dict.fromkeys([geometry_reason, *reasons]))
+                shadow_mtf_execution_reason = (
+                    "MTF_EXECUTION_NOT_CONFIRMED"
+                    if (
+                        self.config.mtf_execution_confirmation_mode == "SHADOW"
+                        and reasons == ["MTF_EXECUTION_NOT_CONFIRMED"]
+                    )
+                    else None
+                )
+                if shadow_mtf_execution_reason:
+                    market_ctx.update(
+                        mtf_execution_confirmation_mode="SHADOW",
+                        shadow_mtf_execution_reason=shadow_mtf_execution_reason,
+                        enforce_counterfactual_reject_reason=shadow_mtf_execution_reason,
+                        authoritative_reject_reason=None,
+                    )
+                    self.metrics.mtf_execution_not_confirmed += 1
+                    self.metrics.mtf_execution_confirmation_shadow += 1
                 reason = reasons[0]
                 canonical_setup_reject = setup_phase in {"NO_SETUP", "INVALID", "OVEREXTENDED"}
                 if canonical_setup_reject and setup_identity is not None:
@@ -1889,31 +1922,33 @@ class RuntimeOrchestrator:
                     signal_id = f"runtime:{hashlib.sha256(setup_identity.encode('utf-8')).hexdigest()[:24]}"
                 else:
                     reject_decision_id = None
-                self._prepare_state_direction_shadow(
-                    symbol=selection.symbol, signal_id=signal_id, market_ctx=market_ctx,
-                    mtf=dict(mtf or {}), execution_ctx=execution_ctx)
-                self.metrics.mtf_alignment_reject += 1
-                self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
-                self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
-                self.metrics.mtf_execution_missing += int("MTF_EXECUTION_UNAVAILABLE" in reasons)
-                self.metrics.mtf_execution_not_confirmed += int("MTF_EXECUTION_NOT_CONFIRMED" in reasons)
-                self.metrics.mtf_execution_counter_regime += int("MTF_EXECUTION_COUNTER_REGIME" in reasons)
-                self.metrics.mtf_stale_context += int("MTF_CONTEXT_STALE" in reasons)
-                self.metrics.mtf_direction_mismatch += int(any(
-                    "MISMATCH" in item or item == "MTF_EXECUTION_COUNTER_REGIME" for item in reasons
-                ))
-                await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
-                reject_payload = {**market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
-                    "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED",
-                    "reason": reason, "reject_reason": reason, "confidence": 0.0, "score": None,
-                    "rr": market_ctx.get("rr"), "effective_rr": None, "explanation": "mtf_alignment_gate",
-                    "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf,
-                    "primary_reject_reason": reason, "reject_reasons": reasons}
-                if reject_decision_id is not None:
-                    reject_payload["reject_decision_id"] = reject_decision_id
-                await self._persist_reject(reject_payload)
-                await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
-                return
+                if not shadow_mtf_execution_reason:
+                    self._prepare_state_direction_shadow(
+                        symbol=selection.symbol, signal_id=signal_id, market_ctx=market_ctx,
+                        mtf=dict(mtf or {}), execution_ctx=execution_ctx)
+                    self.metrics.mtf_alignment_reject += 1
+                    self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
+                    self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
+                    self.metrics.mtf_execution_missing += int("MTF_EXECUTION_UNAVAILABLE" in reasons)
+                    self.metrics.mtf_execution_not_confirmed += int("MTF_EXECUTION_NOT_CONFIRMED" in reasons)
+                    self.metrics.mtf_execution_counter_regime += int("MTF_EXECUTION_COUNTER_REGIME" in reasons)
+                    self.metrics.mtf_stale_context += int("MTF_CONTEXT_STALE" in reasons)
+                    self.metrics.mtf_direction_mismatch += int(any(
+                        "MISMATCH" in item or item == "MTF_EXECUTION_COUNTER_REGIME" for item in reasons
+                    ))
+                    await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
+                    reject_payload = {**market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
+                        "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED",
+                        "reason": reason, "reject_reason": reason, "confidence": 0.0, "score": None,
+                        "rr": market_ctx.get("rr"), "effective_rr": None, "explanation": "mtf_alignment_gate",
+                        "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf,
+                        "primary_reject_reason": reason, "reject_reasons": reasons,
+                        "authoritative_reject_reason": reason}
+                    if reject_decision_id is not None:
+                        reject_payload["reject_decision_id"] = reject_decision_id
+                    await self._persist_reject(reject_payload)
+                    await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
+                    return
             if setup_identity is not None and self._setup_decision_recorded(
                     setup_identity, decision="ACCEPTED"):
                 return
@@ -1982,7 +2017,8 @@ class RuntimeOrchestrator:
                         reject_payload,
                     )
                     return
-            self.metrics.mtf_alignment_pass += 1
+            if alignment.get("aligned"):
+                self.metrics.mtf_alignment_pass += 1
         if geometry_required and str(market_ctx.get("geometry_status") or "").upper() != "COMPLETE":
             reason = str(market_ctx.get("geometry_reason") or "GEOMETRY_INCOMPLETE").upper()
             if self._execution_candle_decision_identity(selection.symbol, market_ctx) is None:
@@ -2167,6 +2203,10 @@ class RuntimeOrchestrator:
             "resolved_state": market_ctx.get("resolved_state"),
             "final_direction": market_ctx.get("final_direction"),
             "override_reason": market_ctx.get("override_reason"),
+            "mtf_execution_confirmation_mode": market_ctx.get("mtf_execution_confirmation_mode", "ENFORCE"),
+            "shadow_mtf_execution_reason": market_ctx.get("shadow_mtf_execution_reason"),
+            "authoritative_reject_reason": None,
+            "enforce_counterfactual_reject_reason": market_ctx.get("enforce_counterfactual_reject_reason"),
         }
         self._record_state_direction_shadow(
             {**accepted_burnin_payload, "side": market_ctx.get("side"),
@@ -2578,6 +2618,10 @@ class RuntimeOrchestrator:
         result.update({
             "reject_decision_id":str(reject_decision_id), "decision":"REJECTED",
             "primary_reject_reason": primary_reject_reason, "reject_reasons": reject_reasons,
+            "authoritative_reject_reason": result.get("authoritative_reject_reason") or primary_reject_reason,
+            "mtf_execution_confirmation_mode": result.get(
+                "mtf_execution_confirmation_mode", self.config.mtf_execution_confirmation_mode
+            ),
             "decision_timestamp":result.get("decision_timestamp") or canonical_utc_timestamp(),
             "timeframe":result.get("timeframe") or result.get("interval"),
             "entry":result.get("entry", result.get("entry_price")), "sl":result.get("sl", result.get("stop_loss", result.get("stop"))),
@@ -3296,7 +3340,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, provider_transient_outage_grace_seconds=cfg.runtime.provider_transient_outage_grace_seconds, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms, market_data_base_url=cfg.exchange.binance.market_data_base_url, regime_timeframe=cfg.runtime.regime_timeframe, setup_timeframe=cfg.runtime.setup_timeframe, execution_timeframe=cfg.runtime.execution_timeframe, mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled, regime_direction_threshold=cfg.runtime.regime_direction_threshold, setup_direction_threshold=cfg.runtime.setup_direction_threshold, execution_direction_threshold=cfg.runtime.execution_direction_threshold, enable_state_direction_resolution=cfg.runtime.enable_state_direction_resolution, paper_decision_timeframe=cfg.runtime.execution_timeframe, require_mtf_alignment=False)
+    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, provider_transient_outage_grace_seconds=cfg.runtime.provider_transient_outage_grace_seconds, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms, market_data_base_url=cfg.exchange.binance.market_data_base_url, regime_timeframe=cfg.runtime.regime_timeframe, setup_timeframe=cfg.runtime.setup_timeframe, execution_timeframe=cfg.runtime.execution_timeframe, mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled, mtf_execution_confirmation_mode=cfg.runtime.mtf_execution_confirmation_mode, regime_direction_threshold=cfg.runtime.regime_direction_threshold, setup_direction_threshold=cfg.runtime.setup_direction_threshold, execution_direction_threshold=cfg.runtime.execution_direction_threshold, enable_state_direction_resolution=cfg.runtime.enable_state_direction_resolution, paper_decision_timeframe=cfg.runtime.execution_timeframe, require_mtf_alignment=False)
     config.agent_graph_enabled = cfg.runtime.agent_graph_enabled
     config.agent_graph_shadow = cfg.runtime.agent_graph_shadow
     config.agent_graph_max_steps = cfg.runtime.agent_graph_max_steps

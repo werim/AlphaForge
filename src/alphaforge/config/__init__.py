@@ -10,6 +10,16 @@ from alphaforge.env_contract import dotenv_status, repository_root, resolve_bina
 from alphaforge.database_defaults import resolve_runtime_database_url
 
 
+MTF_EXECUTION_CONFIRMATION_MODES = frozenset({"ENFORCE", "SHADOW"})
+
+
+def normalize_mtf_execution_confirmation_mode(value: object) -> str:
+    mode = str(value or "ENFORCE").strip().upper()
+    if mode not in MTF_EXECUTION_CONFIRMATION_MODES:
+        raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE must be ENFORCE or SHADOW")
+    return mode
+
+
 def _clean_env_value(raw: str | None) -> str | None:
     if raw is None:
         return None
@@ -90,6 +100,7 @@ class RuntimeSettings:
     setup_timeframe: str = "15m"
     execution_timeframe: str = "1m"
     mtf_guided_signal_generation_enabled: bool = True
+    mtf_execution_confirmation_mode: str = "ENFORCE"
     regime_direction_threshold: float = 0.0005
     setup_direction_threshold: float = 0.0003
     execution_direction_threshold: float = 0.0005
@@ -360,6 +371,12 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
     if str(managed["BINANCE_ENVIRONMENT"]["source"]).startswith("alias (BINANCE_TESTNET)"):
         endpoint_env["BINANCE_TESTNET"] = endpoint_env.pop("BINANCE_ENVIRONMENT")
     resolved_binance = resolve_binance_environment(endpoint_env)
+    mtf_execution_confirmation_mode = normalize_mtf_execution_confirmation_mode(
+        val("MTF_EXECUTION_CONFIRMATION_MODE")
+    )
+    if (mtf_execution_confirmation_mode == "SHADOW"
+            and str(val("ALPHAFORGE_EXECUTION_MODE")).upper() != "PAPER"):
+        raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
     runtime = RuntimeSettings(
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
         paper_enabled=val("ALPHAFORGE_ENABLE_PAPER_TRADING"),
@@ -388,6 +405,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),
         execution_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
         mtf_guided_signal_generation_enabled=val("ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED"),
+        mtf_execution_confirmation_mode=mtf_execution_confirmation_mode,
         regime_direction_threshold=val("ALPHAFORGE_REGIME_DIRECTION_THRESHOLD"),
         setup_direction_threshold=val("ALPHAFORGE_SETUP_DIRECTION_THRESHOLD"),
         execution_direction_threshold=val("ALPHAFORGE_EXECUTION_DIRECTION_THRESHOLD"),

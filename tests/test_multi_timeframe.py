@@ -9,6 +9,7 @@ from sqlalchemy import text
 from alphaforge.execution import build_execution_context as build_canonical_execution_context
 from alphaforge.burnin import (BurnInRun, bootstrap_burnin_schema,
                                canonical_decision_sql, persist_burnin_run)
+from alphaforge.burnin_campaign import build_phase8_campaign_identity
 from alphaforge.multi_timeframe import (BinanceMTFProvider, build_execution_context,
                                         build_regime_context, build_setup_context, closed_candles,
                                         evaluate_mtf_alignment)
@@ -638,6 +639,102 @@ def test_paper_neutral_execution_rejects_before_ai_brain():
     assert "MTF_EXECUTION_UNAVAILABLE" not in rejects[-1]["mtf"]["alignment"]["reasons"]
     assert orchestrator.metrics.mtf_execution_not_confirmed == 1
     assert orchestrator.metrics.mtf_execution_missing == 0
+
+
+def test_mtf_execution_confirmation_shadow_preserves_downstream_authority(tmp_path):
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'shadow-low-effective-rr.db'}")
+    rejects = []
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_execution_confirmation_mode="SHADOW",
+            min_effective_rr=10.0,
+        ),
+        _AlwaysAcceptBrain(),
+        lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_NeutralExecutionProvider(),
+        persistence_engine=engine,
+        on_reject_persist=lambda payload: rejects.append(payload),
+    )
+    runtime._burnin_run_id = "shadow-low-effective-rr"
+
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert rejects[-1]["reason"] == "LOW_EFFECTIVE_RR"
+    assert rejects[-1]["authoritative_reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert rejects[-1]["shadow_mtf_execution_reason"] == "MTF_EXECUTION_NOT_CONFIRMED"
+    assert rejects[-1]["enforce_counterfactual_reject_reason"] == "MTF_EXECUTION_NOT_CONFIRMED"
+    assert runtime.metrics.mtf_execution_confirmation_shadow == 1
+    with engine.connect() as conn:
+        metrics = json.loads(conn.execute(text(
+            "SELECT metrics_json FROM burnin_observations WHERE decision='REJECTED'"
+        )).scalar_one())
+    assert metrics["authoritative_reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert metrics["shadow_mtf_execution_reason"] == "MTF_EXECUTION_NOT_CONFIRMED"
+    assert metrics["mtf_execution_confirmation_mode"] == "SHADOW"
+
+
+def test_mtf_execution_confirmation_shadow_can_reach_paper_accept():
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_execution_confirmation_mode="SHADOW",
+        ),
+        _AlwaysAcceptBrain(),
+        lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_NeutralExecutionProvider(),
+    )
+
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert runtime.metrics.executions == 1
+    assert runtime.metrics.mtf_execution_confirmation_shadow == 1
+
+
+def test_mtf_execution_counter_regime_remains_authoritative_in_shadow_mode():
+    rejects = []
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_execution_confirmation_mode="SHADOW",
+        ),
+        SimpleNamespace(),
+        lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_CounterRegimeGuidedProvider(),
+        on_reject_persist=lambda payload: rejects.append(payload),
+    )
+
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert rejects[-1]["reason"] == "MTF_EXECUTION_COUNTER_REGIME"
+    assert rejects[-1]["authoritative_reject_reason"] == "MTF_EXECUTION_COUNTER_REGIME"
+    assert rejects[-1].get("shadow_mtf_execution_reason") is None
+
+
+def test_mtf_execution_confirmation_mode_keeps_enforce_compatibility_and_separates_identity():
+    enforce = RuntimeConfig(execution_mode=ExecutionMode.PAPER)
+    shadow = RuntimeConfig(
+        execution_mode=ExecutionMode.PAPER,
+        mtf_execution_confirmation_mode="SHADOW",
+    )
+    enforce_identity = build_phase8_campaign_identity(enforce, ["BTCUSDT"], ["1m"], release_id="shadow-test")
+    shadow_identity = build_phase8_campaign_identity(shadow, ["BTCUSDT"], ["1m"], release_id="shadow-test")
+
+    assert enforce.mtf_execution_confirmation_mode == "ENFORCE"
+    assert "mtf_execution_confirmation_mode" not in enforce_identity["config_payload"]
+    assert "MTF_EXECUTION_CONFIRMATION_MODE" not in enforce_identity["config_payload"]
+    assert shadow_identity["config_payload"]["mtf_execution_confirmation_mode"] == "SHADOW"
+    assert shadow_identity["strategy_payload"]["mtf_execution_confirmation_mode"] == "SHADOW"
+    assert enforce_identity["config_hash"] != shadow_identity["config_hash"]
+    assert enforce_identity["strategy_config_hash"] != shadow_identity["strategy_config_hash"]
+    with pytest.raises(ValueError, match="PAPER-only"):
+        RuntimeConfig(
+            execution_mode=ExecutionMode.LIVE,
+            mtf_execution_confirmation_mode="SHADOW",
+        )
 
 
 @pytest.mark.parametrize(("regime_direction", "setup_direction", "expected_side", "expected_reason"), [

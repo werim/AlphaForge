@@ -1,3 +1,31 @@
+# MTF execution-confirmation SHADOW experiment surgery report — 2026-09-21
+
+## Why and root cause
+
+The runtime treated every MTF alignment reason as an immediate authoritative reject in `RuntimeOrchestrator._process_symbol`. This made the one intended experiment—observing 1m execution non-confirmation through the normal downstream pipeline—impossible without broadly disabling MTF.
+
+## Files changed and behavior
+
+- `src/alphaforge/runtime.py`: adds the narrow `ENFORCE|SHADOW` mode to `RuntimeConfig`. SHADOW bypasses only the exact singleton `MTF_EXECUTION_NOT_CONFIRMED` reason; `MTF_EXECUTION_COUNTER_REGIME`, 1h/15m failures, and every other MTF reason retain their existing authoritative path. The candidate then uses the unchanged score, raw/effective-RR, execution-cost, portfolio, and execution pipeline.
+- `src/alphaforge/config/__init__.py`, `src/alphaforge/config_registry.py`, `.env.test.example`: register default `MTF_EXECUTION_CONFIRMATION_MODE=ENFORCE`, normalize its values, and refuse SHADOW outside PAPER.
+- `src/alphaforge/burnin_campaign.py`: prospective SHADOW config and strategy identities include the mode. ENFORCE preserves prior hash payloads to avoid breaking existing campaign attachments.
+- `docs/SQLcheat.md`: documents JSON evidence fields and a read-only comparison query.
+- `tests/test_multi_timeframe.py`, `tests/test_runtime_env_config.py`: cover ENFORCE, SHADOW downstream rejection/acceptance, counter-regime authority, SQL evidence, identity separation, and PAPER/LIVE boundaries.
+
+## Persistence, lifecycle, and compatibility
+
+No schema migration, CSV/export shape, historical-row rewrite, execution-cost formula, score threshold, raw-RR threshold, effective-RR threshold, reject resolver contract, live mutation path, or Binance write call changed. Existing-schema JSON metrics now carry `authoritative_reject_reason`, `shadow_mtf_execution_reason`, `enforce_counterfactual_reject_reason`, and `mtf_execution_confirmation_mode`. SHADOW accepts/rejects retain the actual final lifecycle; ENFORCE and counter-regime retain the existing immediate MTF reject lifecycle.
+
+## Tests and remaining risk
+
+`python -m pytest -q tests/test_multi_timeframe.py tests/test_runtime_env_config.py tests/test_env_wiring_contract.py --disable-warnings --maxfail=1` passed: 193 tests. `python -m compileall -q src/alphaforge` and `git diff --check` passed before documentation updates.
+
+Risk is intentional experimental decision divergence in SHADOW. Do not mix SHADOW and ENFORCE campaign evidence; use a new PAPER campaign, release ID, database, and config identity. Do not launch T05 from this task, do not resume T04, and do not infer LIVE readiness.
+
+## Recommended T05 configuration
+
+Use a fresh PAPER-only campaign with `MTF_EXECUTION_CONFIRMATION_MODE=SHADOW`, all existing MTF timeframes and thresholds unchanged, `ALPHAFORGE_ENABLE_LIVE_TRADING=false`, and `ALPHAFORGE_ALLOW_LIVE_ORDERS=false`. Keep `ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED` at its current campaign setting; do not add an MTF-off switch or change score/RR/cost controls.
+
 # PAPER execution-candle replay idempotency surgery report — 2026-09-21
 
 ## Why the patch was needed and confirmed root cause

@@ -1,3 +1,25 @@
+# MTF execution-confirmation SHADOW experiment — 2026-09-21
+
+### Added
+- PAPER-only `MTF_EXECUTION_CONFIRMATION_MODE=ENFORCE|SHADOW`, defaulting to ENFORCE.
+- JSON decision evidence for authoritative reject reason, shadow MTF reason, and ENFORCE counterfactual reason.
+
+### Changed
+- In SHADOW only, an exact `MTF_EXECUTION_NOT_CONFIRMED` result continues through existing downstream decision gates.
+- Prospective SHADOW campaign/config identity includes the mode; ENFORCE compatibility hashes are unchanged.
+
+### Fixed
+- None.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. SHADOW is a new prospective PAPER experiment and cannot run in LIVE/BACKTEST.
+
+### Known Issues
+- SHADOW evidence must not be mixed with ENFORCE qualification evidence. LIVE remains NOT READY.
+
 # PAPER execution-candle replay idempotency — 2026-09-21
 
 ### Added
