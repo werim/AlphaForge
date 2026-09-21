@@ -332,6 +332,25 @@ $.mtf.regime.regime
 $.mtf.setup.setup_type
 ```
 
+### 7.6 MTF execution-confirmation shadow evidence
+
+`MTF_EXECUTION_CONFIRMATION_MODE=SHADOW` is a prospective PAPER-only
+experiment. It does not add SQL columns or a migration. Canonical
+`burnin_observations.metrics_json` carries the explicit evidence fields:
+
+```text
+$.mtf_execution_confirmation_mode             -- ENFORCE | SHADOW
+$.shadow_mtf_execution_reason                  -- MTF_EXECUTION_NOT_CONFIRMED | null
+$.enforce_counterfactual_reject_reason         -- MTF_EXECUTION_NOT_CONFIRMED | null
+$.authoritative_reject_reason                  -- final authoritative reject | null for ACCEPTED
+```
+
+Under SHADOW, `shadow_mtf_execution_reason` records the evaluated 1m
+non-confirmation while the normal final decision proceeds through score, RR,
+execution-cost, and risk gates. `MTF_EXECUTION_COUNTER_REGIME` remains an
+authoritative reject. Campaign identity/config hashes include SHADOW, so do not
+combine its observations with ENFORCE evidence.
+
 ## 8. Campaign queries
 
 ### 8.1 Database discovery and schema metadata
@@ -507,6 +526,12 @@ Break down MTF rejects by symbol, side, regime, and reason:
 
 ```bash
 sqlite3 -readonly -header -column "$DB" "SELECT COALESCE(json_extract(o.metrics_json,'$.symbol'),o.symbol) AS symbol,COALESCE(s.side,json_extract(o.metrics_json,'$.side')) AS side,COALESCE(json_extract(o.metrics_json,'$.regime'),o.regime,'UNKNOWN') AS regime,COALESCE(d.reject_reason,json_extract(o.metrics_json,'$.primary_reject_reason')) AS reject_reason,COUNT(*) AS n FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id LEFT JOIN order_decisions d ON d.decision_id=json_extract(o.metrics_json,'$.reject_decision_id') LEFT JOIN signals s ON s.signal_id=json_extract(o.metrics_json,'$.signal_id') WHERE cr.campaign_id='$CID' AND UPPER(COALESCE(o.decision,''))='REJECTED' AND COALESCE(d.reject_reason,json_extract(o.metrics_json,'$.primary_reject_reason')) LIKE 'MTF_%' GROUP BY 1,2,3,4 ORDER BY n DESC;"
+```
+
+Compare SHADOW counterfactual evidence with the final authoritative outcome:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "SELECT o.observed_at,json_extract(o.metrics_json,'$.signal_id') AS signal_id,o.decision AS final_decision,json_extract(o.metrics_json,'$.authoritative_reject_reason') AS authoritative_reject_reason,json_extract(o.metrics_json,'$.shadow_mtf_execution_reason') AS shadow_mtf_execution_reason,json_extract(o.metrics_json,'$.enforce_counterfactual_reject_reason') AS enforce_counterfactual_reject_reason,json_extract(o.metrics_json,'$.mtf_execution_confirmation_mode') AS mtf_execution_confirmation_mode,json_extract(o.metrics_json,'$.effective_rr') AS effective_rr FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id='$CID' AND json_extract(o.metrics_json,'$.shadow_mtf_execution_reason')='MTF_EXECUTION_NOT_CONFIRMED' ORDER BY o.observed_at;"
 ```
 
 ### 9.5 Reject persistence reconciliation

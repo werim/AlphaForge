@@ -133,6 +133,16 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         getattr(runtime_config, "mtf_guided_signal_generation_enabled", True)
     )
     config_payload["multi_timeframe"]["guided_signal_generation_enabled"] = config_payload["mtf_guided_signal_generation_enabled"]
+    mtf_execution_confirmation_mode = str(
+        getattr(runtime_config, "mtf_execution_confirmation_mode", "ENFORCE")
+    ).strip().upper() or "ENFORCE"
+    if mtf_execution_confirmation_mode not in {"ENFORCE", "SHADOW"}:
+        raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE must be ENFORCE or SHADOW")
+    # Preserve existing ENFORCE campaign hashes. SHADOW changes decisions and
+    # must therefore be explicit in every prospective campaign identity.
+    if mtf_execution_confirmation_mode == "SHADOW":
+        config_payload["mtf_execution_confirmation_mode"] = mtf_execution_confirmation_mode
+        config_payload["multi_timeframe"]["execution_confirmation_mode"] = mtf_execution_confirmation_mode
     # Read-only compatibility labels for older exporters. They no longer define
     # strategy identity independently of the explicit three-layer contract.
     config_payload["decision_setup_timeframe"] = config_payload["execution_timeframe"]
@@ -157,6 +167,8 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
             getattr(runtime_config, "enable_state_direction_resolution", False)
         ),
     }
+    if mtf_execution_confirmation_mode == "SHADOW":
+        strategy_payload["mtf_execution_confirmation_mode"] = mtf_execution_confirmation_mode
     effective_paper_slippage_bps = paper_slippage_bps if paper_slippage_bps is not None else getattr(runtime_config, "paper_slippage_bps", DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS)
     execution_cost_payload = {
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),

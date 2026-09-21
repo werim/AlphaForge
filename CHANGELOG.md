@@ -1,3 +1,43 @@
+# MTF structural RR geometry — 2026-09-21
+
+### Added
+- 15m setup-window structural stop/target evidence and auditable geometry provenance: source labels, structural levels, setup/execution timeframes, candidate RR, executable RR, and effective RR.
+- Deterministic LONG/SHORT, threshold-independence, no-forced-target, missing-structure, and 1m-refinement regressions.
+
+### Changed
+- Regime-guided candidates now calculate reward/risk from a 1m execution entry within the 15m entry zone and independently derived 15m support/resistance levels.
+- `MIN_RR` remains a downstream quality filter; changing it cannot move structural TP.
+
+### Fixed
+- 1m two-candle noise and the historical `1.2 + breakout/body` reward formula no longer manufacture MTF candidate targets near `MIN_RR`.
+
+### Breaking Changes
+- Prospective guided candidates without favorable 15m structure, or whose 1m execution price lies outside the 15m entry zone, reject fail-closed instead of receiving synthetic target geometry. No schema or LIVE-order authorization change.
+
+### Known Issues
+- Structural levels use the existing closed 15m setup window; fresh PAPER evidence is required before any policy conclusion. Historical campaign databases remain immutable. LIVE remains NOT READY.
+# MTF execution-confirmation SHADOW experiment — 2026-09-21
+
+### Added
+- PAPER-only `MTF_EXECUTION_CONFIRMATION_MODE=ENFORCE|SHADOW`, defaulting to ENFORCE.
+- JSON decision evidence for authoritative reject reason, shadow MTF reason, and ENFORCE counterfactual reason.
+
+### Changed
+- In SHADOW only, an exact `MTF_EXECUTION_NOT_CONFIRMED` result continues through existing downstream decision gates.
+- Prospective SHADOW campaign/config identity includes the mode; ENFORCE compatibility hashes are unchanged.
+
+### Fixed
+- None.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. SHADOW is a new prospective PAPER experiment and cannot run in LIVE/BACKTEST.
+
+### Known Issues
+- SHADOW evidence must not be mixed with ENFORCE qualification evidence. LIVE remains NOT READY.
+
 # PAPER execution-candle replay idempotency — 2026-09-21
 
 ### Added

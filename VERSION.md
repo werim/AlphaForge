@@ -1,3 +1,21 @@
+# MTF structural RR geometry — 2026-09-21
+
+- Current version/phase: prospective `mtf_setup_structure_v1` PAPER decision-geometry correction on `fix/structural-mtf-rr-geometry`.
+- Runtime maturity: 1h remains regime selection; 15m closed setup candles now provide support/resistance-based structural stop and target; 1m can refine only an entry that lies inside the 15m entry zone. Candidate RR is the independently calculated reward/risk ratio and contains no `MIN_RR` target construction.
+- BACKTEST/PAPER/LIVE alignment: execution-cost and effective-RR gates remain unchanged. The existing `MIN_RR` quality filter can reject low structural opportunity, and `LOW_EFFECTIVE_RR` still rejects otherwise valid geometry after fill/cost effects.
+- Lifecycle/persistence: absent, invalid, or non-favorable structure fails closed with explicit geometry reasons. Existing JSON decision/MTF evidence now carries geometry source, entry/stop/target source, timeframes, structural levels, candidate RR, executable RR, and effective RR; no schema migration or historical campaign mutation is required.
+- Validation: 156 focused structural, MTF, runtime, order-filter, legacy-geometry, scanner, and executable-RR tests passed; changed modules compiled, `git diff --check` passed, and the CI-style F821 lint selection reported zero findings.
+- Known critical risks: setup-window extrema are deliberately conservative historical support/resistance evidence, not a forecast of future liquidity. A fresh PAPER campaign is required for prospective distribution evidence; LIVE remains NOT READY.
+# MTF execution-confirmation SHADOW experiment — 2026-09-21
+
+- Current version/phase: minimal prospective PAPER-only experiment on `experiment/mtf-execution-shadow`; no campaign was launched, resumed, migrated, or mutated.
+- Runtime maturity: 1h regime, 15m setup, and `MTF_EXECUTION_COUNTER_REGIME` remain authoritative. `MTF_EXECUTION_NOT_CONFIRMED` is ENFORCE by default; in explicitly configured PAPER SHADOW mode it is persisted as counterfactual evidence and continues to the existing score, raw-RR, effective-RR, execution-cost, and risk gates.
+- BACKTEST/PAPER/LIVE alignment: ENFORCE preserves the prior behavior and identity. SHADOW is rejected outside PAPER at config and direct-runtime construction; LIVE authorization, adapters, and Binance mutation behavior are unchanged.
+- Lifecycle coverage: SHADOW candidates follow the existing final lifecycle for their actual downstream outcome. MTF counter-regime and all non-shadow MTF reasons retain the existing immediate `SIGNAL_REJECTED` progression.
+- Persistence/identity: no schema migration or export-column change. Canonical observation JSON now records mode, shadow reason, ENFORCE counterfactual reason, and final authoritative reason. SHADOW is included in prospective campaign/config and strategy hashes; ENFORCE retains legacy hashes for compatibility.
+- Validation: 193 focused MTF, runtime-env, and configuration-contract tests passed. `compileall` and `git diff --check` passed before documentation updates.
+- Known critical risks: SHADOW evidence is experimental and must not be mixed with ENFORCE qualification evidence. A fresh, isolated PAPER campaign is required for outcome analysis; LIVE remains NOT READY. Last audit date: 2026-09-21.
+
 # PAPER execution-candle replay idempotency — 2026-09-21
 
 - Current version/phase: prospective PAPER replay-safety fix on `fix/paper-execution-candle-replay-idempotency`; no campaign was launched, resumed, paused, migrated, or mutated.

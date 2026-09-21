@@ -120,3 +120,100 @@ def build_regime_guided_geometry_with_diagnostics(
         "geometry_reason": None,
         "geometry_source": "MTF_REGIME_GUIDED_CLOSED_KLINES",
     }, None
+
+
+def derive_setup_structure_with_diagnostics(
+    candles: list[Mapping[str, Any]], *, side: str, lookback: int = 12,
+) -> tuple[dict[str, Any], str | None]:
+    """Derive setup-timeframe support/resistance levels without an RR target.
+
+    This intentionally reuses the closed setup candle window already required by
+    the MTF setup layer.  Its extrema are evidence, not a target multiplier:
+    later candidate construction compares the independently chosen execution
+    entry with these levels and fails closed if they do not form valid geometry.
+    """
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side not in {"LONG", "SHORT"}:
+        return {}, "REGIME_SIDE_INVALID"
+    if len(candles) < lookback:
+        return {}, "KLINE_INSUFFICIENT_ROWS"
+    try:
+        window = [
+            {name: float(candle[name]) for name in ("high", "low", "close")}
+            for candle in candles[-lookback:]
+        ]
+    except (KeyError, TypeError, ValueError):
+        return {}, "KLINE_MALFORMED_PAYLOAD"
+    if any(
+        not all(math.isfinite(value) and value > 0.0 for value in candle.values())
+        or candle["low"] > candle["high"]
+        for candle in window
+    ):
+        return {}, "OHLC_INVALID"
+    if normalized_side == "LONG":
+        return {
+            "structural_stop": min(candle["low"] for candle in window),
+            "structural_target": max(candle["high"] for candle in window),
+            "stop_source": "setup_window_support",
+            "target_source": "setup_window_resistance",
+        }, None
+    return {
+        "structural_stop": max(candle["high"] for candle in window),
+        "structural_target": min(candle["low"] for candle in window),
+        "stop_source": "setup_window_resistance",
+        "target_source": "setup_window_support",
+    }, None
+
+
+def build_structural_geometry_with_diagnostics(
+    *, entry: Any, side: str, setup_type: str, setup_phase: str,
+    structure: Mapping[str, Any], setup_timeframe: str, execution_timeframe: str,
+    entry_source: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Calculate RR from independent setup structure and execution entry.
+
+    ``MIN_RR`` is deliberately absent from this function.  It is a downstream
+    decision filter, while candidate RR is strictly reward/risk from the three
+    observed price levels.
+    """
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side not in {"LONG", "SHORT"}:
+        return {}, "REGIME_SIDE_INVALID"
+    try:
+        entry_price = float(entry)
+        stop = float(structure["structural_stop"])
+        target = float(structure["structural_target"])
+    except (KeyError, TypeError, ValueError):
+        return {}, "NO_STRUCTURAL_GEOMETRY"
+    if not all(math.isfinite(value) and value > 0.0 for value in (entry_price, stop, target)):
+        return {}, "NO_STRUCTURAL_GEOMETRY"
+    if normalized_side == "LONG":
+        risk, reward = entry_price - stop, target - entry_price
+    else:
+        risk, reward = stop - entry_price, entry_price - target
+    if risk <= 0.0:
+        return {}, "NO_STRUCTURAL_GEOMETRY"
+    if reward <= 0.0:
+        return {}, "INSUFFICIENT_STRUCTURAL_REWARD"
+    rr = reward / risk
+    return {
+        "entry": entry_price,
+        "side": normalized_side,
+        "sl": stop,
+        "tp": target,
+        "rr": rr,
+        "setup_type": setup_type,
+        "setup_phase": setup_phase,
+        "setup_reason": f"REGIME_GUIDED_{setup_phase}",
+        "geometry_status": "COMPLETE",
+        "geometry_reason": None,
+        "geometry_source": "MTF_SETUP_STRUCTURE",
+        "entry_source": entry_source,
+        "stop_source": structure.get("stop_source"),
+        "target_source": structure.get("target_source"),
+        "setup_timeframe": setup_timeframe,
+        "execution_timeframe": execution_timeframe,
+        "structural_stop": stop,
+        "structural_target": target,
+        "candidate_rr": rr,
+    }, None
