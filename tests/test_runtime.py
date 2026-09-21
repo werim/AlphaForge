@@ -727,7 +727,13 @@ def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> Non
     orchestrator._persist_burnin_decision({
         "signal_id": "accepted-1", "symbol": "BTCUSDT", "decision": "ACCEPTED",
         "timeframe": "1m", "geometry_status": "COMPLETE", "score": 0.8,
-        "rr": 2.0, "effective_rr": 1.8,
+        "rr": 2.0, "candidate_rr": 2.0, "executable_raw_rr": 1.9,
+        "effective_rr": 1.8, "entry": 100.0, "sl": 95.0, "tp": 110.0,
+        "geometry_source": "MTF_SETUP_STRUCTURE",
+        "entry_source": "execution_close_within_setup_entry_zone",
+        "stop_source": "setup_window_support", "target_source": "setup_window_resistance",
+        "setup_timeframe": "15m", "execution_timeframe": "1m",
+        "structural_stop": 95.0, "structural_target": 110.0,
     })
 
     with engine.connect() as conn:
@@ -736,6 +742,13 @@ def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> Non
         )).scalar_one())
     assert "primary_reject_reason" not in metrics
     assert "reject_reasons" not in metrics
+    assert metrics["geometry_source"] == "MTF_SETUP_STRUCTURE"
+    assert metrics["entry_source"] == "execution_close_within_setup_entry_zone"
+    assert metrics["stop_source"] == "setup_window_support"
+    assert metrics["target_source"] == "setup_window_resistance"
+    assert metrics["setup_timeframe"] == "15m"
+    assert metrics["structural_stop"] == pytest.approx(95.0)
+    assert metrics["structural_target"] == pytest.approx(110.0)
 
 
 def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path: Path) -> None:

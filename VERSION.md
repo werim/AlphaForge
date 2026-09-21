@@ -1,3 +1,11 @@
+# MTF structural RR geometry — 2026-09-21
+
+- Current version/phase: prospective `mtf_setup_structure_v1` PAPER decision-geometry correction on `fix/structural-mtf-rr-geometry`.
+- Runtime maturity: 1h remains regime selection; 15m closed setup candles now provide support/resistance-based structural stop and target; 1m can refine only an entry that lies inside the 15m entry zone. Candidate RR is the independently calculated reward/risk ratio and contains no `MIN_RR` target construction.
+- BACKTEST/PAPER/LIVE alignment: execution-cost and effective-RR gates remain unchanged. The existing `MIN_RR` quality filter can reject low structural opportunity, and `LOW_EFFECTIVE_RR` still rejects otherwise valid geometry after fill/cost effects.
+- Lifecycle/persistence: absent, invalid, or non-favorable structure fails closed with explicit geometry reasons. Existing JSON decision/MTF evidence now carries geometry source, entry/stop/target source, timeframes, structural levels, candidate RR, executable RR, and effective RR; no schema migration or historical campaign mutation is required.
+- Validation: 156 focused structural, MTF, runtime, order-filter, legacy-geometry, scanner, and executable-RR tests passed; changed modules compiled, `git diff --check` passed, and the CI-style F821 lint selection reported zero findings.
+- Known critical risks: setup-window extrema are deliberately conservative historical support/resistance evidence, not a forecast of future liquidity. A fresh PAPER campaign is required for prospective distribution evidence; LIVE remains NOT READY.
 # MTF execution-confirmation SHADOW experiment — 2026-09-21
 
 - Current version/phase: minimal prospective PAPER-only experiment on `experiment/mtf-execution-shadow`; no campaign was launched, resumed, migrated, or mutated.

@@ -1101,7 +1101,9 @@ class RuntimeOrchestrator:
                 metrics = {k: payload.get(k) for k in ("score", "rr", "candidate_rr",
                     "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
                     "effective_rr", "confidence", "spread_pct", "expected_slippage_pct",
-                    "latency_ms", "funding_rate_pct")}
+                    "latency_ms", "funding_rate_pct", "entry", "sl", "tp",
+                    "entry_source", "stop_source", "target_source", "setup_timeframe",
+                    "execution_timeframe", "structural_stop", "structural_target")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
                                 "setup_identity": payload.get("setup_identity"),
@@ -2207,6 +2209,14 @@ class RuntimeOrchestrator:
             "shadow_mtf_execution_reason": market_ctx.get("shadow_mtf_execution_reason"),
             "authoritative_reject_reason": None,
             "enforce_counterfactual_reject_reason": market_ctx.get("enforce_counterfactual_reject_reason"),
+            "geometry_source": market_ctx.get("geometry_source"),
+            "entry_source": market_ctx.get("entry_source"),
+            "stop_source": market_ctx.get("stop_source"),
+            "target_source": market_ctx.get("target_source"),
+            "setup_timeframe": market_ctx.get("setup_timeframe"),
+            "execution_timeframe": market_ctx.get("execution_timeframe"),
+            "structural_stop": market_ctx.get("structural_stop"),
+            "structural_target": market_ctx.get("structural_target"),
         }
         self._record_state_direction_shadow(
             {**accepted_burnin_payload, "side": market_ctx.get("side"),

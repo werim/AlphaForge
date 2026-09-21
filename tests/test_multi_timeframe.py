@@ -245,7 +245,9 @@ def test_provider_generates_regime_guided_candidate(monkeypatch):
     rows_by_tf = {
         "1h": _provider_rows([103 - i * .1 for i in range(24)], decision_ms),
         "15m": _provider_rows([100 + i * .1 for i in range(16)], decision_ms),
-        "1m": _provider_rows([101 - i * .1 for i in range(8)], decision_ms),
+        # The 1m confirmation closes inside the final 15m entry zone.  Its
+        # narrow range must refine entry only, never replace 15m structure.
+        "1m": _provider_rows([102.15 - i * .1 for i in range(8)], decision_ms),
     }
     provider = BinanceMTFProvider()
     monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
@@ -265,6 +267,36 @@ def test_provider_generates_regime_guided_candidate(monkeypatch):
     assert candidate["side"] == "SHORT"
     assert candidate["setup_type"] == "SHORT_PULLBACK"
     assert candidate["sl"] > candidate["entry"] > candidate["tp"]
+    assert candidate["sl"] == pytest.approx(mtf["setup"]["structural_stop"])
+    assert candidate["tp"] == pytest.approx(mtf["setup"]["structural_target"])
+    assert candidate["entry_source"] == "execution_close_within_setup_entry_zone"
+    assert candidate["geometry_source"] == "MTF_SETUP_STRUCTURE"
+    assert candidate["rr"] == pytest.approx(
+        (candidate["entry"] - candidate["tp"])
+        / (candidate["sl"] - candidate["entry"])
+    )
+
+
+def test_provider_fails_closed_when_execution_entry_is_outside_setup_zone(monkeypatch):
+    decision_ms = 20_000_000
+    rows_by_tf = {
+        "1h": _provider_rows([103 - i * .1 for i in range(24)], decision_ms),
+        "15m": _provider_rows([100 + i * .1 for i in range(16)], decision_ms),
+        "1m": _provider_rows([101 - i * .1 for i in range(8)], decision_ms),
+    }
+    provider = BinanceMTFProvider()
+    monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
+    canonical = {"spread_pct": .0002, "expected_slippage_pct": .0004,
+                 "market_data_latency_ms": 20.0, "liquidity_score": .9}
+
+    mtf = asyncio.run(provider.build("BTCUSDT", canonical, execution_ctx=canonical,
+        decision_ts_ms=decision_ms, regime_timeframe="1h", setup_timeframe="15m",
+        execution_timeframe="1m"))
+
+    assert mtf["generation"]["candidate"] is None
+    assert mtf["generation"]["reason"] == "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE"
+    assert mtf["alignment"]["aligned"] is False
+    assert mtf["alignment"]["reasons"] == ["EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE"]
 
 
 def test_provider_rollback_mode_retains_legacy_equality_veto(monkeypatch):

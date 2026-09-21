@@ -1,3 +1,16 @@
+# MTF candidate RR structural geometry — 2026-09-21
+
+## Root cause and behavior
+Guided MTF candidates previously called the shared two-candle geometry helper with 1m execution candles. That helper placed its stop from those tiny candles and manufactured target distance from `1.2 + breakout/body` reward math. The persistent RR arithmetic and existing fill/cost gates were not changed.
+
+The guided path now derives 15m setup-window support/resistance as structural stop/target, accepts a 1m close only as an entry refinement inside the setup entry zone, and calculates raw RR directly as reward divided by risk. Missing, invalid, non-favorable, or out-of-zone geometry rejects with an explicit deterministic reason. `MIN_RR` remains exclusively a quality filter.
+
+## Safety, evidence, and compatibility
+The execution-aware pipeline remains candidate RR -> fill-adjusted executable RR -> remaining execution penalty -> effective RR -> existing gate. SHADOW treatment of replaced legacy geometry is unchanged. Accepted/rejected JSON evidence contains source/timeframe/structural-level provenance without a schema migration. No PAPER database, campaign state, qualification threshold, cost assumption, or LIVE-order permission was changed.
+
+The implementation is intentionally conservative: closed setup-window extrema are the existing available structural evidence, not a fabricated forecast or RR multiplier. A fresh, separately authorized PAPER comparison campaign is required after review/merge; do not resume or mutate prior evidence campaigns, and do not infer LIVE readiness.
+
+Focused structural, MTF, runtime, order-filter, legacy-geometry, scanner, and executable-RR validation passed 156 tests. Changed Python modules compiled; `git diff --check` and the CI-style F821 selection both passed.
 # MTF execution-confirmation SHADOW experiment surgery report — 2026-09-21
 
 ## Why and root cause

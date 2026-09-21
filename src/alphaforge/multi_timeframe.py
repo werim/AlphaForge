@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 from urllib import parse, request
 
-from alphaforge.signal_geometry import build_regime_guided_geometry_with_diagnostics
+from alphaforge.signal_geometry import (
+    build_structural_geometry_with_diagnostics,
+    derive_setup_structure_with_diagnostics,
+)
 
 MTF_REJECT_REASONS = (
     "MTF_REGIME_UNAVAILABLE", "MTF_SETUP_UNAVAILABLE", "MTF_EXECUTION_UNAVAILABLE",
@@ -148,17 +151,26 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *,
     if regime is None:
         if overextended:
             complete = False
+        structure, structure_reason = derive_setup_structure_with_diagnostics(
+            recent, side=direction,
+        ) if direction in {"LONG", "SHORT"} else ({}, "NO_STRUCTURAL_GEOMETRY")
         return {"timeframe": timeframe, "setup_type": "TREND_PULLBACK" if complete else None,
             "direction": direction if direction != "NEUTRAL" else "NONE", "structure_quality": quality,
             "setup_quality": normalize_mtf_quality(quality, threshold),
             "ma_delta_strength": quality, "direction_threshold": threshold,
             "momentum_state": "CONFIRMED" if complete else "UNCONFIRMED", "overextended": overextended,
-            "entry_zone": None if not last else [last["low"], last["high"]], "structural_stop": None,
-            "structural_target": None, "last_closed_candle_ts": _iso(int(identity_last["close_ts"])) if identity_last else None,
+            "entry_zone": None if not last else [last["low"], last["high"]],
+            "structural_stop": structure.get("structural_stop"),
+            "structural_target": structure.get("structural_target"),
+            "structure_reason": structure_reason,
+            "last_closed_candle_ts": _iso(int(identity_last["close_ts"])) if identity_last else None,
             "last_closed_candle_ms": int(identity_last["close_ts"]) if identity_last else None,
             "evidence_status": "COMPLETE" if complete else "INCOMPLETE"}
 
     regime_direction = str(regime.get("direction") or "UNKNOWN").upper()
+    structure, structure_reason = derive_setup_structure_with_diagnostics(
+        recent, side=regime_direction,
+    ) if regime_direction in {"LONG", "SHORT"} else ({}, "REGIME_SIDE_INVALID")
     observed_direction = direction if direction != "NEUTRAL" else "NONE"
     recent_direction, recent_strength = (_direction(candles, 2, 5, neutral_threshold=threshold)
                                          if valid_ohlc else ("UNKNOWN", None))
@@ -193,7 +205,11 @@ def build_setup_context(candles: list[dict[str, Any]], timeframe: str, *,
                                else "UNCONFIRMED"),
             "overextended": overextended,
             "entry_zone": None if not last else [last["low"], last["high"]],
-            "structural_stop": None, "structural_target": None,
+            "structural_stop": structure.get("structural_stop"),
+            "structural_target": structure.get("structural_target"),
+            "structure_reason": structure_reason,
+            "stop_source": structure.get("stop_source"),
+            "target_source": structure.get("target_source"),
             "last_closed_candle_ts": _iso(int(identity_last["close_ts"])) if identity_last else None,
             "last_closed_candle_ms": int(identity_last["close_ts"]) if identity_last else None,
             "evidence_status": "COMPLETE" if evidence_complete else "INCOMPLETE"}
@@ -525,25 +541,41 @@ class BinanceMTFProvider:
         if self.guided_signal_generation_enabled:
             candidate: dict[str, Any] = {}
             geometry_reason: str | None = None
-            if alignment.get("aligned") and len(values.get("execution", [])) >= 2:
+            if alignment.get("aligned") and values.get("execution"):
                 phase = str(setup.get("phase") or "INVALID")
-                candidate, geometry_reason = build_regime_guided_geometry_with_diagnostics(
-                    values["execution"][-1], values["execution"][-2],
-                    side=str(regime.get("direction") or ""),
-                    setup_type=str(setup.get("setup_type") or "REGIME_GUIDED"),
-                    setup_phase=phase,
+                entry_zone = setup.get("entry_zone")
+                entry = values["execution"][-1].get("close")
+                within_entry_zone = (
+                    isinstance(entry_zone, (list, tuple)) and len(entry_zone) == 2
+                    and all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in entry_zone)
+                    and isinstance(entry, (int, float)) and math.isfinite(float(entry))
+                    and float(entry_zone[0]) <= float(entry) <= float(entry_zone[1])
                 )
+                if not within_entry_zone:
+                    geometry_reason = "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE"
+                else:
+                    candidate, geometry_reason = build_structural_geometry_with_diagnostics(
+                        entry=entry,
+                        side=str(regime.get("direction") or ""),
+                        setup_type=str(setup.get("setup_type") or "REGIME_GUIDED"),
+                        setup_phase=phase,
+                        structure=setup,
+                        setup_timeframe=setup_timeframe,
+                        execution_timeframe=execution_timeframe,
+                        entry_source="execution_close_within_setup_entry_zone",
+                    )
             elif alignment.get("aligned"):
                 geometry_reason = "KLINE_INSUFFICIENT_ROWS"
             generation = {"mode": "REGIME_GUIDED",
                           "evidence_status": "COMPLETE" if candidate else "INCOMPLETE",
                           "candidate": candidate or None, "reason": geometry_reason,
                           "trade_side_source": "1h_regime", "setup_phase_source": "15m_regime_guided",
-                          "timing_source": "1m_execution_confirmation"}
+                          "timing_source": "1m_execution_confirmation",
+                          "geometry_source": "15m_setup_structure"}
             if alignment.get("aligned") and not candidate:
                 alignment = {**alignment, "aligned": False, "direction": None,
                     "reasons": list(dict.fromkeys([*(alignment.get("reasons") or []),
-                                                    "MTF_GUIDED_GEOMETRY_UNAVAILABLE"]))}
+                                                    geometry_reason or "MTF_GUIDED_GEOMETRY_UNAVAILABLE"]))}
         return {"regime": regime, "setup": setup, "execution": execution,
                 "alignment": alignment, "generation": generation,
                 "decision_timestamp": _iso(decision_ts_ms), "provider": "BINANCE_FUTURES_CLOSED_KLINES"}
