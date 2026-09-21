@@ -2372,7 +2372,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                     "lifecycle_state_before": row.status_before, "lifecycle_state_after": lifecycle_state,
                     "decision": {"ACCEPTED": "ACCEPT", "REJECTED": "REJECT", "PENDING": "WAIT"}.get(decision, decision),
                     "score": row.score, "raw_rr": row.rr, "effective_rr": effective_rr,
-                    "expectancy": _sql_nullable_number(mctx.get("expectancy") if 'mctx' in locals() else None),
+                    "expectancy": None,
                     "expectancy_bucket": row.expectancy_bucket, "reject_reason": reject_reason or None,
                     "cancel_reason": row.cancel_reason or None, "close_reason": row.close_reason or None,
                     "entry": row.entry, "sl": row.sl, "tp": row.tp, "trigger_price": row.trigger_price or None,
@@ -3827,43 +3827,7 @@ def persist_calibration_snapshots(evals: List[ForwardWindowEvaluation], lifecycl
             })
         rows = session.execute(text("SELECT * FROM calibration_snapshots ORDER BY signal_id, forward_window_minutes")).mappings().all()
     return [dict(r) for r in rows]
-    entry = max(_safe_float(candidate_row.get("entry"), 0.0), 1e-9)
-    mfe_pct = (float(outcome["max_favorable_excursion"]) / entry) * 100.0
-    mae_pct = (float(outcome["max_adverse_excursion"]) / entry) * 100.0
-    decision = str(candidate_row.get("decision", "") or "").upper()
-    lifecycle_state = str(candidate_row.get("status_after", candidate_row.get("lifecycle_state", "")) or "").upper()
-    reject_reason = str(candidate_row.get("reject_reason", "") or "")
-    is_rejected = decision == "REJECTED" or lifecycle_state in {"SIGNAL_REJECTED", "ORDER_REJECTED", "SYMBOL_REJECTED"} or reject_reason != ""
-    reject_correct = None
-    reject_missed_winner = False
-    reject_saved_from_loss = False
-    if is_rejected:
-        reject_missed_winner = bool(outcome["would_tp_hit"]) and not bool(outcome["would_sl_hit"])
-        reject_saved_from_loss = bool(outcome["would_sl_hit"]) and not bool(outcome["would_tp_hit"])
-        reject_correct = reject_saved_from_loss
-    return ForwardWindowEvaluation(
-        signal_id=str(candidate_row.get("signal_id", f"{candidate_row.get('symbol','')}:{candidate_row.get('timestamp','')}")),
-        symbol=str(candidate_row.get("symbol", "")),
-        decision=("REJECTED" if is_rejected else ("ACCEPTED" if decision == "ACCEPTED" else decision)),
-        lifecycle_state=lifecycle_state,
-        reject_reason=reject_reason,
-        forward_window_minutes=forward_window_minutes,
-        would_have_hit_tp=bool(outcome["would_tp_hit"]),
-        would_have_hit_sl=bool(outcome["would_sl_hit"]),
-        mfe_pct=round(mfe_pct, 8),
-        mae_pct=round(mae_pct, 8),
-        max_forward_return=round(mfe_pct, 8),
-        max_adverse_return=round(-mae_pct, 8),
-        reject_correct=reject_correct,
-        reject_missed_winner=reject_missed_winner,
-        reject_saved_from_loss=reject_saved_from_loss,
-        forward_window_regime=str(candidate_row.get("regime", "UNKNOWN")),
-        execution_quality_bucket=_bucket_execution_quality(
-            candidate_row.get("spread_pct"),
-            candidate_row.get("slippage_pct", candidate_row.get("expected_slippage_pct")),
-            candidate_row.get("liquidity_score"),
-        ),
-    )
+
 
 FORWARD_OUTCOME_VALUES = ["WOULD_TP", "WOULD_SL", "WOULD_TIMEOUT", "WOULD_AMBIGUOUS", "INSUFFICIENT_FORWARD_BARS", "NO_TP_SL_GEOMETRY", "SYMBOL_REJECT_NO_CANDIDATE_GEOMETRY"]
 
