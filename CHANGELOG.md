@@ -1,3 +1,26 @@
+# PAPER execution-candle replay idempotency — 2026-09-21
+
+### Added
+- Heartbeat diagnostics for equal-candle, older/replayed-candle, malformed-candle, finalized-signal replay, and final-decision lookup failure skips.
+- Focused regressions for A/B/A/B, A/A, A/B/C, normalized identity equivalence, malformed identity fail-closed behavior, durable restart replay, canonical final-row integrity, and new-candle execution.
+
+### Changed
+- PAPER execution-candle cache semantics are monotonic: only strictly newer normalized epoch-millisecond identities process.
+- PAPER pre-decision processing consults canonical final decision persistence before emitting lifecycle or state-direction shadow evidence.
+
+### Fixed
+- Older closed candles can no longer rewind the per-market cache and allow A/B/A/B reprocessing.
+- Restart replay of an already-finalized canonical signal can no longer add `SIGNAL_CREATED` or state-direction shadow samples.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. Persistence schemas, exports, thresholds, campaign/config identity, BACKTEST behavior, and LIVE authorization are unchanged.
+
+### Known Issues
+- The per-market candle high-water mark remains process-local; completed-signal restart safety is durable through canonical final decisions, not a new watermark table. Concurrent independent PAPER runtimes remain outside this patch. LIVE remains NOT READY.
+
 # PAPER pre-MTF selector ordering correction — 2026-09-21
 
 ### Added

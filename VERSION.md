@@ -1,3 +1,13 @@
+# PAPER execution-candle replay idempotency — 2026-09-21
+
+- Current version/phase: prospective PAPER replay-safety fix on `fix/paper-execution-candle-replay-idempotency`; no campaign was launched, resumed, paused, migrated, or mutated.
+- Runtime maturity: Binance closed-1m execution-candle identities are normalized to integer epoch milliseconds and processed only when strictly newer than the per-market high-water mark. Equal, older/replayed, malformed, and already-finalized signal skips are observable separately.
+- BACKTEST/PAPER/LIVE alignment: the durable canonical-final lookup is PAPER-only. BACKTEST logic, LIVE authorization, thresholds, selector/MTF/scoring semantics, and execution policy are unchanged.
+- Lifecycle coverage: an already-finalized canonical PAPER `signal_id` is stopped before `SIGNAL_CREATED` and state-direction shadow preparation. Later lifecycle transitions for accepted orders/positions are not intercepted.
+- Execution realism/persistence: canonical final-decision upserts are unchanged. No schema, migration, export, campaign identity, config hash, or historical evidence changed.
+- Validation: 29 focused replay/shadow tests, 126 runtime/persistence/scanner tests, and 94 PAPER/MTF/alignment tests passed; changed Python files compiled and `git diff --check` passed before documentation update.
+- Known critical risks: the in-memory high-water mark resets on process restart, so restart safety depends on the canonical final-decision lookup for completed signals; no new durable per-market candle watermark was introduced. The active `POST360S03` campaign and `camp_9f4a9001259415e4` were not accessed or modified. Last audit date: 2026-09-21. LIVE verdict: NOT LIVE READY.
+
 # PAPER pre-MTF selector ordering correction — 2026-09-21
 
 - Current version/phase: prospective PAPER-only selector-ordering fix on `fix/paper-selector-pre-mtf-gate`; no campaign was launched or resumed.
