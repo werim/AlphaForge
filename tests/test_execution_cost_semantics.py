@@ -129,6 +129,100 @@ def test_missing_actual_fill_is_unavailable_not_numeric_zero() -> None:
     assert costs.fill_timestamp is None
 
 
+
+
+def test_paper_and_live_results_share_metric_definitions_but_not_fill_provenance() -> None:
+    paper = _paper_runtime()
+    live = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        ai_brain=SimpleNamespace(),
+        market_scanner=lambda: None,
+    )
+    market = {"entry": 100.0, "side": "LONG", "execution_ctx": {"expected_slippage_pct": 0.002}}
+    result = {
+        "status": "filled",
+        "expected_fill": 100.2,
+        "actual_fill": 100.35,
+        "fill_timestamp": "2026-09-22T10:00:01Z",
+    }
+    decision = {"decision_time": "2026-09-22T10:00:00Z"}
+
+    paper_result = paper._canonical_execution_result(
+        result, decision, market, mode=ExecutionMode.PAPER
+    )
+    live_result = live._canonical_execution_result(
+        result, decision, market, mode=ExecutionMode.LIVE
+    )
+
+    paper_semantics = paper_result["execution_cost_semantics"]
+    live_semantics = live_result["execution_cost_semantics"]
+    for key in (
+        "expected_execution_cost_price",
+        "expected_execution_cost_pct",
+        "expected_execution_cost_bps",
+        "realized_execution_deviation_price",
+        "realized_execution_deviation_pct",
+        "realized_execution_deviation_bps",
+        "total_realized_execution_cost_price",
+        "total_realized_execution_cost_pct",
+        "total_realized_execution_cost_bps",
+    ):
+        assert paper_semantics[key] == pytest.approx(live_semantics[key])
+
+    assert paper_result["actual_fill_provenance"] == PROVENANCE_MODELLED
+    assert live_result["actual_fill_provenance"] == PROVENANCE_ACTUAL
+
+
+def test_live_partial_fill_uses_weighted_average_and_actual_provenance() -> None:
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        ai_brain=SimpleNamespace(),
+        market_scanner=lambda: None,
+    )
+    result = runtime._canonical_execution_result(
+        {
+            "status": "partial_fill",
+            "expected_fill": 100.2,
+            "fills": [
+                {"qty": 1.0, "price": 100.3},
+                {"qty": 3.0, "price": 100.5},
+            ],
+            "fill_timestamp": "2026-09-22T10:00:01Z",
+        },
+        {"decision_time": "2026-09-22T10:00:00Z"},
+        {"entry": 100.0, "side": "LONG", "execution_ctx": {"expected_slippage_pct": 0.002}},
+        mode=ExecutionMode.LIVE,
+    )
+
+    assert result["weighted_average_fill_price"] == pytest.approx(100.45)
+    assert result["actual_fill"] == pytest.approx(100.45)
+    assert result["actual_fill_provenance"] == PROVENANCE_ACTUAL
+    assert result["execution_cost_semantics"]["realized_execution_deviation_bps"] == pytest.approx(25.0)
+    assert result["execution_cost_semantics"]["total_realized_execution_cost_bps"] == pytest.approx(45.0)
+
+
+def test_invalid_live_fill_ledger_marks_semantics_unavailable_without_raising() -> None:
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE),
+        ai_brain=SimpleNamespace(),
+        market_scanner=lambda: None,
+    )
+
+    result = runtime._canonical_execution_result(
+        {
+            "status": "partial_fill",
+            "expected_fill": 100.2,
+            "fills": [{"qty": 0.0, "price": 100.3}],
+        },
+        {"decision_time": "2026-09-22T10:00:00Z"},
+        {"entry": 100.0, "side": "LONG"},
+        mode=ExecutionMode.LIVE,
+    )
+
+    assert result["execution_cost_semantics"] is None
+    assert result["execution_cost_semantics_status"] == "UNAVAILABLE_INVALID_FILL_LEDGER"
+    assert result["actual_fill_provenance"] == PROVENANCE_UNAVAILABLE
+
 def test_paper_simulated_fill_is_modelled_not_exchange_actual() -> None:
     result = _paper_runtime()._simulate_paper_execution(
         "BTCUSDT",
