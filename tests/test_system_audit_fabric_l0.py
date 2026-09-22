@@ -46,6 +46,16 @@ def _source(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
     engine.dispose()
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    conn.execute(
+        "INSERT INTO burnin_campaign_runs("
+        "campaign_id,burnin_run_id,continuation_sequence,status,started_at,created_at,schema_version"
+        ") VALUES (?,?,?,?,?,?,?)",
+        (
+            CAMPAIGN_ID, RUN_ID, 0, "RUNNING",
+            "2026-09-22T15:59:00Z", "2026-09-22T15:59:00Z", "phase8_v1",
+        ),
+    )
+    conn.commit()
     return path, conn
 
 
@@ -63,6 +73,7 @@ def _decision(
     target: float | None,
     reject_reason: str | None = None,
     diagnostics: dict | None = None,
+    observation_metrics: dict | None = None,
 ) -> None:
     persist_burnin_observation(
         source,
@@ -76,7 +87,7 @@ def _decision(
         regime="TRENDING",
         decision="ACCEPTED" if decision == "ACCEPT" else "REJECTED",
         lifecycle_state="POSITION_OPENED" if decision == "ACCEPT" else "SIGNAL_REJECTED",
-        metrics={"signal_id": signal_id},
+        metrics={"signal_id": signal_id, **(observation_metrics or {})},
         source_provenance={"provider": "PAPER_RUNTIME", "runtime_instance_id": "runtime-audit"},
     )
     diag = {
@@ -200,6 +211,7 @@ def _reject(
 ) -> None:
     subject = "LEGACY_SCANNER_SHADOW_CANDIDATE" if legacy else "CANONICAL_REJECT_CANDIDATE"
     diagnostics = {
+        "reject_decision_id": reject_id,
         "geometry_status": "COMPLETE",
         "reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY",
         "reject_quality_attributable": attributable,
@@ -222,6 +234,11 @@ def _reject(
         target=2470.0,
         reject_reason="LOW_SCORE",
         diagnostics=diagnostics,
+        observation_metrics={
+            "reject_decision_id": reject_id,
+            "campaign_id": CAMPAIGN_ID,
+            "primary_reject_reason": "LOW_SCORE",
+        },
     )
     pending_id = persist_pending_reject_label(
         source,
@@ -325,7 +342,7 @@ def test_l0_ingests_accept_and_execution_aligned_reject_idempotently(tmp_path: P
     outcomes = audit.execute(
         "SELECT outcome_kind,authoritative,net_r FROM audit_outcomes ORDER BY outcome_kind"
     ).fetchall()
-    assert outcomes == [
+    assert [tuple(row) for row in outcomes] == [
         ("ACCEPTED_ACTUAL", 1, pytest.approx(1.16)),
         ("REJECT_SHADOW", 1, pytest.approx(1.45)),
     ]
@@ -346,7 +363,7 @@ def test_l0_non_attributable_legacy_shadow_is_diagnostic_not_authoritative(tmp_p
     decision = audit.execute(
         "SELECT eligibility,eligibility_reason,attributable,authoritative FROM shadow_decisions"
     ).fetchone()
-    assert decision == (
+    assert tuple(decision) == (
         "DIAGNOSTIC_SHADOW",
         "NON_ATTRIBUTABLE_OR_LEGACY_SHADOW",
         0,
@@ -355,7 +372,7 @@ def test_l0_non_attributable_legacy_shadow_is_diagnostic_not_authoritative(tmp_p
     outcome = audit.execute(
         "SELECT attributable,authoritative FROM shadow_outcomes"
     ).fetchone()
-    assert outcome == (0, 0)
+    assert tuple(outcome) == (0, 0)
 
 
 def test_l0_missing_geometry_is_non_simulatable_and_no_trade_is_invented(tmp_path: Path) -> None:
@@ -380,7 +397,7 @@ def test_l0_missing_geometry_is_non_simulatable_and_no_trade_is_invented(tmp_pat
     row = audit.execute(
         "SELECT eligibility,eligibility_reason FROM shadow_decisions"
     ).fetchone()
-    assert row == ("NON_SIMULATABLE", "CANONICAL_GEOMETRY_UNAVAILABLE")
+    assert tuple(row) == ("NON_SIMULATABLE", "CANONICAL_GEOMETRY_UNAVAILABLE")
     assert audit.execute("SELECT COUNT(*) FROM shadow_outcomes").fetchone()[0] == 0
 
 
@@ -398,7 +415,7 @@ def test_l0_ambiguous_shadow_outcome_is_explicit_and_not_authoritative(tmp_path:
     row = audit.execute(
         "SELECT ambiguous,evidence_complete,authoritative,forward_label FROM shadow_outcomes"
     ).fetchone()
-    assert row == (1, 0, 0, "AMBIGUOUS")
+    assert tuple(row) == (1, 0, 0, "AMBIGUOUS")
 
 
 def test_l0_immutable_tables_reject_updates_and_source_output_aliasing(tmp_path: Path) -> None:
