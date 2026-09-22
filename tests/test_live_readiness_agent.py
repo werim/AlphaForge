@@ -66,9 +66,6 @@ def test_non_attributable_shadow_reject_cannot_satisfy_readiness_evidence(tmp_pa
 
 def test_attributable_reject_can_satisfy_readiness_evidence(tmp_path):
     db=tmp_path/"campaign.db"; make_db(db); c=sqlite3.connect(db)
-    c.execute("ALTER TABLE burnin_reject_outcomes ADD COLUMN payload_json TEXT")
-    c.execute("ALTER TABLE expectancy_evidence ADD COLUMN source_decision_id TEXT")
-    c.execute("ALTER TABLE expectancy_evidence ADD COLUMN evidence_type TEXT")
     payload='{"reject_decision_id":"guided","forward_label_subject":"GUIDED_CANDIDATE","reject_quality_attributable":true}'
     c.execute("""INSERT INTO burnin_reject_outcomes
         (burnin_run_id,evidence_complete,forward_label,hypothetical_net_r_after_costs,payload_json)
