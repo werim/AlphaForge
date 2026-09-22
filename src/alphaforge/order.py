@@ -9,7 +9,7 @@ from typing import Any, Callable, Literal, Mapping
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
-from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
 from alphaforge.effective_rr import calculate_effective_rr
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
@@ -914,29 +914,8 @@ def _effective_rr(order: Mapping[str, Any], execution_ctx: Mapping[str, Any], *,
     return effective, sorted(set(flags)), breakdown
 
 
-def _execution_review(closed_trade: Mapping[str, Any]) -> dict[str, float]:
-    expected = abs(float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0))
-    fill_quality = 1.0
-
-    try:
-        entry = float(closed_trade.get("entry_price", 0.0) or 0.0)
-        filled = float(closed_trade.get("filled_entry_price", entry) or entry)
-        realized = abs(filled - entry) / entry if entry > 0 else 0.0
-    except (TypeError, ValueError):
-        entry = 0.0
-        filled = 0.0
-        realized = 0.0
-
-    realized = abs(realized)
-    slippage_delta = max(0.0, realized - expected)
-    fill_quality = max(0.0, min(1.0, 1.0 - slippage_delta * 100.0))
-    return {
-        "entry_price": entry,
-        "filled_entry_price": filled,
-        "expected_slippage_pct": expected,
-        "realized_slippage_pct": realized,
-        "fill_quality_score": fill_quality,
-    }
+def _execution_review(closed_trade: Mapping[str, Any]) -> dict[str, Any]:
+    return build_execution_review_metrics(closed_trade)
 
 
 def _signal_adapter(payload: Mapping[str, Any]) -> dict[str, Any]:

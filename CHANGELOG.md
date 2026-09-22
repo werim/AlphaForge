@@ -1,3 +1,32 @@
+# Canonical execution-cost semantics — 2026-09-22
+
+### Added
+- One side-normalized `entry -> expected_fill -> actual_fill` contract with price, percent, and bps representations, explicit strategy-entry denominator, provenance, timestamps, and fee separation.
+- Deterministic quantity-weighted fill pricing for existing `fills.qty`/`fills.price` evidence.
+- Focused LONG/SHORT, partial-fill, decomposition, causality, provenance, unavailable-evidence, persistence, and no-double-count regressions.
+
+### Changed
+- Prospective PAPER accepted-position provenance records expected cost, modelled actual fill, realized deviation, total realized cost, and decision/fill timestamps in existing JSON evidence.
+- Closed-trade fill quality now measures adverse actual-vs-expected deviation through the shared canonical helper.
+- New `closed_trade_reviews.actual_slippage_pct` values retain the legacy column but have explicit canonical meaning: signed total strategy-entry-to-actual-fill execution-cost percent.
+
+### Fixed
+- Expected entry movement can no longer be confused with additional post-model fill deviation.
+- LONG/SHORT direction and favorable fills are no longer erased by absolute-value actual-slippage math.
+- Missing actual-fill evidence no longer becomes a fabricated zero by falling back to strategy entry.
+- PAPER simulated fills are explicitly `MODELLED`, not exchange-observed `ACTUAL`.
+
+### Removed
+- Duplicate post-fill slippage formulas from `order.py` and `ai_brain.py`.
+
+### Breaking Changes
+- No trading or schema break. Consumers interpreting newly written `actual_slippage_pct` as unsigned actual-vs-expected slippage must switch to the explicit canonical JSON fields; historical rows are not rewritten.
+
+### Known Issues
+- Generic LIVE adapter fills are not yet canonically persisted or grouped, so the weighted-average helper is not wired into LIVE execution.
+- #374 rejected-trade execution alignment remains intentionally out of scope.
+- One unrelated exact-float strategy-diagnostics assertion fails in the local full suite. LIVE remains NOT READY.
+
 # MTF structural RR geometry — 2026-09-21
 
 ### Added

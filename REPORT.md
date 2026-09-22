@@ -1,3 +1,69 @@
+# Issue #369 canonical execution-cost semantics surgery report — 2026-09-22
+
+## Why the patch was needed / root cause
+
+AlphaForge had correct but distributed pre-submit execution-cost behavior and an ambiguous post-fill label. Runtime PAPER already moved strategy entry to an adverse expected fill and protected effective RR from deducting that embedded entry movement twice. Separately, closed-trade review code in both `order.py` and `ai_brain.py` calculated `abs(actual_fill - entry) / entry` and called it `realized_slippage_pct` / `actual_slippage_pct`. That value was total entry-to-fill movement, not actual-versus-expected deviation; absolute-value handling also discarded LONG/SHORT direction and could classify favorable movement as cost. Missing fill evidence could be replaced with entry and become a fabricated zero.
+
+## Current-state audit
+
+- Candidate strategy entry: `RuntimeOrchestrator._process_symbol()` receives/enriches `market_ctx["entry"]`; MTF-guided candidates may replace it with the #378 1m refinement inside the 15m structural zone before RR/cost evaluation.
+- Expected/modelled fill: `runtime.py::_expected_fill_price()` applies the configured PAPER slippage assumption or pre-submit expected-slippage evidence with adverse LONG/SHORT direction.
+- Effective RR: `runtime.py::_execution_rr_metrics()` recomputes raw RR from expected fill/SL/TP, then subtracts only remaining model penalties. Its existing `model.total_penalty - model.slippage_penalty / 2` rule prevents the modeled entry move from being deducted again.
+- PAPER accepted fill: `runtime.py::_simulate_paper_execution()` deterministically fills at expected fill; `_persist_pending_paper_position()` writes `planned_entry`, `simulated_fill`, separate entry spread/fee fields, and provenance JSON.
+- LIVE fill: `runtime.py::_execute()` delegates to `RealExecutionAdapter.submit()`. There is no authoritative LIVE fill persistence/aggregation contract in this path, so this patch does not infer one or label adapter data `ACTUAL` automatically.
+- Partial fills: the canonical `fills` table has `qty`, `price`, `fee`, and `filled_at`; reconciliation consumes fill rows for duplicate detection. No weighted-average function previously existed, and `partial_fill` was lifecycle-only.
+- Accepted outcomes: `burnin_pending_position_outcomes` and `burnin_trade_outcomes` keep spread, entry/exit slippage, fees, funding, latency, total execution cost, net PnL/R, and JSON provenance. Resolver cost subtraction is unchanged.
+- Reject handoff: `burnin_pending_reject_labels.execution_cost_assumptions_json`, order-decision execution context, and observation JSON are the prospective decision-time surfaces #374 can extend. No #374 forward resolver behavior is implemented here.
+- Ambiguous actual-slippage field: `closed_trade_reviews.actual_slippage_pct` was populated from the entry-to-filled-entry absolute movement. It is retained as a compatibility column, but new rows now use canonical signed total realized execution-cost percent and JSON explicitly records `actual_slippage_pct_semantics=TOTAL_REALIZED_EXECUTION_COST_PCT`.
+
+## Canonical contract
+
+For side factor `+1` LONG and `-1` SHORT:
+
+- `expected_execution_cost_price = side_factor * (expected_fill - entry)`
+- `realized_execution_deviation_price = side_factor * (actual_fill - expected_fill)`
+- `total_realized_execution_cost_price = side_factor * (actual_fill - entry)`
+
+Positive means adverse execution for both sides. Every percentage divides its side-normalized price quantity by strategy `entry`; bps is percent-as-fraction multiplied by 10,000. Therefore expected cost plus realized deviation equals total realized cost within normal floating-point precision.
+
+Current runtime expected fill embeds only its established expected-slippage component. Spread, fees, funding, latency, liquidity, volatility, and modeled exit slippage remain separately attributable in the existing cost/effective-RR pipeline.
+
+Decision-time evidence contains only entry, expected fill/cost, expected-fill provenance, and decision timestamp. `decision_time_dict()` cannot expose actual fill, realized deviation, total realized cost, or fill timestamp. Fill-time values exist only when actual/simulated fill evidence exists; otherwise they remain `None` with `UNAVAILABLE` provenance. PAPER fills are explicitly `MODELLED`. Exchange `ACTUAL` is accepted only when a caller supplies that provenance. Fees and all other explicit penalties are outside this price-deviation value object.
+
+## Files changed
+
+- `src/alphaforge/execution.py`: adds the single deterministic execution-cost value object, record adapter, review metrics, provenance rules, and quantity-weighted fill-price helper.
+- `src/alphaforge/runtime.py`: attaches decision-time expected-cost evidence, emits modelled PAPER fill-time evidence/timestamps, and persists the contract in existing position provenance JSON without changing effective-RR math.
+- `src/alphaforge/order.py`, `src/alphaforge/ai_brain.py`: replace duplicate ambiguous post-fill formulas with the shared contract; stop fabricating actual fill from entry.
+- `tests/test_execution_cost_semantics.py`: adds LONG/SHORT sign, decomposition, denominator, unavailable, provenance, partial-fill, fee separation, no-double-count, timestamp-causality, persistence, and legacy-alias regressions.
+- `tests/test_execution_layer.py`: supplies explicit side evidence to legacy review tests.
+- `VERSION.md`, `REPORT.md`, `CHANGELOG.md`: document behavior, persistence, compatibility, validation, and #374 handoff.
+
+## Runtime, lifecycle, persistence, export, and compatibility impact
+
+Trading thresholds, scoring, expectancy gates, stop rules, spread/slippage/funding/liquidity/volatility gates, sizing, order type, MTF geometry, SHADOW authority, LIVE authorization, and Binance mutation permissions are unchanged. Lifecycle sequencing is unchanged. Existing effective-RR and PAPER geometry protections remain authoritative.
+
+No schema or export migration is required. Prospective accepted PAPER position provenance now contains entry, expected fill, modelled actual fill, the three cost families, provenance, decision/fill timestamps, reference denominator, sign convention, and explicit fee separation. Existing normalized entry spread/fee fields remain independently attributable. Historical rows and `actual_slippage_pct` values are not backfilled or rewritten.
+
+The new weighted-average helper consumes the existing fill-ledger shape (`qty`/`price`) and rejects invalid/non-positive evidence. It is deliberately not wired into generic LIVE submission because there is no authoritative persisted adapter fill group to aggregate yet; doing so would invent live behavior.
+
+## Tests executed
+
+- `pytest -q tests/test_execution_cost_semantics.py tests/test_execution_layer.py tests/test_paper_rr_geometry.py` — 42 passed.
+- Relevant execution/runtime/PAPER/position/MTF/SHADOW/LIVE-safety selection — 221 passed, 4 dependency warnings.
+- Additional BACKTEST parity, burn-in, runtime-state/control/config, readiness, reconciliation selection — 194 passed.
+- Full `pytest -q` before the direct-persistence compatibility adjustment — 1,780 passed, 3 skipped, 3 failed; the two #369-related failures were fixed and their parameterized regression now passes. The remaining failure is an unrelated exact-float assertion (`0.3` vs `0.30000000000000004`) in `tests/test_strategy_quality_guardrails.py`, a file untouched by this patch.
+- Full suite excluding only that confirmed unrelated assertion — 1,782 passed, 3 skipped, 1 deselected, with 120 dependency deprecation warnings.
+- `python -m py_compile src/alphaforge/execution.py src/alphaforge/runtime.py src/alphaforge/order.py src/alphaforge/ai_brain.py tests/test_execution_cost_semantics.py` — passed.
+- `git diff --check` — passed.
+- CI's `flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics` could not run because flake8 is not installed; `python -m flake8`, `python -m pyflakes`, and `ruff` are also unavailable. No tooling was installed for convenience.
+
+## Risks, limitations, migration, and #374 handoff
+
+#374 can now persist/query entry, expected fill, expected execution cost, provenance, and decision timestamp without future reconstruction, then add prospective rejected-trade realized alignment when a real/modelled fill becomes available. It can use the same helper for actual fill, realized deviation, total cost, and quantity-weighted partial fills. Fees and other penalties remain separate inputs.
+
+Out of scope: rejected-trade forward execution resolution, LIVE adapter fill persistence, historical backfill, campaign migration, and threshold/policy changes. No active PAPER campaign or historical database was accessed, started, paused, resumed, migrated, or mutated. Review and merge are appropriate after CI; do not infer LIVE readiness.
+
 # MTF candidate RR structural geometry — 2026-09-21
 
 ## Root cause and behavior

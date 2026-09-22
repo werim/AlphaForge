@@ -21,7 +21,13 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
-from alphaforge.execution import build_execution_context, build_execution_cost_model
+from alphaforge.execution import (
+    PROVENANCE_ESTIMATED,
+    PROVENANCE_MODELLED,
+    build_execution_context,
+    build_execution_cost_model,
+    build_execution_cost_semantics,
+)
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
@@ -1452,7 +1458,7 @@ class RuntimeOrchestrator:
         fill = entry * (1.0 + slippage_pct if side == "LONG" else 1.0 - slippage_pct)
         return round(fill, 8), slippage_pct
 
-    def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, float | None]:
+    def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
         candidate_rr = float(raw_rr or 0.0)
         expected_fill, fill_slippage_pct = self._expected_fill_price(market_ctx, execution_ctx)
         executable_raw_rr = self._fill_adjusted_raw_rr(
@@ -1469,10 +1475,36 @@ class RuntimeOrchestrator:
             # including the modelled exit-slippage half.
             remaining_penalty = max(model.total_penalty - model.slippage_penalty / 2.0, 0.0)
         effective_rr = max(executable_raw_rr - remaining_penalty, 0.0)
+        cost_semantics = None
+        if expected_fill is not None:
+            try:
+                cost_semantics = build_execution_cost_semantics(
+                    entry=market_ctx.get("entry"),
+                    expected_fill=expected_fill,
+                    actual_fill=None,
+                    side=market_ctx.get("side"),
+                    expected_fill_provenance=(
+                        PROVENANCE_MODELLED
+                        if self.config.execution_mode is ExecutionMode.PAPER
+                        else PROVENANCE_ESTIMATED
+                    ),
+                    decision_timestamp=market_ctx.get("decision_timestamp"),
+                ).decision_time_dict()
+            except ValueError:
+                # Canonical metrics are unavailable when side/price evidence is
+                # incomplete; existing effective-RR behavior remains authoritative.
+                cost_semantics = None
         return {
             "candidate_rr": round(candidate_rr, 6),
             "expected_fill": expected_fill,
             "fill_slippage_pct": fill_slippage_pct,
+            "expected_execution_cost_price": (
+                cost_semantics.get("expected_execution_cost_price") if cost_semantics else None),
+            "expected_execution_cost_pct": (
+                cost_semantics.get("expected_execution_cost_pct") if cost_semantics else None),
+            "expected_execution_cost_bps": (
+                cost_semantics.get("expected_execution_cost_bps") if cost_semantics else None),
+            "execution_cost_semantics": cost_semantics,
             "executable_raw_rr": round(executable_raw_rr, 6),
             "remaining_execution_penalty": round(remaining_penalty, 6),
             "effective_rr": round(effective_rr, 6),
@@ -2040,6 +2072,7 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value,
                                              selection.symbol, reject_payload)
             return
+        market_ctx.setdefault("decision_timestamp", canonical_utc_timestamp())
         raw_rr = market_ctx.get("rr")
         rr_metrics = self._execution_rr_metrics(raw_rr, market_ctx, execution_ctx)
         effective_rr = float(rr_metrics["effective_rr"] or 0.0)
@@ -2184,9 +2217,11 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         accepted_burnin_payload = {
             "signal_id": signal_id,
-            "decision_time": canonical_utc_timestamp(),
+            "decision_time": market_ctx["decision_timestamp"],
             "setup_identity": market_ctx.get("setup_identity"),
             "symbol": selection.symbol,
+            "side": market_ctx.get("side"),
+            "entry": market_ctx.get("entry"),
             "source_exchange": market_ctx.get("source_exchange"),
             "mode": self.config.execution_mode.value,
             "decision": "ACCEPTED",
@@ -2194,6 +2229,10 @@ class RuntimeOrchestrator:
             "rr": signal_payload.get("risk_reward"),
             "candidate_rr": rr_metrics["candidate_rr"],
             "expected_fill": rr_metrics["expected_fill"],
+            "expected_execution_cost_price": rr_metrics["expected_execution_cost_price"],
+            "expected_execution_cost_pct": rr_metrics["expected_execution_cost_pct"],
+            "expected_execution_cost_bps": rr_metrics["expected_execution_cost_bps"],
+            "execution_cost_semantics": rr_metrics["execution_cost_semantics"],
             "executable_raw_rr": rr_metrics["executable_raw_rr"],
             "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
             "effective_rr": effective_rr,
@@ -2368,7 +2407,13 @@ class RuntimeOrchestrator:
         setup = mtf.get("setup") if isinstance(mtf.get("setup"), Mapping) else {}
         execution = mtf.get("execution") if isinstance(mtf.get("execution"), Mapping) else {}
         regime = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
-        fill = float(result.get("fill_price") or market_ctx.get("entry"))
+        actual_fill = result.get("actual_fill", result.get("fill_price"))
+        expected_fill = result.get("expected_fill", market_ctx.get("expected_fill"))
+        if expected_fill is None:
+            expected_fill, _ = self._expected_fill_price(market_ctx, execution_ctx)
+        if actual_fill is None or expected_fill is None:
+            raise RuntimeError("PAPER_FILL_EVIDENCE_UNAVAILABLE")
+        fill = float(actual_fill)
         planned_entry = float(market_ctx.get("entry"))
         requested_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
         if requested_notional is None:
@@ -2387,6 +2432,17 @@ class RuntimeOrchestrator:
         risk_usd = abs(fill - stop) * quantity
         if not math.isfinite(risk_usd) or risk_usd <= 0:
             raise RuntimeError("PAPER_POSITION_RISK_INVALID")
+        fill_timestamp = str(result.get("fill_timestamp") or canonical_utc_timestamp())
+        cost_semantics = build_execution_cost_semantics(
+            entry=planned_entry,
+            expected_fill=expected_fill,
+            actual_fill=fill,
+            side=market_ctx.get("side"),
+            expected_fill_provenance=PROVENANCE_MODELLED,
+            actual_fill_provenance=PROVENANCE_MODELLED,
+            decision_timestamp=decision.get("decision_time"),
+            fill_timestamp=fill_timestamp,
+        )
         provenance = {
             "provider": self.scanner_source or "UNKNOWN",
             "source_exchange": market_ctx.get("source_exchange"),
@@ -2395,9 +2451,14 @@ class RuntimeOrchestrator:
             "execution_cost_model_unit": "R",
             "execution_cost_model": dict(model.__dict__),
             "entry_slippage_embedded_in_fill": True,
+            "entry_slippage_additional_cost": 0.0,
             "fill_slippage_pct": market_ctx.get("fill_slippage_pct"),
             "candidate_rr": market_ctx.get("candidate_rr", market_ctx.get("rr")),
-            "expected_fill": market_ctx.get("expected_fill", fill),
+            "expected_fill": expected_fill,
+            "actual_fill": fill,
+            "actual_fill_provenance": PROVENANCE_MODELLED,
+            "fill_timestamp": fill_timestamp,
+            "execution_cost_semantics": cost_semantics.as_dict(),
             "executable_raw_rr": market_ctx.get("executable_raw_rr"),
             "remaining_execution_penalty": market_ctx.get("remaining_execution_penalty"),
             "effective_rr_at_entry": market_ctx.get(
@@ -2421,7 +2482,7 @@ class RuntimeOrchestrator:
                 signal_id=decision.get("signal_id"), source_decision_id=source_decision_id,
                 decision_time=decision.get("decision_time"), symbol=symbol, side=market_ctx.get("side"),
                 setup_type=market_ctx.get("setup") or market_ctx.get("setup_type") or setup.get("phase"),
-                entry_time=canonical_utc_timestamp(), planned_entry=planned_entry, simulated_fill=fill,
+                entry_time=fill_timestamp, planned_entry=planned_entry, simulated_fill=fill,
                 stop=market_ctx.get("sl"), target=market_ctx.get("tp"), quantity=quantity,
                 notional=notional, entry_spread=model.spread_penalty * risk_usd / 2.0,
                 entry_slippage=0.0, entry_fee=model.fee_penalty * risk_usd / 2.0,
@@ -2494,13 +2555,34 @@ class RuntimeOrchestrator:
         fill, slip = self._expected_fill_price(market_ctx, execution_ctx)
         if fill is None or slip is None:
             raise RuntimeError("PAPER_EXECUTABLE_FILL_UNAVAILABLE")
+        fill_timestamp = canonical_utc_timestamp()
+        try:
+            cost_semantics = build_execution_cost_semantics(
+                entry=market_ctx.get("entry"),
+                expected_fill=fill,
+                actual_fill=fill,
+                side=market_ctx.get("side"),
+                expected_fill_provenance=PROVENANCE_MODELLED,
+                actual_fill_provenance=PROVENANCE_MODELLED,
+                decision_timestamp=decision.get("decision_time"),
+                fill_timestamp=fill_timestamp,
+            ).as_dict()
+        except ValueError:
+            # Preserve non-campaign compatibility for legacy callers without a
+            # side; canonical side-normalized evidence remains unavailable.
+            cost_semantics = None
         return {
             "mode": ExecutionMode.PAPER.value,
             "symbol": symbol,
             "status": "filled",
             "order_type": decision.get("order_type", "MARKET"),
             "expected_slippage_pct": slip,
+            "expected_fill": fill,
+            "actual_fill": fill,
             "fill_price": fill,
+            "fill_provenance": PROVENANCE_MODELLED,
+            "fill_timestamp": fill_timestamp,
+            "execution_cost_semantics": cost_semantics,
         }
 
     async def _persist_reject(self, payload: dict[str, Any]) -> None:

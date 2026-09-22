@@ -1,3 +1,13 @@
+# Canonical execution-cost semantics — 2026-09-22
+
+- Current version/phase: prospective `execution_cost_semantics_v1` contract on `fix/canonical-execution-cost-semantics`, based on merged PR #379 (`b833f27`).
+- Runtime maturity: `strategy entry -> expected/modelled fill -> actual/realized fill` is now one side-normalized contract. Positive cost is adverse for LONG and SHORT; every percentage/bps metric uses strategy entry as denominator; fees remain separate.
+- BACKTEST/PAPER/LIVE alignment: the authoritative effective-RR pipeline and its existing embedded-entry-slippage no-double-count rule are unchanged. PAPER simulated fills are `MODELLED`, never exchange `ACTUAL`. LIVE submission/authorization is unchanged and does not infer missing fill evidence.
+- Lifecycle/persistence: decision-time JSON contains only entry, expected fill, expected cost, decision timestamp, and provenance. Fill-time PAPER provenance adds modelled actual fill, realized deviation, total realized cost, and fill timestamp. Missing actual fills remain NULL/None/UNAVAILABLE. No schema migration, historical backfill, campaign launch, or campaign mutation.
+- Partial fills: the existing `fills.qty`/`fills.price` ledger now has one deterministic quantity-weighted average helper; it is not wired into the generic LIVE adapter until that adapter supplies authoritative persisted fill groups.
+- Validation: 1,782 tests pass with 3 skips when the one unrelated exact-float assertion in `test_strategy_quality_guardrails.py` is deselected; all focused and relevant execution/runtime/PAPER/position/MTF/SHADOW/LIVE-safety suites pass. LIVE remains NOT READY.
+- Known critical risks: generic LIVE fill persistence/aggregation is still adapter-defined, historical `actual_slippage_pct` rows are not reinterpreted/backfilled, and #374 must add rejected-trade alignment prospectively from decision-time evidence. Last audit date: 2026-09-22. Live readiness verdict: NOT LIVE READY.
+
 # MTF structural RR geometry — 2026-09-21
 
 - Current version/phase: prospective `mtf_setup_structure_v1` PAPER decision-geometry correction on `fix/structural-mtf-rr-geometry`.
