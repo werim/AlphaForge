@@ -7,6 +7,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence
+from alphaforge.burnin import persist_burnin_observation
+from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 from alphaforge.release_gates import build_release_snapshot, persist_canary_event, persist_operator_ack, persist_release_snapshot
@@ -487,3 +489,144 @@ def test_phase6_all_gates_pass_still_blocks_real_live_orders() -> None:
     assert report.qualified is False
     assert report.verdict == "LIVE_REAL_ORDERS_BLOCKED"
     assert any(g.name == "phase6_release_gates_verified" and g.passed for g in (report.gates or []))
+
+
+def _seed_scoped_readiness_run(engine) -> tuple[str, str]:
+    with engine.begin() as conn:
+        campaign = create_campaign(
+            conn,
+            release_id="scope-rel",
+            duration_days=1,
+            symbols=["BTCUSDT", "ETHUSDT"],
+            intervals=["1m"],
+        )
+        run = start_or_resume_campaign(conn, campaign.campaign_id)
+        run_id = str(run["burnin_run_id"])
+        persist_burnin_observation(
+            conn,
+            observation_id="scope-reject",
+            burnin_run_id=run_id,
+            release_id=campaign.release_id,
+            execution_mode="PAPER",
+            symbol="BTCUSDT",
+            decision="REJECTED",
+            lifecycle_state="SIGNAL_REJECTED",
+            metrics={"signal_id": "s-1", "reject_decision_id": "d-1"},
+        )
+        persist_burnin_observation(
+            conn,
+            observation_id="scope-accept",
+            burnin_run_id=run_id,
+            release_id=campaign.release_id,
+            execution_mode="PAPER",
+            symbol="ETHUSDT",
+            decision="ACCEPTED",
+            lifecycle_state="CANCELLED",
+            metrics={"signal_id": "s-2"},
+        )
+        conn.execute(
+            text("UPDATE decision_evidence SET run_id=:run_id WHERE UPPER(mode)='PAPER'"),
+            {"run_id": run_id},
+        )
+    return campaign.campaign_id, run_id
+
+
+def test_readiness_run_scope_ignores_dirty_neighbor_evidence() -> None:
+    engine = _engine()
+    campaign_id, run_id = _seed_scoped_readiness_run(engine)
+
+    with Session(engine) as session:
+        save_order_decision(
+            session,
+            decision_id="dirty-decision",
+            signal_id="dirty-signal",
+            symbol="SOLUSDT",
+            mode="PAPER",
+            decision="REJECTED",
+            reject_reason="DECISION_PARITY_MISMATCH",
+            score=1.0,
+            rr=1.0,
+            parity_result="DECISION_PARITY_MISMATCH",
+        )
+        save_trade_lifecycle_event(
+            session,
+            event_id="dirty-event",
+            signal_id="dirty-signal",
+            symbol="SOLUSDT",
+            mode="PAPER",
+            lifecycle_state="ENTRY_TRIGGERED",
+            event_ts="2026-01-01T00:00:00Z",
+        )
+        session.execute(text("""
+            INSERT INTO decision_evidence(
+                evidence_id,run_id,mode,timestamp,symbol,decision,reject_reason,
+                diagnostics_json,spread_pct,expected_slippage_pct,funding_rate_pct,
+                volume_24h_usdt,liquidity_score,created_at
+            ) VALUES(
+                'dirty-evidence','other-run','PAPER','2026-01-01T00:00:00Z','SOLUSDT','REJECT',
+                'DECISION_PARITY_MISMATCH','DECISION_PARITY_MISMATCH UNAVAILABLE',
+                0,0,0,0,0,'2026-01-01T00:00:00Z'
+            )
+        """))
+        session.commit()
+
+    evaluator = LiveReadinessEvaluator(
+        engine,
+        evidence_mode="PAPER",
+        campaign_id=campaign_id,
+        require_run_scope=True,
+    )
+    assert evaluator.burnin_run_id == run_id
+    assert evaluator._scope_check().passed is True
+
+    with engine.connect() as conn:
+        lifecycle = {check.name: check for check in evaluator._check_lifecycle(conn)}
+        persistence = {check.name: check for check in evaluator._check_persistence(conn)}
+        stats = {check.name: check for check in evaluator._check_stats(conn)}
+
+    assert lifecycle["lifecycle_no_orphans"].passed is True
+    assert lifecycle["lifecycle_error_free"].passed is True
+    assert persistence["phase2_no_decision_parity_mismatch"].passed is True
+    assert persistence["phase2_no_fake_zero_execution_evidence"].passed is True
+    assert persistence["phase2_decision_evidence_rows_present"].details == "decision_evidence_rows=2"
+    assert stats["reject_rate_sanity"].details.endswith("total=2")
+
+
+def test_readiness_mode_scope_ignores_backtest_only_poison() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO decision_evidence(
+                evidence_id,mode,timestamp,symbol,decision,reject_reason,diagnostics_json,
+                spread_pct,expected_slippage_pct,funding_rate_pct,volume_24h_usdt,
+                liquidity_score,created_at
+            ) VALUES(
+                'backtest-poison','BACKTEST','2026-01-01T00:00:00Z','SOLUSDT','REJECT',
+                'DECISION_PARITY_MISMATCH','DECISION_PARITY_MISMATCH UNAVAILABLE',
+                0,0,0,0,0,'2026-01-01T00:00:00Z'
+            )
+        """))
+    with engine.connect() as conn:
+        checks = {check.name: check for check in LiveReadinessEvaluator(engine, evidence_mode="PAPER")._check_persistence(conn)}
+    assert checks["phase2_no_decision_parity_mismatch"].passed is True
+    assert checks["phase2_no_fake_zero_execution_evidence"].passed is True
+
+
+def test_required_readiness_scope_fails_closed_when_campaign_run_is_missing() -> None:
+    engine = _engine()
+    evaluator = LiveReadinessEvaluator(
+        engine,
+        evidence_mode="PAPER",
+        campaign_id="missing-campaign",
+        require_run_scope=True,
+    )
+    scope = evaluator._scope_check()
+    assert scope.passed is False
+    assert "burnin_run_id=UNRESOLVED" in scope.details
+    with engine.connect() as conn:
+        persistence = {check.name: check for check in evaluator._check_persistence(conn)}
+        stats = {check.name: check for check in evaluator._check_stats(conn)}
+    assert persistence["phase2_decision_evidence_rows_present"].passed is False
+    assert persistence["phase2_decision_evidence_rows_present"].details == "decision_evidence_rows=0"
+    assert stats["reject_rate_sanity"].passed is False
+    assert stats["reject_rate_sanity"].details.endswith("total=0")
