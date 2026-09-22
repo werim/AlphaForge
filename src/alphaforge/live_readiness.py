@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any, Mapping
@@ -69,6 +70,7 @@ class LiveReadinessEvaluator:
         burnin_run_id: str | None = None,
         release_id: str | None = None,
         runtime_instance_id: str | None = None,
+        min_effective_rr: float | None = None,
         require_run_scope: bool = False,
     ) -> None:
         self.engine = engine
@@ -79,6 +81,7 @@ class LiveReadinessEvaluator:
         self._explicit_burnin_run_id = str(burnin_run_id) if burnin_run_id else None
         self.release_id = self._resolve_release_id(release_id)
         self.runtime_instance_id = str(runtime_instance_id) if runtime_instance_id else None
+        self.min_effective_rr, self.min_effective_rr_valid = self._normalize_min_effective_rr(min_effective_rr)
         self.require_run_scope = bool(require_run_scope)
         self.burnin_run_id = self._resolve_burnin_run_id(burnin_run_id)
         self._scope_fail_closed = self.require_run_scope and not self.burnin_run_id
@@ -113,10 +116,21 @@ class LiveReadinessEvaluator:
             return None
         return str(row[0]) if row and row[0] else None
 
+    @staticmethod
+    def _normalize_min_effective_rr(value: Any) -> tuple[float | None, bool]:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None, False
+        if not math.isfinite(parsed) or parsed < 0.0:
+            return None, False
+        return parsed, True
+
     def _scope_params(self) -> dict[str, Any]:
         return {
             "readiness_mode": self.evidence_mode,
             "readiness_run_id": self.burnin_run_id,
+            "readiness_min_effective_rr": self.min_effective_rr,
         }
 
     def _signal_scope_sql(self, table: str) -> str:
@@ -201,7 +215,7 @@ class LiveReadinessEvaluator:
         operational = {"alert_delivery_evidence", "observability_coverage"}
         rollback = {"rollback_ready"}
         phase6_release = {"phase6_release_gate_evidence"}
-        phase3_execution_realism = {"execution_cost_breakdown_present", "effective_rr_available", "execution_rejects_persisted", "no_accepted_trade_with_effective_rr_below_threshold", "no_accepted_trade_with_missing_critical_execution_context", "no_fake_zero_execution_costs"}
+        phase3_execution_realism = {"execution_cost_breakdown_present", "effective_rr_available", "execution_rejects_persisted", "effective_rr_threshold_provenance_valid", "no_accepted_trade_with_effective_rr_below_threshold", "no_accepted_trade_with_missing_critical_execution_context", "no_fake_zero_execution_costs"}
         phase4_portfolio_risk = {"portfolio_risk_snapshot_present", "portfolio_risk_rejects_persisted", "no_accepted_trade_over_position_limit", "no_accepted_trade_over_notional_limit", "no_accepted_trade_over_symbol_notional_limit", "no_accepted_trade_after_daily_loss_limit", "no_accepted_trade_with_unknown_portfolio_risk", "correlation_risk_evidence_present", "drawdown_guard_evidence_present", "portfolio_accounting_reconciliation_present", "backtest_and_paper_share_portfolio_risk_engine"}
         gates = [
             CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
@@ -481,8 +495,12 @@ class LiveReadinessEvaluator:
                    AND (effective_rr IS NULL OR cost_penalty IS NULL OR spread_pct IS NULL
                         OR expected_slippage_pct IS NULL OR liquidity_score IS NULL)"""
             )
-            phase3_low_effective_accepted = evidence_count(
-                "UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < 1.6"
+            phase3_low_effective_accepted = (
+                evidence_count(
+                    "UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < :readiness_min_effective_rr"
+                )
+                if self.min_effective_rr_valid
+                else 1
             )
         else:
             evidence_rows = evidence_lifecycle_states = evidence_accepted = evidence_rejected = 0
@@ -513,7 +531,16 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("execution_cost_breakdown_present", phase3_breakdown_rows > 0, f"breakdown_rows={phase3_breakdown_rows}"))
         checks.append(CheckResult("effective_rr_available", phase3_effective_rr_rows > 0, f"effective_rr_rows={phase3_effective_rr_rows}"))
         checks.append(CheckResult("execution_rejects_persisted", phase3_execution_reject_rows > 0, f"execution_reject_rows={phase3_execution_reject_rows},evidence_rejected={evidence_rejected}"))
-        checks.append(CheckResult("no_accepted_trade_with_effective_rr_below_threshold", phase3_low_effective_accepted == 0, f"low_effective_accepted={phase3_low_effective_accepted}"))
+        checks.append(CheckResult(
+            "effective_rr_threshold_provenance_valid",
+            self.min_effective_rr_valid,
+            f"min_effective_rr={self.min_effective_rr if self.min_effective_rr_valid else 'INVALID_OR_MISSING'}",
+        ))
+        checks.append(CheckResult(
+            "no_accepted_trade_with_effective_rr_below_threshold",
+            self.min_effective_rr_valid and phase3_low_effective_accepted == 0,
+            f"low_effective_accepted={phase3_low_effective_accepted};min_effective_rr={self.min_effective_rr if self.min_effective_rr_valid else 'INVALID_OR_MISSING'}",
+        ))
         checks.append(CheckResult("no_accepted_trade_with_missing_critical_execution_context", phase3_missing_critical_accepted == 0, f"missing_critical_accepted={phase3_missing_critical_accepted}"))
 
         portfolio_cols = []
