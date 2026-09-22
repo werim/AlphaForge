@@ -445,6 +445,58 @@ def test_phase2_readiness_fails_on_decision_evidence_parity_mismatch() -> None:
     assert check.passed is False
 
 
+def test_effective_rr_readiness_uses_configured_threshold() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE decision_evidence SET effective_rr=1.35 WHERE decision='ACCEPT'"))
+
+    with engine.connect() as conn:
+        permissive = {
+            check.name: check
+            for check in LiveReadinessEvaluator(
+                engine, min_effective_rr=1.1
+            )._check_persistence(conn)
+        }
+        strict = {
+            check.name: check
+            for check in LiveReadinessEvaluator(
+                engine, min_effective_rr=1.6
+            )._check_persistence(conn)
+        }
+
+    assert permissive["no_accepted_trade_with_effective_rr_below_threshold"].passed is True
+    assert "min_effective_rr=1.1" in permissive[
+        "no_accepted_trade_with_effective_rr_below_threshold"
+    ].details
+    assert strict["no_accepted_trade_with_effective_rr_below_threshold"].passed is False
+    assert "min_effective_rr=1.6" in strict[
+        "no_accepted_trade_with_effective_rr_below_threshold"
+    ].details
+
+
+def test_invalid_effective_rr_readiness_threshold_fails_closed() -> None:
+    evaluator = LiveReadinessEvaluator(_engine(), min_effective_rr=float("nan"))
+    threshold = evaluator._threshold_check()
+    assert threshold.passed is False
+    assert threshold.details == "min_effective_rr=INVALID"
+
+    report = evaluator.evaluate(
+        mode_parity=_parity(),
+        reconciliation_snapshot=_reconciliation(),
+        observability_snapshot=_operational(),
+        canary_enabled=True,
+        shadow_mode_enabled=True,
+        operator_ack=True,
+        dashboard_security=_dashboard_security(),
+        timesfm_evidence=_timesfm_evidence(),
+        paper_burnin_report=_paper_burnin(),
+        tests_passing_evidence=_tests_evidence(),
+    )
+    gates = {gate.name: gate for gate in report.gates or []}
+    assert gates["phase3_execution_realism_complete"].passed is False
+    assert report.verdict == "NOT_LIVE_READY"
+
+
 def test_phase3_execution_gate_blocks_when_each_required_check_fails() -> None:
     mutations = {
         "execution_cost_breakdown_present": "UPDATE decision_evidence SET cost_penalty=NULL, diagnostics_json='{}'",
