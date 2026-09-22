@@ -282,13 +282,12 @@ class LiveReadinessEvaluator:
             scoped = any((self.campaign_id, self.burnin_run_id, self.release_id, self.runtime_instance_id))
             if scoped or self.strict_scope:
                 with self.engine.connect() as conn:
-                    run_id = self._resolved_run_id(conn)
                     clauses: list[str] = []
                     params: dict[str, Any] = {}
                     if self.campaign_id:
                         clauses.append("campaign_id=:campaign_id"); params["campaign_id"] = self.campaign_id
-                    if run_id:
-                        clauses.append("burnin_run_id=:burnin_run_id"); params["burnin_run_id"] = run_id
+                    if self.burnin_run_id:
+                        clauses.append("burnin_run_id=:burnin_run_id"); params["burnin_run_id"] = self.burnin_run_id
                     if self.release_id:
                         clauses.append("release_id=:release_id"); params["release_id"] = self.release_id
                     if self.runtime_instance_id:
