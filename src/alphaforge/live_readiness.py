@@ -341,7 +341,21 @@ class LiveReadinessEvaluator:
         ]
 
     def _check_lifecycle(self, conn: Any) -> list[CheckResult]:
-        rows = conn.execute(text("SELECT signal_id, lifecycle_state, event_ts, reject_reason FROM trade_lifecycle_events ORDER BY signal_id, event_ts")).mappings().all()
+        rows = [dict(row) for row in conn.execute(text(
+            "SELECT signal_id, lifecycle_state, event_ts, reject_reason FROM trade_lifecycle_events ORDER BY signal_id, event_ts"
+        )).mappings().all()]
+        signal_ids = self._scoped_signal_ids(conn)
+        if signal_ids is not None:
+            rows = [row for row in rows if str(row.get("signal_id") or "") in signal_ids]
+            if self.strict_scope and not rows:
+                detail = "scoped_lifecycle_evidence_missing"
+                return [
+                    CheckResult("lifecycle_no_orphans", False, detail),
+                    CheckResult("lifecycle_transitions_valid", False, detail),
+                    CheckResult("lifecycle_error_free", False, detail),
+                    CheckResult("rejected_has_reason", False, detail),
+                    CheckResult("entry_exit_completeness", False, detail),
+                ]
         by_signal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             by_signal.setdefault(str(row["signal_id"]), []).append(dict(row))
@@ -459,11 +473,15 @@ class LiveReadinessEvaluator:
         return checks
 
     def _check_stats(self, conn: Any) -> list[CheckResult]:
-        total = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE COALESCE(phase,'final')='final'")).scalar_one())
-        rejected = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one())
+        rows = self._scoped_table_rows(conn, "order_decisions")
+        final_rows = [row for row in rows if str(row.get("phase") or "final") == "final"]
+        total = len(final_rows)
+        rejected = sum(str(row.get("decision") or "").upper() == "REJECTED" for row in final_rows)
         reject_rate = rejected / total if total else 0.0
-        min_rr, max_rr = conn.execute(text("SELECT MIN(rr), MAX(rr) FROM order_decisions")).one()
-        min_score, max_score = conn.execute(text("SELECT MIN(score), MAX(score) FROM order_decisions")).one()
+        rr_values = [float(row["rr"]) for row in rows if row.get("rr") is not None]
+        score_values = [float(row["score"]) for row in rows if row.get("score") is not None]
+        min_rr, max_rr = (min(rr_values), max(rr_values)) if rr_values else (None, None)
+        min_score, max_score = (min(score_values), max(score_values)) if score_values else (None, None)
         lower, upper = self.reject_rate_bounds
         return [CheckResult("reject_rate_sanity", lower <= reject_rate <= upper if total else False, f"reject_rate={reject_rate:.4f},total={total}"), CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"), CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}")]
 
