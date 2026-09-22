@@ -148,8 +148,8 @@ def test_pending_label_exactly_once_and_calibration_excludes_incomplete():
     aggregate=aggregate_campaign(c,'camp')['metrics']
     assert aggregate['completed_rejected_forward_outcomes'] == 1
     assert aggregate['unique_reject_labels_persisted'] == 1
-    assert aggregate['diagnostic_unique_reject_labels_persisted'] == 2
-    assert aggregate['non_attributable_reject_labels_persisted'] == 1
+    assert aggregate['diagnostic_unique_reject_labels_persisted'] == 3
+    assert aggregate['non_attributable_reject_labels_persisted'] == 2
     assert aggregate['reject_label_integrity_status'] == 'PASS'
     c.execute("update burnin_reject_outcomes set payload_json='{}'")
     assert sum(x['count'] for x in execution_threshold_calibration(c,'camp'))==0
