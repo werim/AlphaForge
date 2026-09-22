@@ -1297,7 +1297,14 @@ class RuntimeOrchestrator:
         engine = self._resolve_persistence_engine()
         if engine is None:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
-        evaluator = LiveReadinessEvaluator(engine)
+        readiness_campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        evaluator = LiveReadinessEvaluator(
+            engine,
+            evidence_mode=ExecutionMode.PAPER.value,
+            campaign_id=readiness_campaign_id,
+            burnin_run_id=self._burnin_run_id,
+            require_run_scope=True,
+        )
         mode_parity = self._build_mode_parity_evidence(min_sample_count=3)
         readiness_inputs: dict[str, dict[str, Any]] = {
             "mode_parity": self._readiness_input_metadata("mode_parity", self, mode_parity),
