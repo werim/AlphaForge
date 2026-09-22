@@ -58,10 +58,79 @@ class QualificationReport:
 
 
 class LiveReadinessEvaluator:
-    def __init__(self, engine: Engine, *, reject_rate_bounds: tuple[float, float] = (0.05, 0.98), runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        reject_rate_bounds: tuple[float, float] = (0.05, 0.98),
+        runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC,
+        campaign_id: str | None = None,
+        burnin_run_id: str | None = None,
+        release_id: str | None = None,
+        runtime_instance_id: str | None = None,
+        strict_scope: bool = False,
+    ) -> None:
         self.engine = engine
         self.reject_rate_bounds = reject_rate_bounds
         self.runtime_heartbeat_max_age_sec = max(1.0, float(runtime_heartbeat_max_age_sec))
+        self.campaign_id = campaign_id
+        self.burnin_run_id = burnin_run_id
+        self.release_id = release_id
+        self.runtime_instance_id = runtime_instance_id
+        self.strict_scope = bool(strict_scope)
+
+    def _resolved_run_id(self, conn: Any) -> str | None:
+        if self.burnin_run_id:
+            return self.burnin_run_id
+        if self.campaign_id:
+            try:
+                row = conn.execute(
+                    text("SELECT active_run_id FROM burnin_campaigns WHERE campaign_id=:cid"),
+                    {"cid": self.campaign_id},
+                ).first()
+                if row and row[0]:
+                    return str(row[0])
+            except Exception:
+                return None
+        return None
+
+    def _scoped_signal_ids(self, conn: Any) -> set[str] | None:
+        run_id = self._resolved_run_id(conn)
+        if not run_id:
+            return set() if self.strict_scope else None
+        try:
+            rows = conn.execute(
+                text("SELECT metrics_json FROM burnin_observations WHERE burnin_run_id=:run_id"),
+                {"run_id": run_id},
+            ).all()
+        except Exception:
+            return set()
+        signal_ids: set[str] = set()
+        for row in rows:
+            try:
+                metrics = json.loads(row[0] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metrics = {}
+            signal_id = str(metrics.get("signal_id") or "").strip() if isinstance(metrics, Mapping) else ""
+            if signal_id:
+                signal_ids.add(signal_id)
+        return signal_ids
+
+    def _scoped_table_rows(self, conn: Any, table: str) -> list[dict[str, Any]]:
+        rows = [dict(row) for row in conn.execute(text(f"SELECT * FROM {table}")).mappings().all()]
+        signal_ids = self._scoped_signal_ids(conn)
+        if signal_ids is None:
+            return rows
+        return [row for row in rows if str(row.get("signal_id") or "") in signal_ids]
+
+    def _scoped_decision_evidence_rows(self, conn: Any) -> list[dict[str, Any]]:
+        rows = [dict(row) for row in conn.execute(text(
+            "SELECT * FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER'"
+        )).mappings().all()]
+        run_id = self._resolved_run_id(conn)
+        if run_id:
+            return [row for row in rows if str(row.get("run_id") or "") == run_id]
+        return [] if self.strict_scope else rows
 
     def evaluate(self, *, mode_parity: Mapping[str, Any], reconciliation_snapshot: Mapping[str, Any], observability_snapshot: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool, kill_switch_active: bool = False, dashboard_security: Mapping[str, Any] | None = None, timesfm_evidence: Mapping[str, Any] | None = None, paper_burnin_report: Mapping[str, Any] | None = None, tests_passing_evidence: Mapping[str, Any] | None = None) -> QualificationReport:
         checks: list[CheckResult] = []
