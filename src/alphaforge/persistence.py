@@ -243,6 +243,7 @@ def init_db(database_url: str | None = None) -> Engine:
             score REAL,
             raw_rr REAL,
             effective_rr REAL,
+            min_effective_rr REAL,
             expectancy REAL,
             expectancy_bucket TEXT,
             reject_reason TEXT,
@@ -572,7 +573,8 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("setup_reason", "setup_reason TEXT"), ("regime", "regime TEXT"),
             ("lifecycle_state_before", "lifecycle_state_before TEXT"), ("lifecycle_state_after", "lifecycle_state_after TEXT"),
             ("decision", "decision TEXT"), ("score", "score REAL"), ("raw_rr", "raw_rr REAL"),
-            ("effective_rr", "effective_rr REAL"), ("expectancy", "expectancy REAL"), ("expectancy_bucket", "expectancy_bucket TEXT"),
+            ("effective_rr", "effective_rr REAL"), ("min_effective_rr", "min_effective_rr REAL"),
+            ("expectancy", "expectancy REAL"), ("expectancy_bucket", "expectancy_bucket TEXT"),
             ("reject_reason", "reject_reason TEXT"), ("cancel_reason", "cancel_reason TEXT"), ("close_reason", "close_reason TEXT"),
             ("entry", "entry REAL"), ("sl", "sl REAL"), ("tp", "tp REAL"), ("trigger_price", "trigger_price REAL"),
             ("close_price", "close_price REAL"), ("net_pnl_pct", "net_pnl_pct REAL"), ("net_pnl_usdt", "net_pnl_usdt REAL"),
@@ -678,6 +680,7 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         ("2026_06_21_timesfm_canonical_evidence", "Add canonical TimesFM forecast evidence and optional forward outcome labels tables."),
         ("2026_06_23_core_identifier_normalization", "Add normalized lifecycle identifier columns and safe join indexes."),
         ("2026_07_06_phase2_decision_evidence", "Add SQL-backed decision evidence export surface for lifecycle/dashboard reconciliation."),
+        ("2026_09_22_decision_threshold_provenance", "Add decision-time min_effective_rr provenance to durable decision evidence."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_core_identifier_schema(conn)
