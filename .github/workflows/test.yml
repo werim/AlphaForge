@@ -6,6 +6,7 @@ on:
     branches:
       - dev
       - main
+      - fix/381-evidence-authority
   pull_request:
     branches:
       - dev
