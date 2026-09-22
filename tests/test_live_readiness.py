@@ -146,7 +146,7 @@ def _evaluate(engine, observations=None, **overrides):
         "tests_passing_evidence": _tests_evidence(),
     }
     kwargs.update(overrides)
-    return LiveReadinessEvaluator(engine).evaluate(**kwargs)
+    return LiveReadinessEvaluator(engine, min_effective_rr=1.6).evaluate(**kwargs)
 
 
 def test_live_readiness_pass_and_persistence() -> None:
@@ -688,3 +688,61 @@ def test_scoped_precheck_startup_snapshot_does_not_require_paper_run_attachment(
     }
     assert checks["runtime_state_snapshot_present"].passed is True
     assert checks["runtime_db_persistence_verified"].passed is True
+
+
+def test_effective_rr_readiness_uses_configured_threshold_not_hardcoded_value() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE decision_evidence SET effective_rr=1.35 WHERE evidence_id='de-2'"))
+
+    with engine.connect() as conn:
+        low_threshold = {
+            check.name: check
+            for check in LiveReadinessEvaluator(engine, min_effective_rr=1.1)._check_persistence(conn)
+        }
+    assert low_threshold["effective_rr_threshold_provenance_valid"].passed is True
+    assert low_threshold["no_accepted_trade_with_effective_rr_below_threshold"].passed is True
+    assert "min_effective_rr=1.1" in low_threshold["no_accepted_trade_with_effective_rr_below_threshold"].details
+
+    with engine.connect() as conn:
+        high_threshold = {
+            check.name: check
+            for check in LiveReadinessEvaluator(engine, min_effective_rr=1.6)._check_persistence(conn)
+        }
+    assert high_threshold["effective_rr_threshold_provenance_valid"].passed is True
+    assert high_threshold["no_accepted_trade_with_effective_rr_below_threshold"].passed is False
+    assert "min_effective_rr=1.6" in high_threshold["no_accepted_trade_with_effective_rr_below_threshold"].details
+
+
+def test_effective_rr_readiness_threshold_invalid_values_fail_closed() -> None:
+    engine = _engine()
+    for value in (None, float("nan"), float("inf"), -0.1, "not-a-number"):
+        with engine.connect() as conn:
+            checks = {
+                check.name: check
+                for check in LiveReadinessEvaluator(engine, min_effective_rr=value)._check_persistence(conn)
+            }
+        assert checks["effective_rr_threshold_provenance_valid"].passed is False
+        assert checks["no_accepted_trade_with_effective_rr_below_threshold"].passed is False
+        assert "INVALID_OR_MISSING" in checks["no_accepted_trade_with_effective_rr_below_threshold"].details
+
+
+def test_phase3_gate_requires_valid_effective_rr_threshold_provenance() -> None:
+    engine = _engine()
+    report = LiveReadinessEvaluator(engine, min_effective_rr=None).evaluate(
+        mode_parity=_parity(),
+        reconciliation_snapshot=_reconciliation(),
+        observability_snapshot=_operational(),
+        canary_enabled=True,
+        shadow_mode_enabled=True,
+        operator_ack=True,
+        dashboard_security=_dashboard_security(),
+        timesfm_evidence=_timesfm_evidence(),
+        paper_burnin_report=_paper_burnin(),
+        tests_passing_evidence=_tests_evidence(),
+    )
+    checks = {check.name: check for check in report.checks}
+    gates = {gate.name: gate for gate in report.gates or []}
+    assert checks["effective_rr_threshold_provenance_valid"].passed is False
+    assert gates["phase3_execution_realism_complete"].passed is False
+    assert report.verdict == "NOT_LIVE_READY"
