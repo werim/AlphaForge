@@ -290,6 +290,7 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
             "executable_raw_rr":source_provenance.get("executable_raw_rr"),
             "remaining_execution_penalty":source_provenance.get("remaining_execution_penalty"),
             "effective_rr_at_decision":source_provenance.get("effective_rr_at_decision"),
+            "counterfactual_effective_rr":source_provenance.get("counterfactual_effective_rr"),
             "entry_slippage_embedded_in_fill":source_provenance.get("entry_slippage_embedded_in_fill"),
             "embedded_entry_slippage_cost":source_provenance.get("embedded_entry_slippage_cost"),
             "fill_shift_initial_risk_ratio":source_provenance.get("fill_shift_initial_risk_ratio"),
