@@ -630,3 +630,61 @@ def test_required_readiness_scope_fails_closed_when_campaign_run_is_missing() ->
     assert persistence["phase2_decision_evidence_rows_present"].details == "decision_evidence_rows=0"
     assert stats["reject_rate_sanity"].passed is False
     assert stats["reject_rate_sanity"].details.endswith("total=0")
+
+
+def test_scoped_release_gate_does_not_borrow_default_release() -> None:
+    engine = _engine()
+    check = LiveReadinessEvaluator(
+        engine,
+        release_id="different-release",
+        require_run_scope=True,
+    )._check_release_gates()[0]
+    assert check.passed is False
+    assert "different-release" in check.details
+
+
+def test_scoped_runtime_state_does_not_borrow_other_instance() -> None:
+    engine = _engine()
+    checks = {
+        check.name: check
+        for check in LiveReadinessEvaluator(
+            engine,
+            runtime_instance_id="runtime:not-present",
+        )._check_runtime_state_snapshot()
+    }
+    assert checks["runtime_state_snapshot_present"].passed is False
+
+
+def test_scoped_precheck_startup_snapshot_does_not_require_paper_run_attachment() -> None:
+    engine = _engine(persist_runtime_snapshot=False)
+    save_runtime_state_snapshot(
+        engine,
+        RuntimeStateSnapshot(
+            mode="LIVE_PRECHECK",
+            requested_mode="LIVE_PRECHECK",
+            actual_mode="LIVE_PRECHECK",
+            runtime_status="STARTUP",
+            heartbeat_age_sec=1.0,
+            instance_id="runtime:precheck-current",
+            campaign_id="camp-current",
+            burnin_run_id=None,
+            release_id="rel-current",
+            kill_switch_active=False,
+            unknown_exchange_state=False,
+            exchange_read_only_status="AVAILABLE",
+            reconciliation_status="CLEAN",
+            recovery_action_required=False,
+        ),
+    )
+    checks = {
+        check.name: check
+        for check in LiveReadinessEvaluator(
+            engine,
+            campaign_id="camp-current",
+            burnin_run_id=None,
+            release_id="rel-current",
+            runtime_instance_id="runtime:precheck-current",
+        )._check_runtime_state_snapshot()
+    }
+    assert checks["runtime_state_snapshot_present"].passed is True
+    assert checks["runtime_db_persistence_verified"].passed is True
