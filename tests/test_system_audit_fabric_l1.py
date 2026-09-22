@@ -227,3 +227,36 @@ def test_l1_safe_wrapper_isolates_audit_process_failure(
     assert result["error_type"]=="RuntimeError"
     after=conn.execute("SELECT COUNT(*) FROM audit_decision_envelopes").fetchone()[0]
     assert after==before
+
+def test_l1_regime_mismatch_false_reject_is_attributed_to_regime_gate(tmp_path: Path) -> None:
+    conn=_audit(tmp_path)
+    _envelope(
+        conn,
+        envelope_id="regime-miss",
+        decision="REJECT",
+        regime="TRENDING",
+        setup="RANGE_MEAN_REVERSION",
+        reject_reason="REGIME_MISMATCH",
+        gates=["REGIME_MISMATCH","LOW_SCORE"],
+    )
+    _outcome(
+        conn,
+        envelope_id="regime-miss",
+        kind="REJECT_SHADOW",
+        net_r=0.9,
+        expected=1.3,
+        realized=0.9,
+    )
+    conn.commit()
+
+    report=run_system_diagnostics(conn)
+    row=conn.execute(
+        "SELECT observed_cell,attribution_json FROM audit_decision_classifications "
+        "WHERE audit_run_id=? AND envelope_id='regime-miss'",
+        (report["audit_run_id"],),
+    ).fetchone()
+    attribution=json.loads(row["attribution_json"])
+
+    assert row["observed_cell"]=="FALSE_REJECT"
+    assert attribution["REGIME_MISMATCH"]>attribution["LOW_SCORE"]
+    assert report["observed_matrix"]["FALSE_REJECT"]==1
