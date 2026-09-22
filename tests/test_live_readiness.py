@@ -579,7 +579,6 @@ def test_strict_scope_runtime_state_does_not_borrow_other_instance() -> None:
         for check in LiveReadinessEvaluator(
             engine,
             runtime_instance_id="runtime:not-present",
-            execution_mode="LIVE_PRECHECK",
             strict_scope=True,
         )._check_runtime_state_snapshot()
     }
