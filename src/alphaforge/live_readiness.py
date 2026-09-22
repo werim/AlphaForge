@@ -382,54 +382,122 @@ class LiveReadinessEvaluator:
 
     def _check_persistence(self, conn: Any) -> list[CheckResult]:
         checks: list[CheckResult] = []
+        scoped_by_table: dict[str, list[dict[str, Any]]] = {}
         for table, fields in {"signals": CRITICAL_SIGNAL_FIELDS, "order_decisions": CRITICAL_DECISION_FIELDS, "trade_lifecycle_events": CRITICAL_LIFECYCLE_FIELDS}.items():
             cols = {str(r[1]) for r in conn.execute(text(f"PRAGMA table_info({table})")).all()}
             missing = [field for field in fields if field not in cols]
             checks.append(CheckResult(f"schema_{table}", not missing, f"missing_fields={missing}"))
-            null_rows = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE " + " OR ".join([f"{field} IS NULL" for field in fields]))).scalar_one()
-            checks.append(CheckResult(f"critical_not_null_{table}", int(null_rows) == 0, f"null_rows={null_rows}"))
-        rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
-        rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE lifecycle_state='SIGNAL_REJECTED'")).scalar_one()
-        checks.append(CheckResult("reject_persistence_parity", int(rejected_decisions) <= int(rejected_events), f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
-        decision_evidence_exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_evidence'")).scalar_one() > 0
-        lifecycle_rows = int(conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events")).scalar_one())
-        accepted_events = int(conn.execute(text("SELECT COUNT(DISTINCT signal_id) FROM trade_lifecycle_events WHERE lifecycle_state IN ('SIGNAL_ACCEPTED','WAITING_ENTRY_ZONE','ENTRY_TRIGGERED','ORDER_PLACED','POSITION_OPENED','POSITION_CLOSED','TP_HIT','SL_HIT','OPEN_AT_END','CANCELLED','ENTRY_TIMEOUT')")).scalar_one())
+            rows = self._scoped_table_rows(conn, table) if not missing else []
+            scoped_by_table[table] = rows
+            null_rows = sum(any(row.get(field) is None for field in fields) for row in rows)
+            checks.append(CheckResult(f"critical_not_null_{table}", not missing and null_rows == 0, f"null_rows={null_rows}"))
+
+        decision_rows = scoped_by_table["order_decisions"]
+        lifecycle = scoped_by_table["trade_lifecycle_events"]
+        rejected_decisions = sum(
+            str(row.get("decision") or "").upper() == "REJECTED"
+            and str(row.get("phase") or "final") == "final"
+            for row in decision_rows
+        )
+        rejected_events = sum(str(row.get("lifecycle_state") or "") == "SIGNAL_REJECTED" for row in lifecycle)
+        checks.append(CheckResult(
+            "reject_persistence_parity",
+            rejected_decisions <= rejected_events,
+            f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}",
+        ))
+        lifecycle_rows = len(lifecycle)
+        accepted_states = {
+            "SIGNAL_ACCEPTED","WAITING_ENTRY_ZONE","ENTRY_TRIGGERED","ORDER_PLACED",
+            "POSITION_OPENED","POSITION_CLOSED","TP_HIT","SL_HIT","OPEN_AT_END",
+            "CANCELLED","ENTRY_TIMEOUT",
+        }
+        accepted_events = len({
+            str(row.get("signal_id") or "")
+            for row in lifecycle
+            if str(row.get("lifecycle_state") or "") in accepted_states and row.get("signal_id")
+        })
+
+        decision_evidence_exists = conn.execute(text(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_evidence'"
+        )).scalar_one() > 0
+        portfolio_cols: list[str] = []
+        evidence: list[dict[str, Any]] = []
+        backtest_evidence: list[dict[str, Any]] = []
         if decision_evidence_exists:
-            evidence_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence")).scalar_one())
-            evidence_lifecycle_states = int(conn.execute(text("SELECT COUNT(DISTINCT lifecycle_state_after) FROM decision_evidence WHERE COALESCE(lifecycle_state_after,'') <> ''")).scalar_one())
-            evidence_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT'")).scalar_one())
-            evidence_rejected = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='REJECT'")).scalar_one())
-            evidence_parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(diagnostics_json,'')) LIKE '%DECISION_PARITY_MISMATCH%'")).scalar_one())
-            evidence_fake_zero_rows = int(conn.execute(text("""
-                SELECT COUNT(*) FROM decision_evidence
-                WHERE UPPER(COALESCE(diagnostics_json,'')) LIKE '%UNAVAILABLE%'
-                  AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0 OR COALESCE(volume_24h_usdt, -999) = 0 OR COALESCE(liquidity_score, -999) = 0)
-            """)).scalar_one())
-            phase3_breakdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE cost_penalty IS NOT NULL AND (diagnostics_json LIKE '%spread_penalty%' OR diagnostics_json LIKE '%cost_penalty%')")).scalar_one())
-            phase3_effective_rr_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE raw_rr IS NOT NULL AND effective_rr IS NOT NULL")).scalar_one())
-            phase3_execution_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','HIGH_SLIPPAGE','HIGH_TOTAL_COST','LOW_LIQUIDITY','HIGH_LATENCY','EXECUTION_CONTEXT_UNAVAILABLE','EXCESSIVE_VOLATILITY_PENALTY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')")).scalar_one())
-            phase3_missing_critical_accepted = int(conn.execute(text("""
-                SELECT COUNT(*) FROM decision_evidence
-                WHERE UPPER(COALESCE(decision,''))='ACCEPT'
-                  AND (effective_rr IS NULL OR cost_penalty IS NULL OR spread_pct IS NULL OR expected_slippage_pct IS NULL OR liquidity_score IS NULL)
-            """)).scalar_one())
-            phase3_low_effective_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < 1.6")).scalar_one())
-        else:
-            evidence_rows = evidence_lifecycle_states = evidence_accepted = evidence_rejected = 0
-            evidence_parity_rows = evidence_fake_zero_rows = 1
-            phase3_breakdown_rows = phase3_effective_rr_rows = phase3_execution_reject_rows = 0
-            phase3_missing_critical_accepted = phase3_low_effective_accepted = 1
-        parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH'")).scalar_one()) + evidence_parity_rows
-        fake_zero_rows = int(conn.execute(text("""
-            SELECT COUNT(*) FROM order_decisions
-            WHERE COALESCE(execution_ctx_missing,0)=1
-              AND UPPER(COALESCE(execution_ctx,'')) LIKE '%UNAVAILABLE%'
-              AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0)
-        """)).scalar_one()) + evidence_fake_zero_rows
+            portfolio_cols = [str(r[1]) for r in conn.execute(text("PRAGMA table_info(decision_evidence)")).all()]
+            evidence = self._scoped_decision_evidence_rows(conn)
+            backtest_evidence = [dict(row) for row in conn.execute(text(
+                "SELECT * FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='BACKTEST'"
+            )).mappings().all()]
+
+        accepted_values = {"ACCEPT","ACCEPTED"}
+        rejected_values = {"REJECT","REJECTED"}
+        evidence_rows = len(evidence)
+        evidence_lifecycle_states = len({
+            str(row.get("lifecycle_state_after") or "") for row in evidence
+            if str(row.get("lifecycle_state_after") or "")
+        })
+        evidence_accepted = sum(str(row.get("decision") or "").upper() in accepted_values for row in evidence)
+        evidence_rejected = sum(str(row.get("decision") or "").upper() in rejected_values for row in evidence)
+        evidence_parity_rows = sum(
+            str(row.get("reject_reason") or "").upper() == "DECISION_PARITY_MISMATCH"
+            or "DECISION_PARITY_MISMATCH" in str(row.get("diagnostics_json") or "").upper()
+            for row in evidence
+        )
+        fake_keys = ("spread_pct","expected_slippage_pct","funding_rate_pct","volume_24h_usdt","liquidity_score")
+        evidence_fake_zero_rows = sum(
+            "UNAVAILABLE" in str(row.get("diagnostics_json") or "").upper()
+            and any(row.get(key) == 0 for key in fake_keys)
+            for row in evidence
+        )
+        phase3_breakdown_rows = sum(
+            row.get("cost_penalty") is not None
+            and ("spread_penalty" in str(row.get("diagnostics_json") or "")
+                 or "cost_penalty" in str(row.get("diagnostics_json") or ""))
+            for row in evidence
+        )
+        phase3_effective_rr_rows = sum(
+            row.get("raw_rr") is not None and row.get("effective_rr") is not None
+            for row in evidence
+        )
+        execution_rejects = {
+            "LOW_EFFECTIVE_RR","HIGH_SPREAD","HIGH_SLIPPAGE","HIGH_TOTAL_COST",
+            "LOW_LIQUIDITY","HIGH_LATENCY","EXECUTION_CONTEXT_UNAVAILABLE",
+            "EXCESSIVE_VOLATILITY_PENALTY","FUNDING_UNAVAILABLE","FUNDING_TOO_HIGH",
+        }
+        phase3_execution_reject_rows = sum(
+            str(row.get("reject_reason") or "").upper() in execution_rejects
+            for row in evidence
+        )
+        phase3_missing_critical_accepted = sum(
+            str(row.get("decision") or "").upper() in accepted_values
+            and any(row.get(key) is None for key in (
+                "effective_rr","cost_penalty","spread_pct","expected_slippage_pct","liquidity_score"
+            ))
+            for row in evidence
+        )
+        phase3_low_effective_accepted = sum(
+            str(row.get("decision") or "").upper() in accepted_values
+            and row.get("effective_rr") is not None
+            and float(row["effective_rr"]) < 1.6
+            for row in evidence
+        )
+        parity_rows = sum(
+            str(row.get("reject_reason") or "").upper() == "DECISION_PARITY_MISMATCH"
+            or str(row.get("parity_result") or "").upper() == "DECISION_PARITY_MISMATCH"
+            for row in decision_rows
+        ) + evidence_parity_rows
+        fake_zero_rows = sum(
+            int(row.get("execution_ctx_missing") or 0) == 1
+            and "UNAVAILABLE" in str(row.get("execution_ctx") or "").upper()
+            and any(row.get(key) == 0 for key in ("spread_pct","expected_slippage_pct","funding_rate_pct"))
+            for row in decision_rows
+        ) + evidence_fake_zero_rows
+
         checks.append(CheckResult("phase2_decision_evidence_table_exists", decision_evidence_exists, f"decision_evidence_exists={decision_evidence_exists}"))
         checks.append(CheckResult("phase2_decision_evidence_rows_present", evidence_rows > 0, f"decision_evidence_rows={evidence_rows}"))
         checks.append(CheckResult("phase2_lifecycle_evidence_present", lifecycle_rows > 0 and evidence_lifecycle_states > 0, f"lifecycle_rows={lifecycle_rows},decision_evidence_lifecycle_states={evidence_lifecycle_states}"))
-        checks.append(CheckResult("phase2_reject_evidence_present", int(rejected_decisions) > 0 and int(rejected_events) > 0 and evidence_rejected > 0, f"rejected_decisions={rejected_decisions},rejected_events={rejected_events},decision_evidence_rejected={evidence_rejected}"))
+        checks.append(CheckResult("phase2_reject_evidence_present", rejected_decisions > 0 and rejected_events > 0 and evidence_rejected > 0, f"rejected_decisions={rejected_decisions},rejected_events={rejected_events},decision_evidence_rejected={evidence_rejected}"))
         checks.append(CheckResult("phase2_accept_evidence_present", accepted_events > 0 and evidence_accepted > 0, f"accepted_signal_ids={accepted_events},decision_evidence_accepted={evidence_accepted}"))
         checks.append(CheckResult("phase2_no_fake_zero_execution_evidence", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
         checks.append(CheckResult("phase2_no_decision_parity_mismatch", parity_rows == 0, f"decision_parity_mismatch_rows={parity_rows}"))
@@ -438,26 +506,72 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("execution_rejects_persisted", phase3_execution_reject_rows > 0, f"execution_reject_rows={phase3_execution_reject_rows},evidence_rejected={evidence_rejected}"))
         checks.append(CheckResult("no_accepted_trade_with_effective_rr_below_threshold", phase3_low_effective_accepted == 0, f"low_effective_accepted={phase3_low_effective_accepted}"))
         checks.append(CheckResult("no_accepted_trade_with_missing_critical_execution_context", phase3_missing_critical_accepted == 0, f"missing_critical_accepted={phase3_missing_critical_accepted}"))
-        portfolio_cols = []
-        if decision_evidence_exists:
-            portfolio_cols = [str(r[1]) for r in conn.execute(text("PRAGMA table_info(decision_evidence)")).all()]
-        has_portfolio_cols = {"portfolio_equity", "open_position_count", "total_notional_exposure", "portfolio_risk_state", "portfolio_diagnostics_json"}.issubset(set(portfolio_cols))
+
+        has_portfolio_cols = {"portfolio_equity","open_position_count","total_notional_exposure","portfolio_risk_state","portfolio_diagnostics_json"}.issubset(set(portfolio_cols))
         if decision_evidence_exists and has_portfolio_cols:
-            portfolio_snapshot_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL OR portfolio_diagnostics_json IS NOT NULL")).scalar_one())
-            portfolio_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE portfolio_reject_reason IS NOT NULL AND portfolio_reject_reason <> ''")).scalar_one())
-            accepted_over_position = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_open_positions IS NOT NULL AND open_position_count > max_open_positions")).scalar_one()) if "max_open_positions" in portfolio_cols else 1
-            accepted_over_notional = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_notional_exposure IS NOT NULL AND total_notional_exposure > max_notional_exposure")).scalar_one())
-            accepted_over_symbol = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_symbol_notional IS NOT NULL AND symbol_notional_exposure > max_symbol_notional")).scalar_one())
-            accepted_after_daily_loss = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_daily_loss_pct IS NOT NULL AND daily_loss_pct >= max_daily_loss_pct")).scalar_one())
-            accepted_unknown = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND UPPER(COALESCE(portfolio_risk_state,'')) LIKE '%UNKNOWN%'")).scalar_one())
-            correlation_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE correlation_group IS NOT NULL OR correlated_position_count IS NOT NULL")).scalar_one())
-            drawdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE rolling_drawdown_pct IS NOT NULL OR daily_loss_pct IS NOT NULL")).scalar_one())
-            reconcile_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
-            accounting_distinct_states = int(conn.execute(text("SELECT COUNT(DISTINCT COALESCE(CAST(open_position_count AS TEXT),'') || ':' || COALESCE(CAST(total_notional_exposure AS TEXT),'') || ':' || COALESCE(CAST(portfolio_equity AS TEXT),'')) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
-            shared_engine_rows = int(conn.execute(text("SELECT COUNT(DISTINCT mode) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL AND mode IN ('BACKTEST','PAPER')")).scalar_one())
+            portfolio_snapshot_rows = sum(
+                row.get("portfolio_risk_state") is not None or row.get("portfolio_diagnostics_json") is not None
+                for row in evidence
+            )
+            portfolio_reject_rows = sum(bool(str(row.get("portfolio_reject_reason") or "").strip()) for row in evidence)
+            accepted_over_position = sum(
+                str(row.get("decision") or "").upper() in accepted_values
+                and row.get("max_open_positions") is not None
+                and row.get("open_position_count") is not None
+                and float(row["open_position_count"]) > float(row["max_open_positions"])
+                for row in evidence
+            ) if "max_open_positions" in portfolio_cols else 1
+            accepted_over_notional = sum(
+                str(row.get("decision") or "").upper() in accepted_values
+                and row.get("max_notional_exposure") is not None
+                and row.get("total_notional_exposure") is not None
+                and float(row["total_notional_exposure"]) > float(row["max_notional_exposure"])
+                for row in evidence
+            )
+            accepted_over_symbol = sum(
+                str(row.get("decision") or "").upper() in accepted_values
+                and row.get("max_symbol_notional") is not None
+                and row.get("symbol_notional_exposure") is not None
+                and float(row["symbol_notional_exposure"]) > float(row["max_symbol_notional"])
+                for row in evidence
+            )
+            accepted_after_daily_loss = sum(
+                str(row.get("decision") or "").upper() in accepted_values
+                and row.get("max_daily_loss_pct") is not None
+                and row.get("daily_loss_pct") is not None
+                and float(row["daily_loss_pct"]) >= float(row["max_daily_loss_pct"])
+                for row in evidence
+            )
+            accepted_unknown = sum(
+                str(row.get("decision") or "").upper() in accepted_values
+                and "UNKNOWN" in str(row.get("portfolio_risk_state") or "").upper()
+                for row in evidence
+            )
+            correlation_rows = sum(
+                row.get("correlation_group") is not None or row.get("correlated_position_count") is not None
+                for row in evidence
+            )
+            drawdown_rows = sum(
+                row.get("rolling_drawdown_pct") is not None or row.get("daily_loss_pct") is not None
+                for row in evidence
+            )
+            reconcile_rows = sum(
+                row.get("open_position_count") is not None and row.get("total_notional_exposure") is not None
+                for row in evidence
+            )
+            accounting_states = {
+                (row.get("open_position_count"),row.get("total_notional_exposure"),row.get("portfolio_equity"))
+                for row in evidence
+                if row.get("open_position_count") is not None and row.get("total_notional_exposure") is not None
+            }
+            accounting_distinct_states = len(accounting_states)
+            current_paper_portfolio = any(row.get("portfolio_risk_state") is not None for row in evidence)
+            backtest_portfolio = any(row.get("portfolio_risk_state") is not None for row in backtest_evidence)
+            shared_engine_rows = int(current_paper_portfolio) + int(backtest_portfolio)
         else:
             portfolio_snapshot_rows = portfolio_reject_rows = correlation_rows = drawdown_rows = reconcile_rows = shared_engine_rows = accounting_distinct_states = 0
             accepted_over_position = accepted_over_notional = accepted_over_symbol = accepted_after_daily_loss = accepted_unknown = 1
+
         checks.append(CheckResult("no_fake_zero_execution_costs", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
         checks.append(CheckResult("portfolio_risk_snapshot_present", portfolio_snapshot_rows > 0, f"portfolio_snapshot_rows={portfolio_snapshot_rows},portfolio_columns={has_portfolio_cols}"))
         checks.append(CheckResult("portfolio_risk_rejects_persisted", portfolio_reject_rows > 0, f"portfolio_reject_rows={portfolio_reject_rows}"))
