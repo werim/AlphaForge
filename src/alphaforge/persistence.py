@@ -867,6 +867,71 @@ def save_signal(session: Any, **signal: Any) -> Any:
         return signal.get("id")
 
 
+DECISION_EVIDENCE_COLUMNS: tuple[str, ...] = (
+    "evidence_id", "run_id", "profile_id", "profile_name", "mode", "timestamp", "symbol", "side",
+    "setup_type", "setup_reason", "regime", "lifecycle_state_before", "lifecycle_state_after",
+    "decision", "score", "raw_rr", "effective_rr", "expectancy", "expectancy_bucket", "reject_reason",
+    "cancel_reason", "close_reason", "entry", "sl", "tp", "trigger_price", "close_price", "net_pnl_pct",
+    "net_pnl_usdt", "hold_minutes", "volume_24h_usdt", "spread_pct", "funding_rate_pct",
+    "expected_slippage_pct", "liquidity_score", "volatility_regime", "cost_penalty", "total_cost_pct",
+    "total_explicit_cost_pct", "spread_source", "slippage_source", "fee_pct", "fee_source",
+    "funding_source", "latency_ms", "latency_source", "liquidity_status", "volatility_penalty_pct",
+    "volatility_source", "reject_flags", "unavailable_fields", "diagnostics_json", "portfolio_equity",
+    "available_balance", "open_position_count", "max_open_positions", "total_notional_exposure",
+    "max_notional_exposure", "symbol_notional_exposure", "max_symbol_notional", "side_exposure_long",
+    "side_exposure_short", "net_exposure", "gross_exposure", "daily_realized_pnl", "daily_loss_pct",
+    "max_daily_loss_pct", "rolling_drawdown_pct", "consecutive_loss_count", "correlation_group",
+    "correlation_group_exposure", "correlated_position_count", "risk_flags", "portfolio_reject_reason",
+    "portfolio_risk_state", "portfolio_diagnostics_json", "signal_id", "order_id", "position_id",
+    "lifecycle_id", "lifecycle_seq", "created_at",
+)
+_DECISION_EVIDENCE_JSON_COLUMNS = {
+    "reject_flags", "unavailable_fields", "diagnostics_json", "risk_flags",
+    "portfolio_diagnostics_json",
+}
+
+
+def save_decision_evidence(bind: Any, **evidence: Any) -> bool:
+    """Persist one normalized decision evidence row without inventing unavailable values.
+
+    Callers own the surrounding transaction. The stable evidence_id makes replay
+    idempotent across BACKTEST/PAPER/LIVE_PRECHECK.
+    """
+    if bind is None or not evidence.get("evidence_id"):
+        return False
+    values: dict[str, Any] = {column: evidence.get(column) for column in DECISION_EVIDENCE_COLUMNS}
+    raw_decision = str(values.get("decision") or "").upper()
+    values["decision"] = {
+        "ACCEPTED": "ACCEPT",
+        "REJECTED": "REJECT",
+        "PENDING": "WAIT",
+    }.get(raw_decision, raw_decision or None)
+    if values.get("reject_reason") and values["decision"] == "REJECT":
+        values["reject_reason"] = canonical_reject_reason(values["reject_reason"])
+    values["timestamp"] = (
+        canonical_utc_timestamp(values["timestamp"]) if values.get("timestamp") is not None
+        else _utc_now_iso()
+    )
+    values["created_at"] = values.get("created_at") or _utc_now_iso()
+    for column in _DECISION_EVIDENCE_JSON_COLUMNS:
+        value = values.get(column)
+        if value is not None and not isinstance(value, str):
+            values[column] = json.dumps(value, sort_keys=True, default=str)
+    columns = ", ".join(DECISION_EVIDENCE_COLUMNS)
+    placeholders = ", ".join(f":{column}" for column in DECISION_EVIDENCE_COLUMNS)
+    updates = ", ".join(
+        f"{column}=excluded.{column}"
+        for column in DECISION_EVIDENCE_COLUMNS
+        if column not in {"evidence_id", "created_at"}
+    )
+    bind.execute(text(f"""
+        INSERT INTO decision_evidence ({columns})
+        VALUES ({placeholders})
+        ON CONFLICT(evidence_id) DO UPDATE SET {updates}
+    """), values)
+    return True
+
+
 def save_order_decision(session: Any, **decision: Any) -> Any:
     if session is None:
         return None
