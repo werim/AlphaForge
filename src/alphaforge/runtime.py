@@ -1098,9 +1098,21 @@ class RuntimeOrchestrator:
         cost_breakdown: dict[str, Any] = {}
         if execution_ctx:
             try:
-                cost_breakdown = build_execution_cost_model(
+                model = build_execution_cost_model(
                     execution_ctx, include_missing_penalty=False
-                ).as_dict()
+                )
+                cost_breakdown = {
+                    "spread_penalty": model.spread_penalty,
+                    "slippage_penalty": model.slippage_penalty,
+                    "latency_penalty": model.latency_penalty,
+                    "fee_penalty": model.fee_penalty,
+                    "funding_penalty": model.funding_penalty,
+                    "liquidity_penalty": model.liquidity_penalty,
+                    "volatility_penalty": model.volatility_penalty,
+                    "cost_penalty_rr": model.total_penalty,
+                    "missing_fields": list(model.missing_fields),
+                    "completeness": model.completeness,
+                }
             except Exception:
                 cost_breakdown = {}
         portfolio_diagnostics = payload.get("portfolio_diagnostics")
@@ -1174,22 +1186,22 @@ class RuntimeOrchestrator:
                 "volatility_regime", execution_ctx.get("volatility_regime")
             ),
             cost_penalty=cost_penalty,
-            total_cost_pct=cost_breakdown.get("total_cost_pct"),
-            total_explicit_cost_pct=cost_breakdown.get("total_explicit_cost_pct"),
-            spread_source=cost_breakdown.get("spread_source"),
-            slippage_source=cost_breakdown.get("slippage_source"),
-            fee_pct=cost_breakdown.get("fee_pct"),
-            fee_source=cost_breakdown.get("fee_source"),
-            funding_source=cost_breakdown.get("funding_source"),
+            total_cost_pct=execution_ctx.get("total_cost_pct"),
+            total_explicit_cost_pct=execution_ctx.get("total_explicit_cost_pct"),
+            spread_source=execution_ctx.get("spread_source"),
+            slippage_source=execution_ctx.get("slippage_source"),
+            fee_pct=execution_ctx.get("fee_pct"),
+            fee_source=execution_ctx.get("fee_source"),
+            funding_source=execution_ctx.get("funding_source"),
             latency_ms=payload.get(
                 "latency_ms", execution_ctx.get("market_data_latency_ms", execution_ctx.get("latency_ms"))
             ),
-            latency_source=cost_breakdown.get("latency_source"),
-            liquidity_status=cost_breakdown.get("liquidity_status"),
-            volatility_penalty_pct=cost_breakdown.get("volatility_penalty_pct"),
-            volatility_source=cost_breakdown.get("volatility_source"),
-            reject_flags=cost_breakdown.get("reject_flags"),
-            unavailable_fields=cost_breakdown.get("unavailable_fields"),
+            latency_source=execution_ctx.get("latency_source"),
+            liquidity_status=execution_ctx.get("liquidity_status"),
+            volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
+            volatility_source=execution_ctx.get("volatility_source"),
+            reject_flags=None,
+            unavailable_fields=cost_breakdown.get("missing_fields"),
             diagnostics_json=diagnostics,
             portfolio_equity=snapshot.get("equity"),
             available_balance=snapshot.get("available_balance"),
