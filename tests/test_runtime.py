@@ -762,6 +762,56 @@ def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> Non
     assert metrics["structural_target"] == pytest.approx(110.0)
 
 
+def test_live_precheck_burnin_decision_persists_scoped_no_submit_evidence(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'precheck-evidence.db'}")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    orchestrator._burnin_run_id = "precheck-run"
+    orchestrator._persist_burnin_decision(
+        {
+            "signal_id": "precheck-1",
+            "symbol": "BTCUSDT",
+            "decision": "ACCEPTED",
+            "decision_timestamp": "2026-09-22T08:00:00Z",
+            "score": 0.8,
+            "rr": 2.0,
+            "executable_raw_rr": 1.9,
+            "remaining_execution_penalty": 0.1,
+            "effective_rr": 1.8,
+            "execution_ctx": {
+                "spread_pct": 0.0002,
+                "expected_slippage_pct": 0.0002,
+                "fee_pct": 0.0004,
+                "funding_rate_pct": 0.0,
+                "market_data_latency_ms": 50.0,
+                "liquidity_score": 0.9,
+                "volatility_regime": "MODERATE",
+            },
+        },
+        lifecycle_state=LifecycleState.ORDER_PLACED.value,
+    )
+
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT run_id,mode,decision,lifecycle_state_after,raw_rr,effective_rr,
+                   cost_penalty,diagnostics_json
+            FROM decision_evidence
+            WHERE signal_id='precheck-1'
+        """)).mappings().one()
+    diagnostics = json.loads(row["diagnostics_json"])
+    assert row["run_id"] == "precheck-run"
+    assert row["mode"] == "LIVE_PRECHECK"
+    assert row["decision"] == "ACCEPT"
+    assert row["lifecycle_state_after"] == "ORDER_PLACED"
+    assert row["raw_rr"] == pytest.approx(1.9)
+    assert row["effective_rr"] == pytest.approx(1.8)
+    assert row["cost_penalty"] == pytest.approx(0.1)
+    assert diagnostics["no_submit_verified"] is True
+    assert diagnostics["execution_cost_breakdown"] is not None
+
+
 def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path: Path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'guided-shadow.db'}")
     orchestrator = RuntimeOrchestrator(
