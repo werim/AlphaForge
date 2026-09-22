@@ -474,6 +474,11 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
         SELECT reject_outcome_id || ':agg:' || :cid, :agg, release_id, reject_reason, symbol, regime, decision_time, hypothetical_entry, hypothetical_stop, hypothetical_target, forward_label, would_tp, would_sl, timeout, ambiguous, hypothetical_gross_r, hypothetical_net_r_after_costs, avoided_loss, missed_profit, execution_invalidated, evidence_horizon, evidence_complete,
         json_set(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{{}}' END,
           '$.forward_label_subject', COALESCE(json_extract(payload_json,'$.forward_label_subject'), (SELECT json_extract(p.source_provenance_json,'$.forward_label_subject') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=substr(burnin_reject_outcomes.reject_outcome_id,6) AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1)),
+          '$.reject_execution_basis', COALESCE(json_extract(payload_json,'$.reject_execution_basis'), (SELECT json_extract(p.source_provenance_json,'$.reject_execution_basis') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=json_extract(burnin_reject_outcomes.payload_json,'$.reject_decision_id') AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1)),
+          '$.execution_aligned', CASE WHEN COALESCE(json_extract(payload_json,'$.reject_execution_basis'), (SELECT json_extract(p.source_provenance_json,'$.reject_execution_basis') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=json_extract(burnin_reject_outcomes.payload_json,'$.reject_decision_id') AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1))='EXPECTED_FILL_RUNTIME_PARITY' THEN 1 ELSE 0 END,
+          '$.reject_quality_attributable', CASE WHEN COALESCE(json_extract(payload_json,'$.reject_quality_attributable'), (SELECT json_extract(p.source_provenance_json,'$.reject_quality_attributable') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=json_extract(burnin_reject_outcomes.payload_json,'$.reject_decision_id') AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1), 1)=1
+            AND COALESCE(json_extract(payload_json,'$.reject_execution_basis'), (SELECT json_extract(p.source_provenance_json,'$.reject_execution_basis') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=json_extract(burnin_reject_outcomes.payload_json,'$.reject_decision_id') AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1))='EXPECTED_FILL_RUNTIME_PARITY'
+            THEN 1 ELSE 0 END,
           '$.canonical_pending_linked', CASE WHEN EXISTS(
             SELECT 1 FROM burnin_pending_reject_labels p
             JOIN burnin_observations co ON co.burnin_run_id=p.burnin_run_id
@@ -567,7 +572,8 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
         except (TypeError,json.JSONDecodeError): pending_provenance[key]={}
     candidate_label_keys={key for key in label_keys
                           if pending_provenance.get(key,{}).get("reject_quality_attributable") is not False
-                          and pending_provenance.get(key,{}).get("forward_label_subject") != "LEGACY_SCANNER_SHADOW_CANDIDATE"}
+                          and pending_provenance.get(key,{}).get("forward_label_subject") != "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                          and pending_provenance.get(key,{}).get("reject_execution_basis") == "EXPECTED_FILL_RUNTIME_PARITY"}
     ineligible_ids=canonical_keys & contract_ineligible_ids
     eligible_ids=canonical_keys-ineligible_ids
     qualification_label_ids=(candidate_label_keys if identity_mode == LEGACY_REJECT_IDENTITY_MODE
@@ -584,8 +590,10 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
         try: payload=json.loads(mapped.get("payload_json") or "{}")
         except (TypeError,json.JSONDecodeError): payload={}
         subject=payload.get("forward_label_subject") or pending_provenance.get(key,{}).get("forward_label_subject")
+        basis=payload.get("reject_execution_basis") or pending_provenance.get(key,{}).get("reject_execution_basis")
         return (payload.get("reject_quality_attributable") is not False
                 and subject != "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                and basis == "EXPECTED_FILL_RUNTIME_PARITY"
                 and str(mapped.get("reject_reason") or "").upper() not in {
                     "EXCHANGE_STATE_UNKNOWN","EXCHANGE_RECONCILIATION_UNAVAILABLE","RUNTIME_RECOVERY_REQUIRED"})
     qualification_resolved_candidates=[r for r in resolved if qualification_attributable(r)]
