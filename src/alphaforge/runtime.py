@@ -1305,6 +1305,7 @@ class RuntimeOrchestrator:
             burnin_run_id=self._burnin_run_id,
             release_id=os.getenv("ALPHAFORGE_RELEASE_ID") or self.config.phase7_burnin_release_id,
             runtime_instance_id=self.runtime_instance_id,
+            min_effective_rr=self.config.min_effective_rr,
             require_run_scope=True,
         )
         mode_parity = self._build_mode_parity_evidence(min_sample_count=3)
