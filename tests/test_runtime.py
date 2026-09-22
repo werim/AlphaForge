@@ -844,7 +844,20 @@ def test_guided_null_low_effective_rr_is_not_authoritative(tmp_path: Path) -> No
             FROM rejected_signal_reviews
             WHERE signal_id='guided-null-low-rr'
         """)).one()
+        evidence = conn.execute(text("""
+            SELECT run_id,mode,decision,reject_reason,raw_rr,effective_rr,diagnostics_json
+            FROM decision_evidence
+            WHERE signal_id='guided-null-low-rr'
+        """)).mappings().one()
     persisted = json.loads(row.payload_json)
+    diagnostics = json.loads(evidence["diagnostics_json"])
+    assert evidence["run_id"] == "guided-null-low-rr-run"
+    assert evidence["mode"] == "PAPER"
+    assert evidence["decision"] == "REJECT"
+    assert evidence["reject_reason"] == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+    assert evidence["raw_rr"] is None and evidence["effective_rr"] is None
+    assert diagnostics["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
+    assert diagnostics["reject_quality_attributable"] is False
     assert row.reject_reason == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
     assert row.raw_rr is None and row.effective_rr is None
     assert persisted["source_primary_reject_reason"] == "LOW_EFFECTIVE_RR"
