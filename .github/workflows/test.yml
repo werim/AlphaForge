@@ -66,6 +66,9 @@ jobs:
       - name: Cross-surface invariant gate
         run: pytest -q tests/test_cross_surface_invariants.py
 
+      - name: System audit fabric gate
+        run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py
+
       - name: Run tests
         run: pytest -q
 
