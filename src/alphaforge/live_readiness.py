@@ -235,7 +235,7 @@ class LiveReadinessEvaluator:
         ]
 
     def _check_lifecycle(self, conn: Any) -> list[CheckResult]:
-        rows = conn.execute(text("SELECT signal_id, lifecycle_state, event_ts, reject_reason FROM trade_lifecycle_events ORDER BY signal_id, event_ts")).mappings().all()
+        rows = conn.execute(text("SELECT signal_id, lifecycle_state, event_ts, reject_reason FROM trade_lifecycle_events WHERE UPPER(COALESCE(mode,''))='PAPER' ORDER BY signal_id, event_ts")).mappings().all()
         by_signal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             by_signal.setdefault(str(row["signal_id"]), []).append(dict(row))
@@ -266,43 +266,46 @@ class LiveReadinessEvaluator:
             cols = {str(r[1]) for r in conn.execute(text(f"PRAGMA table_info({table})")).all()}
             missing = [field for field in fields if field not in cols]
             checks.append(CheckResult(f"schema_{table}", not missing, f"missing_fields={missing}"))
-            null_rows = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE " + " OR ".join([f"{field} IS NULL" for field in fields]))).scalar_one()
+            null_rows = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE UPPER(COALESCE(mode,''))='PAPER' AND (" + " OR ".join([f"{field} IS NULL" for field in fields]) + ")")).scalar_one()
             checks.append(CheckResult(f"critical_not_null_{table}", int(null_rows) == 0, f"null_rows={null_rows}"))
-        rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
-        rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE lifecycle_state='SIGNAL_REJECTED'")).scalar_one()
+        rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
+        rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE UPPER(COALESCE(mode,''))='PAPER' WHERE UPPER(COALESCE(mode,''))='PAPER' AND lifecycle_state='SIGNAL_REJECTED'")).scalar_one()
         checks.append(CheckResult("reject_persistence_parity", int(rejected_decisions) <= int(rejected_events), f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
         decision_evidence_exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_evidence'")).scalar_one() > 0
         lifecycle_rows = int(conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events")).scalar_one())
-        accepted_events = int(conn.execute(text("SELECT COUNT(DISTINCT signal_id) FROM trade_lifecycle_events WHERE lifecycle_state IN ('SIGNAL_ACCEPTED','WAITING_ENTRY_ZONE','ENTRY_TRIGGERED','ORDER_PLACED','POSITION_OPENED','POSITION_CLOSED','TP_HIT','SL_HIT','OPEN_AT_END','CANCELLED','ENTRY_TIMEOUT')")).scalar_one())
+        accepted_events = int(conn.execute(text("SELECT COUNT(DISTINCT signal_id) FROM trade_lifecycle_events WHERE UPPER(COALESCE(mode,''))='PAPER' AND lifecycle_state IN ('SIGNAL_ACCEPTED','WAITING_ENTRY_ZONE','ENTRY_TRIGGERED','ORDER_PLACED','POSITION_OPENED','POSITION_CLOSED','TP_HIT','SL_HIT','OPEN_AT_END','CANCELLED','ENTRY_TIMEOUT')")).scalar_one())
         if decision_evidence_exists:
-            evidence_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence")).scalar_one())
-            evidence_lifecycle_states = int(conn.execute(text("SELECT COUNT(DISTINCT lifecycle_state_after) FROM decision_evidence WHERE COALESCE(lifecycle_state_after,'') <> ''")).scalar_one())
-            evidence_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT'")).scalar_one())
-            evidence_rejected = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='REJECT'")).scalar_one())
-            evidence_parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(diagnostics_json,'')) LIKE '%DECISION_PARITY_MISMATCH%'")).scalar_one())
+            evidence_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER'")).scalar_one())
+            evidence_lifecycle_states = int(conn.execute(text("SELECT COUNT(DISTINCT lifecycle_state_after) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND COALESCE(lifecycle_state_after,'') <> ''")).scalar_one())
+            evidence_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(decision,''))='ACCEPT'")).scalar_one())
+            evidence_rejected = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(decision,''))='REJECT'")).scalar_one())
+            evidence_parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND (UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(diagnostics_json,'')) LIKE '%DECISION_PARITY_MISMATCH%')")).scalar_one())
             evidence_fake_zero_rows = int(conn.execute(text("""
                 SELECT COUNT(*) FROM decision_evidence
-                WHERE UPPER(COALESCE(diagnostics_json,'')) LIKE '%UNAVAILABLE%'
+                WHERE UPPER(COALESCE(mode,''))='PAPER'
+                  AND UPPER(COALESCE(diagnostics_json,'')) LIKE '%UNAVAILABLE%'
                   AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0 OR COALESCE(volume_24h_usdt, -999) = 0 OR COALESCE(liquidity_score, -999) = 0)
             """)).scalar_one())
-            phase3_breakdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE cost_penalty IS NOT NULL AND (diagnostics_json LIKE '%spread_penalty%' OR diagnostics_json LIKE '%cost_penalty%')")).scalar_one())
-            phase3_effective_rr_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE raw_rr IS NOT NULL AND effective_rr IS NOT NULL")).scalar_one())
-            phase3_execution_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','HIGH_SLIPPAGE','HIGH_TOTAL_COST','LOW_LIQUIDITY','HIGH_LATENCY','EXECUTION_CONTEXT_UNAVAILABLE','EXCESSIVE_VOLATILITY_PENALTY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')")).scalar_one())
+            phase3_breakdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND cost_penalty IS NOT NULL AND (diagnostics_json LIKE '%spread_penalty%' OR diagnostics_json LIKE '%cost_penalty%')")).scalar_one())
+            phase3_effective_rr_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND raw_rr IS NOT NULL AND effective_rr IS NOT NULL")).scalar_one())
+            phase3_execution_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','HIGH_SLIPPAGE','HIGH_TOTAL_COST','LOW_LIQUIDITY','HIGH_LATENCY','EXECUTION_CONTEXT_UNAVAILABLE','EXCESSIVE_VOLATILITY_PENALTY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')")).scalar_one())
             phase3_missing_critical_accepted = int(conn.execute(text("""
                 SELECT COUNT(*) FROM decision_evidence
-                WHERE UPPER(COALESCE(decision,''))='ACCEPT'
+                WHERE UPPER(COALESCE(mode,''))='PAPER'
+                  AND UPPER(COALESCE(decision,''))='ACCEPT'
                   AND (effective_rr IS NULL OR cost_penalty IS NULL OR spread_pct IS NULL OR expected_slippage_pct IS NULL OR liquidity_score IS NULL)
             """)).scalar_one())
-            phase3_low_effective_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < 1.6")).scalar_one())
+            phase3_low_effective_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < 1.6")).scalar_one())
         else:
             evidence_rows = evidence_lifecycle_states = evidence_accepted = evidence_rejected = 0
             evidence_parity_rows = evidence_fake_zero_rows = 1
             phase3_breakdown_rows = phase3_effective_rr_rows = phase3_execution_reject_rows = 0
             phase3_missing_critical_accepted = phase3_low_effective_accepted = 1
-        parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH'")).scalar_one()) + evidence_parity_rows
+        parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(mode,''))='PAPER' AND (UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH')")).scalar_one()) + evidence_parity_rows
         fake_zero_rows = int(conn.execute(text("""
             SELECT COUNT(*) FROM order_decisions
-            WHERE COALESCE(execution_ctx_missing,0)=1
+            WHERE UPPER(COALESCE(mode,''))='PAPER'
+              AND COALESCE(execution_ctx_missing,0)=1
               AND UPPER(COALESCE(execution_ctx,'')) LIKE '%UNAVAILABLE%'
               AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0)
         """)).scalar_one()) + evidence_fake_zero_rows
@@ -323,17 +326,17 @@ class LiveReadinessEvaluator:
             portfolio_cols = [str(r[1]) for r in conn.execute(text("PRAGMA table_info(decision_evidence)")).all()]
         has_portfolio_cols = {"portfolio_equity", "open_position_count", "total_notional_exposure", "portfolio_risk_state", "portfolio_diagnostics_json"}.issubset(set(portfolio_cols))
         if decision_evidence_exists and has_portfolio_cols:
-            portfolio_snapshot_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL OR portfolio_diagnostics_json IS NOT NULL")).scalar_one())
-            portfolio_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE portfolio_reject_reason IS NOT NULL AND portfolio_reject_reason <> ''")).scalar_one())
-            accepted_over_position = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_open_positions IS NOT NULL AND open_position_count > max_open_positions")).scalar_one()) if "max_open_positions" in portfolio_cols else 1
-            accepted_over_notional = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_notional_exposure IS NOT NULL AND total_notional_exposure > max_notional_exposure")).scalar_one())
-            accepted_over_symbol = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_symbol_notional IS NOT NULL AND symbol_notional_exposure > max_symbol_notional")).scalar_one())
-            accepted_after_daily_loss = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_daily_loss_pct IS NOT NULL AND daily_loss_pct >= max_daily_loss_pct")).scalar_one())
-            accepted_unknown = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND UPPER(COALESCE(portfolio_risk_state,'')) LIKE '%UNKNOWN%'")).scalar_one())
-            correlation_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE correlation_group IS NOT NULL OR correlated_position_count IS NOT NULL")).scalar_one())
-            drawdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE rolling_drawdown_pct IS NOT NULL OR daily_loss_pct IS NOT NULL")).scalar_one())
-            reconcile_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
-            accounting_distinct_states = int(conn.execute(text("SELECT COUNT(DISTINCT COALESCE(CAST(open_position_count AS TEXT),'') || ':' || COALESCE(CAST(total_notional_exposure AS TEXT),'') || ':' || COALESCE(CAST(portfolio_equity AS TEXT),'')) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
+            portfolio_snapshot_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND (portfolio_risk_state IS NOT NULL OR portfolio_diagnostics_json IS NOT NULL)")).scalar_one())
+            portfolio_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND portfolio_reject_reason IS NOT NULL AND portfolio_reject_reason <> ''")).scalar_one())
+            accepted_over_position = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(decision,''))='ACCEPT' AND max_open_positions IS NOT NULL AND open_position_count > max_open_positions")).scalar_one()) if "max_open_positions" in portfolio_cols else 1
+            accepted_over_notional = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(decision,''))='ACCEPT' AND max_notional_exposure IS NOT NULL AND total_notional_exposure > max_notional_exposure")).scalar_one())
+            accepted_over_symbol = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(decision,''))='ACCEPT' AND max_symbol_notional IS NOT NULL AND symbol_notional_exposure > max_symbol_notional")).scalar_one())
+            accepted_after_daily_loss = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(decision,''))='ACCEPT' AND max_daily_loss_pct IS NOT NULL AND daily_loss_pct >= max_daily_loss_pct")).scalar_one())
+            accepted_unknown = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(COALESCE(decision,''))='ACCEPT' AND UPPER(COALESCE(portfolio_risk_state,'')) LIKE '%UNKNOWN%'")).scalar_one())
+            correlation_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND (correlation_group IS NOT NULL OR correlated_position_count IS NOT NULL)")).scalar_one())
+            drawdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND (rolling_drawdown_pct IS NOT NULL OR daily_loss_pct IS NOT NULL)")).scalar_one())
+            reconcile_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
+            accounting_distinct_states = int(conn.execute(text("SELECT COUNT(DISTINCT COALESCE(CAST(open_position_count AS TEXT),'') || ':' || COALESCE(CAST(total_notional_exposure AS TEXT),'') || ':' || COALESCE(CAST(portfolio_equity AS TEXT),'')) FROM decision_evidence WHERE UPPER(COALESCE(mode,''))='PAPER' AND open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
             shared_engine_rows = int(conn.execute(text("SELECT COUNT(DISTINCT mode) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL AND mode IN ('BACKTEST','PAPER')")).scalar_one())
         else:
             portfolio_snapshot_rows = portfolio_reject_rows = correlation_rows = drawdown_rows = reconcile_rows = shared_engine_rows = accounting_distinct_states = 0
@@ -353,11 +356,11 @@ class LiveReadinessEvaluator:
         return checks
 
     def _check_stats(self, conn: Any) -> list[CheckResult]:
-        total = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE COALESCE(phase,'final')='final'")).scalar_one())
-        rejected = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one())
+        total = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(mode,''))='PAPER' AND COALESCE(phase,'final')='final'")).scalar_one())
+        rejected = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(mode,''))='PAPER' AND UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one())
         reject_rate = rejected / total if total else 0.0
-        min_rr, max_rr = conn.execute(text("SELECT MIN(rr), MAX(rr) FROM order_decisions")).one()
-        min_score, max_score = conn.execute(text("SELECT MIN(score), MAX(score) FROM order_decisions")).one()
+        min_rr, max_rr = conn.execute(text("SELECT MIN(rr), MAX(rr) FROM order_decisions WHERE UPPER(COALESCE(mode,''))='PAPER'")).one()
+        min_score, max_score = conn.execute(text("SELECT MIN(score), MAX(score) FROM order_decisions WHERE UPPER(COALESCE(mode,''))='PAPER'")).one()
         lower, upper = self.reject_rate_bounds
         return [CheckResult("reject_rate_sanity", lower <= reject_rate <= upper if total else False, f"reject_rate={reject_rate:.4f},total={total}"), CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"), CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}")]
 
