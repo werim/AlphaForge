@@ -138,7 +138,7 @@ class LiveReadinessEvaluator:
         )
 
     def evaluate(self, *, mode_parity: Mapping[str, Any], reconciliation_snapshot: Mapping[str, Any], observability_snapshot: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool, kill_switch_active: bool = False, dashboard_security: Mapping[str, Any] | None = None, timesfm_evidence: Mapping[str, Any] | None = None, paper_burnin_report: Mapping[str, Any] | None = None, tests_passing_evidence: Mapping[str, Any] | None = None) -> QualificationReport:
-        checks: list[CheckResult] = []
+        checks: list[CheckResult] = [self._scope_check()]
         with self.engine.begin() as conn:
             checks.extend(self._check_lifecycle(conn))
             checks.extend(self._check_persistence(conn))
@@ -186,7 +186,7 @@ class LiveReadinessEvaluator:
         gates = [
             CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
             CheckResult("reject_persistence_complete", self._checks_pass(checks, reject), "requires rejected decisions and lifecycle reject reasons persisted"),
-            CheckResult("phase2_persisted_evidence_complete", self._checks_pass(checks, {"phase2_decision_evidence_table_exists", "phase2_decision_evidence_rows_present", "phase2_lifecycle_evidence_present", "phase2_reject_evidence_present", "phase2_accept_evidence_present", "phase2_no_fake_zero_execution_evidence", "phase2_no_decision_parity_mismatch"}), "requires SQL-backed lifecycle/reject/accept evidence and no fake-zero/parity blockers"),
+            CheckResult("phase2_persisted_evidence_complete", self._checks_pass(checks, {"readiness_evidence_scope_resolved", "phase2_decision_evidence_table_exists", "phase2_decision_evidence_rows_present", "phase2_lifecycle_evidence_present", "phase2_reject_evidence_present", "phase2_accept_evidence_present", "phase2_no_fake_zero_execution_evidence", "phase2_no_decision_parity_mismatch"}), "requires scoped SQL-backed lifecycle/reject/accept evidence and no fake-zero/parity blockers"),
             CheckResult("mode_parity_complete", self._checks_pass(checks, parity), "requires BACKTEST/PAPER/LIVE_PRECHECK parity evidence"),
             CheckResult("execution_realism_complete", self._checks_pass(checks, realism), "requires measured selectivity plus non-constant RR/score evidence"),
             CheckResult("phase3_execution_realism_complete", self._checks_pass(checks, phase3_execution_realism), "requires execution cost breakdown, effective RR, execution reject persistence, no fake-zero costs, and no accepted trade with below-threshold/missing execution context"),
