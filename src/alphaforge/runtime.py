@@ -1304,6 +1304,7 @@ class RuntimeOrchestrator:
             campaign_id=readiness_campaign_id,
             burnin_run_id=self._burnin_run_id,
             require_run_scope=True,
+            min_effective_rr=self.config.min_effective_rr,
         )
         mode_parity = self._build_mode_parity_evidence(min_sample_count=3)
         readiness_inputs: dict[str, dict[str, Any]] = {
