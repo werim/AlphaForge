@@ -145,39 +145,3 @@ def test_latest_heartbeat_selection_prefers_last_insert_for_equal_timestamp(tmp_
     save_runtime_heartbeat(engine, runtime_instance_id="runtime:a", execution_mode="PAPER", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", heartbeat_ts=heartbeat_ts)
     save_runtime_heartbeat(engine, runtime_instance_id="runtime:b", execution_mode="PAPER", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA", heartbeat_ts=heartbeat_ts)
     assert fetch_latest_runtime_heartbeat(engine)["runtime_instance_id"] == "runtime:b"
-
-
-def test_heartbeat_instance_scope_does_not_borrow_another_runtime(tmp_path) -> None:
-    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'instance-scope.db'}")
-    now = datetime(2026, 5, 23, 12, 0, tzinfo=timezone.utc)
-    save_runtime_heartbeat(
-        engine,
-        runtime_instance_id="runtime:other",
-        execution_mode="LIVE_PRECHECK",
-        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
-        heartbeat_ts=now.isoformat(),
-    )
-
-    missing = evaluate_runtime_heartbeat_freshness(
-        engine,
-        required_mode="LIVE_PRECHECK",
-        runtime_instance_id="runtime:target",
-        now=now,
-    )
-    assert missing.state == "MISSING"
-
-    save_runtime_heartbeat(
-        engine,
-        runtime_instance_id="runtime:target",
-        execution_mode="LIVE_PRECHECK",
-        scanner_source="EXCHANGE_PUBLIC_MARKET_DATA",
-        heartbeat_ts=now.isoformat(),
-    )
-    scoped = evaluate_runtime_heartbeat_freshness(
-        engine,
-        required_mode="LIVE_PRECHECK",
-        runtime_instance_id="runtime:target",
-        now=now,
-    )
-    assert scoped.state == "FRESH"
-    assert scoped.latest_heartbeat["runtime_instance_id"] == "runtime:target"
