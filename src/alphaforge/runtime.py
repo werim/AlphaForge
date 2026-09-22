@@ -22,11 +22,14 @@ from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
 from alphaforge.execution import (
+    PROVENANCE_ACTUAL,
     PROVENANCE_ESTIMATED,
     PROVENANCE_MODELLED,
+    PROVENANCE_UNAVAILABLE,
     build_execution_context,
     build_execution_cost_model,
     build_execution_cost_semantics,
+    weighted_average_fill_price,
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
@@ -2355,6 +2358,92 @@ class RuntimeOrchestrator:
             },
         )
 
+    def _canonical_execution_result(
+        self,
+        result: Mapping[str, Any],
+        decision: Mapping[str, Any],
+        market_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode,
+    ) -> dict[str, Any]:
+        """Attach canonical entry -> expected_fill -> actual_fill evidence.
+
+        This is evidence-only normalization after an execution result exists.
+        It must not change authorization, order selection, threshold decisions,
+        or whether an order is submitted. Invalid/missing fill evidence remains
+        explicit UNAVAILABLE rather than failing an already-completed submit.
+        """
+        normalized = dict(result)
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            return normalized
+
+        execution_ctx = dict(market_ctx.get("execution_ctx") or {})
+        expected_fill = normalized.get("expected_fill", market_ctx.get("expected_fill"))
+        if expected_fill is None:
+            expected_fill, _ = self._expected_fill_price(market_ctx, execution_ctx)
+
+        actual_fill = normalized.get("actual_fill")
+        fills = normalized.get("fills")
+        if fills is not None:
+            try:
+                weighted_fill = weighted_average_fill_price(fills)
+            except ValueError:
+                normalized["execution_cost_semantics"] = None
+                normalized["execution_cost_semantics_status"] = "UNAVAILABLE_INVALID_FILL_LEDGER"
+                normalized["actual_fill_provenance"] = PROVENANCE_UNAVAILABLE
+                return normalized
+            if weighted_fill is not None:
+                actual_fill = weighted_fill
+                normalized["weighted_average_fill_price"] = weighted_fill
+        if actual_fill is None:
+            actual_fill = normalized.get("fill_price")
+
+        expected_provenance = (
+            PROVENANCE_MODELLED if mode is ExecutionMode.PAPER else PROVENANCE_ESTIMATED
+        )
+        actual_provenance = (
+            PROVENANCE_MODELLED
+            if mode is ExecutionMode.PAPER and actual_fill is not None
+            else PROVENANCE_ACTUAL
+            if mode is ExecutionMode.LIVE and actual_fill is not None
+            else PROVENANCE_UNAVAILABLE
+        )
+
+        if expected_fill is None:
+            normalized["execution_cost_semantics"] = None
+            normalized["execution_cost_semantics_status"] = "UNAVAILABLE_EXPECTED_FILL"
+            normalized["actual_fill_provenance"] = actual_provenance
+            return normalized
+
+        try:
+            semantics = build_execution_cost_semantics(
+                entry=market_ctx.get("entry"),
+                expected_fill=expected_fill,
+                actual_fill=actual_fill,
+                side=market_ctx.get("side"),
+                expected_fill_provenance=expected_provenance,
+                actual_fill_provenance=actual_provenance,
+                decision_timestamp=decision.get("decision_time"),
+                fill_timestamp=(
+                    normalized.get("fill_timestamp")
+                    or normalized.get("filled_at")
+                    if actual_fill is not None
+                    else None
+                ),
+            )
+        except ValueError:
+            normalized["execution_cost_semantics"] = None
+            normalized["execution_cost_semantics_status"] = "UNAVAILABLE_INVALID_PRICE_OR_SIDE"
+            normalized["actual_fill_provenance"] = actual_provenance
+            return normalized
+
+        normalized["expected_fill"] = semantics.expected_fill
+        normalized["actual_fill"] = semantics.actual_fill
+        normalized["actual_fill_provenance"] = semantics.actual_fill_provenance
+        normalized["execution_cost_semantics"] = semantics.as_dict()
+        normalized["execution_cost_semantics_status"] = "AVAILABLE"
+        return normalized
+
     async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> bool | None:
         self._assert_campaign_candidate(symbol, market_ctx.get("source_exchange"), "PAPER_EXECUTION")
         if self._kill_switch_active():
@@ -2380,6 +2469,7 @@ class RuntimeOrchestrator:
         else:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
+        result = self._canonical_execution_result(result, decision, market_ctx, mode=mode)
         self.metrics.executions += 1
         order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
         result_status = str(result.get("status", "")).lower()
