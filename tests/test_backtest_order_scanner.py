@@ -2097,12 +2097,17 @@ def test_decision_evidence_persists_to_durable_db_and_csv_reconciles(tmp_path):
         bo.LifecycleRow(11, "ETHUSDT", "LONG", "BREAKOUT_UP", "fixture", "TREND", 2.0, 1.0, 50.0, 49.0, 51.0, "SIGNAL_CREATED", "SIGNAL_REJECTED", reject_reason="LOW_SCORE", expectancy_bucket="LOW"),
     ]
 
-    persisted_lifecycle = bo._persist_lifecycle_rows(rows, database_url=db_url)
+    persisted_lifecycle = bo._persist_lifecycle_rows(
+        rows,
+        database_url=db_url,
+        min_effective_rr=1.37,
+    )
     decision_rows = bo._decision_evidence_rows(db_url)
 
     assert len(persisted_lifecycle) == len(rows)
     assert len(decision_rows) == len(rows)
     assert {row["decision"] for row in decision_rows} == {"WAIT", "ACCEPT", "REJECT"}
+    assert {row["min_effective_rr"] for row in decision_rows} == {1.37}
 
     with bo.Session(bo.init_db(db_url)) as session:
         table_count = session.execute(bo.text("SELECT COUNT(*) FROM decision_evidence")).scalar_one()

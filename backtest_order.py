@@ -2150,7 +2150,14 @@ def _sql_nullable_number(value: Any) -> Any:
     except (TypeError, ValueError):
         return None
 
-def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None = None, *, run_id: str | None = None, profile_name: str | None = None) -> List[dict[str, Any]]:
+def _persist_lifecycle_rows(
+    rows: List[LifecycleRow],
+    database_url: str | None = None,
+    *,
+    run_id: str | None = None,
+    profile_name: str | None = None,
+    min_effective_rr: float | None = None,
+) -> List[dict[str, Any]]:
     engine = init_db(database_url)
     persisted_event_ids: set[str] = set()
     decision_counts: dict[str, dict[str, int]] = {}
@@ -2343,6 +2350,7 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 score=row.score,
                 raw_rr=row.rr,
                 effective_rr=effective_rr,
+                min_effective_rr=min_effective_rr,
                 expectancy=None,
                 expectancy_bucket=row.expectancy_bucket,
                 reject_reason=reject_reason or None,
@@ -2500,7 +2508,7 @@ def _decision_evidence_rows(database_url: str | None = None, *, mode: str = "BAC
                 """
                 SELECT evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type,
                        setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr,
-                       effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason,
+                       effective_rr, min_effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason,
                        entry, sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes,
                        volume_24h_usdt, spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score,
                        volatility_regime, cost_penalty, diagnostics_json, signal_id, order_id, position_id,
@@ -5179,7 +5187,13 @@ def main():
         adaptive_scope_stats.append(scope_payload)
     _attach_rejected_shadow_to_lifecycle(lifecycle, rejected_shadow)
     expectancy_session.close()
-    persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle, database_url=backtest_database_url, run_id=backtest_run_id, profile_name=backtest_profile_name)
+    persisted_lifecycle_rows = _persist_lifecycle_rows(
+        lifecycle,
+        database_url=backtest_database_url,
+        run_id=backtest_run_id,
+        profile_name=backtest_profile_name,
+        min_effective_rr=getattr(getattr(cfg, "runtime", cfg), "min_effective_rr", None),
+    )
     persisted_decision_evidence_rows = _decision_evidence_rows(backtest_database_url, run_id=backtest_run_id)
     forward_eval_rows = build_forward_evaluation_rows(
         [{**row, "timestamp": _safe_float(row.get("event_ts"), 0.0)} for row in persisted_lifecycle_rows],

@@ -53,7 +53,7 @@ def test_reject_net_r_subtracts_costs_already_normalized_to_r(tmp_path):
     costs={"spread_cost":0.05,"entry_slippage_cost":0.03,"exit_slippage_cost":0.03,
            "fee_cost":0.04,"funding_cost":0.01,"latency_cost":0.04,
            "execution_cost_unit":"R"}
-    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='units',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=95,target=106,horizon_seconds=60,execution_cost_assumptions=costs,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER','forward_label_subject':'GUIDED_CANDIDATE'})
+    persist_pending_reject_label(conn,campaign_id=camp.campaign_id,burnin_run_id=run['burnin_run_id'],reject_decision_id='units',signal_id='s',symbol='BTCUSDT',side='LONG',decision_timestamp='2026-01-01T00:00:00Z',entry=100,stop=95,target=106,horizon_seconds=60,execution_cost_assumptions=costs,regime='TRENDING',reject_reason='LOW_CONFIDENCE',source_provenance={'provider':'PAPER','forward_label_subject':'GUIDED_CANDIDATE','reject_execution_basis':'EXPECTED_FILL_RUNTIME_PARITY','reject_quality_attributable':True})
     resolve_pending_rejects(conn,{'BTCUSDT':[{'timestamp':'2026-01-01T00:01:00Z','high':106,'low':99}]},now='2026-01-01T00:02:00Z')
     row=conn.execute('select hypothetical_gross_r,hypothetical_net_r_after_costs,payload_json from burnin_reject_outcomes').fetchone()
     payload=json.loads(row['payload_json'])

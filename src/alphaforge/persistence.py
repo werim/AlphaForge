@@ -245,6 +245,7 @@ def init_db(database_url: str | None = None) -> Engine:
             score REAL,
             raw_rr REAL,
             effective_rr REAL,
+            min_effective_rr REAL,
             expectancy REAL,
             expectancy_bucket TEXT,
             reject_reason TEXT,
@@ -574,7 +575,8 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("setup_reason", "setup_reason TEXT"), ("regime", "regime TEXT"),
             ("lifecycle_state_before", "lifecycle_state_before TEXT"), ("lifecycle_state_after", "lifecycle_state_after TEXT"),
             ("decision", "decision TEXT"), ("score", "score REAL"), ("raw_rr", "raw_rr REAL"),
-            ("effective_rr", "effective_rr REAL"), ("expectancy", "expectancy REAL"), ("expectancy_bucket", "expectancy_bucket TEXT"),
+            ("effective_rr", "effective_rr REAL"), ("min_effective_rr", "min_effective_rr REAL"),
+            ("expectancy", "expectancy REAL"), ("expectancy_bucket", "expectancy_bucket TEXT"),
             ("reject_reason", "reject_reason TEXT"), ("cancel_reason", "cancel_reason TEXT"), ("close_reason", "close_reason TEXT"),
             ("entry", "entry REAL"), ("sl", "sl REAL"), ("tp", "tp REAL"), ("trigger_price", "trigger_price REAL"),
             ("close_price", "close_price REAL"), ("net_pnl_pct", "net_pnl_pct REAL"), ("net_pnl_usdt", "net_pnl_usdt REAL"),
@@ -680,6 +682,7 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         ("2026_06_21_timesfm_canonical_evidence", "Add canonical TimesFM forecast evidence and optional forward outcome labels tables."),
         ("2026_06_23_core_identifier_normalization", "Add normalized lifecycle identifier columns and safe join indexes."),
         ("2026_07_06_phase2_decision_evidence", "Add SQL-backed decision evidence export surface for lifecycle/dashboard reconciliation."),
+        ("2026_09_22_decision_threshold_provenance", "Add decision-time min_effective_rr provenance to durable decision evidence."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_core_identifier_schema(conn)
@@ -944,24 +947,27 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         return None
 
 
+
 DECISION_EVIDENCE_COLUMNS: tuple[str, ...] = (
     "evidence_id", "run_id", "profile_id", "profile_name", "mode", "timestamp", "symbol", "side",
     "setup_type", "setup_reason", "regime", "lifecycle_state_before", "lifecycle_state_after",
-    "decision", "score", "raw_rr", "effective_rr", "expectancy", "expectancy_bucket", "reject_reason",
-    "cancel_reason", "close_reason", "entry", "sl", "tp", "trigger_price", "close_price",
-    "net_pnl_pct", "net_pnl_usdt", "hold_minutes", "volume_24h_usdt", "spread_pct",
-    "funding_rate_pct", "expected_slippage_pct", "liquidity_score", "volatility_regime",
-    "cost_penalty", "total_cost_pct", "total_explicit_cost_pct", "spread_source", "slippage_source",
-    "fee_pct", "fee_source", "funding_source", "latency_ms", "latency_source", "liquidity_status",
+    "decision", "score", "raw_rr", "effective_rr", "min_effective_rr", "expectancy",
+    "expectancy_bucket", "reject_reason", "cancel_reason", "close_reason", "entry", "sl", "tp",
+    "trigger_price", "close_price", "net_pnl_pct", "net_pnl_usdt", "hold_minutes",
+    "volume_24h_usdt", "spread_pct", "funding_rate_pct", "expected_slippage_pct",
+    "liquidity_score", "volatility_regime", "cost_penalty", "total_cost_pct",
+    "total_explicit_cost_pct", "spread_source", "slippage_source", "fee_pct", "fee_source",
+    "funding_source", "latency_ms", "latency_source", "liquidity_status",
     "volatility_penalty_pct", "volatility_source", "reject_flags", "unavailable_fields",
     "diagnostics_json", "portfolio_equity", "available_balance", "open_position_count",
     "max_open_positions", "total_notional_exposure", "max_notional_exposure",
-    "symbol_notional_exposure", "max_symbol_notional", "side_exposure_long", "side_exposure_short",
-    "net_exposure", "gross_exposure", "daily_realized_pnl", "daily_loss_pct", "max_daily_loss_pct",
-    "rolling_drawdown_pct", "consecutive_loss_count", "correlation_group",
-    "correlation_group_exposure", "correlated_position_count", "risk_flags",
-    "portfolio_reject_reason", "portfolio_risk_state", "portfolio_diagnostics_json",
-    "signal_id", "order_id", "position_id", "lifecycle_id", "lifecycle_seq", "created_at",
+    "symbol_notional_exposure", "max_symbol_notional", "side_exposure_long",
+    "side_exposure_short", "net_exposure", "gross_exposure", "daily_realized_pnl",
+    "daily_loss_pct", "max_daily_loss_pct", "rolling_drawdown_pct", "consecutive_loss_count",
+    "correlation_group", "correlation_group_exposure", "correlated_position_count",
+    "risk_flags", "portfolio_reject_reason", "portfolio_risk_state",
+    "portfolio_diagnostics_json", "signal_id", "order_id", "position_id", "lifecycle_id",
+    "lifecycle_seq", "created_at",
 )
 
 _DECISION_EVIDENCE_JSON_FIELDS = {
@@ -976,10 +982,10 @@ def _decision_evidence_json_value(value: Any) -> Any:
 
 
 def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
-    """Idempotently persist normalized decision evidence without committing.
+    """Idempotently persist one normalized final-decision evidence row.
 
-    The caller owns the surrounding transaction. Missing/unavailable execution
-    values remain NULL; this helper never fabricates numeric zero evidence.
+    The caller owns the transaction. Unknown execution values stay NULL.
+    Replays never erase previously persisted non-NULL evidence.
     """
     if session is None:
         return None
@@ -997,7 +1003,7 @@ def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
     payload = {column: evidence.get(column) for column in DECISION_EVIDENCE_COLUMNS}
     payload["evidence_id"] = evidence_id
     payload["decision"] = decision
-    payload["timestamp"] = evidence.get("timestamp") or _utc_now_iso()
+    payload["timestamp"] = evidence.get("timestamp")
     payload["created_at"] = evidence.get("created_at") or _utc_now_iso()
     if decision == "REJECT":
         reason = evidence.get("reject_reason")
@@ -1011,7 +1017,10 @@ def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
         column for column in DECISION_EVIDENCE_COLUMNS
         if column not in {"evidence_id", "created_at"}
     ]
-    update_sql = ", ".join(f"{column}=excluded.{column}" for column in update_columns)
+    update_sql = ", ".join(
+        f"{column}=COALESCE(excluded.{column}, decision_evidence.{column})"
+        for column in update_columns
+    )
     statement = f"""INSERT INTO decision_evidence ({columns_sql})
                     VALUES ({values_sql})
                     ON CONFLICT(evidence_id) DO UPDATE SET {update_sql}"""

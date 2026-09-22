@@ -30,20 +30,20 @@ def _seed_valid(session: Session) -> None:
     session.execute(text("""
         INSERT INTO decision_evidence (
             evidence_id, mode, timestamp, symbol, side, lifecycle_state_before, lifecycle_state_after,
-            decision, score, raw_rr, effective_rr, expectancy_bucket, reject_reason,
+            decision, score, raw_rr, effective_rr, min_effective_rr, expectancy_bucket, reject_reason,
             cost_penalty, total_cost_pct, total_explicit_cost_pct, spread_pct, expected_slippage_pct, liquidity_score,
             diagnostics_json, portfolio_equity, open_position_count, max_open_positions, total_notional_exposure, max_notional_exposure,
             symbol_notional_exposure, max_symbol_notional, daily_loss_pct, max_daily_loss_pct, rolling_drawdown_pct,
             correlation_group, correlation_group_exposure, correlated_position_count, portfolio_reject_reason,
             portfolio_risk_state, portfolio_diagnostics_json, signal_id, lifecycle_seq, created_at
         ) VALUES
-            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.2, 'LOW', 'HIGH_SPREAD',
+            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.2, 1.6, 'LOW', 'HIGH_SPREAD',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.5, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 4000, 5000, 1000, 2000, 0.01, 0.05, 0.02, 'CRYPTO_MAJOR_BTC', 4000, 1, 'MAX_NOTIONAL_EXPOSURE', 'MAX_NOTIONAL_EXPOSURE', '{"engine":"evaluate_portfolio_risk"}', 's-1', 2, '2026-01-01T00:00:01Z'),
-            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 1.8, 'HIGH', '',
+            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 1.8, 1.6, 'HIGH', '',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.8, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 1000, 5000, 500, 2000, 0.01, 0.05, 0.02, 'CRYPTO_MAJOR_ETH', 500, 1, '', 'ACCEPTED', '{"engine":"evaluate_portfolio_risk"}', 's-2', 2, '2026-01-01T00:00:01Z'),
-            ('de-3', 'BACKTEST', '2026-01-01T00:00:01Z', 'SOLUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.1, 1.5, 1.2, 'LOW', 'CORRELATION_OVEREXPOSURE',
+            ('de-3', 'BACKTEST', '2026-01-01T00:00:01Z', 'SOLUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.1, 1.5, 1.2, 1.6, 'LOW', 'CORRELATION_OVEREXPOSURE',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.5, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 4500, 5000, 500, 2000, 0.01, 0.05, 0.02, 'CRYPTO_HIGH_BETA_ALT', 4500, 2, 'CORRELATION_OVEREXPOSURE', 'CORRELATION_OVEREXPOSURE', '{"engine":"evaluate_portfolio_risk"}', 's-3', 2, '2026-01-01T00:00:01Z')
         ON CONFLICT(evidence_id) DO NOTHING
@@ -690,46 +690,64 @@ def test_scoped_precheck_startup_snapshot_does_not_require_paper_run_attachment(
     assert checks["runtime_db_persistence_verified"].passed is True
 
 
-def test_effective_rr_readiness_uses_configured_threshold_not_hardcoded_value() -> None:
+def test_effective_rr_readiness_uses_persisted_decision_threshold_not_current_config() -> None:
     engine = _engine()
     with engine.begin() as conn:
-        conn.execute(text("UPDATE decision_evidence SET effective_rr=1.35 WHERE evidence_id='de-2'"))
+        conn.execute(text(
+            "UPDATE decision_evidence SET effective_rr=1.35, min_effective_rr=1.10 WHERE evidence_id='de-2'"
+        ))
 
     with engine.connect() as conn:
         low_threshold = {
             check.name: check
-            for check in LiveReadinessEvaluator(engine, min_effective_rr=1.1)._check_persistence(conn)
+            for check in LiveReadinessEvaluator(engine, min_effective_rr=9.9)._check_persistence(conn)
         }
     assert low_threshold["effective_rr_threshold_provenance_valid"].passed is True
     assert low_threshold["no_accepted_trade_with_effective_rr_below_threshold"].passed is True
-    assert "min_effective_rr=1.1" in low_threshold["no_accepted_trade_with_effective_rr_below_threshold"].details
+    assert "source=decision_evidence.min_effective_rr" in low_threshold[
+        "no_accepted_trade_with_effective_rr_below_threshold"
+    ].details
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE decision_evidence SET min_effective_rr=1.60 WHERE evidence_id='de-2'"
+        ))
 
     with engine.connect() as conn:
         high_threshold = {
             check.name: check
-            for check in LiveReadinessEvaluator(engine, min_effective_rr=1.6)._check_persistence(conn)
+            for check in LiveReadinessEvaluator(engine, min_effective_rr=1.1)._check_persistence(conn)
         }
     assert high_threshold["effective_rr_threshold_provenance_valid"].passed is True
     assert high_threshold["no_accepted_trade_with_effective_rr_below_threshold"].passed is False
-    assert "min_effective_rr=1.6" in high_threshold["no_accepted_trade_with_effective_rr_below_threshold"].details
 
 
-def test_effective_rr_readiness_threshold_invalid_values_fail_closed() -> None:
+def test_effective_rr_readiness_missing_or_invalid_row_threshold_fails_closed() -> None:
     engine = _engine()
-    for value in (None, float("nan"), float("inf"), -0.1, "not-a-number"):
+    for value in (None, 0.0, -0.1):
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE decision_evidence SET min_effective_rr=:value WHERE evidence_id='de-2'"),
+                {"value": value},
+            )
         with engine.connect() as conn:
             checks = {
                 check.name: check
-                for check in LiveReadinessEvaluator(engine, min_effective_rr=value)._check_persistence(conn)
+                for check in LiveReadinessEvaluator(engine, min_effective_rr=0.1)._check_persistence(conn)
             }
         assert checks["effective_rr_threshold_provenance_valid"].passed is False
         assert checks["no_accepted_trade_with_effective_rr_below_threshold"].passed is False
-        assert "INVALID_OR_MISSING" in checks["no_accepted_trade_with_effective_rr_below_threshold"].details
+        assert checks["no_accepted_trade_with_missing_critical_execution_context"].passed is False
+        assert "invalid_or_missing_threshold_rows=1" in checks[
+            "no_accepted_trade_with_effective_rr_below_threshold"
+        ].details
 
 
 def test_phase3_gate_requires_valid_effective_rr_threshold_provenance() -> None:
     engine = _engine()
-    report = LiveReadinessEvaluator(engine, min_effective_rr=None).evaluate(
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE decision_evidence SET min_effective_rr=NULL WHERE evidence_id='de-2'"))
+    report = LiveReadinessEvaluator(engine, min_effective_rr=1.6).evaluate(
         mode_parity=_parity(),
         reconciliation_snapshot=_reconciliation(),
         observability_snapshot=_operational(),

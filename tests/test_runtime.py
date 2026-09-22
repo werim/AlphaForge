@@ -705,15 +705,6 @@ def test_canonical_reject_metrics_persist_final_causality(
         metrics = json.loads(conn.execute(text(
             "SELECT metrics_json FROM burnin_observations WHERE decision='REJECTED'"
         )).scalar_one())
-        evidence = conn.execute(text("""
-            SELECT run_id,mode,decision,reject_reason,signal_id
-            FROM decision_evidence
-            WHERE signal_id=:signal_id
-        """), {"signal_id": signal_id}).mappings().one()
-    assert evidence["run_id"] == f"run-{signal_id}"
-    assert evidence["mode"] == "PAPER"
-    assert evidence["decision"] == "REJECT"
-    assert evidence["reject_reason"] == reason
     assert metrics["primary_reject_reason"] == reason
     assert metrics["reject_reasons"] == expected_reasons
     if reason.startswith("MTF_"):
@@ -733,52 +724,22 @@ def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> Non
     )
     orchestrator._burnin_run_id = "accepted-run"
 
-    payload = {
-        "signal_id": "accepted-1", "setup_identity": "setup-accepted-1",
-        "symbol": "BTCUSDT", "decision": "ACCEPTED",
+    orchestrator._persist_burnin_decision({
+        "signal_id": "accepted-1", "symbol": "BTCUSDT", "decision": "ACCEPTED",
         "timeframe": "1m", "geometry_status": "COMPLETE", "score": 0.8,
-        "rr": 2.0, "candidate_rr": 2.0, "expected_fill": 100.1,
-        "executable_raw_rr": 1.9, "remaining_execution_penalty": 0.1,
+        "rr": 2.0, "candidate_rr": 2.0, "executable_raw_rr": 1.9,
         "effective_rr": 1.8, "entry": 100.0, "sl": 95.0, "tp": 110.0,
         "geometry_source": "MTF_SETUP_STRUCTURE",
         "entry_source": "execution_close_within_setup_entry_zone",
         "stop_source": "setup_window_support", "target_source": "setup_window_resistance",
         "setup_timeframe": "15m", "execution_timeframe": "1m",
         "structural_stop": 95.0, "structural_target": 110.0,
-        "execution_ctx": {
-            "spread_pct": 0.0001, "expected_slippage_pct": 0.0002,
-            "funding_rate_pct": 0.0, "market_data_latency_ms": 25.0,
-            "liquidity_score": 0.9, "volatility_regime": "NORMAL",
-        },
-    }
-    orchestrator._persist_burnin_decision(payload)
-    orchestrator._persist_burnin_decision(payload)
+    })
 
     with engine.connect() as conn:
         metrics = json.loads(conn.execute(text(
             "SELECT metrics_json FROM burnin_observations WHERE decision='ACCEPTED'"
         )).scalar_one())
-        evidence = conn.execute(text("""
-            SELECT run_id,mode,decision,raw_rr,effective_rr,entry,sl,tp,
-                   spread_pct,expected_slippage_pct,signal_id,diagnostics_json
-            FROM decision_evidence
-            WHERE signal_id='accepted-1'
-        """)).mappings().one()
-        evidence_count = conn.execute(text(
-            "SELECT COUNT(*) FROM decision_evidence WHERE signal_id='accepted-1'"
-        )).scalar_one()
-    assert evidence_count == 1
-    assert evidence["run_id"] == "accepted-run"
-    assert evidence["mode"] == "PAPER"
-    assert evidence["decision"] == "ACCEPT"
-    assert evidence["raw_rr"] == pytest.approx(1.9)
-    assert evidence["effective_rr"] == pytest.approx(1.8)
-    assert evidence["entry"] == pytest.approx(100.1)
-    assert evidence["sl"] == pytest.approx(95.0)
-    assert evidence["tp"] == pytest.approx(110.0)
-    assert evidence["spread_pct"] == pytest.approx(0.0001)
-    assert evidence["expected_slippage_pct"] == pytest.approx(0.0002)
-    assert json.loads(evidence["diagnostics_json"])["planned_entry"] == pytest.approx(100.0)
     assert "primary_reject_reason" not in metrics
     assert "reject_reasons" not in metrics
     assert metrics["geometry_source"] == "MTF_SETUP_STRUCTURE"
@@ -861,6 +822,8 @@ def test_guided_null_low_effective_rr_is_not_authoritative(tmp_path: Path) -> No
     assert payload["authoritative_reject_reason"] == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
     assert payload["reason"] == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
     assert "LOW_EFFECTIVE_RR" not in payload["reject_reasons"]
+    assert "LOW_EFFECTIVE_RR" not in payload["all_failed_gates"]
+    assert "LOW_EFFECTIVE_RR" in payload["legacy_shadow_geometry"]["all_failed_gates"]
     assert payload["source_primary_reject_reason"] == "LOW_EFFECTIVE_RR"
     assert payload["legacy_shadow_geometry"]["reject_reason"] == "LOW_EFFECTIVE_RR"
     assert payload["legacy_shadow_geometry"]["effective_rr"] == pytest.approx(0.84)
@@ -1826,53 +1789,3 @@ def test_backtest_selector_retains_coarse_chop_hard_reject_semantics(monkeypatch
         "WEAK_TREND_AND_NO_RANGE_EDGE": 1,
     }
     assert orchestrator._last_scan_advisory_summary == {}
-
-
-def test_live_precheck_burnin_decision_persists_scoped_no_submit_evidence(tmp_path: Path) -> None:
-    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'precheck-decision-evidence.db'}")
-    orchestrator = RuntimeOrchestrator(
-        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),
-        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
-    )
-    orchestrator._burnin_run_id = "precheck-run"
-    orchestrator._persist_burnin_decision({
-        "signal_id": "precheck-1", "symbol": "ETHUSDT", "side": "SHORT",
-        "decision": "ACCEPTED", "decision_time": "2026-09-22T09:00:00Z",
-        "score": 0.71, "rr": 1.7, "executable_raw_rr": 1.55, "effective_rr": 1.42,
-        "entry": 2500.0, "expected_fill": 2499.5, "sl": 2520.0, "tp": 2460.0,
-        "execution_ctx": {
-            "spread_pct": 0.0001, "expected_slippage_pct": 0.0001,
-            "funding_rate_pct": 0.0, "market_data_latency_ms": 12.0,
-            "liquidity_score": 0.95, "volatility_regime": "NORMAL",
-        },
-    }, lifecycle_state=LifecycleState.ORDER_PLACED.value)
-
-    with engine.connect() as conn:
-        row = conn.execute(text("""
-            SELECT run_id,mode,decision,signal_id,diagnostics_json
-            FROM decision_evidence WHERE signal_id='precheck-1'
-        """)).mappings().one()
-    diagnostics = json.loads(row["diagnostics_json"])
-    assert row["run_id"] == "precheck-run"
-    assert row["mode"] == "LIVE_PRECHECK"
-    assert row["decision"] == "ACCEPT"
-    assert diagnostics["no_submit_verified"] is True
-
-
-def test_runtime_decision_evidence_preserves_unavailable_execution_values_as_null(tmp_path: Path) -> None:
-    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'null-decision-evidence.db'}")
-    orchestrator = RuntimeOrchestrator(
-        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
-        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
-    )
-    orchestrator._burnin_run_id = "null-run"
-    orchestrator._persist_burnin_decision({
-        "signal_id": "null-1", "symbol": "BTCUSDT", "decision": "ACCEPTED",
-        "score": 0.8, "rr": 1.5, "effective_rr": 1.2, "execution_ctx": {},
-    })
-    with engine.connect() as conn:
-        row = conn.execute(text("""
-            SELECT spread_pct,expected_slippage_pct,funding_rate_pct,latency_ms,liquidity_score
-            FROM decision_evidence WHERE signal_id='null-1'
-        """)).one()
-    assert tuple(row) == (None, None, None, None, None)

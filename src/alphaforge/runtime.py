@@ -22,11 +22,14 @@ from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
 from alphaforge.execution import (
+    PROVENANCE_ACTUAL,
     PROVENANCE_ESTIMATED,
     PROVENANCE_MODELLED,
+    PROVENANCE_UNAVAILABLE,
     build_execution_context,
     build_execution_cost_model,
     build_execution_cost_semantics,
+    weighted_average_fill_price,
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
@@ -1109,7 +1112,10 @@ class RuntimeOrchestrator:
                     "effective_rr", "confidence", "spread_pct", "expected_slippage_pct",
                     "latency_ms", "funding_rate_pct", "entry", "sl", "tp",
                     "entry_source", "stop_source", "target_source", "setup_timeframe",
-                    "execution_timeframe", "structural_stop", "structural_target")}
+                    "execution_timeframe", "structural_stop", "structural_target",
+                    "all_failed_gates", "failed_gate_evidence", "stop_distance_pct",
+                    "min_signal_score", "min_raw_rr", "min_effective_rr",
+                    "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
                                 "setup_identity": payload.get("setup_identity"),
@@ -1145,18 +1151,23 @@ class RuntimeOrchestrator:
                     f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}"
                 )
                 persist_burnin_observation(target, observation_id=observation_id, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
-
-                decision_ref = (
-                    payload.get("reject_decision_id")
-                    or payload.get("setup_identity")
-                    or payload.get("signal_id")
+                decision_upper = str(payload.get("decision") or "").upper()
+                reject_reason = (
+                    payload.get("primary_reject_reason")
+                    or payload.get("reject_reason")
+                    or payload.get("reason")
+                    if decision_upper == "REJECTED"
+                    else None
                 )
-                evidence_id = "runtime_decision:" + canonical_hash({
-                    "burnin_run_id": self._burnin_run_id,
-                    "decision_ref": str(decision_ref or ""),
-                    "decision": str(payload.get("decision") or ""),
-                })[:24]
+                portfolio_diagnostics = payload.get("portfolio_diagnostics")
+                portfolio_snapshot = (
+                    dict(portfolio_diagnostics.get("snapshot") or {})
+                    if isinstance(portfolio_diagnostics, Mapping)
+                    else {}
+                )
                 diagnostics = {
+                    "observation_id": observation_id,
+                    "campaign_id": campaign_id,
                     "candidate_rr": payload.get("candidate_rr"),
                     "planned_entry": payload.get("entry"),
                     "expected_fill": payload.get("expected_fill"),
@@ -1166,13 +1177,22 @@ class RuntimeOrchestrator:
                     "geometry_status": payload.get("geometry_status"),
                     "geometry_reason": payload.get("geometry_reason"),
                     "geometry_source": payload.get("geometry_source"),
+                    "all_failed_gates": payload.get("all_failed_gates"),
+                    "failed_gate_evidence": payload.get("failed_gate_evidence"),
+                    "reject_execution_basis": payload.get("reject_execution_basis"),
                     "no_submit_verified": self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
                     "execution_ctx": execution_ctx,
                 }
+                evidence_id = "runtime_decision:" + canonical_hash({
+                    "burnin_run_id": self._burnin_run_id,
+                    "observation_id": observation_id,
+                })[:24]
                 persisted_evidence = save_decision_evidence(
                     target,
                     evidence_id=evidence_id,
                     run_id=self._burnin_run_id,
+                    profile_id=payload.get("profile_id"),
+                    profile_name=payload.get("profile_name"),
                     mode=self.config.execution_mode.value,
                     timestamp=payload.get("decision_time") or payload.get("decision_timestamp"),
                     symbol=payload.get("symbol"),
@@ -1180,14 +1200,16 @@ class RuntimeOrchestrator:
                     setup_type=payload.get("setup_type"),
                     setup_reason=payload.get("setup_reason"),
                     regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime"),
+                    lifecycle_state_before=payload.get("lifecycle_state_before"),
                     lifecycle_state_after=lifecycle_state,
                     decision=payload.get("decision"),
                     score=payload.get("score"),
                     raw_rr=payload.get("executable_raw_rr") if payload.get("executable_raw_rr") is not None else payload.get("rr"),
                     effective_rr=payload.get("effective_rr"),
+                    min_effective_rr=payload.get("min_effective_rr") if payload.get("min_effective_rr") is not None else float(self.config.min_effective_rr),
                     expectancy=payload.get("expectancy"),
                     expectancy_bucket=payload.get("expectancy_bucket"),
-                    reject_reason=payload.get("primary_reject_reason") or payload.get("reject_reason") or payload.get("reason"),
+                    reject_reason=reject_reason,
                     entry=payload.get("expected_fill") if payload.get("expected_fill") is not None else payload.get("entry"),
                     sl=payload.get("sl") if payload.get("sl") is not None else payload.get("structural_stop"),
                     tp=payload.get("tp") if payload.get("tp") is not None else payload.get("structural_target"),
@@ -1210,18 +1232,33 @@ class RuntimeOrchestrator:
                     liquidity_status=execution_ctx.get("liquidity_status"),
                     volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
                     volatility_source=execution_ctx.get("volatility_source"),
-                    reject_flags=payload.get("reject_reasons"),
+                    reject_flags=payload.get("all_failed_gates") or payload.get("reject_reasons"),
                     unavailable_fields=execution_ctx.get("unavailable_fields"),
                     diagnostics_json=diagnostics,
-                    portfolio_equity=(payload.get("portfolio_diagnostics") or {}).get("snapshot", {}).get("equity") if isinstance(payload.get("portfolio_diagnostics"), Mapping) else None,
-                    open_position_count=(payload.get("portfolio_diagnostics") or {}).get("snapshot", {}).get("open_position_count") if isinstance(payload.get("portfolio_diagnostics"), Mapping) else None,
-                    total_notional_exposure=(payload.get("portfolio_diagnostics") or {}).get("snapshot", {}).get("total_notional_exposure") if isinstance(payload.get("portfolio_diagnostics"), Mapping) else None,
-                    correlation_group=(payload.get("portfolio_diagnostics") or {}).get("snapshot", {}).get("correlation_group") if isinstance(payload.get("portfolio_diagnostics"), Mapping) else None,
-                    correlated_position_count=(payload.get("portfolio_diagnostics") or {}).get("snapshot", {}).get("correlated_position_count") if isinstance(payload.get("portfolio_diagnostics"), Mapping) else None,
+                    portfolio_equity=portfolio_snapshot.get("equity"),
+                    available_balance=portfolio_snapshot.get("available_balance"),
+                    open_position_count=portfolio_snapshot.get("open_position_count"),
+                    max_open_positions=portfolio_snapshot.get("max_open_positions"),
+                    total_notional_exposure=portfolio_snapshot.get("total_notional_exposure"),
+                    max_notional_exposure=portfolio_snapshot.get("max_notional_exposure"),
+                    symbol_notional_exposure=portfolio_snapshot.get("symbol_notional_exposure"),
+                    max_symbol_notional=portfolio_snapshot.get("max_symbol_notional"),
+                    side_exposure_long=portfolio_snapshot.get("side_exposure_long"),
+                    side_exposure_short=portfolio_snapshot.get("side_exposure_short"),
+                    net_exposure=portfolio_snapshot.get("net_exposure"),
+                    gross_exposure=portfolio_snapshot.get("gross_exposure"),
+                    daily_realized_pnl=portfolio_snapshot.get("daily_realized_pnl"),
+                    daily_loss_pct=portfolio_snapshot.get("daily_loss_pct"),
+                    max_daily_loss_pct=portfolio_snapshot.get("max_daily_loss_pct"),
+                    rolling_drawdown_pct=portfolio_snapshot.get("rolling_drawdown_pct"),
+                    consecutive_loss_count=portfolio_snapshot.get("consecutive_loss_count"),
+                    correlation_group=portfolio_snapshot.get("correlation_group"),
+                    correlation_group_exposure=portfolio_snapshot.get("correlation_group_exposure"),
+                    correlated_position_count=portfolio_snapshot.get("correlated_position_count"),
                     risk_flags=payload.get("risk_flags"),
                     portfolio_reject_reason=payload.get("portfolio_reject_reason"),
                     portfolio_risk_state=payload.get("portfolio_risk_state"),
-                    portfolio_diagnostics_json=payload.get("portfolio_diagnostics"),
+                    portfolio_diagnostics_json=portfolio_diagnostics,
                     signal_id=payload.get("signal_id"),
                     order_id=payload.get("order_id"),
                     position_id=payload.get("position_id"),
@@ -2336,6 +2373,7 @@ class RuntimeOrchestrator:
             "executable_raw_rr": rr_metrics["executable_raw_rr"],
             "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
             "effective_rr": effective_rr,
+            "min_effective_rr": float(self.config.min_effective_rr),
             "confidence": order_plan.confidence,
             "execution_ctx": execution_ctx,
             "timeframe": self.config.execution_timeframe,
@@ -2448,6 +2486,92 @@ class RuntimeOrchestrator:
             },
         )
 
+    def _canonical_execution_result(
+        self,
+        result: Mapping[str, Any],
+        decision: Mapping[str, Any],
+        market_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode,
+    ) -> dict[str, Any]:
+        """Attach canonical entry -> expected_fill -> actual_fill evidence.
+
+        This is evidence-only normalization after an execution result exists.
+        It must not change authorization, order selection, threshold decisions,
+        or whether an order is submitted. Invalid/missing fill evidence remains
+        explicit UNAVAILABLE rather than failing an already-completed submit.
+        """
+        normalized = dict(result)
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            return normalized
+
+        execution_ctx = dict(market_ctx.get("execution_ctx") or {})
+        expected_fill = normalized.get("expected_fill", market_ctx.get("expected_fill"))
+        if expected_fill is None:
+            expected_fill, _ = self._expected_fill_price(market_ctx, execution_ctx)
+
+        actual_fill = normalized.get("actual_fill")
+        fills = normalized.get("fills")
+        if fills is not None:
+            try:
+                weighted_fill = weighted_average_fill_price(fills)
+            except ValueError:
+                normalized["execution_cost_semantics"] = None
+                normalized["execution_cost_semantics_status"] = "UNAVAILABLE_INVALID_FILL_LEDGER"
+                normalized["actual_fill_provenance"] = PROVENANCE_UNAVAILABLE
+                return normalized
+            if weighted_fill is not None:
+                actual_fill = weighted_fill
+                normalized["weighted_average_fill_price"] = weighted_fill
+        if actual_fill is None:
+            actual_fill = normalized.get("fill_price")
+
+        expected_provenance = (
+            PROVENANCE_MODELLED if mode is ExecutionMode.PAPER else PROVENANCE_ESTIMATED
+        )
+        actual_provenance = (
+            PROVENANCE_MODELLED
+            if mode is ExecutionMode.PAPER and actual_fill is not None
+            else PROVENANCE_ACTUAL
+            if mode is ExecutionMode.LIVE and actual_fill is not None
+            else PROVENANCE_UNAVAILABLE
+        )
+
+        if expected_fill is None:
+            normalized["execution_cost_semantics"] = None
+            normalized["execution_cost_semantics_status"] = "UNAVAILABLE_EXPECTED_FILL"
+            normalized["actual_fill_provenance"] = actual_provenance
+            return normalized
+
+        try:
+            semantics = build_execution_cost_semantics(
+                entry=market_ctx.get("entry"),
+                expected_fill=expected_fill,
+                actual_fill=actual_fill,
+                side=market_ctx.get("side"),
+                expected_fill_provenance=expected_provenance,
+                actual_fill_provenance=actual_provenance,
+                decision_timestamp=decision.get("decision_time"),
+                fill_timestamp=(
+                    normalized.get("fill_timestamp")
+                    or normalized.get("filled_at")
+                    if actual_fill is not None
+                    else None
+                ),
+            )
+        except ValueError:
+            normalized["execution_cost_semantics"] = None
+            normalized["execution_cost_semantics_status"] = "UNAVAILABLE_INVALID_PRICE_OR_SIDE"
+            normalized["actual_fill_provenance"] = actual_provenance
+            return normalized
+
+        normalized["expected_fill"] = semantics.expected_fill
+        normalized["actual_fill"] = semantics.actual_fill
+        normalized["actual_fill_provenance"] = semantics.actual_fill_provenance
+        normalized["execution_cost_semantics"] = semantics.as_dict()
+        normalized["execution_cost_semantics_status"] = "AVAILABLE"
+        return normalized
+
     async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> bool | None:
         self._assert_campaign_candidate(symbol, market_ctx.get("source_exchange"), "PAPER_EXECUTION")
         if self._kill_switch_active():
@@ -2473,6 +2597,7 @@ class RuntimeOrchestrator:
         else:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
+        result = self._canonical_execution_result(result, decision, market_ctx, mode=mode)
         self.metrics.executions += 1
         order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
         result_status = str(result.get("status", "")).lower()
@@ -2763,6 +2888,87 @@ class RuntimeOrchestrator:
         self.metrics.rejects_persisted = count
         return count
 
+    def _reject_gate_audit(self, payload: Mapping[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+        """Return non-authoritative multi-gate evidence for a final reject.
+
+        This audit never changes the canonical primary reject reason or decision.
+        It snapshots decision-time observed values against the runtime thresholds
+        so downstream analysis can distinguish overlapping failures.
+        """
+        execution = dict(payload.get("execution_ctx") or {})
+        failed: list[str] = []
+        evidence: list[dict[str, Any]] = []
+
+        def number(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if math.isfinite(parsed) else None
+
+        def add(gate: str, observed: Any, threshold: Any, comparison: str, source: str = "RUNTIME_THRESHOLD") -> None:
+            gate = str(gate).upper()
+            if gate not in failed:
+                failed.append(gate)
+            evidence.append({
+                "gate": gate,
+                "observed": observed,
+                "threshold": threshold,
+                "comparison": comparison,
+                "source": source,
+            })
+
+        supplied = payload.get("all_failed_gates")
+        if isinstance(supplied, (list, tuple)):
+            for gate in supplied:
+                if gate:
+                    add(str(gate), None, None, "SUPPLIED", "UPSTREAM_DIAGNOSTIC")
+
+        primary = canonical_reject_reason(
+            payload.get("primary_reject_reason") or payload.get("reason") or payload.get("reject_reason")
+        )
+        if primary and primary != "UNKNOWN":
+            add(primary, None, None, "PRIMARY", "AUTHORITATIVE_PRIMARY")
+
+        score = number(payload.get("score"))
+        if score is not None and score < float(self.config.min_signal_score):
+            add("LOW_SCORE", score, float(self.config.min_signal_score), "<")
+
+        raw_rr = number(payload.get("candidate_rr", payload.get("rr", payload.get("raw_rr"))))
+        if raw_rr is not None and raw_rr < float(self.config.min_rr):
+            add("RR_TOO_LOW", raw_rr, float(self.config.min_rr), "<")
+
+        effective_rr = number(payload.get("effective_rr"))
+        if effective_rr is not None and effective_rr < float(self.config.min_effective_rr):
+            add("LOW_EFFECTIVE_RR", effective_rr, float(self.config.min_effective_rr), "<")
+
+        entry = number(payload.get("entry", payload.get("entry_price")))
+        stop = number(payload.get("sl", payload.get("stop_loss", payload.get("stop"))))
+        if entry is not None and entry > 0 and stop is not None:
+            stop_distance_pct = abs(entry - stop) / entry * 100.0
+            if stop_distance_pct < float(self.config.min_sl_pct):
+                add("STOP_TOO_TIGHT", stop_distance_pct, float(self.config.min_sl_pct), "<")
+            if stop_distance_pct > float(self.config.max_sl_pct):
+                add("STOP_TOO_WIDE", stop_distance_pct, float(self.config.max_sl_pct), ">")
+
+        spread = number(payload.get("spread_pct", execution.get("spread_pct")))
+        if spread is not None and spread > float(self.config.max_spread_pct):
+            add("SPREAD_TOO_HIGH", spread, float(self.config.max_spread_pct), ">")
+
+        slippage = number(payload.get("expected_slippage_pct", execution.get("expected_slippage_pct")))
+        if slippage is not None and slippage > float(self.config.max_expected_slippage_pct):
+            add("SLIPPAGE_TOO_HIGH", slippage, float(self.config.max_expected_slippage_pct), ">")
+
+        funding = number(payload.get("funding_rate_pct", execution.get("funding_rate_pct")))
+        if funding is not None and abs(funding) > float(self.config.max_abs_funding_rate_pct):
+            add("FUNDING_TOO_HIGH", abs(funding), float(self.config.max_abs_funding_rate_pct), ">")
+
+        volume = number(payload.get("volume_24h_usdt"))
+        if volume is not None and volume < float(self.config.min_liquidity_usd):
+            add("THIN_LIQUIDITY", volume, float(self.config.min_liquidity_usd), "<")
+
+        return failed, evidence
+
     def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")
         supplied_reasons = result.get("reject_reasons")
@@ -2783,6 +2989,7 @@ class RuntimeOrchestrator:
         forward_label_subject = ("GUIDED_CANDIDATE" if guided_candidate else
                                  "LEGACY_SCANNER_SHADOW_CANDIDATE" if guided_generation else
                                  "LEGACY_CANDIDATE")
+        all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         if guided_without_candidate:
             shadow_geometry = {key: result.get(key) for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
@@ -2793,7 +3000,13 @@ class RuntimeOrchestrator:
                 **shadow_geometry,
                 "attributable": False,
                 "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
+                "all_failed_gates": list(all_failed_gates),
+                "failed_gate_evidence": list(failed_gate_evidence),
             }
+            # The scanner-shadow gates are diagnostic only. Do not leak them
+            # back into canonical multi-gate evidence for a missing guided candidate.
+            all_failed_gates = []
+            failed_gate_evidence = []
             for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
                 "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
@@ -2819,6 +3032,7 @@ class RuntimeOrchestrator:
                 if result.get("reject_reason") is not None:
                     result["reject_reason"] = primary_reject_reason
                 result["authoritative_reject_reason"] = primary_reject_reason
+        all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         supplied_reject_decision_id = result.get("reject_decision_id")
@@ -2828,6 +3042,8 @@ class RuntimeOrchestrator:
         result.update({
             "reject_decision_id":str(reject_decision_id), "decision":"REJECTED",
             "primary_reject_reason": primary_reject_reason, "reject_reasons": reject_reasons,
+            "all_failed_gates": list(dict.fromkeys([*all_failed_gates, *reject_reasons])),
+            "failed_gate_evidence": failed_gate_evidence,
             "authoritative_reject_reason": result.get("authoritative_reject_reason") or primary_reject_reason,
             "mtf_execution_confirmation_mode": result.get(
                 "mtf_execution_confirmation_mode", self.config.mtf_execution_confirmation_mode
@@ -2844,6 +3060,20 @@ class RuntimeOrchestrator:
             "runtime_identity": result.get("runtime_identity") or runtime_identity,
             "forward_label_subject": (forward_label_subject if guided_generation
                                       else result.get("forward_label_subject") or forward_label_subject),
+        })
+        try:
+            entry_value = float(result.get("entry"))
+            stop_value = float(result.get("sl"))
+            stop_distance_pct = abs(entry_value - stop_value) / entry_value * 100.0 if entry_value > 0 else None
+        except (TypeError, ValueError):
+            stop_distance_pct = None
+        result.update({
+            "stop_distance_pct": stop_distance_pct,
+            "min_signal_score": float(self.config.min_signal_score),
+            "min_raw_rr": float(self.config.min_rr),
+            "min_effective_rr": float(self.config.min_effective_rr),
+            "min_stop_pct": float(self.config.min_sl_pct),
+            "max_stop_pct": float(self.config.max_sl_pct),
         })
         return result
 
@@ -2878,6 +3108,59 @@ class RuntimeOrchestrator:
                            if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE"
                            and isinstance(payload.get("legacy_shadow_geometry"), Mapping) else {})
         label_geometry = shadow_geometry or payload
+        planned_entry = label_geometry.get("entry", label_geometry.get("entry_price"))
+        expected_fill = None if shadow_geometry else payload.get("expected_fill")
+        derived_rr_metrics: Mapping[str, Any] = {}
+        if not shadow_geometry and expected_fill is None:
+            try:
+                expected_fill, _ = self._expected_fill_price(label_geometry, execution_ctx)
+                if expected_fill is not None:
+                    derived_rr_metrics = self._execution_rr_metrics(
+                        payload.get("candidate_rr", payload.get("rr", payload.get("raw_rr"))),
+                        label_geometry,
+                        execution_ctx,
+                    )
+                    expected_fill = derived_rr_metrics.get("expected_fill", expected_fill)
+            except (TypeError, ValueError):
+                expected_fill = None
+                derived_rr_metrics = {}
+        try:
+            executable_entry = float(expected_fill) if expected_fill is not None else None
+            if executable_entry is not None and (not math.isfinite(executable_entry) or executable_entry <= 0):
+                executable_entry = None
+        except (TypeError, ValueError):
+            executable_entry = None
+        execution_aligned = executable_entry is not None and not shadow_geometry
+        label_entry = executable_entry if execution_aligned else planned_entry
+        embedded_entry_slippage_cost = costs.get("entry_slippage_cost")
+        if execution_aligned and embedded_entry_slippage_cost is not None:
+            # The entry-side slippage is already represented by expected_fill.
+            # Keep the explicit field at zero to preserve the complete R-cost
+            # schema while preventing a second deduction in reject resolution.
+            costs = {**costs, "entry_slippage_cost": 0.0}
+        attributable = payload.get("reject_quality_attributable") is not False and execution_aligned
+        non_attributable_reason = payload.get("non_attributable_reason")
+        if shadow_geometry:
+            attributable = False
+            non_attributable_reason = non_attributable_reason or "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
+        elif not execution_aligned:
+            attributable = False
+            non_attributable_reason = non_attributable_reason or "EXECUTION_PARITY_BASIS_UNAVAILABLE"
+        try:
+            initial_risk = abs(float(planned_entry) - float(
+                label_geometry.get("sl", label_geometry.get("stop_loss", label_geometry.get("stop")))
+            ))
+            fill_shift_initial_risk_ratio = (
+                abs(float(executable_entry) - float(planned_entry)) / initial_risk
+                if execution_aligned and initial_risk > 0 else None
+            )
+        except (TypeError, ValueError):
+            fill_shift_initial_risk_ratio = None
+        reject_execution_basis = (
+            "EXPECTED_FILL_RUNTIME_PARITY" if execution_aligned
+            else "LEGACY_SCANNER_SHADOW" if shadow_geometry
+            else "PLANNED_ENTRY_LEGACY"
+        )
         try:
             def persist(target: Any) -> str | None:
                 return persist_pending_reject_label(
@@ -2885,7 +3168,7 @@ class RuntimeOrchestrator:
                     reject_decision_id=str(payload.get("reject_decision_id") or ""), signal_id=signal_id or None,
                     symbol=payload.get("symbol"), side=label_geometry.get("side"),
                     decision_timestamp=payload.get("decision_timestamp") or canonical_utc_timestamp(), timeframe=payload.get("timeframe"),
-                    entry=label_geometry.get("entry", label_geometry.get("entry_price")),
+                    entry=label_entry,
                     stop=label_geometry.get("sl", label_geometry.get("stop_loss", label_geometry.get("stop"))),
                     target=label_geometry.get("tp", label_geometry.get("take_profit", label_geometry.get("target"))),
                     horizon_bars=self.config.reject_forward_horizon_bars,
@@ -2894,8 +3177,32 @@ class RuntimeOrchestrator:
                     source_provenance={"provider": self.scanner_source or "UNKNOWN", "timeframe": payload.get("timeframe"),
                                        "forward_label_subject": payload.get("forward_label_subject"),
                                        "forward_label_side": label_geometry.get("side"),
-                                       "reject_quality_attributable": payload.get("reject_quality_attributable"),
-                                       "non_attributable_reason": payload.get("non_attributable_reason"),
+                                       "reject_quality_attributable": attributable,
+                                       "non_attributable_reason": non_attributable_reason,
+                                       "reject_execution_basis": reject_execution_basis,
+                                       "planned_entry": planned_entry,
+                                       "executable_entry": executable_entry,
+                                       "score": payload.get("score"),
+                                       "candidate_raw_rr": payload.get("candidate_rr", payload.get("rr")),
+                                       "executable_raw_rr": payload.get("executable_raw_rr", derived_rr_metrics.get("executable_raw_rr")),
+                                       "remaining_execution_penalty": payload.get("remaining_execution_penalty", derived_rr_metrics.get("remaining_execution_penalty")),
+                                       "effective_rr_at_decision": payload.get("effective_rr"),
+                                       "counterfactual_effective_rr": (
+                                           None if payload.get("effective_rr") is not None
+                                           else derived_rr_metrics.get("effective_rr")
+                                       ),
+                                       "min_signal_score": payload.get("min_signal_score"),
+                                       "min_raw_rr": payload.get("min_raw_rr"),
+                                       "min_effective_rr": payload.get("min_effective_rr"),
+                                       "min_stop_pct": payload.get("min_stop_pct"),
+                                       "max_stop_pct": payload.get("max_stop_pct"),
+                                       "entry_slippage_embedded_in_fill": bool(execution_aligned),
+                                       "embedded_entry_slippage_cost": embedded_entry_slippage_cost,
+                                       "fill_shift_initial_risk_ratio": fill_shift_initial_risk_ratio,
+                                       "stop_distance_pct": payload.get("stop_distance_pct"),
+                                       "all_failed_gates": payload.get("all_failed_gates"),
+                                       "failed_gate_evidence": payload.get("failed_gate_evidence"),
+                                       "execution_cost_semantics": payload.get("execution_cost_semantics", derived_rr_metrics.get("execution_cost_semantics")),
                                        "campaign_intervals": list(self._campaign_intervals),
                                        "regime_timeframe": self.config.regime_timeframe,
                                        "setup_timeframe": self.config.setup_timeframe,

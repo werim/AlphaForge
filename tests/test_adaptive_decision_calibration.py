@@ -56,7 +56,8 @@ def _reject(source, i, net, *, reason="LOW_SCORE", symbol="ETHUSDT", side="LONG"
         decision_timestamp=stamp, entry=100, stop=110 if side == "SHORT" else 90,
         target=80 if side == "SHORT" else 120, horizon_seconds=60,
         execution_cost_assumptions={}, regime=regime, reject_reason=reason,
-        source_provenance={})
+        source_provenance={"reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY",
+                           "reject_quality_attributable": attributable})
     if outcome:
         persist_burnin_reject_outcome(source, reject_outcome_id=f"rout_{decision_id}",
             burnin_run_id="run", release_id="rel", reject_reason=reason, symbol=symbol,
@@ -67,7 +68,9 @@ def _reject(source, i, net, *, reason="LOW_SCORE", symbol="ETHUSDT", side="LONG"
             evidence_complete=complete,
             payload={"campaign_id": "camp", "burnin_run_id": "run",
                      "reject_decision_id": decision_id, "pending_label_id": pending_id,
-                     "reject_quality_attributable": attributable})
+                     "reject_quality_attributable": attributable,
+                     "reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY",
+                     "execution_aligned": True})
 
 
 def _accept(source, i, net, *, symbol="ETHUSDT", side="LONG", regime="TRENDING",

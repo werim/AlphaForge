@@ -490,22 +490,27 @@ class LiveReadinessEvaluator:
             phase3_execution_reject_rows = evidence_count(
                 "UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','HIGH_SLIPPAGE','HIGH_TOTAL_COST','LOW_LIQUIDITY','HIGH_LATENCY','EXECUTION_CONTEXT_UNAVAILABLE','EXCESSIVE_VOLATILITY_PENALTY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')"
             )
+            phase3_invalid_effective_rr_threshold = evidence_count(
+                """UPPER(COALESCE(decision,''))='ACCEPT'
+                   AND (min_effective_rr IS NULL OR min_effective_rr <= 0)"""
+            )
             phase3_missing_critical_accepted = evidence_count(
                 """UPPER(COALESCE(decision,''))='ACCEPT'
-                   AND (effective_rr IS NULL OR cost_penalty IS NULL OR spread_pct IS NULL
+                   AND (effective_rr IS NULL OR min_effective_rr IS NULL OR min_effective_rr <= 0
+                        OR cost_penalty IS NULL OR spread_pct IS NULL
                         OR expected_slippage_pct IS NULL OR liquidity_score IS NULL)"""
             )
-            phase3_low_effective_accepted = (
-                evidence_count(
-                    "UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < :readiness_min_effective_rr"
-                )
-                if self.min_effective_rr_valid
-                else 1
+            phase3_low_effective_accepted = evidence_count(
+                """UPPER(COALESCE(decision,''))='ACCEPT'
+                   AND min_effective_rr IS NOT NULL AND min_effective_rr > 0
+                   AND effective_rr IS NOT NULL
+                   AND effective_rr < min_effective_rr"""
             )
         else:
             evidence_rows = evidence_lifecycle_states = evidence_accepted = evidence_rejected = 0
             evidence_parity_rows = evidence_fake_zero_rows = 1
             phase3_breakdown_rows = phase3_effective_rr_rows = phase3_execution_reject_rows = 0
+            phase3_invalid_effective_rr_threshold = 1
             phase3_missing_critical_accepted = phase3_low_effective_accepted = 1
 
         parity_rows = scoped_count(
@@ -533,13 +538,15 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("execution_rejects_persisted", phase3_execution_reject_rows > 0, f"execution_reject_rows={phase3_execution_reject_rows},evidence_rejected={evidence_rejected}"))
         checks.append(CheckResult(
             "effective_rr_threshold_provenance_valid",
-            self.min_effective_rr_valid,
-            f"min_effective_rr={self.min_effective_rr if self.min_effective_rr_valid else 'INVALID_OR_MISSING'}",
+            evidence_accepted > 0 and phase3_invalid_effective_rr_threshold == 0,
+            f"accepted_rows={evidence_accepted};invalid_or_missing_threshold_rows={phase3_invalid_effective_rr_threshold};source=decision_evidence.min_effective_rr",
         ))
         checks.append(CheckResult(
             "no_accepted_trade_with_effective_rr_below_threshold",
-            self.min_effective_rr_valid and phase3_low_effective_accepted == 0,
-            f"low_effective_accepted={phase3_low_effective_accepted};min_effective_rr={self.min_effective_rr if self.min_effective_rr_valid else 'INVALID_OR_MISSING'}",
+            evidence_accepted > 0
+            and phase3_invalid_effective_rr_threshold == 0
+            and phase3_low_effective_accepted == 0,
+            f"low_effective_accepted={phase3_low_effective_accepted};invalid_or_missing_threshold_rows={phase3_invalid_effective_rr_threshold};source=decision_evidence.min_effective_rr",
         ))
         checks.append(CheckResult("no_accepted_trade_with_missing_critical_execution_context", phase3_missing_critical_accepted == 0, f"missing_critical_accepted={phase3_missing_critical_accepted}"))
 

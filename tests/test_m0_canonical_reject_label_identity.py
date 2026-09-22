@@ -54,7 +54,7 @@ def _pending_kwargs(campaign_id, run_id, reject_id, **overrides):
         "execution_cost_assumptions": COSTS,
         "regime": "TRENDING",
         "reject_reason": "LOW_CONFIDENCE",
-        "source_provenance": {"provider": "PAPER", "forward_label_subject": "GUIDED_CANDIDATE"},
+        "source_provenance": {"provider": "PAPER", "forward_label_subject": "GUIDED_CANDIDATE", "reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY", "reject_quality_attributable": True},
     }
     values.update(overrides)
     return values
@@ -70,7 +70,7 @@ def _insert_orphan_pending(conn, campaign_id, run_id, reject_id):
         f"orphan:{reject_id}", campaign_id, run_id, reject_id, f"signal:{reject_id}",
         "BTCUSDT", "LONG", "2026-01-01T00:00:00Z", "1m", 1, 100, 90, 120,
         60, json.dumps(COSTS), "TRENDING", "LOW_CONFIDENCE",
-        json.dumps({"forward_label_subject": "GUIDED_CANDIDATE"}),
+        json.dumps({"forward_label_subject": "GUIDED_CANDIDATE", "reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY", "reject_quality_attributable": True}),
         "2026-01-01T00:01:00Z", "PENDING", "2026-01-01T00:00:00Z", "test"))
 
 
@@ -207,7 +207,9 @@ def test_resolver_retry_produces_one_identity_preserving_outcome():
             payload={"reject_decision_id": reject_id,
                      "pending_label_id": payload["pending_label_id"],
                      "campaign_id": campaign_id, "burnin_run_id": run_id,
-                     "reject_quality_attributable": True})
+                     "reject_quality_attributable": True,
+                     "reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY",
+                     "execution_aligned": True})
     metrics = aggregate_campaign(conn, campaign_id)["metrics"]
     assert metrics["completed_rejected_forward_outcomes"] == 1
     assert metrics["duplicate_canonical_rejected_forward_outcomes"] == 1
