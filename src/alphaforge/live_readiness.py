@@ -68,6 +68,7 @@ class LiveReadinessEvaluator:
         burnin_run_id: str | None = None,
         release_id: str | None = None,
         runtime_instance_id: str | None = None,
+        execution_mode: str | None = None,
         strict_scope: bool = False,
     ) -> None:
         self.engine = engine
@@ -77,6 +78,7 @@ class LiveReadinessEvaluator:
         self.burnin_run_id = burnin_run_id
         self.release_id = release_id
         self.runtime_instance_id = runtime_instance_id
+        self.execution_mode = str(execution_mode or "").strip().upper() or None
         self.strict_scope = bool(strict_scope)
 
     def _resolved_run_id(self, conn: Any) -> str | None:
@@ -600,7 +602,12 @@ class LiveReadinessEvaluator:
         return [CheckResult("reject_rate_sanity", lower <= reject_rate <= upper if total else False, f"reject_rate={reject_rate:.4f},total={total}"), CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"), CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}")]
 
     def _check_runtime_heartbeat(self) -> CheckResult:
-        evidence = evaluate_runtime_heartbeat_freshness(self.engine, required_mode="LIVE", max_age_sec=self.runtime_heartbeat_max_age_sec)
+        evidence = evaluate_runtime_heartbeat_freshness(
+            self.engine,
+            required_mode=self.execution_mode or "LIVE",
+            runtime_instance_id=self.runtime_instance_id if self.strict_scope else None,
+            max_age_sec=self.runtime_heartbeat_max_age_sec,
+        )
         latest = evidence.latest_heartbeat or {}
         details = f"state={evidence.state},reason={evidence.reason},heartbeat_ts={latest.get('heartbeat_ts')},execution_mode={latest.get('execution_mode')},runtime_instance_id={latest.get('runtime_instance_id')},max_age_sec={evidence.max_age_sec}"
         return CheckResult("runtime_heartbeat", evidence.is_fresh, details)
