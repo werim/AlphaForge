@@ -255,7 +255,8 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
         explicit_attributable=source_provenance.get("reject_quality_attributable")
         attributable=(explicit_attributable is not False
                       and subject != "LEGACY_SCANNER_SHADOW_CANDIDATE"
-                      and not infrastructure_reject)
+                      and not infrastructure_reject
+                      and execution_aligned)
         reject_correct=None if invalid or ambiguous or net is None or not complete or not attributable else bool(net<=0)
         market_provenance=next((c.get("source_provenance") for c in observed if c.get("source_provenance")),None)
         payload={
@@ -295,6 +296,7 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
                 source_provenance.get("non_attributable_reason") or
                 ("INFRASTRUCTURE_UNAVAILABILITY" if infrastructure_reject else
                  "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT" if subject == "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                 else "LEGACY_PLANNED_ENTRY_BASIS" if not execution_aligned
                  else "NON_ATTRIBUTABLE_REJECT")
             ),
         }
