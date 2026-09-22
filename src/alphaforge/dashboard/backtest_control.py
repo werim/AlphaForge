@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from alphaforge.config import load_config_from_env
-from alphaforge.config_registry import config_snapshot, effective_config_values
+from alphaforge.config_registry import config_snapshot, effective_config_values, managed_config_value
 from alphaforge.contracts import canonical_utc_timestamp
 from alphaforge.historical_market_data import supported_intervals
 from alphaforge.symbols import SymbolListError, normalize_symbol_list
@@ -1434,7 +1434,7 @@ def _apply_backtest_artifact_model(result: DashboardBacktestResult, artifact_dir
     score10 = result.score_saturation_diagnostics.get("score_10", {}) if isinstance(result.score_saturation_diagnostics, dict) else {}
     score10_sl = _safe_float_or_none(score10.get("would_sl_count")) or 0.0
     score10_tp = _safe_float_or_none(score10.get("would_tp_count")) or 0.0
-    if avg_per_day > float(os.getenv("ALPHAFORGE_BACKTEST_SAFE_TRADES_PER_DAY", "3")):
+    if avg_per_day > float(managed_config_value("ALPHAFORGE_BACKTEST_SAFE_TRADES_PER_DAY")):
         result.blocking_warnings.append("OVERTRADE_RISK")
     if score10_sl > score10_tp:
         result.blocking_warnings.append("SCORE_SATURATION_RISK")

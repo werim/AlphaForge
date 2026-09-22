@@ -151,6 +151,19 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_BACKTEST_USE_EXECUTION_COSTS", "backtest_use_execution_costs", "bool", True, "Backtest Settings", ("BACKTEST",), "Use execution-cost context in backtests when available."),
     _s("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", "backtest_short_breakdown_rescue_enabled", "bool", False, "Backtest Settings", ("BACKTEST",), "BACKTEST-only SHORT_BREAKDOWN_RESCUE experiment; disabled by default and does not affect PAPER/LIVE."),
     _s("ALPHAFORGE_BACKTEST_EXPORT_CONFIG_SNAPSHOT", "backtest_export_config_snapshot", "bool", True, "Backtest Settings", ("BACKTEST",), "Export config_snapshot.json with backtest runs."),
+    _s("ALPHAFORGE_BACKTEST_MAX_OPEN_POSITIONS", "backtest_max_open_positions", "int", None, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST max-open override; falls back to the explicit generic runtime setting or legacy default.", 1, dashboard_editable=False, behavioral_test="tests/test_issue407_config_ssot.py::test_backtest_portfolio_defaults_preserve_legacy_semantics"),
+    _s("ALPHAFORGE_BACKTEST_MAX_CONCURRENT_POSITIONS", "backtest_max_concurrent_positions", "int", None, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST concurrent-position override.", 1, dashboard_editable=False, behavioral_test="tests/test_issue407_config_ssot.py::test_backtest_portfolio_defaults_preserve_legacy_semantics"),
+    _s("ALPHAFORGE_BACKTEST_MAX_NOTIONAL_EXPOSURE", "backtest_max_notional_exposure", "float", None, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST total-notional override; absent value preserves balance-derived legacy fallback.", 0.0, dashboard_editable=False, behavioral_test="tests/test_issue407_config_ssot.py::test_backtest_portfolio_explicit_overrides_and_generic_fallback"),
+    _s("ALPHAFORGE_BACKTEST_MAX_SYMBOL_NOTIONAL", "backtest_max_symbol_notional", "float", None, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST per-symbol notional override; absent value preserves balance-derived legacy fallback.", 0.0, dashboard_editable=False, behavioral_test="tests/test_issue407_config_ssot.py::test_backtest_portfolio_explicit_overrides_and_generic_fallback"),
+    _s("ALPHAFORGE_BACKTEST_MAX_DAILY_LOSS_PCT", "backtest_max_daily_loss_pct", "float", 0.03, "Backtest Settings", ("BACKTEST",), "BACKTEST daily-loss risk limit.", 0.0, 1.0, dashboard_editable=False),
+    _s("ALPHAFORGE_BACKTEST_MAX_ROLLING_DRAWDOWN_PCT", "backtest_max_rolling_drawdown_pct", "float", 0.08, "Backtest Settings", ("BACKTEST",), "BACKTEST rolling drawdown limit.", 0.0, 1.0, dashboard_editable=False),
+    _s("ALPHAFORGE_BACKTEST_MAX_CORRELATION_GROUP_EXPOSURE", "backtest_max_correlation_group_exposure", "float", None, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST correlation-group exposure cap; defaults to 75% of starting balance.", 0.0, dashboard_editable=False),
+    _s("ALPHAFORGE_BACKTEST_MAX_CORRELATED_POSITIONS", "backtest_max_correlated_positions", "int", 2, "Backtest Settings", ("BACKTEST",), "BACKTEST correlated-position cap.", 0, dashboard_editable=False),
+    _s("ALPHAFORGE_BACKTEST_MAX_TRADES_SYMBOL_PER_DAY", "backtest_max_daily_symbol_trades", "int", 2, "Backtest Settings", ("BACKTEST",), "BACKTEST per-symbol daily trade cap.", 0, dashboard_editable=False),
+    _s("ALPHAFORGE_BACKTEST_MAX_TRADES_GLOBAL_PER_DAY", "backtest_max_daily_global_trades", "int", 6, "Backtest Settings", ("BACKTEST",), "BACKTEST global daily trade cap.", 0, dashboard_editable=False),
+    _s("ALPHAFORGE_BACKTEST_MAX_SAME_SIDE_EXPOSURE", "backtest_max_same_side_exposure", "float", None, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST same-side exposure cap; defaults to 75% of starting balance.", 0.0, dashboard_editable=False),
+    _s("ALPHAFORGE_BACKTEST_MAX_NET_EXPOSURE", "backtest_max_net_exposure", "float", None, "Backtest Settings", ("BACKTEST",), "Optional BACKTEST net exposure cap; defaults to starting balance.", 0.0, dashboard_editable=False),
+    _s("ALPHAFORGE_BACKTEST_SAFE_TRADES_PER_DAY", "backtest_safe_trades_per_day", "float", 3.0, "Backtest Settings", ("BACKTEST",), "Dashboard diagnostic threshold for OVERTRADE_RISK warning only.", 0.0, dashboard_editable=False, consumed_by="alphaforge.dashboard.backtest_control._apply_backtest_artifact_model", behavioral_test="tests/test_issue407_config_ssot.py::test_dashboard_safe_trade_limit_uses_registry"),
     _s("ALPHAFORGE_SCAN_INTERVAL_SEC", "scan_interval_sec", "float", 1.0, "Operations", ("PAPER", "LIVE"), "Seconds between runtime scans.", 0.01),
     _s("ALPHAFORGE_REJECT_FORWARD_HORIZON_BARS", "reject_forward_horizon_bars", "int", 240, "Learning", ("PAPER",), "Bars observed after an eligible reject.", 1, consumed_by="alphaforge.runtime.RuntimeOrchestrator._persist_pending_reject", behavioral_test="tests/test_runtime.py::test_standalone_resolver_fetches_each_pending_timeframe"),
     _s("ALPHAFORGE_REGIME_DIRECTION_THRESHOLD", "regime_direction_threshold", "float", 0.0005, "Learning", ("PAPER",), "Regime-layer normalized MA delta required for direction.", 0.0, consumed_by="alphaforge.multi_timeframe.BinanceMTFProvider.build", behavioral_test="tests/test_reject_calibration_canonical.py::test_layer_thresholds_are_independent_and_identity_sensitive"),
@@ -181,8 +194,12 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
     _s("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC", "reconciliation_interval_sec", "float", 5.0, "Operations", ("PAPER", "LIVE"), "Runtime reconciliation interval.", 0.1),
     _s("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC", "reconciliation_timeout_sec", "float", 2.0, "Operations", ("PAPER", "LIVE"), "Runtime reconciliation timeout.", 0.1),
     _s("ALPHAFORGE_PROVIDER_TRANSIENT_OUTAGE_GRACE_SECONDS", "provider_transient_outage_grace_seconds", "float", 300.0, "Operations", ("PAPER", "LIVE"), "Elapsed grace for known transient read-only provider outages; execution remains blocked.", 0.0),
+    _s("ALPHAFORGE_MAX_CLOCK_SKEW_MS", "max_clock_skew_ms", "int", 5000, "Operations", ("PAPER", "LIVE"), "Maximum allowed local/provider clock skew for burn-in preflight.", 0, dashboard_editable=False, consumed_by="alphaforge.burnin_ops.clock_skew_check", behavioral_test="tests/test_issue407_config_ssot.py::test_clock_skew_limit_uses_registry"),
     _s("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "enable_binance_readonly_reconciliation", "bool", True, "Mode / Safety", ("PAPER", "LIVE"), "Enable signed read-only Binance reconciliation."),
     _s("ALPHAFORGE_ALLOW_LIVE_ORDERS", "allow_live_orders", "bool", False, "Mode / Safety", ("LIVE",), "Additional deny-by-default authorization required before any LIVE adapter call.", dashboard_editable=False, consumed_by="alphaforge.runtime.RuntimeOrchestrator._execute", behavioral_test="tests/test_runtime_live_authorization.py::test_runtime_live_authorization_is_authoritative_and_refreshed"),
+    _s("ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", "require_exchange_connectivity_for_live", "bool", True, "Mode / Safety", ("LIVE",), "Require exchange connectivity checks before LIVE startup.", dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_issue407_config_ssot.py::test_live_connectivity_settings_are_registry_managed"),
+    _s("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES", "required_live_exchanges", "str", "binance", "Mode / Safety", ("LIVE",), "Comma-separated exchanges required for LIVE connectivity.", dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_issue407_config_ssot.py::test_live_connectivity_settings_are_registry_managed"),
+    _s("ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", "exchange_connectivity_timeout_sec", "float", 2.0, "Operations", ("LIVE",), "Timeout for LIVE exchange connectivity checks.", 0.1, dashboard_editable=False, consumed_by="alphaforge.runtime._build_runtime_from_env", behavioral_test="tests/test_issue407_config_ssot.py::test_live_connectivity_settings_are_registry_managed"),
     _s("ALPHAFORGE_ENABLE_ORDERBOOK_FILTER", "enable_orderbook_filter", "bool", False, "Execution Cost Filters", MODES, "Enable orderbook-context availability and extreme imbalance/spoof-risk rejection.", deprecated_aliases=("ENABLE_ORDERBOOK_FILTER",), consumed_by="alphaforge.order.evaluate_trade_quality", behavioral_test="tests/test_env_safety_and_filters.py::test_orderbook_filter_changes_decision_without_disabling_other_gates"),
     _s("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS", "binance_reconciliation_trade_lookback_ms", "int", 3600000, "Operations", ("PAPER", "LIVE"), "Read-only fill lookback window.", 1),
     _s("ALPHAFORGE_RECONCILIATION_POSITION_EPSILON", "reconciliation_position_epsilon", "str", "0.00000001", "Operations", ("PAPER", "LIVE"), "Exact Decimal position dust threshold; exposure equal to the threshold remains inactive."),
@@ -374,6 +391,101 @@ def effective_config_values(*, env: Mapping[str, str] | None = None, root: Path 
         tuple(setting.env_name for setting in CONFIG_REGISTRY), env=env, root=root,
         include_files=include_files,
     )
+
+def managed_config_value(name: str, *, env: Mapping[str, str] | None = None,
+                         root: Path | None = None, include_files: bool = False) -> Any:
+    """Resolve one registered setting through canonical precedence and typing."""
+    if name not in REGISTRY_BY_ENV:
+        raise KeyError(f"Unknown managed setting: {name}")
+    return effective_config_subset(
+        (name,), env=env, root=root, include_files=include_files
+    )[name]["value"]
+
+
+def resolve_backtest_portfolio_config(balance: float, *, env: Mapping[str, str] | None = None,
+                                      root: Path | None = None) -> dict[str, Any]:
+    """Resolve BACKTEST portfolio controls without changing legacy fallbacks."""
+    names = (
+        "ALPHAFORGE_BACKTEST_MAX_OPEN_POSITIONS",
+        "ALPHAFORGE_BACKTEST_MAX_CONCURRENT_POSITIONS",
+        "ALPHAFORGE_BACKTEST_MAX_NOTIONAL_EXPOSURE",
+        "ALPHAFORGE_BACKTEST_MAX_SYMBOL_NOTIONAL",
+        "ALPHAFORGE_BACKTEST_MAX_DAILY_LOSS_PCT",
+        "ALPHAFORGE_BACKTEST_MAX_ROLLING_DRAWDOWN_PCT",
+        "ALPHAFORGE_BACKTEST_MAX_CORRELATION_GROUP_EXPOSURE",
+        "ALPHAFORGE_BACKTEST_MAX_CORRELATED_POSITIONS",
+        "ALPHAFORGE_BACKTEST_MAX_TRADES_SYMBOL_PER_DAY",
+        "ALPHAFORGE_BACKTEST_MAX_TRADES_GLOBAL_PER_DAY",
+        "ALPHAFORGE_BACKTEST_MAX_SAME_SIDE_EXPOSURE",
+        "ALPHAFORGE_BACKTEST_MAX_NET_EXPOSURE",
+        "ALPHAFORGE_MAX_CONCURRENT_POSITIONS",
+        "ALPHAFORGE_MAX_NOTIONAL_EXPOSURE",
+        "ALPHAFORGE_MAX_SYMBOL_NOTIONAL",
+    )
+    snap = effective_config_subset(names, env=env, root=root, include_files=False)
+    value = lambda name: snap[name]["value"]
+    explicit = lambda name: snap[name]["source"] != "default"
+    starting_balance = float(balance)
+
+    generic_concurrent = int(value("ALPHAFORGE_MAX_CONCURRENT_POSITIONS"))
+    max_open = value("ALPHAFORGE_BACKTEST_MAX_OPEN_POSITIONS")
+    max_concurrent = value("ALPHAFORGE_BACKTEST_MAX_CONCURRENT_POSITIONS")
+    backtest_notional = value("ALPHAFORGE_BACKTEST_MAX_NOTIONAL_EXPOSURE")
+    generic_notional = value("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE")
+    backtest_symbol_notional = value("ALPHAFORGE_BACKTEST_MAX_SYMBOL_NOTIONAL")
+    generic_symbol_notional = value("ALPHAFORGE_MAX_SYMBOL_NOTIONAL")
+
+    return {
+        "max_open_positions": int(max_open if max_open is not None else generic_concurrent),
+        "max_concurrent_positions": int(max_concurrent if max_concurrent is not None else generic_concurrent),
+        "max_notional_exposure": float(
+            backtest_notional
+            if backtest_notional is not None
+            else generic_notional
+            if explicit("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE")
+            else starting_balance
+        ),
+        "max_symbol_notional": float(
+            backtest_symbol_notional
+            if backtest_symbol_notional is not None
+            else generic_symbol_notional
+            if explicit("ALPHAFORGE_MAX_SYMBOL_NOTIONAL")
+            else starting_balance * 0.5
+        ),
+        "max_daily_loss_pct": float(value("ALPHAFORGE_BACKTEST_MAX_DAILY_LOSS_PCT")),
+        "max_rolling_drawdown_pct": float(value("ALPHAFORGE_BACKTEST_MAX_ROLLING_DRAWDOWN_PCT")),
+        "max_correlation_group_exposure": float(
+            value("ALPHAFORGE_BACKTEST_MAX_CORRELATION_GROUP_EXPOSURE")
+            if value("ALPHAFORGE_BACKTEST_MAX_CORRELATION_GROUP_EXPOSURE") is not None
+            else starting_balance * 0.75
+        ),
+        "max_correlated_positions": int(value("ALPHAFORGE_BACKTEST_MAX_CORRELATED_POSITIONS")),
+        "max_daily_symbol_trades": int(value("ALPHAFORGE_BACKTEST_MAX_TRADES_SYMBOL_PER_DAY")),
+        "max_daily_global_trades": int(value("ALPHAFORGE_BACKTEST_MAX_TRADES_GLOBAL_PER_DAY")),
+        "max_same_side_exposure": float(
+            value("ALPHAFORGE_BACKTEST_MAX_SAME_SIDE_EXPOSURE")
+            if value("ALPHAFORGE_BACKTEST_MAX_SAME_SIDE_EXPOSURE") is not None
+            else starting_balance * 0.75
+        ),
+        "max_net_exposure": float(
+            value("ALPHAFORGE_BACKTEST_MAX_NET_EXPOSURE")
+            if value("ALPHAFORGE_BACKTEST_MAX_NET_EXPOSURE") is not None
+            else starting_balance
+        ),
+        "reject_unknown_portfolio_risk": True,
+    }
+
+
+def resolve_backtest_database_url(output_dir: str | Path, *, env: Mapping[str, str] | None = None,
+                                  root: Path | None = None) -> str:
+    """Use canonical DB config when explicitly managed, else keep local backtest DB fallback."""
+    item = effective_config_subset(
+        ("ALPHAFORGE_DATABASE_URL",), env=env, root=root, include_files=False
+    )["ALPHAFORGE_DATABASE_URL"]
+    if item["source"] == "default":
+        return f"sqlite+pysqlite:///{Path(output_dir) / 'alphaforge_backtest.db'}"
+    return str(item["value"])
+
 
 def decision_filter_config(mode: str, *, env: Mapping[str, str] | None = None, root: Path | None = None) -> dict[str, Any]:
     snap = effective_config_values(env=env, root=root)

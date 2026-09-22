@@ -21,6 +21,7 @@ from alphaforge.burnin_campaign import (
     release_id_validation,
 )
 from alphaforge.config import load_config_from_env, load_reconciliation_settings
+from alphaforge.config_registry import managed_config_value
 from alphaforge.config_audit import audit_config
 from alphaforge.env_contract import bootstrap_environment, dotenv_status
 from alphaforge.runtime_state import evaluate_runtime_recovery, persist_verified_paper_recovery, persist_historical_paper_recovery_without_provider, persist_campaign_linked_zero_exposure_reconciliation_evidence
@@ -414,7 +415,7 @@ def _binance_server_time_ms() -> dict[str, Any]:
 
 
 def clock_skew_check(*, max_skew_ms: int | None = None, provider: Any | None = None) -> dict[str, Any]:
-    configured = int(max_skew_ms if max_skew_ms is not None else os.getenv("ALPHAFORGE_MAX_CLOCK_SKEW_MS", "5000"))
+    configured = int(max_skew_ms if max_skew_ms is not None else managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS"))
     local_ms = int(time.time() * 1000)
     try:
         raw = provider() if provider is not None else _binance_server_time_ms()
