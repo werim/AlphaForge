@@ -11,6 +11,7 @@ from alphaforge.burnin_campaign import (
     reject_candidate_feasibility_shadow,
     start_or_resume_campaign,
 )
+from alphaforge.burnin_resolver import resolve_campaign_batch
 from alphaforge.persistence import init_db
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
@@ -238,7 +239,14 @@ def test_fresh_reject_shadow_diagnostics_are_non_authoritative_and_execution_ali
         **market,
         **runtime._execution_rr_metrics(2.0, market, ctx),
     }))
-    asyncio.run(runtime._resolve_reject_forward_outcomes_once())
+    with engine.begin() as conn:
+        resolved = resolve_campaign_batch(
+            conn,
+            campaign.campaign_id,
+            {("BTCUSDT", "1m"): candles("BTCUSDT", "", "", "1m")},
+            now="2026-01-01T00:02:00Z",
+        )
+    assert resolved["resolved"] == 1
 
     with engine.connect() as conn:
         diagnostics = reject_candidate_feasibility_shadow(conn, campaign.campaign_id)
