@@ -2526,7 +2526,7 @@ def _decision_evidence_rows(database_url: str | None = None, *, mode: str = "BAC
                 """
                 SELECT evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type,
                        setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr,
-                       effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason,
+                       effective_rr, min_effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason,
                        entry, sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes,
                        volume_24h_usdt, spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score,
                        volatility_regime, cost_penalty, diagnostics_json, signal_id, order_id, position_id,
