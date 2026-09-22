@@ -11,6 +11,7 @@ from alphaforge.persistence import (
     _apply_sqlite_migrations,
     _timesfm_forecast_evidence_ddl,
     init_db,
+    save_decision_evidence,
     save_order_decision,
 )
 from alphaforge.schema_doctor import inspect_database_schema
@@ -531,3 +532,52 @@ def test_legacy_identifier_tables_are_additively_repaired_and_insertable(tmp_pat
     assert preserved == 1
     assert event_count == 1
     _assert_core_identifier_schema(engine)
+
+
+def test_save_decision_evidence_is_idempotent_and_normalizes_decision(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'decision-evidence.db'}")
+    with engine.begin() as conn:
+        assert save_decision_evidence(
+            conn,
+            evidence_id="evidence:1",
+            run_id="run-1",
+            mode="PAPER",
+            timestamp="2026-09-22T08:00:00Z",
+            symbol="BTCUSDT",
+            decision="REJECTED",
+            reject_reason="LOW_EFFECTIVE_RR",
+            score=0.4,
+            raw_rr=1.2,
+            effective_rr=0.9,
+            diagnostics_json={"cost_penalty_rr": 0.3},
+            signal_id="signal-1",
+        )
+        assert save_decision_evidence(
+            conn,
+            evidence_id="evidence:1",
+            run_id="run-1",
+            mode="PAPER",
+            timestamp="2026-09-22T08:00:00Z",
+            symbol="BTCUSDT",
+            decision="REJECTED",
+            reject_reason="LOW_EFFECTIVE_RR",
+            score=0.41,
+            raw_rr=1.2,
+            effective_rr=0.9,
+            diagnostics_json={"cost_penalty_rr": 0.3},
+            signal_id="signal-1",
+        )
+
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT COUNT(*) AS n, decision, reject_reason, score, diagnostics_json,
+                   funding_rate_pct
+            FROM decision_evidence
+            WHERE evidence_id='evidence:1'
+        """)).mappings().one()
+    assert row["n"] == 1
+    assert row["decision"] == "REJECT"
+    assert row["reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert row["score"] == pytest.approx(0.41)
+    assert '"cost_penalty_rr": 0.3' in row["diagnostics_json"]
+    assert row["funding_rate_pct"] is None
