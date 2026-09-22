@@ -67,6 +67,8 @@ class LiveReadinessEvaluator:
         evidence_mode: str = "PAPER",
         campaign_id: str | None = None,
         burnin_run_id: str | None = None,
+        release_id: str | None = None,
+        runtime_instance_id: str | None = None,
         require_run_scope: bool = False,
     ) -> None:
         self.engine = engine
@@ -74,6 +76,9 @@ class LiveReadinessEvaluator:
         self.runtime_heartbeat_max_age_sec = max(1.0, float(runtime_heartbeat_max_age_sec))
         self.evidence_mode = str(evidence_mode or "PAPER").upper()
         self.campaign_id = str(campaign_id) if campaign_id else None
+        self._explicit_burnin_run_id = str(burnin_run_id) if burnin_run_id else None
+        self.release_id = self._resolve_release_id(release_id)
+        self.runtime_instance_id = str(runtime_instance_id) if runtime_instance_id else None
         self.require_run_scope = bool(require_run_scope)
         self.burnin_run_id = self._resolve_burnin_run_id(burnin_run_id)
         self._scope_fail_closed = self.require_run_scope and not self.burnin_run_id
@@ -87,6 +92,21 @@ class LiveReadinessEvaluator:
             with self.engine.connect() as conn:
                 row = conn.execute(
                     text("SELECT active_run_id FROM burnin_campaigns WHERE campaign_id=:campaign_id"),
+                    {"campaign_id": self.campaign_id},
+                ).first()
+        except Exception:
+            return None
+        return str(row[0]) if row and row[0] else None
+
+    def _resolve_release_id(self, explicit_release_id: str | None) -> str | None:
+        if explicit_release_id:
+            return str(explicit_release_id)
+        if not self.campaign_id:
+            return None
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT release_id FROM burnin_campaigns WHERE campaign_id=:campaign_id"),
                     {"campaign_id": self.campaign_id},
                 ).first()
         except Exception:
@@ -262,7 +282,13 @@ class LiveReadinessEvaluator:
 
 
     def _check_release_gates(self) -> list[CheckResult]:
-        evidence = release_gate_status(self.engine)
+        if self.require_run_scope and not self.release_id:
+            return [CheckResult("phase6_release_gate_evidence", False, "release_id_missing_for_scoped_readiness")]
+        evidence = release_gate_status(
+            self.engine,
+            release_id=self.release_id or "default",
+            phase="PHASE6",
+        )
         passed = bool(evidence.get("passed", False))
         status = str(evidence.get("status") or "NO_EVIDENCE")
         details = (
@@ -278,7 +304,38 @@ class LiveReadinessEvaluator:
 
     def _check_runtime_state_snapshot(self) -> list[CheckResult]:
         try:
-            snapshot = latest_runtime_state_snapshot(self.engine)
+            runtime_scoped = bool(self.campaign_id or self.release_id or self.runtime_instance_id or self._explicit_burnin_run_id)
+            if runtime_scoped:
+                clauses: list[str] = []
+                params: dict[str, Any] = {}
+                if self.campaign_id:
+                    clauses.append("campaign_id=:campaign_id")
+                    params["campaign_id"] = self.campaign_id
+                if self._explicit_burnin_run_id:
+                    clauses.append("burnin_run_id=:burnin_run_id")
+                    params["burnin_run_id"] = self._explicit_burnin_run_id
+                if self.release_id:
+                    clauses.append("release_id=:release_id")
+                    params["release_id"] = self.release_id
+                if self.runtime_instance_id:
+                    clauses.append("instance_id=:instance_id")
+                    params["instance_id"] = self.runtime_instance_id
+                with self.engine.connect() as conn:
+                    row = conn.execute(
+                        text("SELECT * FROM runtime_state_snapshots WHERE " + " AND ".join(clauses) + " ORDER BY id DESC LIMIT 1"),
+                        params,
+                    ).mappings().first()
+                snapshot = dict(row) if row else None
+                if snapshot:
+                    for key in ("active_symbols","active_positions","pending_orders","cooldown_symbols",
+                                "stale_market_data_symbols","unreconciled_symbols","orphan_orders",
+                                "orphan_positions","runtime_flags","diagnostics_json"):
+                        try:
+                            snapshot[key] = json.loads(snapshot.get(key) or ("{}" if key == "diagnostics_json" else "[]"))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            snapshot[key] = {} if key == "diagnostics_json" else []
+            else:
+                snapshot = latest_runtime_state_snapshot(self.engine)
         except Exception as exc:
             return [CheckResult("runtime_db_persistence_verified", False, f"runtime_state_query_failed={exc.__class__.__name__}")]
         if not snapshot:
