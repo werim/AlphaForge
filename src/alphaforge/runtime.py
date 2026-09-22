@@ -3060,7 +3060,11 @@ class RuntimeOrchestrator:
                                        "candidate_raw_rr": payload.get("candidate_rr", payload.get("rr")),
                                        "executable_raw_rr": payload.get("executable_raw_rr", derived_rr_metrics.get("executable_raw_rr")),
                                        "remaining_execution_penalty": payload.get("remaining_execution_penalty", derived_rr_metrics.get("remaining_execution_penalty")),
-                                       "effective_rr_at_decision": payload.get("effective_rr", derived_rr_metrics.get("effective_rr")),
+                                       "effective_rr_at_decision": payload.get("effective_rr"),
+                                       "counterfactual_effective_rr": (
+                                           None if payload.get("effective_rr") is not None
+                                           else derived_rr_metrics.get("effective_rr")
+                                       ),
                                        "min_signal_score": payload.get("min_signal_score"),
                                        "min_raw_rr": payload.get("min_raw_rr"),
                                        "min_effective_rr": payload.get("min_effective_rr"),
