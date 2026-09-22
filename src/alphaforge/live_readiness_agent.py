@@ -18,6 +18,21 @@ def at(v):
         d=datetime.fromisoformat(str(v).replace("Z","+00:00")); return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
     except (TypeError,ValueError): return None
 def ts(v): return v.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+def obj(v):
+    try:
+        value=json.loads(v or "{}")
+        return value if isinstance(value,dict) else {}
+    except (TypeError,ValueError,json.JSONDecodeError):
+        return {}
+def authoritative_reject(row):
+    payload=obj(row.get("payload_json"))
+    return (payload.get("reject_quality_attributable") is not False
+            and payload.get("forward_label_subject")!="LEGACY_SCANNER_SHADOW_CANDIDATE")
+def authoritative_expectancy(row,authoritative_reject_ids):
+    if str(row.get("evidence_type") or "").upper()!="REJECT_FORWARD":
+        return True
+    source=str(row.get("source_decision_id") or "")
+    return bool(source and source in authoritative_reject_ids)
 class DB:
     denied={sqlite3.SQLITE_INSERT,sqlite3.SQLITE_UPDATE,sqlite3.SQLITE_DELETE,sqlite3.SQLITE_CREATE_TABLE,sqlite3.SQLITE_DROP_TABLE,sqlite3.SQLITE_ALTER_TABLE,sqlite3.SQLITE_ATTACH,sqlite3.SQLITE_DETACH,sqlite3.SQLITE_TRANSACTION}
     def __init__(self,p): self.p=Path(p).resolve(); self.c=None
@@ -69,8 +84,14 @@ class LiveReadinessAgent:
             errs=(c and c.get("last_error")) or (db.rows("SELECT 1 FROM trade_lifecycle_events WHERE UPPER(lifecycle_state)='ERROR'") if "trade_lifecycle_events" in tabs else []); g11=self.g("RUNTIME_ERRORS",BLOCKED if errs else PASS,"RUNTIME_ERRORS_PRESENT" if errs else "NO_RUNTIME_ERRORS","campaign + lifecycle errors",errs,"no runtime errors")
             ctl=self.latest(db.rows("SELECT * FROM runtime_control_state"),"updated_at") if "runtime_control_state" in tabs else None; acts=db.rows("SELECT action FROM runtime_control_audit_events WHERE UPPER(action) GLOB '*SUBMIT*' OR UPPER(action) GLOB '*CANCEL*' OR UPPER(action) GLOB '*AMEND*' OR UPPER(requested_mode)='LIVE'") if "runtime_control_audit_events" in tabs else []; mode=str((ctl or {}).get("mode_running") or (ctl or {}).get("mode_requested") or "").upper(); g12=self.miss("LIVE_MUTATION_DISABLED","runtime control evidence","PAPER mode/no mutation") if not ctl else self.g("LIVE_MUTATION_DISABLED",PASS if mode=="PAPER" and not acts else BLOCKED,"LIVE_MUTATION_GUARD_CONFIRMED" if mode=="PAPER" and not acts else "LIVE_MUTATION_OR_MODE_DETECTED","runtime control evidence",{"mode":mode,"actions":acts},"PAPER mode/no mutation")
             acc=db.rows("SELECT signal_id FROM order_decisions WHERE UPPER(mode)='PAPER' AND UPPER(decision) IN ('ACCEPT','ACCEPTED')") if "order_decisions" in tabs else []; missing=[x["signal_id"] for x in acc if not db.one("SELECT 1 FROM trade_lifecycle_events WHERE signal_id=?",(x["signal_id"],))] if "trade_lifecycle_events" in tabs else acc; g13=self.miss("ACCEPTED_LIFECYCLE_EVIDENCE","decisions + lifecycle","accepted lifecycle exists") if not acc else self.g("ACCEPTED_LIFECYCLE_EVIDENCE",NEEDS_FIX if missing else PASS,"ACCEPTED_LIFECYCLE_MISSING" if missing else "ACCEPTED_LIFECYCLE_PRESENT","decisions + lifecycle",missing,"accepted lifecycle exists")
-            rej=db.rows("SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id=?",(self.scope["burnin_run_id"],)) if "burnin_reject_outcomes" in tabs else []; good=[x for x in rej if int(x.get("evidence_complete") or 0) and x.get("hypothetical_net_r_after_costs") is not None]; g14=self.g("REJECT_FORWARD_OUTCOME_EVIDENCE",PASS if good else NOT_OBSERVABLE,"COMPLETE_REJECT_OUTCOMES_PRESENT" if good else "AUTHORITATIVE_EVIDENCE_MISSING","burnin_reject_outcomes",{"rows":len(rej),"complete":len(good)},"complete reject outcome exists")
-            ev=db.rows("SELECT * FROM expectancy_evidence WHERE campaign_id=? AND run_id=?",(self.cid,self.scope["burnin_run_id"])) if "expectancy_evidence" in tabs else []; valid=[x for x in ev if int(x.get("evidence_complete") or 0) and x.get("net_r") is not None and at(x.get("decision_time")) and at(x.get("resolved_at")) and at(x["decision_time"])<=at(x["resolved_at"])<=self.now]; g15=self.g("EXPECTANCY_TEMPORAL_EVIDENCE",PASS if valid else NOT_OBSERVABLE,"TEMPORAL_EXPECTANCY_EVIDENCE_PRESENT" if valid else "AUTHORITATIVE_EVIDENCE_MISSING","expectancy_evidence",{"rows":len(ev),"valid":len(valid)},"timestamp-bounded expectancy exists")
+            rej=db.rows("SELECT * FROM burnin_reject_outcomes WHERE burnin_run_id=?",(self.scope["burnin_run_id"],)) if "burnin_reject_outcomes" in tabs else []
+            good=[x for x in rej if int(x.get("evidence_complete") or 0) and x.get("hypothetical_net_r_after_costs") is not None and authoritative_reject(x)]
+            authoritative_reject_ids={str(obj(x.get("payload_json")).get("reject_decision_id") or "") for x in good}
+            authoritative_reject_ids.discard("")
+            g14=self.g("REJECT_FORWARD_OUTCOME_EVIDENCE",PASS if good else NOT_OBSERVABLE,"COMPLETE_REJECT_OUTCOMES_PRESENT" if good else "AUTHORITATIVE_EVIDENCE_MISSING","burnin_reject_outcomes",{"rows":len(rej),"complete":len(good)},"complete attributable reject outcome exists")
+            ev=db.rows("SELECT * FROM expectancy_evidence WHERE campaign_id=? AND run_id=?",(self.cid,self.scope["burnin_run_id"])) if "expectancy_evidence" in tabs else []
+            valid=[x for x in ev if int(x.get("evidence_complete") or 0) and x.get("net_r") is not None and at(x.get("decision_time")) and at(x.get("resolved_at")) and at(x["decision_time"])<=at(x["resolved_at"])<=self.now and authoritative_expectancy(x,authoritative_reject_ids)]
+            g15=self.g("EXPECTANCY_TEMPORAL_EVIDENCE",PASS if valid else NOT_OBSERVABLE,"TEMPORAL_EXPECTANCY_EVIDENCE_PRESENT" if valid else "AUTHORITATIVE_EVIDENCE_MISSING","expectancy_evidence",{"rows":len(ev),"valid":len(valid)},"timestamp-bounded attributable expectancy exists")
             cost=db.rows("SELECT * FROM order_decisions WHERE UPPER(mode)='PAPER' AND UPPER(decision) IN ('ACCEPT','ACCEPTED')") if "order_decisions" in tabs else []; keys=("spread_pct","expected_slippage_pct","latency_ms","funding_rate_pct"); absent=[x.get("decision_id") for x in cost if x.get("effective_rr") is None or int(x.get("execution_ctx_missing") or 0) or any(x.get(k) is None for k in keys)]; zero=[x.get("decision_id") for x in cost if all(float(x.get(k) or 0)==0 for k in keys)]; g16=self.miss("EXECUTION_COST_EVIDENCE","order_decisions","measured non-placeholder costs") if not cost else self.g("EXECUTION_COST_EVIDENCE",NOT_OBSERVABLE if absent else (NEEDS_FIX if zero else PASS),"EXECUTION_COST_CONTEXT_MISSING" if absent else ("PLACEHOLDER_ZERO_COSTS" if zero else "EXECUTION_COST_EVIDENCE_PRESENT"),"order_decisions",{"missing":absent,"zero":zero},"measured non-placeholder costs")
             g17=self.status(db,"RECOVERY_DRILL","burnin_recovery_drills","campaign_id=?",(self.cid,),"generated_at","recovery drill PASS")
             q=self.latest(db.rows("SELECT * FROM burnin_qualification_snapshots WHERE burnin_run_id=?",(self.scope["burnin_run_id"],)),"generated_at") if "burnin_qualification_snapshots" in tabs else None; soak=q and all(str(q.get(k) or "").upper()==PASS for k in ("status","sample_status","evidence_completeness_status")); g18=self.miss("SOAK_EVIDENCE","burnin_qualification_snapshots","complete PASS qualification") if not q else self.g("SOAK_EVIDENCE",PASS if soak else BLOCKED,"SOAK_QUALIFICATION_PASS" if soak else "SOAK_QUALIFICATION_INCOMPLETE","burnin_qualification_snapshots",q,"complete PASS qualification")
