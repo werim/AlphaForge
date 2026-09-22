@@ -680,6 +680,7 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         ("2026_06_21_timesfm_canonical_evidence", "Add canonical TimesFM forecast evidence and optional forward outcome labels tables."),
         ("2026_06_23_core_identifier_normalization", "Add normalized lifecycle identifier columns and safe join indexes."),
         ("2026_07_06_phase2_decision_evidence", "Add SQL-backed decision evidence export surface for lifecycle/dashboard reconciliation."),
+        ("2026_09_22_decision_threshold_provenance", "Add decision-time min_effective_rr provenance to durable decision evidence."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_core_identifier_schema(conn)
