@@ -740,6 +740,17 @@ def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> Non
         metrics = json.loads(conn.execute(text(
             "SELECT metrics_json FROM burnin_observations WHERE decision='ACCEPTED'"
         )).scalar_one())
+        evidence = conn.execute(text("""
+            SELECT run_id,mode,decision,signal_id,lifecycle_state_after,raw_rr,effective_rr,cost_penalty
+            FROM decision_evidence WHERE signal_id='accepted-1'
+        """)).mappings().one()
+    assert evidence["run_id"] == "accepted-run"
+    assert evidence["mode"] == "PAPER"
+    assert evidence["decision"] == "ACCEPT"
+    assert evidence["lifecycle_state_after"] is None
+    assert evidence["raw_rr"] == pytest.approx(1.9)
+    assert evidence["effective_rr"] == pytest.approx(1.8)
+    assert evidence["cost_penalty"] == pytest.approx(0.1)
     assert "primary_reject_reason" not in metrics
     assert "reject_reasons" not in metrics
     assert metrics["geometry_source"] == "MTF_SETUP_STRUCTURE"
