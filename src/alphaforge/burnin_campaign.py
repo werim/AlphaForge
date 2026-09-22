@@ -615,7 +615,120 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     } for r in qualification_resolved), key=lambda item: str(item["reject_decision_id"]))
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"qualification_evidence":qualification_hash_payload})
     metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
+    metrics["reject_candidate_feasibility_shadow"] = reject_candidate_feasibility_shadow(conn, campaign_id)
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
+
+def reject_candidate_feasibility_shadow(conn: Any, campaign_id: str) -> dict[str, Any]:
+    """Execution-aligned reject feasibility diagnostics; never authoritative."""
+    rows=_exec(conn,"""SELECT o.forward_label,o.hypothetical_net_r_after_costs,o.ambiguous,
+        o.payload_json,p.source_provenance_json
+        FROM burnin_reject_outcomes o
+        JOIN burnin_pending_reject_labels p
+          ON p.reject_decision_id=json_extract(o.payload_json,'$.reject_decision_id')
+         AND p.pending_label_id=json_extract(o.payload_json,'$.pending_label_id')
+         AND p.burnin_run_id=o.burnin_run_id
+        JOIN burnin_campaign_runs cr
+          ON cr.campaign_id=p.campaign_id AND cr.burnin_run_id=p.burnin_run_id
+        WHERE p.campaign_id=:cid AND o.evidence_complete=1""",{"cid":campaign_id}).fetchall()
+
+    aligned=[]
+    legacy_count=0
+    for raw in rows:
+        r=_row_dict(raw)
+        try:
+            payload=json.loads(r.get("payload_json") or "{}")
+            provenance=json.loads(r.get("source_provenance_json") or "{}")
+        except (TypeError,json.JSONDecodeError):
+            continue
+        if provenance.get("reject_execution_basis") != "EXPECTED_FILL_RUNTIME_PARITY":
+            legacy_count += 1
+            continue
+        if provenance.get("reject_quality_attributable") is False:
+            continue
+        if provenance.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE":
+            continue
+        aligned.append({
+            "score": provenance.get("score"),
+            "candidate_raw_rr": provenance.get("candidate_raw_rr"),
+            "executable_raw_rr": provenance.get("executable_raw_rr"),
+            "effective_rr": provenance.get("effective_rr_at_decision"),
+            "fill_shift_initial_risk_ratio": provenance.get("fill_shift_initial_risk_ratio"),
+            "stop_distance_pct": provenance.get("stop_distance_pct"),
+            "min_stop_pct": provenance.get("min_stop_pct"),
+            "max_stop_pct": provenance.get("max_stop_pct"),
+            "all_failed_gates": provenance.get("all_failed_gates") or payload.get("all_failed_gates") or [],
+            "forward_label": r.get("forward_label"),
+            "net_r": r.get("hypothetical_net_r_after_costs"),
+            "ambiguous": bool(r.get("ambiguous")),
+        })
+
+    def finite(value: Any) -> float | None:
+        try:
+            parsed=float(value)
+        except (TypeError,ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    def distribution(field: str) -> dict[str, Any]:
+        values=[v for row in aligned for v in [finite(row.get(field))] if v is not None]
+        return {
+            "count":len(values),
+            "min":None if not values else min(values),
+            "avg":None if not values else sum(values)/len(values),
+            "max":None if not values else max(values),
+        }
+
+    matrix={}
+    stop_buckets={"BELOW_MIN":{"count":0,"net_r":[]},
+                  "WITHIN_BOUNDS":{"count":0,"net_r":[]},
+                  "ABOVE_MAX":{"count":0,"net_r":[]},
+                  "UNKNOWN":{"count":0,"net_r":[]}}
+    gate_combinations={}
+    for row in aligned:
+        score=finite(row.get("score")); eff=finite(row.get("effective_rr"))
+        if score is not None and eff is not None:
+            score_low=math.floor(score/0.05)*0.05
+            eff_low=math.floor(eff/0.10)*0.10
+            key=f"{score_low:.2f}-{score_low+0.05:.2f}|{eff_low:.2f}-{eff_low+0.10:.2f}"
+            cell=matrix.setdefault(key,{"count":0,"tp":0,"sl":0,"net_r":[]})
+            cell["count"]+=1
+            cell["tp"]+=int(row.get("forward_label")=="TP_BEFORE_SL")
+            cell["sl"]+=int(row.get("forward_label")=="SL_BEFORE_TP")
+            net=finite(row.get("net_r"))
+            if net is not None and not row.get("ambiguous"): cell["net_r"].append(net)
+        stop=finite(row.get("stop_distance_pct")); min_stop=finite(row.get("min_stop_pct")); max_stop=finite(row.get("max_stop_pct"))
+        bucket=("UNKNOWN" if stop is None or min_stop is None or max_stop is None
+                else "BELOW_MIN" if stop < min_stop
+                else "ABOVE_MAX" if stop > max_stop
+                else "WITHIN_BOUNDS")
+        stop_buckets[bucket]["count"]+=1
+        net=finite(row.get("net_r"))
+        if net is not None and not row.get("ambiguous"): stop_buckets[bucket]["net_r"].append(net)
+        gates=tuple(sorted(set(str(x) for x in (row.get("all_failed_gates") or []))))
+        gate_key="|".join(gates) if gates else "NONE"
+        gate_combinations[gate_key]=gate_combinations.get(gate_key,0)+1
+
+    for cell in matrix.values():
+        nets=cell.pop("net_r")
+        cell["avg_net_r"]=None if not nets else sum(nets)/len(nets)
+    for bucket in stop_buckets.values():
+        nets=bucket.pop("net_r")
+        bucket["avg_net_r"]=None if not nets else sum(nets)/len(nets)
+
+    return {
+        "authoritative":False,
+        "purpose":"SHADOW_DIAGNOSTIC_ONLY",
+        "execution_basis":"EXPECTED_FILL_RUNTIME_PARITY",
+        "sample_count":len(aligned),
+        "legacy_or_unaligned_rows_excluded":legacy_count,
+        "candidate_raw_rr":distribution("candidate_raw_rr"),
+        "executable_raw_rr":distribution("executable_raw_rr"),
+        "effective_rr":distribution("effective_rr"),
+        "fill_shift_initial_risk_ratio":distribution("fill_shift_initial_risk_ratio"),
+        "stop_distance_performance":stop_buckets,
+        "score_x_effective_rr_matrix":matrix,
+        "failed_gate_combinations":gate_combinations,
+    }
 
 def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[str, Any]]:
     """Outcome quality by observed execution strength; never selects/relaxes a gate."""
@@ -651,6 +764,7 @@ def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[st
             if identity_mode != LEGACY_REJECT_IDENTITY_MODE and key not in canonical_ids: continue
             if payload.get("reject_quality_attributable") is False: continue
             if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE" or provenance.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE": continue
+            if provenance.get("reject_execution_basis") != "EXPECTED_FILL_RUNTIME_PARITY": continue
             strength=float((((provenance.get("mtf") or {}).get("execution") or {}).get("ma_delta_strength")))
         except (TypeError,ValueError,json.JSONDecodeError):
             continue
