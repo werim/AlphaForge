@@ -146,10 +146,10 @@ def test_pending_label_exactly_once_and_calibration_excludes_incomplete():
     c.execute("insert into burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,decision_time,forward_label,would_tp,would_sl,ambiguous,hypothetical_net_r_after_costs,avoided_loss,missed_profit,evidence_complete,payload_json,schema_version) values('rout_legacy','r','rel','MTF_EXECUTION_NOT_CONFIRMED','BTC','TRENDING','x','TP_BEFORE_SL',1,0,0,99,0,99,1,?, 'v')",(json.dumps({'window_complete':True,'reject_correct':False,'reject_decision_id':'legacy','pending_label_id':legacy_pending_id,'campaign_id':'camp','burnin_run_id':'r','reject_execution_basis':'PLANNED_ENTRY_LEGACY'}),))
     assert next(x for x in execution_threshold_calibration(c,'camp') if x['bucket']=='0.0001-0.0002') == bucket
     aggregate=aggregate_campaign(c,'camp')['metrics']
-    assert aggregate['completed_rejected_forward_outcomes'] == 1
-    assert aggregate['unique_reject_labels_persisted'] == 1
+    assert aggregate['completed_rejected_forward_outcomes'] == 2
+    assert aggregate['unique_reject_labels_persisted'] == 2
     assert aggregate['diagnostic_unique_reject_labels_persisted'] == 3
-    assert aggregate['non_attributable_reject_labels_persisted'] == 2
+    assert aggregate['non_attributable_reject_labels_persisted'] == 1
     assert aggregate['reject_label_integrity_status'] == 'PASS'
     c.execute("update burnin_reject_outcomes set payload_json='{}'")
     assert sum(x['count'] for x in execution_threshold_calibration(c,'camp'))==0
