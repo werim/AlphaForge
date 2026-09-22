@@ -58,10 +58,47 @@ class QualificationReport:
 
 
 class LiveReadinessEvaluator:
-    def __init__(self, engine: Engine, *, reject_rate_bounds: tuple[float, float] = (0.05, 0.98), runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        reject_rate_bounds: tuple[float, float] = (0.05, 0.98),
+        runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC,
+        evidence_mode: str = "PAPER",
+        burnin_run_id: str | None = None,
+    ) -> None:
         self.engine = engine
         self.reject_rate_bounds = reject_rate_bounds
         self.runtime_heartbeat_max_age_sec = max(1.0, float(runtime_heartbeat_max_age_sec))
+        self.evidence_mode = str(evidence_mode or "PAPER").upper()
+        self.burnin_run_id = str(burnin_run_id) if burnin_run_id else None
+
+    def _scope_params(self) -> dict[str, Any]:
+        return {
+            "readiness_mode": self.evidence_mode,
+            "readiness_run_id": self.burnin_run_id,
+        }
+
+    def _signal_scope_sql(self, table: str) -> str:
+        clauses = [f"UPPER(COALESCE({table}.mode,''))=:readiness_mode"]
+        if self.burnin_run_id:
+            clauses.append(
+                f"""{table}.signal_id IN (
+                    SELECT DISTINCT json_extract(metrics_json,'$.signal_id')
+                    FROM burnin_observations
+                    WHERE burnin_run_id=:readiness_run_id
+                      AND UPPER(COALESCE(execution_mode,''))=:readiness_mode
+                      AND json_valid(metrics_json)
+                      AND json_extract(metrics_json,'$.signal_id') IS NOT NULL
+                )"""
+            )
+        return " AND ".join(clauses)
+
+    def _decision_evidence_scope_sql(self) -> str:
+        clauses = ["UPPER(COALESCE(decision_evidence.mode,''))=:readiness_mode"]
+        if self.burnin_run_id:
+            clauses.append("decision_evidence.run_id=:readiness_run_id")
+        return " AND ".join(clauses)
 
     def evaluate(self, *, mode_parity: Mapping[str, Any], reconciliation_snapshot: Mapping[str, Any], observability_snapshot: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool, kill_switch_active: bool = False, dashboard_security: Mapping[str, Any] | None = None, timesfm_evidence: Mapping[str, Any] | None = None, paper_burnin_report: Mapping[str, Any] | None = None, tests_passing_evidence: Mapping[str, Any] | None = None) -> QualificationReport:
         checks: list[CheckResult] = []
