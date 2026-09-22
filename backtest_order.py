@@ -21,7 +21,8 @@ from alphaforge.multi_timeframe import build_execution_context as build_historic
 from alphaforge.scoring_context import build_signal_payload, empty_stats_context, normalize_scoring_context
 from alphaforge.expectancy_evidence import fetch_expectancy_as_of
 from alphaforge.config import load_config_from_env
-from alphaforge.config_registry import decision_filter_config, effective_config_values
+from alphaforge.config_registry import (decision_filter_config, effective_config_values,
+    resolve_backtest_database_url, resolve_backtest_portfolio_config)
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
 from alphaforge.persistence import init_db, save_decision_evidence, save_order_decision, save_signal, save_trade_lifecycle_event
 from alphaforge.portfolio_risk import BacktestPortfolioState, evaluate_portfolio_risk
@@ -177,24 +178,6 @@ def diagnostic_short_low_score_symbols_from_env() -> tuple[str, ...]:
     raw = str(effective_config_values()["ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS"]["value"])
     symbols = tuple(s.strip().upper() for s in raw.replace(",", " ").split() if s.strip())
     return symbols or DIAGNOSTIC_PROFILE_DEFAULT_SYMBOLS
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    return str(os.getenv(name, str(default))).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
 
 
 def strategy_guardrail_config_from_env(profile: str = "DEFAULT_FILTERS") -> StrategyQualityGuardrailConfig:
@@ -576,16 +559,9 @@ def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[f
     return breakdown.effective_rr, list(breakdown.reject_flags), data
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() not in {"0", "false", "no", "off", ""}
-
-
 def _rescue_config_from_args(args: Any, runtime_cfg: Any) -> RescueConfig:
     return RescueConfig(
-        enabled=bool(getattr(args, "rescue_enabled", False)) or _env_bool("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", False),
+        enabled=bool(getattr(args, "rescue_enabled", False)) or bool(effective_config_values(include_files=False)["ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED"]["value"]),
         modes=tuple(str(getattr(args, "rescue_modes", "BACKTEST") or "BACKTEST").upper().replace(",", " ").split()),
         effective_rr_min=float(getattr(args, "rescue_effective_rr_min", 1.90)),
         score_min=float(getattr(args, "rescue_score_min", 9.0)),
@@ -4997,23 +4973,9 @@ def main():
         "accepted_trades_by_symbol_regime_day": {},
         "high_vol_accepted_trades_by_day": {},
     }
-    portfolio_config = {
-        "max_open_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_OPEN_POSITIONS", os.getenv("ALPHAFORGE_MAX_OPEN_POSITIONS", "3"))),
-        "max_concurrent_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_CONCURRENT_POSITIONS", os.getenv("ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "3"))),
-        "max_notional_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_NOTIONAL_EXPOSURE", os.getenv("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", str(args.balance)))),
-        "max_symbol_notional": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_SYMBOL_NOTIONAL", os.getenv("ALPHAFORGE_MAX_SYMBOL_NOTIONAL", str(args.balance * 0.5)))),
-        "max_daily_loss_pct": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_DAILY_LOSS_PCT", "0.03")),
-        "max_rolling_drawdown_pct": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_ROLLING_DRAWDOWN_PCT", "0.08")),
-        "max_correlation_group_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_CORRELATION_GROUP_EXPOSURE", str(args.balance * 0.75))),
-        "max_correlated_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_CORRELATED_POSITIONS", "2")),
-        "max_daily_symbol_trades": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_TRADES_SYMBOL_PER_DAY", "2")),
-        "max_daily_global_trades": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_TRADES_GLOBAL_PER_DAY", "6")),
-        "max_same_side_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_SAME_SIDE_EXPOSURE", str(args.balance * 0.75))),
-        "max_net_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_NET_EXPOSURE", str(args.balance))),
-        "reject_unknown_portfolio_risk": True,
-    }
+    portfolio_config = resolve_backtest_portfolio_config(args.balance, root=ROOT_DIR)
     portfolio_state = BacktestPortfolioState(initial_equity=float(args.balance))
-    backtest_database_url = os.getenv("ALPHAFORGE_DATABASE_URL") or os.getenv("ALPHAFORGE_DB_URL") or f"sqlite+pysqlite:///{Path(args.output_dir) / 'alphaforge_backtest.db'}"
+    backtest_database_url = resolve_backtest_database_url(args.output_dir, root=ROOT_DIR)
     backtest_run_id = os.getenv("ALPHAFORGE_RUN_ID") or Path(args.output_dir).name
     backtest_profile_name = os.getenv("ALPHAFORGE_PROFILE_NAME") or Path(args.output_dir).name
     expectancy_session = Session(init_db(backtest_database_url))
