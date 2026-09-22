@@ -734,7 +734,8 @@ def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> Non
     orchestrator._burnin_run_id = "accepted-run"
 
     payload = {
-        "signal_id": "accepted-1", "symbol": "BTCUSDT", "decision": "ACCEPTED",
+        "signal_id": "accepted-1", "setup_identity": "setup-accepted-1",
+        "symbol": "BTCUSDT", "decision": "ACCEPTED",
         "timeframe": "1m", "geometry_status": "COMPLETE", "score": 0.8,
         "rr": 2.0, "candidate_rr": 2.0, "expected_fill": 100.1,
         "executable_raw_rr": 1.9, "remaining_execution_penalty": 0.1,
