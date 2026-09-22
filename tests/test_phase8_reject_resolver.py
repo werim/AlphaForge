@@ -72,7 +72,10 @@ def test_legacy_shadow_outcome_is_resolved_but_not_marked_reject_correct(tmp_pat
     assert payload['reject_quality_attributable'] is False
     assert payload['reject_correct'] is None
     assert payload['non_attributable_reason'] == 'LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT'
-    assert conn.execute("select count(*) from expectancy_evidence where evidence_type='REJECT_FORWARD'").fetchone()[0] == 0
+    table_exists = conn.execute(
+        "select count(*) from sqlite_master where type='table' and name='expectancy_evidence'"
+    ).fetchone()[0]
+    assert table_exists == 0
 from alphaforge.burnin_campaign import BinanceReadOnlyCandleProvider, MarketDataUnavailable
 
 
