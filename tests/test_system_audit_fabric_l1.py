@@ -260,4 +260,3 @@ def test_l1_regime_mismatch_false_reject_is_attributed_to_regime_gate(tmp_path: 
     assert row["observed_cell"]=="FALSE_REJECT"
     assert attribution["REGIME_MISMATCH"]>attribution["LOW_SCORE"]
     assert report["observed_matrix"]["FALSE_REJECT"]==1
-
