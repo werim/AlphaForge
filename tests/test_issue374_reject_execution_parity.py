@@ -6,7 +6,11 @@ import json
 import pytest
 from sqlalchemy import text
 
-from alphaforge.burnin_campaign import aggregate_campaign
+from alphaforge.burnin_campaign import (
+    create_campaign,
+    reject_candidate_feasibility_shadow,
+    start_or_resume_campaign,
+)
 from alphaforge.persistence import init_db
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
@@ -180,11 +184,40 @@ def test_execution_aligned_reject_uses_expected_fill_and_does_not_double_count_e
     assert expectancy["net_r"] == pytest.approx(outcome["hypothetical_net_r_after_costs"])
 
 
-def test_fresh_reject_shadow_diagnostics_are_non_authoritative_and_execution_aligned(tmp_path):
+def test_fresh_reject_shadow_diagnostics_are_non_authoritative_and_execution_aligned(tmp_path, monkeypatch):
     def candles(_symbol, _start, _end, _timeframe):
         return [{"timestamp": "2026-01-01T00:01:00Z", "high": 102.1, "low": 99.5}]
 
-    engine, runtime = _runtime(tmp_path, candle_provider=candles)
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'issue374-shadow.db'}")
+    with engine.begin() as conn:
+        campaign = create_campaign(
+            conn,
+            release_id="issue374-shadow",
+            duration_days=1,
+            symbols=["BTCUSDT"],
+            intervals=["1m"],
+        )
+        run = start_or_resume_campaign(conn, campaign.campaign_id)
+    monkeypatch.setenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", campaign.campaign_id)
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            phase7_burnin_release_id="issue374-shadow",
+            reject_forward_horizon_bars=1,
+            min_signal_score=0.50,
+            min_rr=1.20,
+            min_effective_rr=1.10,
+            min_sl_pct=0.15,
+            max_sl_pct=1.50,
+        ),
+        ai_brain=object(),
+        market_scanner=lambda: None,
+        persistence_engine=engine,
+        scanner_source="PAPER_RUNTIME",
+        reject_candle_provider=candles,
+        paper_slippage_bps=2.0,
+    )
+    runtime._burnin_run_id = run["burnin_run_id"]
     ctx = _execution_ctx()
     market = {
         "signal_id": "shadow-diagnostic",
@@ -207,11 +240,8 @@ def test_fresh_reject_shadow_diagnostics_are_non_authoritative_and_execution_ali
     }))
     asyncio.run(runtime._resolve_reject_forward_outcomes_once())
 
-    campaign_id = runtime._reject_campaign_id()
     with engine.connect() as conn:
-        diagnostics = aggregate_campaign(conn, campaign_id)["metrics"][
-            "reject_candidate_feasibility_shadow"
-        ]
+        diagnostics = reject_candidate_feasibility_shadow(conn, campaign.campaign_id)
 
     assert diagnostics["authoritative"] is False
     assert diagnostics["purpose"] == "SHADOW_DIAGNOSTIC_ONLY"
