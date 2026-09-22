@@ -487,3 +487,97 @@ def test_phase6_all_gates_pass_still_blocks_real_live_orders() -> None:
     assert report.qualified is False
     assert report.verdict == "LIVE_REAL_ORDERS_BLOCKED"
     assert any(g.name == "phase6_release_gates_verified" and g.passed for g in (report.gates or []))
+
+
+def test_backtest_only_decision_evidence_cannot_satisfy_paper_phase2() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM decision_evidence WHERE UPPER(mode)='PAPER'"))
+    report = _evaluate(engine)
+    checks = {check.name: check for check in report.checks}
+    assert checks["phase2_decision_evidence_rows_present"].passed is False
+    assert checks["phase2_lifecycle_evidence_present"].passed is False
+    assert checks["phase2_reject_evidence_present"].passed is False
+    assert checks["phase2_accept_evidence_present"].passed is False
+    assert any(
+        gate.name == "phase2_persisted_evidence_complete" and not gate.passed
+        for gate in report.gates or []
+    )
+
+
+def test_backtest_execution_evidence_cannot_poison_paper_phase2_or_phase3() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE decision_evidence
+            SET diagnostics_json='UNAVAILABLE',
+                spread_pct=0,
+                expected_slippage_pct=0,
+                effective_rr=NULL,
+                cost_penalty=NULL,
+                portfolio_risk_state='UNKNOWN'
+            WHERE UPPER(mode)='BACKTEST'
+        """))
+    report = _evaluate(engine)
+    checks = {check.name: check for check in report.checks}
+    assert checks["phase2_no_fake_zero_execution_evidence"].passed is True
+    assert checks["effective_rr_available"].passed is True
+    assert checks["execution_cost_breakdown_present"].passed is True
+    assert checks["no_fake_zero_execution_costs"].passed is True
+    assert checks["no_accepted_trade_with_unknown_portfolio_risk"].passed is True
+    assert checks["backtest_and_paper_share_portfolio_risk_engine"].passed is True
+
+
+def test_backtest_lifecycle_error_does_not_contaminate_paper_lifecycle() -> None:
+    engine = _engine()
+    with Session(engine) as session:
+        assert save_trade_lifecycle_event(
+            session,
+            event_id="bt-created",
+            signal_id="bt-signal",
+            symbol="SOLUSDT",
+            mode="BACKTEST",
+            lifecycle_state="SIGNAL_CREATED",
+            event_ts="2026-01-01T00:00:00Z",
+        ) is True
+        assert save_trade_lifecycle_event(
+            session,
+            event_id="bt-error",
+            signal_id="bt-signal",
+            symbol="SOLUSDT",
+            mode="BACKTEST",
+            lifecycle_state="ERROR",
+            previous_lifecycle_state="SIGNAL_CREATED",
+            failure_reason="BACKTEST_ONLY_FAILURE",
+            payload={"attempted_state": "ERROR", "previous_state": "SIGNAL_CREATED"},
+            event_ts="2026-01-01T00:00:01Z",
+        ) is True
+        session.commit()
+    with engine.connect() as conn:
+        checks = {check.name: check for check in LiveReadinessEvaluator(engine)._check_lifecycle(conn)}
+    assert checks["lifecycle_error_free"].passed is True
+    assert checks["lifecycle_no_orphans"].passed is True
+
+
+def test_readiness_stats_ignore_backtest_decision_population() -> None:
+    engine = _engine()
+    with Session(engine) as session:
+        for index in range(30):
+            save_order_decision(
+                session,
+                decision_id=f"bt-accept-{index}",
+                signal_id=f"bt-signal-{index}",
+                symbol="SOLUSDT",
+                mode="BACKTEST",
+                decision="ACCEPTED",
+                reject_reason="",
+                score=5.0,
+                rr=1.0,
+            )
+        session.commit()
+    with engine.connect() as conn:
+        checks = {check.name: check for check in LiveReadinessEvaluator(engine)._check_stats(conn)}
+    assert checks["reject_rate_sanity"].passed is True
+    assert "total=2" in checks["reject_rate_sanity"].details
+    assert checks["rr_not_constant"].passed is True
+    assert checks["score_not_constant"].passed is True
