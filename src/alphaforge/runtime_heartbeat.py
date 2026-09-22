@@ -164,15 +164,24 @@ def save_runtime_heartbeat(
         })
 
 
-def fetch_latest_runtime_heartbeat(engine: Engine, *, execution_mode: str | None = None) -> dict[str, Any] | None:
+def fetch_latest_runtime_heartbeat(
+    engine: Engine,
+    *,
+    execution_mode: str | None = None,
+    runtime_instance_id: str | None = None,
+) -> dict[str, Any] | None:
     try:
         if not inspect(engine).has_table("runtime_heartbeats"):
             return None
         params: dict[str, Any] = {}
-        where = ""
+        clauses: list[str] = []
         if execution_mode:
-            where = "WHERE UPPER(execution_mode) = :execution_mode"
+            clauses.append("UPPER(execution_mode) = :execution_mode")
             params["execution_mode"] = str(execution_mode).strip().upper()
+        if runtime_instance_id:
+            clauses.append("runtime_instance_id = :runtime_instance_id")
+            params["runtime_instance_id"] = str(runtime_instance_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         with engine.connect() as conn:
             row = conn.execute(text(f"""
                 SELECT id, runtime_instance_id, execution_mode, heartbeat_ts, scanner_source,
@@ -210,9 +219,14 @@ def evaluate_runtime_heartbeat_freshness(
     max_age_sec: float = DEFAULT_MAX_AGE_SEC,
     now: datetime | None = None,
     future_tolerance_sec: float = DEFAULT_FUTURE_TOLERANCE_SEC,
+    runtime_instance_id: str | None = None,
 ) -> HeartbeatFreshness:
     mode = str(required_mode or "").strip().upper() or None
-    latest = fetch_latest_runtime_heartbeat(engine, execution_mode=mode)
+    latest = fetch_latest_runtime_heartbeat(
+        engine,
+        execution_mode=mode,
+        runtime_instance_id=runtime_instance_id,
+    )
     max_age = max(1.0, float(max_age_sec))
     if latest is None:
         reason = "NO_PERSISTED_RUNTIME_HEARTBEAT" if mode is None else f"NO_PERSISTED_{mode}_RUNTIME_HEARTBEAT"
