@@ -309,7 +309,15 @@ class LiveReadinessEvaluator:
         ]
 
     def _check_lifecycle(self, conn: Any) -> list[CheckResult]:
-        rows = conn.execute(text("SELECT signal_id, lifecycle_state, event_ts, reject_reason FROM trade_lifecycle_events ORDER BY signal_id, event_ts")).mappings().all()
+        params = self._scope_params()
+        scope = self._signal_scope_sql("trade_lifecycle_events")
+        rows = conn.execute(
+            text(f"""SELECT signal_id, lifecycle_state, event_ts, reject_reason
+                     FROM trade_lifecycle_events
+                     WHERE {scope}
+                     ORDER BY signal_id, event_ts"""),
+            params,
+        ).mappings().all()
         by_signal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             by_signal.setdefault(str(row["signal_id"]), []).append(dict(row))
@@ -333,6 +341,7 @@ class LiveReadinessEvaluator:
             if any(e["lifecycle_state"] == LifecycleEventType.ENTRY_TRIGGERED.value for e in events) and not any(e["lifecycle_state"] in terminal_states for e in events):
                 exit_missing += 1
         return [CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"), CheckResult("lifecycle_transitions_valid", invalid_transitions == 0, f"invalid_transitions={invalid_transitions}"), CheckResult("lifecycle_error_free", lifecycle_errors == 0, f"lifecycle_errors={lifecycle_errors}"), CheckResult("rejected_has_reason", reject_missing == 0, f"missing_reject_reason={reject_missing}"), CheckResult("entry_exit_completeness", exit_missing == 0, f"missing_exit={exit_missing}")]
+
 
     def _check_persistence(self, conn: Any) -> list[CheckResult]:
         checks: list[CheckResult] = []
@@ -427,11 +436,21 @@ class LiveReadinessEvaluator:
         return checks
 
     def _check_stats(self, conn: Any) -> list[CheckResult]:
-        total = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE COALESCE(phase,'final')='final'")).scalar_one())
-        rejected = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one())
+        params = self._scope_params()
+        scope = self._signal_scope_sql("order_decisions")
+        total = int(conn.execute(text(
+            f"SELECT COUNT(*) FROM order_decisions WHERE {scope} AND COALESCE(phase,'final')='final'"
+        ), params).scalar_one())
+        rejected = int(conn.execute(text(
+            f"SELECT COUNT(*) FROM order_decisions WHERE {scope} AND UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'"
+        ), params).scalar_one())
         reject_rate = rejected / total if total else 0.0
-        min_rr, max_rr = conn.execute(text("SELECT MIN(rr), MAX(rr) FROM order_decisions")).one()
-        min_score, max_score = conn.execute(text("SELECT MIN(score), MAX(score) FROM order_decisions")).one()
+        min_rr, max_rr = conn.execute(
+            text(f"SELECT MIN(rr), MAX(rr) FROM order_decisions WHERE {scope}"), params
+        ).one()
+        min_score, max_score = conn.execute(
+            text(f"SELECT MIN(score), MAX(score) FROM order_decisions WHERE {scope}"), params
+        ).one()
         lower, upper = self.reject_rate_bounds
         return [CheckResult("reject_rate_sanity", lower <= reject_rate <= upper if total else False, f"reject_rate={reject_rate:.4f},total={total}"), CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"), CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}")]
 
