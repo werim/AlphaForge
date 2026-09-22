@@ -797,19 +797,22 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
     assert provenance["reject_quality_attributable"] is False
 
 
-def test_guided_null_low_effective_rr_is_not_authoritative() -> None:
+def test_guided_null_low_effective_rr_is_not_authoritative(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'guided-null-low-rr.db'}")
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
-        ai_brain=_brain(), market_scanner=lambda: None,
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
     )
-    payload = orchestrator._canonical_reject_payload({
+    orchestrator._burnin_run_id = "guided-null-low-rr-run"
+    source = {
         "signal_id": "guided-null-low-rr", "symbol": "ETHUSDT", "side": "LONG",
         "entry": 100.0, "sl": 99.0, "tp": 101.2, "rr": 1.2,
         "effective_rr": 0.84, "geometry_status": "COMPLETE",
         "reason": "LOW_EFFECTIVE_RR",
         "mtf": {"generation": {"mode": "REGIME_GUIDED", "candidate": None,
                                 "evidence_status": "INCOMPLETE"}},
-    })
+    }
+    payload = orchestrator._canonical_reject_payload(source)
 
     assert payload["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
     assert payload["geometry_status"] == "UNAVAILABLE"
@@ -822,6 +825,19 @@ def test_guided_null_low_effective_rr_is_not_authoritative() -> None:
     assert payload["source_primary_reject_reason"] == "LOW_EFFECTIVE_RR"
     assert payload["legacy_shadow_geometry"]["reject_reason"] == "LOW_EFFECTIVE_RR"
     assert payload["legacy_shadow_geometry"]["effective_rr"] == pytest.approx(0.84)
+
+    asyncio.run(orchestrator._persist_reject(source))
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT reject_reason, raw_rr, effective_rr, payload_json
+            FROM rejected_signal_reviews
+            WHERE signal_id='guided-null-low-rr'
+        """)).one()
+    persisted = json.loads(row.payload_json)
+    assert row.reject_reason == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+    assert row.raw_rr is None and row.effective_rr is None
+    assert persisted["source_primary_reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert persisted["legacy_shadow_geometry"]["reject_reason"] == "LOW_EFFECTIVE_RR"
 
 
 def test_real_guided_rejected_candidate_remains_attributable() -> None:
