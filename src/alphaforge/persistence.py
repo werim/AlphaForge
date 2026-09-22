@@ -27,6 +27,7 @@ __all__ = [
     "save_ai_decision_features",
     "save_signal",
     "save_order_decision",
+    "save_decision_evidence",
     "save_rejected_decision_artifact",
     "save_trade_lifecycle_event",
     "save_closed_trade_review",
@@ -939,6 +940,89 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
             session.commit()
         return decision_id or row.lastrowid
     except Exception:
+        return None
+
+
+DECISION_EVIDENCE_COLUMNS: tuple[str, ...] = (
+    "evidence_id", "run_id", "profile_id", "profile_name", "mode", "timestamp", "symbol", "side",
+    "setup_type", "setup_reason", "regime", "lifecycle_state_before", "lifecycle_state_after",
+    "decision", "score", "raw_rr", "effective_rr", "expectancy", "expectancy_bucket", "reject_reason",
+    "cancel_reason", "close_reason", "entry", "sl", "tp", "trigger_price", "close_price",
+    "net_pnl_pct", "net_pnl_usdt", "hold_minutes", "volume_24h_usdt", "spread_pct",
+    "funding_rate_pct", "expected_slippage_pct", "liquidity_score", "volatility_regime",
+    "cost_penalty", "total_cost_pct", "total_explicit_cost_pct", "spread_source", "slippage_source",
+    "fee_pct", "fee_source", "funding_source", "latency_ms", "latency_source", "liquidity_status",
+    "volatility_penalty_pct", "volatility_source", "reject_flags", "unavailable_fields",
+    "diagnostics_json", "portfolio_equity", "available_balance", "open_position_count",
+    "max_open_positions", "total_notional_exposure", "max_notional_exposure",
+    "symbol_notional_exposure", "max_symbol_notional", "side_exposure_long", "side_exposure_short",
+    "net_exposure", "gross_exposure", "daily_realized_pnl", "daily_loss_pct", "max_daily_loss_pct",
+    "rolling_drawdown_pct", "consecutive_loss_count", "correlation_group",
+    "correlation_group_exposure", "correlated_position_count", "risk_flags",
+    "portfolio_reject_reason", "portfolio_risk_state", "portfolio_diagnostics_json",
+    "signal_id", "order_id", "position_id", "lifecycle_id", "lifecycle_seq", "created_at",
+)
+
+_DECISION_EVIDENCE_JSON_FIELDS = {
+    "diagnostics_json", "portfolio_diagnostics_json", "risk_flags", "reject_flags", "unavailable_fields",
+}
+
+
+def _decision_evidence_json_value(value: Any) -> Any:
+    if isinstance(value, (Mapping, list, tuple, set)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return value
+
+
+def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
+    """Idempotently persist normalized decision evidence without committing.
+
+    The caller owns the surrounding transaction. Missing/unavailable execution
+    values remain NULL; this helper never fabricates numeric zero evidence.
+    """
+    if session is None:
+        return None
+    evidence_id = str(evidence.get("evidence_id") or "").strip()
+    if not evidence_id:
+        return None
+
+    decision_raw = str(evidence.get("decision") or "").strip().upper()
+    decision = {
+        "ACCEPTED": "ACCEPT",
+        "REJECTED": "REJECT",
+        "PENDING": "WAIT",
+    }.get(decision_raw, decision_raw or None)
+
+    payload = {column: evidence.get(column) for column in DECISION_EVIDENCE_COLUMNS}
+    payload["evidence_id"] = evidence_id
+    payload["decision"] = decision
+    payload["timestamp"] = evidence.get("timestamp") or _utc_now_iso()
+    payload["created_at"] = evidence.get("created_at") or _utc_now_iso()
+    if decision == "REJECT":
+        reason = evidence.get("reject_reason")
+        payload["reject_reason"] = canonical_reject_reason(reason) if reason else None
+    for field in _DECISION_EVIDENCE_JSON_FIELDS:
+        payload[field] = _decision_evidence_json_value(payload.get(field))
+
+    columns_sql = ", ".join(DECISION_EVIDENCE_COLUMNS)
+    values_sql = ", ".join(f":{column}" for column in DECISION_EVIDENCE_COLUMNS)
+    update_columns = [
+        column for column in DECISION_EVIDENCE_COLUMNS
+        if column not in {"evidence_id", "created_at"}
+    ]
+    update_sql = ", ".join(f"{column}=excluded.{column}" for column in update_columns)
+    try:
+        session.execute(
+            text(
+                f"""INSERT INTO decision_evidence ({columns_sql})
+                    VALUES ({values_sql})
+                    ON CONFLICT(evidence_id) DO UPDATE SET {update_sql}"""
+            ),
+            payload,
+        )
+        return evidence_id
+    except Exception:
+        LOGGER.exception("decision_evidence_persistence_failed evidence_id=%s", evidence_id)
         return None
 
 
