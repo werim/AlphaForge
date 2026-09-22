@@ -34,7 +34,7 @@ def test_effective_rr_adjustment() -> None:
 def test_execution_metrics_persisted() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as s:
-        after_position_close(s, {"trade_id": "t1", "symbol": "BTCUSDT", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.2, "expected_slippage_pct": 0.001}, {})
+        after_position_close(s, {"trade_id": "t1", "symbol": "BTCUSDT", "side": "LONG", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.2, "expected_slippage_pct": 0.001}, {})
         row = s.execute(text("SELECT execution_metrics FROM closed_trade_reviews WHERE trade_id='t1' ORDER BY id DESC LIMIT 1")).one()
         metrics = json.loads(row.execution_metrics)
         assert "entry_price" in metrics
@@ -44,12 +44,18 @@ def test_execution_metrics_persisted() -> None:
         assert "fill_quality_score" in metrics
         assert 0.0 <= metrics["fill_quality_score"] <= 1.0
         assert metrics["fill_quality_score"] == pytest.approx(0.9, rel=1e-6)
+        canonical = s.execute(text("""
+            SELECT actual_slippage_pct FROM closed_trade_reviews
+            WHERE trade_id='t1' AND actual_slippage_pct IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+        """)).one()
+        assert canonical.actual_slippage_pct == pytest.approx(0.002)
 
 def test_execution_metrics_worse_slippage_lowers_quality() -> None:
     engine = init_db("sqlite+pysqlite:///:memory:")
     with Session(engine) as s:
-        after_position_close(s, {"trade_id": "t2", "symbol": "BTCUSDT", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.05, "expected_slippage_pct": 0.001}, {})
-        after_position_close(s, {"trade_id": "t3", "symbol": "BTCUSDT", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.3, "expected_slippage_pct": 0.001}, {})
+        after_position_close(s, {"trade_id": "t2", "symbol": "BTCUSDT", "side": "LONG", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.05, "expected_slippage_pct": 0.001}, {})
+        after_position_close(s, {"trade_id": "t3", "symbol": "BTCUSDT", "side": "LONG", "pnl": 1.0, "entry_price": 100, "filled_entry_price": 100.3, "expected_slippage_pct": 0.001}, {})
         better = json.loads(s.execute(text("SELECT execution_metrics FROM closed_trade_reviews WHERE trade_id='t2' ORDER BY id DESC LIMIT 1")).one().execution_metrics)
         worse = json.loads(s.execute(text("SELECT execution_metrics FROM closed_trade_reviews WHERE trade_id='t3' ORDER BY id DESC LIMIT 1")).one().execution_metrics)
         assert worse["fill_quality_score"] < better["fill_quality_score"]
