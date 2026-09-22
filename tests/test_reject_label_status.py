@@ -25,7 +25,11 @@ def database(tmp_path, *, resolve=True, costs=COSTS, candles=None):
         reject_decision_id="reject:1", signal_id="s1", symbol="BTCUSDT", side="LONG",
         decision_timestamp="2026-01-01T00:00:00Z", timeframe="1m", horizon_bars=1,
         entry=100, stop=90, target=120, execution_cost_assumptions=costs, regime="TRENDING",
-        reject_reason="LOW_CONFIDENCE", source_provenance={"provider": "PAPER"})
+        reject_reason="LOW_CONFIDENCE", source_provenance={
+            "provider": "PAPER",
+            "reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY",
+            "reject_quality_attributable": True,
+        })
     if resolve:
         resolve_pending_rejects(conn, {"BTCUSDT": candles or [{"timestamp": "2026-01-01T00:01:00Z", "high": 101, "low": 89}]}, now=NOW)
     conn.commit()
@@ -380,7 +384,11 @@ def test_one_resolved_plus_future_pending_population_cannot_pass(tmp_path):
             reject_decision_id=rid, signal_id=rid, symbol="BTCUSDT", side="LONG",
             decision_timestamp="2026-01-01T00:02:30Z", timeframe="1m", horizon_bars=10,
             entry=100, stop=90, target=120, execution_cost_assumptions=COSTS,
-            regime="TRENDING", reject_reason="LOW_CONFIDENCE", source_provenance={"provider": "PAPER"})
+            regime="TRENDING", reject_reason="LOW_CONFIDENCE", source_provenance={
+                "provider": "PAPER",
+                "reject_execution_basis": "EXPECTED_FILL_RUNTIME_PARITY",
+                "reject_quality_attributable": True,
+            })
     result = report(conn, cid)
     assert result["status"] == "INCOMPLETE"
     assert result["resolver_state"]["PENDING"] == 3
