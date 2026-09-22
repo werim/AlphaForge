@@ -686,24 +686,31 @@ def reject_candidate_feasibility_shadow(conn: Any, campaign_id: str) -> dict[str
             "max":None if not values else max(values),
         }
 
-    matrix={}
+    effective_matrix={}
+    executable_matrix={}
     stop_buckets={"BELOW_MIN":{"count":0,"net_r":[]},
                   "WITHIN_BOUNDS":{"count":0,"net_r":[]},
                   "ABOVE_MAX":{"count":0,"net_r":[]},
                   "UNKNOWN":{"count":0,"net_r":[]}}
     gate_combinations={}
+    def add_matrix(matrix: dict[str, Any], *, score: float | None, rr_value: float | None, row: Mapping[str, Any]) -> None:
+        if score is None or rr_value is None:
+            return
+        score_low=math.floor(score/0.05)*0.05
+        rr_low=math.floor(rr_value/0.10)*0.10
+        key=f"{score_low:.2f}-{score_low+0.05:.2f}|{rr_low:.2f}-{rr_low+0.10:.2f}"
+        cell=matrix.setdefault(key,{"count":0,"tp":0,"sl":0,"net_r":[]})
+        cell["count"]+=1
+        cell["tp"]+=int(row.get("forward_label")=="TP_BEFORE_SL")
+        cell["sl"]+=int(row.get("forward_label")=="SL_BEFORE_TP")
+        net=finite(row.get("net_r"))
+        if net is not None and not row.get("ambiguous"):
+            cell["net_r"].append(net)
+
     for row in aligned:
-        score=finite(row.get("score")); eff=finite(row.get("effective_rr"))
-        if score is not None and eff is not None:
-            score_low=math.floor(score/0.05)*0.05
-            eff_low=math.floor(eff/0.10)*0.10
-            key=f"{score_low:.2f}-{score_low+0.05:.2f}|{eff_low:.2f}-{eff_low+0.10:.2f}"
-            cell=matrix.setdefault(key,{"count":0,"tp":0,"sl":0,"net_r":[]})
-            cell["count"]+=1
-            cell["tp"]+=int(row.get("forward_label")=="TP_BEFORE_SL")
-            cell["sl"]+=int(row.get("forward_label")=="SL_BEFORE_TP")
-            net=finite(row.get("net_r"))
-            if net is not None and not row.get("ambiguous"): cell["net_r"].append(net)
+        score=finite(row.get("score"))
+        add_matrix(effective_matrix, score=score, rr_value=finite(row.get("effective_rr")), row=row)
+        add_matrix(executable_matrix, score=score, rr_value=finite(row.get("executable_raw_rr")), row=row)
         stop=finite(row.get("stop_distance_pct")); min_stop=finite(row.get("min_stop_pct")); max_stop=finite(row.get("max_stop_pct"))
         bucket=("UNKNOWN" if stop is None or min_stop is None or max_stop is None
                 else "BELOW_MIN" if stop < min_stop
@@ -716,9 +723,10 @@ def reject_candidate_feasibility_shadow(conn: Any, campaign_id: str) -> dict[str
         gate_key="|".join(gates) if gates else "NONE"
         gate_combinations[gate_key]=gate_combinations.get(gate_key,0)+1
 
-    for cell in matrix.values():
-        nets=cell.pop("net_r")
-        cell["avg_net_r"]=None if not nets else sum(nets)/len(nets)
+    for matrix in (effective_matrix, executable_matrix):
+        for cell in matrix.values():
+            nets=cell.pop("net_r")
+            cell["avg_net_r"]=None if not nets else sum(nets)/len(nets)
     for bucket in stop_buckets.values():
         nets=bucket.pop("net_r")
         bucket["avg_net_r"]=None if not nets else sum(nets)/len(nets)
@@ -734,7 +742,8 @@ def reject_candidate_feasibility_shadow(conn: Any, campaign_id: str) -> dict[str
         "effective_rr":distribution("effective_rr"),
         "fill_shift_initial_risk_ratio":distribution("fill_shift_initial_risk_ratio"),
         "stop_distance_performance":stop_buckets,
-        "score_x_effective_rr_matrix":matrix,
+        "score_x_executable_rr_matrix":executable_matrix,
+        "score_x_effective_rr_matrix":effective_matrix,
         "failed_gate_combinations":gate_combinations,
     }
 
