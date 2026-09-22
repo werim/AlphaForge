@@ -2864,6 +2864,7 @@ class RuntimeOrchestrator:
         forward_label_subject = ("GUIDED_CANDIDATE" if guided_candidate else
                                  "LEGACY_SCANNER_SHADOW_CANDIDATE" if guided_generation else
                                  "LEGACY_CANDIDATE")
+        all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         if guided_without_candidate:
             shadow_geometry = {key: result.get(key) for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
