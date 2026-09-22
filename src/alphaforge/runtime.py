@@ -2874,7 +2874,13 @@ class RuntimeOrchestrator:
                 **shadow_geometry,
                 "attributable": False,
                 "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
+                "all_failed_gates": list(all_failed_gates),
+                "failed_gate_evidence": list(failed_gate_evidence),
             }
+            # The scanner-shadow gates are diagnostic only. Do not leak them
+            # back into canonical multi-gate evidence for a missing guided candidate.
+            all_failed_gates = []
+            failed_gate_evidence = []
             for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
                 "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
