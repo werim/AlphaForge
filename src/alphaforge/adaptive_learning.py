@@ -40,12 +40,29 @@ def record_closed_trade_review(session: Any, **payload: Any) -> bool:
     fields.update(payload)
     execution_metrics = payload.get("execution_metrics")
     if not isinstance(execution_metrics, Mapping):
+        filled_entry_price = payload.get("filled_entry_price")
         execution_metrics = {
             "expected_slippage_pct": fields.get("expected_slippage_pct"),
             "actual_slippage_pct": fields.get("actual_slippage_pct"),
+            "actual_slippage_pct_semantics": (
+                "TOTAL_REALIZED_EXECUTION_COST_PCT"
+                if fields.get("actual_slippage_pct") is not None
+                else "UNAVAILABLE"
+            ),
             "entry_price": fields.get("entry_price"),
-            "filled_entry_price": payload.get("filled_entry_price", fields.get("entry_price")),
+            # Never manufacture realized execution by substituting entry.
+            "filled_entry_price": filled_entry_price,
+            "actual_fill_provenance": (
+                payload.get("actual_fill_provenance")
+                if filled_entry_price is not None
+                else "UNAVAILABLE"
+            ),
             "fill_quality_score": payload.get("fill_quality_score"),
+            "execution_cost_semantics_status": (
+                "LEGACY_COMPATIBILITY"
+                if filled_entry_price is not None
+                else "UNAVAILABLE"
+            ),
         }
     try:
         session.execute(text("""
