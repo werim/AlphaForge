@@ -2978,6 +2978,20 @@ class RuntimeOrchestrator:
         label_geometry = shadow_geometry or payload
         planned_entry = label_geometry.get("entry", label_geometry.get("entry_price"))
         expected_fill = None if shadow_geometry else payload.get("expected_fill")
+        derived_rr_metrics: Mapping[str, Any] = {}
+        if not shadow_geometry and expected_fill is None:
+            try:
+                expected_fill, _ = self._expected_fill_price(label_geometry, execution_ctx)
+                if expected_fill is not None:
+                    derived_rr_metrics = self._execution_rr_metrics(
+                        payload.get("candidate_rr", payload.get("rr", payload.get("raw_rr"))),
+                        label_geometry,
+                        execution_ctx,
+                    )
+                    expected_fill = derived_rr_metrics.get("expected_fill", expected_fill)
+            except (TypeError, ValueError):
+                expected_fill = None
+                derived_rr_metrics = {}
         try:
             executable_entry = float(expected_fill) if expected_fill is not None else None
             if executable_entry is not None and (not math.isfinite(executable_entry) or executable_entry <= 0):
@@ -3038,9 +3052,9 @@ class RuntimeOrchestrator:
                                        "executable_entry": executable_entry,
                                        "score": payload.get("score"),
                                        "candidate_raw_rr": payload.get("candidate_rr", payload.get("rr")),
-                                       "executable_raw_rr": payload.get("executable_raw_rr"),
-                                       "remaining_execution_penalty": payload.get("remaining_execution_penalty"),
-                                       "effective_rr_at_decision": payload.get("effective_rr"),
+                                       "executable_raw_rr": payload.get("executable_raw_rr", derived_rr_metrics.get("executable_raw_rr")),
+                                       "remaining_execution_penalty": payload.get("remaining_execution_penalty", derived_rr_metrics.get("remaining_execution_penalty")),
+                                       "effective_rr_at_decision": payload.get("effective_rr", derived_rr_metrics.get("effective_rr")),
                                        "min_signal_score": payload.get("min_signal_score"),
                                        "min_raw_rr": payload.get("min_raw_rr"),
                                        "min_effective_rr": payload.get("min_effective_rr"),
@@ -3052,7 +3066,7 @@ class RuntimeOrchestrator:
                                        "stop_distance_pct": payload.get("stop_distance_pct"),
                                        "all_failed_gates": payload.get("all_failed_gates"),
                                        "failed_gate_evidence": payload.get("failed_gate_evidence"),
-                                       "execution_cost_semantics": payload.get("execution_cost_semantics"),
+                                       "execution_cost_semantics": payload.get("execution_cost_semantics", derived_rr_metrics.get("execution_cost_semantics")),
                                        "campaign_intervals": list(self._campaign_intervals),
                                        "regime_timeframe": self.config.regime_timeframe,
                                        "setup_timeframe": self.config.setup_timeframe,
