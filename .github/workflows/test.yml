@@ -63,6 +63,9 @@ jobs:
       - name: Compile
         run: python -m compileall -q src
 
+      - name: Cross-surface invariant gate
+        run: pytest -q tests/test_cross_surface_invariants.py
+
       - name: Run tests
         run: pytest -q
 
