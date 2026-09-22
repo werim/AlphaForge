@@ -822,6 +822,8 @@ def test_guided_null_low_effective_rr_is_not_authoritative(tmp_path: Path) -> No
     assert payload["authoritative_reject_reason"] == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
     assert payload["reason"] == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
     assert "LOW_EFFECTIVE_RR" not in payload["reject_reasons"]
+    assert "LOW_EFFECTIVE_RR" not in payload["all_failed_gates"]
+    assert "LOW_EFFECTIVE_RR" in payload["legacy_shadow_geometry"]["all_failed_gates"]
     assert payload["source_primary_reject_reason"] == "LOW_EFFECTIVE_RR"
     assert payload["legacy_shadow_geometry"]["reject_reason"] == "LOW_EFFECTIVE_RR"
     assert payload["legacy_shadow_geometry"]["effective_rr"] == pytest.approx(0.84)
