@@ -1112,7 +1112,10 @@ class RuntimeOrchestrator:
                     "effective_rr", "confidence", "spread_pct", "expected_slippage_pct",
                     "latency_ms", "funding_rate_pct", "entry", "sl", "tp",
                     "entry_source", "stop_source", "target_source", "setup_timeframe",
-                    "execution_timeframe", "structural_stop", "structural_target")}
+                    "execution_timeframe", "structural_stop", "structural_target",
+                    "all_failed_gates", "failed_gate_evidence", "stop_distance_pct",
+                    "min_signal_score", "min_raw_rr", "min_effective_rr",
+                    "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
                                 "setup_identity": payload.get("setup_identity"),
@@ -2760,8 +2763,90 @@ class RuntimeOrchestrator:
         self.metrics.rejects_persisted = count
         return count
 
+    def _reject_gate_audit(self, payload: Mapping[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+        """Return non-authoritative multi-gate evidence for a final reject.
+
+        This audit never changes the canonical primary reject reason or decision.
+        It snapshots decision-time observed values against the runtime thresholds
+        so downstream analysis can distinguish overlapping failures.
+        """
+        execution = dict(payload.get("execution_ctx") or {})
+        failed: list[str] = []
+        evidence: list[dict[str, Any]] = []
+
+        def number(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if math.isfinite(parsed) else None
+
+        def add(gate: str, observed: Any, threshold: Any, comparison: str, source: str = "RUNTIME_THRESHOLD") -> None:
+            gate = str(gate).upper()
+            if gate not in failed:
+                failed.append(gate)
+            evidence.append({
+                "gate": gate,
+                "observed": observed,
+                "threshold": threshold,
+                "comparison": comparison,
+                "source": source,
+            })
+
+        supplied = payload.get("all_failed_gates")
+        if isinstance(supplied, (list, tuple)):
+            for gate in supplied:
+                if gate:
+                    add(str(gate), None, None, "SUPPLIED", "UPSTREAM_DIAGNOSTIC")
+
+        primary = canonical_reject_reason(
+            payload.get("primary_reject_reason") or payload.get("reason") or payload.get("reject_reason")
+        )
+        if primary and primary != "UNKNOWN":
+            add(primary, None, None, "PRIMARY", "AUTHORITATIVE_PRIMARY")
+
+        score = number(payload.get("score"))
+        if score is not None and score < float(self.config.min_signal_score):
+            add("LOW_SCORE", score, float(self.config.min_signal_score), "<")
+
+        raw_rr = number(payload.get("candidate_rr", payload.get("rr", payload.get("raw_rr"))))
+        if raw_rr is not None and raw_rr < float(self.config.min_rr):
+            add("RR_TOO_LOW", raw_rr, float(self.config.min_rr), "<")
+
+        effective_rr = number(payload.get("effective_rr"))
+        if effective_rr is not None and effective_rr < float(self.config.min_effective_rr):
+            add("LOW_EFFECTIVE_RR", effective_rr, float(self.config.min_effective_rr), "<")
+
+        entry = number(payload.get("entry", payload.get("entry_price")))
+        stop = number(payload.get("sl", payload.get("stop_loss", payload.get("stop"))))
+        if entry is not None and entry > 0 and stop is not None:
+            stop_distance_pct = abs(entry - stop) / entry * 100.0
+            if stop_distance_pct < float(self.config.min_sl_pct):
+                add("STOP_TOO_TIGHT", stop_distance_pct, float(self.config.min_sl_pct), "<")
+            if stop_distance_pct > float(self.config.max_sl_pct):
+                add("STOP_TOO_WIDE", stop_distance_pct, float(self.config.max_sl_pct), ">")
+
+        spread = number(payload.get("spread_pct", execution.get("spread_pct")))
+        if spread is not None and spread > float(self.config.max_spread_pct):
+            add("SPREAD_TOO_HIGH", spread, float(self.config.max_spread_pct), ">")
+
+        slippage = number(payload.get("expected_slippage_pct", execution.get("expected_slippage_pct")))
+        if slippage is not None and slippage > float(self.config.max_expected_slippage_pct):
+            add("SLIPPAGE_TOO_HIGH", slippage, float(self.config.max_expected_slippage_pct), ">")
+
+        funding = number(payload.get("funding_rate_pct", execution.get("funding_rate_pct")))
+        if funding is not None and abs(funding) > float(self.config.max_abs_funding_rate_pct):
+            add("FUNDING_TOO_HIGH", abs(funding), float(self.config.max_abs_funding_rate_pct), ">")
+
+        volume = number(payload.get("volume_24h_usdt"))
+        if volume is not None and volume < float(self.config.min_liquidity_usd):
+            add("THIN_LIQUIDITY", volume, float(self.config.min_liquidity_usd), "<")
+
+        return failed, evidence
+
     def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")
+        all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         supplied_reasons = result.get("reject_reasons")
         reject_reasons = [canonical_reject_reason(value) for value in supplied_reasons
                           if value] if isinstance(supplied_reasons, (list, tuple)) else []
@@ -2825,6 +2910,8 @@ class RuntimeOrchestrator:
         result.update({
             "reject_decision_id":str(reject_decision_id), "decision":"REJECTED",
             "primary_reject_reason": primary_reject_reason, "reject_reasons": reject_reasons,
+            "all_failed_gates": list(dict.fromkeys([*all_failed_gates, *reject_reasons])),
+            "failed_gate_evidence": failed_gate_evidence,
             "authoritative_reject_reason": result.get("authoritative_reject_reason") or primary_reject_reason,
             "mtf_execution_confirmation_mode": result.get(
                 "mtf_execution_confirmation_mode", self.config.mtf_execution_confirmation_mode
@@ -2841,6 +2928,20 @@ class RuntimeOrchestrator:
             "runtime_identity": result.get("runtime_identity") or runtime_identity,
             "forward_label_subject": (forward_label_subject if guided_generation
                                       else result.get("forward_label_subject") or forward_label_subject),
+        })
+        try:
+            entry_value = float(result.get("entry"))
+            stop_value = float(result.get("sl"))
+            stop_distance_pct = abs(entry_value - stop_value) / entry_value * 100.0 if entry_value > 0 else None
+        except (TypeError, ValueError):
+            stop_distance_pct = None
+        result.update({
+            "stop_distance_pct": stop_distance_pct,
+            "min_signal_score": float(self.config.min_signal_score),
+            "min_raw_rr": float(self.config.min_rr),
+            "min_effective_rr": float(self.config.min_effective_rr),
+            "min_stop_pct": float(self.config.min_sl_pct),
+            "max_stop_pct": float(self.config.max_sl_pct),
         })
         return result
 
