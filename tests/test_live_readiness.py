@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence
+from alphaforge.burnin import bootstrap_burnin_schema, persist_burnin_observation
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 from alphaforge.release_gates import build_release_snapshot, persist_canary_event, persist_operator_ack, persist_release_snapshot
@@ -487,3 +488,99 @@ def test_phase6_all_gates_pass_still_blocks_real_live_orders() -> None:
     assert report.qualified is False
     assert report.verdict == "LIVE_REAL_ORDERS_BLOCKED"
     assert any(g.name == "phase6_release_gates_verified" and g.passed for g in (report.gates or []))
+
+
+def _seed_active_run_scope(engine, run_id: str = "run-current") -> None:
+    with engine.begin() as conn:
+        bootstrap_burnin_schema(conn)
+        persist_burnin_observation(
+            conn, observation_id="scope-s1", burnin_run_id=run_id, release_id="rel-current",
+            execution_mode="PAPER", symbol="BTCUSDT", decision="REJECTED",
+            metrics={"signal_id": "s-1"}, source_provenance={"campaign_id": "camp-current"},
+        )
+        persist_burnin_observation(
+            conn, observation_id="scope-s2", burnin_run_id=run_id, release_id="rel-current",
+            execution_mode="PAPER", symbol="ETHUSDT", decision="ACCEPTED",
+            metrics={"signal_id": "s-2"}, source_provenance={"campaign_id": "camp-current"},
+        )
+        conn.execute(text(
+            "UPDATE decision_evidence SET run_id=:run_id WHERE UPPER(mode)='PAPER'"
+        ), {"run_id": run_id})
+
+
+def test_strict_scope_ignores_historical_paper_and_backtest_evidence() -> None:
+    engine = _engine()
+    _seed_active_run_scope(engine)
+    with Session(engine) as session:
+        save_order_decision(
+            session, decision_id="old-duplicate", signal_id="old-signal", symbol="SOLUSDT",
+            mode="PAPER", decision="REJECTED", reject_reason="DECISION_PARITY_MISMATCH",
+            score=1.0, rr=1.0,
+        )
+        save_trade_lifecycle_event(
+            session, event_id="old-error", signal_id="old-signal", symbol="SOLUSDT",
+            mode="PAPER", lifecycle_state="ERROR", event_ts="2026-01-01T00:00:10Z",
+        )
+        session.commit()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO decision_evidence (
+                evidence_id,run_id,mode,timestamp,symbol,decision,reject_reason,
+                diagnostics_json,spread_pct,expected_slippage_pct,funding_rate_pct,
+                volume_24h_usdt,liquidity_score,created_at
+            ) VALUES (
+                'old-paper','old-run','PAPER','2026-01-01T00:00:00Z','SOLUSDT','REJECT',
+                'DECISION_PARITY_MISMATCH','UNAVAILABLE',0,0,0,0,0,'2026-01-01T00:00:00Z'
+            )
+        """))
+
+    evaluator = LiveReadinessEvaluator(
+        engine, burnin_run_id="run-current", strict_scope=True
+    )
+    with engine.connect() as conn:
+        checks = {check.name: check for check in evaluator._check_persistence(conn)}
+        lifecycle = {check.name: check for check in evaluator._check_lifecycle(conn)}
+
+    assert checks["phase2_no_decision_parity_mismatch"].passed is True
+    assert checks["phase2_no_fake_zero_execution_evidence"].passed is True
+    assert lifecycle["lifecycle_error_free"].passed is True
+
+
+def test_strict_scope_backtest_only_evidence_cannot_satisfy_paper_readiness() -> None:
+    engine = _engine()
+    _seed_active_run_scope(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM decision_evidence WHERE UPPER(mode)='PAPER'"))
+
+    evaluator = LiveReadinessEvaluator(
+        engine, burnin_run_id="run-current", strict_scope=True
+    )
+    with engine.connect() as conn:
+        checks = {check.name: check for check in evaluator._check_persistence(conn)}
+
+    assert checks["phase2_decision_evidence_rows_present"].passed is False
+    assert checks["phase2_accept_evidence_present"].passed is False
+    assert checks["phase2_reject_evidence_present"].passed is False
+
+
+def test_strict_scope_release_gate_does_not_borrow_default_release() -> None:
+    engine = _engine()
+    check = LiveReadinessEvaluator(
+        engine, release_id="different-release", strict_scope=True
+    )._check_release_gates()[0]
+    assert check.passed is False
+    assert "different-release" in check.details
+
+
+def test_strict_scope_runtime_state_does_not_borrow_other_instance() -> None:
+    engine = _engine()
+    checks = {
+        check.name: check
+        for check in LiveReadinessEvaluator(
+            engine,
+            runtime_instance_id="runtime:not-present",
+            execution_mode="LIVE_PRECHECK",
+            strict_scope=True,
+        )._check_runtime_state_snapshot()
+    }
+    assert checks["runtime_state_snapshot_present"].passed is False
