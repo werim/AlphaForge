@@ -186,6 +186,7 @@ def _load_evidence(source: sqlite3.Connection, campaign_id: str) -> list[dict[st
                 if reason == "REJECTED" and p["reject_reason"]:
                     reason = str(p["reject_reason"]).upper()
                     entry["reason_or_gate"] = reason
+                pending_provenance = _json(p["source_provenance_json"])
                 for outcome in reject_outcomes[(run_id, identity)]:
                     payload = _json(outcome["payload_json"])
                     if (payload.get("campaign_id") == campaign_id
@@ -197,7 +198,9 @@ def _load_evidence(source: sqlite3.Connection, campaign_id: str) -> list[dict[st
                             and outcome["symbol"] == observation["symbol"]
                             and payload.get("reject_quality_attributable") is not False
                             and payload.get("forward_label_subject") != "LEGACY_SCANNER_SHADOW_CANDIDATE"
-                            and _json(p["source_provenance_json"]).get("forward_label_subject") != "LEGACY_SCANNER_SHADOW_CANDIDATE"):
+                            and pending_provenance.get("forward_label_subject") != "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                            and pending_provenance.get("reject_execution_basis") == "EXPECTED_FILL_RUNTIME_PARITY"
+                            and payload.get("execution_aligned") is True):
                         matches.append(outcome)
             if len(matches) == 1:
                 o = matches[0]

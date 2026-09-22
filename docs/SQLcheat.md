@@ -1115,3 +1115,34 @@ Check `execution_ctx_missing`, JSON `evidence_status`, source/status fields, `un
 | Execution fields missing/fake-zero | [Execution quality](#12-execution-quality) |
 | What threshold was used? | [Configuration verification](#21-configuration-and-threshold-verification) |
 | Campaign/run lineage | [Canonical relationships](#7-canonical-relationships-and-joins) |
+
+
+## 25. Reject execution-parity and multi-gate evidence
+
+These queries apply to fresh PAPER evidence written after the #374 execution-parity contract. Historical rows may not contain these JSON keys; do not reinterpret missing provenance as aligned evidence.
+
+### 25.1 Canonical final reject: primary reason plus every failed gate
+
+    sqlite3 -readonly -header -column "$DB" "SELECT o.observed_at,o.symbol,json_extract(o.metrics_json,'$.reject_decision_id') AS reject_decision_id,json_extract(o.metrics_json,'$.primary_reject_reason') AS primary_reason,json_extract(o.metrics_json,'$.all_failed_gates') AS all_failed_gates,json_extract(o.metrics_json,'$.failed_gate_evidence') AS failed_gate_evidence,json_extract(o.metrics_json,'$.score') AS score,json_extract(o.metrics_json,'$.candidate_rr') AS candidate_raw_rr,json_extract(o.metrics_json,'$.executable_raw_rr') AS executable_raw_rr,json_extract(o.metrics_json,'$.effective_rr') AS effective_rr,json_extract(o.metrics_json,'$.stop_distance_pct') AS stop_distance_pct,json_extract(o.metrics_json,'$.min_signal_score') AS min_signal_score,json_extract(o.metrics_json,'$.min_raw_rr') AS min_raw_rr,json_extract(o.metrics_json,'$.min_effective_rr') AS min_effective_rr,json_extract(o.metrics_json,'$.min_stop_pct') AS min_stop_pct,json_extract(o.metrics_json,'$.max_stop_pct') AS max_stop_pct FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id='$CID' AND UPPER(COALESCE(o.decision,''))='REJECTED' ORDER BY o.observed_at DESC;"
+
+One row per failed gate:
+
+    sqlite3 -readonly -header -column "$DB" "SELECT o.observed_at,o.symbol,json_extract(o.metrics_json,'$.reject_decision_id') AS reject_decision_id,json_extract(o.metrics_json,'$.primary_reject_reason') AS primary_reason,g.value AS failed_gate FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id,json_each(CASE WHEN json_valid(json_extract(o.metrics_json,'$.all_failed_gates')) THEN json_extract(o.metrics_json,'$.all_failed_gates') ELSE '[]' END) g WHERE cr.campaign_id='$CID' AND UPPER(COALESCE(o.decision,''))='REJECTED' ORDER BY o.observed_at DESC;"
+
+### 25.2 Pending reject execution basis
+
+    sqlite3 -readonly -header -column "$DB" "SELECT p.created_at,p.symbol,p.reject_decision_id,p.reject_reason,p.entry AS resolver_entry,p.stop,p.target,json_extract(p.source_provenance_json,'$.reject_execution_basis') AS execution_basis,json_extract(p.source_provenance_json,'$.planned_entry') AS planned_entry,json_extract(p.source_provenance_json,'$.executable_entry') AS executable_entry,json_extract(p.source_provenance_json,'$.candidate_raw_rr') AS candidate_raw_rr,json_extract(p.source_provenance_json,'$.executable_raw_rr') AS executable_raw_rr,json_extract(p.source_provenance_json,'$.remaining_execution_penalty') AS remaining_execution_penalty,json_extract(p.source_provenance_json,'$.effective_rr_at_decision') AS effective_rr,json_extract(p.source_provenance_json,'$.entry_slippage_embedded_in_fill') AS entry_slippage_embedded,json_extract(p.source_provenance_json,'$.embedded_entry_slippage_cost') AS embedded_entry_slippage_cost,json_extract(p.source_provenance_json,'$.fill_shift_initial_risk_ratio') AS fill_shift_initial_risk_ratio,json_extract(p.source_provenance_json,'$.reject_quality_attributable') AS attributable,json_extract(p.source_provenance_json,'$.non_attributable_reason') AS non_attributable_reason,p.execution_cost_assumptions_json FROM burnin_pending_reject_labels p WHERE p.campaign_id='$CID' ORDER BY p.created_at DESC;"
+
+Fresh authoritative execution-parity analysis uses reject_execution_basis = EXPECTED_FILL_RUNTIME_PARITY. PLANNED_ENTRY_LEGACY and LEGACY_SCANNER_SHADOW are diagnostic/legacy bases and must not be mixed into execution-aligned calibration.
+
+### 25.3 Resolved outcome basis and no-double-count audit
+
+    sqlite3 -readonly -header -column "$DB" "SELECT o.decision_time,o.symbol,o.reject_reason,o.hypothetical_entry,o.hypothetical_stop,o.hypothetical_target,o.hypothetical_gross_r,o.hypothetical_net_r_after_costs,o.forward_label,o.evidence_complete,json_extract(o.payload_json,'$.reject_execution_basis') AS execution_basis,json_extract(o.payload_json,'$.execution_aligned') AS execution_aligned,json_extract(o.payload_json,'$.planned_entry') AS planned_entry,json_extract(o.payload_json,'$.executable_entry') AS executable_entry,json_extract(o.payload_json,'$.entry_slippage_embedded_in_fill') AS entry_slippage_embedded,json_extract(o.payload_json,'$.embedded_entry_slippage_cost') AS embedded_entry_slippage_cost,json_extract(o.payload_json,'$.execution_cost_assumptions.entry_slippage_cost') AS deducted_entry_slippage_cost,json_extract(o.payload_json,'$.reject_quality_attributable') AS attributable,json_extract(o.payload_json,'$.all_failed_gates') AS all_failed_gates FROM burnin_reject_outcomes o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id='$CID' ORDER BY o.decision_time DESC;"
+
+For EXPECTED_FILL_RUNTIME_PARITY, hypothetical_entry should equal executable_entry. When entry slippage is already embedded in that expected fill, execution_cost_assumptions.entry_slippage_cost must be 0.0; the original modeled entry-slippage amount remains diagnostic as embedded_entry_slippage_cost.
+
+### 25.4 Count aligned versus legacy reject evidence
+
+    sqlite3 -readonly -header -column "$DB" "SELECT COALESCE(json_extract(p.source_provenance_json,'$.reject_execution_basis'),'MISSING') AS execution_basis,COALESCE(json_extract(p.source_provenance_json,'$.reject_quality_attributable'),1) AS attributable,COUNT(*) AS n FROM burnin_pending_reject_labels p WHERE p.campaign_id='$CID' GROUP BY execution_basis,attributable ORDER BY n DESC;"
+
+Authoritative reject-forward expectancy rows should be backed by EXPECTED_FILL_RUNTIME_PARITY. Legacy rows can remain in the DB for diagnosis but must not silently enter execution-aligned calibration.

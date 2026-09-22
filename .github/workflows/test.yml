@@ -25,6 +25,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check diff whitespace
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git diff --check "origin/${GITHUB_BASE_REF}...HEAD"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^..HEAD
+          else
+            git diff --check
+          fi
 
       - uses: actions/setup-python@v5
         with:
