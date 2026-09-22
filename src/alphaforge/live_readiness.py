@@ -65,13 +65,33 @@ class LiveReadinessEvaluator:
         reject_rate_bounds: tuple[float, float] = (0.05, 0.98),
         runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC,
         evidence_mode: str = "PAPER",
+        campaign_id: str | None = None,
         burnin_run_id: str | None = None,
+        require_run_scope: bool = False,
     ) -> None:
         self.engine = engine
         self.reject_rate_bounds = reject_rate_bounds
         self.runtime_heartbeat_max_age_sec = max(1.0, float(runtime_heartbeat_max_age_sec))
         self.evidence_mode = str(evidence_mode or "PAPER").upper()
-        self.burnin_run_id = str(burnin_run_id) if burnin_run_id else None
+        self.campaign_id = str(campaign_id) if campaign_id else None
+        self.require_run_scope = bool(require_run_scope)
+        self.burnin_run_id = self._resolve_burnin_run_id(burnin_run_id)
+        self._scope_fail_closed = self.require_run_scope and not self.burnin_run_id
+
+    def _resolve_burnin_run_id(self, explicit_run_id: str | None) -> str | None:
+        if explicit_run_id:
+            return str(explicit_run_id)
+        if not self.campaign_id:
+            return None
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT active_run_id FROM burnin_campaigns WHERE campaign_id=:campaign_id"),
+                    {"campaign_id": self.campaign_id},
+                ).first()
+        except Exception:
+            return None
+        return str(row[0]) if row and row[0] else None
 
     def _scope_params(self) -> dict[str, Any]:
         return {
@@ -81,7 +101,9 @@ class LiveReadinessEvaluator:
 
     def _signal_scope_sql(self, table: str) -> str:
         clauses = [f"UPPER(COALESCE({table}.mode,''))=:readiness_mode"]
-        if self.burnin_run_id:
+        if self._scope_fail_closed:
+            clauses.append("1=0")
+        elif self.burnin_run_id:
             clauses.append(
                 f"""{table}.signal_id IN (
                     SELECT DISTINCT json_extract(metrics_json,'$.signal_id')
@@ -96,9 +118,24 @@ class LiveReadinessEvaluator:
 
     def _decision_evidence_scope_sql(self) -> str:
         clauses = ["UPPER(COALESCE(decision_evidence.mode,''))=:readiness_mode"]
-        if self.burnin_run_id:
+        if self._scope_fail_closed:
+            clauses.append("1=0")
+        elif self.burnin_run_id:
             clauses.append("decision_evidence.run_id=:readiness_run_id")
         return " AND ".join(clauses)
+
+    def _scope_check(self) -> CheckResult:
+        if self._scope_fail_closed:
+            return CheckResult(
+                "readiness_evidence_scope_resolved",
+                False,
+                f"campaign_id={self.campaign_id};burnin_run_id=UNRESOLVED;mode={self.evidence_mode}",
+            )
+        return CheckResult(
+            "readiness_evidence_scope_resolved",
+            True,
+            f"campaign_id={self.campaign_id};burnin_run_id={self.burnin_run_id};mode={self.evidence_mode}",
+        )
 
     def evaluate(self, *, mode_parity: Mapping[str, Any], reconciliation_snapshot: Mapping[str, Any], observability_snapshot: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool, kill_switch_active: bool = False, dashboard_security: Mapping[str, Any] | None = None, timesfm_evidence: Mapping[str, Any] | None = None, paper_burnin_report: Mapping[str, Any] | None = None, tests_passing_evidence: Mapping[str, Any] | None = None) -> QualificationReport:
         checks: list[CheckResult] = []
