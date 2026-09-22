@@ -13,6 +13,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from alphaforge.adaptive_learning import record_closed_trade_review, record_rejected_signal_review
 from alphaforge.contracts import canonical_reject_reason
+from alphaforge.execution import build_execution_review_metrics
 
 
 logger = logging.getLogger(__name__)
@@ -300,19 +301,7 @@ class AIBrain:
         self._upsert_expectancy("regime_expectancy_stats", "regime", regime, pnl)
         self._upsert_expectancy("symbol_expectancy_stats", "symbol", symbol, pnl)
 
-        entry_price = float(closed_trade.get("entry_price", 0.0) or 0.0)
-        filled_entry_price = float(closed_trade.get("filled_entry_price", entry_price) or entry_price)
-        expected_slippage_pct = abs(float(closed_trade.get("expected_slippage_pct", 0.0) or 0.0))
-        realized_slippage_pct = abs(abs(filled_entry_price - entry_price) / entry_price if entry_price > 0 else 0.0)
-        slippage_delta = max(0.0, realized_slippage_pct - expected_slippage_pct)
-        fill_quality_score = max(0.0, min(1.0, 1.0 - slippage_delta * 100.0))
-        execution_metrics = {
-            "expected_slippage_pct": expected_slippage_pct,
-            "filled_entry_price": filled_entry_price,
-            "entry_price": entry_price,
-            "realized_slippage_pct": realized_slippage_pct,
-            "fill_quality_score": fill_quality_score,
-        }
+        execution_metrics = build_execution_review_metrics(closed_trade)
         self.session.execute(
             text(
                 """
@@ -344,7 +333,9 @@ class AIBrain:
             fee_pct=closed_trade.get("fee_pct"),
             spread_pct=closed_trade.get("spread_pct"),
             expected_slippage_pct=closed_trade.get("expected_slippage_pct"),
-            actual_slippage_pct=execution_metrics.get("realized_slippage_pct"),
+            # Legacy column retained for compatibility. Its canonical meaning is
+            # total strategy-entry -> actual-fill execution cost.
+            actual_slippage_pct=execution_metrics.get("total_realized_execution_cost_pct"),
             liquidity_score=closed_trade.get("liquidity_score"),
             volatility_regime=closed_trade.get("volatility_regime"),
             close_reason=closed_trade.get("close_reason"),

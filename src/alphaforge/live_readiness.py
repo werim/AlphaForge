@@ -58,13 +58,107 @@ class QualificationReport:
 
 
 class LiveReadinessEvaluator:
-    def __init__(self, engine: Engine, *, reject_rate_bounds: tuple[float, float] = (0.05, 0.98), runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        reject_rate_bounds: tuple[float, float] = (0.05, 0.98),
+        runtime_heartbeat_max_age_sec: float = DEFAULT_MAX_AGE_SEC,
+        evidence_mode: str = "PAPER",
+        campaign_id: str | None = None,
+        burnin_run_id: str | None = None,
+        release_id: str | None = None,
+        runtime_instance_id: str | None = None,
+        require_run_scope: bool = False,
+    ) -> None:
         self.engine = engine
         self.reject_rate_bounds = reject_rate_bounds
         self.runtime_heartbeat_max_age_sec = max(1.0, float(runtime_heartbeat_max_age_sec))
+        self.evidence_mode = str(evidence_mode or "PAPER").upper()
+        self.campaign_id = str(campaign_id) if campaign_id else None
+        self._explicit_burnin_run_id = str(burnin_run_id) if burnin_run_id else None
+        self.release_id = self._resolve_release_id(release_id)
+        self.runtime_instance_id = str(runtime_instance_id) if runtime_instance_id else None
+        self.require_run_scope = bool(require_run_scope)
+        self.burnin_run_id = self._resolve_burnin_run_id(burnin_run_id)
+        self._scope_fail_closed = self.require_run_scope and not self.burnin_run_id
+
+    def _resolve_burnin_run_id(self, explicit_run_id: str | None) -> str | None:
+        if explicit_run_id:
+            return str(explicit_run_id)
+        if not self.campaign_id:
+            return None
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT active_run_id FROM burnin_campaigns WHERE campaign_id=:campaign_id"),
+                    {"campaign_id": self.campaign_id},
+                ).first()
+        except Exception:
+            return None
+        return str(row[0]) if row and row[0] else None
+
+    def _resolve_release_id(self, explicit_release_id: str | None) -> str | None:
+        if explicit_release_id:
+            return str(explicit_release_id)
+        if not self.campaign_id:
+            return None
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT release_id FROM burnin_campaigns WHERE campaign_id=:campaign_id"),
+                    {"campaign_id": self.campaign_id},
+                ).first()
+        except Exception:
+            return None
+        return str(row[0]) if row and row[0] else None
+
+    def _scope_params(self) -> dict[str, Any]:
+        return {
+            "readiness_mode": self.evidence_mode,
+            "readiness_run_id": self.burnin_run_id,
+        }
+
+    def _signal_scope_sql(self, table: str) -> str:
+        clauses = [f"UPPER(COALESCE({table}.mode,''))=:readiness_mode"]
+        if self._scope_fail_closed:
+            clauses.append("1=0")
+        elif self.burnin_run_id:
+            clauses.append(
+                f"""{table}.signal_id IN (
+                    SELECT DISTINCT json_extract(metrics_json,'$.signal_id')
+                    FROM burnin_observations
+                    WHERE burnin_run_id=:readiness_run_id
+                      AND UPPER(COALESCE(execution_mode,''))=:readiness_mode
+                      AND json_valid(metrics_json)
+                      AND json_extract(metrics_json,'$.signal_id') IS NOT NULL
+                )"""
+            )
+        return " AND ".join(clauses)
+
+    def _decision_evidence_scope_sql(self) -> str:
+        clauses = ["UPPER(COALESCE(decision_evidence.mode,''))=:readiness_mode"]
+        if self._scope_fail_closed:
+            clauses.append("1=0")
+        elif self.burnin_run_id:
+            clauses.append("decision_evidence.run_id=:readiness_run_id")
+        return " AND ".join(clauses)
+
+    def _scope_check(self) -> CheckResult:
+        if self._scope_fail_closed:
+            return CheckResult(
+                "readiness_evidence_scope_resolved",
+                False,
+                f"campaign_id={self.campaign_id};burnin_run_id=UNRESOLVED;mode={self.evidence_mode}",
+            )
+        return CheckResult(
+            "readiness_evidence_scope_resolved",
+            True,
+            f"campaign_id={self.campaign_id};burnin_run_id={self.burnin_run_id};mode={self.evidence_mode}",
+        )
 
     def evaluate(self, *, mode_parity: Mapping[str, Any], reconciliation_snapshot: Mapping[str, Any], observability_snapshot: Mapping[str, Any], canary_enabled: bool, shadow_mode_enabled: bool, operator_ack: bool, kill_switch_active: bool = False, dashboard_security: Mapping[str, Any] | None = None, timesfm_evidence: Mapping[str, Any] | None = None, paper_burnin_report: Mapping[str, Any] | None = None, tests_passing_evidence: Mapping[str, Any] | None = None) -> QualificationReport:
-        checks: list[CheckResult] = []
+        checks: list[CheckResult] = [self._scope_check()]
         with self.engine.begin() as conn:
             checks.extend(self._check_lifecycle(conn))
             checks.extend(self._check_persistence(conn))
@@ -112,7 +206,7 @@ class LiveReadinessEvaluator:
         gates = [
             CheckResult("lifecycle_integrity_complete", self._checks_pass(checks, lifecycle), "requires lifecycle ordering, no orphans, and terminal completeness"),
             CheckResult("reject_persistence_complete", self._checks_pass(checks, reject), "requires rejected decisions and lifecycle reject reasons persisted"),
-            CheckResult("phase2_persisted_evidence_complete", self._checks_pass(checks, {"phase2_decision_evidence_table_exists", "phase2_decision_evidence_rows_present", "phase2_lifecycle_evidence_present", "phase2_reject_evidence_present", "phase2_accept_evidence_present", "phase2_no_fake_zero_execution_evidence", "phase2_no_decision_parity_mismatch"}), "requires SQL-backed lifecycle/reject/accept evidence and no fake-zero/parity blockers"),
+            CheckResult("phase2_persisted_evidence_complete", self._checks_pass(checks, {"readiness_evidence_scope_resolved", "phase2_decision_evidence_table_exists", "phase2_decision_evidence_rows_present", "phase2_lifecycle_evidence_present", "phase2_reject_evidence_present", "phase2_accept_evidence_present", "phase2_no_fake_zero_execution_evidence", "phase2_no_decision_parity_mismatch"}), "requires scoped SQL-backed lifecycle/reject/accept evidence and no fake-zero/parity blockers"),
             CheckResult("mode_parity_complete", self._checks_pass(checks, parity), "requires BACKTEST/PAPER/LIVE_PRECHECK parity evidence"),
             CheckResult("execution_realism_complete", self._checks_pass(checks, realism), "requires measured selectivity plus non-constant RR/score evidence"),
             CheckResult("phase3_execution_realism_complete", self._checks_pass(checks, phase3_execution_realism), "requires execution cost breakdown, effective RR, execution reject persistence, no fake-zero costs, and no accepted trade with below-threshold/missing execution context"),
@@ -188,7 +282,13 @@ class LiveReadinessEvaluator:
 
 
     def _check_release_gates(self) -> list[CheckResult]:
-        evidence = release_gate_status(self.engine)
+        if self.require_run_scope and not self.release_id:
+            return [CheckResult("phase6_release_gate_evidence", False, "release_id_missing_for_scoped_readiness")]
+        evidence = release_gate_status(
+            self.engine,
+            release_id=self.release_id or "default",
+            phase="PHASE6",
+        )
         passed = bool(evidence.get("passed", False))
         status = str(evidence.get("status") or "NO_EVIDENCE")
         details = (
@@ -204,7 +304,38 @@ class LiveReadinessEvaluator:
 
     def _check_runtime_state_snapshot(self) -> list[CheckResult]:
         try:
-            snapshot = latest_runtime_state_snapshot(self.engine)
+            runtime_scoped = bool(self.campaign_id or self.release_id or self.runtime_instance_id or self._explicit_burnin_run_id)
+            if runtime_scoped:
+                clauses: list[str] = []
+                params: dict[str, Any] = {}
+                if self.campaign_id:
+                    clauses.append("campaign_id=:campaign_id")
+                    params["campaign_id"] = self.campaign_id
+                if self._explicit_burnin_run_id:
+                    clauses.append("burnin_run_id=:burnin_run_id")
+                    params["burnin_run_id"] = self._explicit_burnin_run_id
+                if self.release_id:
+                    clauses.append("release_id=:release_id")
+                    params["release_id"] = self.release_id
+                if self.runtime_instance_id:
+                    clauses.append("instance_id=:instance_id")
+                    params["instance_id"] = self.runtime_instance_id
+                with self.engine.connect() as conn:
+                    row = conn.execute(
+                        text("SELECT * FROM runtime_state_snapshots WHERE " + " AND ".join(clauses) + " ORDER BY id DESC LIMIT 1"),
+                        params,
+                    ).mappings().first()
+                snapshot = dict(row) if row else None
+                if snapshot:
+                    for key in ("active_symbols","active_positions","pending_orders","cooldown_symbols",
+                                "stale_market_data_symbols","unreconciled_symbols","orphan_orders",
+                                "orphan_positions","runtime_flags","diagnostics_json"):
+                        try:
+                            snapshot[key] = json.loads(snapshot.get(key) or ("{}" if key == "diagnostics_json" else "[]"))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            snapshot[key] = {} if key == "diagnostics_json" else []
+            else:
+                snapshot = latest_runtime_state_snapshot(self.engine)
         except Exception as exc:
             return [CheckResult("runtime_db_persistence_verified", False, f"runtime_state_query_failed={exc.__class__.__name__}")]
         if not snapshot:
@@ -235,7 +366,15 @@ class LiveReadinessEvaluator:
         ]
 
     def _check_lifecycle(self, conn: Any) -> list[CheckResult]:
-        rows = conn.execute(text("SELECT signal_id, lifecycle_state, event_ts, reject_reason FROM trade_lifecycle_events ORDER BY signal_id, event_ts")).mappings().all()
+        params = self._scope_params()
+        scope = self._signal_scope_sql("trade_lifecycle_events")
+        rows = conn.execute(
+            text(f"""SELECT signal_id, lifecycle_state, event_ts, reject_reason
+                     FROM trade_lifecycle_events
+                     WHERE {scope}
+                     ORDER BY signal_id, event_ts"""),
+            params,
+        ).mappings().all()
         by_signal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             by_signal.setdefault(str(row["signal_id"]), []).append(dict(row))
@@ -260,56 +399,114 @@ class LiveReadinessEvaluator:
                 exit_missing += 1
         return [CheckResult("lifecycle_no_orphans", not orphan_signals, f"orphan_signals={len(orphan_signals)}"), CheckResult("lifecycle_transitions_valid", invalid_transitions == 0, f"invalid_transitions={invalid_transitions}"), CheckResult("lifecycle_error_free", lifecycle_errors == 0, f"lifecycle_errors={lifecycle_errors}"), CheckResult("rejected_has_reason", reject_missing == 0, f"missing_reject_reason={reject_missing}"), CheckResult("entry_exit_completeness", exit_missing == 0, f"missing_exit={exit_missing}")]
 
+
     def _check_persistence(self, conn: Any) -> list[CheckResult]:
         checks: list[CheckResult] = []
+        params = self._scope_params()
+        scopes = {
+            "signals": self._signal_scope_sql("signals"),
+            "order_decisions": self._signal_scope_sql("order_decisions"),
+            "trade_lifecycle_events": self._signal_scope_sql("trade_lifecycle_events"),
+        }
+        evidence_scope = self._decision_evidence_scope_sql()
+
+        def scoped_count(table: str, predicate: str = "1=1", *, expression: str = "COUNT(*)") -> int:
+            return int(conn.execute(
+                text(f"SELECT {expression} FROM {table} WHERE {scopes[table]} AND ({predicate})"),
+                params,
+            ).scalar_one())
+
+        def evidence_count(predicate: str = "1=1", *, expression: str = "COUNT(*)") -> int:
+            return int(conn.execute(
+                text(f"SELECT {expression} FROM decision_evidence WHERE {evidence_scope} AND ({predicate})"),
+                params,
+            ).scalar_one())
+
         for table, fields in {"signals": CRITICAL_SIGNAL_FIELDS, "order_decisions": CRITICAL_DECISION_FIELDS, "trade_lifecycle_events": CRITICAL_LIFECYCLE_FIELDS}.items():
             cols = {str(r[1]) for r in conn.execute(text(f"PRAGMA table_info({table})")).all()}
             missing = [field for field in fields if field not in cols]
             checks.append(CheckResult(f"schema_{table}", not missing, f"missing_fields={missing}"))
-            null_rows = conn.execute(text(f"SELECT COUNT(*) FROM {table} WHERE " + " OR ".join([f"{field} IS NULL" for field in fields]))).scalar_one()
-            checks.append(CheckResult(f"critical_not_null_{table}", int(null_rows) == 0, f"null_rows={null_rows}"))
-        rejected_decisions = conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one()
-        rejected_events = conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events WHERE lifecycle_state='SIGNAL_REJECTED'")).scalar_one()
-        checks.append(CheckResult("reject_persistence_parity", int(rejected_decisions) <= int(rejected_events), f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
-        decision_evidence_exists = conn.execute(text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_evidence'")).scalar_one() > 0
-        lifecycle_rows = int(conn.execute(text("SELECT COUNT(*) FROM trade_lifecycle_events")).scalar_one())
-        accepted_events = int(conn.execute(text("SELECT COUNT(DISTINCT signal_id) FROM trade_lifecycle_events WHERE lifecycle_state IN ('SIGNAL_ACCEPTED','WAITING_ENTRY_ZONE','ENTRY_TRIGGERED','ORDER_PLACED','POSITION_OPENED','POSITION_CLOSED','TP_HIT','SL_HIT','OPEN_AT_END','CANCELLED','ENTRY_TIMEOUT')")).scalar_one())
+            null_predicate = " OR ".join([f"{field} IS NULL" for field in fields])
+            null_rows = scoped_count(table, f"({null_predicate})")
+            checks.append(CheckResult(f"critical_not_null_{table}", null_rows == 0, f"null_rows={null_rows}"))
+
+        rejected_decisions = scoped_count(
+            "order_decisions",
+            "UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'",
+        )
+        rejected_events = scoped_count(
+            "trade_lifecycle_events",
+            "lifecycle_state='SIGNAL_REJECTED'",
+        )
+        checks.append(CheckResult("reject_persistence_parity", rejected_decisions <= rejected_events, f"rejected_decisions={rejected_decisions},rejected_events={rejected_events}"))
+
+        decision_evidence_exists = conn.execute(
+            text("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_evidence'")
+        ).scalar_one() > 0
+        lifecycle_rows = scoped_count("trade_lifecycle_events")
+        accepted_events = scoped_count(
+            "trade_lifecycle_events",
+            "lifecycle_state IN ('SIGNAL_ACCEPTED','WAITING_ENTRY_ZONE','ENTRY_TRIGGERED','ORDER_PLACED','POSITION_OPENED','POSITION_CLOSED','TP_HIT','SL_HIT','OPEN_AT_END','CANCELLED','ENTRY_TIMEOUT')",
+            expression="COUNT(DISTINCT signal_id)",
+        )
+
         if decision_evidence_exists:
-            evidence_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence")).scalar_one())
-            evidence_lifecycle_states = int(conn.execute(text("SELECT COUNT(DISTINCT lifecycle_state_after) FROM decision_evidence WHERE COALESCE(lifecycle_state_after,'') <> ''")).scalar_one())
-            evidence_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT'")).scalar_one())
-            evidence_rejected = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='REJECT'")).scalar_one())
-            evidence_parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(diagnostics_json,'')) LIKE '%DECISION_PARITY_MISMATCH%'")).scalar_one())
-            evidence_fake_zero_rows = int(conn.execute(text("""
-                SELECT COUNT(*) FROM decision_evidence
-                WHERE UPPER(COALESCE(diagnostics_json,'')) LIKE '%UNAVAILABLE%'
-                  AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0 OR COALESCE(volume_24h_usdt, -999) = 0 OR COALESCE(liquidity_score, -999) = 0)
-            """)).scalar_one())
-            phase3_breakdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE cost_penalty IS NOT NULL AND (diagnostics_json LIKE '%spread_penalty%' OR diagnostics_json LIKE '%cost_penalty%')")).scalar_one())
-            phase3_effective_rr_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE raw_rr IS NOT NULL AND effective_rr IS NOT NULL")).scalar_one())
-            phase3_execution_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','HIGH_SLIPPAGE','HIGH_TOTAL_COST','LOW_LIQUIDITY','HIGH_LATENCY','EXECUTION_CONTEXT_UNAVAILABLE','EXCESSIVE_VOLATILITY_PENALTY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')")).scalar_one())
-            phase3_missing_critical_accepted = int(conn.execute(text("""
-                SELECT COUNT(*) FROM decision_evidence
-                WHERE UPPER(COALESCE(decision,''))='ACCEPT'
-                  AND (effective_rr IS NULL OR cost_penalty IS NULL OR spread_pct IS NULL OR expected_slippage_pct IS NULL OR liquidity_score IS NULL)
-            """)).scalar_one())
-            phase3_low_effective_accepted = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < 1.6")).scalar_one())
+            evidence_rows = evidence_count()
+            evidence_lifecycle_states = evidence_count(
+                "COALESCE(lifecycle_state_after,'') <> ''",
+                expression="COUNT(DISTINCT lifecycle_state_after)",
+            )
+            evidence_accepted = evidence_count("UPPER(COALESCE(decision,''))='ACCEPT'")
+            evidence_rejected = evidence_count("UPPER(COALESCE(decision,''))='REJECT'")
+            evidence_parity_rows = evidence_count(
+                "UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(diagnostics_json,'')) LIKE '%DECISION_PARITY_MISMATCH%'"
+            )
+            evidence_fake_zero_rows = evidence_count(
+                """UPPER(COALESCE(diagnostics_json,'')) LIKE '%UNAVAILABLE%'
+                   AND (COALESCE(spread_pct, -999) = 0
+                        OR COALESCE(expected_slippage_pct, -999) = 0
+                        OR COALESCE(funding_rate_pct, -999) = 0
+                        OR COALESCE(volume_24h_usdt, -999) = 0
+                        OR COALESCE(liquidity_score, -999) = 0)"""
+            )
+            phase3_breakdown_rows = evidence_count(
+                "cost_penalty IS NOT NULL AND (diagnostics_json LIKE '%spread_penalty%' OR diagnostics_json LIKE '%cost_penalty%')"
+            )
+            phase3_effective_rr_rows = evidence_count("raw_rr IS NOT NULL AND effective_rr IS NOT NULL")
+            phase3_execution_reject_rows = evidence_count(
+                "UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','HIGH_SLIPPAGE','HIGH_TOTAL_COST','LOW_LIQUIDITY','HIGH_LATENCY','EXECUTION_CONTEXT_UNAVAILABLE','EXCESSIVE_VOLATILITY_PENALTY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')"
+            )
+            phase3_missing_critical_accepted = evidence_count(
+                """UPPER(COALESCE(decision,''))='ACCEPT'
+                   AND (effective_rr IS NULL OR cost_penalty IS NULL OR spread_pct IS NULL
+                        OR expected_slippage_pct IS NULL OR liquidity_score IS NULL)"""
+            )
+            phase3_low_effective_accepted = evidence_count(
+                "UPPER(COALESCE(decision,''))='ACCEPT' AND effective_rr < 1.6"
+            )
         else:
             evidence_rows = evidence_lifecycle_states = evidence_accepted = evidence_rejected = 0
             evidence_parity_rows = evidence_fake_zero_rows = 1
             phase3_breakdown_rows = phase3_effective_rr_rows = phase3_execution_reject_rows = 0
             phase3_missing_critical_accepted = phase3_low_effective_accepted = 1
-        parity_rows = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH'")).scalar_one()) + evidence_parity_rows
-        fake_zero_rows = int(conn.execute(text("""
-            SELECT COUNT(*) FROM order_decisions
-            WHERE COALESCE(execution_ctx_missing,0)=1
-              AND UPPER(COALESCE(execution_ctx,'')) LIKE '%UNAVAILABLE%'
-              AND (COALESCE(spread_pct, -999) = 0 OR COALESCE(expected_slippage_pct, -999) = 0 OR COALESCE(funding_rate_pct, -999) = 0)
-        """)).scalar_one()) + evidence_fake_zero_rows
+
+        parity_rows = scoped_count(
+            "order_decisions",
+            "UPPER(COALESCE(reject_reason,''))='DECISION_PARITY_MISMATCH' OR UPPER(COALESCE(parity_result,''))='DECISION_PARITY_MISMATCH'",
+        ) + evidence_parity_rows
+        fake_zero_rows = scoped_count(
+            "order_decisions",
+            """COALESCE(execution_ctx_missing,0)=1
+               AND UPPER(COALESCE(execution_ctx,'')) LIKE '%UNAVAILABLE%'
+               AND (COALESCE(spread_pct, -999) = 0
+                    OR COALESCE(expected_slippage_pct, -999) = 0
+                    OR COALESCE(funding_rate_pct, -999) = 0)""",
+        ) + evidence_fake_zero_rows
+
         checks.append(CheckResult("phase2_decision_evidence_table_exists", decision_evidence_exists, f"decision_evidence_exists={decision_evidence_exists}"))
         checks.append(CheckResult("phase2_decision_evidence_rows_present", evidence_rows > 0, f"decision_evidence_rows={evidence_rows}"))
         checks.append(CheckResult("phase2_lifecycle_evidence_present", lifecycle_rows > 0 and evidence_lifecycle_states > 0, f"lifecycle_rows={lifecycle_rows},decision_evidence_lifecycle_states={evidence_lifecycle_states}"))
-        checks.append(CheckResult("phase2_reject_evidence_present", int(rejected_decisions) > 0 and int(rejected_events) > 0 and evidence_rejected > 0, f"rejected_decisions={rejected_decisions},rejected_events={rejected_events},decision_evidence_rejected={evidence_rejected}"))
+        checks.append(CheckResult("phase2_reject_evidence_present", rejected_decisions > 0 and rejected_events > 0 and evidence_rejected > 0, f"rejected_decisions={rejected_decisions},rejected_events={rejected_events},decision_evidence_rejected={evidence_rejected}"))
         checks.append(CheckResult("phase2_accept_evidence_present", accepted_events > 0 and evidence_accepted > 0, f"accepted_signal_ids={accepted_events},decision_evidence_accepted={evidence_accepted}"))
         checks.append(CheckResult("phase2_no_fake_zero_execution_evidence", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
         checks.append(CheckResult("phase2_no_decision_parity_mismatch", parity_rows == 0, f"decision_parity_mismatch_rows={parity_rows}"))
@@ -318,26 +515,43 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("execution_rejects_persisted", phase3_execution_reject_rows > 0, f"execution_reject_rows={phase3_execution_reject_rows},evidence_rejected={evidence_rejected}"))
         checks.append(CheckResult("no_accepted_trade_with_effective_rr_below_threshold", phase3_low_effective_accepted == 0, f"low_effective_accepted={phase3_low_effective_accepted}"))
         checks.append(CheckResult("no_accepted_trade_with_missing_critical_execution_context", phase3_missing_critical_accepted == 0, f"missing_critical_accepted={phase3_missing_critical_accepted}"))
+
         portfolio_cols = []
         if decision_evidence_exists:
             portfolio_cols = [str(r[1]) for r in conn.execute(text("PRAGMA table_info(decision_evidence)")).all()]
         has_portfolio_cols = {"portfolio_equity", "open_position_count", "total_notional_exposure", "portfolio_risk_state", "portfolio_diagnostics_json"}.issubset(set(portfolio_cols))
         if decision_evidence_exists and has_portfolio_cols:
-            portfolio_snapshot_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL OR portfolio_diagnostics_json IS NOT NULL")).scalar_one())
-            portfolio_reject_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE portfolio_reject_reason IS NOT NULL AND portfolio_reject_reason <> ''")).scalar_one())
-            accepted_over_position = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_open_positions IS NOT NULL AND open_position_count > max_open_positions")).scalar_one()) if "max_open_positions" in portfolio_cols else 1
-            accepted_over_notional = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_notional_exposure IS NOT NULL AND total_notional_exposure > max_notional_exposure")).scalar_one())
-            accepted_over_symbol = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_symbol_notional IS NOT NULL AND symbol_notional_exposure > max_symbol_notional")).scalar_one())
-            accepted_after_daily_loss = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND max_daily_loss_pct IS NOT NULL AND daily_loss_pct >= max_daily_loss_pct")).scalar_one())
-            accepted_unknown = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE UPPER(COALESCE(decision,''))='ACCEPT' AND UPPER(COALESCE(portfolio_risk_state,'')) LIKE '%UNKNOWN%'")).scalar_one())
-            correlation_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE correlation_group IS NOT NULL OR correlated_position_count IS NOT NULL")).scalar_one())
-            drawdown_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE rolling_drawdown_pct IS NOT NULL OR daily_loss_pct IS NOT NULL")).scalar_one())
-            reconcile_rows = int(conn.execute(text("SELECT COUNT(*) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
-            accounting_distinct_states = int(conn.execute(text("SELECT COUNT(DISTINCT COALESCE(CAST(open_position_count AS TEXT),'') || ':' || COALESCE(CAST(total_notional_exposure AS TEXT),'') || ':' || COALESCE(CAST(portfolio_equity AS TEXT),'')) FROM decision_evidence WHERE open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")).scalar_one())
-            shared_engine_rows = int(conn.execute(text("SELECT COUNT(DISTINCT mode) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL AND mode IN ('BACKTEST','PAPER')")).scalar_one())
+            portfolio_snapshot_rows = evidence_count("portfolio_risk_state IS NOT NULL OR portfolio_diagnostics_json IS NOT NULL")
+            portfolio_reject_rows = evidence_count("portfolio_reject_reason IS NOT NULL AND portfolio_reject_reason <> ''")
+            accepted_over_position = evidence_count(
+                "UPPER(COALESCE(decision,''))='ACCEPT' AND max_open_positions IS NOT NULL AND open_position_count > max_open_positions"
+            ) if "max_open_positions" in portfolio_cols else 1
+            accepted_over_notional = evidence_count(
+                "UPPER(COALESCE(decision,''))='ACCEPT' AND max_notional_exposure IS NOT NULL AND total_notional_exposure > max_notional_exposure"
+            )
+            accepted_over_symbol = evidence_count(
+                "UPPER(COALESCE(decision,''))='ACCEPT' AND max_symbol_notional IS NOT NULL AND symbol_notional_exposure > max_symbol_notional"
+            )
+            accepted_after_daily_loss = evidence_count(
+                "UPPER(COALESCE(decision,''))='ACCEPT' AND max_daily_loss_pct IS NOT NULL AND daily_loss_pct >= max_daily_loss_pct"
+            )
+            accepted_unknown = evidence_count(
+                "UPPER(COALESCE(decision,''))='ACCEPT' AND UPPER(COALESCE(portfolio_risk_state,'')) LIKE '%UNKNOWN%'"
+            )
+            correlation_rows = evidence_count("correlation_group IS NOT NULL OR correlated_position_count IS NOT NULL")
+            drawdown_rows = evidence_count("rolling_drawdown_pct IS NOT NULL OR daily_loss_pct IS NOT NULL")
+            reconcile_rows = evidence_count("open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL")
+            accounting_distinct_states = evidence_count(
+                "open_position_count IS NOT NULL AND total_notional_exposure IS NOT NULL",
+                expression="COUNT(DISTINCT COALESCE(CAST(open_position_count AS TEXT),'') || ':' || COALESCE(CAST(total_notional_exposure AS TEXT),'') || ':' || COALESCE(CAST(portfolio_equity AS TEXT),''))",
+            )
+            shared_engine_rows = int(conn.execute(text(
+                "SELECT COUNT(DISTINCT mode) FROM decision_evidence WHERE portfolio_risk_state IS NOT NULL AND mode IN ('BACKTEST','PAPER')"
+            )).scalar_one())
         else:
             portfolio_snapshot_rows = portfolio_reject_rows = correlation_rows = drawdown_rows = reconcile_rows = shared_engine_rows = accounting_distinct_states = 0
             accepted_over_position = accepted_over_notional = accepted_over_symbol = accepted_after_daily_loss = accepted_unknown = 1
+
         checks.append(CheckResult("no_fake_zero_execution_costs", fake_zero_rows == 0, f"fake_zero_execution_rows={fake_zero_rows}"))
         checks.append(CheckResult("portfolio_risk_snapshot_present", portfolio_snapshot_rows > 0, f"portfolio_snapshot_rows={portfolio_snapshot_rows},portfolio_columns={has_portfolio_cols}"))
         checks.append(CheckResult("portfolio_risk_rejects_persisted", portfolio_reject_rows > 0, f"portfolio_reject_rows={portfolio_reject_rows}"))
@@ -352,12 +566,23 @@ class LiveReadinessEvaluator:
         checks.append(CheckResult("backtest_and_paper_share_portfolio_risk_engine", shared_engine_rows >= 2, f"modes_with_portfolio_risk={shared_engine_rows}"))
         return checks
 
+
     def _check_stats(self, conn: Any) -> list[CheckResult]:
-        total = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE COALESCE(phase,'final')='final'")).scalar_one())
-        rejected = int(conn.execute(text("SELECT COUNT(*) FROM order_decisions WHERE UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'")).scalar_one())
+        params = self._scope_params()
+        scope = self._signal_scope_sql("order_decisions")
+        total = int(conn.execute(text(
+            f"SELECT COUNT(*) FROM order_decisions WHERE {scope} AND COALESCE(phase,'final')='final'"
+        ), params).scalar_one())
+        rejected = int(conn.execute(text(
+            f"SELECT COUNT(*) FROM order_decisions WHERE {scope} AND UPPER(decision)='REJECTED' AND COALESCE(phase,'final')='final'"
+        ), params).scalar_one())
         reject_rate = rejected / total if total else 0.0
-        min_rr, max_rr = conn.execute(text("SELECT MIN(rr), MAX(rr) FROM order_decisions")).one()
-        min_score, max_score = conn.execute(text("SELECT MIN(score), MAX(score) FROM order_decisions")).one()
+        min_rr, max_rr = conn.execute(
+            text(f"SELECT MIN(rr), MAX(rr) FROM order_decisions WHERE {scope}"), params
+        ).one()
+        min_score, max_score = conn.execute(
+            text(f"SELECT MIN(score), MAX(score) FROM order_decisions WHERE {scope}"), params
+        ).one()
         lower, upper = self.reject_rate_bounds
         return [CheckResult("reject_rate_sanity", lower <= reject_rate <= upper if total else False, f"reject_rate={reject_rate:.4f},total={total}"), CheckResult("rr_not_constant", min_rr is not None and max_rr is not None and min_rr != max_rr, f"min_rr={min_rr},max_rr={max_rr}"), CheckResult("score_not_constant", min_score is not None and max_score is not None and min_score != max_score, f"min_score={min_score},max_score={max_score}")]
 

@@ -27,6 +27,273 @@ SOURCE_ESTIMATED_BACKTEST = "ESTIMATED_BACKTEST"
 SOURCE_MODELLED = "MODELLED"
 SOURCE_UNAVAILABLE = "UNAVAILABLE"
 
+EXECUTION_COST_REFERENCE_PRICE = "STRATEGY_ENTRY"
+EXECUTION_COST_PERCENTAGE_DENOMINATOR = "STRATEGY_ENTRY"
+EXECUTION_COST_SIGN_CONVENTION = "POSITIVE_IS_ADVERSE"
+PROVENANCE_ACTUAL = "ACTUAL"
+PROVENANCE_ESTIMATED = "ESTIMATED"
+PROVENANCE_ASSUMED = "ASSUMED"
+PROVENANCE_MODELLED = SOURCE_MODELLED
+PROVENANCE_UNAVAILABLE = SOURCE_UNAVAILABLE
+
+_EXECUTION_COST_PROVENANCE = {
+    PROVENANCE_ACTUAL,
+    PROVENANCE_ESTIMATED,
+    PROVENANCE_ASSUMED,
+    PROVENANCE_MODELLED,
+    PROVENANCE_UNAVAILABLE,
+}
+
+
+def _finite_positive_price(value: Any, *, field: str) -> float:
+    try:
+        price = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite positive price") from exc
+    if price <= 0.0 or price != price or price in {float("inf"), float("-inf")}:
+        raise ValueError(f"{field} must be a finite positive price")
+    return price
+
+
+def _execution_cost_provenance(value: Any, *, actual_fill_available: bool) -> str:
+    provenance = str(value or PROVENANCE_UNAVAILABLE).strip().upper()
+    if provenance not in _EXECUTION_COST_PROVENANCE:
+        raise ValueError(f"unsupported execution-cost provenance: {provenance}")
+    if not actual_fill_available:
+        return PROVENANCE_UNAVAILABLE
+    return provenance
+
+
+@dataclass(frozen=True)
+class ExecutionCostSemantics:
+    """Canonical entry -> expected fill -> actual fill execution-cost contract.
+
+    All percentage and basis-point values use the strategy entry as denominator.
+    Price deltas are side-normalized so positive always means adverse execution.
+    Fees and other explicit penalties are deliberately outside this value object.
+    """
+
+    side: str
+    entry: float
+    expected_fill: float
+    actual_fill: float | None
+    expected_execution_cost_price: float
+    expected_execution_cost_pct: float
+    expected_execution_cost_bps: float
+    realized_execution_deviation_price: float | None
+    realized_execution_deviation_pct: float | None
+    realized_execution_deviation_bps: float | None
+    total_realized_execution_cost_price: float | None
+    total_realized_execution_cost_pct: float | None
+    total_realized_execution_cost_bps: float | None
+    expected_fill_provenance: str
+    actual_fill_provenance: str
+    decision_timestamp: str | None
+    fill_timestamp: str | None
+    reference_price: str = EXECUTION_COST_REFERENCE_PRICE
+    percentage_denominator: str = EXECUTION_COST_PERCENTAGE_DENOMINATOR
+    sign_convention: str = EXECUTION_COST_SIGN_CONVENTION
+    fee_treatment: str = "SEPARATE_NOT_INCLUDED"
+
+    def decision_time_dict(self) -> dict[str, Any]:
+        """Return only evidence available before submission/fill."""
+        return {
+            "entry": self.entry,
+            "expected_fill": self.expected_fill,
+            "expected_execution_cost_price": self.expected_execution_cost_price,
+            "expected_execution_cost_pct": self.expected_execution_cost_pct,
+            "expected_execution_cost_bps": self.expected_execution_cost_bps,
+            "expected_fill_provenance": self.expected_fill_provenance,
+            "decision_timestamp": self.decision_timestamp,
+            "reference_price": self.reference_price,
+            "percentage_denominator": self.percentage_denominator,
+            "sign_convention": self.sign_convention,
+            "fee_treatment": self.fee_treatment,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self.decision_time_dict(),
+            "actual_fill": self.actual_fill,
+            "realized_execution_deviation_price": self.realized_execution_deviation_price,
+            "realized_execution_deviation_pct": self.realized_execution_deviation_pct,
+            "realized_execution_deviation_bps": self.realized_execution_deviation_bps,
+            "total_realized_execution_cost_price": self.total_realized_execution_cost_price,
+            "total_realized_execution_cost_pct": self.total_realized_execution_cost_pct,
+            "total_realized_execution_cost_bps": self.total_realized_execution_cost_bps,
+            "actual_fill_provenance": self.actual_fill_provenance,
+            "fill_timestamp": self.fill_timestamp,
+        }
+
+
+def build_execution_cost_semantics(
+    *,
+    entry: Any,
+    expected_fill: Any,
+    actual_fill: Any | None,
+    side: Any,
+    expected_fill_provenance: str = PROVENANCE_ESTIMATED,
+    actual_fill_provenance: str = PROVENANCE_UNAVAILABLE,
+    decision_timestamp: str | None = None,
+    fill_timestamp: str | None = None,
+) -> ExecutionCostSemantics:
+    """Build the canonical cost decomposition without fees or future inference."""
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side not in {"LONG", "SHORT"}:
+        raise ValueError("side must be LONG or SHORT")
+    entry_price = _finite_positive_price(entry, field="entry")
+    expected_price = _finite_positive_price(expected_fill, field="expected_fill")
+    actual_price = None if actual_fill is None else _finite_positive_price(actual_fill, field="actual_fill")
+    side_sign = 1.0 if normalized_side == "LONG" else -1.0
+
+    expected_cost_price = side_sign * (expected_price - entry_price)
+    expected_cost_pct = expected_cost_price / entry_price
+    if actual_price is None:
+        realized_deviation_price = None
+        total_cost_price = None
+    else:
+        realized_deviation_price = side_sign * (actual_price - expected_price)
+        total_cost_price = side_sign * (actual_price - entry_price)
+
+    expected_provenance = _execution_cost_provenance(
+        expected_fill_provenance, actual_fill_available=True)
+    actual_provenance = _execution_cost_provenance(
+        actual_fill_provenance, actual_fill_available=actual_price is not None)
+    return ExecutionCostSemantics(
+        side=normalized_side,
+        entry=entry_price,
+        expected_fill=expected_price,
+        actual_fill=actual_price,
+        expected_execution_cost_price=expected_cost_price,
+        expected_execution_cost_pct=expected_cost_pct,
+        expected_execution_cost_bps=expected_cost_pct * 10_000.0,
+        realized_execution_deviation_price=realized_deviation_price,
+        realized_execution_deviation_pct=(
+            None if realized_deviation_price is None else realized_deviation_price / entry_price),
+        realized_execution_deviation_bps=(
+            None if realized_deviation_price is None else realized_deviation_price / entry_price * 10_000.0),
+        total_realized_execution_cost_price=total_cost_price,
+        total_realized_execution_cost_pct=(
+            None if total_cost_price is None else total_cost_price / entry_price),
+        total_realized_execution_cost_bps=(
+            None if total_cost_price is None else total_cost_price / entry_price * 10_000.0),
+        expected_fill_provenance=expected_provenance,
+        actual_fill_provenance=actual_provenance,
+        decision_timestamp=decision_timestamp,
+        fill_timestamp=fill_timestamp if actual_price is not None else None,
+    )
+
+
+def weighted_average_fill_price(fills: Any) -> float | None:
+    """Return the quantity-weighted price for canonical ``fills`` ledger rows.
+
+    Empty input means the realized fill is unavailable. Invalid or non-positive
+    price/quantity evidence is rejected instead of being coerced to zero.
+    """
+    rows = list(fills or [])
+    if not rows:
+        return None
+    total_quantity = 0.0
+    total_notional = 0.0
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("fill evidence must be a mapping")
+        price = _finite_positive_price(row.get("price"), field="fill.price")
+        quantity = _finite_positive_price(
+            row.get("qty", row.get("quantity")), field="fill.qty")
+        total_quantity += quantity
+        total_notional += price * quantity
+    return total_notional / total_quantity
+
+
+def execution_cost_semantics_from_record(
+    record: Mapping[str, Any],
+) -> ExecutionCostSemantics | None:
+    """Adapt a persisted/legacy fill record to the canonical contract.
+
+    No actual fill is inferred from entry. A legacy ``expected_slippage_pct``
+    may reconstruct expected fill only when side and entry are explicit because
+    it is pre-submit model evidence, not future market state.
+    """
+    raw_side = str(record.get("side") or "").strip().upper()
+    side = {"BUY": "LONG", "SELL": "SHORT"}.get(raw_side, raw_side)
+    if side not in {"LONG", "SHORT"}:
+        return None
+    entry = record.get("entry", record.get("entry_price"))
+    expected_fill = record.get("expected_fill", record.get("expected_fill_price"))
+    if expected_fill is None and record.get("expected_slippage_pct") is not None:
+        try:
+            entry_price = _finite_positive_price(entry, field="entry")
+            expected_pct = abs(float(record["expected_slippage_pct"]))
+        except (TypeError, ValueError, KeyError):
+            return None
+        expected_fill = entry_price * (
+            1.0 + expected_pct if side == "LONG" else 1.0 - expected_pct)
+
+    actual_fill = record.get("actual_fill", record.get("filled_entry_price"))
+    mode = str(record.get("mode") or "").strip().upper()
+    expected_provenance = str(
+        record.get("expected_fill_provenance")
+        or (PROVENANCE_MODELLED if mode == "PAPER" else PROVENANCE_ESTIMATED)
+    )
+    actual_provenance = record.get("actual_fill_provenance")
+    if actual_provenance is None:
+        actual_provenance = (
+            PROVENANCE_MODELLED
+            if actual_fill is not None and mode == "PAPER"
+            else PROVENANCE_UNAVAILABLE
+        )
+    try:
+        return build_execution_cost_semantics(
+            entry=entry,
+            expected_fill=expected_fill,
+            actual_fill=actual_fill,
+            side=side,
+            expected_fill_provenance=expected_provenance,
+            actual_fill_provenance=str(actual_provenance),
+            decision_timestamp=record.get("decision_timestamp", record.get("decision_time")),
+            fill_timestamp=record.get("fill_timestamp", record.get("filled_at")),
+        )
+    except ValueError:
+        return None
+
+
+def build_execution_review_metrics(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return canonical fill-quality evidence plus narrow legacy aliases."""
+    semantics = execution_cost_semantics_from_record(record)
+    if semantics is None:
+        return {
+            "entry_price": record.get("entry_price"),
+            "expected_fill_price": record.get("expected_fill"),
+            "filled_entry_price": record.get("filled_entry_price"),
+            "expected_slippage_pct": None,
+            "realized_slippage_pct": None,
+            "fill_quality_score": None,
+            "actual_fill_provenance": PROVENANCE_UNAVAILABLE,
+            "execution_cost_semantics_status": "UNAVAILABLE",
+        }
+
+    metrics = semantics.as_dict()
+    deviation_pct = semantics.realized_execution_deviation_pct
+    fill_quality = (
+        None
+        if deviation_pct is None
+        else max(0.0, min(1.0, 1.0 - max(deviation_pct, 0.0) * 100.0))
+    )
+    metrics.update({
+        "entry_price": semantics.entry,
+        "expected_fill_price": semantics.expected_fill,
+        "filled_entry_price": semantics.actual_fill,
+        "expected_slippage_pct": semantics.expected_execution_cost_pct,
+        # Compatibility alias: the historical entry -> fill metric is total
+        # realized cost, not actual-vs-expected deviation.
+        "realized_slippage_pct": semantics.total_realized_execution_cost_pct,
+        "actual_slippage_pct_semantics": "TOTAL_REALIZED_EXECUTION_COST_PCT",
+        "fill_quality_score": fill_quality,
+        "execution_cost_semantics_status": "AVAILABLE",
+    })
+    return metrics
+
 
 
 def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: float | None = None) -> dict[str, Any]:
