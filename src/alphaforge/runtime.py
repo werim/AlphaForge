@@ -1128,6 +1128,7 @@ class RuntimeOrchestrator:
             "geometry_reason": payload.get("geometry_reason"),
             "reject_quality_attributable": payload.get("reject_quality_attributable"),
             "forward_label_subject": payload.get("forward_label_subject"),
+            "no_submit_verified": self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
         }
         decision = str(payload.get("decision") or "").upper()
         evidence_id = "decision-evidence:" + canonical_hash({
