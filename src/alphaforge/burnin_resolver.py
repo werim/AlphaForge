@@ -243,7 +243,13 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
             diagnostic=json.dumps({"market_gaps":gaps,"observed_bars":evaluated["observed_bars"],"required_bars":r.get("horizon_bars")},sort_keys=True)
             _exec(conn,"UPDATE burnin_pending_reject_labels SET status='PENDING',claim_token=NULL,claimed_at=NULL,evidence_complete=0,last_error=:err WHERE pending_label_id=:pid AND claim_token=:token",{"err":"INCOMPLETE_MARKET_WINDOW:"+diagnostic,"pid":r["pending_label_id"],"token":token}); counts["pending"]+=1; continue
         costs=json.loads(r.get("execution_cost_assumptions_json") or "{}"); missing=[f for f in CRITICAL_COST_FIELDS if costs.get(f) is None]
-        invalid=bool(missing); total=None if invalid or gross is None else sum(float(costs[f]) for f in CRITICAL_COST_FIELDS); net=None if total is None else gross-total
+        invalid=bool(missing)
+        total=None if invalid or gross is None else (
+            sum(float(costs[f]) for f in CRITICAL_COST_FIELDS)
+            + float(costs.get("volatility_penalty") or 0.0)
+            + float(costs.get("liquidity_penalty") or 0.0)
+        )
+        net=None if total is None else gross-total
         try: source_provenance=json.loads(r.get("source_provenance_json") or "{}")
         except (TypeError,json.JSONDecodeError): source_provenance={}
         subject=source_provenance.get("forward_label_subject")
