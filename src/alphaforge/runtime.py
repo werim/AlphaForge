@@ -2846,7 +2846,6 @@ class RuntimeOrchestrator:
 
     def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")
-        all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         supplied_reasons = result.get("reject_reasons")
         reject_reasons = [canonical_reject_reason(value) for value in supplied_reasons
                           if value] if isinstance(supplied_reasons, (list, tuple)) else []
@@ -2901,6 +2900,7 @@ class RuntimeOrchestrator:
                 if result.get("reject_reason") is not None:
                     result["reject_reason"] = primary_reject_reason
                 result["authoritative_reject_reason"] = primary_reject_reason
+        all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         supplied_reject_decision_id = result.get("reject_decision_id")
