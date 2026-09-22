@@ -2976,6 +2976,45 @@ class RuntimeOrchestrator:
                            if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE"
                            and isinstance(payload.get("legacy_shadow_geometry"), Mapping) else {})
         label_geometry = shadow_geometry or payload
+        planned_entry = label_geometry.get("entry", label_geometry.get("entry_price"))
+        expected_fill = None if shadow_geometry else payload.get("expected_fill")
+        try:
+            executable_entry = float(expected_fill) if expected_fill is not None else None
+            if executable_entry is not None and (not math.isfinite(executable_entry) or executable_entry <= 0):
+                executable_entry = None
+        except (TypeError, ValueError):
+            executable_entry = None
+        execution_aligned = executable_entry is not None and not shadow_geometry
+        label_entry = executable_entry if execution_aligned else planned_entry
+        embedded_entry_slippage_cost = costs.get("entry_slippage_cost")
+        if execution_aligned and embedded_entry_slippage_cost is not None:
+            # The entry-side slippage is already represented by expected_fill.
+            # Keep the explicit field at zero to preserve the complete R-cost
+            # schema while preventing a second deduction in reject resolution.
+            costs = {**costs, "entry_slippage_cost": 0.0}
+        attributable = payload.get("reject_quality_attributable") is not False and execution_aligned
+        non_attributable_reason = payload.get("non_attributable_reason")
+        if shadow_geometry:
+            attributable = False
+            non_attributable_reason = non_attributable_reason or "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
+        elif not execution_aligned:
+            attributable = False
+            non_attributable_reason = non_attributable_reason or "EXECUTION_PARITY_BASIS_UNAVAILABLE"
+        try:
+            initial_risk = abs(float(planned_entry) - float(
+                label_geometry.get("sl", label_geometry.get("stop_loss", label_geometry.get("stop")))
+            ))
+            fill_shift_initial_risk_ratio = (
+                abs(float(executable_entry) - float(planned_entry)) / initial_risk
+                if execution_aligned and initial_risk > 0 else None
+            )
+        except (TypeError, ValueError):
+            fill_shift_initial_risk_ratio = None
+        reject_execution_basis = (
+            "EXPECTED_FILL_RUNTIME_PARITY" if execution_aligned
+            else "LEGACY_SCANNER_SHADOW" if shadow_geometry
+            else "PLANNED_ENTRY_LEGACY"
+        )
         try:
             def persist(target: Any) -> str | None:
                 return persist_pending_reject_label(
@@ -2983,7 +3022,7 @@ class RuntimeOrchestrator:
                     reject_decision_id=str(payload.get("reject_decision_id") or ""), signal_id=signal_id or None,
                     symbol=payload.get("symbol"), side=label_geometry.get("side"),
                     decision_timestamp=payload.get("decision_timestamp") or canonical_utc_timestamp(), timeframe=payload.get("timeframe"),
-                    entry=label_geometry.get("entry", label_geometry.get("entry_price")),
+                    entry=label_entry,
                     stop=label_geometry.get("sl", label_geometry.get("stop_loss", label_geometry.get("stop"))),
                     target=label_geometry.get("tp", label_geometry.get("take_profit", label_geometry.get("target"))),
                     horizon_bars=self.config.reject_forward_horizon_bars,
@@ -2992,8 +3031,22 @@ class RuntimeOrchestrator:
                     source_provenance={"provider": self.scanner_source or "UNKNOWN", "timeframe": payload.get("timeframe"),
                                        "forward_label_subject": payload.get("forward_label_subject"),
                                        "forward_label_side": label_geometry.get("side"),
-                                       "reject_quality_attributable": payload.get("reject_quality_attributable"),
-                                       "non_attributable_reason": payload.get("non_attributable_reason"),
+                                       "reject_quality_attributable": attributable,
+                                       "non_attributable_reason": non_attributable_reason,
+                                       "reject_execution_basis": reject_execution_basis,
+                                       "planned_entry": planned_entry,
+                                       "executable_entry": executable_entry,
+                                       "candidate_raw_rr": payload.get("candidate_rr", payload.get("rr")),
+                                       "executable_raw_rr": payload.get("executable_raw_rr"),
+                                       "remaining_execution_penalty": payload.get("remaining_execution_penalty"),
+                                       "effective_rr_at_decision": payload.get("effective_rr"),
+                                       "entry_slippage_embedded_in_fill": bool(execution_aligned),
+                                       "embedded_entry_slippage_cost": embedded_entry_slippage_cost,
+                                       "fill_shift_initial_risk_ratio": fill_shift_initial_risk_ratio,
+                                       "stop_distance_pct": payload.get("stop_distance_pct"),
+                                       "all_failed_gates": payload.get("all_failed_gates"),
+                                       "failed_gate_evidence": payload.get("failed_gate_evidence"),
+                                       "execution_cost_semantics": payload.get("execution_cost_semantics"),
                                        "campaign_intervals": list(self._campaign_intervals),
                                        "regime_timeframe": self.config.regime_timeframe,
                                        "setup_timeframe": self.config.setup_timeframe,
