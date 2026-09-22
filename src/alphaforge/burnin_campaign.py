@@ -659,7 +659,16 @@ def reject_candidate_feasibility_shadow(conn: Any, campaign_id: str) -> dict[str
             "score": provenance.get("score"),
             "candidate_raw_rr": provenance.get("candidate_raw_rr"),
             "executable_raw_rr": provenance.get("executable_raw_rr"),
-            "effective_rr": provenance.get("effective_rr_at_decision"),
+            "effective_rr": (
+                provenance.get("effective_rr_at_decision")
+                if provenance.get("effective_rr_at_decision") is not None
+                else provenance.get("counterfactual_effective_rr")
+            ),
+            "effective_rr_source": (
+                "DECISION_TIME"
+                if provenance.get("effective_rr_at_decision") is not None
+                else "COUNTERFACTUAL_RUNTIME_PARITY"
+            ),
             "fill_shift_initial_risk_ratio": provenance.get("fill_shift_initial_risk_ratio"),
             "stop_distance_pct": provenance.get("stop_distance_pct"),
             "min_stop_pct": provenance.get("min_stop_pct"),
