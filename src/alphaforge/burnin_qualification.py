@@ -253,6 +253,8 @@ class BurnInQualificationEngine:
             return False
         if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE":
             return False
+        if payload.get("reject_execution_basis") != "EXPECTED_FILL_RUNTIME_PARITY":
+            return False
         return str(row.get("reject_reason") or "").upper() not in {
             "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RUNTIME_RECOVERY_REQUIRED"
         }
