@@ -1280,6 +1280,9 @@ class RuntimeOrchestrator:
                     f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}"
                 )
                 persist_burnin_observation(target, observation_id=observation_id, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
+                self._persist_runtime_decision_evidence(
+                    target, payload, lifecycle_state=lifecycle_state
+                )
                 update_burnin_run_counters(target, self._burnin_run_id)
             if conn is not None:
                 persist(conn)
