@@ -37,7 +37,7 @@ from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, 
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
-from alphaforge.persistence import fetch_expectancy_stat_detail, init_db
+from alphaforge.persistence import fetch_expectancy_stat_detail, init_db, save_decision_evidence
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
@@ -1084,6 +1084,141 @@ class RuntimeOrchestrator:
             "liquidity_penalty": model.liquidity_penalty,
             "execution_cost_unit": "R",
         }
+
+    def _persist_runtime_decision_evidence(
+        self,
+        target: Any,
+        payload: Mapping[str, Any],
+        *,
+        lifecycle_state: str | None,
+    ) -> None:
+        if not self._burnin_run_id:
+            return
+        execution_ctx = dict(payload.get("execution_ctx") or {})
+        cost_breakdown: dict[str, Any] = {}
+        if execution_ctx:
+            try:
+                cost_breakdown = build_execution_cost_model(
+                    execution_ctx, include_missing_penalty=False
+                ).as_dict()
+            except Exception:
+                cost_breakdown = {}
+        portfolio_diagnostics = payload.get("portfolio_diagnostics")
+        portfolio_diagnostics = (
+            dict(portfolio_diagnostics) if isinstance(portfolio_diagnostics, Mapping) else {}
+        )
+        snapshot = portfolio_diagnostics.get("snapshot")
+        snapshot = dict(snapshot) if isinstance(snapshot, Mapping) else {}
+        raw_rr = payload.get("executable_raw_rr")
+        if raw_rr is None:
+            raw_rr = payload.get("rr")
+        cost_penalty = payload.get("remaining_execution_penalty")
+        if cost_penalty is None and payload.get("effective_rr") is not None and raw_rr is not None:
+            try:
+                cost_penalty = max(float(raw_rr) - float(payload["effective_rr"]), 0.0)
+            except (TypeError, ValueError):
+                cost_penalty = None
+        diagnostics = {
+            "execution_cost_breakdown": cost_breakdown or None,
+            "candidate_rr": payload.get("candidate_rr", payload.get("rr")),
+            "executable_raw_rr": payload.get("executable_raw_rr"),
+            "remaining_execution_penalty": payload.get("remaining_execution_penalty"),
+            "execution_cost_semantics": payload.get("execution_cost_semantics"),
+            "geometry_status": payload.get("geometry_status"),
+            "geometry_reason": payload.get("geometry_reason"),
+            "reject_quality_attributable": payload.get("reject_quality_attributable"),
+            "forward_label_subject": payload.get("forward_label_subject"),
+        }
+        decision = str(payload.get("decision") or "").upper()
+        evidence_id = "decision-evidence:" + canonical_hash({
+            "burnin_run_id": self._burnin_run_id,
+            "signal_id": payload.get("signal_id"),
+            "decision": decision,
+        })[:24]
+        if not save_decision_evidence(
+            target,
+            evidence_id=evidence_id,
+            run_id=self._burnin_run_id,
+            mode=self.config.execution_mode.value,
+            timestamp=payload.get("decision_timestamp") or payload.get("decision_time"),
+            symbol=payload.get("symbol"),
+            side=payload.get("side"),
+            setup_type=payload.get("setup_type") or payload.get("setup"),
+            setup_reason=payload.get("setup_reason"),
+            regime=payload.get("regime"),
+            lifecycle_state_after=lifecycle_state,
+            decision=decision,
+            score=payload.get("score"),
+            raw_rr=raw_rr,
+            effective_rr=payload.get("effective_rr"),
+            expectancy=payload.get("expectancy"),
+            expectancy_bucket=payload.get("expectancy_bucket"),
+            reject_reason=(
+                payload.get("primary_reject_reason")
+                or payload.get("reject_reason")
+                or payload.get("reason")
+                if decision == "REJECTED" else None
+            ),
+            entry=payload.get("entry"),
+            sl=payload.get("sl"),
+            tp=payload.get("tp"),
+            volume_24h_usdt=payload.get("volume_24h_usdt"),
+            spread_pct=payload.get("spread_pct", execution_ctx.get("spread_pct")),
+            funding_rate_pct=payload.get("funding_rate_pct", execution_ctx.get("funding_rate_pct")),
+            expected_slippage_pct=payload.get(
+                "expected_slippage_pct", execution_ctx.get("expected_slippage_pct")
+            ),
+            liquidity_score=payload.get("liquidity_score", execution_ctx.get("liquidity_score")),
+            volatility_regime=payload.get(
+                "volatility_regime", execution_ctx.get("volatility_regime")
+            ),
+            cost_penalty=cost_penalty,
+            total_cost_pct=cost_breakdown.get("total_cost_pct"),
+            total_explicit_cost_pct=cost_breakdown.get("total_explicit_cost_pct"),
+            spread_source=cost_breakdown.get("spread_source"),
+            slippage_source=cost_breakdown.get("slippage_source"),
+            fee_pct=cost_breakdown.get("fee_pct"),
+            fee_source=cost_breakdown.get("fee_source"),
+            funding_source=cost_breakdown.get("funding_source"),
+            latency_ms=payload.get(
+                "latency_ms", execution_ctx.get("market_data_latency_ms", execution_ctx.get("latency_ms"))
+            ),
+            latency_source=cost_breakdown.get("latency_source"),
+            liquidity_status=cost_breakdown.get("liquidity_status"),
+            volatility_penalty_pct=cost_breakdown.get("volatility_penalty_pct"),
+            volatility_source=cost_breakdown.get("volatility_source"),
+            reject_flags=cost_breakdown.get("reject_flags"),
+            unavailable_fields=cost_breakdown.get("unavailable_fields"),
+            diagnostics_json=diagnostics,
+            portfolio_equity=snapshot.get("equity"),
+            available_balance=snapshot.get("available_balance"),
+            open_position_count=snapshot.get("open_position_count"),
+            max_open_positions=snapshot.get("max_open_positions"),
+            total_notional_exposure=snapshot.get("total_notional_exposure"),
+            max_notional_exposure=snapshot.get("max_notional_exposure"),
+            symbol_notional_exposure=snapshot.get("symbol_notional_exposure"),
+            max_symbol_notional=snapshot.get("max_symbol_notional"),
+            side_exposure_long=snapshot.get("side_exposure_long"),
+            side_exposure_short=snapshot.get("side_exposure_short"),
+            net_exposure=snapshot.get("net_exposure"),
+            gross_exposure=snapshot.get("gross_exposure"),
+            daily_realized_pnl=snapshot.get("daily_realized_pnl"),
+            daily_loss_pct=snapshot.get("daily_loss_pct"),
+            max_daily_loss_pct=snapshot.get("max_daily_loss_pct"),
+            rolling_drawdown_pct=snapshot.get("rolling_drawdown_pct"),
+            consecutive_loss_count=snapshot.get("consecutive_loss_count"),
+            correlation_group=snapshot.get("correlation_group"),
+            correlation_group_exposure=snapshot.get("correlation_group_exposure"),
+            correlated_position_count=snapshot.get("correlated_position_count"),
+            risk_flags=payload.get("risk_flags"),
+            portfolio_reject_reason=payload.get("portfolio_reject_reason"),
+            portfolio_risk_state=payload.get("portfolio_risk_state"),
+            portfolio_diagnostics_json=portfolio_diagnostics or None,
+            signal_id=payload.get("signal_id"),
+            order_id=payload.get("order_id"),
+            position_id=payload.get("position_id"),
+        ):
+            raise RuntimeError("decision_evidence_persistence_failed")
 
     def _persist_burnin_decision(self, payload: Mapping[str, Any], *,
                                  lifecycle_state: str | None = None,
