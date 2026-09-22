@@ -40,7 +40,7 @@ from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, 
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
-from alphaforge.persistence import fetch_expectancy_stat_detail, init_db
+from alphaforge.persistence import fetch_expectancy_stat_detail, init_db, save_decision_evidence
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
@@ -1151,6 +1151,122 @@ class RuntimeOrchestrator:
                     f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}"
                 )
                 persist_burnin_observation(target, observation_id=observation_id, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
+                decision_upper = str(payload.get("decision") or "").upper()
+                reject_reason = (
+                    payload.get("primary_reject_reason")
+                    or payload.get("reject_reason")
+                    or payload.get("reason")
+                    if decision_upper == "REJECTED"
+                    else None
+                )
+                portfolio_diagnostics = payload.get("portfolio_diagnostics")
+                portfolio_snapshot = (
+                    dict(portfolio_diagnostics.get("snapshot") or {})
+                    if isinstance(portfolio_diagnostics, Mapping)
+                    else {}
+                )
+                diagnostics = {
+                    "observation_id": observation_id,
+                    "campaign_id": campaign_id,
+                    "candidate_rr": payload.get("candidate_rr"),
+                    "planned_entry": payload.get("entry"),
+                    "expected_fill": payload.get("expected_fill"),
+                    "executable_raw_rr": payload.get("executable_raw_rr"),
+                    "remaining_execution_penalty": payload.get("remaining_execution_penalty"),
+                    "execution_cost_semantics": payload.get("execution_cost_semantics"),
+                    "geometry_status": payload.get("geometry_status"),
+                    "geometry_reason": payload.get("geometry_reason"),
+                    "geometry_source": payload.get("geometry_source"),
+                    "all_failed_gates": payload.get("all_failed_gates"),
+                    "failed_gate_evidence": payload.get("failed_gate_evidence"),
+                    "reject_execution_basis": payload.get("reject_execution_basis"),
+                    "no_submit_verified": self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
+                    "execution_ctx": execution_ctx,
+                }
+                evidence_id = "runtime_decision:" + canonical_hash({
+                    "burnin_run_id": self._burnin_run_id,
+                    "observation_id": observation_id,
+                })[:24]
+                persisted_evidence = save_decision_evidence(
+                    target,
+                    evidence_id=evidence_id,
+                    run_id=self._burnin_run_id,
+                    profile_id=payload.get("profile_id"),
+                    profile_name=payload.get("profile_name"),
+                    mode=self.config.execution_mode.value,
+                    timestamp=payload.get("decision_time") or payload.get("decision_timestamp"),
+                    symbol=payload.get("symbol"),
+                    side=payload.get("side"),
+                    setup_type=payload.get("setup_type"),
+                    setup_reason=payload.get("setup_reason"),
+                    regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime"),
+                    lifecycle_state_before=payload.get("lifecycle_state_before"),
+                    lifecycle_state_after=lifecycle_state,
+                    decision=payload.get("decision"),
+                    score=payload.get("score"),
+                    raw_rr=payload.get("executable_raw_rr") if payload.get("executable_raw_rr") is not None else payload.get("rr"),
+                    effective_rr=payload.get("effective_rr"),
+                    min_effective_rr=payload.get("min_effective_rr") if payload.get("min_effective_rr") is not None else float(self.config.min_effective_rr),
+                    expectancy=payload.get("expectancy"),
+                    expectancy_bucket=payload.get("expectancy_bucket"),
+                    reject_reason=reject_reason,
+                    entry=payload.get("expected_fill") if payload.get("expected_fill") is not None else payload.get("entry"),
+                    sl=payload.get("sl") if payload.get("sl") is not None else payload.get("structural_stop"),
+                    tp=payload.get("tp") if payload.get("tp") is not None else payload.get("structural_target"),
+                    volume_24h_usdt=execution_ctx.get("volume_24h_usdt"),
+                    spread_pct=execution_ctx.get("spread_pct"),
+                    funding_rate_pct=execution_ctx.get("funding_rate_pct"),
+                    expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
+                    liquidity_score=execution_ctx.get("liquidity_score"),
+                    volatility_regime=execution_ctx.get("volatility_regime"),
+                    cost_penalty=payload.get("remaining_execution_penalty") if payload.get("remaining_execution_penalty") is not None else execution_ctx.get("cost_penalty"),
+                    total_cost_pct=execution_ctx.get("total_cost_pct"),
+                    total_explicit_cost_pct=execution_ctx.get("total_explicit_cost_pct"),
+                    spread_source=execution_ctx.get("spread_source"),
+                    slippage_source=execution_ctx.get("slippage_source"),
+                    fee_pct=execution_ctx.get("fee_pct"),
+                    fee_source=execution_ctx.get("fee_source"),
+                    funding_source=execution_ctx.get("funding_source"),
+                    latency_ms=execution_ctx.get("market_data_latency_ms") if execution_ctx.get("market_data_latency_ms") is not None else execution_ctx.get("latency_ms"),
+                    latency_source=execution_ctx.get("latency_source"),
+                    liquidity_status=execution_ctx.get("liquidity_status"),
+                    volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
+                    volatility_source=execution_ctx.get("volatility_source"),
+                    reject_flags=payload.get("all_failed_gates") or payload.get("reject_reasons"),
+                    unavailable_fields=execution_ctx.get("unavailable_fields"),
+                    diagnostics_json=diagnostics,
+                    portfolio_equity=portfolio_snapshot.get("equity"),
+                    available_balance=portfolio_snapshot.get("available_balance"),
+                    open_position_count=portfolio_snapshot.get("open_position_count"),
+                    max_open_positions=portfolio_snapshot.get("max_open_positions"),
+                    total_notional_exposure=portfolio_snapshot.get("total_notional_exposure"),
+                    max_notional_exposure=portfolio_snapshot.get("max_notional_exposure"),
+                    symbol_notional_exposure=portfolio_snapshot.get("symbol_notional_exposure"),
+                    max_symbol_notional=portfolio_snapshot.get("max_symbol_notional"),
+                    side_exposure_long=portfolio_snapshot.get("side_exposure_long"),
+                    side_exposure_short=portfolio_snapshot.get("side_exposure_short"),
+                    net_exposure=portfolio_snapshot.get("net_exposure"),
+                    gross_exposure=portfolio_snapshot.get("gross_exposure"),
+                    daily_realized_pnl=portfolio_snapshot.get("daily_realized_pnl"),
+                    daily_loss_pct=portfolio_snapshot.get("daily_loss_pct"),
+                    max_daily_loss_pct=portfolio_snapshot.get("max_daily_loss_pct"),
+                    rolling_drawdown_pct=portfolio_snapshot.get("rolling_drawdown_pct"),
+                    consecutive_loss_count=portfolio_snapshot.get("consecutive_loss_count"),
+                    correlation_group=portfolio_snapshot.get("correlation_group"),
+                    correlation_group_exposure=portfolio_snapshot.get("correlation_group_exposure"),
+                    correlated_position_count=portfolio_snapshot.get("correlated_position_count"),
+                    risk_flags=payload.get("risk_flags"),
+                    portfolio_reject_reason=payload.get("portfolio_reject_reason"),
+                    portfolio_risk_state=payload.get("portfolio_risk_state"),
+                    portfolio_diagnostics_json=portfolio_diagnostics,
+                    signal_id=payload.get("signal_id"),
+                    order_id=payload.get("order_id"),
+                    position_id=payload.get("position_id"),
+                    lifecycle_id=payload.get("lifecycle_id"),
+                    lifecycle_seq=payload.get("lifecycle_seq"),
+                )
+                if not persisted_evidence:
+                    raise RuntimeError("DECISION_EVIDENCE_PERSISTENCE_FAILED")
                 update_burnin_run_counters(target, self._burnin_run_id)
             if conn is not None:
                 persist(conn)
@@ -2238,6 +2354,11 @@ class RuntimeOrchestrator:
             "symbol": selection.symbol,
             "side": market_ctx.get("side"),
             "entry": market_ctx.get("entry"),
+            "sl": market_ctx.get("sl"),
+            "tp": market_ctx.get("tp"),
+            "regime": signal_payload.get("regime") or market_ctx.get("regime"),
+            "setup_type": signal_payload.get("setup") or signal_payload.get("setup_type"),
+            "setup_reason": signal_payload.get("setup_reason"),
             "source_exchange": market_ctx.get("source_exchange"),
             "mode": self.config.execution_mode.value,
             "decision": "ACCEPTED",
@@ -2252,6 +2373,7 @@ class RuntimeOrchestrator:
             "executable_raw_rr": rr_metrics["executable_raw_rr"],
             "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
             "effective_rr": effective_rr,
+            "min_effective_rr": float(self.config.min_effective_rr),
             "confidence": order_plan.confidence,
             "execution_ctx": execution_ctx,
             "timeframe": self.config.execution_timeframe,
@@ -2272,6 +2394,9 @@ class RuntimeOrchestrator:
             "execution_timeframe": market_ctx.get("execution_timeframe"),
             "structural_stop": market_ctx.get("structural_stop"),
             "structural_target": market_ctx.get("structural_target"),
+            "portfolio_risk_state": portfolio_decision.risk_state,
+            "portfolio_diagnostics": portfolio_decision.diagnostics,
+            "risk_flags": portfolio_decision.risk_flags,
         }
         self._record_state_direction_shadow(
             {**accepted_burnin_payload, "side": market_ctx.get("side"),
