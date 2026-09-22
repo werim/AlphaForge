@@ -247,13 +247,57 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
         try: source_provenance=json.loads(r.get("source_provenance_json") or "{}")
         except (TypeError,json.JSONDecodeError): source_provenance={}
         subject=source_provenance.get("forward_label_subject")
+        basis=str(source_provenance.get("reject_execution_basis") or "PLANNED_ENTRY_LEGACY")
+        execution_aligned=basis == "EXPECTED_FILL_RUNTIME_PARITY"
         infrastructure_reject=str(r.get("reject_reason") or "").upper() in {
             "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RUNTIME_RECOVERY_REQUIRED"
         }
-        attributable=subject != "LEGACY_SCANNER_SHADOW_CANDIDATE" and not infrastructure_reject
+        explicit_attributable=source_provenance.get("reject_quality_attributable")
+        attributable=(explicit_attributable is not False
+                      and subject != "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                      and not infrastructure_reject)
         reject_correct=None if invalid or ambiguous or net is None or not complete or not attributable else bool(net<=0)
         market_provenance=next((c.get("source_provenance") for c in observed if c.get("source_provenance")),None)
-        payload={"pending_label_id":r["pending_label_id"],"reject_decision_id":r["reject_decision_id"],"campaign_id":campaign_id,"burnin_run_id":r["burnin_run_id"],"forward_window_bars":r.get("horizon_bars"),"missing_cost_fields":missing,"window_complete":complete,"market_gaps":gaps,"mfe_pct":mfe,"mae_pct":mae,"reject_correct":reject_correct,"execution_cost_assumptions":costs,"execution_cost_unit":costs.get("execution_cost_unit"),"market_data_provenance":market_provenance,"forward_label_subject":subject,"reject_quality_attributable":attributable,"non_attributable_reason":None if attributable else ("INFRASTRUCTURE_UNAVAILABILITY" if infrastructure_reject else "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT")}
+        payload={
+            "pending_label_id":r["pending_label_id"],
+            "reject_decision_id":r["reject_decision_id"],
+            "campaign_id":campaign_id,
+            "burnin_run_id":r["burnin_run_id"],
+            "forward_window_bars":r.get("horizon_bars"),
+            "missing_cost_fields":missing,
+            "window_complete":complete,
+            "market_gaps":gaps,
+            "mfe_pct":mfe,
+            "mae_pct":mae,
+            "reject_correct":reject_correct,
+            "execution_cost_assumptions":costs,
+            "execution_cost_unit":costs.get("execution_cost_unit"),
+            "market_data_provenance":market_provenance,
+            "forward_label_subject":subject,
+            "reject_quality_attributable":attributable,
+            "reject_execution_basis":basis,
+            "execution_aligned":execution_aligned,
+            "planned_entry":source_provenance.get("planned_entry"),
+            "executable_entry":source_provenance.get("executable_entry", r.get("entry")),
+            "candidate_raw_rr":source_provenance.get("candidate_raw_rr"),
+            "executable_raw_rr":source_provenance.get("executable_raw_rr"),
+            "remaining_execution_penalty":source_provenance.get("remaining_execution_penalty"),
+            "effective_rr_at_decision":source_provenance.get("effective_rr_at_decision"),
+            "entry_slippage_embedded_in_fill":source_provenance.get("entry_slippage_embedded_in_fill"),
+            "embedded_entry_slippage_cost":source_provenance.get("embedded_entry_slippage_cost"),
+            "fill_shift_initial_risk_ratio":source_provenance.get("fill_shift_initial_risk_ratio"),
+            "stop_distance_pct":source_provenance.get("stop_distance_pct"),
+            "all_failed_gates":source_provenance.get("all_failed_gates"),
+            "failed_gate_evidence":source_provenance.get("failed_gate_evidence"),
+            "execution_cost_semantics":source_provenance.get("execution_cost_semantics"),
+            "non_attributable_reason":(
+                None if attributable else
+                source_provenance.get("non_attributable_reason") or
+                ("INFRASTRUCTURE_UNAVAILABILITY" if infrastructure_reject else
+                 "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT" if subject == "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                 else "NON_ATTRIBUTABLE_REJECT")
+            ),
+        }
         evidence_complete=bool(complete and not invalid and not ambiguous and net is not None)
         inserted=persist_burnin_reject_outcome(conn,reject_outcome_id="rout_"+r["reject_decision_id"],burnin_run_id=r["burnin_run_id"],release_id=_release(conn,r["burnin_run_id"]),reject_reason=r.get("reject_reason") or "UNKNOWN",symbol=r["symbol"],regime=r.get("regime") or "UNKNOWN",decision_time=r["decision_timestamp"],hypothetical_entry=r["entry"],hypothetical_stop=r["stop"],hypothetical_target=r["target"],forward_label=label,would_tp=label=="TP_BEFORE_SL",would_sl=label=="SL_BEFORE_TP",timeout=label=="TIMEOUT",ambiguous=ambiguous,hypothetical_gross_r=gross,hypothetical_net_r_after_costs=net,avoided_loss=max(0,-net) if net is not None else None,missed_profit=max(0,net) if net is not None else None,execution_invalidated=invalid,evidence_horizon=r["due_at"],evidence_complete=evidence_complete,payload=payload)
         outcome_row=_exec(conn,"SELECT * FROM burnin_reject_outcomes WHERE reject_outcome_id=:id",{"id":"rout_"+r["reject_decision_id"]}).fetchone(); outcome=dict(outcome_row) if isinstance(outcome_row,sqlite3.Row) else dict(outcome_row._mapping)
@@ -272,7 +316,7 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
         status="AMBIGUOUS" if outcome.get("ambiguous") else ("RESOLVED" if outcome.get("evidence_complete") else "FAILED"); error=None if status=="RESOLVED" else ("AMBIGUOUS" if ambiguous else "MISSING_COSTS" if invalid else "INCOMPLETE_MARKET_WINDOW")
         resolved_at=utc_now()
         _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=:now,last_error=:err WHERE pending_label_id=:pid AND claim_token=:token",{"s":status,"ec":outcome.get("evidence_complete") or 0,"now":resolved_at,"err":error,"pid":r["pending_label_id"],"token":token})
-        record_expectancy_evidence(conn,evidence_id='reject:'+r['reject_decision_id'],source_decision_id=r.get('reject_decision_id'),evidence_type='REJECT_FORWARD',decision_time=r.get('decision_timestamp'),resolved_at=resolved_at,symbol=r.get('symbol'),side=r.get('side'),setup_type=None,regime=r.get('regime'),reject_reason=r.get('reject_reason'),net_r=net,run_id=r.get('burnin_run_id'),campaign_id=campaign_id,release_id=_release(conn,r['burnin_run_id']),evidence_complete=status=='RESOLVED' and attributable)
+        record_expectancy_evidence(conn,evidence_id='reject:'+r['reject_decision_id'],source_decision_id=r.get('reject_decision_id'),evidence_type='REJECT_FORWARD',decision_time=r.get('decision_timestamp'),resolved_at=resolved_at,symbol=r.get('symbol'),side=r.get('side'),setup_type=None,regime=r.get('regime'),reject_reason=r.get('reject_reason'),net_r=net,run_id=r.get('burnin_run_id'),campaign_id=campaign_id,release_id=_release(conn,r['burnin_run_id']),evidence_complete=status=='RESOLVED' and attributable and execution_aligned)
         counts["ambiguous" if status=="AMBIGUOUS" else "resolved" if status=="RESOLVED" else "failed"]+=1
     return counts
 
