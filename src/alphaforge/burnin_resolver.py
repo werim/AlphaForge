@@ -259,11 +259,11 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
             "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RUNTIME_RECOVERY_REQUIRED"
         }
         explicit_attributable=source_provenance.get("reject_quality_attributable")
-        attributable=(explicit_attributable is not False
-                      and subject != "LEGACY_SCANNER_SHADOW_CANDIDATE"
-                      and not infrastructure_reject
-                      and execution_aligned)
-        reject_correct=None if invalid or ambiguous or net is None or not complete or not attributable else bool(net<=0)
+        outcome_attributable=(explicit_attributable is not False
+                              and subject != "LEGACY_SCANNER_SHADOW_CANDIDATE"
+                              and not infrastructure_reject)
+        execution_authoritative=outcome_attributable and execution_aligned
+        reject_correct=None if invalid or ambiguous or net is None or not complete or not outcome_attributable else bool(net<=0)
         market_provenance=next((c.get("source_provenance") for c in observed if c.get("source_provenance")),None)
         payload={
             "pending_label_id":r["pending_label_id"],
@@ -281,7 +281,8 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
             "execution_cost_unit":costs.get("execution_cost_unit"),
             "market_data_provenance":market_provenance,
             "forward_label_subject":subject,
-            "reject_quality_attributable":attributable,
+            "reject_quality_attributable":outcome_attributable,
+            "reject_execution_authoritative":execution_authoritative,
             "reject_execution_basis":basis,
             "execution_aligned":execution_aligned,
             "planned_entry":source_provenance.get("planned_entry"),
@@ -299,11 +300,18 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
             "failed_gate_evidence":source_provenance.get("failed_gate_evidence"),
             "execution_cost_semantics":source_provenance.get("execution_cost_semantics"),
             "non_attributable_reason":(
-                None if attributable else
+                None if outcome_attributable else
                 source_provenance.get("non_attributable_reason") or
                 ("INFRASTRUCTURE_UNAVAILABILITY" if infrastructure_reject else
                  "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT" if subject == "LEGACY_SCANNER_SHADOW_CANDIDATE"
-                 else "LEGACY_PLANNED_ENTRY_BASIS" if not execution_aligned
+                 else "NON_ATTRIBUTABLE_REJECT")
+            ),
+            "non_execution_authoritative_reason":(
+                None if execution_authoritative else
+                "LEGACY_PLANNED_ENTRY_BASIS" if outcome_attributable and not execution_aligned
+                else source_provenance.get("non_attributable_reason") or
+                ("INFRASTRUCTURE_UNAVAILABILITY" if infrastructure_reject else
+                 "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT" if subject == "LEGACY_SCANNER_SHADOW_CANDIDATE"
                  else "NON_ATTRIBUTABLE_REJECT")
             ),
         }
@@ -325,7 +333,7 @@ def resolve_campaign_batch(conn: Any,campaign_id: str,candles_by_symbol: Mapping
         status="AMBIGUOUS" if outcome.get("ambiguous") else ("RESOLVED" if outcome.get("evidence_complete") else "FAILED"); error=None if status=="RESOLVED" else ("AMBIGUOUS" if ambiguous else "MISSING_COSTS" if invalid else "INCOMPLETE_MARKET_WINDOW")
         resolved_at=utc_now()
         _exec(conn,"UPDATE burnin_pending_reject_labels SET status=:s,evidence_complete=:ec,resolved_at=:now,last_error=:err WHERE pending_label_id=:pid AND claim_token=:token",{"s":status,"ec":outcome.get("evidence_complete") or 0,"now":resolved_at,"err":error,"pid":r["pending_label_id"],"token":token})
-        record_expectancy_evidence(conn,evidence_id='reject:'+r['reject_decision_id'],source_decision_id=r.get('reject_decision_id'),evidence_type='REJECT_FORWARD',decision_time=r.get('decision_timestamp'),resolved_at=resolved_at,symbol=r.get('symbol'),side=r.get('side'),setup_type=None,regime=r.get('regime'),reject_reason=r.get('reject_reason'),net_r=net,run_id=r.get('burnin_run_id'),campaign_id=campaign_id,release_id=_release(conn,r['burnin_run_id']),evidence_complete=status=='RESOLVED' and attributable and execution_aligned)
+        record_expectancy_evidence(conn,evidence_id='reject:'+r['reject_decision_id'],source_decision_id=r.get('reject_decision_id'),evidence_type='REJECT_FORWARD',decision_time=r.get('decision_timestamp'),resolved_at=resolved_at,symbol=r.get('symbol'),side=r.get('side'),setup_type=None,regime=r.get('regime'),reject_reason=r.get('reject_reason'),net_r=net,run_id=r.get('burnin_run_id'),campaign_id=campaign_id,release_id=_release(conn,r['burnin_run_id']),evidence_complete=status=='RESOLVED' and execution_authoritative)
         counts["ambiguous" if status=="AMBIGUOUS" else "resolved" if status=="RESOLVED" else "failed"]+=1
     return counts
 
