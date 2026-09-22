@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -1011,13 +1012,12 @@ def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
         if column not in {"evidence_id", "created_at"}
     ]
     update_sql = ", ".join(f"{column}=excluded.{column}" for column in update_columns)
-    try:
-        session.execute(
-            text(
-                f"""INSERT INTO decision_evidence ({columns_sql})
+    statement = f"""INSERT INTO decision_evidence ({columns_sql})
                     VALUES ({values_sql})
                     ON CONFLICT(evidence_id) DO UPDATE SET {update_sql}"""
-            ),
+    try:
+        session.execute(
+            statement if isinstance(session, sqlite3.Connection) else text(statement),
             payload,
         )
         return evidence_id
