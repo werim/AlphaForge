@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -34,6 +35,31 @@ def test_closed_trade_review_persistence_with_nulls() -> None:
         row = session.execute(text("SELECT trade_id, expected_slippage_pct, actual_slippage_pct FROM closed_trade_reviews WHERE trade_id='t1'")).fetchone()
         assert row[0] == "t1"
         assert row[1] is None and row[2] is None
+
+
+def test_legacy_closed_trade_review_does_not_infer_missing_fill_from_entry() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    with Session(engine) as session:
+        assert record_closed_trade_review(
+            session,
+            trade_id="legacy-no-fill",
+            symbol="BTCUSDT",
+            side="LONG",
+            entry_price=100.0,
+            expected_slippage_pct=0.002,
+            actual_slippage_pct=None,
+        )
+        session.commit()
+        raw = session.execute(text(
+            "SELECT execution_metrics FROM closed_trade_reviews WHERE trade_id='legacy-no-fill'"
+        )).scalar_one()
+
+    metrics = json.loads(raw)
+    assert metrics["entry_price"] == 100.0
+    assert metrics["filled_entry_price"] is None
+    assert metrics["actual_fill_provenance"] == "UNAVAILABLE"
+    assert metrics["execution_cost_semantics_status"] == "UNAVAILABLE"
+    assert metrics["actual_slippage_pct_semantics"] == "UNAVAILABLE"
 
 
 def test_rejected_signal_review_persistence_reason_and_bucket() -> None:
