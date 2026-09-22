@@ -259,5 +259,6 @@ def test_fresh_reject_shadow_diagnostics_are_non_authoritative_and_execution_ali
     assert diagnostics["executable_raw_rr"]["count"] == 1
     assert diagnostics["effective_rr"]["count"] == 1
     assert diagnostics["fill_shift_initial_risk_ratio"]["count"] == 1
+    assert diagnostics["score_x_executable_rr_matrix"]
     assert diagnostics["score_x_effective_rr_matrix"]
     assert any("LOW_SCORE" in key for key in diagnostics["failed_gate_combinations"])
