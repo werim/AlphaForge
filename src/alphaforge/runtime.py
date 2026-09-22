@@ -2401,6 +2401,9 @@ class RuntimeOrchestrator:
             "execution_timeframe": market_ctx.get("execution_timeframe"),
             "structural_stop": market_ctx.get("structural_stop"),
             "structural_target": market_ctx.get("structural_target"),
+            "portfolio_risk_state": portfolio_decision.risk_state,
+            "portfolio_diagnostics": portfolio_decision.diagnostics,
+            "risk_flags": portfolio_decision.risk_flags,
         }
         self._record_state_direction_shadow(
             {**accepted_burnin_payload, "side": market_ctx.get("side"),
