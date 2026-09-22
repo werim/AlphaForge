@@ -2701,6 +2701,21 @@ class RuntimeOrchestrator:
             result["geometry_reason"] = "GUIDED_CANDIDATE_UNAVAILABLE"
             result["reject_quality_attributable"] = False
             result["non_attributable_reason"] = "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
+            if primary_reject_reason == "LOW_EFFECTIVE_RR":
+                # LOW_EFFECTIVE_RR requires attributable canonical guided geometry.
+                # Preserve the legacy scanner diagnosis only as shadow evidence.
+                result["legacy_shadow_geometry"]["reject_reason"] = primary_reject_reason
+                result["source_primary_reject_reason"] = primary_reject_reason
+                primary_reject_reason = "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+                reject_reasons = [
+                    primary_reject_reason,
+                    *[reason for reason in reject_reasons if reason != "LOW_EFFECTIVE_RR"],
+                ]
+                reject_reasons = list(dict.fromkeys(reject_reasons))
+                result["reason"] = primary_reject_reason
+                if result.get("reject_reason") is not None:
+                    result["reject_reason"] = primary_reject_reason
+                result["authoritative_reject_reason"] = primary_reject_reason
         campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         supplied_reject_decision_id = result.get("reject_decision_id")

@@ -35,3 +35,39 @@ def test_pass_and_missing_cost_source_fails_safe(tmp_path):
     db=tmp_path/"campaign.db"; make_db(db); c=sqlite3.connect(db); c.execute("INSERT INTO order_decisions VALUES(?,?,?,?,?,?,?,?,?,?)",("d","s","ACCEPTED","PAPER",1.2,0,.1,.1,1,.1)); c.execute("INSERT INTO trade_lifecycle_events VALUES(?,?,?)",("s","FILLED","PAPER")); c.execute("INSERT INTO expectancy_evidence VALUES(?,?,?,?,?,?)",("camp","run",1,.2,"2026-09-20T17:00:00Z","2026-09-20T18:00:00Z")); c.commit(); c.close(); r=report(db)
     assert gate(r,"ACCEPTED_LIFECYCLE_EVIDENCE")["status"]==PASS; assert gate(r,"EXECUTION_COST_EVIDENCE")["status"]==PASS
     c=sqlite3.connect(db); c.execute("UPDATE order_decisions SET spread_pct=NULL"); c.commit(); c.close(); assert gate(report(db),"EXECUTION_COST_EVIDENCE")["status"]==NOT_OBSERVABLE
+
+
+def test_non_attributable_shadow_reject_cannot_satisfy_readiness_evidence(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db); c=sqlite3.connect(db)
+    c.execute("ALTER TABLE burnin_reject_outcomes ADD COLUMN payload_json TEXT")
+    c.execute("ALTER TABLE expectancy_evidence ADD COLUMN source_decision_id TEXT")
+    c.execute("ALTER TABLE expectancy_evidence ADD COLUMN evidence_type TEXT")
+    shadow_payload='{"reject_decision_id":"shadow","forward_label_subject":"LEGACY_SCANNER_SHADOW_CANDIDATE","reject_quality_attributable":false}'
+    c.execute("""INSERT INTO burnin_reject_outcomes
+        (burnin_run_id,evidence_complete,forward_label,hypothetical_net_r_after_costs,payload_json)
+        VALUES(?,?,?,?,?)""",("run",1,"SL_BEFORE_TP",-0.8,shadow_payload))
+    c.execute("""INSERT INTO expectancy_evidence
+        (campaign_id,run_id,evidence_complete,net_r,decision_time,resolved_at,source_decision_id,evidence_type)
+        VALUES(?,?,?,?,?,?,?,?)""",("camp","run",1,-0.8,"2026-09-20T17:00:00Z","2026-09-20T18:00:00Z","shadow","REJECT_FORWARD"))
+    c.commit(); c.close()
+    r=report(db)
+    assert gate(r,"REJECT_FORWARD_OUTCOME_EVIDENCE")["status"]==NOT_OBSERVABLE
+    assert gate(r,"EXPECTANCY_TEMPORAL_EVIDENCE")["status"]==NOT_OBSERVABLE
+
+
+def test_attributable_reject_can_satisfy_readiness_evidence(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db); c=sqlite3.connect(db)
+    c.execute("ALTER TABLE burnin_reject_outcomes ADD COLUMN payload_json TEXT")
+    c.execute("ALTER TABLE expectancy_evidence ADD COLUMN source_decision_id TEXT")
+    c.execute("ALTER TABLE expectancy_evidence ADD COLUMN evidence_type TEXT")
+    payload='{"reject_decision_id":"guided","forward_label_subject":"GUIDED_CANDIDATE","reject_quality_attributable":true}'
+    c.execute("""INSERT INTO burnin_reject_outcomes
+        (burnin_run_id,evidence_complete,forward_label,hypothetical_net_r_after_costs,payload_json)
+        VALUES(?,?,?,?,?)""",("run",1,"SL_BEFORE_TP",-0.8,payload))
+    c.execute("""INSERT INTO expectancy_evidence
+        (campaign_id,run_id,evidence_complete,net_r,decision_time,resolved_at,source_decision_id,evidence_type)
+        VALUES(?,?,?,?,?,?,?,?)""",("camp","run",1,-0.8,"2026-09-20T17:00:00Z","2026-09-20T18:00:00Z","guided","REJECT_FORWARD"))
+    c.commit(); c.close()
+    r=report(db)
+    assert gate(r,"REJECT_FORWARD_OUTCOME_EVIDENCE")["status"]==PASS
+    assert gate(r,"EXPECTANCY_TEMPORAL_EVIDENCE")["status"]==PASS
