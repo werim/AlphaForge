@@ -250,6 +250,7 @@ def test_paper_risk_state_reconstructs_restart_and_continuation_history(tmp_path
     assert state1["trades_today_symbol"] == 2
     assert state1["daily_realized_pnl"] == pytest.approx(5.0)
     assert state1["equity"] == pytest.approx(1005.0)
+    assert state1["available_balance"] == pytest.approx(1005.0)
     assert state1["rolling_peak_equity"] == pytest.approx(1010.0)
     assert state1["rolling_drawdown_pct"] == pytest.approx(5.0 / 1010.0)
     assert state1["consecutive_loss_count"] == 1
@@ -292,6 +293,41 @@ def test_paper_risk_state_excludes_other_campaign_history(tmp_path) -> None:
     assert state["trades_today_symbol"] == 0
     assert state["trades_today_global"] == 0
     assert state["consecutive_loss_count"] == 0
+    engine.dispose()
+
+
+def test_restart_reconstructs_persisted_symbol_cooldown(tmp_path) -> None:
+    db = tmp_path / "persisted-cooldown.db"
+    campaign_id, run_id = _create_campaign(db, "p0b-persisted-cooldown")
+    _seed_trade(
+        db,
+        campaign_id=campaign_id,
+        burnin_run_id=run_id,
+        trade_id="recent-btc",
+        symbol="BTCUSDT",
+        pnl=0.0,
+        entry_minutes_ago=1.0,
+    )
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    runtime, rejects = _runtime(
+        engine,
+        campaign_id,
+        run_id,
+        symbol_cooldown_sec=120.0,
+    )
+
+    state = runtime._paper_portfolio_risk_state("BTCUSDT", now_ts=time.time())
+    assert state["risk_state_complete"] is True
+    assert state["persisted_cooldown_until"] is not None
+    assert state["persisted_cooldown_until"] > time.time()
+
+    _process(runtime, "BTCUSDT", "candidate-persisted-cooldown")
+
+    assert rejects[-1]["reason"] == "SYMBOL_COOLDOWN_ACTIVE"
+    assert (
+        rejects[-1]["portfolio_diagnostics"]["snapshot"]["symbol_cooldown_remaining_sec"]
+        > 0
+    )
     engine.dispose()
 
 
