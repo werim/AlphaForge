@@ -32,6 +32,7 @@ def main():
                 symbol="BTCUSDT", mode="PAPER", phase="ai_internal_real",
                 decision="ACCEPTED", score=.9, rr=2.0, effective_rr=1.8,
                 execution_ctx={"evidence_status":"COMPLETE"})
+            s.commit()
         mark("ACCEPT_DURABLE")
     if a.boundary=="fill_before_persistence":
         # Fill is deliberately process-local. No authoritative position/final
