@@ -3063,7 +3063,7 @@ class RuntimeOrchestrator:
                 missing.append(f"accepted_trade_lineage:{trade_id}")
             if not row_symbol:
                 missing.append(f"accepted_trade_symbol:{trade_id}")
-            if entry_dt is None:
+            if entry_dt is None or entry_dt > now_dt:
                 missing.append(f"accepted_trade_entry_time:{trade_id}")
             else:
                 if entry_dt.date() == today:
@@ -3115,6 +3115,7 @@ class RuntimeOrchestrator:
                 or closed_dt is None
                 or accepted_entry is None
                 or closed_dt < accepted_entry
+                or closed_dt > now_dt
                 or net_pnl is None
                 or not math.isfinite(net_pnl)
             ):
