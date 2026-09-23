@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Awaitable, Callable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Protocol
 
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
@@ -54,6 +54,7 @@ from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_sta
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
 from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
     normalize_mtf_execution_confirmation_mode, runtime_filter_config)
+from alphaforge.config_registry import managed_config_value
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
 from alphaforge.agents.phase_b import register_phase_b_handlers
 from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
@@ -113,6 +114,7 @@ class RuntimeConfig:
     max_correlated_positions: int = 2
     reject_unknown_portfolio_risk: bool = True
     stale_market_data_sec: float = 15.0
+    max_clock_skew_ms: int = field(default_factory=lambda: int(managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS")))
     min_rr: float = 1.20
     min_effective_rr: float = 1.10
     max_spread_pct: float = 0.0025
@@ -197,6 +199,8 @@ class RuntimeConfig:
         self.mtf_execution_confirmation_mode = normalize_mtf_execution_confirmation_mode(
             self.mtf_execution_confirmation_mode
         )
+        if int(self.max_clock_skew_ms) < 0:
+            raise ValueError("max_clock_skew_ms must be >= 0")
         if (self.mtf_execution_confirmation_mode == "SHADOW"
                 and str(getattr(self.execution_mode, "value", self.execution_mode)).upper() != "PAPER"):
             raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
@@ -3424,6 +3428,23 @@ class RuntimeOrchestrator:
         if primary and primary != "UNKNOWN":
             add(primary, None, None, "PRIMARY", "AUTHORITATIVE_PRIMARY")
 
+        market_time_evidence = payload.get("market_time_evidence")
+        if isinstance(market_time_evidence, Mapping):
+            market_time_reason = str(market_time_evidence.get("reason") or "").upper()
+            if market_time_reason in {
+                "INVALID_MARKET_TIMESTAMP",
+                "MARKET_TIMESTAMP_UNIT_MISMATCH",
+                "MARKET_TIMESTAMP_IN_FUTURE",
+                "STALE_MARKET_DATA",
+            }:
+                add(
+                    market_time_reason,
+                    market_time_evidence.get("observed"),
+                    market_time_evidence.get("reject_threshold"),
+                    str(market_time_evidence.get("comparison") or "MARKET_TIME_CONTRACT"),
+                    "MARKET_TIME_CONTRACT",
+                )
+
         score = number(payload.get("score"))
         if score is not None and score < float(self.config.min_signal_score):
             add("LOW_SCORE", score, float(self.config.min_signal_score), "<")
@@ -4033,7 +4054,113 @@ class RuntimeOrchestrator:
             )
         self.metrics.burnin_observations += 1
 
-    def _evaluate_runtime_risk(self, symbol: str, market_ctx: Mapping[str, Any]) -> str | None:
+    def _evaluate_market_timestamp(
+        self, market_ts_raw: Any, *, now: float
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Validate provider market time in canonical epoch-seconds semantics."""
+        configured_skew_ms = int(self.config.max_clock_skew_ms)
+        allowed_future_skew_sec = configured_skew_ms / 1000.0
+        stale_limit_sec = float(self.config.stale_market_data_sec)
+        evidence: dict[str, Any] = {
+            "raw_market_ts": market_ts_raw,
+            "runtime_now_sec": now,
+            "configured_max_clock_skew_ms": configured_skew_ms,
+            "allowed_future_skew_sec": allowed_future_skew_sec,
+            "stale_market_data_sec": stale_limit_sec,
+            "policy_source": "CONFIG_REGISTRY:ALPHAFORGE_MAX_CLOCK_SKEW_MS",
+            "expected_unit": "epoch_seconds",
+        }
+
+        if market_ts_raw in (None, "") or isinstance(market_ts_raw, bool):
+            evidence.update({
+                "status": "REJECT",
+                "reason": "INVALID_MARKET_TIMESTAMP",
+                "observed": market_ts_raw,
+                "reject_threshold": "FINITE_EPOCH_SECONDS",
+                "comparison": "VALID_TIMESTAMP_REQUIRED",
+            })
+            return "INVALID_MARKET_TIMESTAMP", evidence
+
+        try:
+            market_ts = float(market_ts_raw)
+        except (TypeError, ValueError):
+            evidence.update({
+                "status": "REJECT",
+                "reason": "INVALID_MARKET_TIMESTAMP",
+                "observed": str(market_ts_raw),
+                "reject_threshold": "FINITE_EPOCH_SECONDS",
+                "comparison": "VALID_TIMESTAMP_REQUIRED",
+            })
+            return "INVALID_MARKET_TIMESTAMP", evidence
+
+        evidence["market_ts_sec"] = market_ts
+        if not math.isfinite(market_ts):
+            evidence.update({
+                "status": "REJECT",
+                "reason": "INVALID_MARKET_TIMESTAMP",
+                "observed": str(market_ts_raw),
+                "reject_threshold": "FINITE_EPOCH_SECONDS",
+                "comparison": "IS_FINITE",
+            })
+            return "INVALID_MARKET_TIMESTAMP", evidence
+
+        # Detect the common seconds/milliseconds conversion error without
+        # accepting or silently normalizing it. The 100x ratio is unit-shape
+        # detection only; the allowed clock skew remains registry-authoritative.
+        milliseconds_as_seconds = market_ts / 1000.0
+        unit_detection_window_sec = max(stale_limit_sec, allowed_future_skew_sec, 1.0)
+        if (
+            now > 0.0
+            and market_ts > now * 100.0
+            and abs(milliseconds_as_seconds - now) <= unit_detection_window_sec
+        ):
+            evidence.update({
+                "status": "REJECT",
+                "reason": "MARKET_TIMESTAMP_UNIT_MISMATCH",
+                "observed": market_ts,
+                "normalized_candidate_seconds": milliseconds_as_seconds,
+                "detected_unit": "epoch_milliseconds",
+                "reject_threshold": "EPOCH_SECONDS",
+                "comparison": "UNIT_MUST_MATCH",
+            })
+            return "MARKET_TIMESTAMP_UNIT_MISMATCH", evidence
+
+        future_delta_sec = market_ts - now
+        if future_delta_sec > allowed_future_skew_sec:
+            evidence.update({
+                "status": "REJECT",
+                "reason": "MARKET_TIMESTAMP_IN_FUTURE",
+                "observed": market_ts,
+                "future_delta_sec": future_delta_sec,
+                "reject_threshold": now + allowed_future_skew_sec,
+                "comparison": "<=",
+            })
+            return "MARKET_TIMESTAMP_IN_FUTURE", evidence
+
+        age_sec = now - market_ts
+        if age_sec > stale_limit_sec:
+            evidence.update({
+                "status": "REJECT",
+                "reason": "STALE_MARKET_DATA",
+                "observed": market_ts,
+                "age_sec": age_sec,
+                "reject_threshold": now - stale_limit_sec,
+                "comparison": ">=",
+            })
+            return "STALE_MARKET_DATA", evidence
+
+        evidence.update({
+            "status": "PASS",
+            "reason": None,
+            "observed": market_ts,
+            "future_delta_sec": max(0.0, future_delta_sec),
+            "age_sec": max(0.0, age_sec),
+            "reject_threshold": now + allowed_future_skew_sec,
+            "comparison": "<=",
+        })
+        return None, evidence
+
+    def _evaluate_runtime_risk(self, symbol: str, market_ctx: MutableMapping[str, Any]) -> str | None:
         now = time.time()
         if self._reconciliation_persistence_unhealthy:
             return "RECONCILIATION_PERSISTENCE_FAILED"
@@ -4057,11 +4184,15 @@ class RuntimeOrchestrator:
             return "MAX_CONCURRENT_POSITIONS"
         if now < self._symbol_cooldown_until.get(symbol, 0.0):
             return "SYMBOL_COOLDOWN"
-        market_ts_raw = market_ctx.get("market_ts", now)
-        market_ts = float(now if market_ts_raw in (None, "") else market_ts_raw)
-        if (now - market_ts) > self.config.stale_market_data_sec:
+
+        market_time_reject, market_time_evidence = self._evaluate_market_timestamp(
+            market_ctx.get("market_ts"), now=now
+        )
+        market_ctx["market_time_evidence"] = market_time_evidence
+        if market_time_reject == "STALE_MARKET_DATA":
             self._stale_market_data_symbols.add(symbol)
-            return "STALE_MARKET_DATA"
+        if market_time_reject is not None:
+            return market_time_reject
 
         liquidity = float(market_ctx.get("volume_24h_usdt", self.config.min_liquidity_usd) or 0.0)
         if liquidity < self.config.min_liquidity_usd:
@@ -4345,6 +4476,7 @@ def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeCon
         max_symbol_notional=cfg.runtime.max_symbol_notional,
         max_daily_loss_pct=cfg.runtime.max_daily_loss_pct,
         stale_market_data_sec=cfg.runtime.stale_market_data_sec,
+        max_clock_skew_ms=cfg.runtime.max_clock_skew_ms,
         min_rr=cfg.runtime.min_rr,
         min_effective_rr=cfg.runtime.min_effective_rr,
         max_spread_pct=cfg.runtime.max_spread_pct,

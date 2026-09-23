@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import inspect
 import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -335,7 +336,7 @@ def test_runtime_exception_persists_diagnostic_error_lifecycle() -> None:
             raise ValueError("decision pipeline blew up")
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "side": "LONG", "spread_pct": 0.0001, "funding_rate_pct": 0.0, "volume_24h_usdt": 95_000_000, "volatility_pct": 0.3, "trend_strength": 0.85, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "side": "LONG", "market_ts": time.time(), "spread_pct": 0.0001, "funding_rate_pct": 0.0, "volume_24h_usdt": 95_000_000, "volatility_pct": 0.3, "trend_strength": 0.85, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -964,7 +965,7 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
             return {"status": "timeout", "order_id": "abc-1"}
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, live_trading_enabled=True, allow_live_orders=True, operator_live_acknowledged=True),
@@ -1083,7 +1084,7 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest
     monkeypatch.setattr(runtime_module, "evaluate_portfolio_risk", capture_portfolio_evidence)
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -1173,7 +1174,7 @@ def test_mtf_reject_starts_new_same_symbol_signal_after_open_position(
         diagnostics={"inputs": {
             "source_exchange": "fixture",
             "timeframe": "1m",
-            "market_ts": 99_999_999_999.0,
+            "market_ts": time.time(),
             "entry": 100.0,
             "sl": 99.0,
             "tp": 102.0,
@@ -1198,7 +1199,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
 
     async def scanner() -> list[dict]:
         return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
-                 "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0,
+                 "rr": 3.0, "side": "LONG", "market_ts": time.time(),
                  "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002,
                  "volatility_pct": 0.4, "trend_strength": 0.9,
                  "liquidity_score": 0.9, "chop_score": 0.1}]
@@ -1249,7 +1250,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
 def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing() -> None:
     rejects: list[dict] = []
     market = {"entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG",
-              "market_ts": 99_999_999_999.0, "volume_24h_usdt": 90_000_000.0,
+              "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0,
               "spread_pct": .0002, "expected_slippage_pct": .0002,
               "liquidity_score": .9}
     selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
@@ -1273,7 +1274,7 @@ def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing(
 def test_effective_rr_gate_still_rejects_before_paper_portfolio_and_execution() -> None:
     rejects: list[dict] = []
     market = {"entry": 100.0, "sl": 99.0, "tp": 101.05, "rr": 1.05, "side": "LONG",
-              "market_ts": 99_999_999_999.0, "volume_24h_usdt": 90_000_000.0,
+              "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0,
               "spread_pct": .0002, "expected_slippage_pct": .0002,
               "liquidity_score": .9}
     selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
@@ -1515,7 +1516,7 @@ def test_live_precheck_uses_paper_decision_pipeline_and_does_not_submit(tmp_path
     async def scanner() -> list[dict]:
         return [{
             "symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
-            "rr": 3.0, "side": "LONG", "market_ts": 9999999999.0,
+            "rr": 3.0, "side": "LONG", "market_ts": time.time(),
             "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0,
             "volume_24h_usdt": 90_000_000,
             "spread_pct": 0.0002, "spread_status": "MEASURED",
