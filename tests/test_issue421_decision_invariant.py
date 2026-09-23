@@ -49,7 +49,12 @@ def _surface(**overrides):
 def test_each_protected_dimension_is_fail_closed(field, value):
     reference = _surface()
     drifted = _surface(**{field: value})
-    with pytest.raises(ValueError, match="DECISION_PARITY_MISMATCH"):
+    expected_error = (
+        "DECISION_PARITY_EVIDENCE_INCOMPLETE"
+        if field == "execution_evidence_status" and value == "INCOMPLETE"
+        else "DECISION_PARITY_MISMATCH"
+    )
+    with pytest.raises(ValueError, match=expected_error):
         assert_pre_submit_invariant_parity(reference, drifted)
 
 
