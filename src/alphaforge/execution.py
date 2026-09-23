@@ -757,7 +757,7 @@ def evaluate_execution_safety(
     """
     t = dict(thresholds or {})
     model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
-    evidence_status = classify_execution_evidence(
+    raw_evidence_status = classify_execution_evidence(
         execution_ctx, require_measured=require_measured
     )
 
@@ -854,6 +854,23 @@ def evaluate_execution_safety(
         ):
             fake_zero_fields.append(field)
 
+    active_statuses = [
+        str(execution_ctx.get(status_keys[field], "") or "").upper()
+        for field in critical_fields
+    ]
+    if fake_zero_fields:
+        evidence_status = EXECUTION_EVIDENCE_INVALID_FAKE_ZERO
+    elif missing_fields:
+        evidence_status = EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+    elif require_measured:
+        evidence_status = EXECUTION_EVIDENCE_COMPLETE_MEASURED
+    elif any(status in ESTIMATED_STATUSES for status in active_statuses):
+        evidence_status = EXECUTION_EVIDENCE_PARTIAL_ESTIMATED
+    elif active_statuses and all(status in MEASURED_STATUSES for status in active_statuses):
+        evidence_status = EXECUTION_EVIDENCE_COMPLETE_MEASURED
+    else:
+        evidence_status = raw_evidence_status
+
     spread = number("spread_pct")
     slippage = number("expected_slippage_pct")
     fee = number("fee_pct")
@@ -938,6 +955,7 @@ def evaluate_execution_safety(
         "all_failed_gates": list(failed),
         "failed_gate_evidence": evidence,
         "execution_evidence_status": evidence_status,
+        "raw_execution_evidence_status": raw_evidence_status,
         "missing_fields": sorted(set(missing_fields)),
         "fake_zero_fields": sorted(set(fake_zero_fields)),
         "total_explicit_cost_pct": total_explicit_cost,
