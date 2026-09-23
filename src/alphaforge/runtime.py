@@ -2989,13 +2989,17 @@ class RuntimeOrchestrator:
         try:
             with engine.connect() as conn:
                 accepted_rows = conn.execute(text("""
-                    SELECT trade_id,symbol,entry_time,status
-                    FROM burnin_pending_position_outcomes
-                    WHERE campaign_id=:campaign_id
-                    ORDER BY entry_time,id
+                    SELECT p.trade_id,p.burnin_run_id,p.symbol,p.entry_time,p.status,
+                           cr.campaign_id AS lineage_campaign_id
+                    FROM burnin_pending_position_outcomes p
+                    LEFT JOIN burnin_campaign_runs cr
+                      ON cr.campaign_id=p.campaign_id
+                     AND cr.burnin_run_id=p.burnin_run_id
+                    WHERE p.campaign_id=:campaign_id
+                    ORDER BY p.entry_time,p.id
                 """), {"campaign_id": campaign_id}).mappings().all()
                 outcome_rows = conn.execute(text("""
-                    SELECT t.trade_id,t.symbol,t.closed_at,t.net_pnl,
+                    SELECT t.trade_id,t.burnin_run_id,t.symbol,t.closed_at,t.net_pnl,
                            t.exit_reason,t.evidence_complete
                     FROM burnin_trade_outcomes t
                     JOIN burnin_campaign_runs cr
@@ -3028,6 +3032,10 @@ class RuntimeOrchestrator:
         today = now_dt.date()
         symbol_u = str(symbol or "").upper()
         accepted_ids: set[str] = set()
+        accepted_status_by_trade: dict[str, str] = {}
+        accepted_symbol_by_trade: dict[str, str] = {}
+        accepted_run_by_trade: dict[str, str] = {}
+        accepted_entry_by_trade: dict[str, datetime | None] = {}
         closed_pending_ids: set[str] = set()
         trades_today_global = 0
         trades_today_symbol = 0
@@ -3045,6 +3053,14 @@ class RuntimeOrchestrator:
                 missing.append(f"duplicate_accepted_trade:{trade_id}")
                 continue
             accepted_ids.add(trade_id)
+            burnin_run_id = str(row.get("burnin_run_id") or "")
+            lineage_campaign_id = str(row.get("lineage_campaign_id") or "")
+            accepted_status_by_trade[trade_id] = status
+            accepted_symbol_by_trade[trade_id] = row_symbol
+            accepted_run_by_trade[trade_id] = burnin_run_id
+            accepted_entry_by_trade[trade_id] = entry_dt
+            if lineage_campaign_id != str(campaign_id):
+                missing.append(f"accepted_trade_lineage:{trade_id}")
             if not row_symbol:
                 missing.append(f"accepted_trade_symbol:{trade_id}")
             if entry_dt is None:
@@ -3084,12 +3100,21 @@ class RuntimeOrchestrator:
                 net_pnl = float(row.get("net_pnl"))
             except (TypeError, ValueError):
                 net_pnl = None
+            accepted_entry = accepted_entry_by_trade.get(trade_id)
+            accepted_symbol = accepted_symbol_by_trade.get(trade_id)
+            accepted_run = accepted_run_by_trade.get(trade_id)
+            outcome_run = str(row.get("burnin_run_id") or "")
             if (
                 not trade_id
                 or trade_id not in accepted_ids
                 or trade_id in outcome_ids
+                or accepted_status_by_trade.get(trade_id) != "CLOSED"
+                or accepted_symbol != row_symbol
+                or accepted_run != outcome_run
                 or not evidence_complete
                 or closed_dt is None
+                or accepted_entry is None
+                or closed_dt < accepted_entry
                 or net_pnl is None
                 or not math.isfinite(net_pnl)
             ):
