@@ -566,6 +566,14 @@ def test_executed_paper_trade_updates_persisted_daily_count_before_next_decision
     assert row is not None
 
     with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE burnin_pending_position_outcomes "
+                "SET entry_time=:entry_time, decision_time=:entry_time "
+                "WHERE trade_id=:trade_id"
+            ),
+            {"entry_time": _iso(1.0), "trade_id": str(row[0])},
+        )
         resolve_position_closure(
             conn,
             trade_id=str(row[0]),
