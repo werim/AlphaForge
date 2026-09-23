@@ -74,6 +74,11 @@ Current reject families include:
 
 The canonical execution-safety contract records both a **primary reject reason** and **`all_failed_gates` / failed-gate evidence** when multiple execution gates fail together. Thresholds and their observed values are persisted with the evidence; do not infer current thresholds from this README.
 
+Supplied numeric execution evidence must be finite and non-boolean. NaN, infinities,
+malformed numbers and booleans fail with `EXECUTION_CONTEXT_UNAVAILABLE`, even when
+missing-context rejection is disabled. Invalid effective RR fails `LOW_EFFECTIVE_RR`
+and remains unavailable in the safety result rather than becoming numeric zero.
+
 ## Evidence Model
 
 AlphaForge treats SQL-backed evidence as the source of truth. CSVs, dashboards and reports are derived views.

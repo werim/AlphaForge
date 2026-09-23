@@ -815,6 +815,8 @@ def evaluate_execution_safety(
 
     def number(field: str) -> float | None:
         value = execution_ctx.get(field)
+        if isinstance(value, bool):
+            return None
         if value in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
             return None
         try:
@@ -879,6 +881,19 @@ def evaluate_execution_safety(
         if unavailable_value or unavailable_status or not_measured:
             missing_fields.append(field)
 
+    # A supplied invalid number is corrupt evidence, even when missing-context
+    # policy is relaxed. Status labels cannot make NaN/Infinity measurable.
+    invalid_numeric_fields = [
+        field for field in (
+            "spread_pct", "expected_slippage_pct", "latency_ms",
+            "liquidity_score", "funding_rate_pct", "fee_pct", "orderbook_imbalance",
+        )
+        if execution_ctx.get(field) not in (
+            None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"
+        ) and number(field) is None
+    ]
+    missing_fields.extend(invalid_numeric_fields)
+
     fake_zero_fields: list[str] = []
     zero_sensitive_fields = [
         "spread_pct",
@@ -926,7 +941,10 @@ def evaluate_execution_safety(
     try:
         effective = float(effective_rr)
     except (TypeError, ValueError):
-        effective = 0.0
+        effective = None
+    if (isinstance(effective_rr, bool) or effective != effective
+            or effective in {float("inf"), float("-inf")}):
+        effective = None
     total_explicit_cost = round(
         sum(abs(value) for value in (spread, slippage, fee, funding) if value is not None),
         10,
@@ -946,7 +964,7 @@ def evaluate_execution_safety(
             "source": "EXECUTION_SAFETY_CONTRACT",
         })
 
-    if reject_unknown and missing_fields:
+    if (reject_unknown and missing_fields) or invalid_numeric_fields:
         fail(
             "EXECUTION_CONTEXT_UNAVAILABLE",
             sorted(set(missing_fields)),
@@ -979,8 +997,9 @@ def evaluate_execution_safety(
         )
     if funding is not None and abs(funding) > max_funding:
         fail("FUNDING_TOO_HIGH", abs(funding), max_funding, ">")
-    if effective < float(min_effective_rr):
-        fail("LOW_EFFECTIVE_RR", effective, float(min_effective_rr), "<")
+    if effective is None or effective < float(min_effective_rr):
+        fail("LOW_EFFECTIVE_RR", effective, float(min_effective_rr),
+             "FINITE_RR_REQUIRED" if effective is None else "<")
 
     priority = (
         "EXECUTION_CONTEXT_UNAVAILABLE",
@@ -1006,7 +1025,7 @@ def evaluate_execution_safety(
         "fake_zero_fields": sorted(set(fake_zero_fields)),
         "total_explicit_cost_pct": total_explicit_cost,
         "volatility_penalty": model.volatility_penalty,
-        "effective_rr": round(effective, 6),
+        "effective_rr": None if effective is None else round(effective, 6),
         "min_effective_rr": float(min_effective_rr),
         "require_measured": bool(require_measured),
     }

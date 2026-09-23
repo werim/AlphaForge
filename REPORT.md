@@ -1,3 +1,23 @@
+# Non-finite execution evidence fail-open repair — 2026-09-24
+
+## Why / root cause
+
+During #421 P2-B inspection, direct safety evaluation accepted NaN/infinite effective RR and invalid spread/liquidity/funding numbers. PAPER `_process_symbol()` also executed with NaN spread, liquidity or funding. Missing-field detection trusted presence/status labels while numeric parsing returned None, silently bypassing comparisons. NaN effective RR also bypassed the minimum comparison.
+
+## Change and evidence
+
+`src/alphaforge/execution.py` now identifies supplied invalid numeric fields independently of missing-context policy, records them as unavailable, and rejects using EXECUTION_CONTEXT_UNAVAILABLE. Invalid effective RR returns None and LOW_EFFECTIVE_RR with FINITE_RR_REQUIRED comparison evidence. Valid numeric thresholds, scoring, cost formulas and authorization are unchanged. Optional absent fields keep their prior policy; optional supplied corrupt numbers now reject.
+
+`tests/test_issue421_execution_safety.py` adds 80 regression cases: numeric field/value/policy combinations, invalid RR, real PAPER process-symbol rejects, and an isolated SQLite run using the real lifecycle writer. The first 79 cases failed before the repair. Persistence regression verifies canonical REJECT decision evidence, unavailable-field attribution, and SIGNAL_CREATED -> SIGNAL_REJECTED without order placement.
+
+Other files changed: `README.md`, `docs/execution_cost_semantics.md`, `VERSION.md`, `REPORT.md`, `CHANGELOG.md`. Canonical SQL and lifecycle docs were inspected; their schema/state contracts need no changes.
+
+## Validation / impact
+
+121 focused execution-safety tests and 299 adjacent execution, RR geometry, parity, runtime, persistence, CSV and backtest tests passed. Compileall and diff whitespace checks passed. No schema/CSV shape change, migration, DB/evidence artifact mutation or historical backfill. Compatibility change: invalid RR safety-result values are None instead of zero/NaN/infinity; corrupt supplied numeric evidence rejects even under relaxed missing-context policy.
+
+Remaining limitations: this patch hardens the canonical PAPER/LIVE_PRECHECK evaluator, not every numeric normalizer or mode. Raw diagnostic payloads can still retain non-finite input; finite configuration threshold validation is separate follow-up. No LIVE enablement. Push recommendation: CHATGPT only, then require CI for the new exact SHA before continuing. Previous prerequisite b711ca7 passed run 35920220623; it does not qualify this patch.
+
 # CHATGPT CI trigger repair — 2026-09-24
 
 The current Tests workflow excluded CHATGPT pushes, preventing automatic exact-commit qualification for the required development branch. Added CHATGPT to its push trigger without changing existing branch triggers or test jobs.

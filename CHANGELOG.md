@@ -1,3 +1,18 @@
+# Invalid execution-number safety repair — 2026-09-24
+
+### Added
+- 80 regressions for corrupt execution numbers, invalid RR, PAPER rejection and SQLite/lifecycle evidence.
+### Changed
+- Supplied invalid numeric evidence blocks even when missing-context policy is relaxed.
+### Fixed
+- NaN/infinity and malformed numbers bypassing execution gates; invalid effective RR bypassing its minimum gate.
+### Removed
+- Fabricated zero fallback for invalid effective RR in the safety evaluator.
+### Breaking Changes
+- Invalid safety-result effective RR is None; valid input behavior and schema are unchanged.
+### Known Issues
+- Other numeric consumers and threshold configuration require separate audit. P2-B remains open; LIVE NOT READY.
+
 # CHATGPT CI trigger repair — 2026-09-24
 
 ### Added

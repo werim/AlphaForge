@@ -136,6 +136,84 @@ def test_execution_safety_complete_context_passes_without_recomputing_geometry()
     assert result["all_failed_gates"] == []
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "bad", True])
+@pytest.mark.parametrize("field", [
+    "spread_pct", "expected_slippage_pct", "latency_ms", "liquidity_score",
+    "funding_rate_pct", "fee_pct", "orderbook_imbalance",
+])
+@pytest.mark.parametrize("reject_unknown", [True, False])
+def test_invalid_numeric_execution_evidence_never_passes(field, value, reject_unknown):
+    result = evaluate_execution_safety(
+        _execution_ctx(**{field: value}), effective_rr=9.0, min_effective_rr=1.1,
+        thresholds=_thresholds(REJECT_UNKNOWN_EXECUTION_CONTEXT=reject_unknown),
+    )
+    assert result["accepted"] is False
+    assert result["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+    assert field in result["missing_fields"]
+    assert result["execution_evidence_status"] == "UNAVAILABLE_BLOCKING"
+
+
+@pytest.mark.parametrize("value", [None, "bad", True, float("nan"), float("inf"), float("-inf")])
+def test_invalid_effective_rr_is_unavailable_and_rejected(value):
+    result = evaluate_execution_safety(
+        _execution_ctx(), effective_rr=value, min_effective_rr=1.1,
+        thresholds=_thresholds(),
+    )
+    assert result["accepted"] is False
+    assert "LOW_EFFECTIVE_RR" in result["all_failed_gates"]
+    assert result["effective_rr"] is None
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize("field", ["spread_pct", "liquidity_score", "funding_rate_pct"])
+def test_paper_runtime_rejects_nonfinite_execution_evidence(field):
+    runtime, rejects = _run_paper(_market(**{field: float("nan")}))
+    assert runtime.metrics.executions == 0
+    assert rejects[-1]["reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+    assert field in rejects[-1]["execution_safety"]["missing_fields"]
+
+
+def test_nonfinite_runtime_reject_persists_unavailable_evidence_and_lifecycle(tmp_path):
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'invalid-execution.db'}")
+
+    def persist_event(event):
+        with Session(engine) as session:
+            assert save_trade_lifecycle_event(
+                session, signal_id=event["signal_id"], symbol=event["symbol"],
+                mode=event["mode"], lifecycle_state=event["lifecycle_state"],
+                previous_lifecycle_state=event["previous_lifecycle_state"],
+                event_ts=event["timestamp"], payload=event["details"],
+                reject_reason=event["details"].get("reason"),
+                execution_ctx=event["details"].get("execution_ctx", {}),
+            )
+            session.commit()
+
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_AlwaysAcceptBrain(), market_scanner=None,
+        persistence_engine=engine, scanner_source="FIXTURE",
+        on_lifecycle_event=persist_event,
+    )
+    market = _market(liquidity_score=float("nan"))
+    asyncio.run(runtime._process_symbol(SimpleNamespace(
+        symbol="BTCUSDT", diagnostics={"inputs": market},
+    )))
+    assert runtime.metrics.executions == 0
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT decision, reject_reason, unavailable_fields "
+            "FROM decision_evidence WHERE lifecycle_state_after='SIGNAL_REJECTED'"
+        )).mappings().one()
+        assert row["decision"] == "REJECT"
+        assert row["reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+        assert "liquidity_score" in json.loads(row["unavailable_fields"])
+        states = conn.execute(text(
+            "SELECT lifecycle_state FROM trade_lifecycle_events ORDER BY id"
+        )).scalars().all()
+        assert states == ["SIGNAL_CREATED", "SIGNAL_REJECTED"]
+    engine.dispose()
+
+
 @pytest.mark.parametrize(
     ("changes", "effective_rr", "expected_gate"),
     [

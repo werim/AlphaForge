@@ -105,6 +105,16 @@ realized evidence unavailable.
 
 ## Fees and other costs
 
+The pre-submit `evaluate_execution_safety()` contract rejects supplied non-finite,
+malformed or boolean spread, slippage, latency, liquidity, funding, fee and orderbook
+numbers as `EXECUTION_CONTEXT_UNAVAILABLE`. Their names appear in `missing_fields`
+and the active evidence status is `UNAVAILABLE_BLOCKING`. This invalid-input guard
+also applies when `REJECT_UNKNOWN_EXECUTION_CONTEXT` is false; that option only
+relaxes missing evidence, not corrupt supplied numbers. Optional absent fields keep
+their existing policy. Invalid effective RR is returned as `None` and rejected with
+`LOW_EFFECTIVE_RR` and `FINITE_RR_REQUIRED` evidence. Valid finite inputs and all
+configured thresholds retain their existing behavior.
+
 Fees, funding, spread assumptions, latency penalties, liquidity penalties, and
 volatility penalties remain independently attributable.
 

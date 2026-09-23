@@ -1,3 +1,12 @@
+# Invalid execution-number safety repair — 2026-09-24
+
+- Current phase: #421 audit / P2-B preparation; reproduced numeric fail-open repaired before mutation work.
+- Runtime maturity: canonical safety evaluation blocks NaN, infinities, malformed numeric strings and booleans; invalid effective RR remains unavailable and rejects.
+- Alignment/lifecycle: PAPER and LIVE_PRECHECK share the repaired guard; invalid PAPER evidence reaches SIGNAL_REJECTED without execution. Other mode paths are unchanged; this is not full numeric hardening of BACKTEST/LIVE.
+- Persistence/execution realism: existing unavailable-field and reject evidence used; no schema/export migration, historical rewrite or campaign mutation.
+- Validation: 121 focused and 299 adjacent tests passed; compileall/diff checks passed. Preceding CI prerequisite b711ca7 passed exact-head CI; this patch still requires its own pushed CI.
+- Known risks: other numeric consumers/normalizers and configuration thresholds need separate audit; P2-B and release qualification remain incomplete. LIVE NOT READY. Last audit: 2026-09-24.
+
 # CHATGPT exact-commit CI prerequisite — 2026-09-24
 
 - Current phase: #421 P2-B preparation; existing Tests workflow now includes CHATGPT pushes.
