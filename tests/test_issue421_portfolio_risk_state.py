@@ -534,7 +534,7 @@ def test_incomplete_realized_history_fails_closed_as_unknown_portfolio_risk(tmp_
     engine.dispose()
 
 
-@pytest.mark.parametrize("drift_kind", ["FOREIGN_RUN", "OPEN_WITH_REALIZED_OUTCOME", "FUTURE_CLOSED"])
+@pytest.mark.parametrize("drift_kind", ["FOREIGN_RUN", "OPEN_WITH_REALIZED_OUTCOME", "FUTURE_CLOSED", "CLOSED_PENDING_INCOMPLETE"])
 def test_paper_risk_state_fails_closed_on_persisted_lineage_or_status_drift(
     tmp_path,
     drift_kind: str,
@@ -572,7 +572,7 @@ def test_paper_risk_state_fails_closed_on_persisted_lineage_or_status_drift(
             "UPDATE burnin_pending_position_outcomes "
             "SET status='OPEN' WHERE trade_id='drifted-trade'"
         )
-    else:
+    elif drift_kind == "FUTURE_CLOSED":
         future_close = (
             datetime.now(timezone.utc) + timedelta(minutes=5)
         ).isoformat().replace("+00:00", "Z")
@@ -580,6 +580,11 @@ def test_paper_risk_state_fails_closed_on_persisted_lineage_or_status_drift(
             "UPDATE burnin_trade_outcomes "
             "SET closed_at=? WHERE trade_id='drifted-trade'",
             (future_close,),
+        )
+    else:
+        conn.execute(
+            "UPDATE burnin_pending_position_outcomes "
+            "SET evidence_complete=0 WHERE trade_id='drifted-trade'"
         )
     conn.commit()
     conn.close()
