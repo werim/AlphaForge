@@ -385,11 +385,14 @@ class AIBrain:
             runtime_mode = str(signal.get("mode") or market_ctx.get("mode") or "BACKTEST").upper()
             execution_ctx = market_ctx.get("execution_ctx") if isinstance(market_ctx.get("execution_ctx"), Mapping) else {}
             raw_rr = float(signal.get("risk_reward", signal.get("rr", 0.0)) or 0.0)
-            effective_rr_raw = market_ctx.get("effective_rr", raw_rr)
-            try:
-                canonical_effective_rr = float(effective_rr_raw)
-            except (TypeError, ValueError):
-                canonical_effective_rr = raw_rr
+            effective_rr_raw = market_ctx.get("effective_rr")
+            if effective_rr_raw in (None, "", "UNKNOWN", "UNAVAILABLE"):
+                canonical_effective_rr = None
+            else:
+                try:
+                    canonical_effective_rr = float(effective_rr_raw)
+                except (TypeError, ValueError):
+                    canonical_effective_rr = None
             execution_ctx_missing = execution_context_is_unavailable(execution_ctx)
             session.execute(
                 text(
