@@ -1,3 +1,19 @@
+# #421 P2-C seeded safety properties — 2026-09-24
+
+### Added
+- Reproducible property tests for geometry, partial fills, costs, time and identity.
+### Changed
+- Weighted fills use scaled finite arithmetic; overflowing executable RR fails closed as zero.
+### Fixed
+- NaN weighted fills from large finite rows and infinite RR from extreme positive-risk geometry.
+- Boolean fill price/quantity accepted as numeric one.
+### Removed
+- None.
+### Breaking Changes
+- Boolean fill evidence now rejects; unrepresentable RR no longer propagates infinity. Schema/exports unchanged.
+### Known Issues
+- Seeded tests are bounded. Full-chain replay, load and final release qualification remain; LIVE NOT READY.
+
 # #421 P2-B targeted safety mutation gate — 2026-09-24
 
 ### Added

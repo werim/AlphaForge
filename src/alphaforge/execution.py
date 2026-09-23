@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Any, Mapping
 
 EXECUTION_EVIDENCE_COMPLETE_MEASURED = "COMPLETE_MEASURED"
@@ -70,6 +71,8 @@ _EXECUTION_COST_PROVENANCE = {
 
 
 def _finite_positive_price(value: Any, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite positive price")
     try:
         price = float(value)
     except (TypeError, ValueError) as exc:
@@ -217,17 +220,26 @@ def weighted_average_fill_price(fills: Any) -> float | None:
     rows = list(fills or [])
     if not rows:
         return None
-    total_quantity = 0.0
-    total_notional = 0.0
+    prices: list[float] = []
+    quantities: list[float] = []
     for row in rows:
         if not isinstance(row, Mapping):
             raise ValueError("fill evidence must be a mapping")
         price = _finite_positive_price(row.get("price"), field="fill.price")
         quantity = _finite_positive_price(
             row.get("qty", row.get("quantity")), field="fill.qty")
-        total_quantity += quantity
-        total_notional += price * quantity
-    return total_notional / total_quantity
+        prices.append(price)
+        quantities.append(quantity)
+    # Scale both factors before summing: finite price*quantity and quantity
+    # values can overflow even when their weighted mean is finite.
+    price_scale = max(prices)
+    quantity_scale = max(quantities)
+    weights = [quantity / quantity_scale for quantity in quantities]
+    weighted_ratio = math.fsum(
+        (price / price_scale) * weight for price, weight in zip(prices, weights)
+    ) / math.fsum(weights)
+    return _finite_positive_price(
+        price_scale * min(weighted_ratio, 1.0), field="weighted_fill")
 
 
 def execution_cost_semantics_from_record(

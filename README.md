@@ -179,16 +179,17 @@ The repository uses `pytest` for unit, persistence, integration-style and produc
 The [targeted safety mutation gate](docs/safety_mutation_testing.md) runs in the
 `Tests` workflow. It verifies named production safety guards against disposable
 source mutations and reports assertion-backed results for the current commit.
+Seeded property tests cover geometry, partial fills, adverse costs, time bounds
+and campaign/run/release identity with reproducible case sequences.
 
 Not all desired full-system verification families are complete. [#421](https://github.com/werim/AlphaForge/issues/421) currently tracks:
 
-- property/fuzz coverage for geometry, time, execution costs and identity;
 - deterministic full-chain replay;
 - bounded load/performance qualification;
 - fresh exact-head FAST plus public 6h SOAK release evidence.
 
-The SQLite contention, real crash/restart, golden-scenario-pack and targeted
-mutation families have dedicated tests. The golden pack freezes scenario
+The SQLite contention, real crash/restart, golden-scenario-pack, targeted
+mutation and seeded property families have dedicated tests. The golden pack freezes scenario
 expectations; full-chain deterministic execution replay remains P2-D work.
 
 ## Repository Navigation

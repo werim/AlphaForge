@@ -103,6 +103,16 @@ weighted_fill = sum(price_i * quantity_i) / sum(quantity_i)
 Invalid/non-positive fill rows are not converted to zero. Missing fill ledgers leave
 realized evidence unavailable.
 
+The weighted mean scales price and quantity before summing, so individually
+finite fills cannot overflow the intermediate notional or total quantity into
+`inf/inf`. A result that still cannot be represented as a finite positive
+price fails validation. Boolean price or quantity values are invalid evidence.
+
+Executable raw RR from expected-fill geometry must also be finite. A
+positive-risk geometry whose reward/risk quotient overflows returns `0.0` at
+that boundary, so it cannot pass the minimum effective-RR gate on an infinite
+value.
+
 ## Fees and other costs
 
 The pre-submit `evaluate_execution_safety()` contract rejects supplied non-finite,

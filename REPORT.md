@@ -1,3 +1,17 @@
+# #421 P2-C deterministic safety properties — 2026-09-24
+
+## Why / root cause
+
+Valid finite partial-fill price and quantity values could overflow both notional and total quantity, producing NaN for the weighted fill. A valid positive-risk but extreme geometry could produce infinite executable RR. Boolean fill price/quantity was accepted as numeric one. These cases violate finite execution evidence and could contaminate downstream decisions.
+
+## Change / behavior
+
+`src/alphaforge/execution.py` now rejects boolean prices/quantities and computes the weighted fill after scaling finite prices and quantities; a still-unrepresentable result fails validation. `src/alphaforge/runtime.py` converts an overflowing reward/risk quotient to 0.0, which fails the existing minimum effective-RR gate. Thresholds, score, cost formulas and LIVE authorization are unchanged. `tests/test_issue421_safety_properties.py` uses fixed seeds to check LONG/SHORT geometry, adverse fill and cost monotonicity, partial-fill order/split invariance and quantity, future/pre-decision candle exclusion, and isolated SQL run/campaign/release scope. Four new cases failed before the fix. `docs/execution_cost_semantics.md`, `docs/safety_mutation_testing.md`, README, VERSION, REPORT and CHANGELOG reflect current behavior.
+
+## Validation / impact
+
+9 property tests, 167 focused execution/geometry/identity regressions and 238 adjacent runtime/backtest/execution tests passed. The existing mutation gate remained 25/25 KILLED, with no survivors/errors. Compileall and diff checks passed. No schema/CSV shape, migration, lifecycle ordering, historical-data rewrite or active campaign mutation. Compatibility: boolean fill evidence now rejects; extreme previously NaN weighted fills become finite when representable; overflowing executable RR becomes 0.0. Remaining limitations: deterministic bounded samples are not exhaustive, and direct numeric consumers outside these contracts need separate audit. P2-D replay, P2-E load and P1-E exact-commit release evidence remain. LIVE remains NOT READY. Push recommendation: CHATGPT only, then qualify exact SHA in CI.
+
 # #421 P2-B targeted safety mutation gate — 2026-09-24
 
 ## Why / root cause

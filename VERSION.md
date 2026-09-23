@@ -1,3 +1,10 @@
+# #421 P2-C seeded safety properties — 2026-09-24
+
+- Current phase: P2-C deterministic property contracts for geometry, partial fills, cost monotonicity, time boundaries, and run/campaign/release identity. P2-B exact-head CI passed on b3800e8; this patch still needs its own exact-head CI.
+- Runtime maturity/alignment: extreme finite fill ledgers now return finite weighted means; boolean fill price/quantity is rejected. Unrepresentable executable RR returns 0.0 and cannot pass the effective-RR gate. Ordinary finite geometry, costs, thresholds and mode policies are unchanged; LIVE remains disabled.
+- Lifecycle/persistence: no state ordering, schema, export, migration, campaign or historical evidence change. The property suite uses isolated in-memory SQL and frozen timestamps.
+- Validation: 9 property tests, 167 focused and 238 adjacent regressions passed; the existing mutation gate remained 25/25 KILLED, with no survivors/errors. Compileall/diff checks passed. Known risks: this is bounded seeded coverage, not exhaustive proof. P2-D replay, P2-E load and P1-E release qualification remain. LIVE NOT READY. Last audit: 2026-09-24.
+
 # #421 P2-B targeted safety mutation gate — 2026-09-24
 
 - Current phase: P2-B focused mutation qualification; 25 named source mutations and 14 baseline test nodes passed locally (25 KILLED, 0 SURVIVED, 0 ERROR). Another 252 related regressions, compileall and diff checks passed. Exact pushed CI for this change is pending.

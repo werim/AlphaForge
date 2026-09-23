@@ -1582,7 +1582,8 @@ class RuntimeOrchestrator:
             return None
         if risk_distance <= 0 or reward_distance <= 0:
             return 0.0
-        return reward_distance / risk_distance
+        executable_rr = reward_distance / risk_distance
+        return executable_rr if math.isfinite(executable_rr) else 0.0
 
     def _expected_fill_price(self, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float | None, float | None]:
         try:
