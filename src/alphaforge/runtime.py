@@ -2253,15 +2253,16 @@ class RuntimeOrchestrator:
         effective_rr = float(rr_metrics["effective_rr"] or 0.0)
         market_ctx.update(rr_metrics)
         execution_safety = None
-        if self.config.execution_mode is not ExecutionMode.BACKTEST:
+        if self.config.execution_mode in {
+            ExecutionMode.PAPER,
+            ExecutionMode.LIVE_PRECHECK,
+        }:
             execution_safety = evaluate_execution_safety(
                 execution_ctx,
                 effective_rr=effective_rr,
                 min_effective_rr=self.config.min_effective_rr,
                 thresholds=self._canonical_filter_config(),
-                require_measured=self.config.execution_mode in {
-                    ExecutionMode.LIVE_PRECHECK, ExecutionMode.LIVE
-                },
+                require_measured=self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
             )
             execution_ctx = {
                 **execution_ctx,
