@@ -487,6 +487,60 @@ def test_incomplete_realized_history_fails_closed_as_unknown_portfolio_risk(tmp_
     engine.dispose()
 
 
+@pytest.mark.parametrize("drift_kind", ["FOREIGN_RUN", "OPEN_WITH_REALIZED_OUTCOME"])
+def test_paper_risk_state_fails_closed_on_persisted_lineage_or_status_drift(
+    tmp_path,
+    drift_kind: str,
+) -> None:
+    db = tmp_path / f"risk-drift-{drift_kind.lower()}.db"
+    campaign_id, run_id = _create_campaign(db, f"p0b-risk-drift-{drift_kind.lower()}")
+    _seed_trade(
+        db,
+        campaign_id=campaign_id,
+        burnin_run_id=run_id,
+        trade_id="drifted-trade",
+        symbol="ETHUSDT",
+        pnl=-5.0,
+        entry_minutes_ago=10,
+    )
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    if drift_kind == "FOREIGN_RUN":
+        foreign = create_campaign(
+            conn,
+            release_id="p0b-risk-drift-foreign",
+            duration_days=1,
+            symbols=["ETHUSDT"],
+            intervals=["1m"],
+        )
+        foreign_run = start_or_resume_campaign(conn, foreign.campaign_id)["burnin_run_id"]
+        conn.execute(
+            "UPDATE burnin_pending_position_outcomes "
+            "SET burnin_run_id=? WHERE trade_id='drifted-trade'",
+            (foreign_run,),
+        )
+    else:
+        conn.execute(
+            "UPDATE burnin_pending_position_outcomes "
+            "SET status='OPEN' WHERE trade_id='drifted-trade'"
+        )
+    conn.commit()
+    conn.close()
+
+    engine = init_db(f"sqlite+pysqlite:///{db}")
+    runtime, rejects = _runtime(engine, campaign_id, run_id)
+    state = runtime._paper_portfolio_risk_state("BTCUSDT", now_ts=time.time())
+
+    assert state["risk_state_complete"] is False
+    assert state["risk_state_missing_fields"]
+
+    _process(runtime, "BTCUSDT", f"candidate-{drift_kind.lower()}")
+
+    assert rejects[-1]["reason"] == "UNKNOWN_PORTFOLIO_RISK"
+    engine.dispose()
+
+
 def test_executed_paper_trade_updates_persisted_daily_count_before_next_decision(tmp_path) -> None:
     db = tmp_path / "accepted-count.db"
     campaign_id, run_id = _create_campaign(db, "p0b-accepted-count")
