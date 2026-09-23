@@ -33,6 +33,16 @@ def test_p2a_each_frozen_fixture_declares_complete_chain(name):
     assert fixture["frozen_market_event"]["closed_candle"] is True
     assert fixture["expected"]["full_chain"] == CHAIN
     assert fixture["expected"]["decision"] in {"ACCEPT", "REJECT"}
+    expected = fixture["expected"]
+    for field in (
+        "failed_gates", "geometry_status", "expected_fill_status",
+        "effective_rr_status", "portfolio_state", "persistence",
+        "resolver", "readiness", "audit",
+    ):
+        assert field in expected, f"{name}: missing frozen full-chain field {field}"
+    assert isinstance(expected["failed_gates"], list)
+    if expected["decision"] == "REJECT":
+        assert expected["failed_gates"], f"{name}: rejected golden must name its failed gate(s)"
 
 
 @pytest.mark.parametrize("name", REQUIRED)
