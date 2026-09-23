@@ -46,6 +46,7 @@ def execution_context_is_unavailable(execution_ctx: Mapping[str, Any] | None) ->
         "UNAVAILABLE",
         "UNAVAILABLE_BACKTEST",
         EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING,
+        EXECUTION_EVIDENCE_INVALID_FAKE_ZERO,
         "NULL",
     }
 
