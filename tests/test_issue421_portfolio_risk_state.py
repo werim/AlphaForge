@@ -279,7 +279,7 @@ def test_paper_risk_state_excludes_other_campaign_history(tmp_path) -> None:
         burnin_run_id=bad_run,
         trade_id="foreign-loss",
         symbol="BTCUSDT",
-        pnl=-500.0,
+        pnl=-50.0,
         entry_minutes_ago=10,
     )
 
