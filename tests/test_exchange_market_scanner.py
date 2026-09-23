@@ -6,10 +6,14 @@ from urllib import request
 
 import pytest
 
-from alphaforge.config import load_config_from_env
+from alphaforge.config import load_config_from_env, runtime_filter_config
 from alphaforge.exchange_market_scanner import (_binance_kline_geometry, _fetch_json_with_latency,
     enrich_selected_market_geometry, scan_exchange_markets)
-from alphaforge.execution import build_execution_context, build_execution_cost_model
+from alphaforge.execution import (
+    build_execution_context,
+    build_execution_cost_model,
+    evaluate_execution_safety,
+)
 from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
 
 
@@ -90,6 +94,59 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
     assert btc["market_data_latency_source"] == "BINANCE_PUBLIC_HTTP_RTT"
 
 
+def test_binance_missing_funding_rate_remains_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT"}],
+        ]),
+    )
+
+    btc = asyncio.run(scan_exchange_markets(load_config_from_env()))[0]
+
+    assert btc["funding_rate_pct"] is None
+    assert btc["funding_status"] == "UNAVAILABLE"
+    assert btc["funding_source"] == "UNAVAILABLE"
+    assert btc["funding_rate_pct_zero_verified"] is False
+
+
+def test_binance_explicit_zero_funding_is_verified_measured_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT", "lastFundingRate": "0.00000000"}],
+        ]),
+    )
+
+    btc = asyncio.run(scan_exchange_markets(load_config_from_env()))[0]
+    ctx = build_execution_context({
+        **btc,
+        "expected_slippage_pct": 0.0002,
+        "slippage_status": "MEASURED",
+        "expected_slippage_pct_zero_verified": True,
+        "latency_ms": 50.0,
+        "latency_status": "MEASURED",
+        "liquidity_status": "MEASURED",
+        "orderbook_imbalance": 0.1,
+        "orderbook_status": "MEASURED",
+        "volatility_regime": "normal",
+        "volatility_status": "MEASURED",
+    })
+
+    assert btc["funding_rate_pct"] == pytest.approx(0.0)
+    assert btc["funding_status"] == "MEASURED"
+    assert btc["funding_rate_pct_zero_verified"] is True
+    assert ctx["funding_rate_pct_zero_verified"] is True
+
+
 def test_binance_public_http_latency_is_monotonic_round_trip_milliseconds(monkeypatch: pytest.MonkeyPatch) -> None:
     ticks = iter((10.0, 11.25))
     monkeypatch.setattr("alphaforge.exchange_market_scanner.time.perf_counter", lambda: next(ticks))
@@ -163,6 +220,28 @@ def test_binance_closed_1m_candles_supply_canonical_trade_geometry(monkeypatch: 
     assert execution_ctx["volatility_status"] == "MEASURED"
     assert execution_ctx["volatility_source"] == "BINANCE_CLOSED_1M_KLINES"
     assert build_execution_cost_model(execution_ctx).volatility_penalty == pytest.approx(0.12)
+
+    paper_ctx = build_execution_context({
+        **btc,
+        "expected_slippage_pct": 0.0002,
+        "slippage_status": "MODEL_ESTIMATE",
+        "slippage_source": "CONFIGURED_PAPER_ASSUMPTION",
+        "latency_ms": 50.0,
+        "latency_status": "MODEL_ESTIMATE",
+        "latency_source": "CONFIGURED_PAPER_ASSUMPTION",
+        "fee_pct": 0.0004,
+        "fee_status": "CONFIGURED",
+        "fee_source": "CONFIGURED_PAPER_ASSUMPTION",
+    })
+    safety = evaluate_execution_safety(
+        paper_ctx,
+        effective_rr=2.0,
+        min_effective_rr=cfg.runtime.min_effective_rr,
+        thresholds=runtime_filter_config(cfg.runtime, mode="PAPER"),
+    )
+    assert safety["accepted"] is True
+    assert safety["execution_evidence_status"] == "PARTIAL_ESTIMATED"
+    assert safety["missing_fields"] == []
 
 
 def test_binance_invalid_or_missing_range_does_not_fabricate_geometry(monkeypatch: pytest.MonkeyPatch) -> None:

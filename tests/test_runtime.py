@@ -1494,7 +1494,20 @@ def test_live_precheck_uses_paper_decision_pipeline_and_does_not_submit(tmp_path
     adapter = _MutationTrapAdapter()
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 9999999999.0, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{
+            "symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
+            "rr": 3.0, "side": "LONG", "market_ts": 9999999999.0,
+            "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0,
+            "volume_24h_usdt": 90_000_000,
+            "spread_pct": 0.0002, "spread_status": "MEASURED",
+            "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED",
+            "latency_ms": 50.0, "latency_status": "MEASURED",
+            "liquidity_score": 0.9, "liquidity_status": "MEASURED",
+            "funding_rate_pct": 0.00005, "funding_status": "MEASURED",
+            "orderbook_imbalance": 0.1, "orderbook_status": "MEASURED",
+            "volatility_regime": "normal", "volatility_status": "MEASURED",
+            "volatility_pct": 0.4, "trend_strength": 0.9, "chop_score": 0.1,
+        }]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),

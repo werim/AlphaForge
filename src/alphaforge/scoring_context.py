@@ -25,6 +25,7 @@ def build_signal_payload(symbol: str, market_ctx: Mapping[str, Any], *, signal_i
     execution_ctx = build_execution_context(market_ctx)
     raw_rr = market_ctx.get("rr")
     rr = float(raw_rr) if raw_rr is not None else None
+    expected_slippage_pct = execution_ctx.get("expected_slippage_pct")
     signal = {
         "symbol": symbol, "signal_id": signal_id,
         "mode": str(market_ctx.get("mode", default_mode)).upper(),
@@ -35,7 +36,9 @@ def build_signal_payload(symbol: str, market_ctx: Mapping[str, Any], *, signal_i
         "setup": market_ctx.get("setup", market_ctx.get("setup_type")),
         "regime": market_ctx.get("regime", regime_fallback), "risk_reward": rr,
         "max_spread_bps": 12.0, "max_funding_rate": 0.0008,
-        "max_expected_slippage_pct": execution_ctx.get("expected_slippage_pct", 0.002) * 1.2,
+        "max_expected_slippage_pct": (
+            None if expected_slippage_pct is None else expected_slippage_pct * 1.2
+        ),
         "execution_ctx": execution_ctx,
     }
     mtf = market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}

@@ -27,6 +27,30 @@ SOURCE_ESTIMATED_BACKTEST = "ESTIMATED_BACKTEST"
 SOURCE_MODELLED = "MODELLED"
 SOURCE_UNAVAILABLE = "UNAVAILABLE"
 
+
+def execution_context_is_unavailable(execution_ctx: Mapping[str, Any] | None) -> bool:
+    """Return whether the active execution-safety evidence is unavailable.
+
+    When a runtime safety evaluation exists it is authoritative over the raw
+    classifier, because optional/disabled evidence (for example orderbook when
+    its filter is disabled) must not poison persistence/readiness metadata.
+    """
+    ctx = dict(execution_ctx or {})
+    status_raw = ctx.get("safety_evidence_status", ctx.get("evidence_status"))
+    if status_raw is None:
+        return True
+    status = str(status_raw).strip().upper()
+    return status in {
+        "",
+        "UNKNOWN",
+        "UNAVAILABLE",
+        "UNAVAILABLE_BACKTEST",
+        EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING,
+        EXECUTION_EVIDENCE_INVALID_FAKE_ZERO,
+        "NULL",
+    }
+
+
 EXECUTION_COST_REFERENCE_PRICE = "STRATEGY_ENTRY"
 EXECUTION_COST_PERCENTAGE_DENOMINATOR = "STRATEGY_ENTRY"
 EXECUTION_COST_SIGN_CONVENTION = "POSITIVE_IS_ADVERSE"
@@ -313,12 +337,48 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         except (TypeError, ValueError):
             return None
 
-    measured_spread = _to_float(raw_spread) is not None
-    spread_status = str(market_ctx.get("spread_status", "MEASURED" if measured_spread else "UNAVAILABLE"))
-    spread_source = str(market_ctx.get("spread_source", "BOOK_TICKER" if measured_spread else "UNAVAILABLE"))
+    explicit_spread = _to_float(market_ctx.get("spread_pct"))
+    best_bid = _to_float(market_ctx.get("best_bid"))
+    best_ask = _to_float(market_ctx.get("best_ask"))
+    measured_spread = (
+        explicit_spread is not None
+        or (best_bid is not None and best_bid > 0.0 and best_ask is not None and best_ask > 0.0)
+    ) and _to_float(raw_spread) is not None
+    spread_status = str(
+        market_ctx.get("spread_status", "MEASURED" if measured_spread else "UNAVAILABLE")
+    )
+    spread_source = str(
+        market_ctx.get("spread_source", "BOOK_TICKER" if measured_spread else "UNAVAILABLE")
+    )
+    if not measured_spread:
+        spread_status = "UNAVAILABLE"
+        spread_source = "UNAVAILABLE"
 
-    slippage_status = str(market_ctx.get("slippage_status", "MODEL_ESTIMATE"))
-    slippage_source = str(market_ctx.get("slippage_source", "KLINE_RANGE_MODEL"))
+    slippage_has_evidence = (
+        market_ctx.get("expected_slippage_pct") not in (None, "")
+        or bool(klines)
+    )
+    slippage_status = str(
+        market_ctx.get(
+            "slippage_status",
+            "MODEL_ESTIMATE" if slippage_has_evidence else "UNAVAILABLE",
+        )
+    )
+    slippage_source = str(
+        market_ctx.get(
+            "slippage_source",
+            (
+                "KLINE_RANGE_MODEL"
+                if klines
+                else "EXPLICIT_EXECUTION_SLIPPAGE"
+                if slippage_has_evidence
+                else "UNAVAILABLE"
+            ),
+        )
+    )
+    if not slippage_has_evidence:
+        slippage_status = "UNAVAILABLE"
+        slippage_source = "UNAVAILABLE"
 
     md_latency = _to_float(market_ctx.get("market_data_latency_ms"))
     md_latency_status = str(market_ctx.get("market_data_latency_status", "MEASURED" if md_latency is not None else "UNAVAILABLE"))
@@ -376,7 +436,11 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         liquidity_score = None
     else:
         liquidity_score = float(raw_liquidity)
-    volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
+    raw_volatility_regime = market_ctx.get("volatility_regime")
+    if raw_volatility_regime in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        volatility_regime = _volatility_regime(klines) if klines else None
+    else:
+        volatility_regime = str(raw_volatility_regime)
 
     liquidity_status = str(market_ctx.get("liquidity_status", "MEASURED" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
     liquidity_source = str(market_ctx.get("liquidity_source", "UNKNOWN" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
@@ -387,10 +451,15 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     ))
 
     return {
-        "expected_slippage_pct": max(expected_slippage_pct, 0.0) if slippage_status != "UNAVAILABLE" else None,
+        # Preserve the legacy normalized estimate for MTF/research consumers,
+        # but keep slippage_status=UNAVAILABLE so execution-safety remains fail-closed.
+        "expected_slippage_pct": max(expected_slippage_pct, 0.0),
         "expected_slippage_legacy_pct": max(expected_slippage_pct, 0.0),
         "slippage_status": slippage_status,
         "slippage_source": slippage_source,
+        "expected_slippage_pct_zero_verified": bool(
+            market_ctx.get("expected_slippage_pct_zero_verified", False)
+        ),
         "market_data_latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
         "market_data_latency_status": md_latency_status,
         "market_data_latency_source": md_latency_source,
@@ -400,24 +469,36 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "latency_ms": max(execution_latency, 0.0) if execution_latency is not None else None,
         "latency_status": execution_latency_status,
         "latency_source": execution_latency_source,
+        "latency_ms_zero_verified": bool(
+            market_ctx.get("latency_ms_zero_verified", False)
+        ),
         "spread_pct": max(spread_pct, 0.0) if spread_status != "UNAVAILABLE" else None,
         "spread_status": spread_status,
         "spread_source": spread_source,
+        "spread_pct_zero_verified": bool(
+            market_ctx.get("spread_pct_zero_verified", False)
+        ),
         "spread_unit_assumed": spread_unit_assumed,
         "slippage_unit_assumed": slippage_unit_assumed,
         "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
         "orderbook_status": orderbook_status,
         "orderbook_source": orderbook_source,
+        "orderbook_imbalance_zero_verified": bool(
+            market_ctx.get("orderbook_imbalance_zero_verified", False)
+        ),
         "liquidity_score": (max(min(liquidity_score, 1.0), 0.0) if liquidity_score is not None and liquidity_status != "UNAVAILABLE" else None),
         "liquidity_status": liquidity_status,
         "liquidity_source": liquidity_source,
         "funding_rate_pct": funding_val,
         "funding_status": funding_status,
         "funding_source": funding_source,
+        "funding_rate_pct_zero_verified": bool(
+            market_ctx.get("funding_rate_pct_zero_verified", False)
+        ),
         "fee_pct": fee,
         "fee_status": fee_status if fee is not None else "UNAVAILABLE",
         "fee_source": fee_source if fee is not None else "UNAVAILABLE",
-        "volatility_regime": volatility_regime if volatility_status != "UNAVAILABLE" else None,
+        "volatility_regime": volatility_regime if volatility_regime is not None and volatility_status.upper() != "UNAVAILABLE" else None,
         "volatility_status": volatility_status,
         "volatility_source": volatility_source,
         "evidence_status": classify_execution_evidence({
@@ -434,7 +515,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
             "funding_status": funding_status,
             "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
             "orderbook_status": orderbook_status,
-            "volatility_regime": volatility_regime if volatility_status != "UNAVAILABLE" else None,
+            "volatility_regime": volatility_regime if volatility_regime is not None and volatility_status.upper() != "UNAVAILABLE" else None,
             "volatility_status": volatility_status,
         }),
         "spoof_risk": float(market_ctx.get("spoof_risk", 0.0) or 0.0),
@@ -703,6 +784,234 @@ def build_execution_cost_model(execution_ctx: Mapping[str, Any], *, include_miss
         missing_fields=tuple(sorted(set(missing))),
         completeness=completeness,
     )
+def evaluate_execution_safety(
+    execution_ctx: Mapping[str, Any],
+    *,
+    effective_rr: Any,
+    min_effective_rr: float,
+    thresholds: Mapping[str, Any] | None = None,
+    require_measured: bool = False,
+) -> dict[str, Any]:
+    """Authoritative pre-submit execution-safety contract.
+
+    This function does not recompute executable geometry. effective_rr must
+    already reflect the canonical entry -> expected_fill geometry and residual
+    cost treatment chosen by the caller. The contract only validates execution
+    evidence and protected execution thresholds, so a high raw RR can never
+    bypass unknown or unsafe execution conditions.
+    """
+    t = dict(thresholds or {})
+    model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
+    raw_evidence_status = classify_execution_evidence(
+        execution_ctx, require_measured=require_measured
+    )
+
+    def threshold(*keys: str, default: float) -> float:
+        for key in keys:
+            value = t.get(key)
+            if value not in (None, ""):
+                return float(value)
+        return float(default)
+
+    def number(field: str) -> float | None:
+        value = execution_ctx.get(field)
+        if value in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed == parsed and parsed not in {float("inf"), float("-inf")} else None
+
+    max_spread = threshold("MAX_SPREAD_PCT", "max_spread_pct", default=0.0025)
+    max_slippage = threshold(
+        "MAX_EXPECTED_SLIPPAGE_PCT", "MAX_SLIPPAGE_PCT", "max_expected_slippage_pct",
+        default=0.002,
+    )
+    max_total_cost = threshold("MAX_TOTAL_COST_PCT", "max_total_cost_pct", default=0.20)
+    min_liquidity = threshold("MIN_LIQUIDITY_SCORE", "min_liquidity_score", default=0.30)
+    max_latency = threshold("MAX_LATENCY_MS", "max_latency_ms", default=2500.0)
+    max_volatility_penalty = threshold(
+        "MAX_VOLATILITY_PENALTY_PCT", "max_volatility_penalty_pct", default=0.20
+    )
+    max_funding = threshold(
+        "MAX_ABS_FUNDING_RATE_PCT", "max_abs_funding_rate_pct", default=0.001
+    )
+    reject_unknown = bool(
+        t.get(
+            "REJECT_UNKNOWN_EXECUTION_CONTEXT",
+            t.get("reject_unknown_execution_context", True),
+        )
+    )
+    orderbook_required = bool(
+        t.get("ENABLE_ORDERBOOK_FILTER", t.get("enable_orderbook_filter", False))
+    )
+
+    status_keys = {
+        "spread_pct": "spread_status",
+        "expected_slippage_pct": "slippage_status",
+        "latency_ms": "latency_status",
+        "liquidity_score": "liquidity_status",
+        "funding_rate_pct": "funding_status",
+        "volatility_regime": "volatility_status",
+        "orderbook_imbalance": "orderbook_status",
+    }
+    critical_fields = [
+        "spread_pct",
+        "expected_slippage_pct",
+        "latency_ms",
+        "liquidity_score",
+    ]
+    if require_measured:
+        critical_fields.extend(["funding_rate_pct", "volatility_regime"])
+    if orderbook_required:
+        critical_fields.append("orderbook_imbalance")
+
+    missing_fields: list[str] = []
+    for field in critical_fields:
+        value = execution_ctx.get(field)
+        status = str(execution_ctx.get(status_keys[field], "") or "").upper()
+        unavailable_value = value in (
+            None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"
+        )
+        unavailable_status = status in UNAVAILABLE_STATUSES
+        not_measured = require_measured and status not in MEASURED_STATUSES
+        if unavailable_value or unavailable_status or not_measured:
+            missing_fields.append(field)
+
+    fake_zero_fields: list[str] = []
+    zero_sensitive_fields = [
+        "spread_pct",
+        "expected_slippage_pct",
+        "latency_ms",
+    ]
+    if require_measured:
+        zero_sensitive_fields.append("funding_rate_pct")
+    if orderbook_required:
+        zero_sensitive_fields.append("orderbook_imbalance")
+    for field in zero_sensitive_fields:
+        value = number(field)
+        status = str(execution_ctx.get(status_keys[field], "") or "").upper()
+        if (
+            require_measured
+            and value == 0.0
+            and status in MEASURED_STATUSES
+            and not bool(execution_ctx.get(f"{field}_zero_verified", False))
+        ):
+            fake_zero_fields.append(field)
+
+    active_statuses = [
+        str(execution_ctx.get(status_keys[field], "") or "").upper()
+        for field in critical_fields
+    ]
+    if fake_zero_fields:
+        evidence_status = EXECUTION_EVIDENCE_INVALID_FAKE_ZERO
+    elif missing_fields:
+        evidence_status = EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+    elif require_measured:
+        evidence_status = EXECUTION_EVIDENCE_COMPLETE_MEASURED
+    elif any(status in ESTIMATED_STATUSES for status in active_statuses):
+        evidence_status = EXECUTION_EVIDENCE_PARTIAL_ESTIMATED
+    elif active_statuses and all(status in MEASURED_STATUSES for status in active_statuses):
+        evidence_status = EXECUTION_EVIDENCE_COMPLETE_MEASURED
+    else:
+        evidence_status = raw_evidence_status
+
+    spread = number("spread_pct")
+    slippage = number("expected_slippage_pct")
+    fee = number("fee_pct")
+    funding = number("funding_rate_pct")
+    latency = number("latency_ms")
+    liquidity = number("liquidity_score")
+    try:
+        effective = float(effective_rr)
+    except (TypeError, ValueError):
+        effective = 0.0
+    total_explicit_cost = round(
+        sum(abs(value) for value in (spread, slippage, fee, funding) if value is not None),
+        10,
+    )
+
+    failed: list[str] = []
+    evidence: list[dict[str, Any]] = []
+
+    def fail(gate: str, observed: Any, limit: Any, comparison: str) -> None:
+        if gate not in failed:
+            failed.append(gate)
+        evidence.append({
+            "gate": gate,
+            "observed": observed,
+            "threshold": limit,
+            "comparison": comparison,
+            "source": "EXECUTION_SAFETY_CONTRACT",
+        })
+
+    if reject_unknown and missing_fields:
+        fail(
+            "EXECUTION_CONTEXT_UNAVAILABLE",
+            sorted(set(missing_fields)),
+            "AVAILABLE",
+            "required",
+        )
+    if fake_zero_fields:
+        fail(
+            "INVALID_FAKE_ZERO",
+            sorted(set(fake_zero_fields)),
+            "VERIFIED_ZERO_OR_NONZERO",
+            "required",
+        )
+    if spread is not None and spread > max_spread:
+        fail("SPREAD_TOO_HIGH", spread, max_spread, ">")
+    if slippage is not None and slippage > max_slippage:
+        fail("SLIPPAGE_TOO_HIGH", slippage, max_slippage, ">")
+    if total_explicit_cost > max_total_cost:
+        fail("HIGH_TOTAL_COST", total_explicit_cost, max_total_cost, ">")
+    if liquidity is not None and liquidity < min_liquidity:
+        fail("THIN_LIQUIDITY", liquidity, min_liquidity, "<")
+    if latency is not None and latency > max_latency:
+        fail("HIGH_LATENCY", latency, max_latency, ">")
+    if model.volatility_penalty > max_volatility_penalty:
+        fail(
+            "EXCESSIVE_VOLATILITY",
+            model.volatility_penalty,
+            max_volatility_penalty,
+            ">",
+        )
+    if funding is not None and abs(funding) > max_funding:
+        fail("FUNDING_TOO_HIGH", abs(funding), max_funding, ">")
+    if effective < float(min_effective_rr):
+        fail("LOW_EFFECTIVE_RR", effective, float(min_effective_rr), "<")
+
+    priority = (
+        "EXECUTION_CONTEXT_UNAVAILABLE",
+        "INVALID_FAKE_ZERO",
+        "SPREAD_TOO_HIGH",
+        "SLIPPAGE_TOO_HIGH",
+        "HIGH_TOTAL_COST",
+        "THIN_LIQUIDITY",
+        "HIGH_LATENCY",
+        "EXCESSIVE_VOLATILITY",
+        "FUNDING_TOO_HIGH",
+        "LOW_EFFECTIVE_RR",
+    )
+    primary = next((gate for gate in priority if gate in failed), None)
+    return {
+        "accepted": not failed,
+        "primary_reject_reason": primary,
+        "all_failed_gates": list(failed),
+        "failed_gate_evidence": evidence,
+        "execution_evidence_status": evidence_status,
+        "raw_execution_evidence_status": raw_evidence_status,
+        "missing_fields": sorted(set(missing_fields)),
+        "fake_zero_fields": sorted(set(fake_zero_fields)),
+        "total_explicit_cost_pct": total_explicit_cost,
+        "volatility_penalty": model.volatility_penalty,
+        "effective_rr": round(effective, 6),
+        "min_effective_rr": float(min_effective_rr),
+        "require_measured": bool(require_measured),
+    }
+
+
 def normalize_pct_input(value: Any, *, field: str) -> tuple[float, str]:
     """
     Normalize spread/slippage inputs into fractional rate units.
