@@ -149,15 +149,43 @@ def compare_pre_submit_invariants(
     return tuple(mismatches)
 
 
+def _incomplete_fields(value: PreSubmitInvariant) -> tuple[str, ...]:
+    missing: list[str] = []
+    for field in ("score", "candidate_rr", "executable_raw_rr", "effective_rr"):
+        if getattr(value, field) is None:
+            missing.append(field)
+    if not value.threshold_provenance:
+        missing.append("threshold_provenance")
+    if value.execution_evidence_status in {"", "UNKNOWN", "UNAVAILABLE", "INCOMPLETE"}:
+        missing.append("execution_evidence_status")
+    if value.portfolio_decision == "UNKNOWN":
+        missing.append("portfolio_decision")
+    if not value.lifecycle_pre_submit_terminal_state:
+        missing.append("lifecycle_pre_submit_terminal_state")
+    if value.decision == "UNKNOWN":
+        missing.append("decision")
+    return tuple(missing)
+
+
 def assert_pre_submit_invariant_parity(
     reference: Mapping[str, Any],
     *surfaces: Mapping[str, Any],
 ) -> PreSubmitInvariant:
-    """Fail closed if any protected semantic differs from the reference."""
+    """Fail closed on incomplete evidence or any protected semantic drift."""
 
     expected = project_pre_submit_invariant(reference)
+    expected_missing = _incomplete_fields(expected)
+    if expected_missing:
+        raise ValueError(
+            "DECISION_PARITY_EVIDENCE_INCOMPLETE: " + ",".join(expected_missing)
+        )
     for payload in surfaces:
         observed = project_pre_submit_invariant(payload)
+        observed_missing = _incomplete_fields(observed)
+        if observed_missing:
+            raise ValueError(
+                "DECISION_PARITY_EVIDENCE_INCOMPLETE: " + ",".join(observed_missing)
+            )
         mismatches = compare_pre_submit_invariants(expected, observed)
         if mismatches:
             detail = "; ".join(
