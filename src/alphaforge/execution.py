@@ -451,7 +451,9 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     ))
 
     return {
-        "expected_slippage_pct": max(expected_slippage_pct, 0.0) if slippage_status != "UNAVAILABLE" else None,
+        # Preserve the legacy normalized estimate for MTF/research consumers,
+        # but keep slippage_status=UNAVAILABLE so execution-safety remains fail-closed.
+        "expected_slippage_pct": max(expected_slippage_pct, 0.0),
         "expected_slippage_legacy_pct": max(expected_slippage_pct, 0.0),
         "slippage_status": slippage_status,
         "slippage_source": slippage_source,
