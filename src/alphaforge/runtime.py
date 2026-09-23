@@ -1713,7 +1713,10 @@ class RuntimeOrchestrator:
             "missing_field_count": missing_field_count,
             "no_order_submission_verified": True,
             "no_submit_verified": True,
-            "execution_context_complete": all(str(c.get("execution_context", {}).get("evidence_status", "")).upper() not in {"", "UNAVAILABLE", "UNKNOWN"} for c in comparisons),
+            "execution_context_complete": all(
+                not execution_context_is_unavailable(c.get("execution_context"))
+                for c in comparisons
+            ),
             "comparison_fields": list(compare_fields),
             "samples": comparisons,
             "generated_at": canonical_utc_timestamp(),
