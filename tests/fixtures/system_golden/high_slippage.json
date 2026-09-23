@@ -23,6 +23,17 @@
       "resolver",
       "readiness",
       "audit"
-    ]
+    ],
+    "failed_gates": [
+      "HIGH_SLIPPAGE"
+    ],
+    "geometry_status": "COMPLETE",
+    "expected_fill_status": "NOT_SUBMITTED",
+    "effective_rr_status": "NOT_APPLICABLE",
+    "portfolio_state": "BLOCK",
+    "persistence": "REJECT_DECISION_DURABLE",
+    "resolver": "REJECT_LABEL_PENDING",
+    "readiness": "BLOCKED_INSUFFICIENT_SAMPLE",
+    "audit": "CANONICAL_REJECT"
   }
 }
