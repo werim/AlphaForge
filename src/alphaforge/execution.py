@@ -435,7 +435,11 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         liquidity_score = None
     else:
         liquidity_score = float(raw_liquidity)
-    volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
+    raw_volatility_regime = market_ctx.get("volatility_regime")
+    if raw_volatility_regime in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        volatility_regime = _volatility_regime(klines) if klines else None
+    else:
+        volatility_regime = str(raw_volatility_regime)
 
     liquidity_status = str(market_ctx.get("liquidity_status", "MEASURED" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
     liquidity_source = str(market_ctx.get("liquidity_source", "UNKNOWN" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
@@ -476,7 +480,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "fee_pct": fee,
         "fee_status": fee_status if fee is not None else "UNAVAILABLE",
         "fee_source": fee_source if fee is not None else "UNAVAILABLE",
-        "volatility_regime": volatility_regime if volatility_status != "UNAVAILABLE" else None,
+        "volatility_regime": volatility_regime if volatility_regime is not None and volatility_status.upper() != "UNAVAILABLE" else None,
         "volatility_status": volatility_status,
         "volatility_source": volatility_source,
         "evidence_status": classify_execution_evidence({
@@ -493,7 +497,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
             "funding_status": funding_status,
             "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
             "orderbook_status": orderbook_status,
-            "volatility_regime": volatility_regime if volatility_status != "UNAVAILABLE" else None,
+            "volatility_regime": volatility_regime if volatility_regime is not None and volatility_status.upper() != "UNAVAILABLE" else None,
             "volatility_status": volatility_status,
         }),
         "spoof_risk": float(market_ctx.get("spoof_risk", 0.0) or 0.0),
