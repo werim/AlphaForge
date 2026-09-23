@@ -2460,6 +2460,7 @@ class RuntimeOrchestrator:
         portfolio_now = time.time()
         historical_risk: dict[str, Any] = {
             "daily_realized_pnl": None,
+            "rolling_peak_equity": None,
             "rolling_drawdown_pct": None,
             "consecutive_loss_count": None,
             "symbol_consecutive_loss_count": None,
@@ -2512,6 +2513,7 @@ class RuntimeOrchestrator:
             trades_today_global=historical_risk.get("trades_today_global"),
             consecutive_loss_count=historical_risk.get("consecutive_loss_count"),
             symbol_consecutive_loss_count=historical_risk.get("symbol_consecutive_loss_count"),
+            rolling_peak_equity=historical_risk.get("rolling_peak_equity"),
             rolling_drawdown_pct=historical_risk.get("rolling_drawdown_pct"),
             risk_state_complete=historical_risk.get("risk_state_complete"),
             risk_state_source=historical_risk.get("risk_state_source"),
@@ -2957,6 +2959,7 @@ class RuntimeOrchestrator:
                 "equity": initial,
                 "available_balance": initial,
                 "daily_realized_pnl": 0.0 if not missing else None,
+                "rolling_peak_equity": initial if not missing else None,
                 "rolling_drawdown_pct": 0.0 if not missing else None,
                 "consecutive_loss_count": 0 if not missing else None,
                 "symbol_consecutive_loss_count": 0 if not missing else None,
@@ -2975,6 +2978,7 @@ class RuntimeOrchestrator:
                 "equity": None,
                 "available_balance": None,
                 "daily_realized_pnl": None,
+                "rolling_peak_equity": None,
                 "rolling_drawdown_pct": None,
                 "consecutive_loss_count": None,
                 "symbol_consecutive_loss_count": None,
@@ -3017,6 +3021,7 @@ class RuntimeOrchestrator:
                 "equity": None,
                 "available_balance": None,
                 "daily_realized_pnl": None,
+                "rolling_peak_equity": None,
                 "rolling_drawdown_pct": None,
                 "consecutive_loss_count": None,
                 "symbol_consecutive_loss_count": None,
@@ -3157,6 +3162,7 @@ class RuntimeOrchestrator:
             "equity": current_equity if complete else None,
             "available_balance": current_equity if complete else None,
             "daily_realized_pnl": daily_realized_pnl if complete else None,
+            "rolling_peak_equity": peak_equity if complete else None,
             "rolling_drawdown_pct": rolling_drawdown_pct if complete else None,
             "consecutive_loss_count": consecutive_losses if complete else None,
             "symbol_consecutive_loss_count": (
