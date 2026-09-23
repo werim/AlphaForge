@@ -156,6 +156,33 @@ def test_unknown_funding_or_volatility_is_fail_closed(
     assert missing_field in result["missing_fields"]
 
 
+def test_disabled_orderbook_filter_does_not_poison_active_execution_evidence_status() -> None:
+    ctx = _execution_ctx(
+        orderbook_imbalance=None,
+        orderbook_status="UNAVAILABLE",
+        orderbook_source="UNAVAILABLE",
+    )
+    result = evaluate_execution_safety(
+        ctx,
+        effective_rr=1.25,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(ENABLE_ORDERBOOK_FILTER=False),
+    )
+    assert result["accepted"] is True
+    assert result["execution_evidence_status"] == "PARTIAL_ESTIMATED"
+    assert result["raw_execution_evidence_status"] == "UNAVAILABLE_BLOCKING"
+
+    required = evaluate_execution_safety(
+        ctx,
+        effective_rr=1.25,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(ENABLE_ORDERBOOK_FILTER=True),
+    )
+    assert required["accepted"] is False
+    assert required["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+    assert "orderbook_imbalance" in required["missing_fields"]
+
+
 def test_live_precheck_requires_measured_execution_evidence() -> None:
     result = evaluate_execution_safety(
         _execution_ctx(),
