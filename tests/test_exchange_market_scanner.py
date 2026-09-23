@@ -90,6 +90,59 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
     assert btc["market_data_latency_source"] == "BINANCE_PUBLIC_HTTP_RTT"
 
 
+def test_binance_missing_funding_rate_remains_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT"}],
+        ]),
+    )
+
+    btc = asyncio.run(scan_exchange_markets(load_config_from_env()))[0]
+
+    assert btc["funding_rate_pct"] is None
+    assert btc["funding_status"] == "UNAVAILABLE"
+    assert btc["funding_source"] == "UNAVAILABLE"
+    assert btc["funding_rate_pct_zero_verified"] is False
+
+
+def test_binance_explicit_zero_funding_is_verified_measured_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT", "lastFundingRate": "0.00000000"}],
+        ]),
+    )
+
+    btc = asyncio.run(scan_exchange_markets(load_config_from_env()))[0]
+    ctx = build_execution_context({
+        **btc,
+        "expected_slippage_pct": 0.0002,
+        "slippage_status": "MEASURED",
+        "expected_slippage_pct_zero_verified": True,
+        "latency_ms": 50.0,
+        "latency_status": "MEASURED",
+        "liquidity_status": "MEASURED",
+        "orderbook_imbalance": 0.1,
+        "orderbook_status": "MEASURED",
+        "volatility_regime": "normal",
+        "volatility_status": "MEASURED",
+    })
+
+    assert btc["funding_rate_pct"] == pytest.approx(0.0)
+    assert btc["funding_status"] == "MEASURED"
+    assert btc["funding_rate_pct_zero_verified"] is True
+    assert ctx["funding_rate_pct_zero_verified"] is True
+
+
 def test_binance_public_http_latency_is_monotonic_round_trip_milliseconds(monkeypatch: pytest.MonkeyPatch) -> None:
     ticks = iter((10.0, 11.25))
     monkeypatch.setattr("alphaforge.exchange_market_scanner.time.perf_counter", lambda: next(ticks))
