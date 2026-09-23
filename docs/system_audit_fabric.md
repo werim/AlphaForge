@@ -20,6 +20,10 @@ Level 0 stores immutable, versioned decision envelopes and outcome snapshots. Re
 - `DIAGNOSTIC_SHADOW`: useful for diagnosis but not authoritative for calibration.
 - `NON_SIMULATABLE`: canonical executable geometry is unavailable; no trade geometry is invented.
 
+An accepted PAPER outcome with ambiguous intrabar TP/SL evidence remains in the
+audit store for diagnosis but is not authoritative for outcome-quality claims;
+resolver evidence completeness controls that boundary.
+
 Legacy/non-attributable shadow evidence is never promoted to executable authority.
 
 All Level 1 and Level 2 derived tables are append-only. Missing evidence is reported as UNKNOWN/NO_EVIDENCE or an explicit limitation rather than fabricated as zero or healthy.

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
@@ -29,6 +30,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "system_golden"
 def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     tmp_path.mkdir()
     fixture = json.loads((FIXTURES / f"{scenario}.json").read_text())
+    frozen_market = fixture["frozen_market_event"]["market_context"]
     event_time = fixture["frozen_market_event"]["timestamp"]
     event_dt = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
     db_path = tmp_path / "campaign.sqlite3"
@@ -44,7 +46,11 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             ("regime_expectancy_stats", "regime"),
             ("symbol_expectancy_stats", "symbol"),
         ):
-            value = {"setup": "LONG_CONTINUATION", "regime": "TRENDING", "symbol": fixture["symbol"]}[key]
+            value = {
+                "setup": frozen_market["setup"],
+                "regime": frozen_market["mtf"]["regime"]["regime"] if "mtf" in frozen_market else "TRENDING",
+                "symbol": fixture["symbol"],
+            }[key]
             conn.execute(text(
                 f"INSERT INTO {table} ({key},samples,expectancy) VALUES (:value,100,0.2)"
             ), {"value": value})
@@ -116,7 +122,11 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     assert json.loads(observation["metrics_json"])["campaign_id"] == campaign.campaign_id
     if fixture["expected"]["decision"] == "ACCEPT":
         assert json.loads(decision["reject_flags"] or "[]") == fixture["expected"]["failed_gates"]
-        assert decision["entry"] == 100.02
+        adverse_side = 1 if market["side"] == "LONG" else -1
+        expected_fill = market["entry"] * (
+            1 + adverse_side * market["expected_slippage_pct"]
+        )
+        assert decision["entry"] == pytest.approx(expected_fill)
         assert decision["raw_rr"] > runtime.config.min_effective_rr
         assert decision["effective_rr"] >= runtime.config.min_effective_rr
         assert decision["portfolio_risk_state"] == fixture["expected"]["portfolio_state"]
@@ -137,13 +147,18 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
                 {position["trade_id"]: fixture["frozen_market_event"]["resolver_candles"]},
                 now=fixture["frozen_market_event"]["resolver_now"],
             )
-        assert resolved["tp"] == resolved["closed"] == 1
+        terminal_key = {
+            "TP_HIT": "tp", "SL_HIT": "sl", "AMBIGUOUS_INTRABAR": "ambiguous",
+        }[fixture["expected"]["resolver"]]
+        assert resolved[terminal_key] == resolved["closed"] == 1
         with engine.connect() as conn:
             outcome = conn.execute(text(
                 "SELECT exit_reason,evidence_complete,net_r FROM burnin_trade_outcomes WHERE trade_id=:trade"
             ), {"trade": position["trade_id"]}).mappings().one()
         assert outcome["exit_reason"] == fixture["expected"]["resolver"]
-        assert outcome["evidence_complete"] == 1 and outcome["net_r"] > 0
+        ambiguous = terminal_key == "ambiguous"
+        assert outcome["evidence_complete"] == (0 if ambiguous else 1)
+        assert (outcome["net_r"] > 0) == (fixture["expected"]["resolver"] == "TP_HIT")
     else:
         assert position is None and runtime.metrics.executions == 0
         assert decision["reject_reason"] == fixture["expected"]["failed_gates"][0]
@@ -199,7 +214,10 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             audited_outcome = audit.execute(
                 "SELECT outcome_status,authoritative FROM audit_outcomes"
             ).fetchone()
-            assert tuple(audited_outcome) == (fixture["expected"]["resolver"], 1)
+            assert tuple(audited_outcome) == (
+                fixture["expected"]["resolver"],
+                0 if fixture["expected"]["resolver"] == "AMBIGUOUS_INTRABAR" else 1,
+            )
         else:
             assert audit_row[3] == fixture["expected"]["failed_gates"][0]
     finally:
@@ -217,6 +235,24 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
 def test_profitable_long_replays_same_full_chain_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "profitable_long")
     second = _replay(tmp_path / "second", monkeypatch, "profitable_long")
+    assert first == second
+
+
+def test_profitable_short_replays_same_full_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "profitable_short")
+    second = _replay(tmp_path / "second", monkeypatch, "profitable_short")
+    assert first == second
+
+
+def test_losing_accept_replays_same_full_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "losing_accept")
+    second = _replay(tmp_path / "second", monkeypatch, "losing_accept")
+    assert first == second
+
+
+def test_ambiguous_tp_sl_replays_non_authoritative_outcome_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "ambiguous_tp_sl")
+    second = _replay(tmp_path / "second", monkeypatch, "ambiguous_tp_sl")
     assert first == second
 
 
@@ -265,6 +301,13 @@ def test_final_reject_from_another_campaign_cannot_skip_same_signal(tmp_path, mo
     runtime._burnin_run_id = second_run["burnin_run_id"]
     monkeypatch.setenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", first.campaign_id)
     assert runtime._canonical_final_decision_recorded(signal_id) is False
+    scoped_reject = runtime._canonical_reject_payload({
+        "signal_id": "golden:forged-campaign", "symbol": "BTCUSDT",
+        "reason": "SPREAD_TOO_HIGH", "campaign_id": first.campaign_id,
+        "runtime_identity": first.campaign_id,
+    })
+    assert scoped_reject["campaign_id"] == second.campaign_id
+    assert scoped_reject["runtime_identity"] == second.campaign_id
     runtime._burnin_run_id = None
     assert runtime._canonical_final_decision_recorded(signal_id) is None
     engine.dispose()

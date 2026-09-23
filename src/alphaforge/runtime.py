@@ -3574,8 +3574,8 @@ class RuntimeOrchestrator:
             "spread_pct":result.get("spread_pct",execution.get("spread_pct")), "expected_slippage_pct":result.get("expected_slippage_pct",execution.get("expected_slippage_pct")),
             "funding_rate_pct":result.get("funding_rate_pct",execution.get("funding_rate_pct")), "liquidity_score":result.get("liquidity_score",execution.get("liquidity_score")),
             "volatility_regime":result.get("volatility_regime",execution.get("volatility_regime")),
-            "campaign_id": result.get("campaign_id") or campaign_id,
-            "runtime_identity": result.get("runtime_identity") or runtime_identity,
+            "campaign_id": campaign_id or result.get("campaign_id"),
+            "runtime_identity": runtime_identity or result.get("runtime_identity"),
             "forward_label_subject": (forward_label_subject if guided_generation
                                       else result.get("forward_label_subject") or forward_label_subject),
         })
