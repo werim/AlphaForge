@@ -790,3 +790,20 @@ def test_aibrain_internal_audit_does_not_fabricate_effective_rr_when_missing() -
     assert decision_effective is None
     assert signal_effective is None
     session.close()
+
+
+def test_mode_parity_cannot_treat_unavailable_blocking_context_as_complete() -> None:
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=AIBrain.for_stateless_scoring(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+    )
+
+    parity = runtime._build_mode_parity_evidence(min_sample_count=3)
+
+    assert parity["sample_count"] == 3
+    assert parity["execution_context_complete"] is False
+    assert any(
+        sample["execution_context"]["evidence_status"] == "UNAVAILABLE_BLOCKING"
+        for sample in parity["samples"]
+    )
