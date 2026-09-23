@@ -148,11 +148,20 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
             continue
         book_map[str(item.get("symbol"))] = (bid, ask)
 
-    funding_map = {
-        str(item.get("symbol")): float(item.get("lastFundingRate", 0.0) or 0.0)
-        for item in (funding if isinstance(funding, list) else [])
-        if isinstance(item, dict) and item.get("symbol")
-    }
+    funding_map: dict[str, float] = {}
+    for item in (funding if isinstance(funding, list) else []):
+        if not isinstance(item, dict) or not item.get("symbol"):
+            continue
+        raw_rate = item.get("lastFundingRate")
+        if raw_rate in (None, ""):
+            continue
+        try:
+            rate = float(raw_rate)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(rate):
+            continue
+        funding_map[str(item.get("symbol"))] = rate
     now_ts = time.time()
     candidates: list[dict[str, Any]] = []
     for item in tickers:
@@ -193,8 +202,12 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
                 "spread_bps": spread_pct * 10_000.0,
                 "spread_status": "MEASURED",
                 "spread_source": "BINANCE_BOOK_TICKER",
+                "spread_pct_zero_verified": spread_pct == 0.0,
                 "funding_rate_pct": funding_map.get(symbol),
                 "funding_status": "MEASURED" if symbol in funding_map else "UNAVAILABLE",
+                "funding_rate_pct_zero_verified": (
+                    symbol in funding_map and funding_map[symbol] == 0.0
+                ),
                 "funding_source": "BINANCE_PREMIUM_INDEX" if symbol in funding_map else "UNAVAILABLE",
                 "market_data_latency_ms": market_data_latency_ms,
                 "market_data_latency_status": "UNAVAILABLE" if market_data_latency_ms is None else "MEASURED",
