@@ -13,8 +13,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from alphaforge.adaptive_learning import record_closed_trade_review, record_rejected_signal_review
 from alphaforge.contracts import canonical_reject_reason
-from alphaforge.execution import build_execution_review_metrics
-from alphaforge.persistence import _execution_context_is_unavailable
+from alphaforge.execution import build_execution_review_metrics, execution_context_is_unavailable
 
 
 logger = logging.getLogger(__name__)
@@ -391,7 +390,7 @@ class AIBrain:
                 canonical_effective_rr = float(effective_rr_raw)
             except (TypeError, ValueError):
                 canonical_effective_rr = raw_rr
-            execution_ctx_missing = _execution_context_is_unavailable(execution_ctx)
+            execution_ctx_missing = execution_context_is_unavailable(execution_ctx)
             session.execute(
                 text(
                     """
