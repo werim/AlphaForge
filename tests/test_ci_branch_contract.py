@@ -12,3 +12,4 @@ def test_chatgpt_push_runs_existing_qualification_workflow() -> None:
     assert "run: pytest -q" in workflow
     assert "python -m compileall -q src" in workflow
     assert "backtest_order.py --ci --offline" in workflow
+    assert "python scripts/run_safety_mutations.py" in workflow

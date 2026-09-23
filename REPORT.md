@@ -1,3 +1,19 @@
+# #421 P2-B targeted safety mutation gate — 2026-09-24
+
+## Why / root cause
+
+Ordinary green tests did not prove individual protected guards were independently detected. In-memory probes showed the existing expectancy scope test survived deletion of any one campaign/run/release filter because all three foreign IDs changed together. A broader audit mapped the #421 P2-B candidates to production source and test nodes.
+
+## Change / behavior
+
+`tests/test_expectancy_evidence.py` now varies one identity dimension at a time. `tests/test_issue421_portfolio_risk_state.py` asserts a reject exists before inspecting its reason, so a missing risk veto fails as an assertion rather than an IndexError. `scripts/run_safety_mutations.py` copies `src` and `tests` into a disposable directory, checks a clean baseline, applies each unique one-at-a-time production mutation, and credits only an assertion failure. It reports survivors and harness errors separately. `.github/workflows/test.yml` runs this gate before the full suite. `docs/safety_mutation_testing.md` and README document the scope and limits; VERSION/REPORT/CHANGELOG record the change.
+
+The 25 candidates cover effective RR, unknown execution context, seven execution hard gates, planned versus expected fill, entry slippage double counting, run/campaign/release/mode scope, diagnostic shadow authority, accepted-window completeness, reconciliation CLEAN, final kill-switch reread, five runtime portfolio-risk inputs and future timestamps. Local result on the working tree: 14 baseline test nodes passed; 25 KILLED, 0 SURVIVED, 0 ERROR. Another 252 related regressions, compileall and diff checks passed. Pushed exact-SHA CI remains the final gate.
+
+## Impact / risks
+
+No production runtime behavior, lifecycle ordering, persistence schema, CSV export, migration, cost formula, threshold, campaign database or historical evidence changed. CI time grows by a focused mutation run; baseline/anchor errors fail closed. The runner uses temporary copies and removes them. Test compatibility is unchanged except clearer assertions. Mutation coverage is targeted, not a global score; P2-C property tests, P2-D full-chain replay, P2-E bounded load and P1-E exact-commit FAST/SOAK remain. LIVE remains NOT READY. Push recommendation: CHATGPT only after local verification, then qualify its exact SHA.
+
 # Finite managed configuration repair — 2026-09-24
 
 The canonical ConfigSetting.parse float branch accepted NaN because both range comparisons evaluate false. Confirmed MIN_EFFECTIVE_RR=nan and ALPHAFORGE_MAX_SPREAD_PCT=nan parsed successfully, allowing safety comparisons to become ineffective. Infinities were only rejected where a corresponding bound existed.

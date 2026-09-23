@@ -160,7 +160,11 @@ The isolated [autonomous qualification harness](docs/AUTONOMOUS_QUALIFICATION_HA
 - **FAST** — deterministic accelerated PAPER qualification suitable for CI;
 - **SOAK** — 6–24 hour qualification with the same fault/invariant schedule and optional public market-data probes.
 
-A historical FAST/SOAK result is not proof for a newer commit. Fresh exact-head qualification must be bound to the code/config under evaluation. [#421](https://github.com/werim/AlphaForge/issues/421) remains the full-system verification tracker; current `dev` contains P0-A/P0-B/P0-C/P1-A/P1-B, while P1-C and later verification families remain open.
+A historical FAST/SOAK result is not proof for a newer commit. Fresh qualification
+must be bound to the code/config under evaluation. [#421](https://github.com/werim/AlphaForge/issues/421)
+remains the full-system verification tracker. Current `CHATGPT` includes the
+P0-A/B/C, P1-A/B/C/D and P2-A regression families. P2-B has a focused mutation
+gate; remaining P2 and final release qualification work are tracked separately.
 
 ## Testing
 
@@ -172,18 +176,20 @@ for the current commit. The separate `Python application` workflow targets
 
 The repository uses `pytest` for unit, persistence, integration-style and production-path regression coverage. Current tests include lifecycle/reject persistence, execution-cost semantics, production execution-safety gates, authoritative PAPER portfolio-risk state, accepted/rejected resolver integrity, invalid/stale/future market-time fail-closed behavior, protected BACKTEST/PAPER/LIVE_PRECHECK pre-submit semantic parity, reconciliation contention/recovery, and the autonomous FAST/SOAK qualification harness.
 
+The [targeted safety mutation gate](docs/safety_mutation_testing.md) runs in the
+`Tests` workflow. It verifies named production safety guards against disposable
+source mutations and reports assertion-backed results for the current commit.
+
 Not all desired full-system verification families are complete. [#421](https://github.com/werim/AlphaForge/issues/421) currently tracks:
 
-- SQLite lock/failure coverage across every authoritative write family;
-- real subprocess crash / cold-restart E2E;
-- canonical full-chain golden scenarios;
-- targeted mutation testing;
 - property/fuzz coverage for geometry, time, execution costs and identity;
 - deterministic full-chain replay;
 - bounded load/performance qualification;
 - fresh exact-head FAST plus public 6h SOAK release evidence.
 
-Do not describe those open families as completed merely because the normal suite is green.
+The SQLite contention, real crash/restart, golden-scenario-pack and targeted
+mutation families have dedicated tests. The golden pack freezes scenario
+expectations; full-chain deterministic execution replay remains P2-D work.
 
 ## Repository Navigation
 

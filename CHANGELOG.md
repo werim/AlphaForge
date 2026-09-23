@@ -1,3 +1,19 @@
+# #421 P2-B targeted safety mutation gate — 2026-09-24
+
+### Added
+- Disposable 25-candidate mutation runner and CI gate for protected safety invariants.
+- Independent campaign/run/release scope regressions.
+### Changed
+- Portfolio risk tests assert the reject exists before inspecting its reason.
+### Fixed
+- Scope regressions that previously survived deletion of one identity filter.
+### Removed
+- None.
+### Breaking Changes
+- None; runtime, schema, exports and campaign evidence unchanged.
+### Known Issues
+- Property tests, deterministic replay, bounded load and final release qualification remain; LIVE NOT READY.
+
 # Finite managed configuration repair — 2026-09-24
 
 ### Added

@@ -403,6 +403,7 @@ def test_runtime_rejects_rolling_drawdown_when_daily_pnl_is_positive(tmp_path) -
 
     _process(runtime, "BTCUSDT", "candidate-drawdown")
 
+    assert rejects, "rolling drawdown must block the candidate"
     assert rejects[-1]["reason"] == "MAX_ROLLING_DRAWDOWN"
     snapshot = rejects[-1]["portfolio_diagnostics"]["snapshot"]
     assert snapshot["daily_realized_pnl"] == pytest.approx(10.0)
@@ -451,6 +452,7 @@ def test_runtime_daily_trade_caps_use_canonical_runtime_config_names(
 
     _process(runtime, candidate_symbol, f"candidate-{expected_reason.lower()}")
 
+    assert rejects, "the daily trade cap must block the candidate"
     assert rejects[-1]["reason"] == expected_reason
     snapshot = rejects[-1]["portfolio_diagnostics"]["snapshot"]
     assert snapshot["trades_today_global"] == 1
@@ -495,6 +497,7 @@ def test_runtime_rejects_symbol_and_global_loss_clusters(
 
     _process(runtime, candidate_symbol, f"candidate-loss-cluster-{candidate_symbol}")
 
+    assert rejects, "the loss cluster must block the candidate"
     assert rejects[-1]["reason"] == "LOSS_CLUSTER_ACTIVE"
     snapshot = rejects[-1]["portfolio_diagnostics"]["snapshot"]
     if candidate_symbol == "BTCUSDT":

@@ -1,3 +1,10 @@
+# #421 P2-B targeted safety mutation gate — 2026-09-24
+
+- Current phase: P2-B focused mutation qualification; 25 named source mutations and 14 baseline test nodes passed locally (25 KILLED, 0 SURVIVED, 0 ERROR). Another 252 related regressions, compileall and diff checks passed. Exact pushed CI for this change is pending.
+- Runtime maturity/alignment: no production decision, threshold, cost, mode or authorization logic changed. The gate protects PAPER execution and portfolio paths, readiness scope, accepted resolver completeness, market time and final LIVE authorization reread without enabling LIVE.
+- Lifecycle/persistence/execution realism: existing tests check rejects, isolated SQLite evidence, scope and position-window behavior. No schema/export change, migration, historical backfill or campaign mutation.
+- Risks: focused mutations are not exhaustive; P2-C properties, P2-D replay, P2-E load and P1-E release qualification remain. LIVE NOT READY. Last audit: 2026-09-24.
+
 # Finite configuration threshold validation — 2026-09-24
 
 - Current phase: #421 audit / P2-B preparation; canonical configuration NaN bypass repaired.
