@@ -91,7 +91,7 @@ The current evidence model includes:
 
 Campaign/burn-in evidence uses explicit identity and provenance so stale or cross-campaign rows do not silently satisfy current qualification. Runtime/readiness surfaces additionally resolve the current mode, campaign, run, release and runtime instance where required.
 
-Shadow/adaptive/agent evidence — including state-direction shadow and System Audit Fabric diagnostics — is not order authority and must not silently overwrite canonical decisions or thresholds.
+Shadow/adaptive/agent evidence — including state-direction shadow — is not order authority and must not silently overwrite canonical decisions or thresholds. System Audit Fabric output is likewise audit/diagnostic evidence, not a replacement for canonical decision authority.
 
 For read-only SQL inspection, [`docs/SQLcheat.md`](docs/SQLcheat.md) is the canonical operator reference.
 
