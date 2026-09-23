@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -356,7 +357,7 @@ def test_real_runtime_decision_path_passes_built_context_to_ai_brain() -> None:
 
     market = _guided_market(
         symbol="BTCUSDT",
-        market_ts=99_999_999_999.0,
+        market_ts=time.time(),
         volume_24h_usdt=90_000_000.0,
         volatility_pct=0.4,
         trend_strength=0.9,
