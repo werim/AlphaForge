@@ -729,3 +729,64 @@ def test_runtime_decision_evidence_persists_execution_safety_snapshot() -> None:
     assert row["volatility_penalty_pct"] == pytest.approx(0.0)
     assert row["total_explicit_cost_pct"] == pytest.approx(0.00085)
     assert row["reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+
+
+def test_aibrain_internal_audit_does_not_fabricate_effective_rr_when_missing() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    session = Session(engine)
+    brain = AIBrain(session)
+    score = ScoreContext(
+        total_score=0.9,
+        expectancy_edge=0.7,
+        components={},
+        penalties={},
+        accepted=True,
+        reason_flags=[],
+        probabilistic={},
+    )
+    plan = OrderPlan(
+        decision="ACCEPTED",
+        order_type="LIMIT",
+        limit_price=100.0,
+        stop_price=None,
+        confidence=0.9,
+        reason="fixture",
+    )
+    execution_ctx = _execution_ctx(
+        evidence_status="PARTIAL_ESTIMATED",
+        safety_evidence_status="PARTIAL_ESTIMATED",
+        safety_missing_fields=[],
+    )
+    brain._persist_decision(
+        {
+            "signal_id": "ai-missing-effective-rr",
+            "symbol": "BTCUSDT",
+            "side": "LONG",
+            "timeframe": "1m",
+            "mode": "PAPER",
+            "entry_price": 100.0,
+            "risk_reward": 2.0,
+        },
+        {
+            "mode": "PAPER",
+            "market_ts": 1_790_000_001.0,
+            "execution_ctx": execution_ctx,
+        },
+        score,
+        plan,
+        "fixture",
+        "real",
+    )
+
+    with engine.connect() as conn:
+        decision_effective = conn.execute(text(
+            "SELECT effective_rr FROM order_decisions "
+            "WHERE signal_id='ai-missing-effective-rr' AND phase='ai_internal_real'"
+        )).scalar_one()
+        signal_effective = conn.execute(text(
+            "SELECT effective_rr FROM signals WHERE signal_id='ai-missing-effective-rr'"
+        )).scalar_one()
+
+    assert decision_effective is None
+    assert signal_effective is None
+    session.close()
