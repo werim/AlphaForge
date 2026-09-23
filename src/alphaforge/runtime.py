@@ -2994,6 +2994,7 @@ class RuntimeOrchestrator:
             with engine.connect() as conn:
                 accepted_rows = conn.execute(text("""
                     SELECT p.trade_id,p.burnin_run_id,p.symbol,p.entry_time,p.status,
+                           p.evidence_complete AS pending_evidence_complete,
                            cr.campaign_id AS lineage_campaign_id
                     FROM burnin_pending_position_outcomes p
                     LEFT JOIN burnin_campaign_runs cr
@@ -3041,6 +3042,7 @@ class RuntimeOrchestrator:
         accepted_symbol_by_trade: dict[str, str] = {}
         accepted_run_by_trade: dict[str, str] = {}
         accepted_entry_by_trade: dict[str, datetime | None] = {}
+        accepted_complete_by_trade: dict[str, bool] = {}
         closed_pending_ids: set[str] = set()
         trades_today_global = 0
         trades_today_symbol = 0
@@ -3064,6 +3066,9 @@ class RuntimeOrchestrator:
             accepted_symbol_by_trade[trade_id] = row_symbol
             accepted_run_by_trade[trade_id] = burnin_run_id
             accepted_entry_by_trade[trade_id] = entry_dt
+            accepted_complete_by_trade[trade_id] = (
+                int(row.get("pending_evidence_complete") or 0) == 1
+            )
             if lineage_campaign_id != str(campaign_id):
                 missing.append(f"accepted_trade_lineage:{trade_id}")
             if not row_symbol:
@@ -3114,6 +3119,7 @@ class RuntimeOrchestrator:
                 or trade_id not in accepted_ids
                 or trade_id in outcome_ids
                 or accepted_status_by_trade.get(trade_id) != "CLOSED"
+                or not accepted_complete_by_trade.get(trade_id, False)
                 or accepted_symbol != row_symbol
                 or accepted_run != outcome_run
                 or not evidence_complete
