@@ -19,11 +19,13 @@ def _engine(path):
     with engine.begin() as conn:
         bootstrap_burnin_schema(conn); bootstrap_campaign_schema(conn)
         conn.execute(text("""INSERT OR IGNORE INTO burnin_campaigns
-            (campaign_id,release_id,execution_mode,campaign_status,created_at,schema_version)
-            VALUES ('camp-p1d','rel-p1d','PAPER','RUNNING','2026-09-23T18:00:00Z','p1d')"""))
+            (campaign_id,release_id,campaign_status,created_at,config_hash,strategy_config_hash,
+             universe_hash,git_commit,source_provenance_json,symbols_json,intervals_json,schema_version)
+            VALUES ('camp-p1d','rel-p1d','RUNNING','2026-09-23T18:00:00Z','cfg','strategy',
+             'universe','test-head','{"mode":"PAPER"}','["BTCUSDT"]','["1m"]','p1d')"""))
         conn.execute(text("""INSERT OR IGNORE INTO burnin_campaign_runs
-            (campaign_run_id,campaign_id,burnin_run_id,continuation_sequence,run_status,created_at,schema_version)
-            VALUES ('crun-p1d','camp-p1d','run-p1d',0,'RUNNING','2026-09-23T18:00:00Z','p1d')"""))
+            (campaign_id,burnin_run_id,continuation_sequence,status,started_at,created_at,schema_version)
+            VALUES ('camp-p1d','run-p1d',0,'RUNNING','2026-09-23T18:00:00Z','2026-09-23T18:00:00Z','p1d')"""))
     return engine
 
 def _kill_at(db, boundary, marker):
@@ -89,8 +91,9 @@ def test_resolver_cold_restart_is_idempotent_and_preserves_lineage(tmp_path):
 def test_unclean_restart_and_orphan_exposure_block_until_clean_reconciliation(tmp_path):
     db=tmp_path/"recovery.sqlite3"; engine=_engine(db)
     save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER",requested_mode="PAPER",actual_mode="PAPER",
         instance_id="runtime-p1d",startup_id="startup-p1d",runtime_status="OPERATING",
-        execution_mode="PAPER",campaign_id="camp-p1d",burnin_run_id="run-p1d",
+        campaign_id="camp-p1d",burnin_run_id="run-p1d",
         process_id=None,last_start_time="2026-09-23T18:00:00Z"))
     save_exchange_reconciliation_event(engine,instance_id="runtime-p1d",startup_id="startup-p1d",
         mode="PAPER",status="MISMATCH",orphan_position_count=1,exchange_read_only_status="READ_ONLY")
