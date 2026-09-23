@@ -455,6 +455,9 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "expected_slippage_legacy_pct": max(expected_slippage_pct, 0.0),
         "slippage_status": slippage_status,
         "slippage_source": slippage_source,
+        "expected_slippage_pct_zero_verified": bool(
+            market_ctx.get("expected_slippage_pct_zero_verified", False)
+        ),
         "market_data_latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
         "market_data_latency_status": md_latency_status,
         "market_data_latency_source": md_latency_source,
@@ -464,20 +467,32 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "latency_ms": max(execution_latency, 0.0) if execution_latency is not None else None,
         "latency_status": execution_latency_status,
         "latency_source": execution_latency_source,
+        "latency_ms_zero_verified": bool(
+            market_ctx.get("latency_ms_zero_verified", False)
+        ),
         "spread_pct": max(spread_pct, 0.0) if spread_status != "UNAVAILABLE" else None,
         "spread_status": spread_status,
         "spread_source": spread_source,
+        "spread_pct_zero_verified": bool(
+            market_ctx.get("spread_pct_zero_verified", False)
+        ),
         "spread_unit_assumed": spread_unit_assumed,
         "slippage_unit_assumed": slippage_unit_assumed,
         "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
         "orderbook_status": orderbook_status,
         "orderbook_source": orderbook_source,
+        "orderbook_imbalance_zero_verified": bool(
+            market_ctx.get("orderbook_imbalance_zero_verified", False)
+        ),
         "liquidity_score": (max(min(liquidity_score, 1.0), 0.0) if liquidity_score is not None and liquidity_status != "UNAVAILABLE" else None),
         "liquidity_status": liquidity_status,
         "liquidity_source": liquidity_source,
         "funding_rate_pct": funding_val,
         "funding_status": funding_status,
         "funding_source": funding_source,
+        "funding_rate_pct_zero_verified": bool(
+            market_ctx.get("funding_rate_pct_zero_verified", False)
+        ),
         "fee_pct": fee,
         "fee_status": fee_status if fee is not None else "UNAVAILABLE",
         "fee_source": fee_source if fee is not None else "UNAVAILABLE",
