@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain, OrderPlan, ScoreContext
 from alphaforge.execution import evaluate_execution_safety
-from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
+from alphaforge.persistence import (
+    init_db,
+    save_order_decision,
+    save_rejected_decision_artifact,
+    save_trade_lifecycle_event,
+)
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
 
@@ -588,3 +593,39 @@ def test_aibrain_internal_audit_persists_canonical_effective_rr_and_execution_la
     assert persisted_features["latency_ms"] == pytest.approx(50.0)
     assert persisted_features["safety_evidence_status"] == "PARTIAL_ESTIMATED"
     session.close()
+
+
+def test_rejected_artifact_never_promotes_market_data_rtt_to_execution_latency() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    execution_ctx = _execution_ctx(
+        evidence_status="PARTIAL_ESTIMATED",
+        safety_evidence_status="PARTIAL_ESTIMATED",
+        market_data_latency_ms=1500.0,
+        latency_ms=50.0,
+    )
+
+    with Session(engine) as session:
+        artifact = save_rejected_decision_artifact(
+            session,
+            decision_id="reject-latency-contract",
+            event_id="reject-latency-event",
+            signal_id="reject-latency-signal",
+            symbol="BTCUSDT",
+            side="LONG",
+            timeframe="1m",
+            mode="PAPER",
+            reason="HIGH_LATENCY",
+            raw_rr=2.0,
+            effective_rr=1.2,
+            execution_ctx=execution_ctx,
+            event_ts="2026-09-23T00:00:01Z",
+        )
+        assert artifact is not None
+
+    with engine.connect() as conn:
+        latency = conn.execute(text(
+            "SELECT latency_ms FROM order_decisions "
+            "WHERE decision_id='reject-latency-contract'"
+        )).scalar_one()
+
+    assert latency == pytest.approx(50.0)
