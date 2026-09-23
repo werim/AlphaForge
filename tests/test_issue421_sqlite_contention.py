@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from alphaforge.burnin_campaign import _with_fresh_lock_retry
+from alphaforge.burnin_campaign import _with_fresh_lock_retry, bootstrap_campaign_schema
 from alphaforge.persistence import init_db
 
 
@@ -50,7 +50,12 @@ FAMILIES = {
 
 
 def _engine(tmp_path):
-    return init_db(f"sqlite+pysqlite:///{tmp_path / 'p1c.sqlite3'}")
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'p1c.sqlite3'}")
+    # init_db owns the core persistence schema; Phase 8/9 authoritative
+    # campaign families have a separate canonical bootstrap contract.
+    with engine.begin() as conn:
+        bootstrap_campaign_schema(conn)
+    return engine
 
 
 def _count(engine, table, where):
