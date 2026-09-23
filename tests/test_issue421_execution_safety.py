@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain, OrderPlan, ScoreContext
-from alphaforge.execution import evaluate_execution_safety
+from alphaforge.execution import build_execution_context, evaluate_execution_safety
 from alphaforge.persistence import (
     init_db,
     save_order_decision,
@@ -79,6 +79,34 @@ def _thresholds(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+def test_none_volatility_value_cannot_be_promoted_to_measured_string_evidence() -> None:
+    ctx = build_execution_context({
+        "spread_pct": 0.0002,
+        "spread_status": "MEASURED",
+        "expected_slippage_pct": 0.0002,
+        "slippage_status": "MODEL_ESTIMATE",
+        "latency_ms": 50.0,
+        "latency_status": "MODEL_ESTIMATE",
+        "liquidity_score": 0.9,
+        "liquidity_status": "MEASURED",
+        "funding_rate_pct": 0.00005,
+        "funding_status": "MEASURED",
+        "volatility_regime": None,
+        "volatility_status": "MEASURED",
+    })
+    assert ctx["volatility_regime"] is None
+
+    result = evaluate_execution_safety(
+        ctx,
+        effective_rr=9.0,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(),
+    )
+    assert result["accepted"] is False
+    assert result["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+    assert "volatility_regime" in result["missing_fields"]
 
 
 def test_execution_safety_complete_context_passes_without_recomputing_geometry() -> None:
