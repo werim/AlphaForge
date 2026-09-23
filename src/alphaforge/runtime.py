@@ -1237,7 +1237,7 @@ class RuntimeOrchestrator:
                     fee_pct=execution_ctx.get("fee_pct"),
                     fee_source=execution_ctx.get("fee_source"),
                     funding_source=execution_ctx.get("funding_source"),
-                    latency_ms=execution_ctx.get("latency_ms") if execution_ctx.get("latency_ms") is not None else execution_ctx.get("latency_ms"),
+                    latency_ms=execution_ctx.get("latency_ms"),
                     latency_source=execution_ctx.get("latency_source"),
                     liquidity_status=execution_ctx.get("liquidity_status"),
                     volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
@@ -2266,6 +2266,9 @@ class RuntimeOrchestrator:
                 "safety_missing_fields": list(execution_safety.get("missing_fields") or []),
                 "safety_fake_zero_fields": list(execution_safety.get("fake_zero_fields") or []),
                 "safety_all_failed_gates": list(execution_safety.get("all_failed_gates") or []),
+                "unavailable_fields": list(execution_safety.get("missing_fields") or []),
+                "total_explicit_cost_pct": execution_safety.get("total_explicit_cost_pct"),
+                "volatility_penalty_pct": execution_safety.get("volatility_penalty"),
             }
             market_ctx["execution_ctx"] = execution_ctx
             market_ctx["execution_safety"] = execution_safety
