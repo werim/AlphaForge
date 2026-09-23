@@ -1,0 +1,37 @@
+{
+  "schema_version": "system_golden.v1",
+  "scenario": "profitable_short",
+  "mode": "PAPER",
+  "symbol": "BTCUSDT",
+  "side": "SHORT",
+  "frozen_market_event": {
+    "event_id": "golden:profitable_short",
+    "timestamp": "2026-01-01T00:00:00Z",
+    "closed_candle": true
+  },
+  "expected": {
+    "decision": "ACCEPT",
+    "full_chain": [
+      "market_event",
+      "decision",
+      "failed_gates",
+      "geometry",
+      "expected_fill",
+      "effective_rr",
+      "portfolio_state",
+      "persistence",
+      "resolver",
+      "readiness",
+      "audit"
+    ],
+    "failed_gates": [],
+    "geometry_status": "COMPLETE",
+    "expected_fill_status": "FILLED",
+    "effective_rr_status": "ABOVE_THRESHOLD",
+    "portfolio_state": "ALLOW",
+    "persistence": "ACCEPTED_DECISION_DURABLE",
+    "resolver": "TP_HIT",
+    "readiness": "BLOCKED_INSUFFICIENT_SAMPLE",
+    "audit": "CANONICAL_ACCEPT"
+  }
+}
