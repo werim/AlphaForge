@@ -27,5 +27,6 @@ accepted-position candle-window completeness, reconciliation CLEAN, final
 kill-switch reread, runtime portfolio-risk inputs, and future market timestamps.
 The coverage is intentionally targeted; it is not a global mutation score or
 a claim of LIVE readiness. P2-C seeded property contracts live in
-`tests/test_issue421_safety_properties.py`. P2-D replay, P2-E load checks, and
-final exact-commit release qualification remain separate work.
+`tests/test_issue421_safety_properties.py`. P2-D has two frozen production-chain
+replays in `tests/test_issue421_full_chain_replay.py`; the remaining golden cases,
+P2-E load checks, and final exact-commit release qualification remain separate work.

@@ -311,7 +311,9 @@ SIGNAL_CREATED
 
 The canonical timeline is `trade_lifecycle_events`. `order_decisions` explains the decision; `decision_evidence` is a SQL-backed readiness/export surface; `expectancy_evidence` is the compact timestamp-bounded evidence surface; `rejected_signal_reviews` and `closed_trade_reviews` are review projections; burn-in outcomes are the campaign qualification surfaces.
 
-Current source inspection found the `decision_evidence` table DDL and readiness reads, but no production `INSERT INTO decision_evidence` writer under `src/alphaforge`. Therefore an empty table is not automatically harmless: it can be expected for a database that has not run the export path, but the live-readiness checks treat missing rows as a readiness failure. Always report table existence and row count separately.
+The PAPER/LIVE_PRECHECK runtime writes run-scoped final decisions to `decision_evidence` through `_persist_burnin_decision` and `save_decision_evidence` when its persistence engine and burn-in run are available. The audit fabric reads those rows. An empty table for a run with observed runtime decisions is a persistence gap, and live-readiness treats missing rows as a failure. Always report table existence and run-scoped row count separately.
+
+For PAPER accepted signals, an `ai_internal_real` order-decision row alone is not proof of a fill. Durable `decision_evidence` with `decision='ACCEPT'` and `lifecycle_state_after='POSITION_OPENED'` records the post-fill decision; an attached campaign's `burnin_pending_position_outcomes` row also proves execution during the crash interval before that evidence transaction. The PAPER replay guard uses these surfaces with run/campaign scope. Rejected final decisions remain in `order_decisions` with `phase='final'`, but signal ID alone is not enough to scope a replay across campaigns; use its run-scoped decision evidence or canonical campaign/run reject identity.
 
 ### 7.5 JSON/MTF evidence location
 
@@ -1079,7 +1081,7 @@ Check pending status, `due_at`, market-window completeness, execution-cost field
 
 ### Why is `decision_evidence` empty?
 
-The table is present in the canonical schema and is read by live-readiness checks, but current source inspection found no production insert writer under `src/alphaforge`. It may be an export/readiness surface or an implementation gap for the selected runtime path. Report its existence, row count, lifecycle coverage, and readiness result separately; use `trade_lifecycle_events`, `order_decisions`, and burn-in evidence for the direct runtime audit.
+The table is populated by the PAPER/LIVE_PRECHECK runtime's final-decision persistence when an engine and burn-in run are available; it is also consumed by live-readiness and the downstream audit fabric. Report its existence, run-scoped row count, lifecycle coverage, and readiness result separately. Cross-check `trade_lifecycle_events`, `order_decisions`, and burn-in observations for missing or mismatched decisions.
 
 ### Why do global rows not match campaign rows?
 

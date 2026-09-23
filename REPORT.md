@@ -1,3 +1,17 @@
+# #421 P2-D first deterministic full-chain replays — 2026-09-24
+
+## Why / root cause
+
+The P2-A golden pack declared full-chain expectations but exercised only a pre-submit projection. Replaying a frozen high-spread PAPER event exposed a real identity error: an attached campaign's reject forward label and observation used environment/standalone identity when the runtime attachment existed only in `_campaign_id`. A frozen accepted replay showed that complete geometry status was dropped from its persisted decision envelope and the replay guard ignored durable accepted position/decision evidence, allowing a second processing attempt. The same signal's final reject in another campaign also caused a false replay skip because the guard queried only signal ID. `docs/SQLcheat.md` incorrectly said no production `decision_evidence` writer existed.
+
+## Change / behavior
+
+`src/alphaforge/runtime.py` now uses attached campaign identity for reject IDs, reject payloads, pending labels and burn-in decision provenance, falling back to existing environment/standalone identity for unattached runs. Accepted burn-in decisions carry geometry status/reason into existing observation and `decision_evidence` JSON. The PAPER finalized-signal guard reads run-scoped accepted/rejected decision evidence and, for attached campaigns, campaign/run-scoped pending positions; a final reject row must match the current canonical campaign/run identity. This covers the crash interval before the post-fill evidence transaction and prevents cross-campaign false skips. Two P2-A fixtures now contain complete frozen market input; their expected portfolio/gate semantics were corrected from real production behavior. `tests/test_issue421_full_chain_replay.py` drives real AIBrain scoring, PAPER runtime, persisted lifecycle/decisions, accepted position or reject label, resolver, readiness and isolated append-only audit ingestion twice. A real SIGKILL cold-start test checks the pending-position fallback. The restart replay fixture now includes run-scoped decision evidence. The reject callback uses the same persistence helper as production wiring. `docs/SQLcheat.md`, the lifecycle contract, README and the safety testing guide describe the implemented boundary.
+
+## Validation / impact
+
+Focused replay/crash tests and related runtime, burn-in, execution-safety, audit and golden tests passed. The accepted path preserves decision-to-position lineage, resolves a complete candle window to an evidence-complete TP, and creates one authoritative audit outcome. The reject path persists one final decision and campaign-scoped pending label, makes no execution, and creates one audit shadow decision. Readiness remains blocked with insufficient qualification evidence. No schema/CSV shape, migration, threshold, cost, LIVE authorization or active campaign database change. Earlier standalone evidence identity remains compatible; already-mis-scoped historical rows are not rewritten. The remaining 21 golden scenarios and bounded load/release qualification still need production replay. Push recommendation: CHATGPT only, followed by exact-SHA CI; LIVE NOT READY.
+
 # #421 P2-C deterministic safety properties — 2026-09-24
 
 ## Why / root cause

@@ -1119,7 +1119,7 @@ class RuntimeOrchestrator:
             execution_ctx = dict(payload.get("execution_ctx") or {})
             missing = [name for name in ("signal_id", "symbol", "decision") if not payload.get(name)]
             def persist(target: Any) -> None:
-                campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+                campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
                 runtime_identity = campaign_id or f"standalone:{self._burnin_run_id}"
                 metrics = {k: payload.get(k) for k in ("score", "rr", "candidate_rr",
                     "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
@@ -2602,6 +2602,8 @@ class RuntimeOrchestrator:
             "shadow_mtf_execution_reason": market_ctx.get("shadow_mtf_execution_reason"),
             "authoritative_reject_reason": None,
             "enforce_counterfactual_reject_reason": market_ctx.get("enforce_counterfactual_reject_reason"),
+            "geometry_status": market_ctx.get("geometry_status"),
+            "geometry_reason": market_ctx.get("geometry_reason"),
             "geometry_source": market_ctx.get("geometry_source"),
             "entry_source": market_ctx.get("entry_source"),
             "stop_source": market_ctx.get("stop_source"),
@@ -3549,7 +3551,7 @@ class RuntimeOrchestrator:
                     result["reject_reason"] = primary_reject_reason
                 result["authoritative_reject_reason"] = primary_reject_reason
         all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
-        campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
+        campaign_id = (self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")) if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         supplied_reject_decision_id = result.get("reject_decision_id")
         reject_decision_id = self._canonical_reject_decision_id(result)
@@ -3594,7 +3596,7 @@ class RuntimeOrchestrator:
         return result
 
     def _canonical_reject_decision_id(self, payload: Mapping[str, Any]) -> str:
-        campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
+        campaign_id = (self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")) if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         return "reject:" + canonical_hash({
             "runtime_identity": runtime_identity,
@@ -3608,7 +3610,7 @@ class RuntimeOrchestrator:
     def _reject_campaign_id(self) -> str | None:
         if not self._burnin_run_id:
             return None
-        return os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or f"standalone:{self._burnin_run_id}"
+        return self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or f"standalone:{self._burnin_run_id}"
 
     def _persist_pending_reject(self, payload: Mapping[str, Any], *, conn: Any | None = None) -> str | None:
         """Durably enqueue eligible PAPER rejects; incomplete geometry remains auditable."""
@@ -3949,7 +3951,13 @@ class RuntimeOrchestrator:
             return None
 
     def _canonical_final_decision_recorded(self, signal_id: str) -> bool | None:
-        """Return durable PAPER finalization state; lookup failure is fail-closed."""
+        """Return durable PAPER finalization state; lookup failure is fail-closed.
+
+        An accepted PAPER fill is authoritative even when its final evidence is
+        in decision_evidence or the campaign position rather than a final-phase
+        order_decisions row. The position also closes the crash window before
+        the post-fill decision evidence transaction.
+        """
         if self.config.execution_mode is not ExecutionMode.PAPER:
             return False
         engine = self._resolve_persistence_engine()
@@ -3957,14 +3965,45 @@ class RuntimeOrchestrator:
             return False
         try:
             with engine.connect() as conn:
-                return conn.execute(text("""
-                    SELECT 1 FROM order_decisions
+                final_rows = conn.execute(text("""
+                    SELECT decision_id, symbol, decision FROM order_decisions
                     WHERE signal_id=:signal_id
                       AND UPPER(COALESCE(mode, ''))='PAPER'
                       AND LOWER(COALESCE(phase, ''))='final'
                       AND UPPER(COALESCE(decision, '')) IN ('ACCEPTED', 'REJECTED')
+                """), {"signal_id": signal_id}).fetchall()
+                if not self._burnin_run_id:
+                    if self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID"):
+                        return None
+                    return bool(final_rows)
+                for row in final_rows:
+                    if str(row.decision).upper() == "REJECTED" and row.decision_id == self._canonical_reject_decision_id({
+                        "signal_id": signal_id, "symbol": row.symbol,
+                    }):
+                        return True
+                if conn.execute(text("""
+                    SELECT 1 FROM decision_evidence
+                    WHERE signal_id=:signal_id AND run_id=:burnin_run_id
+                      AND UPPER(COALESCE(mode, ''))='PAPER'
+                      AND ((UPPER(COALESCE(decision, ''))='ACCEPT'
+                            AND lifecycle_state_after='POSITION_OPENED')
+                           OR (UPPER(COALESCE(decision, ''))='REJECT'
+                               AND lifecycle_state_after='SIGNAL_REJECTED'))
                     LIMIT 1
-                """), {"signal_id": signal_id}).first() is not None
+                """), {"signal_id": signal_id, "burnin_run_id": self._burnin_run_id}).first() is not None:
+                    return True
+                campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+                if not campaign_id:
+                    return False
+                return conn.execute(text("""
+                    SELECT 1 FROM burnin_pending_position_outcomes
+                    WHERE signal_id=:signal_id AND burnin_run_id=:burnin_run_id
+                      AND campaign_id=:campaign_id
+                    LIMIT 1
+                """), {
+                    "signal_id": signal_id, "burnin_run_id": self._burnin_run_id,
+                    "campaign_id": campaign_id,
+                }).first() is not None
         except Exception as exc:
             self.metrics.final_decision_lookup_failures += 1
             logger.exception(

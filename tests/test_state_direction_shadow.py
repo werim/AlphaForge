@@ -12,7 +12,8 @@ from alphaforge.burnin_resolver import evaluate_forward_outcome
 from alphaforge.config import runtime_filter_config
 from alphaforge.multi_timeframe import evaluate_mtf_alignment
 from alphaforge.persistence import (
-    init_db, save_rejected_decision_artifact, save_trade_lifecycle_event,
+    init_db, save_decision_evidence, save_rejected_decision_artifact,
+    save_trade_lifecycle_event,
 )
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 from alphaforge.state_direction_shadow import (
@@ -349,6 +350,12 @@ def test_finalized_signal_restart_replay_skips_predecision_side_effects_and_allo
                 (event_id,signal_id,symbol,mode,lifecycle_state,event_ts)
             VALUES ('original-created',:signal_id,'BTCUSDT','PAPER','SIGNAL_CREATED',:event_ts)
         """), {"signal_id": first_signal_id, "event_ts": DECISION_TS})
+        assert save_decision_evidence(
+            conn, evidence_id="replay-first-reject", run_id="restart-replay-run",
+            mode="PAPER", timestamp=DECISION_TS, signal_id=first_signal_id,
+            symbol="BTCUSDT", decision="REJECT", reject_reason="MTF_EXECUTION_COUNTER_REGIME",
+            lifecycle_state_after="SIGNAL_REJECTED",
+        )
 
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 

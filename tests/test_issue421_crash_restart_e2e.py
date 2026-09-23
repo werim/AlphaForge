@@ -7,6 +7,7 @@ from alphaforge.persistence import init_db
 from alphaforge.burnin import bootstrap_burnin_schema, BurnInRun, persist_burnin_run
 from alphaforge.burnin_campaign import bootstrap_campaign_schema
 from alphaforge.burnin_resolver import resolve_position_closure
+from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 from alphaforge.runtime_state import (
     RuntimeStateSnapshot, evaluate_runtime_recovery, save_runtime_state_snapshot,
     save_exchange_reconciliation_event, persist_verified_paper_recovery,
@@ -127,6 +128,19 @@ def test_persisted_paper_position_is_authoritative_cold_start_exposure(tmp_path)
         campaign_id="camp-p1d",burnin_run_id="run-p1d",
         process_id=None,last_start_time="2026-09-23T18:00:00Z"))
     _kill_at(db,"pending_after_persistence","PENDING_DURABLE")
+    restarted = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=object(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    restarted._campaign_id = "camp-p1d"
+    restarted._burnin_run_id = "run-p1d"
+    assert restarted._canonical_final_decision_recorded("sig-p1d") is True
+    assert restarted._canonical_final_decision_recorded("other-signal") is False
+    restarted._campaign_id = "other-campaign"
+    assert restarted._canonical_final_decision_recorded("sig-p1d") is False
+    restarted._campaign_id = "camp-p1d"
+    restarted._burnin_run_id = "other-run"
+    assert restarted._canonical_final_decision_recorded("sig-p1d") is False
     clean_probe={"evidence_status":"COMPLETE","authenticated":True,
         "input_source":"AUTHENTICATED_EXCHANGE_SNAPSHOT","orders":[],"positions":[],"errors":[]}
     blocked=evaluate_runtime_recovery(engine,mode="PAPER",campaign_id="camp-p1d",

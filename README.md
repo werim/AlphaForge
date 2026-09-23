@@ -164,7 +164,9 @@ A historical FAST/SOAK result is not proof for a newer commit. Fresh qualificati
 must be bound to the code/config under evaluation. [#421](https://github.com/werim/AlphaForge/issues/421)
 remains the full-system verification tracker. Current `CHATGPT` includes the
 P0-A/B/C, P1-A/B/C/D and P2-A regression families. P2-B has a focused mutation
-gate; remaining P2 and final release qualification work are tracked separately.
+gate, P2-C has seeded safety properties, and P2-D now replays two golden cases
+through the production PAPER evidence chain. Remaining coverage and final release
+qualification are tracked separately.
 
 ## Testing
 
@@ -184,13 +186,14 @@ and campaign/run/release identity with reproducible case sequences.
 
 Not all desired full-system verification families are complete. [#421](https://github.com/werim/AlphaForge/issues/421) currently tracks:
 
-- deterministic full-chain replay;
+- full-chain replay for the other golden scenarios;
 - bounded load/performance qualification;
 - fresh exact-head FAST plus public 6h SOAK release evidence.
 
 The SQLite contention, real crash/restart, golden-scenario-pack, targeted
 mutation and seeded property families have dedicated tests. The golden pack freezes scenario
-expectations; full-chain deterministic execution replay remains P2-D work.
+expectations; profitable LONG and high-spread cases also have deterministic production-chain
+replay, while the other scenarios remain P2-D work.
 
 ## Repository Navigation
 

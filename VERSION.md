@@ -1,3 +1,10 @@
+# AlphaForge 0.1.0 — #421 P2-D full-chain replay in progress — 2026-09-24
+
+- Current phase: two P2-A golden cases replay through real PAPER scoring/decision, lifecycle and SQLite persistence, resolver, readiness and isolated audit ingestion. P2-C passed exact-head CI on `c3a9ffd`.
+- Runtime maturity/alignment: attached PAPER campaigns now own reject labels, reject identities and decision observations without relying on an environment variable. Accepted decisions retain geometry status/reason in existing JSON evidence; durable accepted evidence prevents repeated PAPER execution, and an unrelated campaign's reject cannot suppress the same signal. BACKTEST and LIVE behavior, thresholds and costs are unchanged; LIVE stays disabled.
+- Lifecycle/execution/persistence: frozen profitable LONG closes at TP; high spread rejects before submit and retains a pending forward label. Both replay twice with the same semantic result; repeated accepted scans skip the finalized signal. A real SIGKILL cold-start position also blocks replay. PAPER fills remain modeled. No schema/export migration or historical evidence rewrite.
+- Validation: focused replay/crash tests and related regressions passed; exact-head CI for this patch remains required. Known risks: 21 other golden cases still lack production full-chain replay; P2-E load, P2-F documentation sweep and P1-E release qualification remain. Last audit: 2026-09-24. LIVE NOT READY.
+
 # #421 P2-C seeded safety properties — 2026-09-24
 
 - Current phase: P2-C deterministic property contracts for geometry, partial fills, cost monotonicity, time boundaries, and run/campaign/release identity. P2-B exact-head CI passed on b3800e8; this patch still needs its own exact-head CI.
