@@ -120,35 +120,40 @@ def test_each_protected_execution_gate_independently_kills_acceptance(
     )
 
 
-def test_missing_funding_blocks_when_funding_evidence_is_required() -> None:
-    result = evaluate_execution_safety(
-        _execution_ctx(
-            funding_rate_pct=None,
-            funding_status="UNAVAILABLE",
-            funding_source="UNAVAILABLE",
+@pytest.mark.parametrize(
+    ("changes", "missing_field"),
+    [
+        (
+            {
+                "funding_rate_pct": None,
+                "funding_status": "UNAVAILABLE",
+                "funding_source": "UNAVAILABLE",
+            },
+            "funding_rate_pct",
         ),
-        effective_rr=9.0,
-        min_effective_rr=1.10,
-        thresholds=_thresholds(REQUIRE_FUNDING_RATE=True),
-    )
-    assert result["accepted"] is False
-    assert result["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
-    assert "funding_rate_pct" in result["missing_fields"]
-
-
-def test_unknown_volatility_is_conservatively_penalized_without_fake_evidence() -> None:
-    result = evaluate_execution_safety(
-        _execution_ctx(
-            volatility_regime=None,
-            volatility_status="UNAVAILABLE",
-            volatility_source="UNAVAILABLE",
+        (
+            {
+                "volatility_regime": None,
+                "volatility_status": "UNAVAILABLE",
+                "volatility_source": "UNAVAILABLE",
+            },
+            "volatility_regime",
         ),
+    ],
+)
+def test_unknown_funding_or_volatility_is_fail_closed(
+    changes: dict[str, Any],
+    missing_field: str,
+) -> None:
+    result = evaluate_execution_safety(
+        _execution_ctx(**changes),
         effective_rr=9.0,
         min_effective_rr=1.10,
         thresholds=_thresholds(),
     )
-    assert result["accepted"] is True
-    assert result["volatility_penalty"] == pytest.approx(0.10)
+    assert result["accepted"] is False
+    assert result["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+    assert missing_field in result["missing_fields"]
 
 
 def test_live_precheck_requires_measured_execution_evidence() -> None:
@@ -330,6 +335,40 @@ def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit
         event.get("lifecycle_event_type")
         for event in events
     }
+
+
+def test_execution_safety_reject_happens_before_ai_brain_is_called() -> None:
+    class _CountingBrain:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
+            self.calls += 1
+            raise AssertionError("unsafe execution context reached AIBrain")
+
+    rejects: list[dict[str, Any]] = []
+    brain = _CountingBrain()
+    market = _market(
+        rr=25.0,
+        liquidity_score=None,
+        liquidity_status="UNAVAILABLE",
+    )
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=brain,
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        on_reject_persist=lambda payload: rejects.append(payload),
+        paper_slippage_bps=2.0,
+    )
+    asyncio.run(orchestrator._process_symbol(SimpleNamespace(
+        symbol="BTCUSDT",
+        diagnostics={"inputs": market},
+    )))
+
+    assert brain.calls == 0
+    assert orchestrator.metrics.decisions_generated == 0
+    assert orchestrator.metrics.executions == 0
+    assert rejects[-1]["reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
 
 
 def test_high_raw_rr_cannot_bypass_unknown_execution_context() -> None:
