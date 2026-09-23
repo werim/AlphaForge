@@ -117,3 +117,28 @@ def test_unclean_restart_and_orphan_exposure_block_until_clean_reconciliation(tm
         instance_id="runtime-restart-2",startup_id="startup-restart-2")
     assert clean["blocked"] is False
     assert clean["reconciliation_status"]=="CLEAN"
+
+
+def test_persisted_paper_position_is_authoritative_cold_start_exposure(tmp_path):
+    db=tmp_path/"pending-exposure.sqlite3"; engine=_engine(db)
+    save_runtime_state_snapshot(engine, RuntimeStateSnapshot(
+        mode="PAPER",requested_mode="PAPER",actual_mode="PAPER",
+        instance_id="runtime-p1d",startup_id="startup-p1d",runtime_status="OPERATING",
+        campaign_id="camp-p1d",burnin_run_id="run-p1d",
+        process_id=None,last_start_time="2026-09-23T18:00:00Z"))
+    _kill_at(db,"pending_after_persistence","PENDING_DURABLE")
+    clean_probe={"evidence_status":"COMPLETE","authenticated":True,
+        "input_source":"AUTHENTICATED_EXCHANGE_SNAPSHOT","orders":[],"positions":[],"errors":[]}
+    blocked=evaluate_runtime_recovery(engine,mode="PAPER",campaign_id="camp-p1d",
+        instance_id="runtime-restart",startup_id="startup-restart",
+        reconciliation_probe=lambda:clean_probe)
+    assert blocked["blocked"] is True
+    assert blocked["current_exposure_check"]["active_positions"] == 1
+    assert blocked["availability"]["paper_campaign_positions_available"] is True
+    # Repeating cold-start evaluation cannot mutate or duplicate exposure.
+    repeated=evaluate_runtime_recovery(engine,mode="PAPER",campaign_id="camp-p1d",
+        instance_id="runtime-restart-2",startup_id="startup-restart-2",
+        reconciliation_probe=lambda:clean_probe)
+    assert repeated["blocked"] is True
+    assert repeated["current_exposure_check"] == blocked["current_exposure_check"]
+    assert _counts(db)["positions"] == 1
