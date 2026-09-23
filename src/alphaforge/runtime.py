@@ -28,6 +28,7 @@ from alphaforge.execution import (
     PROVENANCE_UNAVAILABLE,
     build_execution_context,
     build_execution_cost_model,
+    evaluate_execution_safety,
     build_execution_cost_semantics,
     weighted_average_fill_price,
 )
@@ -1235,7 +1236,7 @@ class RuntimeOrchestrator:
                     fee_pct=execution_ctx.get("fee_pct"),
                     fee_source=execution_ctx.get("fee_source"),
                     funding_source=execution_ctx.get("funding_source"),
-                    latency_ms=execution_ctx.get("market_data_latency_ms") if execution_ctx.get("market_data_latency_ms") is not None else execution_ctx.get("latency_ms"),
+                    latency_ms=execution_ctx.get("latency_ms") if execution_ctx.get("latency_ms") is not None else execution_ctx.get("latency_ms"),
                     latency_source=execution_ctx.get("latency_source"),
                     liquidity_status=execution_ctx.get("liquidity_status"),
                     volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
@@ -1904,7 +1905,23 @@ class RuntimeOrchestrator:
         self._assert_campaign_candidate(selection.symbol, market_ctx.get("source_exchange"),
                                         "PROCESS_SYMBOL")
         market_ctx.setdefault("mode", self.config.execution_mode.value)
-        if self.config.execution_mode is ExecutionMode.PAPER and self.config.paper_fee_bps is not None:
+        if self.config.execution_mode is ExecutionMode.PAPER:
+            try:
+                paper_slippage_bps = float(self.paper_slippage_bps)
+                if paper_slippage_bps < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                paper_slippage_bps = None
+            if (
+                paper_slippage_bps is not None
+                and market_ctx.get("expected_slippage_pct") in (None, "")
+            ):
+                market_ctx.update(
+                    expected_slippage_pct=paper_slippage_bps / 10_000.0,
+                    slippage_status="MODEL_ESTIMATE",
+                    slippage_source="CONFIGURED_PAPER_ASSUMPTION",
+                )
+
             try:
                 paper_fee_bps = float(self.config.paper_fee_bps)
                 if paper_fee_bps < 0:
@@ -2217,15 +2234,27 @@ class RuntimeOrchestrator:
         rr_metrics = self._execution_rr_metrics(raw_rr, market_ctx, execution_ctx)
         effective_rr = float(rr_metrics["effective_rr"] or 0.0)
         market_ctx.update(rr_metrics)
+        execution_safety = None
+        if self.config.execution_mode is not ExecutionMode.BACKTEST:
+            execution_safety = evaluate_execution_safety(
+                execution_ctx,
+                effective_rr=effective_rr,
+                min_effective_rr=self.config.min_effective_rr,
+                thresholds=self._canonical_filter_config(),
+                require_measured=self.config.execution_mode in {
+                    ExecutionMode.LIVE_PRECHECK, ExecutionMode.LIVE
+                },
+            )
+            market_ctx["execution_safety"] = execution_safety
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if self._kill_switch_active():
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
             return
         if risk_reject is not None:
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
@@ -2250,7 +2279,7 @@ class RuntimeOrchestrator:
         self.metrics.last_decision_ts = canonical_utc_timestamp()
 
         if self._kill_switch_active():
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
             return
@@ -2280,7 +2309,7 @@ class RuntimeOrchestrator:
                 "execution_ctx": execution_ctx,
                 "spread_pct": execution_ctx.get("spread_pct"),
                 "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
-                "latency_ms": execution_ctx.get("market_data_latency_ms"),
+                "latency_ms": execution_ctx.get("latency_ms"),
                 "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
                 "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
                 "volatility_regime": execution_ctx.get("volatility_regime"),
@@ -2297,9 +2326,18 @@ class RuntimeOrchestrator:
             })
             return
 
+        if execution_safety is not None and not bool(execution_safety.get("accepted")):
+            reject_reason = str(
+                execution_safety.get("primary_reject_reason") or "BAD_EXECUTION"
+            )
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "primary_reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_execution_safety_gate", "execution_ctx": execution_ctx, "execution_safety": execution_safety, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "liquidity_score": execution_ctx.get("liquidity_score"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            await self._persist_reject({**market_ctx, **reject_payload})
+            await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
+            return
+
         if effective_rr < self.config.min_effective_rr:
             reject_reason = "LOW_EFFECTIVE_RR"
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
             return
@@ -2338,7 +2376,7 @@ class RuntimeOrchestrator:
         portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
         if not portfolio_decision.accepted:
             reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
             return
@@ -2775,7 +2813,7 @@ class RuntimeOrchestrator:
                 execution_ctx_missing=str(execution_ctx.get("evidence_status", "")).upper() in {"", "UNAVAILABLE", "UNKNOWN"},
                 expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
                 spread_pct=execution_ctx.get("spread_pct"),
-                latency_ms=execution_ctx.get("market_data_latency_ms"),
+                latency_ms=execution_ctx.get("latency_ms"),
                 funding_rate_pct=execution_ctx.get("funding_rate_pct"),
                 orderbook_imbalance=execution_ctx.get("orderbook_imbalance"),
                 volatility_regime=execution_ctx.get("volatility_regime"),
@@ -2925,6 +2963,21 @@ class RuntimeOrchestrator:
                 "comparison": comparison,
                 "source": source,
             })
+
+        execution_safety = payload.get("execution_safety")
+        if isinstance(execution_safety, Mapping):
+            safety_evidence = execution_safety.get("failed_gate_evidence")
+            if isinstance(safety_evidence, (list, tuple)):
+                for row in safety_evidence:
+                    if not isinstance(row, Mapping) or not row.get("gate"):
+                        continue
+                    add(
+                        str(row.get("gate")),
+                        row.get("observed"),
+                        row.get("threshold"),
+                        str(row.get("comparison") or "SAFETY_CONTRACT"),
+                        str(row.get("source") or "EXECUTION_SAFETY_CONTRACT"),
+                    )
 
         supplied = payload.get("all_failed_gates")
         if isinstance(supplied, (list, tuple)):
@@ -3576,15 +3629,7 @@ class RuntimeOrchestrator:
         if (now - market_ts) > self.config.stale_market_data_sec:
             self._stale_market_data_symbols.add(symbol)
             return "STALE_MARKET_DATA"
-        spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
-        if spread_pct > self.config.max_spread_pct:
-            return "SPREAD_TOO_HIGH"
-        slippage = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-        if slippage > self.config.max_expected_slippage_pct:
-            return "SLIPPAGE_TOO_HIGH"
-        funding = abs(float(market_ctx.get("funding_rate_pct", 0.0) or 0.0))
-        if funding > self.config.max_abs_funding_rate_pct:
-            return "FUNDING_TOO_HIGH"
+
         liquidity = float(market_ctx.get("volume_24h_usdt", self.config.min_liquidity_usd) or 0.0)
         if liquidity < self.config.min_liquidity_usd:
             return "THIN_LIQUIDITY"
