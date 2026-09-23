@@ -330,13 +330,31 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         spread_status = "UNAVAILABLE"
         spread_source = "UNAVAILABLE"
 
-    slippage_status = str(market_ctx.get("slippage_status", "MODEL_ESTIMATE"))
+    slippage_has_evidence = (
+        market_ctx.get("expected_slippage_pct") not in (None, "")
+        or bool(klines)
+    )
+    slippage_status = str(
+        market_ctx.get(
+            "slippage_status",
+            "MODEL_ESTIMATE" if slippage_has_evidence else "UNAVAILABLE",
+        )
+    )
     slippage_source = str(
         market_ctx.get(
             "slippage_source",
-            "KLINE_RANGE_MODEL" if klines else "LEGACY_SLIPPAGE_MODEL",
+            (
+                "KLINE_RANGE_MODEL"
+                if klines
+                else "EXPLICIT_EXECUTION_SLIPPAGE"
+                if slippage_has_evidence
+                else "UNAVAILABLE"
+            ),
         )
     )
+    if not slippage_has_evidence:
+        slippage_status = "UNAVAILABLE"
+        slippage_source = "UNAVAILABLE"
 
     md_latency = _to_float(market_ctx.get("market_data_latency_ms"))
     md_latency_status = str(market_ctx.get("market_data_latency_status", "MEASURED" if md_latency is not None else "UNAVAILABLE"))
