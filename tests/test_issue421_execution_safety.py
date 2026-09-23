@@ -102,15 +102,25 @@ def test_none_volatility_value_cannot_be_promoted_to_measured_string_evidence() 
     })
     assert ctx["volatility_regime"] is None
 
-    result = evaluate_execution_safety(
+    paper = evaluate_execution_safety(
         ctx,
         effective_rr=9.0,
         min_effective_rr=1.10,
         thresholds=_thresholds(),
     )
-    assert result["accepted"] is False
-    assert result["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
-    assert "volatility_regime" in result["missing_fields"]
+    assert paper["accepted"] is True
+    assert paper["volatility_penalty"] == pytest.approx(0.10)
+
+    live_precheck = evaluate_execution_safety(
+        ctx,
+        effective_rr=9.0,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(),
+        require_measured=True,
+    )
+    assert live_precheck["accepted"] is False
+    assert live_precheck["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+    assert "volatility_regime" in live_precheck["missing_fields"]
 
 
 def test_execution_safety_complete_context_passes_without_recomputing_geometry() -> None:
@@ -183,7 +193,7 @@ def test_each_protected_execution_gate_independently_kills_acceptance(
         ),
     ],
 )
-def test_unknown_funding_or_volatility_is_fail_closed(
+def test_live_precheck_unknown_funding_or_volatility_is_fail_closed(
     changes: dict[str, Any],
     missing_field: str,
 ) -> None:
@@ -192,6 +202,7 @@ def test_unknown_funding_or_volatility_is_fail_closed(
         effective_rr=9.0,
         min_effective_rr=1.10,
         thresholds=_thresholds(),
+        require_measured=True,
     )
     assert result["accepted"] is False
     assert result["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
