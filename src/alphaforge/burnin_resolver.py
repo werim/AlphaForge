@@ -154,33 +154,84 @@ def _candles_for(source,r):
     return source.get((r["symbol"],r.get("timeframe"))) or source.get(r["symbol"],[])
 
 
-def _normalized_candles(candles,r):
-    unique={}
-    for c in candles:
+def _normalize_candle_window(candles, r):
+    """Canonical candle normalization shared by reject and accepted-position resolvers."""
+    try:
+        window_start = _dt(r["decision_timestamp"])
+        window_end = _dt(r["due_at"])
+        if window_end <= window_start:
+            return [], ["window_bounds:non_positive"]
+    except (TypeError, ValueError, KeyError):
+        return [], ["window_bounds:malformed"]
+
+    unique = {}
+    input_errors = []
+    for index, candle in enumerate(candles or []):
+        if not isinstance(candle, Mapping):
+            input_errors.append(f"candle[{index}]:not_mapping")
+            continue
+        if candle.get("is_closed") is False or candle.get("closed") is False:
+            continue
+        raw_ts = candle.get("timestamp") or candle.get("open_time") or candle.get("time")
         try:
-            if c.get("is_closed") is False or c.get("closed") is False:
-                continue
-            ts=_dt(c.get("timestamp") or c.get("open_time") or c.get("time")); high=float(c["high"]); low=float(c["low"])
-            if math.isfinite(high) and math.isfinite(low) and high >= low and _dt(r["decision_timestamp"]) < ts <= _dt(r["due_at"]): unique[ts]=dict(c,timestamp=ts.isoformat())
-        except (TypeError,ValueError,KeyError): continue
-    return [unique[k] for k in sorted(unique)]
+            if raw_ts is None or raw_ts == "":
+                raise ValueError("missing timestamp")
+            ts = _dt(raw_ts)
+            in_window = window_start < ts <= window_end
+        except (TypeError, ValueError):
+            input_errors.append(f"candle[{index}]:malformed_timestamp")
+            continue
+        if not in_window:
+            continue
+        try:
+            high = float(candle["high"])
+            low = float(candle["low"])
+            if not math.isfinite(high) or not math.isfinite(low) or high < low:
+                raise ValueError("invalid high/low")
+        except (TypeError, ValueError, KeyError):
+            input_errors.append(f"candle[{index}]:malformed_ohlc")
+            continue
+
+        existing = unique.get(ts)
+        if existing is not None:
+            if float(existing["high"]) != high or float(existing["low"]) != low:
+                input_errors.append(f"duplicate_conflict:{ts.isoformat()}")
+            continue
+        unique[ts] = dict(candle, timestamp=ts.isoformat(), high=high, low=low)
+
+    return [unique[key] for key in sorted(unique)], sorted(set(input_errors))
 
 
-def _window_complete(candles,r,terminal_index):
-    interval=timeframe_seconds(r.get("timeframe"))
-    bars=r.get("horizon_bars")
-    if interval is None or bars is None: return True, []  # legacy rows retain pre-timeframe semantics
-    expected=int(bars) if terminal_index is None else terminal_index+1
-    observed=candles if terminal_index is None else candles[:terminal_index+1]
-    gaps=[]; previous=_dt(r["decision_timestamp"])
-    for candle in observed:
-        current=_dt(candle["timestamp"])
-        if (current-previous).total_seconds() > interval*1.5: gaps.append((previous.isoformat(),current.isoformat()))
-        previous=current
-    complete=len(observed) >= expected and not gaps
+def _normalized_candles(candles, r):
+    normalized, _ = _normalize_candle_window(candles, r)
+    return normalized
+
+
+def _window_complete(candles, r, terminal_index, *, input_errors=None):
+    interval = timeframe_seconds(r.get("timeframe"))
+    bars = r.get("horizon_bars")
+    if input_errors:
+        return False, []
+    if interval is None or bars is None:
+        return True, []  # legacy rows retain pre-timeframe semantics
+    expected = int(bars) if terminal_index is None else terminal_index + 1
+    observed = candles if terminal_index is None else candles[:terminal_index + 1]
+    gaps = []
+    previous = _dt(r["decision_timestamp"])
+    for index, candle in enumerate(observed):
+        current = _dt(candle["timestamp"])
+        delta = (current - previous).total_seconds()
+        # The first forward candle must be the next interval boundary; later
+        # candles use the existing 1.5x tolerance while still rejecting a
+        # missing full bar.
+        max_gap = interval if index == 0 else interval * 1.5
+        if delta <= 0 or delta > max_gap:
+            gaps.append((previous.isoformat(), current.isoformat()))
+        previous = current
+    complete = len(observed) >= expected and not gaps
     if terminal_index is None and observed:
-        complete=complete and (_dt(r["due_at"])-_dt(observed[-1]["timestamp"])).total_seconds() <= interval*0.5
-    return complete,gaps
+        complete = complete and (_dt(r["due_at"]) - _dt(observed[-1]["timestamp"])).total_seconds() <= interval * 0.5
+    return complete, gaps
 
 
 def _sync_review(conn,r,outcome):
@@ -390,33 +441,59 @@ def resolve_position_closure(conn: Any, *, trade_id: str, exit_time: str, exit_p
 
 
 def resolve_campaign_positions(conn: Any, campaign_id: str, candles_by_trade: Mapping[Any,Sequence[Mapping[str,Any]]], *, now: str|None=None) -> dict[str,int]:
-    """Resolve campaign PAPER positions from exchange 1m candles without inventing intrabar order."""
+    """Resolve PAPER positions only across a complete canonical 1m entry-to-terminal path."""
     bootstrap_campaign_schema(conn); now=now or utc_now()
     rows=_exec(conn,"SELECT * FROM burnin_pending_position_outcomes WHERE campaign_id=:cid AND status='OPEN' ORDER BY entry_time,id",{'cid':campaign_id}).fetchall()
     counts={'closed':0,'tp':0,'sl':0,'ambiguous':0,'pending':0}
     for raw in rows:
         r=dict(raw) if isinstance(raw,sqlite3.Row) else dict(raw._mapping)
         candles=candles_by_trade.get((r['symbol'],'position',r['trade_id'])) or candles_by_trade.get(r['trade_id']) or []
-        normalized=[]
-        for candle in candles:
-            try:
-                ts=_dt(candle.get('timestamp') or candle.get('open_time') or candle.get('time'))
-                high=float(candle['high']); low=float(candle['low'])
-                if math.isfinite(high) and math.isfinite(low) and high >= low and _dt(r['entry_time']) < ts <= _dt(now):
-                    normalized.append((ts,high,low))
-            except (TypeError,ValueError,KeyError): continue
-        normalized.sort(key=lambda item:item[0])
+        window_row={
+            'decision_timestamp':r['entry_time'],
+            'due_at':now,
+            'timeframe':'1m',
+            'horizon_bars':1,
+        }
+        normalized,input_errors=_normalize_candle_window(candles,window_row)
+
         fill=float(r.get('simulated_fill') or r['planned_entry']); stop=float(r['stop']); target=float(r['target']); risk=abs(fill-stop) or 1.0
         sign=-1 if _side(r['side'])=='SHORT' else 1
         favorable=[]; adverse=[]; terminal=None
-        for ts,high,low in normalized:
+        for index,candle in enumerate(normalized):
+            high=float(candle['high']); low=float(candle['low'])
             favorable.append(((high-fill)*sign)/risk if sign>0 else ((fill-low)/risk))
             adverse.append(((fill-low)/risk) if sign>0 else ((high-fill)/risk))
             sl,tp=_hit(r['side'],high,low,stop,target)
             if sl or tp:
-                terminal=(ts,sl,tp); break
+                terminal=(index,candle,sl,tp)
+                break
+
         if terminal is None:
-            counts['pending']+=1; continue
+            if input_errors:
+                _exec(conn,"UPDATE burnin_pending_position_outcomes SET evidence_complete=0,missing_fields_json=:mf WHERE trade_id=:tid AND status='OPEN'",{
+                    'mf':json.dumps(input_errors,sort_keys=True),'tid':r['trade_id']})
+            counts['pending']+=1
+            continue
+
+        terminal_index,terminal_candle,sl,tp=terminal
+        window_row['horizon_bars']=terminal_index+1
+        complete,gaps=_window_complete(
+            normalized,window_row,terminal_index,input_errors=input_errors)
+        if not complete:
+            diagnostics=['incomplete_market_window',*input_errors]
+            diagnostics += [f"market_gap:{start}->{end}" for start,end in gaps]
+            _exec(conn,"UPDATE burnin_pending_position_outcomes SET evidence_complete=0,missing_fields_json=:mf WHERE trade_id=:tid AND status='OPEN'",{
+                'mf':json.dumps(sorted(set(diagnostics)),sort_keys=True),'tid':r['trade_id']})
+            counts['pending']+=1
+            continue
+
+        observed=normalized[:terminal_index+1]
+        favorable=[]; adverse=[]
+        for candle in observed:
+            high=float(candle['high']); low=float(candle['low'])
+            favorable.append(((high-fill)*sign)/risk if sign>0 else ((fill-low)/risk))
+            adverse.append(((fill-low)/risk) if sign>0 else ((high-fill)/risk))
+
         try: provenance=json.loads(r.get('source_provenance_json') or '{}')
         except (TypeError,json.JSONDecodeError): provenance={}
         model=provenance.get('execution_cost_model') if isinstance(provenance.get('execution_cost_model'),Mapping) else {}
@@ -427,7 +504,7 @@ def resolve_campaign_positions(conn: Any, campaign_id: str, candles_by_trade: Ma
         exit_costs={'exit_spread':half('spread_penalty'),'exit_slippage':half('slippage_penalty'),'exit_fee':half('fee_penalty'),'funding':model.get('funding_penalty'),'latency_impact_penalty':model.get('latency_penalty'),'volatility_penalty':model.get('volatility_penalty'),'liquidity_penalty':model.get('liquidity_penalty')}
         if provenance.get('execution_cost_model_unit') == 'R' and provenance.get('execution_cost_unit') == 'USD':
             exit_costs={key: None if value is None else float(value)*risk_usd for key,value in exit_costs.items()}
-        ts,sl,tp=terminal; ambiguous=bool(sl and tp); reason='AMBIGUOUS_INTRABAR' if ambiguous else ('SL_HIT' if sl else 'TP_HIT'); price=stop if sl else target
+        ts=_dt(terminal_candle['timestamp']); ambiguous=bool(sl and tp); reason='AMBIGUOUS_INTRABAR' if ambiguous else ('SL_HIT' if sl else 'TP_HIT'); price=stop if sl else target
         resolve_position_closure(conn,trade_id=r['trade_id'],exit_time=ts.isoformat().replace('+00:00','Z'),exit_price=price,exit_reason=reason,exit_costs=exit_costs,mfe=max(favorable,default=0.0),mae=max(adverse,default=0.0),ambiguous=ambiguous)
         counts['closed']+=1; counts['ambiguous' if ambiguous else 'sl' if sl else 'tp']+=1
     return counts
@@ -456,7 +533,7 @@ def evaluate_forward_outcome(*, side: str, entry: Any, stop: Any, target: Any,
     row = {"side": side, "entry": float(entry), "stop": float(stop),
            "target": float(target), "decision_timestamp": decision_timestamp,
            "due_at": due_at, "timeframe": timeframe, "horizon_bars": horizon_bars}
-    normalized = _normalized_candles(candles, row)
+    normalized, input_errors = _normalize_candle_window(candles, row)
     label = "TIMEOUT"
     ambiguous = False
     gross = 0.0
@@ -479,10 +556,10 @@ def evaluate_forward_outcome(*, side: str, entry: Any, stop: Any, target: Any,
     observed = normalized if terminal is None else normalized[:terminal + 1]
     favorable = [((float(c["high"])-float(entry))/float(entry) if sign > 0 else (float(entry)-float(c["low"]))/float(entry))*100 for c in observed]
     adverse = [((float(entry)-float(c["low"]))/float(entry) if sign > 0 else (float(c["high"])-float(entry))/float(entry))*100 for c in observed]
-    complete, gaps = _window_complete(normalized, row, terminal)
+    complete, gaps = _window_complete(normalized, row, terminal, input_errors=input_errors)
     return {"forward_label": label, "mfe": max(favorable, default=0.0),
             "mae": max(adverse, default=0.0), "gross_r": gross,
             "ambiguous": ambiguous, "evidence_complete": bool(complete and not ambiguous),
             "window_complete": complete,
             "terminal_index": terminal,
-            "market_gaps": gaps, "missing_fields": [], "observed_bars": len(observed)}
+            "market_gaps": gaps, "missing_fields": input_errors, "observed_bars": len(observed)}
