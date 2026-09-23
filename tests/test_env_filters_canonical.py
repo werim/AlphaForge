@@ -5,7 +5,12 @@ import pytest
 from alphaforge.config import load_config_from_env, runtime_filter_config
 from alphaforge.execution import build_execution_context, evaluate_execution_safety
 from alphaforge.order import OrderExecutionContext, TradingMode, evaluate_paper_style_pre_submit
-from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
+from alphaforge.runtime import (
+    ExecutionMode,
+    RuntimeConfig,
+    RuntimeOrchestrator,
+    _runtime_config_from_app_config,
+)
 from alphaforge.symbol_selector import select_symbols
 
 
@@ -144,6 +149,49 @@ def test_runtime_risk_uses_canonical_spread_slippage_funding_liquidity_and_stale
     assert execution_result(spread_pct=0.002)["primary_reject_reason"] == "SPREAD_TOO_HIGH"
     assert execution_result(expected_slippage_pct=0.002)["primary_reject_reason"] == "SLIPPAGE_TOO_HIGH"
     assert execution_result(funding_rate_pct=0.002)["primary_reject_reason"] == "FUNDING_TOO_HIGH"
+
+
+def test_registry_execution_safety_overrides_drive_production_runtime_gate(monkeypatch):
+    cfg = _cfg(
+        monkeypatch,
+        ALPHAFORGE_MAX_TOTAL_COST_PCT="0.001",
+        ALPHAFORGE_MIN_LIQUIDITY_SCORE="0.95",
+        ALPHAFORGE_MAX_VOLATILITY_PENALTY_PCT="0.05",
+        ALPHAFORGE_REJECT_UNKNOWN_EXECUTION_CONTEXT="true",
+        ALPHAFORGE_MAX_LATENCY_MS="25",
+    )
+    runtime_cfg = _runtime_config_from_app_config(cfg, ExecutionMode.PAPER)
+    rt = RuntimeOrchestrator(
+        config=runtime_cfg,
+        ai_brain=None,
+        market_scanner=None,
+    )
+
+    assert runtime_cfg.max_total_cost_pct == pytest.approx(0.001)
+    assert runtime_cfg.min_liquidity_score == pytest.approx(0.95)
+    assert runtime_cfg.max_volatility_penalty_pct == pytest.approx(0.05)
+    assert runtime_cfg.reject_unknown_execution_context is True
+    assert runtime_cfg.max_latency_ms == 25
+
+    execution_ctx = _market(
+        liquidity_score=0.90,
+        latency_ms=50.0,
+        volatility_regime="high",
+        volatility_status="MEASURED",
+    )["execution_ctx"]
+    result = evaluate_execution_safety(
+        execution_ctx,
+        effective_rr=2.0,
+        min_effective_rr=runtime_cfg.min_effective_rr,
+        thresholds=rt._canonical_filter_config(),
+    )
+
+    assert {
+        "HIGH_TOTAL_COST",
+        "THIN_LIQUIDITY",
+        "HIGH_LATENCY",
+        "EXCESSIVE_VOLATILITY",
+    } <= set(result["all_failed_gates"])
 
 
 def test_max_symbols_is_runtime_config_selection_cap():
