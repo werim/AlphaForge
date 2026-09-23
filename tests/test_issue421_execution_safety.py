@@ -91,8 +91,6 @@ def test_execution_safety_complete_context_passes_without_recomputing_geometry()
         ({"expected_slippage_pct": None, "slippage_status": "UNAVAILABLE"}, 9.0, "EXECUTION_CONTEXT_UNAVAILABLE"),
         ({"latency_ms": None, "latency_status": "UNAVAILABLE"}, 9.0, "EXECUTION_CONTEXT_UNAVAILABLE"),
         ({"liquidity_score": None, "liquidity_status": "UNAVAILABLE"}, 9.0, "EXECUTION_CONTEXT_UNAVAILABLE"),
-        ({"funding_rate_pct": None, "funding_status": "UNAVAILABLE"}, 9.0, "EXECUTION_CONTEXT_UNAVAILABLE"),
-        ({"volatility_regime": None, "volatility_status": "UNAVAILABLE"}, 9.0, "EXECUTION_CONTEXT_UNAVAILABLE"),
         ({"spread_pct": 0.0030}, 9.0, "SPREAD_TOO_HIGH"),
         ({"expected_slippage_pct": 0.0030}, 9.0, "SLIPPAGE_TOO_HIGH"),
         ({"fee_pct": 0.1997}, 9.0, "HIGH_TOTAL_COST"),
@@ -120,6 +118,37 @@ def test_each_protected_execution_gate_independently_kills_acceptance(
         row["gate"] == expected_gate and row["source"] == "EXECUTION_SAFETY_CONTRACT"
         for row in result["failed_gate_evidence"]
     )
+
+
+def test_missing_funding_blocks_when_funding_evidence_is_required() -> None:
+    result = evaluate_execution_safety(
+        _execution_ctx(
+            funding_rate_pct=None,
+            funding_status="UNAVAILABLE",
+            funding_source="UNAVAILABLE",
+        ),
+        effective_rr=9.0,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(REQUIRE_FUNDING_RATE=True),
+    )
+    assert result["accepted"] is False
+    assert result["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+    assert "funding_rate_pct" in result["missing_fields"]
+
+
+def test_unknown_volatility_is_conservatively_penalized_without_fake_evidence() -> None:
+    result = evaluate_execution_safety(
+        _execution_ctx(
+            volatility_regime=None,
+            volatility_status="UNAVAILABLE",
+            volatility_source="UNAVAILABLE",
+        ),
+        effective_rr=9.0,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(),
+    )
+    assert result["accepted"] is True
+    assert result["volatility_penalty"] == pytest.approx(0.10)
 
 
 def test_live_precheck_requires_measured_execution_evidence() -> None:
@@ -211,12 +240,6 @@ def _run_paper(
         ),
         (
             {"liquidity_score": None, "liquidity_status": "UNAVAILABLE", "rr": 10.0},
-            RuntimeConfig(execution_mode=ExecutionMode.PAPER),
-            2.0,
-            "EXECUTION_CONTEXT_UNAVAILABLE",
-        ),
-        (
-            {"funding_rate_pct": None, "funding_status": "UNAVAILABLE", "rr": 10.0},
             RuntimeConfig(execution_mode=ExecutionMode.PAPER),
             2.0,
             "EXECUTION_CONTEXT_UNAVAILABLE",
