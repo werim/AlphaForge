@@ -23,6 +23,15 @@
       "resolver",
       "readiness",
       "audit"
-    ]
+    ],
+    "failed_gates": [],
+    "geometry_status": "COMPLETE",
+    "expected_fill_status": "FILLED",
+    "effective_rr_status": "ABOVE_THRESHOLD",
+    "portfolio_state": "ALLOW",
+    "persistence": "ACCEPTED_DECISION_DURABLE",
+    "resolver": "PENDING",
+    "readiness": "BLOCKED_OPEN_POSITION",
+    "audit": "DELAYED_RESOLUTION"
   }
 }
