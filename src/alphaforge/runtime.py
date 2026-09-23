@@ -2378,7 +2378,7 @@ class RuntimeOrchestrator:
             })
             return
 
-        if effective_rr < self.config.min_effective_rr:
+        if execution_safety is None and effective_rr < self.config.min_effective_rr:
             reject_reason = "LOW_EFFECTIVE_RR"
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
