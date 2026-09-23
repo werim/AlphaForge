@@ -534,7 +534,7 @@ def test_incomplete_realized_history_fails_closed_as_unknown_portfolio_risk(tmp_
     engine.dispose()
 
 
-@pytest.mark.parametrize("drift_kind", ["FOREIGN_RUN", "OPEN_WITH_REALIZED_OUTCOME"])
+@pytest.mark.parametrize("drift_kind", ["FOREIGN_RUN", "OPEN_WITH_REALIZED_OUTCOME", "FUTURE_CLOSED"])
 def test_paper_risk_state_fails_closed_on_persisted_lineage_or_status_drift(
     tmp_path,
     drift_kind: str,
@@ -567,10 +567,19 @@ def test_paper_risk_state_fails_closed_on_persisted_lineage_or_status_drift(
             "SET burnin_run_id=? WHERE trade_id='drifted-trade'",
             (foreign_run,),
         )
-    else:
+    elif drift_kind == "OPEN_WITH_REALIZED_OUTCOME":
         conn.execute(
             "UPDATE burnin_pending_position_outcomes "
             "SET status='OPEN' WHERE trade_id='drifted-trade'"
+        )
+    else:
+        future_close = (
+            datetime.now(timezone.utc) + timedelta(minutes=5)
+        ).isoformat().replace("+00:00", "Z")
+        conn.execute(
+            "UPDATE burnin_trade_outcomes "
+            "SET closed_at=? WHERE trade_id='drifted-trade'",
+            (future_close,),
         )
     conn.commit()
     conn.close()
@@ -611,6 +620,14 @@ def test_executed_paper_trade_updates_persisted_daily_count_before_next_decision
             ORDER BY id DESC LIMIT 1
         """), {"cid": campaign_id}).first()
     assert row is not None
+
+    open_state = runtime._paper_portfolio_risk_state(
+        "BTCUSDT",
+        now_ts=time.time(),
+    )
+    assert open_state["risk_state_complete"] is True
+    assert open_state["trades_today_symbol"] == 1
+    assert open_state["trades_today_global"] == 1
 
     with engine.begin() as conn:
         conn.execute(
