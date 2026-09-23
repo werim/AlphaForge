@@ -15,6 +15,7 @@ from sqlalchemy.engine.url import make_url
 from alphaforge.contracts import canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.burnin import DDL as PHASE7_BURNIN_DDL
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
+from alphaforge.execution import execution_context_is_unavailable
 from alphaforge.expectancy_evidence import EXPECTANCY_EVIDENCE_DDL, EXPECTANCY_EVIDENCE_INDEX_DDL
 
 
@@ -41,22 +42,6 @@ __all__ = [
 
 def _utc_now_iso() -> str:
     return canonical_utc_timestamp()
-
-
-def _execution_context_is_unavailable(execution_ctx: Mapping[str, Any] | None) -> bool:
-    ctx = dict(execution_ctx or {})
-    status_raw = ctx.get("safety_evidence_status", ctx.get("evidence_status"))
-    if status_raw is None:
-        return True
-    status = str(status_raw).strip().upper()
-    return status in {
-        "",
-        "UNKNOWN",
-        "UNAVAILABLE",
-        "UNAVAILABLE_BACKTEST",
-        "UNAVAILABLE_BLOCKING",
-        "NULL",
-    }
 
 
 def _ensure_sqlite_parent_dir(database_url: str) -> None:
@@ -900,7 +885,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "reject_reason": canonical_reject_reason(decision.get("reject_reason")) if str(decision.get("decision", "")).upper() == "REJECTED" else decision.get("reject_reason"), "score": decision.get("score"), "rr": decision.get("rr"),
         "effective_rr": decision.get("effective_rr"), "expectancy_bucket": decision.get("expectancy_bucket"),
         "execution_ctx": json.dumps(execution_ctx),
-        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", _execution_context_is_unavailable(execution_ctx))) else 0,
+        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", execution_context_is_unavailable(execution_ctx))) else 0,
         "created_at": now, "updated_at": now,
     }
     payload_obj = decision.get("order_payload")
@@ -953,7 +938,7 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
         "input_snapshot_hash": decision.get("input_snapshot_hash"),
         "no_submit_verified": 1 if bool(decision.get("no_submit_verified", False)) else 0,
         "parity_result": decision.get("parity_result"),
-        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", _execution_context_is_unavailable(execution_ctx))) else 0,
+        "execution_ctx_missing": 1 if bool(decision.get("execution_ctx_missing", execution_context_is_unavailable(execution_ctx))) else 0,
         "created_at": now, "updated_at": now,
     })
         if hasattr(session, "commit"):
@@ -1077,7 +1062,7 @@ def save_rejected_decision_artifact(session: Any, **artifact: Any) -> dict[str, 
     execution_ctx_missing = bool(
         artifact.get(
             "execution_ctx_missing",
-            _execution_context_is_unavailable(execution_ctx),
+            execution_context_is_unavailable(execution_ctx),
         )
     )
     signal_payload = {
@@ -1192,7 +1177,7 @@ def save_trade_lifecycle_event(session: Any, **event: Any) -> Any:
         "mode": event.get("mode"), "lifecycle_state": lifecycle_state, "decision": event.get("decision"),
         "reject_reason": canonical_reject_reason(event.get("reject_reason")), "score": event.get("score"), "rr": event.get("rr"), "effective_rr": event.get("effective_rr"),
         "expectancy_bucket": event.get("expectancy_bucket"), "execution_ctx": json.dumps(event.get("execution_ctx", {})),
-        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", _execution_context_is_unavailable(event.get("execution_ctx")))) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
+        "execution_ctx_missing": 1 if bool(event.get("execution_ctx_missing", execution_context_is_unavailable(event.get("execution_ctx")))) else 0, "event_ts": canonical_utc_timestamp(event.get("event_ts")), "created_at": now,
         "lifecycle_seq": event.get("lifecycle_seq"),
         "cancel_reason": event.get("cancel_reason"),
         "lifecycle_id": event.get("lifecycle_id") or f"{signal_id}:{canonical_utc_timestamp(event.get('event_ts'))}:{lifecycle_state}",
