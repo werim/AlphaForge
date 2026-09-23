@@ -23,6 +23,15 @@
       "resolver",
       "readiness",
       "audit"
-    ]
+    ],
+    "failed_gates": [],
+    "geometry_status": "COMPLETE",
+    "expected_fill_status": "FILLED",
+    "effective_rr_status": "ABOVE_THRESHOLD",
+    "portfolio_state": "ALLOW",
+    "persistence": "ACCEPTED_DECISION_DURABLE",
+    "resolver": "TP_HIT",
+    "readiness": "BLOCKED_INSUFFICIENT_SAMPLE",
+    "audit": "CANONICAL_ACCEPT"
   }
 }
