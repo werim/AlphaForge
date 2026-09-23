@@ -935,7 +935,7 @@ def evaluate_execution_safety(
             "AVAILABLE",
             "required",
         )
-    if reject_unknown and fake_zero_fields:
+    if fake_zero_fields:
         fail(
             "INVALID_FAKE_ZERO",
             sorted(set(fake_zero_fields)),
