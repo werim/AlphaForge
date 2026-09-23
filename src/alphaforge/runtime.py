@@ -2288,6 +2288,55 @@ class RuntimeOrchestrator:
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
             return
+        legacy_pre_ai_execution_reason = None
+        if execution_safety is not None:
+            failed_execution_gates = set(execution_safety.get("all_failed_gates") or [])
+            legacy_pre_ai_execution_reason = next(
+                (
+                    gate
+                    for gate in (
+                        "SPREAD_TOO_HIGH",
+                        "SLIPPAGE_TOO_HIGH",
+                        "FUNDING_TOO_HIGH",
+                    )
+                    if gate in failed_execution_gates
+                ),
+                None,
+            )
+        if legacy_pre_ai_execution_reason is not None:
+            reject_payload = {
+                "signal_id": signal_id,
+                "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
+                "decision": "REJECTED",
+                "reason": legacy_pre_ai_execution_reason,
+                "primary_reject_reason": legacy_pre_ai_execution_reason,
+                "confidence": 0.0,
+                "score": 0.0,
+                "rr": raw_rr,
+                "candidate_rr": rr_metrics["candidate_rr"],
+                "expected_fill": rr_metrics["expected_fill"],
+                "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                "effective_rr": effective_rr,
+                "explanation": "legacy_pre_ai_execution_gate",
+                "execution_ctx": execution_ctx,
+                "execution_safety": execution_safety,
+                "spread_pct": execution_ctx.get("spread_pct"),
+                "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                "latency_ms": execution_ctx.get("latency_ms"),
+                "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                "liquidity_score": execution_ctx.get("liquidity_score"),
+                "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                "volatility_regime": execution_ctx.get("volatility_regime"),
+            }
+            await self._persist_reject({**market_ctx, **reject_payload})
+            await self._emit_lifecycle_event(
+                LifecycleState.SIGNAL_REJECTED.value,
+                selection.symbol,
+                {**reject_payload, "reject_reason": legacy_pre_ai_execution_reason},
+            )
+            return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
         signal_payload["reject_decision_id"] = self._canonical_reject_decision_id({
             **market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
