@@ -3,7 +3,7 @@ import os
 import pytest
 
 from alphaforge.config import load_config_from_env, runtime_filter_config
-from alphaforge.execution import build_execution_context
+from alphaforge.execution import build_execution_context, evaluate_execution_safety
 from alphaforge.order import OrderExecutionContext, TradingMode, evaluate_paper_style_pre_submit
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 from alphaforge.symbol_selector import select_symbols
@@ -113,10 +113,37 @@ def test_runtime_risk_uses_canonical_spread_slippage_funding_liquidity_and_stale
     assert rt._evaluate_runtime_risk("BTCUSDT", {"market_ts": 0}) == "STALE_MARKET_DATA"
     import time
     now = time.time()
-    assert rt._evaluate_runtime_risk("BTCUSDT", {"market_ts": now, "spread_pct": 0.002}) == "SPREAD_TOO_HIGH"
-    assert rt._evaluate_runtime_risk("BTCUSDT", {"market_ts": now, "expected_slippage_pct": 0.002}) == "SLIPPAGE_TOO_HIGH"
-    assert rt._evaluate_runtime_risk("BTCUSDT", {"market_ts": now, "funding_rate_pct": 0.002}) == "FUNDING_TOO_HIGH"
     assert rt._evaluate_runtime_risk("BTCUSDT", {"market_ts": now, "volume_24h_usdt": 999}) == "THIN_LIQUIDITY"
+
+    def execution_result(**overrides):
+        market = {
+            "spread_pct": 0.0002,
+            "spread_status": "MEASURED",
+            "expected_slippage_pct": 0.0002,
+            "slippage_status": "MODEL_ESTIMATE",
+            "latency_ms": 50.0,
+            "latency_status": "MODEL_ESTIMATE",
+            "liquidity_score": 0.9,
+            "liquidity_status": "MEASURED",
+            "funding_rate_pct": 0.0001,
+            "funding_status": "MEASURED",
+            "orderbook_imbalance": 0.1,
+            "orderbook_status": "MEASURED",
+            "volatility_regime": "normal",
+            "volatility_status": "MEASURED",
+        }
+        market.update(overrides)
+        execution_ctx = build_execution_context(market)
+        return evaluate_execution_safety(
+            execution_ctx,
+            effective_rr=2.0,
+            min_effective_rr=rt.config.min_effective_rr,
+            thresholds=rt._canonical_filter_config(),
+        )
+
+    assert execution_result(spread_pct=0.002)["primary_reject_reason"] == "SPREAD_TOO_HIGH"
+    assert execution_result(expected_slippage_pct=0.002)["primary_reject_reason"] == "SLIPPAGE_TOO_HIGH"
+    assert execution_result(funding_rate_pct=0.002)["primary_reject_reason"] == "FUNDING_TOO_HIGH"
 
 
 def test_max_symbols_is_runtime_config_selection_cap():
