@@ -48,6 +48,14 @@ def _seed_valid(session: Session) -> None:
              10000, 1, 3, 4500, 5000, 500, 2000, 0.01, 0.05, 0.02, 'CRYPTO_HIGH_BETA_ALT', 4500, 2, 'CORRELATION_OVEREXPOSURE', 'CORRELATION_OVEREXPOSURE', '{"engine":"evaluate_portfolio_risk"}', 's-3', 2, '2026-01-01T00:00:01Z')
         ON CONFLICT(evidence_id) DO NOTHING
     """))
+    session.execute(text("""
+        UPDATE decision_evidence
+        SET funding_rate_pct=0.0001,
+            latency_ms=50.0,
+            volatility_regime='normal',
+            unavailable_fields='[]'
+        WHERE evidence_id IN ('de-1','de-2','de-3')
+    """))
     session.commit()
 
 
@@ -464,6 +472,53 @@ def test_phase3_execution_gate_blocks_when_each_required_check_fails() -> None:
         assert checks[check_name].passed is False
         assert gates["phase3_execution_realism_complete"].passed is False
         assert report.verdict == "NOT_LIVE_READY"
+
+
+def test_phase3_readiness_recognizes_canonical_execution_safety_reject_names() -> None:
+    canonical_reasons = (
+        "SPREAD_TOO_HIGH",
+        "SLIPPAGE_TOO_HIGH",
+        "HIGH_TOTAL_COST",
+        "THIN_LIQUIDITY",
+        "HIGH_LATENCY",
+        "EXECUTION_CONTEXT_UNAVAILABLE",
+        "INVALID_FAKE_ZERO",
+        "EXCESSIVE_VOLATILITY",
+        "FUNDING_TOO_HIGH",
+        "LOW_EFFECTIVE_RR",
+    )
+    for reason in canonical_reasons:
+        engine = _engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE decision_evidence SET reject_reason=:reason WHERE evidence_id='de-1'"),
+                {"reason": reason},
+            )
+        with engine.connect() as conn:
+            checks = {
+                check.name: check
+                for check in LiveReadinessEvaluator(engine, min_effective_rr=1.6)._check_persistence(conn)
+            }
+        assert checks["execution_rejects_persisted"].passed is True, reason
+
+
+def test_phase3_readiness_blocks_all_critical_execution_context_gaps() -> None:
+    mutations = (
+        "UPDATE decision_evidence SET latency_ms=NULL WHERE evidence_id='de-2'",
+        "UPDATE decision_evidence SET funding_rate_pct=NULL WHERE evidence_id='de-2'",
+        "UPDATE decision_evidence SET volatility_regime=NULL WHERE evidence_id='de-2'",
+        "UPDATE decision_evidence SET unavailable_fields='[\"latency_ms\"]' WHERE evidence_id='de-2'",
+    )
+    for sql in mutations:
+        engine = _engine()
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        with engine.connect() as conn:
+            checks = {
+                check.name: check
+                for check in LiveReadinessEvaluator(engine, min_effective_rr=1.6)._check_persistence(conn)
+            }
+        assert checks["no_accepted_trade_with_missing_critical_execution_context"].passed is False
 
 
 def test_phase6_readiness_fails_when_release_evidence_absent() -> None:
