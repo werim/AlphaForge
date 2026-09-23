@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset
+from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset, managed_config_value
 from alphaforge.env_contract import dotenv_status, repository_root, resolve_binance_environment
 from alphaforge.database_defaults import resolve_runtime_database_url
 
@@ -89,6 +89,7 @@ class RuntimeSettings:
     max_symbol_notional: float = 50_000.0
     max_daily_loss_pct: float = 0.03
     stale_market_data_sec: float = 15.0
+    max_clock_skew_ms: int = field(default_factory=lambda: int(managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS")))
     min_rr: float = 1.20
     min_effective_rr: float = 1.10
     max_spread_pct: float = 0.0025
@@ -425,6 +426,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         max_symbol_notional=val("ALPHAFORGE_MAX_SYMBOL_NOTIONAL"),
         max_daily_loss_pct=val("ALPHAFORGE_MAX_DAILY_LOSS_PCT"),
         stale_market_data_sec=val("ALPHAFORGE_STALE_MARKET_DATA_SEC"),
+        max_clock_skew_ms=int(val("ALPHAFORGE_MAX_CLOCK_SKEW_MS")),
         min_rr=val("ALPHAFORGE_MIN_RR"),
         min_effective_rr=val("MIN_EFFECTIVE_RR"),
         max_spread_pct=val("ALPHAFORGE_MAX_SPREAD_PCT"),
