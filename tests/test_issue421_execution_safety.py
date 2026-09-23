@@ -247,6 +247,38 @@ def test_invalid_fake_zero_is_blocking_for_persistence_and_parity() -> None:
     assert execution_context_is_unavailable(ctx) is True
 
 
+def test_unknown_context_override_never_allows_invalid_fake_zero() -> None:
+    result = evaluate_execution_safety(
+        _execution_ctx(
+            spread_pct=0.0,
+            spread_status="MEASURED",
+            spread_source="BOOK_TICKER",
+        ),
+        effective_rr=9.0,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(REJECT_UNKNOWN_EXECUTION_CONTEXT=False),
+        require_measured=True,
+    )
+    assert result["accepted"] is False
+    assert "INVALID_FAKE_ZERO" in result["all_failed_gates"]
+
+
+def test_unknown_context_override_only_relaxes_missing_context_gate() -> None:
+    result = evaluate_execution_safety(
+        _execution_ctx(
+            liquidity_score=None,
+            liquidity_status="UNAVAILABLE",
+            liquidity_source="UNAVAILABLE",
+        ),
+        effective_rr=9.0,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(REJECT_UNKNOWN_EXECUTION_CONTEXT=False),
+    )
+    assert result["accepted"] is True
+    assert result["execution_evidence_status"] == "UNAVAILABLE_BLOCKING"
+    assert "EXECUTION_CONTEXT_UNAVAILABLE" not in result["all_failed_gates"]
+
+
 def test_live_precheck_requires_measured_execution_evidence() -> None:
     result = evaluate_execution_safety(
         _execution_ctx(),
