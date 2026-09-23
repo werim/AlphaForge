@@ -1,3 +1,18 @@
+# CHATGPT CI trigger repair — 2026-09-24
+
+### Added
+- Regression protection for CHATGPT push qualification and core CI commands.
+### Changed
+- Existing Tests workflow also runs on CHATGPT pushes.
+### Fixed
+- Missing automatic CI trigger for the required development branch; README identifies exact-commit qualification.
+### Removed
+- None.
+### Breaking Changes
+- None; runtime, schema, lifecycle and persistence unchanged.
+### Known Issues
+- P2-B mutation coverage and final release qualification remain open; LIVE NOT READY.
+
 # Canonical execution-cost semantics — 2026-09-22
 
 ### Added

@@ -1,3 +1,11 @@
+# CHATGPT CI trigger repair — 2026-09-24
+
+The current Tests workflow excluded CHATGPT pushes, preventing automatic exact-commit qualification for the required development branch. Added CHATGPT to its push trigger without changing existing branch triggers or test jobs.
+
+Files changed: `.github/workflows/test.yml`, `tests/test_ci_branch_contract.py`, `README.md`, `VERSION.md`, `REPORT.md`, `CHANGELOG.md`. README now identifies the applicable qualification workflow and exact-SHA evidence requirement. A regression test protects the CHATGPT trigger and existing compile/full-suite/offline-smoke commands.
+
+Validation: 6 focused CI and audit-contract tests passed; compileall passed. Remote CI is pending the push. Runtime, lifecycle, persistence, exports, schema, compatibility and migrations are unchanged; no database or historical evidence changes. Push recommendation: push only CHATGPT, then qualify that exact SHA. Remaining limitations: P2-B is not implemented yet; separate main-only Python 3.10 workflow conflicts with the declared Python 3.11 minimum and requires follow-up. LIVE remains NOT READY.
+
 # Issue #369 canonical execution-cost semantics surgery report — 2026-09-22
 
 ## Why the patch was needed / root cause

@@ -1,3 +1,10 @@
+# CHATGPT exact-commit CI prerequisite — 2026-09-24
+
+- Current phase: #421 P2-B preparation; existing Tests workflow now includes CHATGPT pushes.
+- Runtime maturity/alignment, lifecycle, execution realism, persistence and schema: unchanged.
+- Validation: six focused CI/audit contract tests and compileall passed locally; pushed exact-head CI remains pending.
+- Critical risks: mutation coverage and final release qualification remain incomplete. LIVE NOT READY; last audit 2026-09-24.
+
 # Canonical execution-cost semantics — 2026-09-22
 
 - Current version/phase: prospective `execution_cost_semantics_v1` contract on `fix/canonical-execution-cost-semantics`, based on merged PR #379 (`b833f27`).

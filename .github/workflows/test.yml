@@ -4,6 +4,7 @@ name: Tests
 on:
   push:
     branches:
+      - CHATGPT
       - dev
       - main
   pull_request:

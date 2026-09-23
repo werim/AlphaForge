@@ -155,6 +155,12 @@ A historical FAST/SOAK result is not proof for a newer commit. Fresh exact-head 
 
 ## Testing
 
+The `Tests` workflow (`.github/workflows/test.yml`) runs on pushes to `CHATGPT`,
+`dev`, and `main`, and on pull requests targeting `dev` or `main`. Qualify each
+pushed commit using its exact SHA; an older or cancelled run is not evidence
+for the current commit. The separate `Python application` workflow targets
+`main` only and is not the CHATGPT qualification workflow.
+
 The repository uses `pytest` for unit, persistence, integration-style and production-path regression coverage. Current tests include lifecycle/reject persistence, execution-cost semantics, production execution-safety gates, authoritative PAPER portfolio-risk state, accepted/rejected resolver integrity, invalid/stale/future market-time fail-closed behavior, protected BACKTEST/PAPER/LIVE_PRECHECK pre-submit semantic parity, reconciliation contention/recovery, and the autonomous FAST/SOAK qualification harness.
 
 Not all desired full-system verification families are complete. [#421](https://github.com/werim/AlphaForge/issues/421) currently tracks:
