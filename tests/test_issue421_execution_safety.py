@@ -270,6 +270,44 @@ def test_paper_process_symbol_enforces_each_execution_safety_family(
     )
 
 
+def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit() -> None:
+    rejects: list[dict[str, Any]] = []
+    market = _market(
+        latency_ms=50.0,
+        latency_status="MODEL_ESTIMATE",
+        latency_source="EXPLICIT_EXECUTION_LATENCY",
+        expected_slippage_pct=0.0002,
+        slippage_status="MODEL_ESTIMATE",
+        slippage_source="MODEL",
+    )
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        on_reject_persist=lambda payload: rejects.append(payload),
+    )
+    selection = SimpleNamespace(
+        symbol=str(market["symbol"]),
+        diagnostics={"inputs": market},
+    )
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    assert orchestrator.metrics.executions == 0
+    assert rejects
+    reject = rejects[-1]
+    assert reject["reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
+    assert {
+        "expected_slippage_pct",
+        "latency_ms",
+    } <= set(reject["execution_safety"]["missing_fields"])
+    assert "ORDER_PLACED" not in {
+        event.get("lifecycle_event_type")
+        for event in getattr(orchestrator, "_reject_log", [])
+        if isinstance(event, dict)
+    }
+
+
 def test_high_raw_rr_cannot_bypass_unknown_execution_context() -> None:
     runtime, rejects = _run_paper(
         _market(
