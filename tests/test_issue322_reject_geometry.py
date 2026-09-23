@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 from sqlalchemy import text
@@ -203,7 +204,7 @@ def test_shared_geometry_short_and_phase_b_parity_are_stable() -> None:
 def _selection_candidate(symbol: str, *, volume: float, source: str = "binance") -> dict:
     return {
         "symbol": symbol, "source_exchange": source, "entry": 100.0, "side": "LONG",
-        "timeframe": "1m", "market_ts": 99_999_999_999.0, "volume_24h_usdt": volume,
+        "timeframe": "1m", "market_ts": time.time(), "volume_24h_usdt": volume,
         "spread_pct": 0.0002, "expected_slippage_pct": 0.0001, "funding_rate_pct": 0.0,
         "volatility_pct": 0.01, "trend_strength": 0.9, "liquidity_score": 0.9,
         "chop_score": 0.1, "regime": "TREND",
