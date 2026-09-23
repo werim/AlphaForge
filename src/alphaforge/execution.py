@@ -893,8 +893,9 @@ def evaluate_execution_safety(
         value = number(field)
         status = str(execution_ctx.get(status_keys[field], "") or "").upper()
         if (
-            value == 0.0
-            and (require_measured or status in MEASURED_STATUSES)
+            require_measured
+            and value == 0.0
+            and status in MEASURED_STATUSES
             and not bool(execution_ctx.get(f"{field}_zero_verified", False))
         ):
             fake_zero_fields.append(field)
