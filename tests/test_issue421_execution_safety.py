@@ -247,6 +247,22 @@ def test_invalid_fake_zero_is_blocking_for_persistence_and_parity() -> None:
     assert execution_context_is_unavailable(ctx) is True
 
 
+def test_verified_measured_zero_funding_is_not_invalid_fake_zero() -> None:
+    result = evaluate_execution_safety(
+        _execution_ctx(
+            funding_rate_pct=0.0,
+            funding_status="MEASURED",
+            funding_source="BINANCE_PREMIUM_INDEX",
+            funding_rate_pct_zero_verified=True,
+        ),
+        effective_rr=9.0,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(),
+        require_measured=True,
+    )
+    assert "INVALID_FAKE_ZERO" not in result["all_failed_gates"]
+
+
 def test_unknown_context_override_never_allows_invalid_fake_zero() -> None:
     result = evaluate_execution_safety(
         _execution_ctx(
