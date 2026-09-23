@@ -629,3 +629,75 @@ def test_rejected_artifact_never_promotes_market_data_rtt_to_execution_latency()
         )).scalar_one()
 
     assert latency == pytest.approx(50.0)
+
+
+def test_runtime_decision_evidence_persists_execution_safety_snapshot() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_AlwaysAcceptBrain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+        persistence_engine=engine,
+        scanner_source="FIXTURE",
+    )
+    runtime._start_or_resume_burnin_run()
+    assert runtime._burnin_run_id
+
+    execution_ctx = _execution_ctx(
+        evidence_status="UNAVAILABLE_BLOCKING",
+        safety_evidence_status="UNAVAILABLE_BLOCKING",
+        safety_missing_fields=["liquidity_score"],
+        safety_fake_zero_fields=[],
+        safety_all_failed_gates=["EXECUTION_CONTEXT_UNAVAILABLE"],
+        unavailable_fields=["liquidity_score"],
+        liquidity_score=None,
+        liquidity_status="UNAVAILABLE",
+        total_explicit_cost_pct=0.00085,
+        volatility_penalty_pct=0.0,
+    )
+    runtime._persist_burnin_decision(
+        {
+            "signal_id": "runtime-safety-evidence",
+            "symbol": "BTCUSDT",
+            "source_exchange": "fixture",
+            "decision": "REJECTED",
+            "reason": "EXECUTION_CONTEXT_UNAVAILABLE",
+            "primary_reject_reason": "EXECUTION_CONTEXT_UNAVAILABLE",
+            "reject_reasons": ["EXECUTION_CONTEXT_UNAVAILABLE"],
+            "all_failed_gates": ["EXECUTION_CONTEXT_UNAVAILABLE"],
+            "failed_gate_evidence": [
+                {
+                    "gate": "EXECUTION_CONTEXT_UNAVAILABLE",
+                    "observed": ["liquidity_score"],
+                    "threshold": "AVAILABLE",
+                    "comparison": "required",
+                    "source": "EXECUTION_SAFETY_CONTRACT",
+                }
+            ],
+            "decision_timestamp": "2026-09-23T00:00:02Z",
+            "side": "LONG",
+            "entry": 100.0,
+            "sl": 99.0,
+            "tp": 102.0,
+            "rr": 2.0,
+            "executable_raw_rr": 1.8,
+            "remaining_execution_penalty": 0.2,
+            "effective_rr": 1.6,
+            "execution_ctx": execution_ctx,
+        },
+        lifecycle_state="SIGNAL_REJECTED",
+    )
+
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT unavailable_fields, latency_ms, funding_rate_pct, "
+            "volatility_penalty_pct, total_explicit_cost_pct, reject_reason "
+            "FROM decision_evidence WHERE signal_id='runtime-safety-evidence'"
+        )).mappings().one()
+
+    assert json.loads(row["unavailable_fields"]) == ["liquidity_score"]
+    assert row["latency_ms"] == pytest.approx(50.0)
+    assert row["funding_rate_pct"] == pytest.approx(0.00005)
+    assert row["volatility_penalty_pct"] == pytest.approx(0.0)
+    assert row["total_explicit_cost_pct"] == pytest.approx(0.00085)
+    assert row["reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
