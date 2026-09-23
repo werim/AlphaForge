@@ -41,7 +41,12 @@ from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, 
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
-from alphaforge.persistence import fetch_expectancy_stat_detail, init_db, save_decision_evidence
+from alphaforge.persistence import (
+    _execution_context_is_unavailable,
+    fetch_expectancy_stat_detail,
+    init_db,
+    save_decision_evidence,
+)
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
@@ -2259,6 +2264,14 @@ class RuntimeOrchestrator:
                     ExecutionMode.LIVE_PRECHECK, ExecutionMode.LIVE
                 },
             )
+            execution_ctx = {
+                **execution_ctx,
+                "safety_evidence_status": execution_safety.get("execution_evidence_status"),
+                "safety_missing_fields": list(execution_safety.get("missing_fields") or []),
+                "safety_fake_zero_fields": list(execution_safety.get("fake_zero_fields") or []),
+                "safety_all_failed_gates": list(execution_safety.get("all_failed_gates") or []),
+            }
+            market_ctx["execution_ctx"] = execution_ctx
             market_ctx["execution_safety"] = execution_safety
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
@@ -2853,7 +2866,7 @@ class RuntimeOrchestrator:
                 confidence=order_plan.confidence,
                 explanation=explanation,
                 execution_ctx=execution_ctx,
-                execution_ctx_missing=str(execution_ctx.get("evidence_status", "")).upper() in {"", "UNAVAILABLE", "UNKNOWN"},
+                execution_ctx_missing=_execution_context_is_unavailable(execution_ctx),
                 expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
                 spread_pct=execution_ctx.get("spread_pct"),
                 latency_ms=execution_ctx.get("latency_ms"),
