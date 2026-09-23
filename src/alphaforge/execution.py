@@ -811,15 +811,14 @@ def evaluate_execution_safety(
         "volatility_regime": "volatility_status",
         "orderbook_imbalance": "orderbook_status",
     }
-    require_funding = bool(t.get("REQUIRE_FUNDING_RATE", False))
     critical_fields = [
         "spread_pct",
         "expected_slippage_pct",
         "latency_ms",
         "liquidity_score",
+        "funding_rate_pct",
+        "volatility_regime",
     ]
-    if require_funding:
-        critical_fields.append("funding_rate_pct")
     if orderbook_required:
         critical_fields.append("orderbook_imbalance")
 
