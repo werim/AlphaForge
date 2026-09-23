@@ -27,6 +27,29 @@ SOURCE_ESTIMATED_BACKTEST = "ESTIMATED_BACKTEST"
 SOURCE_MODELLED = "MODELLED"
 SOURCE_UNAVAILABLE = "UNAVAILABLE"
 
+
+def execution_context_is_unavailable(execution_ctx: Mapping[str, Any] | None) -> bool:
+    """Return whether the active execution-safety evidence is unavailable.
+
+    When a runtime safety evaluation exists it is authoritative over the raw
+    classifier, because optional/disabled evidence (for example orderbook when
+    its filter is disabled) must not poison persistence/readiness metadata.
+    """
+    ctx = dict(execution_ctx or {})
+    status_raw = ctx.get("safety_evidence_status", ctx.get("evidence_status"))
+    if status_raw is None:
+        return True
+    status = str(status_raw).strip().upper()
+    return status in {
+        "",
+        "UNKNOWN",
+        "UNAVAILABLE",
+        "UNAVAILABLE_BACKTEST",
+        EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING,
+        "NULL",
+    }
+
+
 EXECUTION_COST_REFERENCE_PRICE = "STRATEGY_ENTRY"
 EXECUTION_COST_PERCENTAGE_DENOMINATOR = "STRATEGY_ENTRY"
 EXECUTION_COST_SIGN_CONVENTION = "POSITIVE_IS_ADVERSE"
