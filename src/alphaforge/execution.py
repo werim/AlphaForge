@@ -861,9 +861,9 @@ def evaluate_execution_safety(
         "expected_slippage_pct",
         "latency_ms",
         "liquidity_score",
-        "funding_rate_pct",
-        "volatility_regime",
     ]
+    if require_measured:
+        critical_fields.extend(["funding_rate_pct", "volatility_regime"])
     if orderbook_required:
         critical_fields.append("orderbook_imbalance")
 
