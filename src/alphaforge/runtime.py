@@ -30,6 +30,7 @@ from alphaforge.execution import (
     build_execution_cost_model,
     evaluate_execution_safety,
     build_execution_cost_semantics,
+    execution_context_is_unavailable,
     weighted_average_fill_price,
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
@@ -41,12 +42,7 @@ from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, 
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
-from alphaforge.persistence import (
-    _execution_context_is_unavailable,
-    fetch_expectancy_stat_detail,
-    init_db,
-    save_decision_evidence,
-)
+from alphaforge.persistence import fetch_expectancy_stat_detail, init_db, save_decision_evidence
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
@@ -2866,7 +2862,7 @@ class RuntimeOrchestrator:
                 confidence=order_plan.confidence,
                 explanation=explanation,
                 execution_ctx=execution_ctx,
-                execution_ctx_missing=_execution_context_is_unavailable(execution_ctx),
+                execution_ctx_missing=execution_context_is_unavailable(execution_ctx),
                 expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
                 spread_pct=execution_ctx.get("spread_pct"),
                 latency_ms=execution_ctx.get("latency_ms"),
