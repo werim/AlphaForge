@@ -33,7 +33,7 @@ class _EarlyRejectBrain:
 def _candidate(side: str, *, geometry: bool = True) -> dict:
     row = {
         "symbol": "BTCUSDT", "entry": 100.0, "side": side, "rr": 2.0, "timeframe": "1m",
-        "volume_24h_usdt": 90_000_000.0, "spread_pct": 0.0002,
+        "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0, "spread_pct": 0.0002,
         "expected_slippage_pct": 0.0001, "funding_rate_pct": 0.0,
         "volatility_pct": 0.01, "trend_strength": 0.9, "liquidity_score": 0.9,
         "chop_score": 0.1, "regime": "TREND", "setup_type": "BREAKOUT",
@@ -93,7 +93,7 @@ def test_real_early_reject_sequence_retains_observational_geometry_without_execu
 
 def test_repeated_real_early_reject_is_idempotent(tmp_path) -> None:
     candidate = _candidate("LONG")
-    candidate["market_ts"] = 1_700_000_000.0
+    candidate["market_ts"] = time.time()
     runtime, engine = _runtime(tmp_path, candidate, "Score below threshold or negative expectancy.")
     asyncio.run(runtime._scan_once())
     asyncio.run(runtime._scan_once())
