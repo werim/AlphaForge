@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
+from alphaforge.ai_brain import AIBrain, OrderPlan, ScoreContext
 from alphaforge.execution import evaluate_execution_safety
+from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 
 
@@ -444,3 +449,142 @@ def test_multi_gate_execution_reject_persists_all_failed_threshold_evidence() ->
     for gate in expected:
         assert evidence[gate]["observed"] is not None
         assert evidence[gate]["threshold"] is not None
+
+
+def test_persistence_uses_active_safety_status_for_execution_ctx_missing() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    blocking = {
+        "evidence_status": "UNAVAILABLE_BLOCKING",
+        "spread_pct": None,
+    }
+    active_safe = {
+        "evidence_status": "UNAVAILABLE_BLOCKING",
+        "safety_evidence_status": "PARTIAL_ESTIMATED",
+        "spread_pct": 0.0002,
+    }
+
+    with Session(engine) as session:
+        save_order_decision(
+            session,
+            decision_id="blocking-decision",
+            signal_id="blocking-signal",
+            symbol="BTCUSDT",
+            mode="PAPER",
+            phase="final",
+            decision="REJECTED",
+            reject_reason="EXECUTION_CONTEXT_UNAVAILABLE",
+            execution_ctx=blocking,
+        )
+        save_order_decision(
+            session,
+            decision_id="active-safe-decision",
+            signal_id="active-safe-signal",
+            symbol="ETHUSDT",
+            mode="PAPER",
+            phase="final",
+            decision="ACCEPTED",
+            execution_ctx=active_safe,
+        )
+        save_trade_lifecycle_event(
+            session,
+            event_id="blocking-event",
+            signal_id="blocking-signal",
+            symbol="BTCUSDT",
+            mode="PAPER",
+            lifecycle_state="SIGNAL_CREATED",
+            execution_ctx=blocking,
+            event_ts="2026-09-23T00:00:00Z",
+        )
+
+    with engine.connect() as conn:
+        rows = {
+            row.decision_id: row.execution_ctx_missing
+            for row in conn.execute(text(
+                "SELECT decision_id, execution_ctx_missing "
+                "FROM order_decisions "
+                "WHERE decision_id IN ('blocking-decision','active-safe-decision')"
+            ))
+        }
+        lifecycle_missing = conn.execute(text(
+            "SELECT execution_ctx_missing FROM trade_lifecycle_events "
+            "WHERE event_id='blocking-event'"
+        )).scalar_one()
+
+    assert rows["blocking-decision"] == 1
+    assert rows["active-safe-decision"] == 0
+    assert lifecycle_missing == 1
+
+
+def test_aibrain_internal_audit_persists_canonical_effective_rr_and_execution_latency() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    session = Session(engine)
+    brain = AIBrain(session)
+    score = ScoreContext(
+        total_score=0.9,
+        expectancy_edge=0.7,
+        components={"momentum_confirmation": 0.9},
+        penalties={},
+        accepted=True,
+        reason_flags=[],
+        probabilistic={"p_win": 0.6},
+    )
+    plan = OrderPlan(
+        decision="ACCEPTED",
+        order_type="LIMIT",
+        limit_price=100.0,
+        stop_price=None,
+        confidence=0.9,
+        reason="fixture",
+    )
+    execution_ctx = _execution_ctx(
+        evidence_status="UNAVAILABLE_BLOCKING",
+        safety_evidence_status="PARTIAL_ESTIMATED",
+        safety_missing_fields=[],
+        market_data_latency_ms=1500.0,
+        latency_ms=50.0,
+    )
+    signal = {
+        "signal_id": "ai-audit-signal",
+        "symbol": "BTCUSDT",
+        "side": "LONG",
+        "timeframe": "1m",
+        "mode": "PAPER",
+        "entry_price": 100.0,
+        "risk_reward": 2.0,
+    }
+    market = {
+        "mode": "PAPER",
+        "market_ts": 1_790_000_000.0,
+        "effective_rr": 1.234,
+        "execution_ctx": execution_ctx,
+    }
+
+    brain._persist_decision(signal, market, score, plan, "fixture", "real")
+
+    with engine.connect() as conn:
+        decision = conn.execute(text(
+            "SELECT rr, effective_rr, latency_ms, execution_ctx_missing, execution_ctx "
+            "FROM order_decisions WHERE signal_id='ai-audit-signal' "
+            "AND phase='ai_internal_real'"
+        )).mappings().one()
+        signal_row = conn.execute(text(
+            "SELECT rr, effective_rr FROM signals WHERE signal_id='ai-audit-signal'"
+        )).mappings().one()
+        features = conn.execute(text(
+            "SELECT execution_features FROM ai_decision_features "
+            "WHERE decision_id IN (SELECT decision_id FROM order_decisions "
+            "WHERE signal_id='ai-audit-signal' AND phase='ai_internal_real')"
+        )).scalar_one()
+
+    persisted_ctx = json.loads(decision["execution_ctx"])
+    persisted_features = json.loads(features)
+    assert decision["rr"] == pytest.approx(2.0)
+    assert decision["effective_rr"] == pytest.approx(1.234)
+    assert decision["latency_ms"] == pytest.approx(50.0)
+    assert decision["execution_ctx_missing"] == 0
+    assert persisted_ctx["market_data_latency_ms"] == pytest.approx(1500.0)
+    assert persisted_ctx["latency_ms"] == pytest.approx(50.0)
+    assert signal_row["effective_rr"] == pytest.approx(1.234)
+    assert persisted_features["latency_ms"] == pytest.approx(50.0)
+    assert persisted_features["safety_evidence_status"] == "PARTIAL_ESTIMATED"
+    session.close()
