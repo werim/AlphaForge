@@ -489,14 +489,16 @@ def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit
     }
 
 
-def test_execution_safety_reject_happens_before_ai_brain_is_called() -> None:
+def test_execution_safety_veto_preserves_ai_gate_order_but_blocks_submit() -> None:
     class _CountingBrain:
         def __init__(self) -> None:
             self.calls = 0
 
         def before_real_order(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
             self.calls += 1
-            raise AssertionError("unsafe execution context reached AIBrain")
+            return _AlwaysAcceptBrain().before_real_order(
+                signal_payload, market_ctx, regime_ctx, stats_ctx
+            )
 
     rejects: list[dict[str, Any]] = []
     brain = _CountingBrain()
@@ -517,8 +519,8 @@ def test_execution_safety_reject_happens_before_ai_brain_is_called() -> None:
         diagnostics={"inputs": market},
     )))
 
-    assert brain.calls == 0
-    assert orchestrator.metrics.decisions_generated == 0
+    assert brain.calls == 1
+    assert orchestrator.metrics.decisions_generated == 1
     assert orchestrator.metrics.executions == 0
     assert rejects[-1]["reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
 
