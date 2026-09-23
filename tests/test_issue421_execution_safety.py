@@ -341,6 +341,19 @@ def _run_paper(
             "EXECUTION_CONTEXT_UNAVAILABLE",
         ),
         (
+            {
+                "orderbook_imbalance": None,
+                "orderbook_status": "UNAVAILABLE",
+                "rr": 10.0,
+            },
+            RuntimeConfig(
+                execution_mode=ExecutionMode.PAPER,
+                enable_orderbook_filter=True,
+            ),
+            2.0,
+            "EXECUTION_CONTEXT_UNAVAILABLE",
+        ),
+        (
             {"fee_pct": 0.1997, "fee_status": "CONFIGURED"},
             RuntimeConfig(execution_mode=ExecutionMode.PAPER, paper_fee_bps=None),
             2.0,
