@@ -884,8 +884,9 @@ def evaluate_execution_safety(
         "spread_pct",
         "expected_slippage_pct",
         "latency_ms",
-        "funding_rate_pct",
     ]
+    if require_measured:
+        zero_sensitive_fields.append("funding_rate_pct")
     if orderbook_required:
         zero_sensitive_fields.append("orderbook_imbalance")
     for field in zero_sensitive_fields:
