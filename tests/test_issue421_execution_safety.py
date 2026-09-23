@@ -272,6 +272,7 @@ def test_paper_process_symbol_enforces_each_execution_safety_family(
 
 def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit() -> None:
     rejects: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
     market = _market(
         latency_ms=50.0,
         latency_status="MODEL_ESTIMATE",
@@ -285,6 +286,7 @@ def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit
         ai_brain=_AlwaysAcceptBrain(),
         market_scanner=lambda: asyncio.sleep(0, result=[]),
         on_reject_persist=lambda payload: rejects.append(payload),
+        on_lifecycle_event=lambda event: events.append(event),
     )
     selection = SimpleNamespace(
         symbol=str(market["symbol"]),
@@ -303,8 +305,7 @@ def test_live_precheck_runtime_rejects_modelled_execution_evidence_before_submit
     } <= set(reject["execution_safety"]["missing_fields"])
     assert "ORDER_PLACED" not in {
         event.get("lifecycle_event_type")
-        for event in getattr(orchestrator, "_reject_log", [])
-        if isinstance(event, dict)
+        for event in events
     }
 
 
