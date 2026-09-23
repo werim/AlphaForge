@@ -1,376 +1,230 @@
-# AlphaForge: Execution-Aware Trading Research/Runtime Prototype
+# AlphaForge
 
-AlphaForge is a SQL-first, execution-aware futures trading research/runtime prototype. It includes deterministic signal decision logic, symbol selection, runtime orchestration, and backtest tooling. It does **not** currently meet production live-trading standards.
+AlphaForge is an **execution-aware, regime-aware, evidence-driven trading research and PAPER execution platform**. Its operating objective is not trade count or raw win rate; it is **positive expectancy after real-world execution costs, capital preservation, and reproducible evidence**.
 
-> **LIVE safety gate:** AlphaForge is **not LIVE-ready by default**. Real-order LIVE use is unsafe unless the local final readiness aggregator records `LIVE_REAL_ORDERS_READY` with every lifecycle, reject persistence, execution realism, exchange connectivity, authenticated reconciliation, no-submit precheck, kill-switch, rollback, heartbeat/alert/incident, dashboard/RBAC/secrets, TimesFM non-ordering, PAPER burn-in, full-test, and operator acknowledgement gate passing. PAPER success alone is never LIVE readiness.
+AlphaForge is not an indicator bot and it is not currently authorized for production LIVE trading.
 
-## Current Status
+## Core Principles
 
-- SQL-first foundation exists (SQLAlchemy models, Alembic migrations, persistence modules).
-- Symbol selection exists as a scored/reject-aware prototype selector.
-- Deterministic AI decision/reject engine exists (`AIBrain`) with persisted decision features.
-- Runtime orchestrator exists with `BACKTEST`, `PAPER`, and `LIVE` mode handling in code.
-- Backtest lifecycle tooling exists but lifecycle/export fidelity is still incomplete.
-- Live trading is **not production-ready**.
+- **Capital preservation first.** No trade is preferable to an unjustified trade.
+- **Fail closed on missing authority.** Missing execution, portfolio-risk, reconciliation, runtime, or identity evidence must not be converted into a passing default.
+- **Execution-aware expectancy.** Spread, slippage, fees, funding, latency, liquidity, volatility and fill geometry can invalidate an otherwise attractive setup.
+- **Regime awareness.** Signal quality is evaluated in market/MTF/regime context rather than from one isolated indicator.
+- **Reject-first filtering.** Selectivity and explicit reject evidence are part of the edge.
+- **Evidence integrity.** Decisions, lifecycle events, accepted trades, rejects, resolver outcomes, readiness and recovery are SQL-backed and scoped.
+- **Deterministic and restart-safe behavior.** Runtime recovery, campaign continuation and finalized outcomes are designed to be reconstructable and idempotent.
+- **Shadow is not authority.** State-direction shadow, adaptive calibration and agent traces are observational/diagnostic unless an explicit authoritative path says otherwise.
 
-## Phase Status
+## Current Operating Modes
 
-| Phase | Scope | Conservative Status |
+| Mode | Current role | Order mutation |
 |---|---|---|
-| Phase 1 | SQL-first foundation | Mostly implemented |
-| Phase 2 | Decision/reject engine | Partially implemented |
-| Phase 3 | Symbol selection | Implemented prototype |
-| Phase 4 | Paper runtime | Implemented prototype |
-| Phase 5 | Lifecycle-accurate backtest | Incomplete |
-| Phase 6 | Analytics/persistence hardening | Partial |
-| Phase 7 | Live execution readiness | Not ready |
-| Phase 8 | Adaptive learning/optimizer | Early groundwork only |
+| **BACKTEST** | Historical/offline research and lifecycle/evidence generation. | No live exchange mutation. |
+| **PAPER** | Authoritative simulated execution path with runtime, execution-safety, portfolio-risk, reconciliation and burn-in evidence. | Simulated only. |
+| **LIVE_PRECHECK** | Non-mutating production-like precheck path. Requires measured execution evidence where the policy requires it and keeps a mutation trap active. | Submit/cancel/modify is forbidden. |
+| **LIVE** | Enum/config surface retained for guarded future use. | **Currently blocked by the runtime safety boundary; not authorized for real orders.** |
 
-## Not Production Ready
+The canonical mode setting is managed by [`src/alphaforge/config_registry.py`](src/alphaforge/config_registry.py). PAPER success, readiness evidence, or a permissive local flag does not by itself authorize LIVE trading.
 
-> **Warning**
-> AlphaForge should currently be treated as a research/runtime prototype. Do not assume production-grade controls, exchange-failure handling, reconciliation, or operational safeguards for live capital deployment.
+## Decision Pipeline
 
-## Repository Highlights
+The authoritative production-oriented PAPER/LIVE_PRECHECK path is, at a high level:
 
-- Runtime orchestration: `src/alphaforge/runtime.py`
-- Deterministic decision engine: `src/alphaforge/ai_brain.py`
-- Symbol selection: `src/alphaforge/symbol_selector.py`
-- Execution context helpers: `src/alphaforge/execution.py`
-- Persistence and schema modules: `src/alphaforge/persistence.py`, `src/alphaforge/models/`, `alembic/`
-- Backtest runner/export script: `backtest_order.py`
+```text
+market data
+  -> MTF / regime / market context
+  -> canonical candidate geometry
+  -> expected fill and executable raw RR
+  -> runtime/time/recovery safety checks
+  -> deterministic scoring / AIBrain decision
+  -> effective-RR and execution-safety gates
+  -> portfolio-risk evaluation
+  -> scoped decision + lifecycle evidence
+  -> PAPER simulated execution OR LIVE_PRECHECK no-submit evidence
+  -> accepted/rejected resolver
+  -> qualification / readiness / audit
+```
 
-## Documentation Index
+BACKTEST shares important scoring, decision, execution-cost and lifecycle primitives, but its complete orchestration is not yet one identical pre-submit boundary with PAPER/LIVE_PRECHECK. That remaining cross-mode invariant work is tracked in [#421](https://github.com/werim/AlphaForge/issues/421).
 
-- [Repository operating rules](AGENTS.md)
-- [Current version and readiness snapshot](VERSION.md)
-- [Technical patch report](REPORT.md)
-- [Change history](CHANGELOG.md)
+## Execution-Aware Risk/Reward
 
-## Setup
+AlphaForge distinguishes three prices:
 
-### macOS / Linux
+- **planned entry** — strategy geometry before execution;
+- **expected fill** — decision-time executable estimate used to re-evaluate entry geometry;
+- **actual fill** — post-execution evidence, available only after a PAPER/real fill exists.
+
+The canonical execution-cost contract is implemented in [`src/alphaforge/execution.py`](src/alphaforge/execution.py). Decision-time runtime geometry recalculates **executable raw RR from the expected fill**, stop and target. It then applies only the **remaining execution penalty**, avoiding double-counting entry slippage already embedded in the expected fill.
+
+The execution-cost model can include spread, slippage, fees, funding, latency, liquidity and volatility penalties. [`src/alphaforge/effective_rr.py`](src/alphaforge/effective_rr.py) owns the shared execution-adjusted RR calculation; [`src/alphaforge/runtime.py`](src/alphaforge/runtime.py) owns the expected-fill geometry used by the production-oriented runtime path.
+
+Actual fill evidence is recorded separately from the decision-time estimate so realized execution deviation can be audited without leaking future information into the original decision.
+
+## Reject Engine
+
+Rejects are explicit evidence, not a generic “no trade” bucket.
+
+Current reject families include:
+
+- scoring/expectancy gates such as `LOW_SCORE`, `LOW_P_WIN`, `LOW_CONFIDENCE` and `NEGATIVE_EXPECTANCY_AFTER_COSTS`;
+- execution gates such as `EXECUTION_CONTEXT_UNAVAILABLE`, `INVALID_FAKE_ZERO`, `SPREAD_TOO_HIGH`, `SLIPPAGE_TOO_HIGH`, `HIGH_TOTAL_COST`, `THIN_LIQUIDITY`, `HIGH_LATENCY`, `EXCESSIVE_VOLATILITY`, `FUNDING_TOO_HIGH` and `LOW_EFFECTIVE_RR`;
+- portfolio gates such as `MAX_DAILY_LOSS`, `MAX_ROLLING_DRAWDOWN`, daily trade limits, `CORRELATION_OVEREXPOSURE`, `LOSS_CLUSTER_ACTIVE` and `UNKNOWN_PORTFOLIO_RISK`;
+- runtime/time gates such as stale, invalid or materially future market timestamps, kill-switch and recovery/reconciliation blockers.
+
+The canonical execution-safety contract records both a **primary reject reason** and **`all_failed_gates` / failed-gate evidence** when multiple execution gates fail together. Thresholds and their observed values are persisted with the evidence; do not infer current thresholds from this README.
+
+## Evidence Model
+
+AlphaForge treats SQL-backed evidence as the source of truth. CSVs, dashboards and reports are derived views.
+
+The current evidence model includes:
+
+- final decision and lifecycle evidence;
+- reject evidence and pending reject-forward labels;
+- accepted PAPER position/fill/outcome evidence;
+- execution-context and execution-cost evidence;
+- resolver outcomes for accepted and rejected decisions;
+- campaign/run/release/runtime/mode identity and provenance;
+- runtime heartbeat, recovery and reconciliation evidence;
+- qualification/readiness and audit evidence.
+
+Campaign/burn-in evidence uses explicit identity and provenance so stale or cross-campaign rows do not silently satisfy current qualification. Runtime/readiness surfaces additionally resolve the current mode, campaign, run, release and runtime instance where required.
+
+Shadow/adaptive/agent evidence — including state-direction shadow and System Audit Fabric diagnostics — is not order authority and must not silently overwrite canonical decisions or thresholds.
+
+For read-only SQL inspection, [`docs/SQLcheat.md`](docs/SQLcheat.md) is the canonical operator reference.
+
+## Resolver & Forward Outcome Semantics
+
+[`src/alphaforge/burnin_resolver.py`](src/alphaforge/burnin_resolver.py) uses shared candle-window normalization for reject-forward and accepted PAPER outcome resolution.
+
+Current invariants include:
+
+- complete, ordered candle coverage is required before terminal classification;
+- missing/gapped or partial windows remain pending/open for retry;
+- malformed/conflicting candle evidence fails the window closed;
+- future candles are excluded — no look-ahead;
+- same-candle TP+SL is explicit ambiguous intrabar evidence, not a clean win/loss;
+- finalized outcomes are not reclassified on retry;
+- reject-quality attribution is authoritative only when the forward label is execution-aligned and otherwise eligible; legacy/shadow labels remain diagnostic.
+
+## Runtime Safety
+
+Current runtime safety mechanisms include:
+
+- invalid, stale and materially future market-data timestamp checks;
+- canonical execution-context validation and protected execution-cost gates;
+- PAPER portfolio-risk state reconstructed from scoped persisted evidence where a campaign is attached;
+- drawdown, daily-loss, loss-cluster, exposure, correlation, cooldown and trade-count controls;
+- global kill switch;
+- read-only exchange reconciliation and orphan/stale exposure detection;
+- fail-closed runtime recovery after unclean/unknown state;
+- provider-failure classification: only known transient transport failures receive recovery grace, while execution remains blocked until safe recovery evidence exists.
+
+Do not hardcode operating thresholds in documentation or scripts. The typed source of truth is [`src/alphaforge/config_registry.py`](src/alphaforge/config_registry.py).
+
+## Campaign / Run / Release Scoping
+
+Burn-in/runtime attachment identity is intentionally stronger than a database path.
+
+Current campaign attachment identity includes, as applicable:
+
+- `campaign_id` and `burnin_run_id`;
+- `release_id`;
+- `execution_mode`;
+- `config_hash`, `strategy_config_hash`, `universe_hash`;
+- `git_commit`;
+- `execution_cost_config_hash` for campaign/runtime parity;
+- runtime instance identity on readiness/runtime evidence.
+
+Continuation runs in the same campaign can contribute to restart-safe campaign evidence; unrelated campaigns must not contaminate current risk state or readiness.
+
+## Readiness / Qualification
+
+Readiness is an **evidence gate**, not a profitability guarantee and not LIVE authorization.
+
+[`src/alphaforge/live_readiness.py`](src/alphaforge/live_readiness.py) evaluates scoped lifecycle, reject, execution, portfolio-risk, reconciliation, no-submit, rollback and operational evidence. Current runtime code still blocks real LIVE mutation even when non-mutating readiness evidence is strong.
+
+The isolated [autonomous qualification harness](docs/AUTONOMOUS_QUALIFICATION_HARNESS.md) provides:
+
+- **FAST** — deterministic accelerated PAPER qualification suitable for CI;
+- **SOAK** — 6–24 hour qualification with the same fault/invariant schedule and optional public market-data probes.
+
+A historical FAST/SOAK result is not proof for a newer commit. Fresh exact-head qualification must be bound to the code/config under evaluation. [#421](https://github.com/werim/AlphaForge/issues/421) tracks the remaining full-system release-verification work.
+
+## Testing
+
+The repository uses `pytest` for unit, persistence, integration-style and production-path regression coverage. Current tests include lifecycle/reject persistence, execution-cost semantics, production execution-safety gates, authoritative PAPER portfolio-risk state, accepted/rejected resolver integrity, market-time fail-closed behavior, reconciliation contention/recovery, and the autonomous FAST/SOAK qualification harness.
+
+Not all desired full-system verification families are complete. [#421](https://github.com/werim/AlphaForge/issues/421) currently tracks:
+
+- complete BACKTEST/PAPER/LIVE_PRECHECK gate-sequence invariant coverage;
+- SQLite lock/failure coverage across every authoritative write family;
+- real subprocess crash / cold-restart E2E;
+- canonical full-chain golden scenarios;
+- targeted mutation testing;
+- property/fuzz coverage for geometry, time, execution costs and identity;
+- deterministic full-chain replay;
+- bounded load/performance qualification;
+- fresh exact-head FAST plus public 6h SOAK release evidence.
+
+Do not describe those open families as completed merely because the normal suite is green.
+
+## Repository Navigation
+
+| Area | Canonical entry points |
+|---|---|
+| Runtime orchestration | [`src/alphaforge/runtime.py`](src/alphaforge/runtime.py) |
+| Execution context / cost semantics / execution safety | [`src/alphaforge/execution.py`](src/alphaforge/execution.py), [`src/alphaforge/effective_rr.py`](src/alphaforge/effective_rr.py) |
+| Order/lifecycle decision helpers | [`src/alphaforge/order.py`](src/alphaforge/order.py) |
+| Portfolio risk | [`src/alphaforge/portfolio_risk.py`](src/alphaforge/portfolio_risk.py) |
+| Resolver | [`src/alphaforge/burnin_resolver.py`](src/alphaforge/burnin_resolver.py) |
+| Qualification/readiness | [`src/alphaforge/burnin_qualification.py`](src/alphaforge/burnin_qualification.py), [`src/alphaforge/live_readiness.py`](src/alphaforge/live_readiness.py) |
+| Recovery/reconciliation | [`src/alphaforge/runtime_state.py`](src/alphaforge/runtime_state.py), [`src/alphaforge/reconciliation.py`](src/alphaforge/reconciliation.py) |
+| Typed config source of truth | [`src/alphaforge/config_registry.py`](src/alphaforge/config_registry.py) |
+| BACKTEST CLI | [`backtest_order.py`](backtest_order.py) |
+| Canonical SQL/operator queries | [`docs/SQLcheat.md`](docs/SQLcheat.md) |
+| Lifecycle contract | [`docs/decision_lifecycle_contract.md`](docs/decision_lifecycle_contract.md) |
+| FAST/SOAK qualification | [`docs/AUTONOMOUS_QUALIFICATION_HARNESS.md`](docs/AUTONOMOUS_QUALIFICATION_HARNESS.md) |
+| LIVE-readiness roadmap / deeper context | [`docs/LIVE_READINESS_ROADMAP.md`](docs/LIVE_READINESS_ROADMAP.md) |
+
+Historical implementation detail belongs in [`CHANGELOG.md`](CHANGELOG.md), [`REPORT.md`](REPORT.md) and [`VERSION.md`](VERSION.md), not in this overview.
+
+## Quick Start
+
+AlphaForge requires **Python 3.11+**.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+pip install -e '.[dev]'
+pytest -q
 ```
 
-### Windows PowerShell
+Windows PowerShell activation:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .[dev]
-```
-
-## Environment Configuration
-
-### Environment profiles
-
-AlphaForge now ships purpose-specific example profiles so BACKTEST diagnostics, PAPER evaluation, and LIVE preparation do not share one ambiguous template. Keep real secrets out of example files and commit only templates.
-
-| Profile | Purpose | Safety posture |
-|---|---|---|
-| `.env.test.example` | Loose BACKTEST-only diagnostics to verify whether strategies can produce trades | NOT for PAPER burn-in/preflight or LIVE; runtime and authenticated reconciliation are disabled |
-| `.env.medium.example` | Balanced PAPER/default evaluation and dashboard experimentation | LIVE disabled, realistic execution-cost and risk defaults |
-| `.env.live.example` | Hardened LIVE readiness preparation | Fail-closed defaults; real orders remain disabled until credentials, readiness evidence, and operator guards are explicitly supplied locally |
-| `.env.example` | Canonical PAPER runtime and burn-in template | PAPER mode and runtime limits align; LIVE and real-order submission remain disabled |
-
-Copy exactly one profile to `.env` before running local workflows.
-
-Windows PowerShell:
-
-```powershell
-Copy-Item .env.test.example .env
-Copy-Item .env.example .env
-Copy-Item .env.medium.example .env
-Copy-Item .env.live.example .env
-```
-
-macOS/Linux:
-
-```bash
-cp .env.test.example .env
-cp .env.example .env
-cp .env.medium.example .env
-cp .env.live.example .env
-```
-
-Recommended use:
-
-1. Use `.env.test.example` only for BACKTEST diagnostics. Never use it for PAPER burn-in or preflight.
-2. Copy `.env.example` for normal PAPER runtime/burn-in; `.env.medium.example` remains the balanced dashboard/evaluation variant.
-3. Use `.env.live.example` only for hardened LIVE preparation. It requires explicit local credentials and readiness evidence, keeps `ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY=true`, preserves strict risk/cost/staleness guards, and does not enable live trading or live orders by default.
-
-The PAPER template deliberately keeps signed read-only reconciliation enabled and contains placeholders rather than secrets. Replace both `BINANCE_API_KEY` and `BINANCE_API_SECRET` locally with credentials for the selected Binance environment. Until then, `env_contract_valid`, `reconciliation_credentials_non_placeholder`, and `signed_readonly_reconciliation_available` fail closed by design. The template itself sets canonical `ALPHAFORGE_EXECUTION_MODE=PAPER`; `RUNTIME_LIMITS_ACTIVE` is derived as true from that mode, so it must not be added as a separate env variable. `ALPHAFORGE_ENABLE_LIVE_TRADING=false` and `ALPHAFORGE_ALLOW_LIVE_ORDERS=false` keep order submission disabled.
-
-### Binance environment and endpoint configuration
-
-For normal Binance USD-M Futures **production** or **testnet** operation, set `BINANCE_ENVIRONMENT` and leave `BINANCE_BASE_URL` and `BINANCE_WS_URL` blank. AlphaForge resolves the canonical endpoints automatically. Explicit endpoint overrides are intended for `demo` or other operator-verified custom endpoints, not routine production/testnet use.
-
-| Use | `BINANCE_ENVIRONMENT` | `BINANCE_BASE_URL` | `BINANCE_WS_URL` | Resolved canonical endpoints |
-|---|---|---|---|---|
-| Production | `production` | leave blank | leave blank | REST `https://fapi.binance.com`, WS `wss://fstream.binance.com` |
-| Futures Testnet | `testnet` | leave blank | leave blank | REST `https://testnet.binancefuture.com`, WS `wss://stream.binancefuture.com` |
-| Demo/custom | `demo` | explicit operator-verified URL required | explicit operator-verified URL required for runtime websocket use | supplied explicitly by operator |
-
-Recommended production `.env` fragment:
-
-```dotenv
-BINANCE_ENVIRONMENT=production
-BINANCE_API_KEY=<your_production_readonly_key>
-BINANCE_API_SECRET=<your_production_readonly_secret>
-BINANCE_BASE_URL=
-BINANCE_WS_URL=
-```
-
-Recommended Futures Testnet `.env` fragment:
-
-```dotenv
-BINANCE_ENVIRONMENT=testnet
-BINANCE_API_KEY=<your_testnet_key>
-BINANCE_API_SECRET=<your_testnet_secret>
-BINANCE_BASE_URL=
-BINANCE_WS_URL=
-```
-
-Do not copy production credentials into testnet or testnet credentials into production. Reconciliation credentials and the selected Binance environment must refer to the same account environment.
-
-**Important precedence rule:** existing process environment variables override repository `.env` values. A stale shell export such as `BINANCE_ENVIRONMENT=production` or an explicit `BINANCE_BASE_URL=https://fapi.binance.com` can therefore override a `.env` that says `BINANCE_ENVIRONMENT=testnet`.
-
-Before changing environments, clear stale Binance overrides from the current shell if needed.
-
-macOS/Linux:
-
-```bash
-unset BINANCE_ENVIRONMENT BINANCE_TESTNET BINANCE_BASE_URL BINANCE_WS_URL BINANCE_API_KEY BINANCE_API_SECRET
-```
-
-Windows PowerShell:
-
-```powershell
-Remove-Item Env:BINANCE_ENVIRONMENT,Env:BINANCE_TESTNET,Env:BINANCE_BASE_URL,Env:BINANCE_WS_URL,Env:BINANCE_API_KEY,Env:BINANCE_API_SECRET -ErrorAction SilentlyContinue
-```
-
-Verify the effective reconciliation configuration without printing credentials:
-
-```bash
-python - <<'PY'
-from alphaforge.env_contract import bootstrap_environment
-from alphaforge.config import load_reconciliation_settings
-
-bootstrap_environment()
-c = load_reconciliation_settings()
-
-print("environment:", c.environment)
-print("base_url:", c.base_url)
-print("key_loaded:", bool(c.api_key))
-print("secret_loaded:", bool(c.api_secret))
-print("key_source:", c.sources.get("BINANCE_API_KEY"))
-print("secret_source:", c.sources.get("BINANCE_API_SECRET"))
-PY
-```
-
-For testnet, the expected environment/endpoint pair is:
-
-```text
-environment: testnet
-base_url: https://testnet.binancefuture.com
-```
-
-For production, the expected pair is:
-
-```text
-environment: production
-base_url: https://fapi.binance.com
-```
-
-Do not run a burn-in launch when authenticated reconciliation is unavailable or points at the wrong Binance environment. Preflight must fail closed until the selected account environment and reconciliation evidence agree.
-
-Mode switching uses the canonical `ALPHAFORGE_EXECUTION_MODE` value (`BACKTEST`, `PAPER`, or `LIVE`) plus the backward-compatible `EXECUTION_MODE` alias. Never assume PAPER success means LIVE readiness.
-
-LIVE trading can lose capital quickly from slippage, spread expansion, latency, exchange-side failures, and incomplete reconciliation. Do not enable LIVE unless lifecycle integrity, reject persistence, authenticated reconciliation, no-submit prechecks, execution-risk thresholds, kill-switch behavior, rollback evidence, alerting, and operator acknowledgement are validated in your environment.
-
-## Run migrations
-
-```bash
-alembic upgrade head
-```
-
-## Run tests
-
-```bash
+pip install -e ".[dev]"
 pytest -q
 ```
 
-## Exact Running Commands
-
-Run these from the repository root after activating `.venv` and installing the package in editable mode.
-
-### Backtest
-
-Backtest entrypoint: `backtest_order.py`.
-
-```bash
-python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/manual_1h_30d
-```
-
-Refresh Binance historical cache for the requested range:
-
-```bash
-python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/manual_1h_30d --force-refresh
-```
-
-CI/offline smoke backtest without network calls:
+CI/offline-safe backtest smoke:
 
 ```bash
 python backtest_order.py --ci --interval 1h --last-n-days 7 --symbols BTCUSDT --output-dir data/backtests/ci_smoke
 ```
 
-BACKTEST-only SHORT breakdown rescue comparison, disabled by default unless explicitly enabled:
+`--ci` implies the deterministic offline path; it does not require live exchange mutation.
 
-```bash
-ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED=true python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/rescue_on
-```
+For PAPER/burn-in operational commands, environment selection, reconciliation and qualification workflows, use the linked runbooks/docs rather than bypassing the canonical configuration registry.
 
-Windows PowerShell equivalent:
+## Safety Notice
 
-```powershell
-$env:ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED="true"
-python backtest_order.py --interval 1h --last-n-days 30 --symbols BTCUSDT,ETHUSDT --output-dir data/backtests/rescue_on
-Remove-Item Env:ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED
-```
-
-### PAPER runtime
-
-PAPER runtime entrypoint: `python -m alphaforge.runtime`.
-
-macOS / Linux:
-
-```bash
-ALPHAFORGE_MODE=PAPER python -m alphaforge.runtime
-```
-
-Windows PowerShell:
-
-```powershell
-$env:ALPHAFORGE_MODE="PAPER"
-python -m alphaforge.runtime
-```
-
-For a deterministic smoke path using the safe placeholder scanner:
-
-```bash
-ALPHAFORGE_MODE=PAPER ALPHAFORGE_RUNTIME_SAFE_SCANNER=1 python -m alphaforge.runtime
-```
-
-### Dashboard
-
-Dashboard entrypoint: `alphaforge.dashboard.app:create_app`.
-
-```bash
-python -m uvicorn alphaforge.dashboard.app:create_app --factory --host 127.0.0.1 --port 8000
-```
-
-Then open:
-
-```text
-http://127.0.0.1:8000
-```
-
-If you want the dashboard to read a specific SQLite DB, set `ALPHAFORGE_DATABASE_URL` before starting it, using the same value expected by `load_config_from_env()`.
-
-## Shortcut Scripts
-
-PowerShell shortcuts:
-
-```powershell
-.\scripts\run_backtest.ps1 -Interval 1h -Days 30 -Symbols BTCUSDT,ETHUSDT
-.\scripts\run_paper.ps1
-.\scripts\run_dashboard.ps1 -Port 8000
-```
-
-Bash shortcuts:
-
-```bash
-bash scripts/run_backtest.sh 1h 30 BTCUSDT,ETHUSDT
-bash scripts/run_paper.sh
-bash scripts/run_dashboard.sh 8000
-```
-
-These shortcuts are thin wrappers around the exact commands above. They do not bypass `.env`, migrations, readiness gates, or LIVE safeguards.
-
-## PAPER burn-in report
-
-Generate deterministic PAPER runtime diagnostics from a SQLite runtime database without changing thresholds or enabling live order flow:
-
-```bash
-python -m alphaforge.paper_burnin --db path/to/paper_runtime.db --out reports/paper_burnin
-```
-
-The command writes `paper_burnin_summary.csv`, `paper_burnin_report.md`, and `paper_burnin_blockers.json`. Missing evidence is reported as a blocker; this report never promotes LIVE readiness by itself.
-
-## Next Development Priority
-
-1. Unify `BACKTEST` / `PAPER` / `LIVE` decision lifecycle contract as much as possible.
-2. Persist rejected signals/orders consistently across modes.
-3. Fix lifecycle export accuracy (event ordering, statuses, and rejection visibility).
-4. Ensure score/RR fields are computed from context and not hardcoded placeholders.
-5. Populate execution-context fields where data exists; otherwise mark as unavailable explicitly.
-6. Add regression tests for rejected lifecycle rows and lifecycle completeness.
-
-## Adaptive Learning Foundation (Generation 9)
-- AlphaForge now includes a deterministic, SQL-first adaptive learning foundation in `src/alphaforge/adaptive_learning.py`.
-- This patch adds passive review persistence/analytics only (closed trade + rejected signal reviews, adaptive stats, shadow threshold recommendations).
-- No unconstrained ML behavior is introduced; no active threshold application is enabled by default.
-
-## Mode-aware configuration and Dashboard Settings
-
-AlphaForge managed engine settings now have a typed source of truth in `src/alphaforge/config_registry.py`. Effective precedence is: process environment variables > Dashboard override file (`config/runtime_overrides.json`) > `.env.local` > `.env` > typed defaults. Dashboard Settings edits local override values only and does not write secrets.
-
-Settings are grouped as Trade Quality Filters, Execution Cost Filters, Runtime Risk Limits, Backtest Settings, and Mode / Safety. Trade-quality filters can affect BACKTEST/PAPER/LIVE. Runtime risk limits such as `ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY` and `ALPHAFORGE_MAX_TRADES_SYMBOL_PER_DAY` are PAPER/LIVE runtime/session controls and are ignored by BACKTEST by default; BACKTEST caps must use explicit `ALPHAFORGE_BACKTEST_*` settings. LIVE remains readiness-guarded and cannot be enabled from the generic Settings page.
-
-### Environment audit and Windows PowerShell acceptance
-
-The repository-root `.env` is loaded before canonical configuration; an existing process variable wins. Audit without printing secrets:
-
-```powershell
-$env:PYTHONPATH = "src"
-python -m alphaforge.config_audit
-if ($LASTEXITCODE -ne 0) { throw "environment contract failed" }
-```
-
-Validate production/testnet selection and explicit override precedence:
-
-```powershell
-$env:BINANCE_ENVIRONMENT = "testnet"
-Remove-Item Env:BINANCE_TESTNET -ErrorAction SilentlyContinue
-Remove-Item Env:BINANCE_BASE_URL -ErrorAction SilentlyContinue
-Remove-Item Env:BINANCE_WS_URL -ErrorAction SilentlyContinue
-python -c "from alphaforge.config import load_config_from_env; c=load_config_from_env().binance; print(c.environment,c.base_url,c.ws_url,c.resolution_source)"
-$env:BINANCE_BASE_URL = "https://operator-verified-rest.example"
-$env:BINANCE_WS_URL = "wss://operator-verified-ws.example"
-python -m alphaforge.config_audit
-```
-
-Run matching-environment, read-only Phase 9 reconciliation preflight (enter credentials only in the current process; never commit them):
-
-```powershell
-$env:ALPHAFORGE_EXECUTION_MODE = "PAPER"
-$env:ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION = "true"
-$env:BINANCE_ENVIRONMENT = "testnet" # or demo with both operator-verified explicit URLs
-$env:BINANCE_API_KEY = Read-Host "Read-only Binance key"
-$env:BINANCE_API_SECRET = Read-Host "Read-only Binance secret"
-python -m alphaforge.burnin_ops --db data/runtime/phase9.db preflight --release-id env-contract --symbols BTCUSDT --intervals 1h
-Remove-Item Env:BINANCE_API_KEY,Env:BINANCE_API_SECRET
-```
-
-The command must report `PASS` and COMPLETE reconciliation evidence against the selected account environment; unavailable/mismatched evidence fails closed. It does not establish LIVE readiness.
-
-`ALPHAFORGE_ALLOW_LIVE_ORDERS=true` is never sufficient by itself: the final adapter boundary also requires LIVE trading enablement, operator acknowledgement, qualification, clean reconciliation, and an inactive kill switch. The default is false. Prefer `ALPHAFORGE_REQUIRE_REGIME_ALIGNMENT` over deprecated `ENABLE_REGIME_FILTER`, and `ALPHAFORGE_ENABLE_ORDERBOOK_FILTER` over deprecated `ENABLE_ORDERBOOK_FILTER`.
-
-### Canonical runtime database and PAPER reconciliation
-
-Fresh runtime persistence defaults to `data/runtime/alphaforge_runtime.db`; repository-root `alphaforge.db` is legacy and is neither migrated nor deleted automatically. `ALPHAFORGE_DATABASE_URL` remains canonical, `ALPHAFORGE_DB_PATH` is a burn-in compatibility override, and explicit `--db` wins for supporting CLIs. Normal PAPER enables signed read-only Binance reconciliation and preflight requires usable non-placeholder credentials; this does not authorize LIVE order mutation.
+- AlphaForge is development/PAPER-oriented.
+- Real LIVE trading is **not automatically authorized and is currently blocked by the runtime safety boundary**.
+- Do not bypass configuration, execution-safety, portfolio-risk, reconciliation, readiness or kill-switch controls.
+- Missing authoritative evidence must fail closed rather than be replaced with optimistic zeros/defaults.
+- Historical backtest, PAPER or qualification performance does not guarantee future performance.
