@@ -64,7 +64,7 @@ jobs:
         run: python -m compileall -q src
 
       - name: Cross-surface invariant gate
-        run: pytest -q tests/test_cross_surface_invariants.py
+        run: pytest -q tests/test_cross_surface_invariants.py tests/test_issue421_decision_invariant.py
 
       - name: System audit fabric gate
         run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py
