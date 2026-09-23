@@ -111,3 +111,28 @@ def test_missing_protected_evidence_does_not_equal_complete_evidence():
     incomplete.pop("executable_raw_rr")
     with pytest.raises(ValueError, match="executable_raw_rr"):
         assert_pre_submit_invariant_parity(reference, incomplete)
+
+
+def test_identically_missing_required_evidence_still_fails_closed():
+    left = _surface(threshold_provenance={})
+    right = _surface(threshold_provenance={})
+    with pytest.raises(ValueError, match="DECISION_PARITY_EVIDENCE_INCOMPLETE"):
+        assert_pre_submit_invariant_parity(left, right)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("score", None),
+        ("candidate_rr", None),
+        ("executable_raw_rr", None),
+        ("effective_rr", None),
+        ("execution_evidence_status", "INCOMPLETE"),
+        ("portfolio_decision", None),
+        ("lifecycle_pre_submit_terminal_state", ""),
+    ],
+)
+def test_missing_required_authority_never_passes_by_symmetry(field, value):
+    payload = _surface(**{field: value})
+    with pytest.raises(ValueError, match="DECISION_PARITY_EVIDENCE_INCOMPLETE"):
+        assert_pre_submit_invariant_parity(payload, payload)
