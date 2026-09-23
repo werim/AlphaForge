@@ -212,6 +212,8 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
+Environment profiles are purpose-specific: `.env.test.example` is for BACKTEST diagnostics, `.env.medium.example` is the balanced PAPER/default evaluation profile, and `.env.live.example` is hardened LIVE-readiness preparation without LIVE authorization. `.env.example` remains the canonical PAPER template. Keep real secrets local.
+
 CI/offline-safe backtest smoke:
 
 ```bash
