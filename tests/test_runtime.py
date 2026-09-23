@@ -1215,6 +1215,25 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
             calls.append(("accepted_observation", lifecycle_state)),
     )
     monkeypatch.setattr(RuntimeOrchestrator, "_generate_burnin_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_paper_portfolio_risk_state",
+        lambda self, symbol, now_ts: {
+            "equity": 1000.0,
+            "available_balance": 1000.0,
+            "daily_realized_pnl": 0.0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.0,
+            "consecutive_loss_count": 0,
+            "symbol_consecutive_loss_count": 0,
+            "trades_today_symbol": 0,
+            "trades_today_global": 0,
+            "persisted_cooldown_until": None,
+            "risk_state_complete": True,
+            "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+            "risk_state_missing_fields": [],
+        },
+    )
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
         ai_brain=_AlwaysAcceptBrain(), market_scanner=scanner,

@@ -2473,28 +2473,44 @@ class RuntimeOrchestrator:
         }
         cooldown_until = dict(self._symbol_cooldown_until)
         if self.config.execution_mode is ExecutionMode.PAPER:
-            historical_risk = self._paper_portfolio_risk_state(
-                selection.symbol,
-                now_ts=portfolio_now,
+            attached_campaign_id = (
+                self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
             )
-            portfolio_evidence_source = str(
-                historical_risk.get("risk_state_source") or "PAPER_RISK_STATE_UNKNOWN"
-            )
-            if historical_risk.get("risk_state_source") == "BURNIN_CAMPAIGN_EVIDENCE":
-                inferred_equity = historical_risk.get("equity")
-                available_balance = historical_risk.get("available_balance")
-            elif inferred_equity is None:
-                inferred_equity = historical_risk.get("equity")
-                available_balance = historical_risk.get("available_balance")
+            if attached_campaign_id:
+                historical_risk = self._paper_portfolio_risk_state(
+                    selection.symbol,
+                    now_ts=portfolio_now,
+                )
+                portfolio_evidence_source = str(
+                    historical_risk.get("risk_state_source")
+                    or "PAPER_RISK_STATE_UNKNOWN"
+                )
+                if (
+                    historical_risk.get("risk_state_source")
+                    == "BURNIN_CAMPAIGN_EVIDENCE"
+                ):
+                    inferred_equity = historical_risk.get("equity")
+                    available_balance = historical_risk.get("available_balance")
+                elif inferred_equity is None:
+                    inferred_equity = historical_risk.get("equity")
+                    available_balance = historical_risk.get("available_balance")
+                persisted_cooldown_until = historical_risk.get(
+                    "persisted_cooldown_until"
+                )
+                if persisted_cooldown_until is not None:
+                    cooldown_until[selection.symbol] = max(
+                        float(cooldown_until.get(selection.symbol, 0.0) or 0.0),
+                        float(persisted_cooldown_until),
+                    )
+            elif inferred_equity is None and self.config.paper_initial_equity is not None:
+                inferred_equity = self.config.paper_initial_equity
+                available_balance = self.config.paper_initial_equity
+                portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
             if candidate_notional is None and self.config.paper_candidate_notional is not None:
                 candidate_notional = self.config.paper_candidate_notional
+                if not attached_campaign_id:
+                    portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
                 market_ctx["notional"] = candidate_notional
-            persisted_cooldown_until = historical_risk.get("persisted_cooldown_until")
-            if persisted_cooldown_until is not None:
-                cooldown_until[selection.symbol] = max(
-                    float(cooldown_until.get(selection.symbol, 0.0) or 0.0),
-                    float(persisted_cooldown_until),
-                )
         elif candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
         snapshot = snapshot_from_state(

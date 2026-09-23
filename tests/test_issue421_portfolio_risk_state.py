@@ -43,6 +43,8 @@ def _iso(minutes_ago: float = 0.0) -> str:
 
 
 def _create_campaign(db_path, release_id: str, *, symbols: list[str] | None = None):
+    engine = init_db(f"sqlite+pysqlite:///{db_path}")
+    engine.dispose()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     campaign = create_campaign(
