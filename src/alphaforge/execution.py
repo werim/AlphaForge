@@ -330,24 +330,13 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         spread_status = "UNAVAILABLE"
         spread_source = "UNAVAILABLE"
 
-    slippage_has_evidence = (
-        _to_float(market_ctx.get("expected_slippage_pct")) is not None or bool(klines)
-    )
-    slippage_status = str(
-        market_ctx.get(
-            "slippage_status",
-            "MODEL_ESTIMATE" if slippage_has_evidence else "UNAVAILABLE",
-        )
-    )
+    slippage_status = str(market_ctx.get("slippage_status", "MODEL_ESTIMATE"))
     slippage_source = str(
         market_ctx.get(
             "slippage_source",
-            "KLINE_RANGE_MODEL" if slippage_has_evidence else "UNAVAILABLE",
+            "KLINE_RANGE_MODEL" if klines else "LEGACY_SLIPPAGE_MODEL",
         )
     )
-    if not slippage_has_evidence:
-        slippage_status = "UNAVAILABLE"
-        slippage_source = "UNAVAILABLE"
 
     md_latency = _to_float(market_ctx.get("market_data_latency_ms"))
     md_latency_status = str(market_ctx.get("market_data_latency_status", "MEASURED" if md_latency is not None else "UNAVAILABLE"))
@@ -804,14 +793,15 @@ def evaluate_execution_safety(
         "volatility_regime": "volatility_status",
         "orderbook_imbalance": "orderbook_status",
     }
+    require_funding = bool(t.get("REQUIRE_FUNDING_RATE", False))
     critical_fields = [
         "spread_pct",
         "expected_slippage_pct",
         "latency_ms",
         "liquidity_score",
-        "funding_rate_pct",
-        "volatility_regime",
     ]
+    if require_funding:
+        critical_fields.append("funding_rate_pct")
     if orderbook_required:
         critical_fields.append("orderbook_imbalance")
 
