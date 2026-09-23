@@ -70,7 +70,7 @@ Current reject families include:
 - scoring/expectancy gates such as `LOW_SCORE`, `LOW_P_WIN`, `LOW_CONFIDENCE` and `NEGATIVE_EXPECTANCY_AFTER_COSTS`;
 - execution gates such as `EXECUTION_CONTEXT_UNAVAILABLE`, `INVALID_FAKE_ZERO`, `SPREAD_TOO_HIGH`, `SLIPPAGE_TOO_HIGH`, `HIGH_TOTAL_COST`, `THIN_LIQUIDITY`, `HIGH_LATENCY`, `EXCESSIVE_VOLATILITY`, `FUNDING_TOO_HIGH` and `LOW_EFFECTIVE_RR`;
 - portfolio gates such as `MAX_DAILY_LOSS`, `MAX_ROLLING_DRAWDOWN`, daily trade limits, `CORRELATION_OVEREXPOSURE`, `LOSS_CLUSTER_ACTIVE` and `UNKNOWN_PORTFOLIO_RISK`;
-- runtime/time gates such as stale, invalid or materially future market timestamps, kill-switch and recovery/reconciliation blockers.
+- runtime/time gates such as stale market data, kill-switch and recovery/reconciliation blockers.
 
 The canonical execution-safety contract records both a **primary reject reason** and **`all_failed_gates` / failed-gate evidence** when multiple execution gates fail together. Thresholds and their observed values are persisted with the evidence; do not infer current thresholds from this README.
 
@@ -113,7 +113,7 @@ Current invariants include:
 
 Current runtime safety mechanisms include:
 
-- invalid, stale and materially future market-data timestamp checks;
+- stale market-data checks;
 - canonical execution-context validation and protected execution-cost gates;
 - PAPER portfolio-risk state reconstructed from scoped persisted evidence where a campaign is attached;
 - drawdown, daily-loss, loss-cluster, exposure, correlation, cooldown and trade-count controls;
@@ -155,10 +155,11 @@ A historical FAST/SOAK result is not proof for a newer commit. Fresh exact-head 
 
 ## Testing
 
-The repository uses `pytest` for unit, persistence, integration-style and production-path regression coverage. Current tests include lifecycle/reject persistence, execution-cost semantics, production execution-safety gates, authoritative PAPER portfolio-risk state, accepted/rejected resolver integrity, market-time fail-closed behavior, reconciliation contention/recovery, and the autonomous FAST/SOAK qualification harness.
+The repository uses `pytest` for unit, persistence, integration-style and production-path regression coverage. Current tests include lifecycle/reject persistence, execution-cost semantics, production execution-safety gates, authoritative PAPER portfolio-risk state, accepted/rejected resolver integrity, stale-market-data behavior, reconciliation contention/recovery, and the autonomous FAST/SOAK qualification harness.
 
 Not all desired full-system verification families are complete. [#421](https://github.com/werim/AlphaForge/issues/421) currently tracks:
 
+- fail-closed invalid/future market-timestamp validation at the top-level runtime boundary;
 - complete BACKTEST/PAPER/LIVE_PRECHECK gate-sequence invariant coverage;
 - SQLite lock/failure coverage across every authoritative write family;
 - real subprocess crash / cold-restart E2E;
