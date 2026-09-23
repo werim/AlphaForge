@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,8 @@ class ConfigSetting:
             value = int(raw)
         elif self.value_type == "float":
             value = float(raw)
+            if not math.isfinite(value):
+                raise ValueError(f"{self.env_name} must be finite")
         else:
             value = str(raw)
         if isinstance(value, (int, float)):

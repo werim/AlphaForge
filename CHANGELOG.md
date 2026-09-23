@@ -1,3 +1,18 @@
+# Finite managed configuration repair — 2026-09-24
+
+### Added
+- 159 non-finite setting/environment/override-preservation regression cases.
+### Changed
+- Registry float values require finite numbers before bounds validation.
+### Fixed
+- NaN bypassing configured safety bounds and unbounded infinity acceptance.
+### Removed
+- None.
+### Breaking Changes
+- Non-finite managed configuration now fails validation; defaults, bounds and schema unchanged.
+### Known Issues
+- Direct runtime-config construction and other numeric consumers remain audit scope. P2-B remains open; LIVE NOT READY.
+
 # Invalid execution-number safety repair — 2026-09-24
 
 ### Added

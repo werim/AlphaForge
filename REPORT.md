@@ -1,3 +1,11 @@
+# Finite managed configuration repair — 2026-09-24
+
+The canonical ConfigSetting.parse float branch accepted NaN because both range comparisons evaluate false. Confirmed MIN_EFFECTIVE_RR=nan and ALPHAFORGE_MAX_SPREAD_PCT=nan parsed successfully, allowing safety comparisons to become ineffective. Infinities were only rejected where a corresponding bound existed.
+
+Changed `src/alphaforge/config_registry.py` to require math.isfinite immediately after float parsing. Existing bounds/defaults remain unchanged. `tests/test_config_registry.py` adds 156 cases across all 52 float settings plus two environment-path checks and an override-file preservation test. NaN cases exposed false acceptance; infinity cases also standardize finite-value rejection rather than relying on bounds. README records the shared environment/dashboard contract. VERSION/REPORT/CHANGELOG updated.
+
+No runtime architecture, lifecycle, schema, export, migration, campaign or historical-evidence mutation. Compatibility: non-finite managed configuration now raises ValueError instead of entering runtime; operators must supply valid finite settings. Dashboard validation fails before writing the file. Direct construction bypassing the registry is not covered by this patch. LIVE remains NOT READY. Push recommendation: CHATGPT only, then exact-SHA CI; prior commit's CI is not qualification for this patch.
+
 # Non-finite execution evidence fail-open repair — 2026-09-24
 
 ## Why / root cause

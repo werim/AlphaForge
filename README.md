@@ -129,6 +129,10 @@ Current runtime safety mechanisms include:
 
 Do not hardcode operating thresholds in documentation or scripts. The typed source of truth is [`src/alphaforge/config_registry.py`](src/alphaforge/config_registry.py).
 
+Managed float settings must be finite: NaN and infinities fail configuration
+validation before range comparisons. The rule applies to environment values and
+dashboard overrides; an invalid dashboard update leaves the existing file unchanged.
+
 ## Campaign / Run / Release Scoping
 
 Burn-in/runtime attachment identity is intentionally stronger than a database path.

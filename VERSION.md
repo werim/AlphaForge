@@ -1,3 +1,11 @@
+# Finite configuration threshold validation — 2026-09-24
+
+- Current phase: #421 audit / P2-B preparation; canonical configuration NaN bypass repaired.
+- Runtime maturity/alignment: all registry-managed float settings reject NaN and infinities before range checks across environment/dashboard consumers. Defaults and thresholds are unchanged; LIVE remains disabled.
+- Lifecycle/persistence/execution realism: no lifecycle, database, schema, export or cost-formula changes. Invalid dashboard updates preserve the existing override file; no campaign data was touched.
+- Validation: focused registry/environment and adjacent dashboard/configuration regressions, compileall and diff checks; exact pushed CI still required. Preceding execution-number repair 1b2671f passed exact-head CI.
+- Known risks: direct manually constructed runtime configs and other numeric consumers remain separate audit scope. P2-B/release qualification incomplete; LIVE NOT READY. Last audit: 2026-09-24.
+
 # Invalid execution-number safety repair — 2026-09-24
 
 - Current phase: #421 audit / P2-B preparation; reproduced numeric fail-open repaired before mutation work.
