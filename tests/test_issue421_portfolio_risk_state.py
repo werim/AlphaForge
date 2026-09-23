@@ -30,8 +30,16 @@ class _AlwaysAcceptBrain:
 
 
 def _iso(minutes_ago: float = 0.0) -> str:
-    value = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
-    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    # Keep daily-risk fixtures inside the current UTC trading day even when
+    # CI runs immediately after midnight. The argument is an ordering weight:
+    # larger values are further in the past, but never before today's 00:00Z.
+    now = datetime.now(timezone.utc)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = max((now - day_start).total_seconds(), 0.001)
+    weight = max(float(minutes_ago), 0.0)
+    seconds_ago = elapsed * min(weight / 1000.0, 0.90)
+    value = now - timedelta(seconds=seconds_ago)
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def _create_campaign(db_path, release_id: str, *, symbols: list[str] | None = None):
