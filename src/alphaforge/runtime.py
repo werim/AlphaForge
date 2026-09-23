@@ -2457,15 +2457,43 @@ class RuntimeOrchestrator:
             "MARKET_CONTEXT" if inferred_equity is not None and candidate_notional is not None
             else "MISSING"
         )
+        portfolio_now = time.time()
+        historical_risk: dict[str, Any] = {
+            "daily_realized_pnl": None,
+            "rolling_drawdown_pct": None,
+            "consecutive_loss_count": None,
+            "symbol_consecutive_loss_count": None,
+            "trades_today_symbol": None,
+            "trades_today_global": None,
+            "persisted_cooldown_until": None,
+            "risk_state_complete": None,
+            "risk_state_source": None,
+            "risk_state_missing_fields": [],
+        }
+        cooldown_until = dict(self._symbol_cooldown_until)
         if self.config.execution_mode is ExecutionMode.PAPER:
-            if inferred_equity is None and self.config.paper_initial_equity is not None:
-                inferred_equity = self.config.paper_initial_equity
-                available_balance = self.config.paper_initial_equity
-                portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
+            historical_risk = self._paper_portfolio_risk_state(
+                selection.symbol,
+                now_ts=portfolio_now,
+            )
+            portfolio_evidence_source = str(
+                historical_risk.get("risk_state_source") or "PAPER_RISK_STATE_UNKNOWN"
+            )
+            if historical_risk.get("risk_state_source") == "BURNIN_CAMPAIGN_EVIDENCE":
+                inferred_equity = historical_risk.get("equity")
+                available_balance = historical_risk.get("available_balance")
+            elif inferred_equity is None:
+                inferred_equity = historical_risk.get("equity")
+                available_balance = historical_risk.get("available_balance")
             if candidate_notional is None and self.config.paper_candidate_notional is not None:
                 candidate_notional = self.config.paper_candidate_notional
-                portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
                 market_ctx["notional"] = candidate_notional
+            persisted_cooldown_until = historical_risk.get("persisted_cooldown_until")
+            if persisted_cooldown_until is not None:
+                cooldown_until[selection.symbol] = max(
+                    float(cooldown_until.get(selection.symbol, 0.0) or 0.0),
+                    float(persisted_cooldown_until),
+                )
         elif candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
         snapshot = snapshot_from_state(
@@ -2477,8 +2505,19 @@ class RuntimeOrchestrator:
             available_balance=available_balance,
             open_positions={k: {"notional": v, "side": self._active_position_sides.get(k, "UNKNOWN")} for k, v in self._active_positions.items()},
             config=self.config,
-            now=time.time(),
-            cooldown_until=self._symbol_cooldown_until,
+            now=portfolio_now,
+            cooldown_until=cooldown_until,
+            daily_realized_pnl=historical_risk.get("daily_realized_pnl"),
+            trades_today_symbol=historical_risk.get("trades_today_symbol"),
+            trades_today_global=historical_risk.get("trades_today_global"),
+            consecutive_loss_count=historical_risk.get("consecutive_loss_count"),
+            symbol_consecutive_loss_count=historical_risk.get("symbol_consecutive_loss_count"),
+            rolling_drawdown_pct=historical_risk.get("rolling_drawdown_pct"),
+            risk_state_complete=historical_risk.get("risk_state_complete"),
+            risk_state_source=historical_risk.get("risk_state_source"),
+            risk_state_missing_fields=list(
+                historical_risk.get("risk_state_missing_fields") or []
+            ),
         )
         portfolio_decision = evaluate_portfolio_risk({"symbol": selection.symbol, "side": market_ctx.get("side"), "entry": market_ctx.get("entry"), "quantity": market_ctx.get("quantity", market_ctx.get("qty")), "notional": candidate_notional}, snapshot, self.config, mode=self.config.execution_mode.value)
         portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
@@ -2872,6 +2911,238 @@ class RuntimeOrchestrator:
                 source_provenance=provenance,
             )
         return notional
+
+    @staticmethod
+    def _portfolio_risk_dt(value: Any) -> datetime | None:
+        if value in (None, ""):
+            return None
+        try:
+            if isinstance(value, (int, float)):
+                raw = float(value)
+                seconds = raw / 1000.0 if raw > 10_000_000_000 else raw
+                return datetime.fromtimestamp(seconds, tz=timezone.utc)
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
+
+    def _paper_portfolio_risk_state(
+        self,
+        symbol: str,
+        *,
+        now_ts: float,
+    ) -> dict[str, Any]:
+        """Reconstruct PAPER risk history from canonical campaign evidence.
+
+        Accepted trade counts come from burnin_pending_position_outcomes so an
+        open position counts immediately. Realized PnL, equity, drawdown and
+        loss streaks come only from evidence-complete burnin_trade_outcomes.
+        Continuation runs in the same campaign are intentionally included;
+        unrelated campaigns/runs are excluded.
+        """
+        initial_equity = self.config.paper_initial_equity
+        missing: list[str] = []
+        try:
+            initial = float(initial_equity) if initial_equity is not None else None
+        except (TypeError, ValueError):
+            initial = None
+        if initial is None or not math.isfinite(initial) or initial <= 0:
+            missing.append("paper_initial_equity")
+
+        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        if not campaign_id:
+            return {
+                "equity": initial,
+                "available_balance": initial,
+                "daily_realized_pnl": 0.0 if not missing else None,
+                "rolling_drawdown_pct": 0.0 if not missing else None,
+                "consecutive_loss_count": 0 if not missing else None,
+                "symbol_consecutive_loss_count": 0 if not missing else None,
+                "trades_today_symbol": 0 if not missing else None,
+                "trades_today_global": 0 if not missing else None,
+                "persisted_cooldown_until": None,
+                "risk_state_complete": not missing,
+                "risk_state_source": "RUNTIME_SESSION_UNSCOPED",
+                "risk_state_missing_fields": missing,
+            }
+
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            missing.append("persistence_engine")
+            return {
+                "equity": None,
+                "available_balance": None,
+                "daily_realized_pnl": None,
+                "rolling_drawdown_pct": None,
+                "consecutive_loss_count": None,
+                "symbol_consecutive_loss_count": None,
+                "trades_today_symbol": None,
+                "trades_today_global": None,
+                "persisted_cooldown_until": None,
+                "risk_state_complete": False,
+                "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+                "risk_state_missing_fields": missing,
+            }
+
+        try:
+            with engine.connect() as conn:
+                accepted_rows = conn.execute(text("""
+                    SELECT trade_id,symbol,entry_time,status
+                    FROM burnin_pending_position_outcomes
+                    WHERE campaign_id=:campaign_id
+                    ORDER BY entry_time,id
+                """), {"campaign_id": campaign_id}).mappings().all()
+                outcome_rows = conn.execute(text("""
+                    SELECT t.trade_id,t.symbol,t.closed_at,t.net_pnl,
+                           t.exit_reason,t.evidence_complete
+                    FROM burnin_trade_outcomes t
+                    JOIN burnin_campaign_runs cr
+                      ON cr.burnin_run_id=t.burnin_run_id
+                    WHERE cr.campaign_id=:campaign_id
+                    ORDER BY t.closed_at,t.id
+                """), {"campaign_id": campaign_id}).mappings().all()
+        except Exception as exc:
+            logger.error(
+                "paper_portfolio_risk_state_load_failed campaign_id=%s error=%s",
+                campaign_id,
+                exc,
+            )
+            return {
+                "equity": None,
+                "available_balance": None,
+                "daily_realized_pnl": None,
+                "rolling_drawdown_pct": None,
+                "consecutive_loss_count": None,
+                "symbol_consecutive_loss_count": None,
+                "trades_today_symbol": None,
+                "trades_today_global": None,
+                "persisted_cooldown_until": None,
+                "risk_state_complete": False,
+                "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+                "risk_state_missing_fields": ["portfolio_risk_state_query_failed"],
+            }
+
+        now_dt = datetime.fromtimestamp(float(now_ts), tz=timezone.utc)
+        today = now_dt.date()
+        symbol_u = str(symbol or "").upper()
+        accepted_ids: set[str] = set()
+        closed_pending_ids: set[str] = set()
+        trades_today_global = 0
+        trades_today_symbol = 0
+        latest_symbol_entry: datetime | None = None
+
+        for row in accepted_rows:
+            trade_id = str(row.get("trade_id") or "")
+            row_symbol = str(row.get("symbol") or "").upper()
+            entry_dt = self._portfolio_risk_dt(row.get("entry_time"))
+            status = str(row.get("status") or "").upper()
+            if not trade_id:
+                missing.append("accepted_trade_id")
+                continue
+            if trade_id in accepted_ids:
+                missing.append(f"duplicate_accepted_trade:{trade_id}")
+                continue
+            accepted_ids.add(trade_id)
+            if not row_symbol:
+                missing.append(f"accepted_trade_symbol:{trade_id}")
+            if entry_dt is None:
+                missing.append(f"accepted_trade_entry_time:{trade_id}")
+            else:
+                if entry_dt.date() == today:
+                    trades_today_global += 1
+                    if row_symbol == symbol_u:
+                        trades_today_symbol += 1
+                if row_symbol == symbol_u and (
+                    latest_symbol_entry is None or entry_dt > latest_symbol_entry
+                ):
+                    latest_symbol_entry = entry_dt
+            if status == "CLOSED":
+                closed_pending_ids.add(trade_id)
+            elif status != "OPEN":
+                missing.append(f"accepted_trade_status:{trade_id}:{status or 'UNKNOWN'}")
+
+        if initial is None:
+            current_equity = None
+            peak_equity = None
+        else:
+            current_equity = initial
+            peak_equity = initial
+
+        daily_realized_pnl = 0.0
+        consecutive_losses = 0
+        symbol_consecutive_losses = 0
+        outcome_ids: set[str] = set()
+
+        for row in outcome_rows:
+            trade_id = str(row.get("trade_id") or "")
+            row_symbol = str(row.get("symbol") or "").upper()
+            closed_dt = self._portfolio_risk_dt(row.get("closed_at"))
+            evidence_complete = int(row.get("evidence_complete") or 0) == 1
+            try:
+                net_pnl = float(row.get("net_pnl"))
+            except (TypeError, ValueError):
+                net_pnl = None
+            if (
+                not trade_id
+                or trade_id not in accepted_ids
+                or trade_id in outcome_ids
+                or not evidence_complete
+                or closed_dt is None
+                or net_pnl is None
+                or not math.isfinite(net_pnl)
+            ):
+                missing.append(f"realized_trade_outcome:{trade_id or 'UNKNOWN'}")
+                continue
+            outcome_ids.add(trade_id)
+            if current_equity is not None and peak_equity is not None:
+                current_equity += net_pnl
+                peak_equity = max(peak_equity, current_equity)
+            if closed_dt.date() == today:
+                daily_realized_pnl += net_pnl
+
+            exit_reason = str(row.get("exit_reason") or "").upper()
+            is_loss = net_pnl < 0 or exit_reason == "SL_HIT"
+            is_win = net_pnl > 0 or exit_reason == "TP_HIT"
+            if is_loss:
+                consecutive_losses += 1
+            elif is_win:
+                consecutive_losses = 0
+            if row_symbol == symbol_u:
+                if is_loss:
+                    symbol_consecutive_losses += 1
+                elif is_win:
+                    symbol_consecutive_losses = 0
+
+        for trade_id in sorted(closed_pending_ids - outcome_ids):
+            missing.append(f"closed_trade_outcome_missing:{trade_id}")
+
+        rolling_drawdown_pct = None
+        if current_equity is not None and peak_equity is not None and peak_equity > 0:
+            rolling_drawdown_pct = max(0.0, (peak_equity - current_equity) / peak_equity)
+
+        cooldown_until = None
+        if latest_symbol_entry is not None:
+            cooldown_until = latest_symbol_entry.timestamp() + float(self.config.symbol_cooldown_sec)
+
+        complete = not missing
+        return {
+            "equity": current_equity if complete else None,
+            "available_balance": current_equity if complete else None,
+            "daily_realized_pnl": daily_realized_pnl if complete else None,
+            "rolling_drawdown_pct": rolling_drawdown_pct if complete else None,
+            "consecutive_loss_count": consecutive_losses if complete else None,
+            "symbol_consecutive_loss_count": (
+                symbol_consecutive_losses if complete else None
+            ),
+            "trades_today_symbol": trades_today_symbol if complete else None,
+            "trades_today_global": trades_today_global if complete else None,
+            "persisted_cooldown_until": cooldown_until,
+            "risk_state_complete": complete,
+            "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+            "risk_state_missing_fields": sorted(set(missing)),
+        }
 
     def _sync_resolved_paper_positions(self) -> None:
         if self.config.execution_mode != ExecutionMode.PAPER or not self._campaign_id:
