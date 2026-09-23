@@ -250,12 +250,14 @@ def test_paper_risk_state_reconstructs_restart_and_continuation_history(tmp_path
     assert state1["trades_today_symbol"] == 2
     assert state1["daily_realized_pnl"] == pytest.approx(5.0)
     assert state1["equity"] == pytest.approx(1005.0)
+    assert state1["rolling_peak_equity"] == pytest.approx(1010.0)
     assert state1["rolling_drawdown_pct"] == pytest.approx(5.0 / 1010.0)
     assert state1["consecutive_loss_count"] == 1
     assert state1["symbol_consecutive_loss_count"] == 2
     for key in (
         "equity",
         "daily_realized_pnl",
+        "rolling_peak_equity",
         "rolling_drawdown_pct",
         "consecutive_loss_count",
         "symbol_consecutive_loss_count",
@@ -358,6 +360,7 @@ def test_runtime_rejects_rolling_drawdown_when_daily_pnl_is_positive(tmp_path) -
     assert rejects[-1]["reason"] == "MAX_ROLLING_DRAWDOWN"
     snapshot = rejects[-1]["portfolio_diagnostics"]["snapshot"]
     assert snapshot["daily_realized_pnl"] == pytest.approx(10.0)
+    assert snapshot["rolling_peak_equity"] == pytest.approx(1100.0)
     assert snapshot["rolling_drawdown_pct"] == pytest.approx(90.0 / 1100.0)
     engine.dispose()
 
