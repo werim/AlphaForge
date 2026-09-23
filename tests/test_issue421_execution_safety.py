@@ -11,7 +11,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain, OrderPlan, ScoreContext
-from alphaforge.execution import build_execution_context, evaluate_execution_safety
+from alphaforge.execution import (
+    build_execution_context,
+    evaluate_execution_safety,
+    execution_context_is_unavailable,
+)
 from alphaforge.persistence import (
     init_db,
     save_order_decision,
@@ -219,6 +223,28 @@ def test_disabled_orderbook_filter_does_not_poison_active_execution_evidence_sta
     assert required["accepted"] is False
     assert required["primary_reject_reason"] == "EXECUTION_CONTEXT_UNAVAILABLE"
     assert "orderbook_imbalance" in required["missing_fields"]
+
+
+def test_invalid_fake_zero_is_blocking_for_persistence_and_parity() -> None:
+    result = evaluate_execution_safety(
+        _execution_ctx(
+            spread_pct=0.0,
+            spread_status="MEASURED",
+            spread_source="BOOK_TICKER",
+        ),
+        effective_rr=9.0,
+        min_effective_rr=1.10,
+        thresholds=_thresholds(),
+        require_measured=True,
+    )
+    assert result["execution_evidence_status"] == "INVALID_FAKE_ZERO"
+    assert result["accepted"] is False
+
+    ctx = {
+        "evidence_status": "COMPLETE_MEASURED",
+        "safety_evidence_status": result["execution_evidence_status"],
+    }
+    assert execution_context_is_unavailable(ctx) is True
 
 
 def test_live_precheck_requires_measured_execution_evidence() -> None:
