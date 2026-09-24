@@ -169,6 +169,14 @@ def _scan_exchange_markets_sync(config: Any) -> MarketScanRows:
     provider_diagnostics = [binance_rows.diagnostics, hyperliquid_rows.diagnostics]
     if rows:
         status = "AVAILABLE"
+        active_providers = {
+            str(row.get("source_exchange") or "unknown") for row in rows
+        }
+        provider = (
+            next(iter(active_providers))
+            if len(active_providers) == 1
+            else "multi"
+        )
         cause = endpoint = error_class = http_status = None
     else:
         unavailable = next(
@@ -177,16 +185,19 @@ def _scan_exchange_markets_sync(config: Any) -> MarketScanRows:
         )
         if unavailable is not None:
             status = "UNAVAILABLE"
+            provider = unavailable.get("provider")
             cause = unavailable.get("cause")
             endpoint = unavailable.get("endpoint")
             error_class = unavailable.get("error_class")
             http_status = unavailable.get("http_status")
         else:
             status = "VALID_EMPTY"
+            provider = None
             cause = "NO_CANDIDATES"
             endpoint = error_class = http_status = None
     diagnostics = {
         "status": status,
+        "provider": provider,
         "cause": cause,
         "endpoint": endpoint,
         "error_class": error_class,
