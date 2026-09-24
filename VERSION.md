@@ -1,3 +1,14 @@
+# AlphaForge 0.1.0 — #421 P2-F current-state documentation — 2026-09-24
+
+- Current phase: implementation and regression work is complete through P2-E. All 23 P2-A golden scenarios replay deterministically through PAPER decision, scoped SQLite evidence, lifecycle, resolver, readiness and isolated audit surfaces. P2-E adds bounded decision persistence, resolver backlog, reconciliation volume, audit ingestion, repeated-outcome and concurrent read-only qualification.
+- Runtime maturity/alignment: the protected BACKTEST/PAPER/LIVE_PRECHECK invariant, execution and portfolio fail-closed gates, complete-window resolvers, future-time rejection, SQLite contention recovery, real SIGKILL restart recovery and macOS detached PAPER worker attachment fix are present in this lineage. Thresholds, cost policy and LIVE authorization are unchanged; LIVE stays disabled.
+- Lifecycle/persistence: restart replay consults durable accepted finality and resolver outcomes remain immutable/idempotent. Bounded load preserves exact row counts, unique reconciliation cycles, resolved queues and append-only audit identities while readiness/audit readers run against active PAPER writes. No schema/export migration, historical evidence rewrite or active campaign database change.
+- Validation: P2-D focused replay/crash tests passed 31 tests and exact-head CI run 35984711551 passed on `91b1f1b`; P2-E focused and adjacent load/contention/resolver/audit tests passed 50 tests and exact-head CI run 35986274853 passed on `21f0054`. P2-F marks obsolete point-in-time documents and synchronizes current guidance. Fresh FAST and public six-hour SOAK on the exact final `dev` SHA remain the #421 release gate. Last audit: 2026-09-24. LIVE NOT READY.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
 # AlphaForge 0.1.0 — #421 P2-D full-chain replay in progress — 2026-09-24
 
 - Current phase: seventeen P2-A golden cases replay through real PAPER scoring/decision, lifecycle and SQLite persistence, resolver, readiness and isolated audit ingestion. The first fifteen passed exact-head CI on `b871305`.

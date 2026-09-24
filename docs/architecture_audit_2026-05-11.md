@@ -1,5 +1,10 @@
 # AlphaForge architecture audit (2026-05-11)
 
+> **Historical point-in-time audit.** Findings and proposed patches below describe
+> the 2026-05-11 repository state. They are preserved for traceability and are not
+> current operating instructions. Use `README.md`, `docs/execution_cost_semantics.md`,
+> `docs/decision_lifecycle_contract.md`, and production code/tests for current behavior.
+
 ## Root-cause snapshot
 
 1. BACKTEST signal processing uses `run_order_cycle` (shared with PAPER/LIVE) for signal-quality rejection, but then applies an extra, backtest-local execution rejection step (`_execution_reject_flags`) that is **not** the same as PAPER/LIVE `before_real_order` execution gate.

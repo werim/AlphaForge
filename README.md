@@ -45,7 +45,7 @@ market data
   -> qualification / readiness / audit
 ```
 
-BACKTEST, PAPER and LIVE_PRECHECK still have separate orchestration/side-effect paths, but current `dev` includes a fail-closed `PreSubmitInvariant` contract that compares the protected decision semantics for the same frozen event: decision, primary reject reason, all failed gates, score, candidate RR, executable raw RR, effective RR, threshold provenance, execution-evidence status, portfolio decision and pre-submit terminal lifecycle state. P0-A/P0-B/P0-C/P1-A/P1-B from [#421](https://github.com/werim/AlphaForge/issues/421) are merged; remaining full-system verification work starts at P1-C.
+BACKTEST, PAPER and LIVE_PRECHECK still have separate orchestration/side-effect paths, but the current code includes a fail-closed `PreSubmitInvariant` contract that compares the protected decision semantics for the same frozen event: decision, primary reject reason, all failed gates, score, candidate RR, executable raw RR, effective RR, threshold provenance, execution-evidence status, portfolio decision and pre-submit terminal lifecycle state. P0-A/P0-B/P0-C and P1-A/P1-B from [#421](https://github.com/werim/AlphaForge/issues/421) are implemented and regression-protected.
 
 ## Execution-Aware Risk/Reward
 
@@ -162,11 +162,12 @@ The isolated [autonomous qualification harness](docs/AUTONOMOUS_QUALIFICATION_HA
 
 A historical FAST/SOAK result is not proof for a newer commit. Fresh qualification
 must be bound to the code/config under evaluation. [#421](https://github.com/werim/AlphaForge/issues/421)
-remains the full-system verification tracker. Current `CHATGPT` includes the
-P0-A/B/C, P1-A/B/C/D and P2-A regression families. P2-B has a focused mutation
-gate, P2-C has seeded safety properties, and P2-D now replays seventeen golden cases
-through the production PAPER evidence chain. Remaining coverage and final release
-qualification are tracked separately.
+remains the full-system verification tracker. The current development lineage includes
+P0-A/B/C, P1-A/B/C/D and P2-A through P2-E. P2-B has a focused mutation gate,
+P2-C has seeded safety properties, all 23 P2-A golden scenarios have deterministic
+production-chain replay, and P2-E covers bounded decision, resolver,
+reconciliation, audit and concurrent read-only load. Fresh exact-final-SHA FAST
+and public six-hour SOAK qualification remain required.
 
 ## Testing
 
@@ -184,20 +185,14 @@ source mutations and reports assertion-backed results for the current commit.
 Seeded property tests cover geometry, partial fills, adverse costs, time bounds
 and campaign/run/release identity with reproducible case sequences.
 
-Not all desired full-system verification families are complete. [#421](https://github.com/werim/AlphaForge/issues/421) currently tracks:
-
-- full-chain replay for the other golden scenarios;
-- bounded load/performance qualification;
-- fresh exact-head FAST plus public 6h SOAK release evidence.
-
-The SQLite contention, real crash/restart, golden-scenario-pack, targeted
-mutation and seeded property families have dedicated tests. The golden pack
-freezes scenario expectations; profitable LONG/SHORT, losing LONG, ambiguous
-TP+SL, high-spread, high-slippage, thin-liquidity, low-effective-RR,
-unavailable-execution-context, combined spread/effective-RR, correlated-portfolio,
-incomplete-geometry, resolved correct/false-reject, delayed-open-position and MTF
-mismatch cases have deterministic production-chain replay, while the other scenarios
-remain P2-D work.
+The implementation and regression stages tracked by [#421](https://github.com/werim/AlphaForge/issues/421)
+are complete through P2-E. SQLite contention, real crash/restart, the 23-case
+golden pack, targeted mutation, seeded properties, deterministic replay and bounded
+load each have dedicated tests. The bounded-load qualification covers rapid decision
+persistence, resolver backlog, reconciliation volume, audit ingestion, repeated
+reject outcomes, and concurrent readiness/audit reads against an active PAPER
+database. The remaining #421 release gate is fresh FAST plus public six-hour SOAK
+evidence bound to the exact final `dev` SHA.
 
 ## Repository Navigation
 
