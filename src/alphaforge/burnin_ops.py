@@ -31,7 +31,7 @@ from alphaforge.database_defaults import resolve_runtime_database_url, sqlite_pa
 from alphaforge.schema_doctor import ensure_database_schema, validate_required_schema
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reject_label_status import reject_label_status
-from alphaforge.process_liveness import process_is_alive
+from alphaforge.process_liveness import process_is_alive, process_liveness_diagnostics
 
 PHASE9_SCHEMA_VERSION = "phase9_ops_v2"
 ALLOWED_FINAL_DECISIONS = {"PAPER_BURNIN_INCOMPLETE", "PAPER_BURNIN_FAILED", "PAPER_BURNIN_QUALIFIED_FOR_CANARY_REVIEW", "PAPER_BURNIN_SUSPENDED"}
@@ -285,17 +285,36 @@ def _pid_alive(pid: Any) -> bool:
 _PID_ALIVE_IMPL = _pid_alive
 
 
-def _campaign_worker_alive(campaign: Mapping[str, Any]) -> bool:
+def _campaign_worker_liveness(campaign: Mapping[str, Any]) -> dict[str, Any]:
     # Preserve the established test/integration seam while production probes
-    # always continue through the stronger identity check below.
+    # continue through structured ownership diagnostics.
     if _pid_alive is not _PID_ALIVE_IMPL:
-        return _pid_alive(campaign.get("worker_pid"))
+        alive = bool(_pid_alive(campaign.get("worker_pid")))
+        return {
+            "pid": campaign.get("worker_pid"),
+            "alive": alive,
+            "identity_verified": alive,
+            "reason": "TEST_LIVENESS_OVERRIDE",
+            "expected_command_parts": [],
+            "observed_command": None,
+            "expected_started_at": campaign.get("worker_started_at"),
+            "observed_creation_time": None,
+            "native_error": None,
+            "identity_detail": None,
+        }
     campaign_id = str(campaign.get("campaign_id") or "")
-    return process_is_alive(
+    return process_liveness_diagnostics(
         campaign.get("worker_pid"),
         expected_command_parts=("alphaforge.burnin", campaign_id),
         expected_started_at=campaign.get("worker_started_at"),
-    )
+    ).as_dict()
+
+
+def _campaign_worker_alive(campaign: Mapping[str, Any]) -> bool:
+    return bool(_campaign_worker_liveness(campaign).get("alive"))
+
+
+_CAMPAIGN_WORKER_ALIVE_IMPL = _campaign_worker_alive
 
 
 def _git_clean() -> bool:
@@ -664,17 +683,75 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
         attach = _latest_attach(conn, campaign_id, since=launch_started_at, run_id=active_run_id)
         details = _event_details(attach)
         heartbeat = campaign.get("last_heartbeat_at")
-        worker_alive = _campaign_worker_alive(campaign)
+
+        if _campaign_worker_alive is not _CAMPAIGN_WORKER_ALIVE_IMPL:
+            worker_alive = bool(_campaign_worker_alive(campaign))
+            worker_liveness = {
+                "pid": pid,
+                "alive": worker_alive,
+                "identity_verified": worker_alive,
+                "reason": "TEST_CAMPAIGN_LIVENESS_OVERRIDE",
+                "expected_command_parts": [],
+                "observed_command": None,
+                "expected_started_at": campaign.get("worker_started_at"),
+                "observed_creation_time": None,
+                "native_error": None,
+                "identity_detail": None,
+            }
+        else:
+            worker_liveness = _campaign_worker_liveness(campaign)
+            worker_alive = bool(worker_liveness.get("alive"))
+
         worker_exit_code = process.poll() if process is not None else None
-        checks = {
-            "worker_alive": worker_alive,
-            "worker_not_exited": worker_exit_code is None,
+        process_pid = getattr(process, "pid", None) if process is not None else None
+        try:
+            exact_launch_child = process is not None and process_pid is not None and pid is not None and int(process_pid) == int(pid)
+        except (TypeError, ValueError):
+            exact_launch_child = False
+
+        evidence_checks = {
             "attach_event_after_launch": attach is not None,
             "runtime_instance_evidence": bool(details.get("runtime_instance_id")),
             "heartbeat_newer_than_worker_started": bool(heartbeat and heartbeat >= worker_started_at),
             "active_run_id_matches_attach": bool(active_run_id and details.get("active_run_id") == active_run_id),
         }
-        last = {"status": "ATTACHED" if all(checks.values()) else "WAITING", "checks": checks, "worker_pid": pid, "worker_exit_code": worker_exit_code, "runtime_instance_id": details.get("runtime_instance_id"), "active_run_id": active_run_id, "heartbeat": heartbeat}
+        fallback_reason = worker_liveness.get("reason")
+        exact_child_identity_fallback = bool(
+            not worker_alive
+            and exact_launch_child
+            and worker_exit_code is None
+            and fallback_reason in {
+                "COMMAND_IDENTITY_UNAVAILABLE",
+                "PROCESS_CREATION_TIME_UNAVAILABLE",
+                "DARWIN_NATIVE_PROBE_ERROR",
+            }
+            and all(evidence_checks.values())
+        )
+        effective_worker_alive = worker_alive or exact_child_identity_fallback
+
+        checks = {
+            "worker_alive": effective_worker_alive,
+            "worker_not_exited": worker_exit_code is None,
+            **evidence_checks,
+        }
+        ownership_source = None
+        if worker_alive:
+            ownership_source = "PROCESS_IDENTITY"
+        elif exact_child_identity_fallback:
+            ownership_source = "EXACT_POPEN_CHILD_PLUS_RUNTIME_EVIDENCE"
+
+        last = {
+            "status": "ATTACHED" if all(checks.values()) else "WAITING",
+            "checks": checks,
+            "worker_pid": pid,
+            "worker_exit_code": worker_exit_code,
+            "runtime_instance_id": details.get("runtime_instance_id"),
+            "active_run_id": active_run_id,
+            "heartbeat": heartbeat,
+            "worker_liveness": worker_liveness,
+            "worker_ownership_source": ownership_source,
+            "exact_launch_child": exact_launch_child,
+        }
         if all(checks.values()):
             return last
         if worker_exit_code is not None:
@@ -685,6 +762,7 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
     reason = last.get("reason") or "WORKER_ATTACHMENT_TIMEOUT"
     _mark_campaign_failed(conn, campaign_id, reason, last)
     return {**last, "status": "FAILED", "reason": reason}
+
 
 def _mark_campaign_failed(conn: sqlite3.Connection, campaign_id: str, reason: str, details: Mapping[str, Any] | None = None) -> None:
     campaign = get_campaign(conn, campaign_id)
