@@ -1,17 +1,17 @@
 # #421 P2-D full-chain replay expansion — 2026-09-24
 
 ### Added
-- Frozen profitable LONG/SHORT, losing LONG, ambiguous TP+SL, execution-gate, correlated-portfolio, incomplete-geometry, resolved correct/false-reject and delayed-open-position PAPER replays across decision, persistence, resolver, readiness and isolated audit, each repeated for deterministic semantics; real SIGKILL cold-start replay protection.
+- Frozen profitable LONG/SHORT, losing LONG, ambiguous TP+SL, execution-gate, correlated-portfolio, incomplete-geometry, resolved correct/false-reject, delayed-open-position and MTF mismatch PAPER replays across decision, persistence, resolver, readiness and isolated audit, each repeated for deterministic semantics; real SIGKILL cold-start replay protection.
 ### Changed
 - Attached campaign identity takes precedence over environment and caller-supplied reject metadata; accepted decision JSON retains geometry status/reason; finalized PAPER lookup recognizes durable accepted evidence and scopes rejects to the current campaign/run.
 ### Fixed
-- Reject forward labels escaping an attached campaign without an environment campaign ID; forged reject payload scope; repeated processing of a durable accepted PAPER signal; a final reject from another campaign falsely suppressing a reused signal; stale `decision_evidence` writer guidance; golden expectations that conflated missing execution evidence with missing geometry, used generic portfolio/geometry diagnostic labels instead of canonical decision reasons, mislabeled execution rejects as portfolio blocks, and reversed correct versus false reject outcomes.
+- Reject forward labels escaping an attached campaign without an environment campaign ID; forged reject payload scope; repeated processing of a durable accepted PAPER signal; a final reject from another campaign falsely suppressing a reused signal; stale `decision_evidence` writer guidance; golden expectations that used generic portfolio, geometry and MTF labels instead of canonical production reasons, conflated missing execution evidence with missing geometry, mislabeled execution rejects as portfolio blocks, and reversed correct versus false reject outcomes.
 ### Removed
 - None.
 ### Breaking Changes
 - No schema or API break. Prospective attached-campaign reject identities may differ from previously incorrect standalone IDs; historical rows are untouched.
 ### Known Issues
-- Fifteen of 23 golden cases run the production full chain. Partial-fill runtime semantics and seven other P2-D cases remain; P2-E load and P1-E release qualification remain; LIVE NOT READY.
+- Seventeen of 23 golden cases run the production full chain. Partial-fill runtime semantics and five other P2-D cases remain; P2-E load and P1-E release qualification remain; LIVE NOT READY.
 
 # #421 P2-C seeded safety properties — 2026-09-24
 

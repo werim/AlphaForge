@@ -404,6 +404,18 @@ def test_delayed_resolver_replays_open_position_without_outcome_twice(tmp_path, 
     assert first == second
 
 
+def test_regime_setup_mismatch_replays_same_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "regime_mismatch")
+    second = _replay(tmp_path / "second", monkeypatch, "regime_mismatch")
+    assert first == second
+
+
+def test_setup_execution_mismatch_replays_same_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "mtf_conflict")
+    second = _replay(tmp_path / "second", monkeypatch, "mtf_conflict")
+    assert first == second
+
+
 def test_final_reject_from_another_campaign_cannot_skip_same_signal(tmp_path, monkeypatch):
     monkeypatch.delenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID", raising=False)
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'scope.sqlite3'}")
