@@ -59,6 +59,9 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     monkeypatch.setattr("alphaforge.runtime.canonical_utc_timestamp", lambda: event_time)
     factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
+    async def preserve_candidates(candidates):
+        return candidates
+
     def persist_event(event):
         with factory.begin() as session:
             assert save_trade_lifecycle_event(
@@ -83,14 +86,25 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             session.commit()
 
     runtime = RuntimeOrchestrator(
-        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            **fixture["frozen_market_event"].get("runtime_config", {}),
+        ),
         ai_brain=AIBrain(session_factory=factory),
         market_scanner=lambda: asyncio.sleep(0, result=[]),
         persistence_engine=engine, scanner_source="FROZEN_REPLAY",
         on_lifecycle_event=persist_event, on_reject_persist=persist_reject,
+        selected_candidate_enricher=(
+            preserve_candidates
+            if fixture["frozen_market_event"].get("geometry_gate_required")
+            else None
+        ),
     )
     runtime._campaign_id = campaign.campaign_id
     runtime._burnin_run_id = run["burnin_run_id"]
+    for initial in fixture["frozen_market_event"].get("initial_positions", []):
+        runtime._active_positions[initial["symbol"]] = initial["notional"]
+        runtime._active_position_sides[initial["symbol"]] = initial["side"]
     market = {
         **fixture["frozen_market_event"]["market_context"],
         "signal_id": fixture["frozen_market_event"]["event_id"],
@@ -112,7 +126,9 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         ), {"campaign": campaign.campaign_id}).mappings().one_or_none()
         observation = conn.execute(text(
             "SELECT metrics_json FROM burnin_observations WHERE burnin_run_id=:run "
-            "AND decision IN ('ACCEPTED','REJECTED')"
+            "AND decision IN ('ACCEPTED','REJECTED') "
+            "AND COALESCE(json_extract(metrics_json,'$.observation_kind'),"
+            "'CANONICAL_DECISION')='CANONICAL_DECISION'"
         ), {"run": run["burnin_run_id"]}).mappings().one()
     assert decision["decision"] == fixture["expected"]["decision"]
     assert decision["sl"] == market["sl"] and decision["tp"] == market["tp"]
@@ -165,26 +181,37 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         assert set(fixture["expected"]["failed_gates"]) <= set(
             json.loads(decision["reject_flags"] or "[]")
         )
-        if fixture["expected"]["effective_rr_status"] == "BELOW_THRESHOLD":
+        if fixture["expected"]["effective_rr_status"] == "NOT_APPLICABLE":
+            assert decision["effective_rr"] is None
+        elif fixture["expected"]["effective_rr_status"] == "BELOW_THRESHOLD":
             assert decision["effective_rr"] < runtime.config.min_effective_rr
         else:
             assert decision["effective_rr"] >= runtime.config.min_effective_rr
-        assert fixture["expected"]["portfolio_state"] == "NOT_EVALUATED"
-        assert decision["portfolio_risk_state"] is None
-        assert diagnostics["expected_fill"] == decision["entry"]
+        if fixture["expected"]["portfolio_state"] == "NOT_EVALUATED":
+            assert decision["portfolio_risk_state"] is None
+        else:
+            assert decision["portfolio_risk_state"] == fixture["expected"]["portfolio_state"]
+        if fixture["expected"]["effective_rr_status"] == "NOT_APPLICABLE":
+            assert diagnostics.get("expected_fill") is None
+        else:
+            assert diagnostics["expected_fill"] == decision["entry"]
         with engine.connect() as conn:
             label = conn.execute(text(
                 "SELECT status,signal_id,reject_reason,reject_decision_id FROM burnin_pending_reject_labels "
                 "WHERE campaign_id=:campaign"
-            ), {"campaign": campaign.campaign_id}).mappings().one()
+            ), {"campaign": campaign.campaign_id}).mappings().one_or_none()
             final = conn.execute(text(
                 "SELECT decision_id FROM order_decisions WHERE signal_id=:signal "
                 "AND decision='REJECTED' AND phase='final'"
             ), {"signal": decision["signal_id"]}).mappings().one()
-        assert label["status"] == "PENDING"
-        assert label["signal_id"] == decision["signal_id"]
-        assert label["reject_reason"] == decision["reject_reason"]
-        assert label["reject_decision_id"] == final["decision_id"]
+        if fixture["expected"]["resolver"] == "REJECT_LABEL_PENDING":
+            assert label is not None and label["status"] == "PENDING"
+            assert label["signal_id"] == decision["signal_id"]
+            assert label["reject_reason"] == decision["reject_reason"]
+            assert label["reject_decision_id"] == final["decision_id"]
+        else:
+            assert fixture["expected"]["resolver"] == "INELIGIBLE"
+            assert label is None
         outcome = None
     readiness = LiveReadinessEvaluator(
         engine, campaign_id=campaign.campaign_id,
@@ -231,7 +258,11 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         audit.close()
         engine.dispose()
     return {
-        "decision": decision["decision"], "effective_rr": round(decision["effective_rr"], 8),
+        "decision": decision["decision"],
+        "effective_rr": (
+            round(decision["effective_rr"], 8)
+            if decision["effective_rr"] is not None else None
+        ),
         "exit_reason": outcome["exit_reason"] if outcome else None,
         "net_r": round(outcome["net_r"], 8) if outcome else None,
         "audit_decision": audit_row[0],
@@ -295,6 +326,18 @@ def test_thin_liquidity_replays_same_reject_chain_twice(tmp_path, monkeypatch):
 def test_multi_gate_reject_replays_complete_gate_set_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "multi_gate_reject")
     second = _replay(tmp_path / "second", monkeypatch, "multi_gate_reject")
+    assert first == second
+
+
+def test_portfolio_overexposure_replays_same_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "portfolio_overexposure")
+    second = _replay(tmp_path / "second", monkeypatch, "portfolio_overexposure")
+    assert first == second
+
+
+def test_incomplete_geometry_replays_ineligible_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "incomplete_geometry")
+    second = _replay(tmp_path / "second", monkeypatch, "incomplete_geometry")
     assert first == second
 
 
