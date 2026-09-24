@@ -1,9 +1,9 @@
 # AlphaForge 0.1.0 — #421 P2-D full-chain replay in progress — 2026-09-24
 
-- Current phase: five P2-A golden cases replay through real PAPER scoring/decision, lifecycle and SQLite persistence, resolver, readiness and isolated audit ingestion. The first two passed exact-head CI on `489f495`.
+- Current phase: seven P2-A golden cases replay through real PAPER scoring/decision, lifecycle and SQLite persistence, resolver, readiness and isolated audit ingestion. The first five passed exact-head CI on `0d13196`.
 - Runtime maturity/alignment: attached PAPER campaigns own reject labels, reject identities and decision observations without relying on an environment variable; caller-supplied reject metadata cannot override that attachment. Durable accepted evidence prevents repeated PAPER execution, and an unrelated campaign's reject cannot suppress the same signal. BACKTEST and LIVE behavior, thresholds and costs are unchanged; LIVE stays disabled.
-- Lifecycle/execution/persistence: profitable LONG/SHORT, losing LONG, ambiguous TP+SL and high-spread reject replay with stable semantics. Ambiguous intrabar closure remains evidence-incomplete and non-authoritative in audit. A real SIGKILL cold-start position blocks replay. PAPER fills remain modeled. No schema/export migration or historical evidence rewrite.
-- Validation: five focused replays and 147 adjacent tests passed; exact-head CI for this extension remains required. Known risks: 18 other golden cases still lack production full-chain replay; P2-E load, P2-F documentation sweep and P1-E release qualification remain. Last audit: 2026-09-24. LIVE NOT READY.
+- Lifecycle/execution/persistence: profitable LONG/SHORT, losing LONG, ambiguous TP+SL, high-spread, low-effective-RR and unavailable-execution-context paths replay with stable semantics. Execution rejects occur before portfolio evaluation while retaining complete price geometry and durable campaign-scoped forward labels. Ambiguous intrabar closure remains evidence-incomplete and non-authoritative in audit. A real SIGKILL cold-start position blocks replay. PAPER fills remain modeled. No schema/export migration or historical evidence rewrite.
+- Validation: seven replay tests and 139 focused/adjacent execution tests passed; exact-head CI for this extension remains required. Known risks: 16 other golden cases still lack production full-chain replay; P2-E load, P2-F documentation sweep and P1-E release qualification remain. Last audit: 2026-09-24. LIVE NOT READY.
 
 # #421 P2-C seeded safety properties — 2026-09-24
 

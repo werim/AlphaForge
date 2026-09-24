@@ -163,7 +163,11 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         assert position is None and runtime.metrics.executions == 0
         assert decision["reject_reason"] == fixture["expected"]["failed_gates"][0]
         assert fixture["expected"]["failed_gates"][0] in json.loads(decision["reject_flags"] or "[]")
-        assert decision["effective_rr"] >= runtime.config.min_effective_rr
+        if fixture["expected"]["effective_rr_status"] == "BELOW_THRESHOLD":
+            assert decision["effective_rr"] < runtime.config.min_effective_rr
+        else:
+            assert decision["effective_rr"] >= runtime.config.min_effective_rr
+        assert fixture["expected"]["portfolio_state"] == "NOT_EVALUATED"
         assert decision["portfolio_risk_state"] is None
         assert diagnostics["expected_fill"] == decision["entry"]
         with engine.connect() as conn:
@@ -259,6 +263,18 @@ def test_ambiguous_tp_sl_replays_non_authoritative_outcome_twice(tmp_path, monke
 def test_high_spread_replays_same_reject_chain_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "high_spread")
     second = _replay(tmp_path / "second", monkeypatch, "high_spread")
+    assert first == second
+
+
+def test_low_effective_rr_replays_same_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "low_effective_rr")
+    second = _replay(tmp_path / "second", monkeypatch, "low_effective_rr")
+    assert first == second
+
+
+def test_unavailable_execution_context_replays_same_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "execution_context_unavailable")
+    second = _replay(tmp_path / "second", monkeypatch, "execution_context_unavailable")
     assert first == second
 
 
