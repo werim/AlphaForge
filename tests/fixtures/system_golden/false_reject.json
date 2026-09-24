@@ -7,7 +7,48 @@
   "frozen_market_event": {
     "event_id": "golden:false_reject",
     "timestamp": "2026-01-01T00:00:00Z",
-    "closed_candle": true
+    "closed_candle": true,
+    "market_context": {
+      "source_exchange": "fixture",
+      "timeframe": "1m",
+      "entry": 100.0,
+      "sl": 99.9,
+      "tp": 100.12,
+      "rr": 1.2,
+      "side": "LONG",
+      "setup": "LONG_CONTINUATION",
+      "geometry_status": "COMPLETE",
+      "geometry_source": "FROZEN_REPLAY",
+      "volume_24h_usdt": 90000000.0,
+      "spread_pct": 0.0002,
+      "spread_status": "MEASURED",
+      "expected_slippage_pct": 0.0002,
+      "slippage_status": "MODEL_ESTIMATE",
+      "liquidity_score": 0.95,
+      "liquidity_status": "MEASURED",
+      "funding_rate_pct": 0.0,
+      "funding_status": "MEASURED",
+      "orderbook_imbalance": 0.1,
+      "orderbook_status": "MEASURED",
+      "volatility_regime": "normal",
+      "volatility_status": "MEASURED",
+      "trend_strength": 0.95,
+      "chop_score": 0.05,
+      "mtf": {
+        "setup": {"setup_quality": 1.0},
+        "execution": {
+          "momentum_confirmation": 1.0,
+          "liquidity_score": 1.0,
+          "volatility_fit": 1.0
+        },
+        "regime": {"regime": "TRENDING", "alignment": 1.0},
+        "alignment": {"aligned": true}
+      }
+    },
+    "resolver_candles": [
+      {"timestamp": "2026-01-01T00:01:00Z", "high": 100.2, "low": 100.0}
+    ],
+    "resolver_now": "2026-01-01T04:01:00Z"
   },
   "expected": {
     "decision": "REJECT",
@@ -30,9 +71,9 @@
     "geometry_status": "COMPLETE",
     "expected_fill_status": "NOT_SUBMITTED",
     "effective_rr_status": "BELOW_THRESHOLD",
-    "portfolio_state": "BLOCK",
+    "portfolio_state": "NOT_EVALUATED",
     "persistence": "REJECT_DECISION_DURABLE",
-    "resolver": "REJECT_LABEL_SL",
+    "resolver": "REJECT_LABEL_TP",
     "readiness": "BLOCKED_INSUFFICIENT_SAMPLE",
     "audit": "CANONICAL_REJECT"
   }

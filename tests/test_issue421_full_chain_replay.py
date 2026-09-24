@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
-from alphaforge.burnin_resolver import resolve_campaign_positions
+from alphaforge.burnin_resolver import resolve_campaign_batch, resolve_campaign_positions
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import (
     init_db, save_rejected_decision_artifact, save_trade_lifecycle_event,
@@ -136,6 +136,9 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     assert diagnostics["geometry_status"] == fixture["expected"]["geometry_status"]
     assert diagnostics["campaign_id"] == campaign.campaign_id
     assert json.loads(observation["metrics_json"])["campaign_id"] == campaign.campaign_id
+    outcome = None
+    resolved_status = None
+    resolved_net_r = None
     if fixture["expected"]["decision"] == "ACCEPT":
         assert json.loads(decision["reject_flags"] or "[]") == fixture["expected"]["failed_gates"]
         adverse_side = 1 if market["side"] == "LONG" else -1
@@ -172,6 +175,8 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
                 "SELECT exit_reason,evidence_complete,net_r FROM burnin_trade_outcomes WHERE trade_id=:trade"
             ), {"trade": position["trade_id"]}).mappings().one()
         assert outcome["exit_reason"] == fixture["expected"]["resolver"]
+        resolved_status = outcome["exit_reason"]
+        resolved_net_r = outcome["net_r"]
         ambiguous = terminal_key == "ambiguous"
         assert outcome["evidence_complete"] == (0 if ambiguous else 1)
         assert (outcome["net_r"] > 0) == (fixture["expected"]["resolver"] == "TP_HIT")
@@ -210,9 +215,33 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             assert label["reject_reason"] == decision["reject_reason"]
             assert label["reject_decision_id"] == final["decision_id"]
         else:
-            assert fixture["expected"]["resolver"] == "INELIGIBLE"
-            assert label is None
-        outcome = None
+            assert fixture["expected"]["resolver"] in {
+                "INELIGIBLE", "REJECT_LABEL_TP", "REJECT_LABEL_SL",
+            }
+            if fixture["expected"]["resolver"] == "INELIGIBLE":
+                assert label is None
+            else:
+                assert label is not None and label["status"] == "PENDING"
+                expected_label = {
+                    "REJECT_LABEL_TP": "TP_BEFORE_SL",
+                    "REJECT_LABEL_SL": "SL_BEFORE_TP",
+                }[fixture["expected"]["resolver"]]
+                with engine.begin() as conn:
+                    counts = resolve_campaign_batch(
+                        conn, campaign.campaign_id,
+                        {fixture["symbol"]: fixture["frozen_market_event"]["resolver_candles"]},
+                        now=fixture["frozen_market_event"]["resolver_now"],
+                    )
+                assert counts["resolved"] == 1
+                with engine.connect() as conn:
+                    outcome = conn.execute(text(
+                        "SELECT forward_label,evidence_complete,hypothetical_net_r_after_costs "
+                        "FROM burnin_reject_outcomes WHERE burnin_run_id=:run"
+                    ), {"run": run["burnin_run_id"]}).mappings().one()
+                assert outcome["forward_label"] == expected_label
+                assert outcome["evidence_complete"] == 1
+                resolved_status = outcome["forward_label"]
+                resolved_net_r = outcome["hypothetical_net_r_after_costs"]
     readiness = LiveReadinessEvaluator(
         engine, campaign_id=campaign.campaign_id,
         burnin_run_id=run["burnin_run_id"], evidence_mode="PAPER",
@@ -223,7 +252,9 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     by_name = {check.name: check for check in readiness.checks}
     assert by_name["phase2_decision_evidence_rows_present"].passed
     assert by_name[
-        "phase2_accept_evidence_present" if outcome else "phase2_reject_evidence_present"
+        "phase2_accept_evidence_present"
+        if fixture["expected"]["decision"] == "ACCEPT"
+        else "phase2_reject_evidence_present"
     ].passed
     assert readiness.qualified is False
     assert readiness.verdict != "READY_FOR_OPERATOR_REVIEW"
@@ -235,7 +266,9 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         second = ingest_audit_evidence(source, audit, burnin_run_id=run["burnin_run_id"])
         assert first["source_decisions"] == first["envelopes_added"] == 1
         assert first["outcomes_added"] == (1 if outcome else 0)
-        assert first["shadow_decisions_added"] == (0 if outcome else 1)
+        assert first["shadow_decisions_added"] == (
+            0 if fixture["expected"]["decision"] == "ACCEPT" else 1
+        )
         assert second["envelopes_added"] == second["outcomes_added"] == 0
         audit_row = audit.execute(
             "SELECT decision,campaign_id,burnin_run_id,reject_reason "
@@ -243,7 +276,7 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         ).fetchone()
         assert audit_row[0] == fixture["expected"]["decision"]
         assert audit_row[1:3] == (campaign.campaign_id, run["burnin_run_id"])
-        if outcome:
+        if fixture["expected"]["decision"] == "ACCEPT":
             audited_outcome = audit.execute(
                 "SELECT outcome_status,authoritative FROM audit_outcomes"
             ).fetchone()
@@ -253,6 +286,11 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             )
         else:
             assert audit_row[3] == fixture["expected"]["failed_gates"][0]
+            if outcome:
+                audited_outcome = audit.execute(
+                    "SELECT outcome_status,authoritative FROM audit_outcomes"
+                ).fetchone()
+                assert tuple(audited_outcome) == (resolved_status, 1)
     finally:
         source.close()
         audit.close()
@@ -263,8 +301,8 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             round(decision["effective_rr"], 8)
             if decision["effective_rr"] is not None else None
         ),
-        "exit_reason": outcome["exit_reason"] if outcome else None,
-        "net_r": round(outcome["net_r"], 8) if outcome else None,
+        "exit_reason": resolved_status,
+        "net_r": round(resolved_net_r, 8) if resolved_net_r is not None else None,
         "audit_decision": audit_row[0],
     }
 
@@ -338,6 +376,18 @@ def test_portfolio_overexposure_replays_same_reject_chain_twice(tmp_path, monkey
 def test_incomplete_geometry_replays_ineligible_reject_chain_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "incomplete_geometry")
     second = _replay(tmp_path / "second", monkeypatch, "incomplete_geometry")
+    assert first == second
+
+
+def test_correct_reject_replays_stop_first_outcome_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "correct_reject")
+    second = _replay(tmp_path / "second", monkeypatch, "correct_reject")
+    assert first == second
+
+
+def test_false_reject_replays_target_first_outcome_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "false_reject")
+    second = _replay(tmp_path / "second", monkeypatch, "false_reject")
     assert first == second
 
 
