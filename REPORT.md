@@ -1,3 +1,27 @@
+# #421 P2-D/P2-E completion and P2-F documentation consistency — 2026-09-24
+
+## Why / root cause
+
+P2-D had one unwired golden case: `restart_replay`. The current documentation also stopped at 17 production-chain replays, described P2-E as missing, and left point-in-time BACKTEST/JOB notes using present-tense language about fixed score/RR and completed lifecycle defects. P2-E still needed direct bounded evidence for the six load surfaces named by #421.
+
+## Change / behavior
+
+`tests/test_issue421_full_chain_replay.py` and `tests/fixtures/system_golden/restart_replay.json` now replay a finalized accepted signal through a fresh runtime on the same database, require zero duplicate execution/lifecycle rows, and prove repeated resolver closure is idempotent. The complete pack now exercises all 23 frozen scenarios through production decision, persistence, resolver, readiness and isolated audit behavior.
+
+`tests/test_issue421_bounded_load.py` adds bounded real-SQL qualification for 64 rapid decisions/reject labels, backlog resolution, audit ingestion/re-ingestion, unique reconciliation cycles and concurrent readiness/audit readers during active PAPER writes. Assertions require exact evidence counts, drained resolved queues, immutable finalization, no duplicate cycles, no lock starvation and completion inside a conservative bound. Existing persistent-lock tests retain the explicit safety timeout/fail-closed contract.
+
+README, VERSION, CHANGELOG, the mutation guide and qualification guide now state the current P2-D/P2-E status and remaining exact-final-SHA FAST/SOAK gate. `docs/backtest_lifecycle_review.md`, `docs/architecture_audit_2026-05-11.md` and `docs/JOB21_PAPER_AUDIT_INTEGRITY_HARDENING.md` remain intact as historical evidence but are explicitly labeled point-in-time records. No historical audit results were rewritten.
+
+## Validation / impact
+
+P2-D focused replay/crash validation passed 31 tests; exact-head CI run 35984711551 passed on `91b1f1b4db119a223939599ae342e04ecd58215f`. P2-E focused and adjacent load, contention, resolver and audit validation passed 50 tests; exact-head CI run 35986274853 passed on `21f0054be516512a4b4b211a5a7ff6473ed2f9d7`. No production code, threshold, cost formula, schema/CSV shape, migration, active PAPER database, historical evidence or LIVE authorization changed in P2-E/P2-F. The macOS detached PAPER worker attachment fix from `972307ab2f1a0ebd904fdec4a785b1c371300187` remains in the lineage.
+
+The remaining #421 work is P1-E: merge the complete lineage to `dev`, establish its exact final SHA, then run FAST and the public six-hour SOAK on that same SHA. Older qualification reports do not qualify it. LIVE remains NOT READY.
+
+## Historical surgery reports
+
+Reports below describe the repository state at their recorded commit and remain immutable historical context.
+
 # #421 P2-D deterministic full-chain replay expansion — 2026-09-24
 
 ## Why / root cause

@@ -15,7 +15,9 @@ from sqlalchemy.orm import sessionmaker
 
 from alphaforge.ai_brain import AIBrain
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
-from alphaforge.burnin_resolver import resolve_campaign_batch, resolve_campaign_positions
+from alphaforge.burnin_resolver import (
+    resolve_campaign_batch, resolve_campaign_positions, resolve_position_closure,
+)
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import (
     init_db, save_rejected_decision_artifact, save_trade_lifecycle_event,
@@ -208,11 +210,24 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             assert position["notional"] == pytest.approx(5.001)
             assert json.loads(position["source_provenance_json"])["fill_state"] == "PARTIAL"
         assert runtime._canonical_final_decision_recorded(decision["signal_id"]) is True
-        asyncio.run(runtime._process_symbol(SimpleNamespace(
+        replay_runtime = runtime
+        if fixture["frozen_market_event"].get("restart_replay"):
+            replay_runtime = RuntimeOrchestrator(
+                config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+                ai_brain=AIBrain(session_factory=factory),
+                market_scanner=lambda: asyncio.sleep(0, result=[]),
+                persistence_engine=engine, scanner_source="FROZEN_REPLAY",
+                on_lifecycle_event=persist_event, on_reject_persist=persist_reject,
+            )
+            replay_runtime._campaign_id = campaign.campaign_id
+            replay_runtime._burnin_run_id = run["burnin_run_id"]
+        event_count_before_replay = len(lifecycle_events)
+        asyncio.run(replay_runtime._process_symbol(SimpleNamespace(
             symbol=fixture["symbol"], regime_hint="TRENDING", diagnostics={"inputs": market},
         )))
-        assert runtime.metrics.executions == 1
-        assert runtime.metrics.finalized_signal_replays_skipped == 1
+        assert replay_runtime.metrics.executions == (1 if replay_runtime is runtime else 0)
+        assert replay_runtime.metrics.finalized_signal_replays_skipped == 1
+        assert len(lifecycle_events) == event_count_before_replay
         if fixture["expected"]["resolver"] == "PENDING":
             assert position["status"] == "OPEN"
         else:
@@ -222,20 +237,34 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
                     {position["trade_id"]: fixture["frozen_market_event"]["resolver_candles"]},
                     now=fixture["frozen_market_event"]["resolver_now"],
                 )
+            expected_resolver = (
+                fixture["expected"].get("terminal_outcome")
+                if fixture["expected"]["resolver"] == "IDEMPOTENT_REPLAY"
+                else fixture["expected"]["resolver"]
+            )
             terminal_key = {
                 "TP_HIT": "tp", "SL_HIT": "sl", "AMBIGUOUS_INTRABAR": "ambiguous",
-            }[fixture["expected"]["resolver"]]
+            }[expected_resolver]
             assert resolved[terminal_key] == resolved["closed"] == 1
+            if fixture["expected"]["resolver"] == "IDEMPOTENT_REPLAY":
+                with engine.begin() as conn:
+                    replayed_resolution = resolve_position_closure(
+                        conn, trade_id=position["trade_id"],
+                        exit_time=fixture["frozen_market_event"]["resolver_now"],
+                        exit_price=market["tp"], exit_reason=expected_resolver,
+                        exit_costs={},
+                    )
+                assert replayed_resolution["status"] == "IDEMPOTENT"
             with engine.connect() as conn:
                 outcome = conn.execute(text(
                     "SELECT exit_reason,evidence_complete,net_r FROM burnin_trade_outcomes WHERE trade_id=:trade"
                 ), {"trade": position["trade_id"]}).mappings().one()
-            assert outcome["exit_reason"] == fixture["expected"]["resolver"]
+            assert outcome["exit_reason"] == expected_resolver
             resolved_status = outcome["exit_reason"]
             resolved_net_r = outcome["net_r"]
             ambiguous = terminal_key == "ambiguous"
             assert outcome["evidence_complete"] == (0 if ambiguous else 1)
-            assert (outcome["net_r"] > 0) == (fixture["expected"]["resolver"] == "TP_HIT")
+            assert (outcome["net_r"] > 0) == (expected_resolver == "TP_HIT")
     else:
         assert position is None and runtime.metrics.executions == 0
         assert decision["reject_reason"] == fixture["expected"]["failed_gates"][0]
@@ -338,8 +367,8 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             ).fetchone()
             if outcome:
                 assert tuple(audited_outcome) == (
-                    fixture["expected"]["resolver"],
-                    0 if fixture["expected"]["resolver"] == "AMBIGUOUS_INTRABAR" else 1,
+                    resolved_status,
+                    0 if resolved_status == "AMBIGUOUS_INTRABAR" else 1,
                 )
             else:
                 assert fixture["expected"]["resolver"] == "PENDING"
@@ -484,6 +513,12 @@ def test_provider_outage_replays_fail_closed_reject_chain_twice(tmp_path, monkey
 def test_orphan_position_replays_fail_closed_reject_chain_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "orphan_position")
     second = _replay(tmp_path / "second", monkeypatch, "orphan_position")
+    assert first == second
+
+
+def test_restart_replay_uses_durable_finality_and_idempotent_resolution_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "restart_replay")
+    second = _replay(tmp_path / "second", monkeypatch, "restart_replay")
     assert first == second
 
 

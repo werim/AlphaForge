@@ -1,10 +1,19 @@
 # AlphaForge LIVE Readiness Roadmap
 
-**Status:** Living operational document  
+**Status:** Historical baseline with current-state notice
 **Created:** 2026-05-22  
 **Baseline branch:** `dev`  
 **Baseline version:** `0.3.25-dev`  
 **Current verdict:** ❌ **NOT LIVE-READY**
+
+> **Current-state notice (2026-09-24).** The numbered findings and delivery plan
+> below describe the `0.3.25-dev` baseline and are preserved for traceability;
+> several are implemented and regression-protected in current code. Do not use
+> them as a current defect list or infer fixed RR/default semantics from them.
+> `README.md` and `VERSION.md` summarize current maturity, while production code,
+> typed configuration and tests remain authoritative. LIVE remains blocked. Fresh
+> FAST and public six-hour SOAK evidence on the exact final release SHA is still
+> required by issue #421 and does not itself authorize LIVE.
 
 ## Purpose
 
@@ -24,7 +33,7 @@ The `dev` branch currently includes useful groundwork:
 
 These improvements are preparation only. They do not authorize LIVE operation.
 
-## Blocking Findings at Baseline
+## Blocking Findings at Baseline (historical)
 
 ### P0-1: Placeholder/safe scanner LIVE block can be bypassed through wrapper wiring
 

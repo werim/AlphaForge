@@ -50,9 +50,9 @@ def test_p2a_fixture_decision_projects_through_production_invariant(name):
     """Golden decision semantics must be consumable by the production projector.
 
     This deliberately does not reimplement score/RR thresholds. P2-A freezes
-    scenario identity and the required end-to-end surfaces; existing production
-    regression suites remain the authority for each gate/resolver/readiness
-    implementation until the deterministic full-chain replay work in P2-D.
+    scenario identity and the required end-to-end surfaces. The production-chain
+    authority for each gate/resolver/readiness implementation is exercised by
+    test_issue421_full_chain_replay.py.
     """
     fixture = _load(name)
     decision = fixture["expected"]["decision"]

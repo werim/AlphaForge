@@ -1,5 +1,11 @@
 # Backtest lifecycle review notes
 
+> **Historical snapshot.** These notes describe the pre-2026-05-11 BACKTEST
+> implementation and are retained as audit evidence. The current path computes
+> score/RR from market context, persists explicit reject and lifecycle evidence,
+> and is summarized in `README.md` and current production tests. Do not use the
+> fixed values below to diagnose current HEAD.
+
 This document captures why the current backtest order lifecycle export has mostly static values and limited lifecycle stages.
 
 - `backtest_order.scan_symbol_backtest` seeds `market_ctx` with hardcoded values (`score=0.8`, `rr=2.0`, `expectancy=0.1`, `regime='TREND'`).

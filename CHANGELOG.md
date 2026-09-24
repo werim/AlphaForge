@@ -1,3 +1,25 @@
+# #421 P2-D/P2-E completion and P2-F current-state cleanup — 2026-09-24
+
+### Added
+- Deterministic production-chain replay for all 23 frozen golden scenarios, including partial fill, stale/future data, provider outage, orphan exposure and durable restart replay.
+- Bounded qualification for rapid decision persistence, resolver backlog, reconciliation volume, audit ingestion, repeated reject outcomes and concurrent readiness/audit reads against active PAPER writes.
+### Changed
+- Current README, version, mutation and qualification guidance now reflects completed P2-D/P2-E coverage and the remaining exact-final-SHA release gate.
+- Point-in-time BACKTEST, architecture and JOB-21 notes are explicitly marked historical so fixed score/RR and completed blocker descriptions are not mistaken for current behavior.
+### Fixed
+- Restart replay now proves zero duplicate execution and idempotent resolution from the same durable campaign database.
+- Stale documentation that reported only 17 of 23 replay scenarios and P2-E as missing.
+### Removed
+- None.
+### Breaking Changes
+- None. No production threshold, lifecycle, schema, export, migration, cost or LIVE-authorization change.
+### Known Issues
+- Fresh FAST and public six-hour SOAK must pass on the exact final `dev` SHA before #421 is complete. LIVE NOT READY.
+
+## Historical changelog entries
+
+Entries below preserve the repository state at the time of each change.
+
 # #421 P2-D full-chain replay expansion — 2026-09-24
 
 ### Added
