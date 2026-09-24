@@ -2827,16 +2827,21 @@ class RuntimeOrchestrator:
         await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
         if result_status == "no_submit_verified":
             return
-        if result_status == "partial_fill":
-            await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result), "fill_state": "partial"})
-        elif result_status in {"rejected", "exchange_reject"}:
+        if result_status in {"rejected", "exchange_reject"}:
             await self._emit_lifecycle_event(LifecycleState.ORDER_REJECTED.value, symbol, {"reason": "exchange_rejected_order", "result": dict(result)})
             return
         elif result_status in {"timeout", "error", "missing_ack"}:
             await self._record_incident(symbol, LifecycleState.ENTRY_TIMEOUT.value, "execution_uncertain_state")
             await self._reconcile_symbol_state(symbol, result, market_ctx)
             return
-        await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
+        await self._emit_lifecycle_event(
+            LifecycleState.POSITION_OPENED.value,
+            symbol,
+            {
+                "result": dict(result),
+                **({"fill_state": "partial"} if result_status == "partial_fill" else {}),
+            },
+        )
         self._generate_burnin_snapshot(reason="periodic")
         self._active_positions[symbol] = float(paper_notional or market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
         self._active_position_sides[symbol] = str(market_ctx.get("side") or "UNKNOWN").upper()
@@ -2874,6 +2879,18 @@ class RuntimeOrchestrator:
         if not math.isfinite(fill) or fill <= 0 or not math.isfinite(notional) or notional <= 0:
             raise RuntimeError("PAPER_POSITION_SIZE_INVALID")
         quantity = notional / fill
+        if str(result.get("status") or "").lower() == "partial_fill":
+            fills = result.get("fills")
+            if not isinstance(fills, list) or not fills:
+                raise RuntimeError("PAPER_PARTIAL_FILL_QUANTITY_UNAVAILABLE")
+            try:
+                filled_quantity = sum(float(row["qty"]) for row in fills)
+            except (KeyError, TypeError, ValueError):
+                raise RuntimeError("PAPER_PARTIAL_FILL_QUANTITY_UNAVAILABLE") from None
+            if not math.isfinite(filled_quantity) or filled_quantity <= 0 or filled_quantity > quantity:
+                raise RuntimeError("PAPER_PARTIAL_FILL_QUANTITY_INVALID")
+            quantity = filled_quantity
+            notional = fill * quantity
         stop = float(market_ctx.get("sl"))
         risk_usd = abs(fill - stop) * quantity
         if not math.isfinite(risk_usd) or risk_usd <= 0:
@@ -2904,6 +2921,8 @@ class RuntimeOrchestrator:
             "actual_fill": fill,
             "actual_fill_provenance": PROVENANCE_MODELLED,
             "fill_timestamp": fill_timestamp,
+            "fill_state": "PARTIAL" if str(result.get("status") or "").lower() == "partial_fill" else "FILLED",
+            "filled_quantity": quantity,
             "execution_cost_semantics": cost_semantics.as_dict(),
             "executable_raw_rr": market_ctx.get("executable_raw_rr"),
             "remaining_execution_penalty": market_ctx.get("remaining_execution_penalty"),

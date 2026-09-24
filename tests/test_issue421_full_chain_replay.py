@@ -62,6 +62,8 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     async def preserve_candidates(candidates):
         return candidates
 
+    lifecycle_events = []
+
     def persist_event(event):
         with factory.begin() as session:
             assert save_trade_lifecycle_event(
@@ -72,6 +74,7 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
                 reject_reason=event["details"].get("reason"),
                 execution_ctx=event["details"].get("execution_ctx", {}),
             )
+        lifecycle_events.append(event)
 
     def persist_reject(payload):
         with factory() as session:
@@ -102,6 +105,17 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     )
     runtime._campaign_id = campaign.campaign_id
     runtime._burnin_run_id = run["burnin_run_id"]
+    execution_override = fixture["frozen_market_event"].get("paper_execution_override")
+    if execution_override:
+        simulated_execution = RuntimeOrchestrator._simulate_paper_execution
+
+        def replay_execution(self, symbol, decision, market_ctx):
+            return {
+                **simulated_execution(self, symbol, decision, market_ctx),
+                **execution_override,
+            }
+
+        monkeypatch.setattr(RuntimeOrchestrator, "_simulate_paper_execution", replay_execution)
     for initial in fixture["frozen_market_event"].get("initial_positions", []):
         runtime._active_positions[initial["symbol"]] = initial["notional"]
         runtime._active_position_sides[initial["symbol"]] = initial["side"]
@@ -121,7 +135,7 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             "FROM decision_evidence WHERE run_id=:run"
         ), {"run": run["burnin_run_id"]}).mappings().one()
         position = conn.execute(text(
-            "SELECT trade_id,signal_id,source_decision_id,status,simulated_fill,target "
+            "SELECT trade_id,signal_id,source_decision_id,status,simulated_fill,target,quantity,notional,source_provenance_json "
             "FROM burnin_pending_position_outcomes WHERE campaign_id=:campaign"
         ), {"campaign": campaign.campaign_id}).mappings().one_or_none()
         observation = conn.execute(text(
@@ -154,6 +168,18 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         assert position is not None and position["signal_id"] == decision["signal_id"]
         assert position["source_decision_id"]
         assert position["status"] == "OPEN"
+        if fixture["expected"]["expected_fill_status"] == "PARTIAL":
+            partial_opened = [
+                event for event in lifecycle_events
+                if event["lifecycle_state"] == "POSITION_OPENED"
+                and event["details"].get("fill_state") == "partial"
+            ]
+            assert len(partial_opened) == 1
+            assert not any(event["lifecycle_state"] == "ERROR" for event in lifecycle_events)
+            assert runtime._active_positions[fixture["symbol"]] == pytest.approx(5.001)
+            assert position["quantity"] == pytest.approx(0.05)
+            assert position["notional"] == pytest.approx(5.001)
+            assert json.loads(position["source_provenance_json"])["fill_state"] == "PARTIAL"
         assert runtime._canonical_final_decision_recorded(decision["signal_id"]) is True
         asyncio.run(runtime._process_symbol(SimpleNamespace(
             symbol=fixture["symbol"], regime_hint="TRENDING", diagnostics={"inputs": market},
@@ -401,6 +427,12 @@ def test_false_reject_replays_target_first_outcome_twice(tmp_path, monkeypatch):
 def test_delayed_resolver_replays_open_position_without_outcome_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "delayed_resolver")
     second = _replay(tmp_path / "second", monkeypatch, "delayed_resolver")
+    assert first == second
+
+
+def test_partial_fill_replays_one_canonical_open_position_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "partial_fill")
+    second = _replay(tmp_path / "second", monkeypatch, "partial_fill")
     assert first == second
 
 

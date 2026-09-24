@@ -7,7 +7,48 @@
   "frozen_market_event": {
     "event_id": "golden:partial_fill",
     "timestamp": "2026-01-01T00:00:00Z",
-    "closed_candle": true
+    "closed_candle": true,
+    "paper_execution_override": {
+      "status": "partial_fill",
+      "fills": [{"qty": 0.05, "price": 100.02}]
+    },
+    "market_context": {
+      "source_exchange": "fixture",
+      "timeframe": "1m",
+      "entry": 100.0,
+      "sl": 99.0,
+      "tp": 103.0,
+      "rr": 3.0,
+      "side": "LONG",
+      "setup": "LONG_CONTINUATION",
+      "geometry_status": "COMPLETE",
+      "geometry_source": "FROZEN_REPLAY",
+      "volume_24h_usdt": 90000000.0,
+      "spread_pct": 0.0002,
+      "spread_status": "MEASURED",
+      "expected_slippage_pct": 0.0002,
+      "slippage_status": "MODEL_ESTIMATE",
+      "liquidity_score": 0.95,
+      "liquidity_status": "MEASURED",
+      "funding_rate_pct": 0.0,
+      "funding_status": "MEASURED",
+      "orderbook_imbalance": 0.1,
+      "orderbook_status": "MEASURED",
+      "volatility_regime": "normal",
+      "volatility_status": "MEASURED",
+      "trend_strength": 0.95,
+      "chop_score": 0.05,
+      "mtf": {
+        "setup": {"setup_quality": 1.0},
+        "execution": {
+          "momentum_confirmation": 1.0,
+          "liquidity_score": 1.0,
+          "volatility_fit": 1.0
+        },
+        "regime": {"regime": "TRENDING", "alignment": 1.0},
+        "alignment": {"aligned": true}
+      }
+    }
   },
   "expected": {
     "decision": "ACCEPT",
@@ -28,7 +69,7 @@
     "geometry_status": "COMPLETE",
     "expected_fill_status": "PARTIAL",
     "effective_rr_status": "ABOVE_THRESHOLD",
-    "portfolio_state": "ALLOW",
+    "portfolio_state": "ACCEPTED",
     "persistence": "ACCEPTED_DECISION_DURABLE",
     "resolver": "PENDING",
     "readiness": "BLOCKED_OPEN_POSITION",
