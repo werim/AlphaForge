@@ -1,17 +1,17 @@
 # #421 P2-D full-chain replay expansion — 2026-09-24
 
 ### Added
-- Frozen profitable LONG/SHORT, losing LONG, ambiguous TP+SL, high-spread, low-effective-RR and unavailable-execution-context PAPER replays across decision, persistence, resolver, readiness and isolated audit, each repeated for deterministic semantics; real SIGKILL cold-start replay protection.
+- Frozen profitable LONG/SHORT, losing LONG, ambiguous TP+SL, high-spread, high-slippage, thin-liquidity, low-effective-RR, unavailable-execution-context and combined spread/effective-RR PAPER replays across decision, persistence, resolver, readiness and isolated audit, each repeated for deterministic semantics; real SIGKILL cold-start replay protection.
 ### Changed
 - Attached campaign identity takes precedence over environment and caller-supplied reject metadata; accepted decision JSON retains geometry status/reason; finalized PAPER lookup recognizes durable accepted evidence and scopes rejects to the current campaign/run.
 ### Fixed
-- Reject forward labels escaping an attached campaign without an environment campaign ID; forged reject payload scope; repeated processing of a durable accepted PAPER signal; a final reject from another campaign falsely suppressing a reused signal; stale `decision_evidence` writer guidance; golden expectations that conflated missing execution evidence with missing geometry and claimed execution rejects reached portfolio evaluation.
+- Reject forward labels escaping an attached campaign without an environment campaign ID; forged reject payload scope; repeated processing of a durable accepted PAPER signal; a final reject from another campaign falsely suppressing a reused signal; stale `decision_evidence` writer guidance; golden expectations that conflated missing execution evidence with missing geometry and mislabeled execution rejects as portfolio blocks.
 ### Removed
 - None.
 ### Breaking Changes
 - No schema or API break. Prospective attached-campaign reject identities may differ from previously incorrect standalone IDs; historical rows are untouched.
 ### Known Issues
-- Seven of 23 golden cases run the production full chain. P2-E load and P1-E release qualification remain; LIVE NOT READY.
+- Ten of 23 golden cases run the production full chain. P2-E load and P1-E release qualification remain; LIVE NOT READY.
 
 # #421 P2-C seeded safety properties — 2026-09-24
 

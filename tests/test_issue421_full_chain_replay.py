@@ -162,7 +162,9 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     else:
         assert position is None and runtime.metrics.executions == 0
         assert decision["reject_reason"] == fixture["expected"]["failed_gates"][0]
-        assert fixture["expected"]["failed_gates"][0] in json.loads(decision["reject_flags"] or "[]")
+        assert set(fixture["expected"]["failed_gates"]) <= set(
+            json.loads(decision["reject_flags"] or "[]")
+        )
         if fixture["expected"]["effective_rr_status"] == "BELOW_THRESHOLD":
             assert decision["effective_rr"] < runtime.config.min_effective_rr
         else:
@@ -275,6 +277,24 @@ def test_low_effective_rr_replays_same_reject_chain_twice(tmp_path, monkeypatch)
 def test_unavailable_execution_context_replays_same_reject_chain_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "execution_context_unavailable")
     second = _replay(tmp_path / "second", monkeypatch, "execution_context_unavailable")
+    assert first == second
+
+
+def test_high_slippage_replays_same_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "high_slippage")
+    second = _replay(tmp_path / "second", monkeypatch, "high_slippage")
+    assert first == second
+
+
+def test_thin_liquidity_replays_same_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "thin_liquidity")
+    second = _replay(tmp_path / "second", monkeypatch, "thin_liquidity")
+    assert first == second
+
+
+def test_multi_gate_reject_replays_complete_gate_set_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "multi_gate_reject")
+    second = _replay(tmp_path / "second", monkeypatch, "multi_gate_reject")
     assert first == second
 
 
