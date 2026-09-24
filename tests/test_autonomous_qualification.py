@@ -12,6 +12,7 @@ from alphaforge.autonomous_qualification import (
     AutonomousQualificationHarness,
     main,
 )
+from alphaforge.exchange_market_scanner import MarketScanRows
 
 
 def test_fast_qualification_is_isolated_complete_and_machine_readable(tmp_path: Path) -> None:
@@ -260,4 +261,47 @@ def test_public_soak_uses_the_production_market_scanner_path(
         ]
         assert observed["config"].exchange.hyperliquid.enabled is False
     finally:
+        harness.close()
+
+
+def test_public_probe_persists_scanner_failure_diagnostics(tmp_path: Path) -> None:
+    harness = AutonomousQualificationHarness(
+        mode="SOAK", output_root=tmp_path, soak_hours=6,
+        market_data_source="PUBLIC", sleep=lambda _seconds: None,
+    )
+    ctx = harness._new_context("market_data_diagnostics", qualification_targets=True)
+    rows = MarketScanRows([], diagnostics={
+        "status": "UNAVAILABLE",
+        "provider": "binance",
+        "cause": "TIMEOUT",
+        "endpoint": "premiumIndex",
+        "error_class": "TimeoutError",
+        "http_status": None,
+        "providers": [{
+            "status": "UNAVAILABLE",
+            "provider": "binance",
+            "cause": "TIMEOUT",
+            "endpoint": "premiumIndex",
+            "error_class": "TimeoutError",
+            "http_status": None,
+        }],
+    })
+    try:
+        harness._record_market_data_probe(ctx, rows, 7.583101)
+        with harness.engine.connect() as conn:
+            details = json.loads(conn.exec_driver_sql(
+                "SELECT details_json FROM burnin_campaign_events "
+                "WHERE campaign_id=? AND event_type='QUALIFICATION_MARKET_DATA_PROBE' "
+                "ORDER BY id DESC LIMIT 1",
+                (ctx.campaign_id,),
+            ).scalar_one())
+        assert details["row_count"] == 0
+        assert details["status"] == "UNAVAILABLE"
+        assert details["provider"] == "binance"
+        assert details["cause"] == "TIMEOUT"
+        assert details["endpoint"] == "premiumIndex"
+        assert details["error_class"] == "TimeoutError"
+        assert details["http_status"] is None
+    finally:
+        harness._terminalize(ctx)
         harness.close()
