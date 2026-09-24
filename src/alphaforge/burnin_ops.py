@@ -700,7 +700,10 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
             }
         else:
             worker_liveness = _campaign_worker_liveness(campaign)
-            worker_alive = bool(worker_liveness.get("alive"))
+            worker_alive = bool(
+                worker_liveness.get("alive")
+                and worker_liveness.get("identity_verified")
+            )
 
         worker_exit_code = process.poll() if process is not None else None
         process_pid = getattr(process, "pid", None) if process is not None else None
