@@ -160,26 +160,29 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         )))
         assert runtime.metrics.executions == 1
         assert runtime.metrics.finalized_signal_replays_skipped == 1
-        with engine.begin() as conn:
-            resolved = resolve_campaign_positions(
-                conn, campaign.campaign_id,
-                {position["trade_id"]: fixture["frozen_market_event"]["resolver_candles"]},
-                now=fixture["frozen_market_event"]["resolver_now"],
-            )
-        terminal_key = {
-            "TP_HIT": "tp", "SL_HIT": "sl", "AMBIGUOUS_INTRABAR": "ambiguous",
-        }[fixture["expected"]["resolver"]]
-        assert resolved[terminal_key] == resolved["closed"] == 1
-        with engine.connect() as conn:
-            outcome = conn.execute(text(
-                "SELECT exit_reason,evidence_complete,net_r FROM burnin_trade_outcomes WHERE trade_id=:trade"
-            ), {"trade": position["trade_id"]}).mappings().one()
-        assert outcome["exit_reason"] == fixture["expected"]["resolver"]
-        resolved_status = outcome["exit_reason"]
-        resolved_net_r = outcome["net_r"]
-        ambiguous = terminal_key == "ambiguous"
-        assert outcome["evidence_complete"] == (0 if ambiguous else 1)
-        assert (outcome["net_r"] > 0) == (fixture["expected"]["resolver"] == "TP_HIT")
+        if fixture["expected"]["resolver"] == "PENDING":
+            assert position["status"] == "OPEN"
+        else:
+            with engine.begin() as conn:
+                resolved = resolve_campaign_positions(
+                    conn, campaign.campaign_id,
+                    {position["trade_id"]: fixture["frozen_market_event"]["resolver_candles"]},
+                    now=fixture["frozen_market_event"]["resolver_now"],
+                )
+            terminal_key = {
+                "TP_HIT": "tp", "SL_HIT": "sl", "AMBIGUOUS_INTRABAR": "ambiguous",
+            }[fixture["expected"]["resolver"]]
+            assert resolved[terminal_key] == resolved["closed"] == 1
+            with engine.connect() as conn:
+                outcome = conn.execute(text(
+                    "SELECT exit_reason,evidence_complete,net_r FROM burnin_trade_outcomes WHERE trade_id=:trade"
+                ), {"trade": position["trade_id"]}).mappings().one()
+            assert outcome["exit_reason"] == fixture["expected"]["resolver"]
+            resolved_status = outcome["exit_reason"]
+            resolved_net_r = outcome["net_r"]
+            ambiguous = terminal_key == "ambiguous"
+            assert outcome["evidence_complete"] == (0 if ambiguous else 1)
+            assert (outcome["net_r"] > 0) == (fixture["expected"]["resolver"] == "TP_HIT")
     else:
         assert position is None and runtime.metrics.executions == 0
         assert decision["reject_reason"] == fixture["expected"]["failed_gates"][0]
@@ -280,10 +283,14 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
             audited_outcome = audit.execute(
                 "SELECT outcome_status,authoritative FROM audit_outcomes"
             ).fetchone()
-            assert tuple(audited_outcome) == (
-                fixture["expected"]["resolver"],
-                0 if fixture["expected"]["resolver"] == "AMBIGUOUS_INTRABAR" else 1,
-            )
+            if outcome:
+                assert tuple(audited_outcome) == (
+                    fixture["expected"]["resolver"],
+                    0 if fixture["expected"]["resolver"] == "AMBIGUOUS_INTRABAR" else 1,
+                )
+            else:
+                assert fixture["expected"]["resolver"] == "PENDING"
+                assert audited_outcome is None
         else:
             assert audit_row[3] == fixture["expected"]["failed_gates"][0]
             if outcome:
@@ -388,6 +395,12 @@ def test_correct_reject_replays_stop_first_outcome_twice(tmp_path, monkeypatch):
 def test_false_reject_replays_target_first_outcome_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "false_reject")
     second = _replay(tmp_path / "second", monkeypatch, "false_reject")
+    assert first == second
+
+
+def test_delayed_resolver_replays_open_position_without_outcome_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "delayed_resolver")
+    second = _replay(tmp_path / "second", monkeypatch, "delayed_resolver")
     assert first == second
 
 
