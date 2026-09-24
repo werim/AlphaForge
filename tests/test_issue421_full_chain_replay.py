@@ -122,7 +122,8 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
     market = {
         **fixture["frozen_market_event"]["market_context"],
         "signal_id": fixture["frozen_market_event"]["event_id"],
-        "market_ts": event_dt.timestamp(),
+        "market_ts": event_dt.timestamp()
+        + fixture["frozen_market_event"].get("market_ts_offset_sec", 0.0),
     }
     asyncio.run(runtime._process_symbol(SimpleNamespace(
         symbol=fixture["symbol"], regime_hint="TRENDING", diagnostics={"inputs": market},
@@ -433,6 +434,18 @@ def test_delayed_resolver_replays_open_position_without_outcome_twice(tmp_path, 
 def test_partial_fill_replays_one_canonical_open_position_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "partial_fill")
     second = _replay(tmp_path / "second", monkeypatch, "partial_fill")
+    assert first == second
+
+
+def test_stale_candle_replays_ineligible_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "stale_candle")
+    second = _replay(tmp_path / "second", monkeypatch, "stale_candle")
+    assert first == second
+
+
+def test_future_candle_replays_ineligible_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "future_candle")
+    second = _replay(tmp_path / "second", monkeypatch, "future_candle")
     assert first == second
 
 

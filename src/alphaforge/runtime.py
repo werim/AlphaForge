@@ -3635,6 +3635,14 @@ class RuntimeOrchestrator:
         """Durably enqueue eligible PAPER rejects; incomplete geometry remains auditable."""
         if self.config.execution_mode != ExecutionMode.PAPER or not self._burnin_run_id:
             return None
+        reject_reason = str(payload.get("reason") or payload.get("reject_reason") or "").upper()
+        if reject_reason in {
+            "INVALID_MARKET_TIMESTAMP",
+            "MARKET_TIMESTAMP_UNIT_MISMATCH",
+            "MARKET_TIMESTAMP_IN_FUTURE",
+            "STALE_MARKET_DATA",
+        }:
+            return None
         engine, campaign_id = self._resolve_persistence_engine(), self._reject_campaign_id()
         if engine is None or campaign_id is None:
             return None
