@@ -114,6 +114,23 @@ def _replay(tmp_path: Path, monkeypatch, scenario: str) -> dict:
         asyncio.run(runtime._run_reconciliation_once())
         assert runtime._reconciliation_status == "EXCHANGE_STATE_UNKNOWN"
         assert runtime._execution_reconciliation_blocked()
+    if fixture["frozen_market_event"].get("reconciliation_orphan_position"):
+        class OrphanPositionProvider:
+            def snapshot(self):
+                return {
+                    "evidence_status": "COMPLETE",
+                    "authenticated": True,
+                    "input_source": "FROZEN_REPLAY",
+                    "orders": [],
+                    "positions": [{"symbol": fixture["symbol"], "qty": 0.25}],
+                    "fills": [],
+                }
+
+        runtime.live_reconciliation_provider = OrphanPositionProvider()
+        asyncio.run(runtime._run_reconciliation_once())
+        assert runtime._reconciliation_status == "DIRTY"
+        assert runtime._fail_closed_reason == "ORPHAN_POSITION_DETECTED"
+        assert runtime._execution_reconciliation_blocked()
     execution_override = fixture["frozen_market_event"].get("paper_execution_override")
     if execution_override:
         simulated_execution = RuntimeOrchestrator._simulate_paper_execution
@@ -461,6 +478,12 @@ def test_future_candle_replays_ineligible_reject_chain_twice(tmp_path, monkeypat
 def test_provider_outage_replays_fail_closed_reject_chain_twice(tmp_path, monkeypatch):
     first = _replay(tmp_path / "first", monkeypatch, "provider_outage")
     second = _replay(tmp_path / "second", monkeypatch, "provider_outage")
+    assert first == second
+
+
+def test_orphan_position_replays_fail_closed_reject_chain_twice(tmp_path, monkeypatch):
+    first = _replay(tmp_path / "first", monkeypatch, "orphan_position")
+    second = _replay(tmp_path / "second", monkeypatch, "orphan_position")
     assert first == second
 
 
