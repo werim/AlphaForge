@@ -2035,3 +2035,271 @@ def test_health_resolver_and_provider_failures_remain_unhealthy(tmp_path):
     reasons = health_payload(conn, camp.campaign_id)["unhealthy_reasons"]
     assert "RESOLVER_FAILURES" in reasons
     assert "REPEATED_PROVIDER_FAILURES" in reasons
+
+
+def _ready_attachment_for_worker_identity_test(conn, camp, run, pid):
+    worker_started = utc_now()
+    conn.execute(
+        "UPDATE burnin_campaigns SET campaign_status='STARTING', worker_pid=?, "
+        "worker_started_at=?, last_heartbeat_at=? WHERE campaign_id=?",
+        (pid, worker_started, worker_started, camp.campaign_id),
+    )
+    conn.execute(
+        "UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=?",
+        (run,),
+    )
+    conn.execute(
+        "UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?",
+        (run,),
+    )
+    event(
+        conn,
+        camp.campaign_id,
+        "PHASE8_CAMPAIGN_ATTACHED",
+        burnin_run_id=run,
+        details={
+            "runtime_instance_id": "runtime:macos-identity",
+            "active_run_id": run,
+        },
+    )
+    conn.commit()
+    return worker_started
+
+
+@pytest.mark.parametrize(
+    "reason,alive",
+    [
+        ("COMMAND_IDENTITY_UNAVAILABLE", True),
+        ("DARWIN_NATIVE_PROBE_ERROR", False),
+    ],
+)
+def test_exact_popen_child_can_complete_attachment_when_darwin_identity_is_unavailable(
+    monkeypatch, tmp_path, reason, alive
+):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    pid = 8401
+    worker_started = _ready_attachment_for_worker_identity_test(conn, camp, run, pid)
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": pid,
+            "alive": alive,
+            "identity_verified": False,
+            "reason": reason,
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": None,
+            "expected_started_at": worker_started,
+            "observed_creation_time": None,
+            "native_error": "simulated" if reason == "DARWIN_NATIVE_PROBE_ERROR" else None,
+            "identity_detail": "simulated-unavailable",
+        },
+    )
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(pid=pid, poll=lambda: None),
+    )
+
+    assert out["status"] == "ATTACHED"
+    assert all(out["checks"].values())
+    assert out["worker_ownership_source"] == "EXACT_POPEN_CHILD_PLUS_RUNTIME_EVIDENCE"
+    assert out["exact_launch_child"] is True
+    assert out["worker_liveness"]["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["EXPECTED_COMMAND_MISMATCH", "PROCESS_CREATION_TIME_MISMATCH"],
+)
+def test_exact_popen_child_never_overrides_positive_identity_contradiction(
+    monkeypatch, tmp_path, reason
+):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    pid = 8402
+    worker_started = _ready_attachment_for_worker_identity_test(conn, camp, run, pid)
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": pid,
+            "alive": False,
+            "identity_verified": False,
+            "reason": reason,
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": (
+                "/usr/bin/python -m alphaforge.burnin_cli worker --campaign-id camp_other"
+                if reason == "EXPECTED_COMMAND_MISMATCH"
+                else "/usr/bin/python -m alphaforge.burnin_cli worker --campaign-id " + camp.campaign_id
+            ),
+            "expected_started_at": worker_started,
+            "observed_creation_time": 1.0 if reason == "PROCESS_CREATION_TIME_MISMATCH" else None,
+            "native_error": None,
+            "identity_detail": None,
+        },
+    )
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(pid=pid, poll=lambda: None),
+    )
+
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+    assert out["checks"]["worker_alive"] is False
+    assert out["checks"]["worker_not_exited"] is True
+    assert out["worker_ownership_source"] is None
+    assert out["worker_liveness"]["reason"] == reason
+
+
+def test_unverified_arbitrary_pid_cannot_complete_attachment_without_exact_popen_child(
+    monkeypatch, tmp_path
+):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    pid = 8403
+    worker_started = _ready_attachment_for_worker_identity_test(conn, camp, run, pid)
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": pid,
+            "alive": True,
+            "identity_verified": False,
+            "reason": "COMMAND_IDENTITY_UNAVAILABLE",
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": None,
+            "expected_started_at": worker_started,
+            "observed_creation_time": None,
+            "native_error": None,
+            "identity_detail": "PROCARGS_ARGV_MUTATED_TO_AUXILIARY_VECTOR",
+        },
+    )
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=None,
+    )
+
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+    assert out["checks"]["worker_alive"] is False
+    assert out["exact_launch_child"] is False
+    assert out["worker_ownership_source"] is None
+
+
+def test_popen_pid_mismatch_cannot_use_identity_unavailable_fallback(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    persisted_pid = 8404
+    worker_started = _ready_attachment_for_worker_identity_test(
+        conn, camp, run, persisted_pid
+    )
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": persisted_pid,
+            "alive": True,
+            "identity_verified": False,
+            "reason": "COMMAND_IDENTITY_UNAVAILABLE",
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": None,
+            "expected_started_at": worker_started,
+            "observed_creation_time": None,
+            "native_error": None,
+            "identity_detail": "simulated-unavailable",
+        },
+    )
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(pid=persisted_pid + 1, poll=lambda: None),
+    )
+
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+    assert out["exact_launch_child"] is False
+    assert out["checks"]["worker_alive"] is False
+
+
+def test_real_popen_exit_still_fails_immediately_despite_complete_runtime_evidence(
+    monkeypatch, tmp_path
+):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    pid = 8405
+    worker_started = _ready_attachment_for_worker_identity_test(conn, camp, run, pid)
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": pid,
+            "alive": True,
+            "identity_verified": False,
+            "reason": "COMMAND_IDENTITY_UNAVAILABLE",
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": None,
+            "expected_started_at": worker_started,
+            "observed_creation_time": None,
+            "native_error": None,
+            "identity_detail": "simulated-unavailable",
+        },
+    )
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=10,
+        process=SimpleNamespace(pid=pid, poll=lambda: 17),
+    )
+
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "WORKER_EXITED_BEFORE_ATTACHMENT"
+    assert out["worker_exit_code"] == 17
+    assert out["checks"]["worker_not_exited"] is False
+    assert out["worker_ownership_source"] is None
