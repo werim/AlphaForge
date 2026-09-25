@@ -25,6 +25,9 @@ from typing import Any, Callable, Mapping
 from urllib import error
 
 from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
+
+from alphaforge.ai_brain import AIBrain
 
 from alphaforge.binance_reconciliation_provider import (
     BinanceReadonlyReconciliationConfig,
@@ -142,6 +145,9 @@ class AutonomousQualificationHarness:
             raise RuntimeError("qualification database must be new")
         self.engine = init_db(f"sqlite+pysqlite:///{self.db_path}")
         self.run_id = "qualification:" + uuid.uuid4().hex
+        self._soak_decision_signal_prefix = f"qualification:{self.run_id}:soak:"
+        self._soak_decision_probe_done = False
+        self._soak_decision_probe_error: str | None = None
         self.results: list[ScenarioResult] = []
         self.worker_lifecycle: list[dict[str, Any]] = []
         self._active_contexts: dict[str, HarnessContext] = {}
@@ -172,11 +178,24 @@ class AutonomousQualificationHarness:
             run = start_or_resume_campaign(conn, campaign.campaign_id)
         state = {"fault": None}
         lifecycle_events: list[dict[str, Any]] = []
+        brain: Any = _NoopBrain()
+        scanner_source = "QUALIFICATION_FAULT_HARNESS"
+        if qualification_targets:
+            SessionLocal = sessionmaker(
+                bind=self.engine, expire_on_commit=False, future=True
+            )
+            # The SOAK decision probe is deliberately rejection-biased: a score
+            # can never reach 2.0 because AIBrain scores are clipped to [0, 1].
+            # This exercises canonical decision persistence without opening a
+            # PAPER position or creating any exchange mutation.
+            brain = AIBrain(session_factory=SessionLocal, min_accept_score=2.0)
+            scanner_source = "QUALIFICATION_DETERMINISTIC_DECISION_PROBE"
         runtime = RuntimeOrchestrator(
             config=RuntimeConfig(execution_mode=ExecutionMode.PAPER,
                                  provider_transient_outage_grace_seconds=grace,
                                  live_trading_enabled=False, allow_live_orders=False),
-            ai_brain=_NoopBrain(), market_scanner=_empty_scanner,
+            ai_brain=brain, market_scanner=_empty_scanner,
+            scanner_source=scanner_source,
             persistence_engine=self.engine, live_reconciliation_provider=provider,
             on_lifecycle_event=lambda payload: lifecycle_events.append(dict(payload)),
         )
@@ -846,6 +865,7 @@ class AutonomousQualificationHarness:
             reconciliation_started = time.monotonic()
             asyncio.run(ctx.runtime._run_reconciliation_once())
             reconciliation_latency = time.monotonic() - reconciliation_started
+            self._run_soak_decision_evidence_probe(ctx)
             resolver_result = resolver.resolver_tick()
             snapshot = ctx.runtime._build_runtime_state_snapshot(status="OPERATING")
             ctx.runtime._persist_runtime_state_snapshot(snapshot.runtime_status)
@@ -872,6 +892,181 @@ class AutonomousQualificationHarness:
             delay = max(0.0, target - time.monotonic()) if self._enforce_wall_clock else duration_seconds / segments
             self._sleep(delay)
 
+    def _soak_decision_probe_candidate(self) -> dict[str, Any]:
+        now = time.time()
+        return {
+            "signal_id": f"{self._soak_decision_signal_prefix}0001",
+            "symbol": "BTCUSDT",
+            "source_exchange": "binance",
+            "timeframe": "1m",
+            "market_ts": now,
+            "side": "LONG",
+            "entry": 100.0,
+            "sl": 99.5,
+            "tp": 101.5,
+            "rr": 3.0,
+            "geometry_status": "COMPLETE",
+            "geometry_source": "QUALIFICATION_DETERMINISTIC_DECISION_PROBE",
+            "setup_type": "QUALIFICATION_PROBE",
+            "setup_reason": "PIPELINE_COVERAGE",
+            "setup_quality": 0.95,
+            "volume_24h_usdt": 100_000_000.0,
+            "spread_pct": 0.0002,
+            "spread_status": "MEASURED",
+            "spread_source": "QUALIFICATION_PROBE",
+            "expected_slippage_pct": 0.0002,
+            "slippage_status": "MODEL_ESTIMATE",
+            "slippage_source": "QUALIFICATION_PROBE",
+            "latency_ms": 50.0,
+            "latency_status": "MODEL_ESTIMATE",
+            "latency_source": "QUALIFICATION_PROBE",
+            "market_data_latency_ms": 25.0,
+            "market_data_latency_status": "MEASURED",
+            "market_data_latency_source": "QUALIFICATION_PROBE",
+            "liquidity_score": 0.95,
+            "liquidity_status": "MEASURED",
+            "liquidity_source": "QUALIFICATION_PROBE",
+            "funding_rate_pct": 0.00001,
+            "funding_status": "MEASURED",
+            "funding_source": "QUALIFICATION_PROBE",
+            "volatility_pct": 1.0,
+            "volatility_regime": "NORMAL",
+            "volatility_status": "MEASURED",
+            "volatility_source": "QUALIFICATION_PROBE",
+            "trend_strength": 0.90,
+            "momentum_confirmation": 0.90,
+            "liquidity_quality": 0.95,
+            "volatility_fit": 0.90,
+            "recent_volume_change_pct": 1.0,
+            "chop_score": 0.10,
+            "panic_score": 0.0,
+            "spoof_risk": 0.0,
+            "fakeout_risk": 0.10,
+            "orderbook_imbalance": 0.50,
+            "orderbook_status": "MEASURED",
+            "orderbook_source": "QUALIFICATION_PROBE",
+            "regime": "TREND",
+            "mtf": {
+                "regime": {
+                    "regime": "TRENDING",
+                    "evidence_status": "COMPLETE",
+                    "alignment": 1.0,
+                }
+            },
+            "qualification_decision_probe": True,
+        }
+
+    def _run_soak_decision_evidence_probe(self, ctx: HarnessContext) -> None:
+        if self._soak_decision_probe_done:
+            return
+        self._soak_decision_probe_done = True
+        candidate = self._soak_decision_probe_candidate()
+        original_scanner = ctx.runtime.market_scanner
+
+        async def probe_scanner() -> list[dict[str, Any]]:
+            return [candidate]
+
+        try:
+            ctx.runtime.market_scanner = probe_scanner
+            before_executions = ctx.runtime.metrics.executions
+            asyncio.run(ctx.runtime._scan_once())
+            if ctx.runtime.metrics.executions != before_executions:
+                raise RuntimeError("QUALIFICATION_DECISION_PROBE_EXECUTED_TRADE")
+            ctx.runtime._generate_burnin_snapshot(reason="soak_decision_evidence")
+        except Exception as exc:
+            self._soak_decision_probe_error = f"{exc.__class__.__name__}:{exc}"
+            self._soak_monitor_errors.append(
+                f"decision_evidence_probe:{self._soak_decision_probe_error}"
+            )
+        finally:
+            ctx.runtime.market_scanner = original_scanner
+
+    def _soak_decision_evidence(self, ctx: HarnessContext) -> dict[str, int]:
+        params = {
+            "bid": ctx.burnin_run_id,
+            "prefix": f"{self._soak_decision_signal_prefix}%",
+        }
+        canonical = canonical_decision_sql("o")
+        with self.engine.connect() as conn:
+            def scalar(sql: str) -> int:
+                return int(conn.execute(text(sql), params).scalar_one() or 0)
+
+            evidence = {
+                "canonical_decisions": scalar(
+                    f"SELECT COUNT(*) FROM burnin_observations o "
+                    f"WHERE o.burnin_run_id=:bid AND {canonical}"
+                ),
+                "accepted_decisions": scalar(
+                    f"SELECT COUNT(*) FROM burnin_observations o "
+                    f"WHERE o.burnin_run_id=:bid AND UPPER(COALESCE(o.decision,''))='ACCEPTED' "
+                    f"AND {canonical}"
+                ),
+                "rejected_decisions": scalar(
+                    f"SELECT COUNT(*) FROM burnin_observations o "
+                    f"WHERE o.burnin_run_id=:bid AND UPPER(COALESCE(o.decision,''))='REJECTED' "
+                    f"AND {canonical}"
+                ),
+                "decision_evidence": scalar(
+                    "SELECT COUNT(*) FROM decision_evidence WHERE run_id=:bid"
+                ),
+                "order_decisions": scalar(
+                    "SELECT COUNT(*) FROM order_decisions WHERE signal_id LIKE :prefix"
+                ),
+                "rejected_signal_reviews": scalar(
+                    "SELECT COUNT(*) FROM rejected_signal_reviews WHERE signal_id LIKE :prefix"
+                ),
+                "pending_reject_labels": scalar(
+                    "SELECT COUNT(*) FROM burnin_pending_reject_labels "
+                    "WHERE burnin_run_id=:bid AND signal_id LIKE :prefix"
+                ),
+                "reject_outcomes": scalar(
+                    "SELECT COUNT(*) FROM burnin_reject_outcomes WHERE burnin_run_id=:bid"
+                ),
+                "trade_outcomes": scalar(
+                    "SELECT COUNT(*) FROM burnin_trade_outcomes WHERE burnin_run_id=:bid"
+                ),
+                "qualification_snapshots": scalar(
+                    "SELECT COUNT(*) FROM burnin_qualification_snapshots WHERE burnin_run_id=:bid"
+                ),
+                "complete_mtf_regime_mismatches": scalar(
+                    """
+                    SELECT COUNT(*)
+                    FROM burnin_observations o
+                    WHERE o.burnin_run_id=:bid
+                      AND UPPER(COALESCE(json_extract(o.metrics_json,'$.mtf.regime.evidence_status'),''))='COMPLETE'
+                      AND json_extract(o.metrics_json,'$.mtf.regime.regime') IS NOT NULL
+                      AND UPPER(COALESCE(o.regime,''))
+                          <> UPPER(COALESCE(json_extract(o.metrics_json,'$.mtf.regime.regime'),''))
+                    """
+                ),
+            }
+        return evidence
+
+    def _soak_decision_evidence_checks(
+        self, ctx: HarnessContext, evidence: Mapping[str, int]
+    ) -> dict[str, bool]:
+        canonical_decisions = int(evidence.get("canonical_decisions") or 0)
+        return {
+            "canonical_decision_evidence_nonzero": canonical_decisions > 0,
+            "decision_evidence_persisted":
+                int(evidence.get("decision_evidence") or 0) >= canonical_decisions > 0,
+            "order_decision_pipeline_exercised":
+                int(evidence.get("order_decisions") or 0) > 0,
+            "reject_path_evidence_persisted":
+                int(evidence.get("rejected_decisions") or 0) > 0
+                and int(evidence.get("rejected_signal_reviews") or 0) > 0,
+            "reject_label_evidence_persisted":
+                int(evidence.get("pending_reject_labels") or 0) > 0,
+            "qualification_snapshot_scoped":
+                int(evidence.get("qualification_snapshots") or 0) > 0,
+            "canonical_regime_evidence_consistent":
+                int(evidence.get("complete_mtf_regime_mismatches") or 0) == 0,
+            "decision_probe_no_submit":
+                self._soak_decision_probe_done
+                and self._soak_decision_probe_error is None
+                and ctx.runtime.metrics.executions == 0,
+        }
+
     def _finish_soak_operation(self, ctx: HarnessContext, injected_at: str,
                                started_monotonic: float) -> ScenarioResult:
         observed = {**self._soak_observed, "market_data_source": self.market_data_source}
@@ -881,6 +1076,10 @@ class AutonomousQualificationHarness:
         resources = self._soak_resource_summary()
         observed["resources"] = resources
         observed["monitor_errors"] = list(self._soak_monitor_errors)
+        observed["qualification_scope"] = "END_TO_END_PAPER_NO_SUBMIT"
+        decision_evidence = self._soak_decision_evidence(ctx)
+        observed["decision_evidence"] = decision_evidence
+        observed["decision_probe_error"] = self._soak_decision_probe_error
         all_samples_safe = all(all(sample["invariants"].values()) for sample in self._soak_samples)
         checks = {
             "normal_market_data_observed": self._soak_observed["market_data_rows"] > 0
@@ -888,6 +1087,7 @@ class AutonomousQualificationHarness:
                                            and self._market_data_max_empty_streak <= 1
                                            and self._soak_observed["empty_market_data_probes"]
                                            <= max(1, len(self._market_data_probes) // 20),
+            **self._soak_decision_evidence_checks(ctx, decision_evidence),
             "empty_market_data_never_executed": all(
                 sample["paper_executions"] == 0 for sample in self._soak_samples
             ),
@@ -906,6 +1106,7 @@ class AutonomousQualificationHarness:
             ctx, name="soak_normal_market_data", injected_at=injected_at,
             recovered_at=recovered_at, classification=UNKNOWN,
             expected=["public feed gaps recover by the next five-minute probe, with no PAPER execution",
+                      "same-run canonical PAPER decision evidence is persisted without order submission",
                       "clean reconciliation and heartbeat continue"],
             observed=observed, checks=checks, started_monotonic=started_monotonic,
         )
@@ -1017,7 +1218,11 @@ class AutonomousQualificationHarness:
                           "database_created_for_run": True, "paper_only": True,
                           "live_order_submission": False, "production_db_discovery": False,
                           "active_runtime_reuse": False,
-                          "market_data_source": self.market_data_source},
+                          "market_data_source": self.market_data_source,
+                          "qualification_scope": (
+                              "END_TO_END_PAPER_NO_SUBMIT" if self.mode == "SOAK"
+                              else "FAULT_INVARIANT_HARNESS"
+                          )},
             "tests_executed": [result.name for result in self.results] +
                               ["watchdog_and_export_consistency", "reject_persistence"],
             "faults_injected": [asdict(result) for result in self.results],

@@ -52,7 +52,7 @@ jobs:
 
       - name: Cross-surface invariant gate
         if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_cross_surface_invariants.py tests/test_issue421_decision_invariant.py
+        run: pytest -q tests/test_cross_surface_invariants.py tests/test_issue421_decision_invariant.py tests/test_ci_branch_contract.py
 
       - name: System audit fabric gate
         if: github.event_name == 'pull_request'
@@ -61,6 +61,10 @@ jobs:
       - name: Public market-data safety gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_exchange_market_scanner.py tests/test_issue438_market_data_supervision.py
+
+      - name: SOAK decision evidence gate
+        if: github.event_name == 'pull_request'
+        run: pytest -q tests/test_issue441_soak_decision_evidence.py tests/test_autonomous_qualification.py -k "soak or issue441"
 
       - name: Full regression suite
         if: github.event_name != 'pull_request'
