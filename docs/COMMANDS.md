@@ -562,6 +562,197 @@ echo "CID=$CID"
 
 ### 7.1.4 SOAK canlı durum — yalnız read-only
 
+Aşağıdaki üç blok yalnız izole `QDB` üzerinde `sqlite3 -readonly` kullanır. Çalışan SOAK'a write, attach, migration, pause/resume veya runtime müdahalesi yapmaz.
+
+#### SOAK STATUS — tek atımlık özet
+
+`scans`, `empty_scans`, açık PAPER pozisyonu, canonical reject ve reject-label backlog sayaçlarını tek satırda gör:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+WITH campaign_run_ids AS (
+  SELECT burnin_run_id
+  FROM burnin_campaign_runs
+  WHERE campaign_id='$CID'
+),
+canonical AS (
+  SELECT o.*
+  FROM burnin_observations o
+  JOIN campaign_run_ids r
+    ON r.burnin_run_id=o.burnin_run_id
+  WHERE json_valid(COALESCE(o.metrics_json,''))
+    AND UPPER(COALESCE(json_extract(o.metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='CANONICAL_DECISION'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM burnin_observations newer
+      WHERE newer.burnin_run_id=o.burnin_run_id
+        AND newer.id < o.id
+        AND COALESCE(
+              json_extract(newer.metrics_json,'$.reject_decision_id'),
+              json_extract(newer.metrics_json,'$.signal_id'),
+              newer.observation_id
+            ) = COALESCE(
+              json_extract(o.metrics_json,'$.reject_decision_id'),
+              json_extract(o.metrics_json,'$.signal_id'),
+              o.observation_id
+            )
+        AND UPPER(COALESCE(json_extract(newer.metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='CANONICAL_DECISION'
+    )
+),
+probes AS (
+  SELECT
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+)
+SELECT
+  (SELECT campaign_status FROM burnin_campaigns WHERE campaign_id='$CID') AS campaign_status,
+  (SELECT active_run_id FROM burnin_campaigns WHERE campaign_id='$CID') AS active_run_id,
+  (SELECT COUNT(*) FROM probes) AS scans,
+  COALESCE((SELECT SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END) FROM probes),0) AS empty_scans,
+  COALESCE((SELECT status FROM probes ORDER BY probe_index DESC LIMIT 1),'NO_SCAN_YET') AS last_scan_status,
+  COALESCE((SELECT row_count FROM probes ORDER BY probe_index DESC LIMIT 1),0) AS last_scan_rows,
+  (SELECT COUNT(*) FROM burnin_pending_position_outcomes
+   WHERE campaign_id='$CID' AND UPPER(status)='OPEN') AS open_positions,
+  (SELECT COUNT(*) FROM canonical
+   WHERE UPPER(COALESCE(decision,''))='REJECTED') AS rejects,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID') AS reject_labels_total,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID'
+     AND UPPER(status) IN ('PENDING','READY','RESOLVING')) AS reject_pending;
+"
+```
+
+#### SOAK WATCH — 30 saniyede bir
+
+Aynı sayaçları 30 saniyede bir yenile. Durdurmak için `Ctrl+C`:
+
+```bash
+while true; do
+  clear
+  date
+  echo "SOAK: $CID"
+  echo
+
+  sqlite3 -readonly -header -column "$QDB" "
+WITH campaign_run_ids AS (
+  SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id='$CID'
+),
+canonical AS (
+  SELECT o.*
+  FROM burnin_observations o
+  JOIN campaign_run_ids r ON r.burnin_run_id=o.burnin_run_id
+  WHERE json_valid(COALESCE(o.metrics_json,''))
+    AND UPPER(COALESCE(json_extract(o.metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='CANONICAL_DECISION'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM burnin_observations newer
+      WHERE newer.burnin_run_id=o.burnin_run_id
+        AND newer.id < o.id
+        AND COALESCE(json_extract(newer.metrics_json,'$.reject_decision_id'),json_extract(newer.metrics_json,'$.signal_id'),newer.observation_id)
+          = COALESCE(json_extract(o.metrics_json,'$.reject_decision_id'),json_extract(o.metrics_json,'$.signal_id'),o.observation_id)
+        AND UPPER(COALESCE(json_extract(newer.metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='CANONICAL_DECISION'
+    )
+),
+probes AS (
+  SELECT
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+)
+SELECT
+  (SELECT COUNT(*) FROM probes) AS scans,
+  COALESCE((SELECT SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END) FROM probes),0) AS empty_scans,
+  COALESCE((SELECT row_count FROM probes ORDER BY probe_index DESC LIMIT 1),0) AS last_scan_rows,
+  COALESCE((SELECT status FROM probes ORDER BY probe_index DESC LIMIT 1),'NO_SCAN_YET') AS last_scan_status,
+  (SELECT COUNT(*) FROM burnin_pending_position_outcomes
+   WHERE campaign_id='$CID' AND UPPER(status)='OPEN') AS open_positions,
+  (SELECT COUNT(*) FROM canonical
+   WHERE UPPER(COALESCE(decision,''))='REJECTED') AS rejects,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID') AS reject_labels_total,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID'
+     AND UPPER(status) IN ('PENDING','READY','RESOLVING')) AS reject_pending;
+"
+
+  sleep 30
+done
+```
+
+`scans` yaklaşık 5 dakikada bir artar. `open_positions` bu qualification SOAK'ında normalde `0` kalmalıdır; harness decision probe rejection-biased ve no-submit tasarlanmıştır.
+
+#### SOAK HEALTH — DB-backed güvenlik özeti
+
+Campaign/run lineage, son runtime snapshot, heartbeat/reconciliation durumu, backlog ve persistence-failure sayısını tek satırda kontrol et:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+WITH latest_state AS (
+  SELECT *
+  FROM runtime_state_snapshots
+  WHERE campaign_id='$CID'
+  ORDER BY id DESC
+  LIMIT 1
+),
+probe AS (
+  SELECT
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status,
+    event_time
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+  ORDER BY id DESC
+  LIMIT 1
+)
+SELECT
+  c.campaign_status,
+  cr.status AS campaign_run_status,
+  br.status AS burnin_run_status,
+  c.last_heartbeat_at AS campaign_heartbeat_at,
+  ls.runtime_status,
+  ROUND(ls.heartbeat_age_sec,1) AS heartbeat_age_sec,
+  ls.exchange_read_only_status,
+  ls.reconciliation_status,
+  ls.reconciliation_mismatch_count,
+  ls.kill_switch_active,
+  ls.recovery_action_required,
+  ls.fail_closed_reason,
+  ls.last_error AS runtime_last_error,
+  COALESCE((SELECT status FROM probe),'NO_SCAN_YET') AS last_scan_status,
+  COALESCE((SELECT row_count FROM probe),0) AS last_scan_rows,
+  (SELECT COUNT(*) FROM burnin_pending_position_outcomes
+   WHERE campaign_id='$CID' AND UPPER(status)='OPEN') AS open_positions,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID'
+     AND UPPER(status) IN ('PENDING','READY','RESOLVING')) AS reject_backlog,
+  (SELECT COUNT(*) FROM exchange_reconciliation_events
+   WHERE status='PERSISTENCE_FAILED') AS sqlite_persistence_failures,
+  c.last_error AS campaign_last_error
+FROM burnin_campaigns c
+LEFT JOIN burnin_campaign_runs cr
+  ON cr.campaign_id=c.campaign_id AND cr.burnin_run_id=c.active_run_id
+LEFT JOIN burnin_runs br
+  ON br.burnin_run_id=c.active_run_id
+LEFT JOIN latest_state ls ON 1=1
+WHERE c.campaign_id='$CID';
+"
+```
+
+Sağlıklı çalışan SOAK sırasında beklenen ana durum: campaign/run/mapping `RUNNING`, runtime `OPERATING`, heartbeat fresh, `exchange_read_only_status` available/healthy, reconciliation `CLEAN`, mismatch `0`, `open_positions=0`, `sqlite_persistence_failures=0`, fail-closed/recovery alanları boş olmalı. Public probe geçici olarak empty olabilir; final gate ayrıca recovery, empty-rate ve consecutive-empty kurallarını uygular.
+
+> **Önemli:** 30 saniyelik resource/safety invariant'ları SQLite'ta authoritative değildir. RSS/DB/artifact growth, queue-depth ve bütün sample invariant'ları için `soak-resource-samples.jsonl`; final verdict için `qualification-report.json` esas alınır.
+
+
 Campaign/run durumu:
 
 ```bash
