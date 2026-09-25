@@ -4368,13 +4368,20 @@ class RuntimeOrchestrator:
         }
         await self._emit_lifecycle_event(LifecycleEventType.RECONCILIATION_REPAIR.value, symbol, {"reason": f"reconcile_{reason}", "snapshot": snapshot})
 
-    def _mark_heartbeat_persistence_recovery_required(self) -> None:
+    def _mark_heartbeat_persistence_recovery_required(self) -> bool:
+        """Persist the controlled recovery transition before allowing runtime exit.
+
+        Returning False means SQLite is still contended.  The runtime remains
+        alive but fail-closed and retries this transition on the next heartbeat
+        cycle, so the outer campaign supervisor never has to infer a terminal
+        cause from an unexplained runtime exit.
+        """
         self._runtime_status = "RECOVERY_REQUIRED"
         self._recovery_required = True
         self._fail_closed_reason = "SUSTAINED_HEARTBEAT_PERSISTENCE_FAILURE"
         engine = self._resolve_persistence_engine()
         if engine is None or not self._campaign_id:
-            return
+            return True
         try:
             with engine.begin() as conn:
                 terminalize_active_campaign_run(
@@ -4391,6 +4398,7 @@ class RuntimeOrchestrator:
                     },
                     clear_worker_metadata=False,
                 )
+            return True
         except OperationalError as exc:
             if not is_sqlite_busy_error(exc):
                 raise
@@ -4400,11 +4408,22 @@ class RuntimeOrchestrator:
                 self._heartbeat_persistence_failure_streak,
                 self._heartbeat_persistence_failure_threshold,
             )
+            return False
 
     async def _heartbeat_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
                 self.metrics.last_heartbeat_ts = time.time()
+                if (
+                    self._recovery_required
+                    and self._fail_closed_reason == "SUSTAINED_HEARTBEAT_PERSISTENCE_FAILURE"
+                ):
+                    if self._mark_heartbeat_persistence_recovery_required():
+                        self.shutdown()
+                        return
+                    await asyncio.sleep(self.config.heartbeat_interval_sec)
+                    continue
+
                 was_degraded = self.metrics.heartbeat_persistence_degraded
                 try:
                     self._persist_runtime_heartbeat()
@@ -4421,9 +4440,9 @@ class RuntimeOrchestrator:
                         self._heartbeat_persistence_failure_threshold,
                     )
                     if self._heartbeat_persistence_failure_streak >= self._heartbeat_persistence_failure_threshold:
-                        self._mark_heartbeat_persistence_recovery_required()
-                        self.shutdown()
-                        return
+                        if self._mark_heartbeat_persistence_recovery_required():
+                            self.shutdown()
+                            return
                     await asyncio.sleep(self.config.heartbeat_interval_sec)
                     continue
 

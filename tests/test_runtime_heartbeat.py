@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 
 from alphaforge.persistence import init_db
+from alphaforge.burnin_campaign import create_campaign, get_campaign, start_or_resume_campaign
 from alphaforge.runtime import ExecutionMode, RuntimeConfig, RuntimeOrchestrator
 from alphaforge.runtime_heartbeat import (
     ensure_runtime_heartbeat_schema,
@@ -309,6 +310,90 @@ def test_heartbeat_loop_sustained_lock_enters_controlled_recovery_required(tmp_p
     assert runtime._fail_closed_reason == "SUSTAINED_HEARTBEAT_PERSISTENCE_FAILURE"
     assert runtime._fatal_task_exception is None
     assert runtime._stop_event.is_set()
+
+
+def test_sustained_lock_keeps_runtime_alive_until_recovery_state_is_durable(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "heartbeat_durable_recovery.db"
+    seed = sqlite3.connect(db)
+    seed.row_factory = sqlite3.Row
+    campaign = create_campaign(
+        seed,
+        release_id="rel-heartbeat-recovery",
+        duration_days=1,
+        symbols=["BTCUSDT"],
+        intervals=["1h"],
+    )
+    run = start_or_resume_campaign(seed, campaign.campaign_id)
+    seed.commit()
+    seed.execute("PRAGMA journal_mode=WAL")
+    seed.close()
+
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db}",
+        future=True,
+        connect_args={"timeout": 0.01},
+    )
+    runtime = _runtime(engine, ExecutionMode.PAPER)
+    runtime.config.heartbeat_interval_sec = 0.01
+    runtime._heartbeat_persistence_failure_threshold = 1
+    runtime._campaign_id = campaign.campaign_id
+    runtime._burnin_run_id = run["burnin_run_id"]
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_persist_runtime_heartbeat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(_locked_error()),
+    )
+
+    lock_acquired = threading.Event()
+
+    def hold_writer_lock() -> None:
+        blocker = sqlite3.connect(db, timeout=0.01)
+        try:
+            blocker.execute("PRAGMA journal_mode=WAL")
+            blocker.execute("BEGIN IMMEDIATE")
+            lock_acquired.set()
+            time.sleep(0.12)
+            blocker.commit()
+        finally:
+            blocker.close()
+
+    holder = threading.Thread(target=hold_writer_lock)
+    holder.start()
+    assert lock_acquired.wait(timeout=1.0)
+
+    asyncio.run(runtime._heartbeat_loop())
+    holder.join(timeout=1.0)
+    assert not holder.is_alive()
+
+    verify = sqlite3.connect(db)
+    verify.row_factory = sqlite3.Row
+    persisted_campaign = get_campaign(verify, campaign.campaign_id)
+    persisted_run_status = verify.execute(
+        "SELECT status FROM burnin_campaign_runs "
+        "WHERE campaign_id=? AND burnin_run_id=?",
+        (campaign.campaign_id, run["burnin_run_id"]),
+    ).fetchone()[0]
+    events = verify.execute(
+        "SELECT event_type, details_json FROM burnin_campaign_events "
+        "WHERE campaign_id=? AND event_type='RUNTIME_PERSISTENCE_RECOVERY_REQUIRED'",
+        (campaign.campaign_id,),
+    ).fetchall()
+    failed_events = verify.execute(
+        "SELECT COUNT(*) FROM burnin_campaign_events "
+        "WHERE campaign_id=? AND event_type IN ('RUNTIME_SUPERVISION_FAILED','WORKER_UNCAUGHT_EXCEPTION')",
+        (campaign.campaign_id,),
+    ).fetchone()[0]
+    verify.close()
+    engine.dispose()
+
+    assert runtime._fatal_task_exception is None
+    assert runtime._recovery_required is True
+    assert runtime._stop_event.is_set()
+    assert persisted_campaign["campaign_status"] == "RECOVERY_REQUIRED"
+    assert persisted_campaign["last_error"] == "SUSTAINED_HEARTBEAT_PERSISTENCE_FAILURE"
+    assert persisted_run_status == "RECOVERY_REQUIRED"
+    assert len(events) == 1
+    assert failed_events == 0
 
 
 def test_heartbeat_loop_non_lock_database_failure_remains_fatal(tmp_path, monkeypatch) -> None:
