@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-from urllib import request
+import socket
+from urllib import error, request
 
 import pytest
 
 from alphaforge.config import load_config_from_env, runtime_filter_config
 from alphaforge.exchange_market_scanner import (_binance_kline_geometry, _fetch_json_with_latency,
-    enrich_selected_market_geometry, scan_exchange_markets)
+    _scan_binance, enrich_selected_market_geometry, scan_exchange_markets)
 from alphaforge.execution import (
     build_execution_context,
     build_execution_cost_model,
@@ -65,6 +66,7 @@ def test_scan_exchange_markets_uses_public_endpoints_only(monkeypatch: pytest.Mo
     assert any(row.get("source_exchange") == "binance" for row in rows)
     assert any(row.get("source_exchange") == "hyperliquid" for row in rows)
     assert all("symbol" in row and "entry" in row for row in rows)
+    assert rows.diagnostics["status"] == "AVAILABLE"
 
 
 def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -339,6 +341,39 @@ def test_scan_exchange_markets_returns_empty_on_malformed_binance_payload(monkey
     cfg = load_config_from_env()
     rows = asyncio.run(scan_exchange_markets(cfg))
     assert rows == []
+    assert rows.diagnostics["status"] == "UNAVAILABLE"
+    assert rows.diagnostics["cause"] == "MALFORMED_PAYLOAD"
+    assert rows.diagnostics["endpoint"] == "ticker_24hr"
+
+
+@pytest.mark.parametrize(
+    ("exc", "cause", "http_status"),
+    [
+        (TimeoutError("timed out"), "TIMEOUT", None),
+        (OSError("network down"), "NETWORK_ERROR", None),
+        (error.URLError(socket.gaierror(-2, "name resolution failed")), "DNS_FAILURE", None),
+        (error.HTTPError("https://example.invalid", 429, "rate limited", None, None), "HTTP_429", 429),
+        (error.HTTPError("https://example.invalid", 503, "unavailable", None, None), "HTTP_5XX", 503),
+        (json.JSONDecodeError("invalid json", "{", 1), "JSON_DECODE_ERROR", None),
+    ],
+)
+def test_binance_provider_failures_are_queryable_and_not_valid_empty(
+    monkeypatch: pytest.MonkeyPatch, exc: BaseException, cause: str, http_status: int | None,
+) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+
+    def _raise(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", _raise)
+    rows = _scan_binance(load_config_from_env(), timeout_sec=0.1)
+
+    assert rows == []
+    assert rows.diagnostics["status"] == "UNAVAILABLE"
+    assert rows.diagnostics["provider"] == "binance"
+    assert rows.diagnostics["cause"] == cause
+    assert rows.diagnostics["endpoint"] == "exchangeInfo"
+    assert rows.diagnostics["http_status"] == http_status
 
 
 def test_scan_exchange_markets_handles_exchange_failure(monkeypatch: pytest.MonkeyPatch) -> None:
