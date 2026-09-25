@@ -292,7 +292,7 @@ def test_heartbeat_loop_sustained_lock_enters_controlled_recovery_required(tmp_p
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'heartbeat_loop_sustained.db'}")
     runtime = _runtime(engine, ExecutionMode.PAPER)
     runtime.config.heartbeat_interval_sec = 0.0
-    runtime.config.heartbeat_persistence_failure_threshold = 2
+    runtime._heartbeat_persistence_failure_threshold = 2
     runtime._persist_runtime_state_snapshot = lambda *_args, **_kwargs: None
     runtime._persist_runtime_heartbeat = lambda *_args, **_kwargs: (_ for _ in ()).throw(_locked_error())
 
