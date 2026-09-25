@@ -35,7 +35,11 @@ from alphaforge.execution import (
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
-from alphaforge.runtime_heartbeat import save_runtime_heartbeat
+from alphaforge.runtime_heartbeat import (
+    RuntimeHeartbeatPersistenceFailure,
+    is_sqlite_busy_error,
+    save_runtime_heartbeat,
+)
 from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
@@ -63,6 +67,7 @@ from alphaforge.multi_timeframe import BinanceMTFProvider
 from alphaforge.state_direction_shadow import StateDirectionShadowStore, build_state_direction_shadow_draft
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -316,6 +321,8 @@ class RuntimeOrchestrator:
     _unknown_exchange_state: bool = field(default=False, init=False)
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
     _reconciliation_persistence_unhealthy: bool = field(default=False, init=False)
+    _heartbeat_persistence_unhealthy: bool = field(default=False, init=False)
+    _heartbeat_persistence_failure_streak: int = field(default=0, init=False)
     _provider_failure_class: str | None = field(default=None, init=False)
     _transient_provider_outage_started_monotonic: float | None = field(default=None, init=False)
     _provider_failure_count: int = field(default=0, init=False)
@@ -675,6 +682,8 @@ class RuntimeOrchestrator:
             flags.append("KILL_SWITCH_ACTIVE")
         if self._unknown_exchange_state and self.config.execution_mode != ExecutionMode.BACKTEST:
             flags.append("EXCHANGE_STATE_UNKNOWN")
+        if self._heartbeat_persistence_unhealthy:
+            flags.append("HEARTBEAT_PERSISTENCE_DEGRADED")
         if self._exchange_read_only_status == "LOCAL_ONLY":
             flags.append("LOCAL_ONLY_DIAGNOSTIC_RECONCILIATION")
         if self._market_data_health_status == "DEGRADED":
@@ -726,8 +735,8 @@ class RuntimeOrchestrator:
     def _execution_reconciliation_blocked(self) -> bool:
         if self.config.execution_mode == ExecutionMode.BACKTEST:
             return False
-        return bool(self._reconciliation_persistence_unhealthy or self._fail_closed_reason
-                    or self._recovery_required or self._unknown_exchange_state
+        return bool(self._reconciliation_persistence_unhealthy or self._heartbeat_persistence_unhealthy
+                    or self._fail_closed_reason or self._recovery_required or self._unknown_exchange_state
                     or self._resolver_provider_unavailable or self._resolver_provider_recovery_pending
                     or self._exchange_read_only_status == "UNAVAILABLE"
                     or self._reconciliation_status in {"EXCHANGE_STATE_UNKNOWN", "DIRTY", "PERSISTENCE_FAILED"})
@@ -4289,6 +4298,8 @@ class RuntimeOrchestrator:
         now = time.time()
         if self._reconciliation_persistence_unhealthy:
             return "RECONCILIATION_PERSISTENCE_FAILED"
+        if self._heartbeat_persistence_unhealthy:
+            return "RUNTIME_HEARTBEAT_PERSISTENCE_FAILED"
         if self._fail_closed_reason:
             return self._fail_closed_reason
         if self._recovery_required:
@@ -4336,12 +4347,39 @@ class RuntimeOrchestrator:
         }
         await self._emit_lifecycle_event(LifecycleEventType.RECONCILIATION_REPAIR.value, symbol, {"reason": f"reconcile_{reason}", "snapshot": snapshot})
 
+    def _mark_runtime_heartbeat_persistence_failure(self, exc: BaseException) -> None:
+        self._heartbeat_persistence_unhealthy = True
+        self._heartbeat_persistence_failure_streak += 1
+        self._runtime_status = "RECOVERY_REQUIRED"
+        self._last_error = str(exc)
+        if self._fail_closed_reason in {None, "RUNTIME_HEARTBEAT_PERSISTENCE_FAILED"}:
+            self._fail_closed_reason = "RUNTIME_HEARTBEAT_PERSISTENCE_FAILED"
+        log = logger.error if self._heartbeat_persistence_failure_streak >= 3 else logger.warning
+        log(
+            "runtime_heartbeat_persistence_degraded streak=%s reason=%s",
+            self._heartbeat_persistence_failure_streak,
+            exc,
+        )
+
+    def _mark_runtime_heartbeat_persistence_recovered(self) -> None:
+        if not self._heartbeat_persistence_unhealthy:
+            return
+        prior_streak = self._heartbeat_persistence_failure_streak
+        self._heartbeat_persistence_unhealthy = False
+        self._heartbeat_persistence_failure_streak = 0
+        logger.warning(
+            "runtime_heartbeat_persistence_recovered prior_failure_streak=%s; "
+            "execution remains fail-closed until clean reconciliation commits",
+            prior_streak,
+        )
+
     async def _heartbeat_loop(self) -> None:
-        try:
-            while not self._stop_event.is_set():
+        while not self._stop_event.is_set():
+            try:
                 self.metrics.last_heartbeat_ts = time.time()
                 self._persist_runtime_heartbeat()
                 self._persist_runtime_state_snapshot("OPERATING")
+                self._mark_runtime_heartbeat_persistence_recovered()
                 logger.info(
                     "runtime_heartbeat=%s persistence_enabled=%s top_selection_reject_reasons=%s top_selection_advisory_reasons=%s decision_gate_blockers=%s",
                     self.metrics,
@@ -4350,9 +4388,15 @@ class RuntimeOrchestrator:
                     dict(sorted(self._last_scan_advisory_summary.items(), key=lambda item: item[1], reverse=True)[:3]),
                     self._last_scan_gate_blockers,
                 )
-                await asyncio.sleep(self.config.heartbeat_interval_sec)
-        except asyncio.CancelledError:
-            raise
+            except asyncio.CancelledError:
+                raise
+            except RuntimeHeartbeatPersistenceFailure as exc:
+                self._mark_runtime_heartbeat_persistence_failure(exc)
+            except OperationalError as exc:
+                if not is_sqlite_busy_error(exc):
+                    raise
+                self._mark_runtime_heartbeat_persistence_failure(exc)
+            await asyncio.sleep(self.config.heartbeat_interval_sec)
 
     async def _reconciliation_loop(self) -> None:
         try:
@@ -4435,10 +4479,22 @@ class RuntimeOrchestrator:
                 previous_unknown = bool(self._unknown_exchange_state or self._transient_provider_outage_started_monotonic is not None or self._resolver_provider_recovery_pending)
                 self._unknown_exchange_state = not complete or previous_unknown
                 self._exchange_read_only_status = "AVAILABLE" if complete else "UNAVAILABLE"
-                if complete and self._fail_closed_reason in {
-                    "EXCHANGE_STATE_UNKNOWN", "EXCHANGE_RECONCILIATION_UNAVAILABLE", "RECONCILIATION_PERSISTENCE_FAILED", "RESOLVER_PROVIDER_UNAVAILABLE"
+                recoverable_reason = self._fail_closed_reason
+                if complete and recoverable_reason in {
+                    "EXCHANGE_STATE_UNKNOWN",
+                    "EXCHANGE_RECONCILIATION_UNAVAILABLE",
+                    "RECONCILIATION_PERSISTENCE_FAILED",
+                    "RESOLVER_PROVIDER_UNAVAILABLE",
+                    "RUNTIME_HEARTBEAT_PERSISTENCE_FAILED",
                 } and not self._resolver_provider_unavailable:
-                    self._fail_closed_reason = None
+                    heartbeat_recovered = (
+                        recoverable_reason != "RUNTIME_HEARTBEAT_PERSISTENCE_FAILED"
+                        or not self._heartbeat_persistence_unhealthy
+                    )
+                    if heartbeat_recovered:
+                        self._fail_closed_reason = None
+                        if recoverable_reason == "RUNTIME_HEARTBEAT_PERSISTENCE_FAILED":
+                            self._last_error = None
                 if complete and self._resolver_provider_unavailable:
                     self._fail_closed_reason = "RESOLVER_PROVIDER_UNAVAILABLE"
                 if not complete:
