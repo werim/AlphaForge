@@ -1,9 +1,9 @@
 name: Qualification 438 FAST
 
 on:
-  push:
+  pull_request:
     branches:
-      - qualification-438-fast
+      - dev
 
 permissions:
   contents: read
