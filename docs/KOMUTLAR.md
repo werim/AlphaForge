@@ -393,6 +393,271 @@ pytest -q --ff
 
 ---
 
+## 7.1 Güvenli autonomous qualification: FAST + SOAK
+
+`alphaforge.autonomous_qualification` normal PAPER campaign'ına bağlanan bir komut değildir. Her çalıştırmada seçilen output root altında yeni bir `alphaforge-qualification-*` klasörü, izole `qualification.sqlite3` ve ayrı artifacts dizini oluşturur. Harness süreç içinde PAPER modunu zorlar, LIVE order submission'ı kapatır ve production DB keşfi/aktif runtime reuse yapmaz.
+
+> **Kural:** Aktif PAPER DB yolunu bu harness'e verme. CLI'da `--db` seçeneği yoktur. Public SOAK dış market-data erişilebilirliğini doğrular; `--market-data synthetic` yalnız offline/synthetic stabilite kanıtıdır ve public-feed release gate'inin yerine geçmez.
+
+### 7.1.1 Exact SHA + test + FAST önkoşulu
+
+SOAK'ı release edeceğin exact commit üzerinde çalıştır. Commit/config değişirse eski FAST/SOAK sonucu yeni SHA'yı qualify etmez.
+
+```bash
+git status --short
+git rev-parse HEAD
+pytest -q
+
+OUT="/private/tmp/alphaforge-autonomous-qualification"
+mkdir -p "$OUT"
+
+.venv/bin/python -m alphaforge.autonomous_qualification \
+  --mode fast \
+  --output-root "$OUT"
+FAST_RC=$?
+echo "FAST_RC=$FAST_RC"
+```
+
+Exit code: `0=PASS`, `1=NEEDS_FIX`, `2=BLOCKED`. FAST `PASS` olmadan release SOAK'a geçme.
+
+### 7.1.2 6 saatlik public SOAK
+
+`--soak-hours` yalnız `6..24` kabul eder. Release-quality dış feed kanıtı için `public` kullan:
+
+```bash
+.venv/bin/python -m alphaforge.autonomous_qualification \
+  --mode soak \
+  --soak-hours 6 \
+  --market-data public \
+  --output-root "$OUT"
+SOAK_RC=$?
+echo "SOAK_RC=$SOAK_RC"
+```
+
+Harness 30 saniyede bir safety/resource sample alır; public market-data scan her 10 sample'da bir, yani yaklaşık 5 dakikada bir çalışır. SOAK foreground çalışır; izleme sorgularını ikinci terminalden çalıştır.
+
+Offline karşılaştırma gerekiyorsa:
+
+```bash
+.venv/bin/python -m alphaforge.autonomous_qualification \
+  --mode soak \
+  --soak-hours 6 \
+  --market-data synthetic \
+  --output-root "$OUT"
+```
+
+Synthetic SOAK external exchange availability kanıtı değildir.
+
+### 7.1.3 İzole SOAK DB/artifact yollarını bul
+
+```bash
+OUT="/private/tmp/alphaforge-autonomous-qualification"
+RUN_DIR="$(ls -td "$OUT"/alphaforge-qualification-* 2>/dev/null | head -n 1)"
+[ -n "$RUN_DIR" ] || { echo "qualification run bulunamadı"; exit 1; }
+
+QDB="$RUN_DIR/qualification.sqlite3"
+SAMPLES="$RUN_DIR/artifacts/soak-resource-samples.jsonl"
+REPORT="$RUN_DIR/artifacts/qualification-report.json"
+
+printf 'RUN_DIR=%s\nQDB=%s\nSAMPLES=%s\nREPORT=%s\n' \
+  "$RUN_DIR" "$QDB" "$SAMPLES" "$REPORT"
+test -f "$QDB"
+```
+
+SOAK campaign kimliğini tahmin etme; izole DB'den al:
+
+```bash
+CID="$(sqlite3 -readonly "$QDB" "
+SELECT campaign_id
+FROM burnin_campaigns
+WHERE release_id GLOB 'AQH-*-soak_normal_market_data'
+ORDER BY created_at DESC
+LIMIT 1;
+")"
+
+[ -n "$CID" ] || { echo "SOAK campaign henüz oluşmadı"; exit 1; }
+echo "CID=$CID"
+```
+
+### 7.1.4 SOAK canlı durum — yalnız read-only
+
+Campaign/run durumu:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT
+  c.campaign_id,
+  c.release_id,
+  c.campaign_status,
+  c.active_run_id,
+  c.last_heartbeat_at,
+  c.last_error,
+  cr.continuation_sequence,
+  cr.status AS campaign_run_status,
+  br.status AS burnin_run_status
+FROM burnin_campaigns c
+LEFT JOIN burnin_campaign_runs cr
+  ON cr.campaign_id=c.campaign_id AND cr.burnin_run_id=c.active_run_id
+LEFT JOIN burnin_runs br
+  ON br.burnin_run_id=c.active_run_id
+WHERE c.campaign_id='$CID';
+"
+```
+
+Public market-data probe özeti:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+WITH p AS (
+  SELECT
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status,
+    event_time
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+), x AS (
+  SELECT
+    *,
+    LAG(CASE WHEN row_count=0 THEN 1 ELSE 0 END)
+      OVER (ORDER BY probe_index) AS previous_empty
+  FROM p
+)
+SELECT
+  COUNT(*) AS probes,
+  SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END) AS empty_probes,
+  MAX(1, CAST(COUNT(*)/20 AS INTEGER)) AS allowed_empty_probes,
+  ROUND(100.0*SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END)
+        / NULLIF(COUNT(*),0), 2) AS empty_pct,
+  SUM(CASE WHEN row_count=0 AND previous_empty=1 THEN 1 ELSE 0 END)
+    AS consecutive_empty_pairs,
+  (SELECT status FROM p ORDER BY probe_index DESC LIMIT 1) AS last_status,
+  (SELECT row_count FROM p ORDER BY probe_index DESC LIMIT 1) AS last_row_count
+FROM x;
+"
+```
+
+Son probe/recovery kayıtları:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT
+  id, event_time, event_type,
+  json_extract(details_json,'$.probe_index') AS probe_index,
+  json_extract(details_json,'$.row_count') AS row_count,
+  json_extract(details_json,'$.status') AS status,
+  json_extract(details_json,'$.latency_seconds') AS latency_seconds,
+  json_extract(details_json,'$.empty_probe_count') AS recovered_empty_count,
+  json_extract(details_json,'$.cause') AS cause,
+  json_extract(details_json,'$.error_class') AS error_class,
+  json_extract(details_json,'$.http_status') AS http_status
+FROM burnin_campaign_events
+WHERE campaign_id='$CID'
+  AND event_type IN ('QUALIFICATION_MARKET_DATA_PROBE','QUALIFICATION_MARKET_DATA_RECOVERED')
+ORDER BY id DESC
+LIMIT 20;
+"
+```
+
+Resource/safety samples SQL tablosunda değildir; canonical canlı örnek dosyası `soak-resource-samples.jsonl`'dır. Son sample'ı kompakt gör:
+
+```bash
+python - "$SAMPLES" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+rows = [line for line in path.read_text().splitlines() if line.strip()]
+if not rows:
+    raise SystemExit("henüz SOAK sample yok")
+s = json.loads(rows[-1])
+failed = [name for name, passed in s.get("invariants", {}).items() if not passed]
+print("at=", s.get("at"))
+print("elapsed_seconds=", s.get("elapsed_seconds"))
+print("heartbeat_age_seconds=", s.get("heartbeat_age_seconds"))
+print("reconciliation_status=", s.get("reconciliation_status"))
+print("resolver_status=", s.get("resolver_status"))
+print("pending_resolver_backlog=", s.get("pending_resolver_backlog"))
+print("pending_reject_backlog=", s.get("pending_reject_backlog"))
+print("queue_depths=", s.get("queue_depths"))
+print("paper_executions=", s.get("paper_executions"))
+print("failed_invariants=", failed)
+PY
+```
+
+### 7.1.5 SOAK tamamlanınca final raporu oku
+
+```bash
+test -f "$REPORT" || { echo "final report henüz yok"; exit 1; }
+
+python - "$REPORT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    r = json.load(f)
+
+soak = next((x for x in r.get("faults_injected", [])
+             if x.get("name") == "soak_normal_market_data"), {})
+obs = soak.get("observed_behavior", {})
+resources = r.get("soak_resources") or {}
+
+print("overall_verdict=", r.get("overall_verdict"))
+print("mode=", r.get("mode"))
+print("duration_seconds=", r.get("actual_wall_clock_duration_seconds"))
+print("isolation=", r.get("isolation"))
+print("soak_verdict=", soak.get("verdict"))
+print("market_data_probes=", len(obs.get("market_data_probes") or []))
+print("empty_market_data_probes=", obs.get("empty_market_data_probes"))
+print("max_consecutive_empty_market_data_probes=",
+      obs.get("max_consecutive_empty_market_data_probes"))
+print("growth_flags=", resources.get("growth_flags"))
+print("resource_sample_count=", resources.get("sample_count"))
+print("invariant_failures=", r.get("invariant_failures"))
+print("soak_sample_invariant_failures=", r.get("soak_sample_invariant_failures"))
+print("persistence_gaps=", r.get("persistence_gaps"))
+print("unexplained_state_transitions=", r.get("unexplained_state_transitions"))
+print("campaign_run_lineage_consistency=", r.get("campaign_run_lineage_consistency"))
+print("soak_checks=")
+for name, passed in sorted((soak.get("invariant_checks") or {}).items()):
+    print(f"  {name}={passed}")
+PY
+```
+
+### 7.1.6 Public SOAK PASS gate'i
+
+Harness'in mevcut gate mantığında release-quality public SOAK için en az şunlar birlikte sağlanmalıdır:
+
+- full wall-clock süre tamamlanmış olmalı;
+- normal market data görülmüş ve final probe available olmalı;
+- `max_consecutive_empty_market_data_probes <= 1` olmalı; yani boş bir 5 dakikalık probe bir sonraki probe'da toparlanmalı;
+- empty probe sayısı `<= max(1, probes // 20)` olmalı;
+- bütün 30 saniyelik safety invariant sample'ları geçmeli;
+- reconciliation her sample arasında CLEAN kalmalı, resolver sağlıklı olmalı ve worker canlı kalmalı;
+- harness SOAK decision probe canonical PAPER evidence üretmeli fakat order submit/PAPER execution oluşturmamalı;
+- resource `growth_flags` boş olmalı ve monitor error olmamalı;
+- persistence gap, unexplained worker transition veya campaign/run lineage drift olmamalı.
+
+Resource gate ayrıca RSS growth `>128 MiB`, artifact growth `>64 MiB`, DB growth `>max(64 MiB, 160 KiB × sample_count)`, son 12 sample'da `>8 MiB` sürekli artan RSS ve queue/backlog `>32` durumlarını flag eder.
+
+Full repository suite + FAST + full **public** SOAK aynı exact code/config üzerinde `PASS` olmadan bunu release qualification olarak kullanma. Bu gate LIVE trading yetkisi vermez; yalnız yeni gerçek PAPER burn-in'e geçiş için kanıttır.
+
+### 7.1.7 SOAK'ı erken durdurma
+
+Foreground harness için terminalde:
+
+```text
+Ctrl+C
+```
+
+Harness `finally` cleanup yolunda aktif qualification context'lerini terminalize eder ve process-local environment'ı geri yükler. Ancak erken kesilmiş run tam wall-clock gate'ini karşılamaz ve geçerli `PASS` olarak kullanılamaz; exact SHA/config üzerinde baştan tam SOAK çalıştır.
+
+SOAK SQL sorgularının daha ayrıntılı ve kanonik kopyası için `docs/SQLcheat.md` içindeki **Autonomous qualification / SOAK isolated database** bölümünü kullan.
+
+---
+
 ## 8. BACKTEST çalıştır
 
 ### Doğrudan Python komutu

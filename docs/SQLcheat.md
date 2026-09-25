@@ -889,6 +889,229 @@ Blocker list as one row per JSON array element, when JSON1 is available:
 sqlite3 -readonly -header -column "$DB" "SELECT q.qualification_id,q.generated_at,j.value AS blocker FROM burnin_qualification_snapshots q,json_each(CASE WHEN json_valid(q.blockers_json) THEN q.blockers_json ELSE '[]' END) j WHERE q.campaign_id='$CID' ORDER BY q.generated_at DESC;"
 ```
 
+### 17.1 Autonomous qualification / SOAK isolated database
+
+`alphaforge.autonomous_qualification --mode soak` normal campaign DB'sine attach olmaz. Her invocation kendi `qualification.sqlite3` dosyasını oluşturur. Aşağıdaki sorgularda `QDB` yalnız bu izole qualification DB olmalıdır; aktif PAPER campaign DB'sini `QDB` olarak kullanma.
+
+Run klasörünü `docs/KOMUTLAR.md` içindeki SOAK bölümünden aldıktan sonra:
+
+```bash
+QDB="$RUN_DIR/qualification.sqlite3"
+```
+
+SOAK scenario campaign/run/qualification kimliklerini DB'den çıkar:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT
+  c.campaign_id,
+  c.release_id,
+  c.campaign_status,
+  c.active_run_id,
+  c.created_at,
+  c.last_heartbeat_at,
+  c.last_error,
+  json_extract(c.source_provenance_json,'$.qualification_run_id') AS qualification_run_id
+FROM burnin_campaigns c
+WHERE c.release_id GLOB 'AQH-*-soak_normal_market_data'
+ORDER BY c.created_at DESC;
+"
+```
+
+Shell değişkenleri:
+
+```bash
+CID="$(sqlite3 -readonly "$QDB" "SELECT campaign_id FROM burnin_campaigns WHERE release_id GLOB 'AQH-*-soak_normal_market_data' ORDER BY created_at DESC LIMIT 1;")"
+RID="$(sqlite3 -readonly "$QDB" "SELECT active_run_id FROM burnin_campaigns WHERE campaign_id='$CID';")"
+QID="$(sqlite3 -readonly "$QDB" "SELECT json_extract(source_provenance_json,'$.qualification_run_id') FROM burnin_campaigns WHERE campaign_id='$CID';")"
+printf 'CID=%s\nRID=%s\nQID=%s\n' "$CID" "$RID" "$QID"
+```
+
+#### 17.1.1 Public market-data probe history
+
+Harness market-data availability evidence is persisted as `QUALIFICATION_MARKET_DATA_PROBE`; a recovered outage adds `QUALIFICATION_MARKET_DATA_RECOVERED`.
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT
+  id,
+  event_time,
+  event_type,
+  json_extract(details_json,'$.probe_index') AS probe_index,
+  json_extract(details_json,'$.row_count') AS row_count,
+  json_extract(details_json,'$.status') AS status,
+  json_extract(details_json,'$.classification') AS classification,
+  json_extract(details_json,'$.latency_seconds') AS latency_seconds,
+  json_extract(details_json,'$.empty_probe_count') AS recovered_empty_count,
+  json_extract(details_json,'$.cause') AS cause,
+  json_extract(details_json,'$.provider') AS provider,
+  json_extract(details_json,'$.endpoint') AS endpoint,
+  json_extract(details_json,'$.error_class') AS error_class,
+  json_extract(details_json,'$.http_status') AS http_status
+FROM burnin_campaign_events
+WHERE campaign_id='$CID'
+  AND event_type IN ('QUALIFICATION_MARKET_DATA_PROBE','QUALIFICATION_MARKET_DATA_RECOVERED')
+ORDER BY id;
+"
+```
+
+#### 17.1.2 Probe gate summary
+
+Bu query final verdict üretmez; yalnız public-feed gate girdilerini güvenli biçimde özetler. `consecutive_empty_pairs=0`, `empty_probes<=allowed_empty_probes` ve son probe'un available olması public-feed gate'inin gerekli parçalarıdır.
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+WITH p AS (
+  SELECT
+    id,
+    event_time,
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+), x AS (
+  SELECT
+    *,
+    LAG(CASE WHEN row_count=0 THEN 1 ELSE 0 END)
+      OVER (ORDER BY probe_index) AS previous_empty
+  FROM p
+)
+SELECT
+  COUNT(*) AS probes,
+  SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END) AS empty_probes,
+  MAX(1, CAST(COUNT(*)/20 AS INTEGER)) AS allowed_empty_probes,
+  ROUND(100.0*SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END)
+        / NULLIF(COUNT(*),0), 2) AS empty_pct,
+  SUM(CASE WHEN row_count=0 AND previous_empty=1 THEN 1 ELSE 0 END)
+    AS consecutive_empty_pairs,
+  (SELECT status FROM p ORDER BY probe_index DESC LIMIT 1) AS last_status,
+  (SELECT row_count FROM p ORDER BY probe_index DESC LIMIT 1) AS last_row_count,
+  (SELECT event_time FROM p ORDER BY probe_index DESC LIMIT 1) AS last_probe_at
+FROM x;
+"
+```
+
+Recovery rows only:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT
+  id, event_time,
+  json_extract(details_json,'$.recovered_at') AS recovered_at,
+  json_extract(details_json,'$.latency_seconds') AS recovery_latency_seconds,
+  json_extract(details_json,'$.empty_probe_count') AS empty_probe_count,
+  json_extract(details_json,'$.probe_index') AS recovery_probe_index
+FROM burnin_campaign_events
+WHERE campaign_id='$CID'
+  AND event_type='QUALIFICATION_MARKET_DATA_RECOVERED'
+ORDER BY id;
+"
+```
+
+#### 17.1.3 SOAK campaign/run lineage and runtime state
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT
+  c.campaign_id,
+  c.campaign_status,
+  c.active_run_id,
+  c.last_heartbeat_at,
+  c.last_error,
+  cr.continuation_sequence,
+  cr.status AS campaign_run_status,
+  br.status AS burnin_run_status
+FROM burnin_campaigns c
+LEFT JOIN burnin_campaign_runs cr
+  ON cr.campaign_id=c.campaign_id AND cr.burnin_run_id=c.active_run_id
+LEFT JOIN burnin_runs br
+  ON br.burnin_run_id=c.active_run_id
+WHERE c.campaign_id='$CID';
+
+SELECT
+  id, timestamp, runtime_status, heartbeat_age_sec,
+  exchange_read_only_status, reconciliation_status,
+  active_position_count, pending_order_count,
+  orphan_position_count, orphan_order_count,
+  recovery_action_required, fail_closed_reason, last_error
+FROM runtime_state_snapshots
+WHERE campaign_id='$CID'
+ORDER BY id DESC
+LIMIT 10;
+"
+```
+
+Worker lifecycle and fault/probe event counts:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT event_type,COUNT(*) AS n,MIN(event_time) AS first_seen,MAX(event_time) AS last_seen
+FROM burnin_campaign_events
+WHERE campaign_id='$CID'
+  AND event_type LIKE 'QUALIFICATION_%'
+GROUP BY event_type
+ORDER BY event_type;
+"
+```
+
+#### 17.1.4 SOAK decision-evidence persistence
+
+Harness SOAK decision probe aynı isolated run içinde canonical PAPER decision evidence üretir fakat order submit etmemelidir. Exact canonical `burnin_observations` denominator için [9.1 Canonical campaign scoping](#91-canonical-campaign-scoping) query'sini kullan. Ek persistence yüzeyleri:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT 'decision_evidence' AS surface,COUNT(*) AS n
+FROM decision_evidence
+WHERE run_id='$RID'
+UNION ALL
+SELECT 'order_decisions',COUNT(*)
+FROM order_decisions
+WHERE signal_id LIKE 'qualification:$QID:soak:%'
+UNION ALL
+SELECT 'rejected_signal_reviews',COUNT(*)
+FROM rejected_signal_reviews
+WHERE signal_id LIKE 'qualification:$QID:soak:%'
+UNION ALL
+SELECT 'pending_reject_labels',COUNT(*)
+FROM burnin_pending_reject_labels
+WHERE burnin_run_id='$RID'
+  AND signal_id LIKE 'qualification:$QID:soak:%'
+UNION ALL
+SELECT 'reject_outcomes',COUNT(*)
+FROM burnin_reject_outcomes
+WHERE burnin_run_id='$RID'
+UNION ALL
+SELECT 'trade_outcomes',COUNT(*)
+FROM burnin_trade_outcomes
+WHERE burnin_run_id='$RID'
+UNION ALL
+SELECT 'qualification_snapshots',COUNT(*)
+FROM burnin_qualification_snapshots
+WHERE burnin_run_id='$RID';
+"
+```
+
+SOAK decision probe rejection-biased tasarlanmıştır; gate açısından önemli olan canonical decision evidence'in nonzero olması, decision/order/reject evidence zincirinin persist edilmesi, qualification snapshot'ın run'a scope edilmesi ve execution/submit oluşmamasıdır.
+
+#### 17.1.5 Resource/safety samples SQL değildir
+
+30 saniyelik SOAK safety/resource sample'ları SQLite tablosuna yazılmaz; canonical artifact:
+
+```bash
+SAMPLES="$RUN_DIR/artifacts/soak-resource-samples.jsonl"
+tail -n 3 "$SAMPLES"
+```
+
+Bu JSONL içindeki her sample `heartbeat_age_seconds`, reconciliation/runtime/resolver durumları, queue/backlog, SQLite lock exhaustion, RSS/DB/artifact byte ölçümleri, `paper_executions`, lineage ve `invariants` alanlarını taşır. Resource growth verdict'ini SQL'den yeniden üretme; final `qualification-report.json` içindeki `soak_resources` ve `soak_sample_invariant_failures` authoritative harness çıktısıdır.
+
+Harness gate'i şu resource flag'lerini üretir: `RSS_GROWTH_OVER_128_MIB`, `DB_GROWTH_ABOVE_AUDIT_BUDGET`, `ARTIFACT_GROWTH_OVER_64_MIB`, `SUSTAINED_MONOTONIC_RSS_GROWTH`, `UNBOUNDED_QUEUE_OR_BACKLOG`. DB growth budget `max(64 MiB, 160 KiB × sample_count)`; queue/backlog limiti `32`'dir.
+
+#### 17.1.6 Final report authority
+
+`qualification-report.json` final SOAK authority'dir. SQL sorguları teşhis/kanıt doğrulaması içindir; kendi başına `PASS` üretmez. Release gate için report'ta `overall_verdict=PASS`, `soak_normal_market_data` scenario verdict/check'leri PASS, `soak_resources.growth_flags=[]`, `soak_sample_invariant_failures=[]`, `persistence_gaps=[]`, `unexplained_state_transitions=[]` ve campaign/run lineage consistency true olmalıdır. Synthetic SOAK external public-feed availability kanıtı değildir.
+
 ## 18. Runtime health
 
 ### 18.1 Heartbeat and scan freshness
@@ -1111,6 +1334,7 @@ Check `execution_ctx_missing`, JSON `evidence_status`, source/status fields, `un
 | Open positions | [Open and closed positions](#102-open-and-closed-positions) |
 | Evidence missing | [Evidence quality](#15-evidence-quality) |
 | Qualification blockers | [Qualification](#17-qualification) |
+| SOAK public-feed / isolated qualification DB | [Autonomous qualification / SOAK](#171-autonomous-qualification--soak-isolated-database) |
 | Runtime alive? | [Runtime health](#18-runtime-health) |
 | Find orphan reject labels | [Integrity/orphans](#192-orphan-joins) |
 | Score/RR variability | [Score/RR](#11-score-rr-expectancy-and-adaptive-state) |
