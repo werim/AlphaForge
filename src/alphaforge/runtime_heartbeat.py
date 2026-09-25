@@ -171,6 +171,7 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> str:
         "heartbeat_persistence_recoveries",
         "heartbeat_persistence_degraded",
         "heartbeat_persistence_failure_streak",
+        "heartbeat_persistence_failure_threshold",
     }
     safe = {key: value for key, value in dict(payload or {}).items() if key in permitted}
     return json.dumps(safe, separators=(",", ":"), sort_keys=True)
