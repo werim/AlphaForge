@@ -28,7 +28,7 @@ Run a six-hour SOAK qualification:
   --output-root /private/tmp/alphaforge-autonomous-qualification
 ```
 
-Use `--json` for the full machine-readable result on stdout. Each run also writes `qualification-report.json` and `qualification-report.md` beneath its unique artifact directory. Exit status is `0` for `PASS`, `1` for `NEEDS_FIX`, and `2` for a harness setup/environment `BLOCKED` result. A product-path scenario exception is captured as `NEEDS_FIX`, followed by automatic teardown.
+Use `--json` for the full machine-readable result on stdout. Each run also writes `qualification-report.json` and `qualification-report.md` beneath its unique artifact directory. Final reports pin the Git commit captured when the harness was initialized, record the report-time HEAD and whether it changed during the run, and create a transactionally consistent `artifacts/qualification.sqlite3` snapshot with SHA-256 and `PRAGMA quick_check` metadata before teardown. Evidence references point at that preserved database artifact rather than the disposable runtime database path. Exit status is `0` for `PASS`, `1` for `NEEDS_FIX`, and `2` for a harness setup/environment `BLOCKED` result. A product-path scenario exception is captured as `NEEDS_FIX`, followed by automatic teardown.
 
 ## Architecture
 

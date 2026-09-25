@@ -41,6 +41,7 @@ from alphaforge.burnin_campaign import (
     event,
     export_campaign_bundle,
     get_campaign,
+    git_commit,
     qualify_campaign,
     start_or_resume_campaign,
     terminalize_active_campaign_run,
@@ -152,6 +153,12 @@ class AutonomousQualificationHarness:
         self.worker_lifecycle: list[dict[str, Any]] = []
         self._active_contexts: dict[str, HarnessContext] = {}
         self.started_at = utc_now()
+        # Capture the harness code identity once. A checkout/merge while a long SOAK
+        # is running must not rewrite the authoritative provenance of the process
+        # that actually started the qualification.
+        self.git_commit = git_commit()
+        self._database_artifact_path = self.artifact_dir / "qualification.sqlite3"
+        self._database_artifact: dict[str, Any] | None = None
         self._closed = False
 
     def _record_event(self, campaign_id: str, event_type: str, details: Mapping[str, Any]) -> int:
@@ -291,7 +298,9 @@ class AutonomousQualificationHarness:
                 rows = conn.execute(text(f"SELECT id FROM {table} WHERE {where} ORDER BY id"),
                                     params).scalars().all()
                 if rows:
-                    refs.append(f"sqlite:{self.db_path}#{table}:ids={rows[0]}..{rows[-1]}")
+                    refs.append(
+                        f"sqlite:{self._database_artifact_path}#{table}:ids={rows[0]}..{rows[-1]}"
+                    )
         return refs
 
     def _finish_result(self, ctx: HarnessContext, *, name: str, injected_at: str,
@@ -1189,6 +1198,44 @@ class AutonomousQualificationHarness:
                 else: os.environ[key] = value
             self.close()
 
+    def _snapshot_database_artifact(self) -> dict[str, Any]:
+        """Create a transactionally consistent, immutable qualification DB artifact."""
+        destination = self._database_artifact_path
+        temporary = destination.with_name(
+            f".{destination.name}.{uuid.uuid4().hex}.tmp"
+        )
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+        source = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        try:
+            target = sqlite3.connect(temporary)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+        finally:
+            source.close()
+
+        os.replace(temporary, destination)
+        with sqlite3.connect(f"file:{destination}?mode=ro", uri=True) as verify:
+            quick_check = str(verify.execute("PRAGMA quick_check").fetchone()[0])
+        if quick_check.lower() != "ok":
+            raise RuntimeError(
+                f"qualification database artifact failed quick_check: {quick_check}"
+            )
+
+        artifact = {
+            "path": str(destination),
+            "source_database": str(self.db_path),
+            "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+            "size_bytes": destination.stat().st_size,
+            "quick_check": quick_check,
+            "captured_at": utc_now(),
+        }
+        self._database_artifact = artifact
+        return artifact
+
     def _report(self, watchdog_checks: dict[str, bool], watchdog_observed: dict[str, Any],
                 reject_checks: dict[str, bool], reject_observed: dict[str, Any]) -> dict[str, Any]:
         all_checks = [value for result in self.results for value in result.invariant_checks.values()]
@@ -1207,9 +1254,21 @@ class AutonomousQualificationHarness:
         unexplained = [{"runtime_instance_id": rid, **counts} for rid, counts in runtime_lifecycle.items()
                        if counts != {"starts": 1, "exits": 1}]
         verdict = "PASS" if all(all_checks) and all(result.verdict == "PASS" for result in self.results) and not unexplained else "NEEDS_FIX"
+        database_artifact = self._snapshot_database_artifact()
+        report_time_git_commit = git_commit()
         report = {
             "schema_version": "autonomous_qualification_v1", "overall_verdict": verdict,
             "qualification_run_id": self.run_id, "mode": self.mode,
+            "git_commit": self.git_commit,
+            "commit_sha": self.git_commit,
+            "git_provenance": {
+                "authoritative_commit": self.git_commit,
+                "authoritative_source": "HARNESS_INITIALIZATION",
+                "captured_at": self.started_at,
+                "report_time_commit": report_time_git_commit,
+                "head_changed_during_run": report_time_git_commit != self.git_commit,
+            },
+            "database_artifact": database_artifact,
             "started_at": self.started_at, "completed_at": utc_now(),
             "actual_wall_clock_duration_seconds": round(
                 time.monotonic() - (self._run_started_monotonic or time.monotonic()), 3
@@ -1266,8 +1325,15 @@ class AutonomousQualificationHarness:
         lines = ["# AlphaForge Autonomous Qualification", "",
                  f"- Overall verdict: **{report['overall_verdict']}**",
                  f"- Mode: `{report['mode']}`", f"- Run: `{report['qualification_run_id']}`",
+                 f"- Git commit: `{report['git_commit']}`",
+                 f"- Git provenance: `{report['git_provenance']['authoritative_source']}`"
+                 f" (report-time HEAD: `{report['git_provenance']['report_time_commit']}`,"
+                 f" changed during run: {report['git_provenance']['head_changed_during_run']})",
                  f"- Actual wall-clock duration: {report['actual_wall_clock_duration_seconds']} seconds",
                  f"- Database: `{report['isolation']['database']}`",
+                 f"- Database artifact: `{report['database_artifact']['path']}`"
+                 f" (sha256: `{report['database_artifact']['sha256']}`,"
+                 f" quick_check: `{report['database_artifact']['quick_check']}`)",
                  f"- Artifacts: `{report['isolation']['artifact_directory']}`", "",
                  "## Fault injection results", "",
                  "| Fault | Class | Verdict | Recovery latency (s) |", "|---|---|---:|---:|"]
