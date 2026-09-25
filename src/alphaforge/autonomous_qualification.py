@@ -1062,7 +1062,8 @@ class AutonomousQualificationHarness:
             "canonical_regime_evidence_consistent":
                 int(evidence.get("complete_mtf_regime_mismatches") or 0) == 0,
             "decision_probe_no_submit":
-                self._soak_decision_probe_error is None
+                self._soak_decision_probe_done
+                and self._soak_decision_probe_error is None
                 and ctx.runtime.metrics.executions == 0,
         }
 
