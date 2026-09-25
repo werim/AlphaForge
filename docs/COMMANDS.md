@@ -2914,6 +2914,83 @@ ORDER BY total_net_r DESC;
 > Reject outcome'da `total_net_r > 0`, otomatik olarak “bu reject yanlıştı” anlamına gelmez.
 > Execution invalidation, ambiguity, attribution ve sample size birlikte değerlendirilmelidir.
 
+## D.6 Reject reason × missed winners / saved losers
+
+Yalnız **complete**, **EXPECTED_FILL_RUNTIME_PARITY** execution basis'li ve reject-quality açısından **attributable** outcome'ları kullan. Böylece legacy/planned-entry veya attribution dışı forward outcome'lar tabloyu kirletmez.
+
+- `missed_winners`: reject edilmeseydi cost sonrası `net R > 0` olacak outcome.
+- `saved_losers`: reject edilmeseydi cost sonrası `net R < 0` olacak outcome.
+- `avoided_loss_r`: saved loser'ların mutlak toplam R değeri.
+- `missed_profit_r`: missed winner'ların toplam pozitif R değeri.
+- `net R = 0` outcome'lar neither missed-winner nor saved-loser sayılır.
+
+```bash
+sqlite3 -readonly -header -column "$DB" "
+SELECT
+    ro.reject_reason,
+    COUNT(*) AS n,
+
+    SUM(CASE
+        WHEN ro.hypothetical_net_r_after_costs > 0
+        THEN 1 ELSE 0
+    END) AS missed_winners,
+
+    SUM(CASE
+        WHEN ro.hypothetical_net_r_after_costs < 0
+        THEN 1 ELSE 0
+    END) AS saved_losers,
+
+    ROUND(
+        AVG(ro.hypothetical_net_r_after_costs),
+        4
+    ) AS avg_net_r,
+
+    ROUND(
+        SUM(ro.hypothetical_net_r_after_costs),
+        4
+    ) AS total_net_r,
+
+    ROUND(
+        SUM(CASE
+            WHEN ro.hypothetical_net_r_after_costs < 0
+            THEN -ro.hypothetical_net_r_after_costs
+            ELSE 0
+        END),
+        4
+    ) AS avoided_loss_r,
+
+    ROUND(
+        SUM(CASE
+            WHEN ro.hypothetical_net_r_after_costs > 0
+            THEN ro.hypothetical_net_r_after_costs
+            ELSE 0
+        END),
+        4
+    ) AS missed_profit_r
+
+FROM burnin_reject_outcomes ro
+JOIN burnin_campaign_runs cr
+  ON cr.burnin_run_id = ro.burnin_run_id
+
+WHERE cr.campaign_id = '$CID'
+  AND ro.evidence_complete = 1
+  AND ro.hypothetical_net_r_after_costs IS NOT NULL
+  AND json_extract(
+        ro.payload_json,
+        '$.reject_execution_basis'
+      ) = 'EXPECTED_FILL_RUNTIME_PARITY'
+  AND json_extract(
+        ro.payload_json,
+        '$.reject_quality_attributable'
+      ) = 1
+
+GROUP BY ro.reject_reason
+ORDER BY avoided_loss_r DESC;
+"
+```
+
+> Bu tablo **reject reason kalitesi için attribution-safe ekonomik özet** verir; tek başına threshold promotion gerekçesi değildir. Sample size, regime coverage, execution validity, ambiguity ve concentration birlikte değerlendirilmelidir.
+
 ---
 
 # E. Identity / lineage / coverage kontrolleri
