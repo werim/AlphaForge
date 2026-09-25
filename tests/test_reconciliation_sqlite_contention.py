@@ -140,3 +140,29 @@ def test_non_busy_write_failure_rolls_back_event_and_findings_without_retry(tmp_
     with engine.connect() as conn:
         assert conn.execute(text("SELECT count(*) FROM exchange_reconciliation_events")).scalar_one() == 0
         assert conn.execute(text("SELECT count(*) FROM reconciliation_incidents")).scalar_one() == 0
+
+
+
+def test_clean_reconciliation_releases_recovered_heartbeat_persistence_gate(tmp_path):
+    path = tmp_path / "heartbeat-recovery-gate.db"
+    engine = init_db(f"sqlite+pysqlite:///{path}")
+    runtime = _runtime(engine)
+    runtime._heartbeat_persistence_unhealthy = False
+    runtime._heartbeat_persistence_failure_streak = 0
+    runtime._fail_closed_reason = "RUNTIME_HEARTBEAT_PERSISTENCE_FAILED"
+    runtime._runtime_status = "RECOVERY_REQUIRED"
+    runtime._last_error = "SQLITE_BUSY runtime heartbeat persistence after 4 attempts"
+
+    asyncio.run(runtime._run_reconciliation_once())
+
+    assert runtime._fail_closed_reason is None
+    assert runtime._last_error is None
+    assert runtime._reconciliation_status == "CLEAN"
+    assert runtime._runtime_status == "OPERATING"
+    assert runtime._evaluate_runtime_risk(
+        "BTCUSDT", {"market_ts": time.time()}
+    ) is None
+    events, states = _rows(engine)
+    assert events[-1][0] == "CLEAN"
+    assert states[-1][0] == "CLEAN"
+    assert states[-1][1] == "RECONCILED"
