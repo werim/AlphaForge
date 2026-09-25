@@ -735,8 +735,9 @@ SELECT
   (SELECT COUNT(*) FROM burnin_pending_reject_labels
    WHERE campaign_id='$CID'
      AND UPPER(status) IN ('PENDING','READY','RESOLVING')) AS reject_backlog,
-  (SELECT COUNT(*) FROM exchange_reconciliation_events
-   WHERE status='PERSISTENCE_FAILED') AS sqlite_persistence_failures,
+  (SELECT COUNT(*) FROM exchange_reconciliation_events e
+   WHERE e.instance_id=ls.instance_id
+     AND e.status='PERSISTENCE_FAILED') AS soak_persistence_failures,
   c.last_error AS campaign_last_error
 FROM burnin_campaigns c
 LEFT JOIN burnin_campaign_runs cr
@@ -748,7 +749,7 @@ WHERE c.campaign_id='$CID';
 "
 ```
 
-Sağlıklı çalışan SOAK sırasında beklenen ana durum: campaign/run/mapping `RUNNING`, runtime `OPERATING`, heartbeat fresh, `exchange_read_only_status` available/healthy, reconciliation `CLEAN`, mismatch `0`, `open_positions=0`, `sqlite_persistence_failures=0`, fail-closed/recovery alanları boş olmalı. Public probe geçici olarak empty olabilir; final gate ayrıca recovery, empty-rate ve consecutive-empty kurallarını uygular.
+Sağlıklı çalışan SOAK sırasında beklenen ana durum: campaign/run/mapping `RUNNING`, runtime `OPERATING`, heartbeat fresh, `exchange_read_only_status` available/healthy, reconciliation `CLEAN`, mismatch `0`, `open_positions=0`, SOAK runtime'ına scoped `soak_persistence_failures=0`, fail-closed/recovery alanları boş olmalı. Public probe geçici olarak empty olabilir; final gate ayrıca recovery, empty-rate ve consecutive-empty kurallarını uygular.
 
 > **Önemli:** 30 saniyelik resource/safety invariant'ları SQLite'ta authoritative değildir. RSS/DB/artifact growth, queue-depth ve bütün sample invariant'ları için `soak-resource-samples.jsonl`; final verdict için `qualification-report.json` esas alınır.
 
