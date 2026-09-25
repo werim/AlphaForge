@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
-from typing import Any, Mapping
+import random
+import time
+from typing import Any, Callable, Mapping, TypeVar
 
 from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from alphaforge.contracts import canonical_utc_timestamp
 
@@ -16,6 +18,11 @@ DEFAULT_FUTURE_TOLERANCE_SEC = 5.0
 _ALLOWED_MODES = {"PAPER", "LIVE"}
 _ALLOWED_STATES = {"OPERATING", "RECOVERY_REQUIRED", "STOPPING"}
 _ALLOWED_EVIDENCE_STATUS = {"MEASURED_RUNTIME_HEARTBEAT"}
+SQLITE_BUSY_RETRY_ATTEMPTS = 4
+SQLITE_BUSY_RETRY_BASE_SECONDS = 0.05
+SQLITE_BUSY_RETRY_MAX_SECONDS = 0.50
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,29 +48,80 @@ class HeartbeatFreshness:
         }
 
 
+def is_sqlite_busy_error(exc: BaseException) -> bool:
+    """Return True only for transient SQLite lock/busy contention."""
+    message = str(getattr(exc, "orig", exc)).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "sqlite_busy" in message
+    )
+
+
+def _with_sqlite_busy_retry(
+    engine: Engine,
+    operation: Callable[[Connection], _T],
+    *,
+    attempts: int = SQLITE_BUSY_RETRY_ATTEMPTS,
+) -> _T:
+    """Run one write transaction with bounded fresh-connection SQLite busy retries."""
+    total_attempts = max(1, int(attempts))
+    for attempt in range(total_attempts):
+        conn = engine.connect()
+        transaction = conn.begin()
+        try:
+            result = operation(conn)
+            transaction.commit()
+            return result
+        except OperationalError as exc:
+            transaction.rollback()
+            # A failed locked transaction must never be recycled into the retry.
+            conn.invalidate()
+            if (
+                engine.dialect.name != "sqlite"
+                or not is_sqlite_busy_error(exc)
+                or attempt + 1 >= total_attempts
+            ):
+                raise
+            base = min(
+                SQLITE_BUSY_RETRY_BASE_SECONDS * (2 ** attempt),
+                SQLITE_BUSY_RETRY_MAX_SECONDS,
+            )
+            time.sleep(base * random.uniform(0.80, 1.20))
+        except BaseException:
+            transaction.rollback()
+            raise
+        finally:
+            conn.close()
+    raise AssertionError("unreachable")
+
+
+def _ensure_runtime_heartbeat_schema_conn(conn: Connection) -> None:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS runtime_heartbeats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            runtime_instance_id TEXT NOT NULL,
+            execution_mode TEXT NOT NULL,
+            heartbeat_ts TEXT NOT NULL,
+            scanner_source TEXT,
+            runtime_state TEXT NOT NULL,
+            last_scan_ts TEXT,
+            last_decision_ts TEXT,
+            active_positions_count INTEGER,
+            pending_orders_count INTEGER,
+            evidence_status TEXT NOT NULL,
+            payload_json TEXT
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_runtime_heartbeats_mode_ts
+        ON runtime_heartbeats(execution_mode, heartbeat_ts DESC, id DESC)
+    """))
+
+
 def ensure_runtime_heartbeat_schema(engine: Engine) -> None:
     """Add the runtime-owned heartbeat evidence table without altering existing data."""
-    with engine.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS runtime_heartbeats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                runtime_instance_id TEXT NOT NULL,
-                execution_mode TEXT NOT NULL,
-                heartbeat_ts TEXT NOT NULL,
-                scanner_source TEXT,
-                runtime_state TEXT NOT NULL,
-                last_scan_ts TEXT,
-                last_decision_ts TEXT,
-                active_positions_count INTEGER,
-                pending_orders_count INTEGER,
-                evidence_status TEXT NOT NULL,
-                payload_json TEXT
-            )
-        """))
-        conn.execute(text("""
-            CREATE INDEX IF NOT EXISTS ix_runtime_heartbeats_mode_ts
-            ON runtime_heartbeats(execution_mode, heartbeat_ts DESC, id DESC)
-        """))
+    _with_sqlite_busy_retry(engine, _ensure_runtime_heartbeat_schema_conn)
 
 
 def _safe_payload(payload: Mapping[str, Any] | None) -> str:
@@ -109,6 +167,10 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> str:
         "agent_shadow_persistence_retries",
         "agent_shadow_lock_wait_ms",
         "agent_shadow_worker_count",
+        "heartbeat_persistence_failures",
+        "heartbeat_persistence_recoveries",
+        "heartbeat_persistence_degraded",
+        "heartbeat_persistence_failure_streak",
     }
     safe = {key: value for key, value in dict(payload or {}).items() if key in permitted}
     return json.dumps(safe, separators=(",", ":"), sort_keys=True)
@@ -127,6 +189,7 @@ def save_runtime_heartbeat(
     active_positions_count: int = 0,
     pending_orders_count: int = 0,
     payload: Mapping[str, Any] | None = None,
+    retry_attempts: int = SQLITE_BUSY_RETRY_ATTEMPTS,
 ) -> None:
     mode = str(execution_mode or "").strip().upper()
     if mode not in _ALLOWED_MODES:
@@ -137,8 +200,22 @@ def save_runtime_heartbeat(
     state = str(runtime_state or "").strip().upper()
     if state not in _ALLOWED_STATES:
         raise ValueError("unsupported runtime_state")
-    ensure_runtime_heartbeat_schema(engine)
-    with engine.begin() as conn:
+    params = {
+        "runtime_instance_id": instance_id,
+        "execution_mode": mode,
+        "heartbeat_ts": heartbeat_ts or canonical_utc_timestamp(),
+        "scanner_source": scanner_source,
+        "runtime_state": state,
+        "last_scan_ts": last_scan_ts,
+        "last_decision_ts": last_decision_ts,
+        "active_positions_count": max(0, int(active_positions_count)),
+        "pending_orders_count": max(0, int(pending_orders_count)),
+        "evidence_status": "MEASURED_RUNTIME_HEARTBEAT",
+        "payload_json": _safe_payload(payload),
+    }
+
+    def persist(conn: Connection) -> None:
+        _ensure_runtime_heartbeat_schema_conn(conn)
         conn.execute(text("""
             INSERT INTO runtime_heartbeats(
                 runtime_instance_id, execution_mode, heartbeat_ts, scanner_source, runtime_state,
@@ -149,19 +226,9 @@ def save_runtime_heartbeat(
                 :last_scan_ts, :last_decision_ts, :active_positions_count, :pending_orders_count,
                 :evidence_status, :payload_json
             )
-        """), {
-            "runtime_instance_id": instance_id,
-            "execution_mode": mode,
-            "heartbeat_ts": heartbeat_ts or canonical_utc_timestamp(),
-            "scanner_source": scanner_source,
-            "runtime_state": state,
-            "last_scan_ts": last_scan_ts,
-            "last_decision_ts": last_decision_ts,
-            "active_positions_count": max(0, int(active_positions_count)),
-            "pending_orders_count": max(0, int(pending_orders_count)),
-            "evidence_status": "MEASURED_RUNTIME_HEARTBEAT",
-            "payload_json": _safe_payload(payload),
-        })
+        """), params)
+
+    _with_sqlite_busy_retry(engine, persist, attempts=retry_attempts)
 
 
 def fetch_latest_runtime_heartbeat(engine: Engine, *, execution_mode: str | None = None) -> dict[str, Any] | None:
