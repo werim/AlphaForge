@@ -38,6 +38,7 @@ def test_fast_qualification_is_isolated_complete_and_machine_readable(tmp_path: 
         "production_db_discovery": False,
         "active_runtime_reuse": False,
         "market_data_source": "SYNTHETIC",
+        "qualification_scope": "FAULT_INVARIANT_HARNESS",
     }
     assert harness.db_path.parent == harness.run_dir
     assert harness.artifact_dir.parent == harness.run_dir

@@ -64,7 +64,7 @@ jobs:
 
       - name: SOAK decision evidence gate
         if: github.event_name == 'pull_request'
-        run: pytest -q tests/test_issue441_soak_decision_evidence.py tests/test_autonomous_qualification.py -k "soak or issue441"
+        run: pytest -q tests/test_issue441_soak_decision_evidence.py tests/test_autonomous_qualification.py -k "soak or issue441 or fast_qualification_is_isolated_complete_and_machine_readable"
 
       - name: Full regression suite
         if: github.event_name != 'pull_request'
