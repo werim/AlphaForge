@@ -480,6 +480,96 @@ def _canonical_rejected_count(engine: object, campaign_id: str) -> int:
         """), {"cid": campaign_id}).scalar_one())
 
 
+def test_complete_mtf_regime_is_canonical_across_negative_expectancy_reject_evidence(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, _campaign_id, _run_id = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "regime-authority")
+    payload = _canonical_reject_payload("runtime:regime-authority")
+    payload.update({
+        "reason": "NEGATIVE_EXPECTANCY_AFTER_COSTS",
+        "regime": "UNFAVORABLE",
+        "geometry_status": "COMPLETE",
+        "rr": 1.2,
+        "candidate_rr": 1.2,
+        "effective_rr": 0.9,
+        "mtf": {
+            "regime": {
+                "regime": "TRENDING",
+                "evidence_status": "COMPLETE",
+                "direction": "SHORT",
+            }
+        },
+    })
+
+    asyncio.run(runtime._persist_reject(payload))
+
+    with engine.connect() as conn:
+        observation = conn.execute(text(
+            "SELECT regime,metrics_json FROM burnin_observations WHERE decision='REJECTED'"
+        )).one()
+        decision_regime = conn.execute(text(
+            "SELECT regime FROM decision_evidence WHERE signal_id='runtime:regime-authority' AND decision='REJECT'"
+        )).scalar_one()
+        review_regime = conn.execute(text(
+            "SELECT regime FROM rejected_signal_reviews WHERE signal_id='runtime:regime-authority'"
+        )).scalar_one()
+        pending_regime = conn.execute(text(
+            "SELECT regime FROM burnin_pending_reject_labels WHERE signal_id='runtime:regime-authority'"
+        )).scalar_one()
+
+    metrics = json.loads(observation[1])
+    assert observation[0] == "TRENDING"
+    assert decision_regime == "TRENDING"
+    assert review_regime == "TRENDING"
+    assert pending_regime == "TRENDING"
+    assert metrics["canonical_market_regime"] == "TRENDING"
+    assert metrics["legacy_decision_regime"] == "UNFAVORABLE"
+    assert metrics["mtf"]["regime"]["regime"] == "TRENDING"
+
+
+def test_incomplete_mtf_regime_does_not_override_legacy_regime() -> None:
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None,
+    )
+    payload = runtime._canonical_reject_payload({
+        "signal_id": "runtime:incomplete-regime", "symbol": "BTCUSDT",
+        "reason": "NEGATIVE_EXPECTANCY_AFTER_COSTS", "regime": "UNFAVORABLE",
+        "mtf": {"regime": {"regime": "TRENDING", "evidence_status": "INCOMPLETE"}},
+    })
+
+    assert payload["regime"] == "UNFAVORABLE"
+    assert "legacy_decision_regime" not in payload
+
+
+def test_accepted_burnin_persistence_prefers_complete_mtf_regime(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'accepted-regime-authority.db'}")
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    runtime._burnin_run_id = "accepted-regime-authority-run"
+    runtime._persist_burnin_decision({
+        "signal_id": "accepted-regime-authority", "symbol": "ETHUSDT",
+        "decision": "ACCEPTED", "regime": "TREND", "timeframe": "1m",
+        "mtf": {"regime": {"regime": "TRENDING", "evidence_status": "COMPLETE"}},
+    })
+
+    with engine.connect() as conn:
+        observation = conn.execute(text(
+            "SELECT regime,metrics_json FROM burnin_observations WHERE decision='ACCEPTED'"
+        )).one()
+        decision_regime = conn.execute(text(
+            "SELECT regime FROM decision_evidence WHERE signal_id='accepted-regime-authority' AND decision='ACCEPT'"
+        )).scalar_one()
+
+    metrics = json.loads(observation[1])
+    assert observation[0] == "TRENDING"
+    assert decision_regime == "TRENDING"
+    assert metrics["canonical_market_regime"] == "TRENDING"
+    assert metrics["legacy_decision_regime"] == "TREND"
+
+
 def test_same_canonical_reject_persisted_twice_counts_once(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     engine, runtime, campaign_id, _ = _canonical_reject_fixture(
