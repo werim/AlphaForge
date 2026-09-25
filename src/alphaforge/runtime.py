@@ -102,7 +102,6 @@ class RuntimeConfig:
     min_signal_score: float = 0.62
     scan_interval_sec: float = 1.0
     heartbeat_interval_sec: float = 30.0
-    heartbeat_persistence_failure_threshold: int = 3
     max_symbols_per_scan: int = 5
     max_reject_log_entries: int = 1000
     max_concurrent_positions: int = 3
@@ -203,8 +202,6 @@ class RuntimeConfig:
         )
         if int(self.max_clock_skew_ms) < 0:
             raise ValueError("max_clock_skew_ms must be >= 0")
-        if int(self.heartbeat_persistence_failure_threshold) < 1:
-            raise ValueError("heartbeat_persistence_failure_threshold must be >= 1")
         if (self.mtf_execution_confirmation_mode == "SHADOW"
                 and str(getattr(self.execution_mode, "value", self.execution_mode)).upper() != "PAPER"):
             raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
@@ -324,6 +321,7 @@ class RuntimeOrchestrator:
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
     _reconciliation_persistence_unhealthy: bool = field(default=False, init=False)
     _heartbeat_persistence_failure_streak: int = field(default=0, init=False)
+    _heartbeat_persistence_failure_threshold: int = field(default=3, init=False)
     _provider_failure_class: str | None = field(default=None, init=False)
     _transient_provider_outage_started_monotonic: float | None = field(default=None, init=False)
     _provider_failure_count: int = field(default=0, init=False)
@@ -666,6 +664,7 @@ class RuntimeOrchestrator:
                 "heartbeat_persistence_recoveries": self.metrics.heartbeat_persistence_recoveries,
                 "heartbeat_persistence_degraded": self.metrics.heartbeat_persistence_degraded,
                 "heartbeat_persistence_failure_streak": self._heartbeat_persistence_failure_streak,
+                "heartbeat_persistence_failure_threshold": self._heartbeat_persistence_failure_threshold,
             },
         )
 
@@ -4388,7 +4387,7 @@ class RuntimeOrchestrator:
                     details={
                         "runtime_instance_id": self.runtime_instance_id,
                         "failure_streak": self._heartbeat_persistence_failure_streak,
-                        "failure_threshold": self.config.heartbeat_persistence_failure_threshold,
+                        "failure_threshold": self._heartbeat_persistence_failure_threshold,
                     },
                     clear_worker_metadata=False,
                 )
@@ -4399,7 +4398,7 @@ class RuntimeOrchestrator:
                 "heartbeat_persistence_recovery_state_not_persisted reason=SQLITE_BUSY "
                 "failure_streak=%s threshold=%s",
                 self._heartbeat_persistence_failure_streak,
-                self.config.heartbeat_persistence_failure_threshold,
+                self._heartbeat_persistence_failure_threshold,
             )
 
     async def _heartbeat_loop(self) -> None:
@@ -4419,9 +4418,9 @@ class RuntimeOrchestrator:
                     logger.warning(
                         "heartbeat_persistence_degraded reason=SQLITE_BUSY failure_streak=%s threshold=%s",
                         self._heartbeat_persistence_failure_streak,
-                        self.config.heartbeat_persistence_failure_threshold,
+                        self._heartbeat_persistence_failure_threshold,
                     )
-                    if self._heartbeat_persistence_failure_streak >= self.config.heartbeat_persistence_failure_threshold:
+                    if self._heartbeat_persistence_failure_streak >= self._heartbeat_persistence_failure_threshold:
                         self._mark_heartbeat_persistence_recovery_required()
                         self.shutdown()
                         return
