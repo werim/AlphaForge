@@ -893,7 +893,7 @@ sqlite3 -readonly -header -column "$DB" "SELECT q.qualification_id,q.generated_a
 
 `alphaforge.autonomous_qualification --mode soak` normal campaign DB'sine attach olmaz. Her invocation kendi `qualification.sqlite3` dosyasını oluşturur. Aşağıdaki sorgularda `QDB` yalnız bu izole qualification DB olmalıdır; aktif PAPER campaign DB'sini `QDB` olarak kullanma.
 
-Run klasörünü `docs/KOMUTLAR.md` içindeki SOAK bölümünden aldıktan sonra:
+Run klasörünü `docs/COMMANDS.md` içindeki SOAK bölümünden aldıktan sonra:
 
 ```bash
 QDB="$RUN_DIR/qualification.sqlite3"

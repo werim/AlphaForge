@@ -420,21 +420,101 @@ echo "FAST_RC=$FAST_RC"
 
 Exit code: `0=PASS`, `1=NEEDS_FIX`, `2=BLOCKED`. FAST `PASS` olmadan release SOAK'a geçme.
 
-### 7.1.2 6 saatlik public SOAK
+### 7.1.2 6 saatlik public SOAK — güvenli detached starter (macOS)
 
-`--soak-hours` yalnız `6..24` kabul eder. Release-quality dış feed kanıtı için `public` kullan:
+`--soak-hours` yalnız `6..24` kabul eder. Release-quality dış feed kanıtı için `public` kullan. Aşağıdaki starter exact SHA'yı kaydeder, dirty working tree'yi reddeder, SOAK'ı `nohup` ile terminalden ayırır, `caffeinate -w` ile yalnız SOAK PID yaşadığı sürece Mac'in uyumasını engeller ve başlangıçta process/artifact oluşumunu fail-fast doğrular.
+
+> **Önkoşul:** Bu starter'ı yalnız aynı exact SHA üzerinde full test suite ve FAST `PASS` sonrasında çalıştır. SOAK devam ederken checkout/branch değiştirme, repo dosyalarını düzenleme veya aynı output root altında manuel dosya değiştirme.
 
 ```bash
-.venv/bin/python -m alphaforge.autonomous_qualification \
+set -euo pipefail
+
+SHA="$(git rev-parse HEAD)"
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "ERROR: working tree dirty; final SOAK başlatılmadı"
+  git status --short
+  exit 1
+fi
+
+test -x .venv/bin/python || { echo "ERROR: .venv/bin/python bulunamadı"; exit 1; }
+command -v caffeinate >/dev/null 2>&1 || { echo "ERROR: caffeinate bulunamadı"; exit 1; }
+
+OUTROOT="/private/tmp/alphaforge-final-soak-${SHA:0:8}"
+LOG="/private/tmp/alphaforge-final-soak-${SHA:0:8}.log"
+CAFFEINE_LOG="/private/tmp/alphaforge-final-caffeinate-${SHA:0:8}.log"
+
+mkdir -p "$OUTROOT"
+
+echo "=== START FINAL 6H PUBLIC SOAK ==="
+echo "SHA=$SHA"
+echo "OUTROOT=$OUTROOT"
+echo "LOG=$LOG"
+
+nohup .venv/bin/python -u -m alphaforge.autonomous_qualification \
   --mode soak \
   --soak-hours 6 \
   --market-data public \
-  --output-root "$OUT"
-SOAK_RC=$?
-echo "SOAK_RC=$SOAK_RC"
+  --output-root "$OUTROOT" \
+  >"$LOG" 2>&1 < /dev/null &
+
+SOAK_PID=$!
+
+nohup caffeinate -w "$SOAK_PID" \
+  >"$CAFFEINE_LOG" 2>&1 < /dev/null &
+
+CAFFEINE_PID=$!
+
+ROOT=""
+for _ in {1..30}; do
+  if ! kill -0 "$SOAK_PID" 2>/dev/null; then
+    echo "ERROR: SOAK process erken öldü"
+    tail -100 "$LOG" || true
+    exit 1
+  fi
+  ROOT="$(ls -td "$OUTROOT"/alphaforge-qualification-* 2>/dev/null | head -n 1 || true)"
+  [ -n "$ROOT" ] && break
+  sleep 1
+done
+
+if [ -z "$ROOT" ]; then
+  echo "ERROR: qualification run directory 30 saniye içinde oluşmadı"
+  tail -100 "$LOG" || true
+  exit 1
+fi
+
+if ! kill -0 "$CAFFEINE_PID" 2>/dev/null; then
+  echo "ERROR: caffeinate process erken öldü"
+  cat "$CAFFEINE_LOG" || true
+  exit 1
+fi
+
+echo
+echo "=== FINAL SOAK IDENTITY ==="
+echo "SOAK_PID=$SOAK_PID"
+echo "CAFFEINE_PID=$CAFFEINE_PID"
+echo "SHA=$SHA"
+echo "ROOT=$ROOT"
+echo "LOG=$LOG"
+echo "CAFFEINE_LOG=$CAFFEINE_LOG"
+
+echo
+echo "=== PROCESS CHECK ==="
+ps -p "$SOAK_PID" -o pid=,etime=,state=,command=
+ps -p "$CAFFEINE_PID" -o pid=,etime=,state=,command=
+
+echo
+echo "=== FILES ==="
+find "$ROOT" -maxdepth 2 -type f -print 2>/dev/null
+
+echo
+echo "=== LOG ==="
+tail -30 "$LOG"
 ```
 
-Harness 30 saniyede bir safety/resource sample alır; public market-data scan her 10 sample'da bir, yani yaklaşık 5 dakikada bir çalışır. SOAK foreground çalışır; izleme sorgularını ikinci terminalden çalıştır.
+Harness 30 saniyede bir safety/resource sample alır; public market-data scan her 10 sample'da bir, yani yaklaşık 5 dakikada bir çalışır. Starter terminale geri döndükten sonra SOAK arka planda devam eder; izleme sorgularını ikinci terminalden çalıştır.
+
+SOAK PID ve logları sonradan tekrar bulmak için starter çıktısındaki `SOAK_PID`, `ROOT` ve `LOG` değerlerini sakla. SOAK process'i bittiğinde `caffeinate -w` de kendiliğinden sona erer.
 
 Offline karşılaştırma gerekiyorsa:
 
@@ -451,8 +531,9 @@ Synthetic SOAK external exchange availability kanıtı değildir.
 ### 7.1.3 İzole SOAK DB/artifact yollarını bul
 
 ```bash
-OUT="/private/tmp/alphaforge-autonomous-qualification"
-RUN_DIR="$(ls -td "$OUT"/alphaforge-qualification-* 2>/dev/null | head -n 1)"
+SHA="$(git rev-parse HEAD)"
+OUTROOT="/private/tmp/alphaforge-final-soak-${SHA:0:8}"
+RUN_DIR="$(ls -td "$OUTROOT"/alphaforge-qualification-* 2>/dev/null | head -n 1)"
 [ -n "$RUN_DIR" ] || { echo "qualification run bulunamadı"; exit 1; }
 
 QDB="$RUN_DIR/qualification.sqlite3"
