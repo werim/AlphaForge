@@ -745,7 +745,7 @@ $CID="camp_xxxxxxxxxxxxxxxx"
 ## 14. Son kampanya ID'sini SQL'den bul
 
 ```bash
-sqlite3 "$DB" <<'SQL'
+sqlite3 -readonly "$DB" <<'SQL'
 .headers on
 .mode column
 SELECT
@@ -766,7 +766,7 @@ SQL
 PowerShell tek satır:
 
 ```powershell
-sqlite3 $DB "SELECT campaign_id,release_id,campaign_status,active_run_id,worker_pid,created_at,last_heartbeat_at,last_error FROM burnin_campaigns ORDER BY created_at DESC LIMIT 10;"
+sqlite3 -readonly $DB "SELECT campaign_id,release_id,campaign_status,active_run_id,worker_pid,created_at,last_heartbeat_at,last_error FROM burnin_campaigns ORDER BY created_at DESC LIMIT 10;"
 ```
 
 ---
@@ -1216,7 +1216,7 @@ python -m alphaforge.burnin_cli \
 ## 27. Kampanya özeti
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1239,7 +1239,7 @@ SQL
 ## 28. Son kampanya olayları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 .width 6 28 38 38 100
@@ -1259,7 +1259,7 @@ SQL
 ## 29. Run kayıtları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT *
@@ -1272,7 +1272,7 @@ SQL
 ## 30. Health geçmişi
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1290,7 +1290,7 @@ SQL
 ## 31. Incident geçmişi
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1309,7 +1309,7 @@ SQL
 ## 32. Recovery drill kayıtları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1327,7 +1327,7 @@ SQL
 ## 33. Integrity audit kayıtları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1346,7 +1346,7 @@ SQL
 ## 34. Final release decision
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1365,7 +1365,7 @@ SQL
 ## 35. Karar sayıları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1385,7 +1385,7 @@ SQL
 ## 36. Reject nedenleri
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1413,7 +1413,7 @@ sqlite3 -readonly "$DB" ".schema burnin_trade_outcomes"
 Sonra açık kayıtları say:
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT COUNT(*) AS open_trade_outcomes
@@ -1427,184 +1427,10 @@ AND closed_at IS NULL;
 SQL
 ```
 
-## SQL tüm kampanya 
-Kampanya bilgileri:
+## SQL tüm kampanya
 
-```bash
-sqlite3 -header -column data/campaign/POSTDBFX.db "
--- ============================================================
--- 1) CAMPAIGN / RUN SUMMARY
--- ============================================================
-SELECT
-    c.campaign_id,
-    c.release_id,
-    c.status AS campaign_status,
-    r.burnin_run_id,
-    r.status AS run_status,
-    r.started_at,
-    r.ended_at,
-    r.observed_duration_seconds
-FROM burnin_campaigns c
-LEFT JOIN burnin_campaign_runs r
-  ON r.campaign_id = c.campaign_id
-WHERE c.campaign_id = 'camp_bd9dc5aeadac0b59';
+> **Kaldırılan legacy örnek:** Bu bölümde daha önce `POSTDBFX.db` ve `camp_bd9dc5aeadac0b59` gibi sabit DB/campaign kimlikleri içeren çalıştırılabilir bir SQL bloğu vardı. Yanlış kampanyaya sorgu çalıştırma ve stale şema kullanma riski nedeniyle kaldırıldı. Güncel campaign/reject/accepted-trade sorguları için `docs/SQLcheat.md` kullan; aşağıdaki B–H bölümleri de yalnız read-only operasyon örnekleri olarak tutulur.
 
--- ============================================================
--- 2) ACCEPTED TRADE OUTCOMES — REALIZED EVIDENCE
--- ============================================================
-SELECT
-    symbol,
-    regime,
-    side,
-    COUNT(*) AS n,
-    SUM(CASE WHEN tp_hit = 1 THEN 1 ELSE 0 END) AS tp,
-    SUM(CASE WHEN sl_hit = 1 THEN 1 ELSE 0 END) AS sl,
-    ROUND(AVG(net_pnl_pct), 6) AS avg_net_pnl_pct,
-    ROUND(SUM(net_pnl_pct), 6) AS total_net_pnl_pct,
-    ROUND(AVG(actual_slippage_pct), 6) AS avg_actual_slippage_pct,
-    ROUND(AVG(spread_pct), 6) AS avg_spread_pct,
-    ROUND(AVG(effective_rr), 4) AS avg_effective_rr
-FROM closed_trade_reviews
-WHERE created_at >= (
-    SELECT started_at
-    FROM burnin_campaign_runs
-    WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-    ORDER BY started_at
-    LIMIT 1
-)
-GROUP BY symbol, regime, side
-ORDER BY total_net_pnl_pct DESC;
-
--- ============================================================
--- 3) REJECT FORWARD OUTCOMES — DIAGNOSTIC QUALITY
--- ============================================================
-SELECT
-    reject_reason,
-    symbol,
-    regime,
-    COUNT(*) AS n,
-    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
-    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
-    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
-    SUM(CASE WHEN timeout = 1 THEN 1 ELSE 0 END) AS timeout,
-    ROUND(
-      100.0 * SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END)
-      / NULLIF(SUM(CASE WHEN ambiguous = 0 THEN 1 ELSE 0 END), 0),
-      1
-    ) AS tp_pct_non_ambiguous,
-    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
-    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r,
-    SUM(CASE WHEN execution_invalidated = 1 THEN 1 ELSE 0 END) AS execution_invalidated
-FROM burnin_reject_outcomes
-WHERE burnin_run_id = 'camp_bd9dc5aeadac0b59_run_0000'
-GROUP BY reject_reason, symbol, regime
-ORDER BY total_net_r DESC;
-
--- ============================================================
--- 4) REJECT REASON TOP-LEVEL SUMMARY
--- ============================================================
-SELECT
-    reject_reason,
-    COUNT(*) AS n,
-    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
-    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
-    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
-    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
-    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r
-FROM burnin_reject_outcomes
-WHERE burnin_run_id = 'camp_bd9dc5aeadac0b59_run_0000'
-GROUP BY reject_reason
-ORDER BY total_net_r DESC;
-
--- ============================================================
--- 5) REJECT ATTRIBUTION / PROVENANCE
--- ============================================================
-SELECT
-    COALESCE(
-      json_extract(source_provenance_json, '$.forward_label_subject'),
-      'UNKNOWN'
-    ) AS subject,
-    COALESCE(
-      json_extract(source_provenance_json, '$.reject_quality_attributable'),
-      0
-    ) AS attributable,
-    status,
-    COUNT(*) AS n
-FROM burnin_pending_reject_labels
-WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-GROUP BY subject, attributable, status
-ORDER BY attributable DESC, subject, status;
-
--- ============================================================
--- 6) IDENTITY INTEGRITY
--- ============================================================
-SELECT
-    COUNT(*) AS pending_labels,
-    SUM(
-      CASE WHEN EXISTS (
-        SELECT 1
-        FROM rejected_signal_reviews r
-        WHERE r.reject_decision_id = p.reject_decision_id
-      ) THEN 1 ELSE 0 END
-    ) AS linked_reviews,
-    SUM(
-      CASE WHEN EXISTS (
-        SELECT 1
-        FROM order_decisions d
-        WHERE d.decision_id = p.reject_decision_id
-      ) THEN 1 ELSE 0 END
-    ) AS linked_core_decisions
-FROM burnin_pending_reject_labels p
-WHERE p.campaign_id = 'camp_bd9dc5aeadac0b59';
-
--- ============================================================
--- 7) RESOLVER / PROVIDER FAILURE CLASSIFICATION
--- ============================================================
-SELECT
-    event_type,
-    COUNT(*) AS n,
-    MIN(event_time) AS first_seen,
-    MAX(event_time) AS last_seen
-FROM burnin_campaign_events
-WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-  AND (
-       event_type LIKE '%RESOLVER%'
-       OR event_type LIKE '%PROVIDER%'
-       OR event_type LIKE '%FAIL%'
-  )
-GROUP BY event_type
-ORDER BY n DESC;
-
--- ============================================================
--- 8) EXACT RESOLVER FAILURE PATTERN
--- ============================================================
-SELECT
-    json_extract(details_json, '$.error') AS error,
-    COUNT(*) AS n
-FROM burnin_campaign_events
-WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-  AND event_type = 'RESOLVER_BATCH_FAILED'
-GROUP BY error
-ORDER BY n DESC;
-
--- ============================================================
--- 9) REJECT LABEL FINAL STATUS
--- ============================================================
-SELECT
-    status,
-    COUNT(*) AS n,
-    SUM(CASE WHEN evidence_complete = 1 THEN 1 ELSE 0 END) AS complete
-FROM burnin_pending_reject_labels
-WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-GROUP BY status
-ORDER BY n DESC;
-
--- ============================================================
--- 10) DB HEALTH
--- ============================================================
-PRAGMA quick_check;
-"
-```
 ---
 
 # Süreç ve Hata Teşhisi
@@ -1614,20 +1440,20 @@ PRAGMA quick_check;
 Kampanya PID'sini getir:
 
 ```bash
-sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
+sqlite3 -readonly "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
 ```
 
 macOS / Linux:
 
 ```bash
-PID=$(sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';")
+PID=$(sqlite3 -readonly "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';")
 ps -p "$PID" -o pid,ppid,etime,state,command
 ```
 
 PowerShell:
 
 ```powershell
-$PID_FROM_DB=sqlite3 $DB "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
+$PID_FROM_DB=sqlite3 -readonly $DB "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
 Get-Process -Id $PID_FROM_DB
 ```
 
@@ -1962,11 +1788,11 @@ $env:ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS = "64"
 $env:ALPHAFORGE_AGENT_GRAPH_ENABLED = "false" # disable
 
 $DB = "data/runtime/alphaforge_runtime.db"
-sqlite3 $DB "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
-sqlite3 $DB "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
+sqlite3 -readonly $DB "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
+sqlite3 -readonly $DB "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
 # Confirm the shadow tables have no triggers and compare order/lifecycle counts before and after a shadow-only test.
-sqlite3 $DB "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
-sqlite3 $DB "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
+sqlite3 -readonly $DB "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
+sqlite3 -readonly $DB "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
 pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
 pytest -q
 ```
@@ -1981,10 +1807,10 @@ export ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS=64
 export ALPHAFORGE_AGENT_GRAPH_ENABLED=false # disable
 
 DB=data/runtime/alphaforge_runtime.db
-sqlite3 "$DB" "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
-sqlite3 "$DB" "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
-sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
-sqlite3 "$DB" "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
+sqlite3 -readonly "$DB" "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
+sqlite3 -readonly "$DB" "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
+sqlite3 -readonly "$DB" "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
+sqlite3 -readonly "$DB" "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
 pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
 pytest -q
 ```
@@ -2824,7 +2650,7 @@ sqlite3 -readonly "$DB" ".tables"
 Campaign tabloları:
 
 ```bash
-sqlite3 "$DB" "
+sqlite3 -readonly "$DB" "
 SELECT name
 FROM sqlite_master
 WHERE type='table'
