@@ -8,11 +8,13 @@ This is observational only. It is not a LIVE authorization mechanism and not an 
 
 # AlphaForge Komut Rehberi
 
-> **Son şema/CLI doğrulaması:** 2026-09-15, `dev` branch. Aşağıdaki campaign/PAPER komutlarında `burnin_ops` kanonik arayüzü esas alınır.
+> **Rehber bakım tarihi:** 2026-09-25, `dev` branch. Campaign/PAPER komutlarında `burnin_ops`; SQL tablo/kolon/ilişki ve audit sorgularında `docs/SQLcheat.md` kanonik kaynaktır.
 
 Bu sayfa AlphaForge'u kurmak, güncellemek, test etmek, BACKTEST/PAPER çalıştırmak, dashboard açmak ve çok günlük PAPER burn-in kampanyasını yönetmek için doğrulanmış komutları tek yerde toplar.
 
 > **Güvenlik:** AlphaForge varsayılan olarak LIVE-ready değildir. Bu rehber PAPER ve BACKTEST işletimine odaklanır. LIVE modu veya gerçek emir yolu, yerel readiness kanıtları ve bütün fail-closed güvenlik kapıları geçmeden açılmamalıdır.
+>
+> **SQL güvenlik kuralı:** `docs/SQLcheat.md` SQL için source of truth'tur. Bu dosyadaki gömülü SQL örnekleri yalnızca operasyon kolaylığı içindir; tablo/kolon/ilişki veya sorgu `SQLcheat.md` ile çelişirse `SQLcheat.md` esas alınır. Aktif PAPER DB incelemelerinde `sqlite3 -readonly` kullan; `no such table/column` hatasında önce `SQLcheat.md`, sonra `PRAGMA table_info(...)` ile doğrula.
 
 ---
 
@@ -36,6 +38,9 @@ Konumu doğrula:
 
 ```bash
 pwd
+git rev-parse --show-toplevel
+git remote get-url origin
+git branch --show-current
 git status
 ```
 
@@ -43,6 +48,9 @@ PowerShell:
 
 ```powershell
 Get-Location
+git rev-parse --show-toplevel
+git remote get-url origin
+git branch --show-current
 git status
 ```
 
@@ -69,7 +77,7 @@ git rev-parse --short HEAD
 git log -1 --oneline
 ```
 
-Burn-in preflight temiz çalışma ağacı bekler. `git status` çıktısında commitlenmemiş değişiklik bırakma.
+Burn-in preflight temiz çalışma ağacı bekler. `git status` çıktısında commitlenmemiş değişiklik bırakma. Birden fazla AlphaForge çalışma kopyası varsa (`Public`, `Documents` vb.) DB veya campaign komutundan önce `git rev-parse --show-toplevel` ile doğru kopyada olduğunu doğrula.
 
 ---
 
@@ -280,11 +288,12 @@ export DB
 $DB="data/runtime/alphaforge_runtime.db"
 ```
 
-Dosyayı kontrol et:
+Dosyayı kontrol et. Özellikle kopyala-yapıştır sonrası `DB=\<...>` gibi literal kaçış/angle-bracket karakterlerinin değişkene girmediğini doğrula:
 
 macOS / Linux:
 
 ```bash
+printf 'DB shell-escaped: %q\n' "$DB"
 ls -lh "$DB"
 ```
 
@@ -297,13 +306,13 @@ Get-Item $DB
 SQLite bütünlük kontrolü:
 
 ```bash
-sqlite3 "$DB" "PRAGMA integrity_check;"
+sqlite3 -readonly "$DB" "PRAGMA integrity_check;"
 ```
 
 PowerShell:
 
 ```powershell
-sqlite3 $DB "PRAGMA integrity_check;"
+sqlite3 -readonly $DB "PRAGMA integrity_check;"
 ```
 
 Beklenen çıktı:
@@ -693,7 +702,7 @@ macOS / Linux:
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   launch \
-  --release-id "$RID" \
+  --release-id "$RELEASE_ID" \
   --duration-days 7 \
   --symbols BTCUSDT,ETHUSDT \
   --intervals 1h \
@@ -790,7 +799,7 @@ python -m alphaforge.burnin_ops --db $DB status --campaign-id $CID
 SQL:
 
 Current campaign için tek sorguda accepted closed PAPER trades vs resolved rejected forward outcomes:
-sqlite3 -header -column "$DB" <<'SQL'
+sqlite3 -readonly -header -column "$DB" <<'SQL'
 WITH accepted AS (
     SELECT
         'ACCEPTED_CLOSED' AS cohort,
@@ -837,7 +846,7 @@ SELECT * FROM rejected;
 SQL
 ---
 Rejectleri ayrıca TP / SL / timeout / ambiguous görmek için:
-sqlite3 -header -column "$DB" <<'SQL'
+sqlite3 -readonly -header -column "$DB" <<'SQL'
 SELECT
     reject_reason,
     COUNT(*) AS n,
@@ -1398,7 +1407,7 @@ SQL
 Önce tablo şemasını doğrula:
 
 ```bash
-sqlite3 "$DB" ".schema burnin_trade_outcomes"
+sqlite3 -readonly "$DB" ".schema burnin_trade_outcomes"
 ```
 
 Sonra açık kayıtları say:
@@ -1708,7 +1717,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CID"
 python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CID"
 tail -n 200 "artifacts/burnin/$CID/worker.stderr.log"
 tail -n 200 "artifacts/burnin/$CID/worker.stdout.log"
-sqlite3 "$DB" "PRAGMA integrity_check;"
+sqlite3 -readonly "$DB" "PRAGMA integrity_check;"
 ```
 
 Ardından son 30 kampanya olayını ve ilgili run kayıtlarını SQL ile çıkar.
@@ -2173,7 +2182,7 @@ kendi gerçek değerlerinle değiştir.
 ## B.1 Campaign + active continuation tek satır özet
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     c.campaign_id,
     c.release_id,
@@ -2206,7 +2215,7 @@ WHERE c.campaign_id = '$CID';
 ## B.2 Tüm continuation geçmişi
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     continuation_sequence,
     burnin_run_id,
@@ -2229,7 +2238,7 @@ Beklenti:
 ## B.3 Son 50 campaign event
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     id,
     event_time,
@@ -2246,7 +2255,7 @@ LIMIT 50;
 ## B.4 Resolver / provider / failure event özeti
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     event_type,
     COUNT(*) AS n,
@@ -2268,7 +2277,7 @@ ORDER BY n DESC, event_type;
 ## B.5 Resolver batch hata metinleri
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COALESCE(json_extract(details_json, '$.error'), 'NO_ERROR_FIELD') AS error,
     COUNT(*) AS n,
@@ -2289,7 +2298,7 @@ ORDER BY n DESC;
 ## C.1 Açık / kapanmış campaign PAPER pozisyonları
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     status,
     COUNT(*) AS n,
@@ -2306,7 +2315,7 @@ ORDER BY status;
 ## C.2 Açık pozisyon detayları
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     pending_position_id,
     trade_id,
@@ -2335,7 +2344,7 @@ ORDER BY entry_time;
 ## C.3 Kapanmış PAPER sonuç özeti
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COUNT(*) AS closed_trades,
     SUM(CASE WHEN net_r > 0 THEN 1 ELSE 0 END) AS winners,
@@ -2364,7 +2373,7 @@ WHERE campaign_id = '$CID'
 ## C.4 Sonuçları sembol / side / regime bazında
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     symbol,
     side,
@@ -2389,7 +2398,7 @@ ORDER BY total_net_r DESC;
 ## C.5 Exit reason dağılımı
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COALESCE(exit_reason,'UNKNOWN') AS exit_reason,
     COUNT(*) AS n,
@@ -2406,7 +2415,7 @@ ORDER BY n DESC;
 ## C.6 Execution-cost drag
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COUNT(*) AS n,
     ROUND(AVG(entry_spread), 8) AS avg_entry_spread,
@@ -2433,7 +2442,7 @@ WHERE campaign_id = '$CID'
 ## D.1 Label durumları
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     status,
     COUNT(*) AS n,
@@ -2450,7 +2459,7 @@ ORDER BY n DESC;
 ## D.2 Reject reason + label maturity
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COALESCE(reject_reason,'UNKNOWN') AS reject_reason,
     status,
@@ -2466,7 +2475,7 @@ ORDER BY n DESC, reject_reason;
 ## D.3 Reject attribution / provenance
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COALESCE(
       json_extract(source_provenance_json, '$.forward_label_subject'),
@@ -2488,7 +2497,7 @@ ORDER BY attributable DESC, subject, status;
 ## D.4 Reject forward-outcome sonuçları — bütün continuation'lar
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 WITH campaign_runs AS (
     SELECT burnin_run_id
     FROM burnin_campaign_runs
@@ -2516,7 +2525,7 @@ ORDER BY total_net_r DESC;
 ## D.5 Reject reason top-level kalite özeti
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 WITH campaign_runs AS (
     SELECT burnin_run_id
     FROM burnin_campaign_runs
@@ -2548,7 +2557,7 @@ ORDER BY total_net_r DESC;
 ## E.1 Pending label → rejected review / core decision bağlantısı
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COUNT(*) AS labels,
     SUM(
@@ -2573,7 +2582,7 @@ WHERE p.campaign_id = '$CID';
 ## E.2 Duplicate reject label identity
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     reject_decision_id,
     COUNT(*) AS n
@@ -2590,7 +2599,7 @@ Beklenen: **0 satır**.
 ## E.3 Duplicate continuation sequence / run identity
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT 'continuation_sequence' AS kind, continuation_sequence AS identity, COUNT(*) AS n
 FROM burnin_campaign_runs
 WHERE campaign_id = '$CID'
@@ -2616,13 +2625,13 @@ Beklenen: **0 satır**.
 Önce şemayı gör:
 
 ```bash
-sqlite3 "$DB" ".schema burnin_qualification_snapshots"
+sqlite3 -readonly "$DB" ".schema burnin_qualification_snapshots"
 ```
 
 Son snapshot:
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT *
 FROM burnin_qualification_snapshots
 WHERE campaign_id = '$CID'
@@ -2634,7 +2643,7 @@ LIMIT 1;
 Campaign tablosundaki pointer ile karşılaştır:
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     campaign_id,
     campaign_status,
@@ -2657,13 +2666,13 @@ snapshot age/fresh/stale alanlarıyla birlikte yorumla.
 Önce şema:
 
 ```bash
-sqlite3 "$DB" ".schema runtime_state_snapshots"
+sqlite3 -readonly "$DB" ".schema runtime_state_snapshots"
 ```
 
 Son campaign runtime snapshot:
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     id,
     timestamp,
@@ -2692,7 +2701,7 @@ LIMIT 5;
 Günlük operasyon için en kullanışlı özet:
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 -- CAMPAIGN
 SELECT
     campaign_id,
@@ -2782,7 +2791,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CID"
 python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CID"
 python -m alphaforge.burnin_ops --db "$DB" --json watch --campaign-id "$CID"
 python -m alphaforge.burnin_ops --db "$DB" --json reject-label-status --campaign-id "$CID"
-sqlite3 "$DB" "PRAGMA quick_check;"
+sqlite3 -readonly "$DB" "PRAGMA quick_check;"
 ```
 
 İstatistiksel yorum sırası:
@@ -2802,12 +2811,14 @@ sqlite3 "$DB" "PRAGMA quick_check;"
 
 ---
 
-# J. Şema keşfi — sorgu yazmadan önce
+# J. SQLcheat-first — şema keşfi yalnızca uyuşmazlıkta
+
+Normal akışta önce `docs/SQLcheat.md` kullan. Aşağıdaki discovery komutları yalnızca seçtiğin DB'nin canonical dokümandan farklı olduğundan şüpheleniyorsan veya `no such table/column` hatası alıyorsan kullanılmalıdır. Aktif campaign DB'yi discovery amacıyla açarken read-only kal.
 
 Tablolar:
 
 ```bash
-sqlite3 "$DB" ".tables"
+sqlite3 -readonly "$DB" ".tables"
 ```
 
 Campaign tabloları:
@@ -2829,13 +2840,13 @@ ORDER BY name;
 Kolonlar:
 
 ```bash
-sqlite3 "$DB" "PRAGMA table_info(burnin_campaigns);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_campaign_runs);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_pending_position_outcomes);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_pending_reject_labels);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_reject_outcomes);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_qualification_snapshots);"
-sqlite3 "$DB" "PRAGMA table_info(runtime_state_snapshots);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_campaigns);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_campaign_runs);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_pending_position_outcomes);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_pending_reject_labels);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_reject_outcomes);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_qualification_snapshots);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(runtime_state_snapshots);"
 ```
 
 Bir sorgu eski branch veya eski DB şeması nedeniyle `no such column/table` verirse,
