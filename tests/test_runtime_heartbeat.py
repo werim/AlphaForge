@@ -261,11 +261,11 @@ def test_runtime_heartbeat_persistent_sqlite_lock_exhausts_bounded_retry(tmp_pat
     assert not holder.is_alive()
 
 
-def test_heartbeat_loop_transient_lock_recovers_without_fatal_task(tmp_path) -> None:
+def test_heartbeat_loop_transient_lock_recovers_without_fatal_task(tmp_path, monkeypatch) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'heartbeat_loop_recovery.db'}")
     runtime = _runtime(engine, ExecutionMode.PAPER)
     runtime.config.heartbeat_interval_sec = 0.0
-    runtime._persist_runtime_state_snapshot = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(RuntimeOrchestrator, "_persist_runtime_state_snapshot", lambda *_args, **_kwargs: None)
     calls = {"count": 0}
 
     def persist(*_args, **_kwargs) -> None:
@@ -275,7 +275,7 @@ def test_heartbeat_loop_transient_lock_recovers_without_fatal_task(tmp_path) -> 
         if calls["count"] == 3:
             runtime.shutdown()
 
-    runtime._persist_runtime_heartbeat = persist
+    monkeypatch.setattr(RuntimeOrchestrator, "_persist_runtime_heartbeat", persist)
 
     asyncio.run(runtime._heartbeat_loop())
 
@@ -288,13 +288,17 @@ def test_heartbeat_loop_transient_lock_recovers_without_fatal_task(tmp_path) -> 
     assert runtime._recovery_required is False
 
 
-def test_heartbeat_loop_sustained_lock_enters_controlled_recovery_required(tmp_path) -> None:
+def test_heartbeat_loop_sustained_lock_enters_controlled_recovery_required(tmp_path, monkeypatch) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'heartbeat_loop_sustained.db'}")
     runtime = _runtime(engine, ExecutionMode.PAPER)
     runtime.config.heartbeat_interval_sec = 0.0
     runtime._heartbeat_persistence_failure_threshold = 2
-    runtime._persist_runtime_state_snapshot = lambda *_args, **_kwargs: None
-    runtime._persist_runtime_heartbeat = lambda *_args, **_kwargs: (_ for _ in ()).throw(_locked_error())
+    monkeypatch.setattr(RuntimeOrchestrator, "_persist_runtime_state_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_persist_runtime_heartbeat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(_locked_error()),
+    )
 
     asyncio.run(runtime._heartbeat_loop())
 
@@ -307,17 +311,21 @@ def test_heartbeat_loop_sustained_lock_enters_controlled_recovery_required(tmp_p
     assert runtime._stop_event.is_set()
 
 
-def test_heartbeat_loop_non_lock_database_failure_remains_fatal(tmp_path) -> None:
+def test_heartbeat_loop_non_lock_database_failure_remains_fatal(tmp_path, monkeypatch) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'heartbeat_loop_schema_error.db'}")
     runtime = _runtime(engine, ExecutionMode.PAPER)
     runtime.config.heartbeat_interval_sec = 0.0
-    runtime._persist_runtime_state_snapshot = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(RuntimeOrchestrator, "_persist_runtime_state_snapshot", lambda *_args, **_kwargs: None)
     schema_error = OperationalError(
         "INSERT",
         {},
         sqlite3.OperationalError("no such table: required_runtime_evidence"),
     )
-    runtime._persist_runtime_heartbeat = lambda *_args, **_kwargs: (_ for _ in ()).throw(schema_error)
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_persist_runtime_heartbeat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(schema_error),
+    )
 
     with pytest.raises(OperationalError, match="no such table"):
         asyncio.run(runtime._heartbeat_loop())
