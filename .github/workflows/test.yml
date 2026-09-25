@@ -62,6 +62,8 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           pytest -q tests/test_runtime_heartbeat.py
+          pytest -q tests/test_reconciliation_sqlite_contention.py
+          pytest -q tests/test_issue450_sqlite_concurrency.py
           pytest -q tests/test_phase8_burnin_campaign.py -k "lock"
 
       - name: Public market-data safety gate
