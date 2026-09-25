@@ -508,7 +508,7 @@ def test_complete_mtf_regime_is_canonical_across_negative_expectancy_reject_evid
             "SELECT regime,metrics_json FROM burnin_observations WHERE decision='REJECTED'"
         )).one()
         decision_regime = conn.execute(text(
-            "SELECT regime FROM decision_evidence WHERE decision='REJECTED'"
+            "SELECT regime FROM decision_evidence WHERE signal_id='runtime:regime-authority' AND decision='REJECT'"
         )).scalar_one()
         review_regime = conn.execute(text(
             "SELECT regime FROM rejected_signal_reviews WHERE signal_id='runtime:regime-authority'"
@@ -560,7 +560,7 @@ def test_accepted_burnin_persistence_prefers_complete_mtf_regime(tmp_path: Path)
             "SELECT regime,metrics_json FROM burnin_observations WHERE decision='ACCEPTED'"
         )).one()
         decision_regime = conn.execute(text(
-            "SELECT regime FROM decision_evidence WHERE decision='ACCEPTED'"
+            "SELECT regime FROM decision_evidence WHERE signal_id='accepted-regime-authority' AND decision='ACCEPT'"
         )).scalar_one()
 
     metrics = json.loads(observation[1])
