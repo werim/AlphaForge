@@ -341,6 +341,9 @@ class RuntimeOrchestrator:
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_advisory_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
+    _market_data_health_status: str = field(default="UNKNOWN", init=False)
+    _market_data_failure_streak: int = field(default=0, init=False)
+    _last_market_data_diagnostics: dict[str, Any] = field(default_factory=dict, init=False)
     _live_order_submission_enabled: bool = field(default=False, init=False)
     _mutation_trap_active: bool = field(default=False, init=False)
     _exchange_health: list[ExchangeHealth] = field(default_factory=list, init=False)
@@ -674,6 +677,10 @@ class RuntimeOrchestrator:
             flags.append("EXCHANGE_STATE_UNKNOWN")
         if self._exchange_read_only_status == "LOCAL_ONLY":
             flags.append("LOCAL_ONLY_DIAGNOSTIC_RECONCILIATION")
+        if self._market_data_health_status == "DEGRADED":
+            flags.append("MARKET_DATA_DEGRADED")
+        elif self._market_data_health_status == "UNAVAILABLE":
+            flags.append("MARKET_DATA_UNAVAILABLE")
         effective_status = status or self._runtime_status
         if effective_status == "OPERATING" and self._execution_reconciliation_blocked():
             effective_status = "RECOVERY_REQUIRED"
@@ -713,7 +720,7 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
         )
 
     def _execution_reconciliation_blocked(self) -> bool:
@@ -1784,6 +1791,20 @@ class RuntimeOrchestrator:
             return
         self.metrics.scans += 1
         candidates = await self.market_scanner()
+        market_data_diagnostics = dict(getattr(candidates, "diagnostics", {}) or {})
+        market_data_status = str(
+            market_data_diagnostics.get("status")
+            or ("AVAILABLE" if candidates else "VALID_EMPTY")
+        ).upper()
+        self._last_market_data_diagnostics = market_data_diagnostics
+        if market_data_status == "UNAVAILABLE":
+            self._market_data_failure_streak += 1
+            self._market_data_health_status = (
+                "UNAVAILABLE" if self._market_data_failure_streak >= 2 else "DEGRADED"
+            )
+        else:
+            self._market_data_failure_streak = 0
+            self._market_data_health_status = market_data_status
         if self._burnin_run_id and self._campaign_symbols:
             candidates = [candidate for candidate in candidates
                           if str(candidate.get("symbol") or "").upper() in self._campaign_symbols
@@ -1817,7 +1838,11 @@ class RuntimeOrchestrator:
         self._last_scan_rejection_summary = reject_reasons
         self._last_scan_advisory_summary = advisory_reasons
         if not candidates:
-            self._last_scan_gate_blockers = ["NO_MARKET_CANDIDATES"]
+            self._last_scan_gate_blockers = (
+                ["MARKET_DATA_UNAVAILABLE"]
+                if self._market_data_health_status in {"DEGRADED", "UNAVAILABLE"}
+                else ["NO_MARKET_CANDIDATES"]
+            )
         elif not selected:
             self._last_scan_gate_blockers = ["NO_TRADABLE_SYMBOLS_AFTER_SELECTION"]
         else:
