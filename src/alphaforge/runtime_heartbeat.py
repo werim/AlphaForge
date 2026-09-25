@@ -3,11 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import random
+import sqlite3
+import time
 from typing import Any, Mapping
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from alphaforge.contracts import canonical_utc_timestamp
 
@@ -16,6 +19,24 @@ DEFAULT_FUTURE_TOLERANCE_SEC = 5.0
 _ALLOWED_MODES = {"PAPER", "LIVE"}
 _ALLOWED_STATES = {"OPERATING", "RECOVERY_REQUIRED", "STOPPING"}
 _ALLOWED_EVIDENCE_STATUS = {"MEASURED_RUNTIME_HEARTBEAT"}
+_HEARTBEAT_WRITE_DEADLINE_SEC = 0.75
+_HEARTBEAT_BUSY_TIMEOUT_MS = 50
+_HEARTBEAT_BACKOFFS_SEC = (0.025, 0.05, 0.1)
+
+
+class RuntimeHeartbeatPersistenceFailure(RuntimeError):
+    """Heartbeat persistence exhausted its bounded SQLite lock budget."""
+
+
+def is_sqlite_busy_error(exc: OperationalError) -> bool:
+    original = exc.orig
+    code = getattr(original, "sqlite_errorcode", None)
+    message = str(original).lower()
+    return (
+        (isinstance(code, int) and code & 0xff == sqlite3.SQLITE_BUSY)
+        or "database is locked" in message
+        or "database table is locked" in message
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,31 +158,75 @@ def save_runtime_heartbeat(
     state = str(runtime_state or "").strip().upper()
     if state not in _ALLOWED_STATES:
         raise ValueError("unsupported runtime_state")
-    ensure_runtime_heartbeat_schema(engine)
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO runtime_heartbeats(
-                runtime_instance_id, execution_mode, heartbeat_ts, scanner_source, runtime_state,
-                last_scan_ts, last_decision_ts, active_positions_count, pending_orders_count,
-                evidence_status, payload_json
-            ) VALUES (
-                :runtime_instance_id, :execution_mode, :heartbeat_ts, :scanner_source, :runtime_state,
-                :last_scan_ts, :last_decision_ts, :active_positions_count, :pending_orders_count,
-                :evidence_status, :payload_json
+
+    # Runtime heartbeat schema is provisioned lazily for PAPER/LIVE, but schema
+    # DDL must not run on every heartbeat. Repeated CREATE IF NOT EXISTS calls
+    # increase SQLite schema/write lock pressure under concurrent runtime writers.
+    if not inspect(engine).has_table("runtime_heartbeats"):
+        ensure_runtime_heartbeat_schema(engine)
+
+    persisted_ts = heartbeat_ts or canonical_utc_timestamp()
+    persisted_payload = _safe_payload(payload)
+    deadline = time.monotonic() + _HEARTBEAT_WRITE_DEADLINE_SEC
+
+    for attempt in range(4):
+        try:
+            with engine.begin() as conn:
+                old_timeout = None
+                try:
+                    if engine.dialect.name == "sqlite":
+                        old_timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar_one()
+                        conn.exec_driver_sql(
+                            f"PRAGMA busy_timeout={_HEARTBEAT_BUSY_TIMEOUT_MS}"
+                        )
+                        conn.exec_driver_sql("BEGIN IMMEDIATE")
+                    conn.execute(text("""
+                        INSERT INTO runtime_heartbeats(
+                            runtime_instance_id, execution_mode, heartbeat_ts, scanner_source, runtime_state,
+                            last_scan_ts, last_decision_ts, active_positions_count, pending_orders_count,
+                            evidence_status, payload_json
+                        ) VALUES (
+                            :runtime_instance_id, :execution_mode, :heartbeat_ts, :scanner_source, :runtime_state,
+                            :last_scan_ts, :last_decision_ts, :active_positions_count, :pending_orders_count,
+                            :evidence_status, :payload_json
+                        )
+                    """), {
+                        "runtime_instance_id": instance_id,
+                        "execution_mode": mode,
+                        "heartbeat_ts": persisted_ts,
+                        "scanner_source": scanner_source,
+                        "runtime_state": state,
+                        "last_scan_ts": last_scan_ts,
+                        "last_decision_ts": last_decision_ts,
+                        "active_positions_count": max(0, int(active_positions_count)),
+                        "pending_orders_count": max(0, int(pending_orders_count)),
+                        "evidence_status": "MEASURED_RUNTIME_HEARTBEAT",
+                        "payload_json": persisted_payload,
+                    })
+                finally:
+                    if old_timeout is not None:
+                        try:
+                            conn.exec_driver_sql(f"PRAGMA busy_timeout={int(old_timeout)}")
+                        except SQLAlchemyError:
+                            pass
+            return
+        except OperationalError as exc:
+            if engine.dialect.name != "sqlite" or not is_sqlite_busy_error(exc):
+                raise
+            if attempt == 3 or time.monotonic() >= deadline:
+                raise RuntimeHeartbeatPersistenceFailure(
+                    f"SQLITE_BUSY runtime heartbeat persistence after {attempt + 1} attempts; "
+                    f"runtime_instance_id={instance_id}"
+                ) from exc
+            base_backoff = _HEARTBEAT_BACKOFFS_SEC[attempt]
+            jitter = random.uniform(0.0, base_backoff * 0.25)
+            time.sleep(
+                min(
+                    base_backoff + jitter,
+                    max(0.0, deadline - time.monotonic()),
+                )
             )
-        """), {
-            "runtime_instance_id": instance_id,
-            "execution_mode": mode,
-            "heartbeat_ts": heartbeat_ts or canonical_utc_timestamp(),
-            "scanner_source": scanner_source,
-            "runtime_state": state,
-            "last_scan_ts": last_scan_ts,
-            "last_decision_ts": last_decision_ts,
-            "active_positions_count": max(0, int(active_positions_count)),
-            "pending_orders_count": max(0, int(pending_orders_count)),
-            "evidence_status": "MEASURED_RUNTIME_HEARTBEAT",
-            "payload_json": _safe_payload(payload),
-        })
+    raise AssertionError("unreachable")
 
 
 def fetch_latest_runtime_heartbeat(engine: Engine, *, execution_mode: str | None = None) -> dict[str, Any] | None:
