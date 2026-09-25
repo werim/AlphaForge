@@ -35,7 +35,7 @@ from alphaforge.execution import (
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
-from alphaforge.runtime_heartbeat import save_runtime_heartbeat
+from alphaforge.runtime_heartbeat import is_sqlite_busy_error, save_runtime_heartbeat
 from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
@@ -48,7 +48,7 @@ from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
@@ -63,6 +63,7 @@ from alphaforge.multi_timeframe import BinanceMTFProvider
 from alphaforge.state_direction_shadow import StateDirectionShadowStore, build_state_direction_shadow_draft
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ class RuntimeConfig:
     min_signal_score: float = 0.62
     scan_interval_sec: float = 1.0
     heartbeat_interval_sec: float = 30.0
+    heartbeat_persistence_failure_threshold: int = 3
     max_symbols_per_scan: int = 5
     max_reject_log_entries: int = 1000
     max_concurrent_positions: int = 3
@@ -201,6 +203,8 @@ class RuntimeConfig:
         )
         if int(self.max_clock_skew_ms) < 0:
             raise ValueError("max_clock_skew_ms must be >= 0")
+        if int(self.heartbeat_persistence_failure_threshold) < 1:
+            raise ValueError("heartbeat_persistence_failure_threshold must be >= 1")
         if (self.mtf_execution_confirmation_mode == "SHADOW"
                 and str(getattr(self.execution_mode, "value", self.execution_mode)).upper() != "PAPER"):
             raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
@@ -265,6 +269,9 @@ class RuntimeMetrics:
     malformed_execution_candles_skipped: int = 0
     finalized_signal_replays_skipped: int = 0
     final_decision_lookup_failures: int = 0
+    heartbeat_persistence_failures: int = 0
+    heartbeat_persistence_recoveries: int = 0
+    heartbeat_persistence_degraded: bool = False
     persistence_enabled: bool = False
 
 
@@ -316,6 +323,7 @@ class RuntimeOrchestrator:
     _unknown_exchange_state: bool = field(default=False, init=False)
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
     _reconciliation_persistence_unhealthy: bool = field(default=False, init=False)
+    _heartbeat_persistence_failure_streak: int = field(default=0, init=False)
     _provider_failure_class: str | None = field(default=None, init=False)
     _transient_provider_outage_started_monotonic: float | None = field(default=None, init=False)
     _provider_failure_count: int = field(default=0, init=False)
@@ -654,6 +662,10 @@ class RuntimeOrchestrator:
                 "quality_reject": self.metrics.quality_reject,
                 "quality_defer": self.metrics.quality_defer,
                 "phase_b_errors": self.metrics.phase_b_errors,
+                "heartbeat_persistence_failures": self.metrics.heartbeat_persistence_failures,
+                "heartbeat_persistence_recoveries": self.metrics.heartbeat_persistence_recoveries,
+                "heartbeat_persistence_degraded": self.metrics.heartbeat_persistence_degraded,
+                "heartbeat_persistence_failure_streak": self._heartbeat_persistence_failure_streak,
             },
         )
 
@@ -893,10 +905,29 @@ class RuntimeOrchestrator:
         finally:
             self._runtime_status = "STOPPING"
             self._last_shutdown_time = canonical_utc_timestamp()
-            self._finalize_burnin_run(status="FAILED" if self._fatal_task_exception else "COMPLETED")
+            finalize_status = (
+                "FAILED" if self._fatal_task_exception
+                else "RECOVERY_REQUIRED" if self._recovery_required
+                else "COMPLETED"
+            )
+            self._finalize_burnin_run(status=finalize_status)
             self._generate_burnin_snapshot(reason="shutdown")
-            self._persist_runtime_heartbeat(runtime_state="STOPPING")
-            self._persist_runtime_state_snapshot("FAILED" if self._fatal_task_exception else "CLEAN_SHUTDOWN")
+            try:
+                self._persist_runtime_heartbeat(runtime_state="STOPPING")
+            except OperationalError as exc:
+                if not is_sqlite_busy_error(exc):
+                    raise
+                logger.warning("shutdown_heartbeat_persistence_skipped reason=SQLITE_BUSY")
+            try:
+                self._persist_runtime_state_snapshot(
+                    "FAILED" if self._fatal_task_exception
+                    else "RECOVERY_REQUIRED" if self._recovery_required
+                    else "CLEAN_SHUTDOWN"
+                )
+            except OperationalError as exc:
+                if not is_sqlite_busy_error(exc):
+                    raise
+                logger.warning("shutdown_runtime_state_persistence_skipped reason=SQLITE_BUSY")
             await self._shutdown_tasks()
         if self._fatal_task_exception is not None:
             reason = "MARKET_SCAN_LOOP_FAILED" if self._fatal_task_name == "market_scan_loop" else f"RUNTIME_TASK_FAILED:{self._fatal_task_name}"
@@ -4289,6 +4320,8 @@ class RuntimeOrchestrator:
         now = time.time()
         if self._reconciliation_persistence_unhealthy:
             return "RECONCILIATION_PERSISTENCE_FAILED"
+        if self.metrics.heartbeat_persistence_degraded:
+            return "RUNTIME_DB_UNAVAILABLE"
         if self._fail_closed_reason:
             return self._fail_closed_reason
         if self._recovery_required:
@@ -4336,12 +4369,73 @@ class RuntimeOrchestrator:
         }
         await self._emit_lifecycle_event(LifecycleEventType.RECONCILIATION_REPAIR.value, symbol, {"reason": f"reconcile_{reason}", "snapshot": snapshot})
 
+    def _mark_heartbeat_persistence_recovery_required(self) -> None:
+        self._runtime_status = "RECOVERY_REQUIRED"
+        self._recovery_required = True
+        self._fail_closed_reason = "SUSTAINED_HEARTBEAT_PERSISTENCE_FAILURE"
+        engine = self._resolve_persistence_engine()
+        if engine is None or not self._campaign_id:
+            return
+        try:
+            with engine.begin() as conn:
+                terminalize_active_campaign_run(
+                    conn,
+                    self._campaign_id,
+                    run_status="RECOVERY_REQUIRED",
+                    campaign_status="RECOVERY_REQUIRED",
+                    reason=self._fail_closed_reason,
+                    event_type="RUNTIME_PERSISTENCE_RECOVERY_REQUIRED",
+                    details={
+                        "runtime_instance_id": self.runtime_instance_id,
+                        "failure_streak": self._heartbeat_persistence_failure_streak,
+                        "failure_threshold": self.config.heartbeat_persistence_failure_threshold,
+                    },
+                    clear_worker_metadata=False,
+                )
+        except OperationalError as exc:
+            if not is_sqlite_busy_error(exc):
+                raise
+            logger.error(
+                "heartbeat_persistence_recovery_state_not_persisted reason=SQLITE_BUSY "
+                "failure_streak=%s threshold=%s",
+                self._heartbeat_persistence_failure_streak,
+                self.config.heartbeat_persistence_failure_threshold,
+            )
+
     async def _heartbeat_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
                 self.metrics.last_heartbeat_ts = time.time()
-                self._persist_runtime_heartbeat()
-                self._persist_runtime_state_snapshot("OPERATING")
+                was_degraded = self.metrics.heartbeat_persistence_degraded
+                try:
+                    self._persist_runtime_heartbeat()
+                    self._persist_runtime_state_snapshot("OPERATING")
+                except OperationalError as exc:
+                    if not is_sqlite_busy_error(exc):
+                        raise
+                    self._heartbeat_persistence_failure_streak += 1
+                    self.metrics.heartbeat_persistence_failures += 1
+                    self.metrics.heartbeat_persistence_degraded = True
+                    logger.warning(
+                        "heartbeat_persistence_degraded reason=SQLITE_BUSY failure_streak=%s threshold=%s",
+                        self._heartbeat_persistence_failure_streak,
+                        self.config.heartbeat_persistence_failure_threshold,
+                    )
+                    if self._heartbeat_persistence_failure_streak >= self.config.heartbeat_persistence_failure_threshold:
+                        self._mark_heartbeat_persistence_recovery_required()
+                        self.shutdown()
+                        return
+                    await asyncio.sleep(self.config.heartbeat_interval_sec)
+                    continue
+
+                if was_degraded:
+                    self.metrics.heartbeat_persistence_recoveries += 1
+                    logger.info(
+                        "heartbeat_persistence_recovered prior_failure_streak=%s",
+                        self._heartbeat_persistence_failure_streak,
+                    )
+                self._heartbeat_persistence_failure_streak = 0
+                self.metrics.heartbeat_persistence_degraded = False
                 logger.info(
                     "runtime_heartbeat=%s persistence_enabled=%s top_selection_reject_reasons=%s top_selection_advisory_reasons=%s decision_gate_blockers=%s",
                     self.metrics,
