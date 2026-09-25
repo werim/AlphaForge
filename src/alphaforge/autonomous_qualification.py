@@ -658,13 +658,27 @@ class AutonomousQualificationHarness:
 
     def _record_market_data_probe(self, ctx: HarnessContext, rows: list[dict[str, Any]],
                                   scan_latency: float) -> None:
-        """Audit feed gaps without inventing an error hidden by the public scanner."""
+        """Audit public-feed availability while preserving scanner failure semantics."""
         now = time.monotonic()
         available = bool(rows)
-        status = "AVAILABLE" if available else "UNAVAILABLE_UNKNOWN_CAUSE"
-        probe = {"at": utc_now(), "probe_index": len(self._market_data_probes),
-                 "row_count": len(rows), "status": status, "classification": UNKNOWN if not available else None,
-                 "latency_seconds": round(scan_latency, 6)}
+        diagnostics = dict(getattr(rows, "diagnostics", {}) or {})
+        status = "AVAILABLE" if available else str(
+            diagnostics.get("status") or "UNAVAILABLE_UNKNOWN_CAUSE"
+        )
+        probe = {
+            "at": utc_now(),
+            "probe_index": len(self._market_data_probes),
+            "row_count": len(rows),
+            "status": status,
+            "classification": UNKNOWN if not available else None,
+            "latency_seconds": round(scan_latency, 6),
+            "cause": diagnostics.get("cause"),
+            "provider": diagnostics.get("provider"),
+            "endpoint": diagnostics.get("endpoint"),
+            "error_class": diagnostics.get("error_class"),
+            "http_status": diagnostics.get("http_status"),
+            "provider_diagnostics": diagnostics.get("providers"),
+        }
         probe["db_event_id"] = self._record_event(ctx.campaign_id, "QUALIFICATION_MARKET_DATA_PROBE", probe)
         if available:
             if self._market_data_outage_started is not None:

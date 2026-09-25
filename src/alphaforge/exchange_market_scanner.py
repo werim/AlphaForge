@@ -3,16 +3,73 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import socket
 import time
-from typing import Any
-from urllib import parse, request
+from typing import Any, Iterable
+from urllib import error, parse, request
 
 from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
 
 GEOMETRY_SOURCE = "BINANCE_CLOSED_1M_KLINES"
 
 
-async def scan_exchange_markets(config: Any) -> list[dict[str, Any]]:
+class MarketScanRows(list[dict[str, Any]]):
+    """List-compatible market scan result carrying queryable provider diagnostics."""
+
+    def __init__(
+        self,
+        rows: Iterable[dict[str, Any]] = (),
+        *,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(rows)
+        self.diagnostics = dict(diagnostics or {})
+
+
+def _market_scan_diagnostics(
+    *,
+    status: str,
+    provider: str,
+    cause: str | None = None,
+    endpoint: str | None = None,
+    error_class: str | None = None,
+    http_status: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "provider": provider,
+        "cause": cause,
+        "endpoint": endpoint,
+        "error_class": error_class,
+        "http_status": http_status,
+    }
+
+
+def _classify_public_fetch_error(exc: BaseException) -> tuple[str, int | None]:
+    if isinstance(exc, error.HTTPError):
+        code = int(exc.code)
+        if code == 429:
+            return "HTTP_429", code
+        if 500 <= code <= 599:
+            return "HTTP_5XX", code
+        return "HTTP_ERROR", code
+    if isinstance(exc, error.URLError):
+        reason = exc.reason
+        if isinstance(reason, socket.gaierror):
+            return "DNS_FAILURE", None
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return "TIMEOUT", None
+        return "URL_ERROR", None
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, socket.timeout)):
+        return "TIMEOUT", None
+    if isinstance(exc, json.JSONDecodeError):
+        return "JSON_DECODE_ERROR", None
+    if isinstance(exc, OSError):
+        return "NETWORK_ERROR", None
+    return "FETCH_ERROR", None
+
+
+async def scan_exchange_markets(config: Any) -> MarketScanRows:
     return await asyncio.to_thread(_scan_exchange_markets_sync, config)
 
 
@@ -104,35 +161,115 @@ async def enrich_selected_market_geometry(
     return enriched
 
 
-def _scan_exchange_markets_sync(config: Any) -> list[dict[str, Any]]:
+def _scan_exchange_markets_sync(config: Any) -> MarketScanRows:
     timeout = float(getattr(getattr(config, "exchange", object()), "timeout_sec", 2.0) or 2.0)
-    rows: list[dict[str, Any]] = []
-    rows.extend(_scan_binance(config, timeout_sec=timeout))
-    rows.extend(_scan_hyperliquid(config, timeout_sec=timeout))
-    return rows
+    binance_rows = _scan_binance(config, timeout_sec=timeout)
+    hyperliquid_rows = _scan_hyperliquid(config, timeout_sec=timeout)
+    rows = [*binance_rows, *hyperliquid_rows]
+    provider_diagnostics = [binance_rows.diagnostics, hyperliquid_rows.diagnostics]
+    if rows:
+        status = "AVAILABLE"
+        active_providers = {
+            str(row.get("source_exchange") or "unknown") for row in rows
+        }
+        provider = (
+            next(iter(active_providers))
+            if len(active_providers) == 1
+            else "multi"
+        )
+        cause = endpoint = error_class = http_status = None
+    else:
+        unavailable = next(
+            (item for item in provider_diagnostics if item.get("status") == "UNAVAILABLE"),
+            None,
+        )
+        if unavailable is not None:
+            status = "UNAVAILABLE"
+            provider = unavailable.get("provider")
+            cause = unavailable.get("cause")
+            endpoint = unavailable.get("endpoint")
+            error_class = unavailable.get("error_class")
+            http_status = unavailable.get("http_status")
+        else:
+            status = "VALID_EMPTY"
+            provider = None
+            cause = "NO_CANDIDATES"
+            endpoint = error_class = http_status = None
+    diagnostics = {
+        "status": status,
+        "provider": provider,
+        "cause": cause,
+        "endpoint": endpoint,
+        "error_class": error_class,
+        "http_status": http_status,
+        "providers": provider_diagnostics,
+    }
+    return MarketScanRows(rows, diagnostics=diagnostics)
 
 
-def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
+def _scan_binance(config: Any, *, timeout_sec: float) -> MarketScanRows:
     binance = getattr(getattr(config, "exchange", object()), "binance", object())
     if str(getattr(binance, "default_market_type", "USD_M")).upper() != "USD_M":
-        return []
+        return MarketScanRows([], diagnostics=_market_scan_diagnostics(
+            status="VALID_EMPTY", provider="binance", cause="UNSUPPORTED_MARKET_TYPE",
+        ))
     base_url = str(getattr(binance, "market_data_base_url", getattr(binance, "base_url", "https://fapi.binance.com")))
     quote_asset = str(getattr(binance, "default_quote_asset", "USDT")).upper()
     decision_timeframe = str(getattr(getattr(config, "runtime", object()), "paper_decision_timeframe", "1m"))
     if decision_timeframe != "1m":
-        return []  # the canonical geometry provider currently supports closed 1m setup candles only
-    try:
-        exchange_info = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/exchangeInfo", timeout_sec=timeout_sec)
-        tickers = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/ticker/24hr", timeout_sec=timeout_sec)
-        book_tickers, market_data_latency_ms = _fetch_json_with_latency(
-            f"{base_url.rstrip('/')}/fapi/v1/ticker/bookTicker", timeout_sec=timeout_sec
-        )
-        funding = _fetch_json(f"{base_url.rstrip('/')}/fapi/v1/premiumIndex", timeout_sec=timeout_sec)
-    except Exception:  # noqa: BLE001
-        return []
-    if (not isinstance(exchange_info, dict) or not isinstance(exchange_info.get("symbols"), list)
-            or not isinstance(tickers, list) or not isinstance(book_tickers, list)):
-        return []
+        return MarketScanRows([], diagnostics=_market_scan_diagnostics(
+            status="VALID_EMPTY", provider="binance", cause="UNSUPPORTED_TIMEFRAME",
+        ))  # the canonical geometry provider currently supports closed 1m setup candles only
+
+    endpoint_specs = (
+        ("exchangeInfo", f"{base_url.rstrip('/')}/fapi/v1/exchangeInfo", False),
+        ("ticker_24hr", f"{base_url.rstrip('/')}/fapi/v1/ticker/24hr", False),
+        ("bookTicker", f"{base_url.rstrip('/')}/fapi/v1/ticker/bookTicker", True),
+        ("premiumIndex", f"{base_url.rstrip('/')}/fapi/v1/premiumIndex", False),
+    )
+    payloads: dict[str, Any] = {}
+    market_data_latency_ms: float | None = None
+    for endpoint, url, measure_latency in endpoint_specs:
+        try:
+            if measure_latency:
+                payload, market_data_latency_ms = _fetch_json_with_latency(
+                    url, timeout_sec=timeout_sec
+                )
+            else:
+                payload = _fetch_json(url, timeout_sec=timeout_sec)
+        except Exception as exc:  # noqa: BLE001
+            cause, http_status = _classify_public_fetch_error(exc)
+            return MarketScanRows([], diagnostics=_market_scan_diagnostics(
+                status="UNAVAILABLE",
+                provider="binance",
+                cause=cause,
+                endpoint=endpoint,
+                error_class=exc.__class__.__name__,
+                http_status=http_status,
+            ))
+        payloads[endpoint] = payload
+
+    exchange_info = payloads["exchangeInfo"]
+    tickers = payloads["ticker_24hr"]
+    book_tickers = payloads["bookTicker"]
+    funding = payloads["premiumIndex"]
+    malformed_endpoint = None
+    if not isinstance(exchange_info, dict) or not isinstance(exchange_info.get("symbols"), list):
+        malformed_endpoint = "exchangeInfo"
+    elif not isinstance(tickers, list):
+        malformed_endpoint = "ticker_24hr"
+    elif not isinstance(book_tickers, list):
+        malformed_endpoint = "bookTicker"
+    elif not isinstance(funding, list):
+        malformed_endpoint = "premiumIndex"
+    if malformed_endpoint is not None:
+        return MarketScanRows([], diagnostics=_market_scan_diagnostics(
+            status="UNAVAILABLE",
+            provider="binance",
+            cause="MALFORMED_PAYLOAD",
+            endpoint=malformed_endpoint,
+            error_class="PayloadShapeError",
+        ))
     trading_symbols = {
         row.get("symbol") for row in exchange_info["symbols"]
         if isinstance(row, dict) and isinstance(row.get("symbol"), str) and row.get("status") == "TRADING"
@@ -219,13 +356,20 @@ def _scan_binance(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
             }
         )
     candidates.sort(key=lambda row: float(row.get("volume_24h_usdt", 0.0)), reverse=True)
-    return candidates[:30]
+    selected = candidates[:30]
+    return MarketScanRows(selected, diagnostics=_market_scan_diagnostics(
+        status="AVAILABLE" if selected else "VALID_EMPTY",
+        provider="binance",
+        cause=None if selected else "NO_CANDIDATES_AFTER_FILTERING",
+    ))
 
 
-def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> list[dict[str, Any]]:
+def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> MarketScanRows:
     hyperliquid = getattr(getattr(config, "exchange", object()), "hyperliquid", object())
     if not bool(getattr(hyperliquid, "enabled", True)):
-        return []
+        return MarketScanRows([], diagnostics=_market_scan_diagnostics(
+            status="DISABLED", provider="hyperliquid", cause="PROVIDER_DISABLED",
+        ))
     api_url = str(getattr(hyperliquid, "api_url", "https://api.hyperliquid.xyz"))
     req = request.Request(
         f"{api_url.rstrip('/')}/info",
@@ -235,10 +379,24 @@ def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> list[dict[str, Any]
     )
     try:
         mids = _fetch_json(req, timeout_sec=timeout_sec)
-    except Exception:  # noqa: BLE001
-        return []
+    except Exception as exc:  # noqa: BLE001
+        cause, http_status = _classify_public_fetch_error(exc)
+        return MarketScanRows([], diagnostics=_market_scan_diagnostics(
+            status="UNAVAILABLE",
+            provider="hyperliquid",
+            cause=cause,
+            endpoint="allMids",
+            error_class=exc.__class__.__name__,
+            http_status=http_status,
+        ))
     if not isinstance(mids, dict):
-        return []
+        return MarketScanRows([], diagnostics=_market_scan_diagnostics(
+            status="UNAVAILABLE",
+            provider="hyperliquid",
+            cause="MALFORMED_PAYLOAD",
+            endpoint="allMids",
+            error_class="PayloadShapeError",
+        ))
     now_ts = time.time()
     market_data_latency_ms = None
     rows: list[dict[str, Any]] = []
@@ -271,7 +429,12 @@ def _scan_hyperliquid(config: Any, *, timeout_sec: float) -> list[dict[str, Any]
                 "chop_score": 1.0,
             }
         )
-    return rows[:20]
+    selected = rows[:20]
+    return MarketScanRows(selected, diagnostics=_market_scan_diagnostics(
+        status="AVAILABLE" if selected else "VALID_EMPTY",
+        provider="hyperliquid",
+        cause=None if selected else "NO_CANDIDATES_AFTER_FILTERING",
+    ))
 
 
 def _fetch_json(url_or_request: str | request.Request, *, timeout_sec: float) -> Any:

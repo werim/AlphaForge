@@ -349,6 +349,77 @@ def test_scan_exchange_markets_handles_exchange_failure(monkeypatch: pytest.Monk
     cfg = load_config_from_env()
     rows = asyncio.run(scan_exchange_markets(cfg))
     assert rows == []
+    assert rows.diagnostics["status"] == "UNAVAILABLE"
+    assert rows.diagnostics["provider"] == "binance"
+    assert rows.diagnostics["cause"] == "TIMEOUT"
+    assert rows.diagnostics["endpoint"] == "exchangeInfo"
+    assert rows.diagnostics["error_class"] == "TimeoutError"
+
+
+def test_binance_premium_index_timeout_is_not_reported_as_valid_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    payloads = iter([
+        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+        [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000",
+          "priceChangePercent": "1"}],
+        [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+    ])
+
+    class _Resp:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(self.payload).encode("utf-8")
+
+    calls = {"count": 0}
+
+    def _open(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 4:
+            raise TimeoutError("premium index timed out")
+        return _Resp(next(payloads))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    rows = asyncio.run(scan_exchange_markets(load_config_from_env()))
+
+    assert rows == []
+    assert rows.diagnostics["status"] == "UNAVAILABLE"
+    assert rows.diagnostics["provider"] == "binance"
+    assert rows.diagnostics["cause"] == "TIMEOUT"
+    assert rows.diagnostics["endpoint"] == "premiumIndex"
+    assert rows.diagnostics["error_class"] == "TimeoutError"
+    assert rows.diagnostics["http_status"] is None
+
+
+def test_valid_empty_binance_response_remains_distinct_from_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": []},
+            [],
+            [],
+            [],
+        ]),
+    )
+
+    rows = asyncio.run(scan_exchange_markets(load_config_from_env()))
+
+    assert rows == []
+    assert rows.diagnostics["status"] == "VALID_EMPTY"
+    assert rows.diagnostics["cause"] == "NO_CANDIDATES"
+    assert rows.diagnostics["error_class"] is None
 
 
 def test_hyperliquid_mid_only_sets_unavailable_spread(monkeypatch: pytest.MonkeyPatch) -> None:
