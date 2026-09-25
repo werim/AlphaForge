@@ -1042,6 +1042,30 @@ class AutonomousQualificationHarness:
             }
         return evidence
 
+    def _soak_decision_evidence_checks(
+        self, ctx: HarnessContext, evidence: Mapping[str, int]
+    ) -> dict[str, bool]:
+        canonical_decisions = int(evidence.get("canonical_decisions") or 0)
+        return {
+            "canonical_decision_evidence_nonzero": canonical_decisions > 0,
+            "decision_evidence_persisted":
+                int(evidence.get("decision_evidence") or 0) >= canonical_decisions > 0,
+            "order_decision_pipeline_exercised":
+                int(evidence.get("order_decisions") or 0) > 0,
+            "reject_path_evidence_persisted":
+                int(evidence.get("rejected_decisions") or 0) > 0
+                and int(evidence.get("rejected_signal_reviews") or 0) > 0,
+            "reject_label_evidence_persisted":
+                int(evidence.get("pending_reject_labels") or 0) > 0,
+            "qualification_snapshot_scoped":
+                int(evidence.get("qualification_snapshots") or 0) > 0,
+            "canonical_regime_evidence_consistent":
+                int(evidence.get("complete_mtf_regime_mismatches") or 0) == 0,
+            "decision_probe_no_submit":
+                self._soak_decision_probe_error is None
+                and ctx.runtime.metrics.executions == 0,
+        }
+
     def _finish_soak_operation(self, ctx: HarnessContext, injected_at: str,
                                started_monotonic: float) -> ScenarioResult:
         observed = {**self._soak_observed, "market_data_source": self.market_data_source}
@@ -1062,24 +1086,7 @@ class AutonomousQualificationHarness:
                                            and self._market_data_max_empty_streak <= 1
                                            and self._soak_observed["empty_market_data_probes"]
                                            <= max(1, len(self._market_data_probes) // 20),
-            "canonical_decision_evidence_nonzero":
-                decision_evidence["canonical_decisions"] > 0,
-            "decision_evidence_persisted":
-                decision_evidence["decision_evidence"] >= decision_evidence["canonical_decisions"] > 0,
-            "order_decision_pipeline_exercised":
-                decision_evidence["order_decisions"] > 0,
-            "reject_path_evidence_persisted":
-                decision_evidence["rejected_decisions"] > 0
-                and decision_evidence["rejected_signal_reviews"] > 0,
-            "reject_label_evidence_persisted":
-                decision_evidence["pending_reject_labels"] > 0,
-            "qualification_snapshot_scoped":
-                decision_evidence["qualification_snapshots"] > 0,
-            "canonical_regime_evidence_consistent":
-                decision_evidence["complete_mtf_regime_mismatches"] == 0,
-            "decision_probe_no_submit":
-                self._soak_decision_probe_error is None
-                and ctx.runtime.metrics.executions == 0,
+            **self._soak_decision_evidence_checks(ctx, decision_evidence),
             "empty_market_data_never_executed": all(
                 sample["paper_executions"] == 0 for sample in self._soak_samples
             ),
