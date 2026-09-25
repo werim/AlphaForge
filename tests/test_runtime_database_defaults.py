@@ -135,7 +135,7 @@ def test_windows_drive_url_is_not_corrupted() -> None:
 
 
 def test_komutlar_documents_only_valid_db_doctor_form() -> None:
-    guide = Path("docs/KOMUTLAR.md").read_text(encoding="utf-8")
+    guide = Path("docs/COMMANDS.md").read_text(encoding="utf-8")
     assert "db-doctor diagnose" not in guide
     assert "db-doctor --check-only" in guide
     assert "db-doctor --apply" in guide
@@ -143,7 +143,7 @@ def test_komutlar_documents_only_valid_db_doctor_form() -> None:
 
 
 def test_komutlar_multiday_launch_is_detached_and_uses_canonical_loader() -> None:
-    guide = Path("docs/KOMUTLAR.md").read_text(encoding="utf-8")
+    guide = Path("docs/COMMANDS.md").read_text(encoding="utf-8")
     assert "--duration-days 7 `\n  --detach" in guide
     assert "load_config_from_env, load_reconciliation_settings" in guide
     assert 'print(f"KEY={bool(recon.api_key.strip())}")' in guide
