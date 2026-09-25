@@ -1102,6 +1102,24 @@ class RuntimeOrchestrator:
             "execution_cost_unit": "R",
         }
 
+    @staticmethod
+    def _canonical_market_regime(payload: Mapping[str, Any]) -> str:
+        """Prefer complete MTF market-regime evidence over legacy decision labels."""
+        mtf = payload.get("mtf") if isinstance(payload.get("mtf"), Mapping) else {}
+        regime_layer = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
+        mtf_regime = regime_layer.get("regime")
+        mtf_evidence_status = str(regime_layer.get("evidence_status") or "").upper()
+        if mtf_regime and mtf_evidence_status == "COMPLETE":
+            return str(mtf_regime).upper()
+        execution_ctx = payload.get("execution_ctx") if isinstance(payload.get("execution_ctx"), Mapping) else {}
+        fallback = (
+            payload.get("regime")
+            or execution_ctx.get("volatility_regime")
+            or payload.get("volatility_regime")
+            or "UNKNOWN"
+        )
+        return str(fallback)
+
     def _persist_burnin_decision(self, payload: Mapping[str, Any], *,
                                  lifecycle_state: str | None = None,
                                  conn: Any | None = None) -> None:
@@ -1117,6 +1135,12 @@ class RuntimeOrchestrator:
             return
         try:
             execution_ctx = dict(payload.get("execution_ctx") or {})
+            canonical_regime = self._canonical_market_regime(payload)
+            source_regime = payload.get("regime")
+            legacy_decision_regime = payload.get("legacy_decision_regime")
+            if (legacy_decision_regime is None and source_regime is not None
+                    and str(source_regime).upper() != str(canonical_regime).upper()):
+                legacy_decision_regime = source_regime
             missing = [name for name in ("signal_id", "symbol", "decision") if not payload.get(name)]
             def persist(target: Any) -> None:
                 campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
@@ -1137,6 +1161,8 @@ class RuntimeOrchestrator:
                                 "geometry_status": payload.get("geometry_status"),
                                 "geometry_reason": payload.get("geometry_reason"),
                                 "geometry_source": payload.get("geometry_source"),
+                                "canonical_market_regime": canonical_regime,
+                                "legacy_decision_regime": legacy_decision_regime,
                                 "mtf": payload.get("mtf"),
                                 "base_exec_direction": payload.get("base_exec_direction"),
                                 "resolved_state": payload.get("resolved_state"),
@@ -1164,7 +1190,7 @@ class RuntimeOrchestrator:
                     if setup_identity else
                     f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}"
                 )
-                persist_burnin_observation(target, observation_id=observation_id, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
+                persist_burnin_observation(target, observation_id=observation_id, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=canonical_regime, decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
                 decision_upper = str(payload.get("decision") or "").upper()
                 reject_reason = (
                     payload.get("primary_reject_reason")
@@ -1213,7 +1239,7 @@ class RuntimeOrchestrator:
                     side=payload.get("side"),
                     setup_type=payload.get("setup_type"),
                     setup_reason=payload.get("setup_reason"),
-                    regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime"),
+                    regime=canonical_regime,
                     lifecycle_state_before=payload.get("lifecycle_state_before"),
                     lifecycle_state_after=lifecycle_state,
                     decision=payload.get("decision"),
@@ -3518,6 +3544,13 @@ class RuntimeOrchestrator:
         reject_reasons = list(dict.fromkeys([primary_reject_reason, *reject_reasons]))
         mtf = result.get("mtf") if isinstance(result.get("mtf"), Mapping) else {}
         regime_layer = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
+        mtf_regime = regime_layer.get("regime")
+        if mtf_regime and str(regime_layer.get("evidence_status") or "").upper() == "COMPLETE":
+            source_regime = result.get("regime")
+            if (source_regime is not None
+                    and str(source_regime).upper() != str(mtf_regime).upper()):
+                result["legacy_decision_regime"] = source_regime
+            result["regime"] = str(mtf_regime).upper()
         generation = mtf.get("generation") if isinstance(mtf.get("generation"), Mapping) else {}
         guided_generation = generation.get("mode") == "REGIME_GUIDED"
         guided_candidate = (guided_generation and generation.get("evidence_status") == "COMPLETE"
