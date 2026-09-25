@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-import json, os, sqlite3, time, uuid
+import json, os, random, sqlite3, time, uuid
 from typing import Any, Mapping
 
 from sqlalchemy import inspect, text
@@ -402,7 +402,9 @@ def persist_reconciliation_cycle(engine: Engine, *, cycle_id: str, findings: lis
                 raise
             if attempt == 3 or time.monotonic() >= deadline:
                 raise ReconciliationPersistenceFailure(f"SQLITE_BUSY reconciliation persistence after {attempt + 1} attempts; cycle_id={cycle_id}") from exc
-            time.sleep(min(backoffs[attempt], max(0.0, deadline - time.monotonic())))
+            remaining = max(0.0, deadline - time.monotonic())
+            base_sleep = min(backoffs[attempt], remaining)
+            time.sleep(min(base_sleep * random.uniform(0.80, 1.20), remaining))
     raise AssertionError("unreachable")
 
 
