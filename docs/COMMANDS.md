@@ -1159,7 +1159,7 @@ Bu bölüm, fresh M0 PAPER qualification kampanyasını current validated source
 
 ### M0.1 Exact source ve PAPER ortamı
 
-2026-09-26 current baseline için validated `dev` SHA:
+Current M0 baseline her launch öncesinde **o anda remote `origin/dev` üzerinde bulunan exact SHA'ya** pinlenir. Dokümana sabit SHA yazılmaz; aksi halde yalnız docs veya safety-fix commit'i bile runbook'u sessizce eski source'a sabitleyebilir.
 
 ```bash
 source .venv/bin/activate
@@ -1168,31 +1168,28 @@ git fetch origin
 git switch dev
 git pull --ff-only origin dev
 
-EXPECTED_SHA="63f462e49aefeafdff1cb94228b726e7cd6f2635"
+EXPECTED_SHA="$(git rev-parse origin/dev)"
 
 echo "=== REPO ==="
 pwd
 git branch --show-current
 git rev-parse HEAD
 git status --short
+echo "EXPECTED_SHA=$EXPECTED_SHA"
+
+test "$(git branch --show-current)" = "dev" || {
+  echo "ERROR: M0 baseline yalnız temiz dev branch'inden başlatılır"
+  exit 1
+}
 
 test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || {
-  echo "ERROR: dev SHA beklenen validated SHA değil"
+  echo "ERROR: local HEAD origin/dev exact SHA ile eşleşmiyor"
   exit 1
 }
 
 test -z "$(git status --porcelain)" || {
   echo "ERROR: working tree temiz değil"
   git status --short
-  exit 1
-}
-
-echo "=== DEV / MAIN TREE CHECK ==="
-git rev-parse HEAD^{tree}
-git rev-parse origin/main^{tree}
-
-test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse origin/main^{tree})" || {
-  echo "ERROR: dev ve promoted main aynı tree değil"
   exit 1
 }
 
@@ -1203,20 +1200,20 @@ export ALPHAFORGE_ALLOW_LIVE_ORDERS=false
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 SHA8="$(git rev-parse --short=8 HEAD)"
-RELEASE_ID="M0_20260926_${SHA8}"
+STAMP="$(date -u +%Y%m%d)"
+RELEASE_ID="M0_${STAMP}_${SHA8}"
 DB="$REPO_ROOT/data/campaign/${RELEASE_ID}.db"
 
-export RELEASE_ID DB
+export EXPECTED_SHA RELEASE_ID DB
 
+echo "EXPECTED_SHA=$EXPECTED_SHA"
 echo "RELEASE_ID=$RELEASE_ID"
 echo "DB=$DB"
 ```
 
-Bu exact baseline için beklenen release kimliği:
+Bu akışta `main` ile tree eşitliği M0 başlangıç şartı değildir. M0 issue'sunun otoritesi current `dev`dir; preflight ayrıca source branch/worktree identity'yi doğrular. Promotion state ayrıca release/promotion sürecinde değerlendirilir.
 
-```text
-M0_20260926_63f462e4
-```
+Fresh M0 release kimliği dinamik olarak `M0_<UTC tarih>_<dev SHA8>` biçimindedir. Böylece her yeni `dev` source identity eski campaign evidence'inden ayrılır.
 
 İlk preflight öncesinde aynı DB zaten varsa fresh evidence ile historical evidence'i karıştırma:
 
@@ -1227,7 +1224,7 @@ if [ -e "$DB" ]; then
 fi
 ```
 
-Yeni bir M0 baseline başlatırken `EXPECTED_SHA`, tarih ve `RELEASE_ID` bilinçli olarak yenilenmelidir; eski DB/release ID reuse edilmez.
+Yeni bir M0 baseline başlatırken `EXPECTED_SHA` doğrudan `origin/dev`den türetilir; tarih ve `RELEASE_ID` bu exact source identity ile birlikte yenilenir. Eski DB/release ID reuse edilmez.
 
 ### M0.2 Config ve read-only reconciliation doğrulaması
 
@@ -1620,6 +1617,90 @@ LIMIT 1;
 ```
 
 Bu snapshot'ta minimum-duration, decision, accepted, closed-trade ve mature reject outcome blocker'larının başlangıçta bulunması normaldir. Bunları kaldırmak için threshold gevşetme. Operasyonel/plumbing blocker ile salt sample insufficiency blocker'ını ayrı değerlendir.
+
+### M0.7a Final qualification release-evidence refresh
+
+#461 sonrası Phase 6/7 release gate kanıtları doğrudan SQL ile "PASS" yazılarak üretilemez. Final M0 qualification penceresinde canonical ölçüm/yazıcılar kullanılmalıdır.
+
+> **Zamanlama:** Bu adımları campaign daha yeni başlarken sırf blocker listesini temizlemek için çalıştırma. Özellikle rollback evidence bounded-freshness taşır ve operator acknowledgement en fazla 240 dakika geçerlidir. Campaign sample/duration gereksinimleri tamamlanmaya yaklaştığında, final qualification/finalize öncesinde çalıştır.
+
+Önce local checkout hâlâ campaign source identity ile birebir eşleşiyor mu doğrula:
+
+```bash
+test "$(git branch --show-current)" = "dev" || {
+  echo "ERROR: release evidence yalnız pinned dev checkout üzerinde üretilir"
+  exit 1
+}
+
+test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || {
+  echo "ERROR: checkout campaign EXPECTED_SHA ile eşleşmiyor"
+  exit 1
+}
+
+test -z "$(git status --porcelain)" || {
+  echo "ERROR: release evidence için working tree temiz olmalı"
+  exit 1
+}
+```
+
+Deterministic rollback readiness evidence üret:
+
+```bash
+python -m alphaforge.rollback_evidence   --database-url "sqlite+pysqlite:///$DB"
+```
+
+Bu komut gerçek order göndermeden kill-switch/no-submit/reconciliation/non-mutating-repair davranışını deterministic harness ile ölçer. `evidence_status=COMPLETE` olmadan devam etme.
+
+Rollback verification + tracked runbook evidence'ını campaign/release identity'ye bağla:
+
+```bash
+python -m alphaforge.release_safety_evidence   --db "$DB"   --campaign-id "$CID"   --phase PHASE6   --runbook RUNBOOK.md   --rollback-max-age-sec 900   --repo .
+```
+
+Measured mutation-trap canary evidence üret:
+
+```bash
+python -m alphaforge.release_canary_evidence   --db "$DB"   --campaign-id "$CID"   --phase PHASE6   --repo .
+```
+
+Exact campaign commit için GitHub Actions **push** full-test evidence'ını doğrula ve release snapshot'a yaz:
+
+```bash
+python -m alphaforge.release_ci_evidence   --db "$DB"   --campaign-id "$CID"   --phase PHASE6   --repository werim/AlphaForge
+```
+
+Bu gate yalnız campaign'in exact `git_commit` SHA'sına ait canonical push workflow'da aşağıdaki adımlar gerçekten `success` ise PASS verir:
+
+- Full regression suite
+- Protected safety mutation gate
+- Run offline backtest
+- Verify backtest outputs
+
+PR workflow'unda full regression `skipped` ise bu kanıt olarak kullanılamaz.
+
+Operator acknowledgement **otomatik üretilemez**. Önce required statement'ı göster:
+
+```bash
+python -m alphaforge.release_operator_ack   --db "$DB"   --campaign-id "$CID"   --phase PHASE6   --show-required-text
+```
+
+Statement'ı gerçekten okuyup kabul ediyorsan, çıktıyı bilinçli olarak `--acknowledgement-text` ile gir. Örnek kabuk değişkeni:
+
+```bash
+ACK_TEXT="$(python -m alphaforge.release_operator_ack   --db "$DB"   --campaign-id "$CID"   --phase PHASE6   --show-required-text)"
+
+printf '%s\n' "$ACK_TEXT"
+```
+
+Burada durup metni insan olarak doğrula. Kabul ettikten sonra:
+
+```bash
+python -m alphaforge.release_operator_ack   --db "$DB"   --campaign-id "$CID"   --phase PHASE6   --ttl-minutes 240   --acknowledgement-text "$ACK_TEXT"
+```
+
+Bu acknowledgement final qualification penceresine yakın üretilmelidir; 240 dakika sonrası expire olur. Script kendi kendine acknowledgement oluşturmaz veya submit etmez.
+
+Ardından yeni qualification snapshot'ında release-gate blocker'larının canonical evidence ile kalktığını doğrula. Direct SQL ile rollback/runbook/full-test/operator-ack/canary PASS satırı eklemek yasaktır; read-path provenance doğrulaması bu tür optimistic satırları zaten `UNVERIFIED` olarak bloke eder.
 
 ### M0.8 Safe pause / resume
 
