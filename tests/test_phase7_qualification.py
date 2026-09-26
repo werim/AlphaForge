@@ -162,6 +162,31 @@ def test_optimistic_full_test_pass_without_verified_provenance_is_blocked(tmp_pa
     assert "FULL_TEST_EVIDENCE_UNVERIFIED" in snap.blockers
 
 
+def test_one_release_evidence_commit_mismatch_cannot_be_masked_by_other_passes(tmp_path):
+    e=_engine(); _run(e)
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    with e.begin() as c:
+        row=c.execute(text("""
+            SELECT id,evidence_json FROM canary_run_events
+            WHERE release_id='rel' AND event_type='CANARY_VALIDATION_PASS'
+            ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        payload=json.loads(row["evidence_json"])
+        payload["git_commit"]="different"
+        c.execute(text("UPDATE canary_run_events SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(payload,sort_keys=True),
+            "id":row["id"],
+        })
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=0,minimum_accepted_trades=0,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "CANARY_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+    assert "ROLLBACK_EVIDENCE_COMMIT_MISMATCH" not in snap.blockers
+    assert "RUNBOOK_EVIDENCE_COMMIT_MISMATCH" not in snap.blockers
+
+
 def test_verified_full_test_evidence_for_different_commit_is_blocked(tmp_path):
     from alphaforge.release_gates import ensure_release_gate_schema, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
