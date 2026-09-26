@@ -1319,6 +1319,7 @@ def test_recovery_required_terminalization_requires_explicit_flag_and_complete_e
 
 
 def test_manual_terminalization_event_failure_rolls_back_all_statuses(monkeypatch, tmp_path):
+    import alphaforge.burnin_campaign as campaign_module
     import alphaforge.burnin_ops as ops
     _, conn = _conn(tmp_path)
     camp, run = _campaign(conn)
@@ -1327,11 +1328,16 @@ def test_manual_terminalization_event_failure_rolls_back_all_statuses(monkeypatc
     conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,)); conn.commit()
     _prepare_terminalization_evidence(conn, camp, run)
     monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery(conn))
-    monkeypatch.setattr(ops, "event", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("event failed")))
+    monkeypatch.setattr(campaign_module, "event", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("event failed")))
     with pytest.raises(sqlite3.OperationalError, match="event failed"):
         ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
     assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RECOVERY_REQUIRED"
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM burnin_terminal_causes WHERE campaign_id=? AND burnin_run_id=?",
+        (camp.campaign_id, run),
+    ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(("mutation", "reason"), [
