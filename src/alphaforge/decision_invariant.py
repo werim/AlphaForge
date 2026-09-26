@@ -35,6 +35,12 @@ class InvariantMismatch:
     observed: Any
 
 
+@dataclass(frozen=True)
+class SemanticInvariantViolation:
+    code: str
+    detail: str
+
+
 def _number(value: Any) -> float | None:
     if value in (None, "", "UNKNOWN", "UNAVAILABLE"):
         return None
