@@ -356,6 +356,7 @@ def rollback_verification_evidence_valid(status: Any, evidence: Mapping[str, Any
         and str(evidence.get("source") or "") == "DETERMINISTIC_VALIDATION"
         and bool(evidence.get("validation_id"))
         and bool(str(evidence.get("git_commit") or "").strip())
+        and str(evidence.get("source_git_commit") or "") == str(evidence.get("git_commit") or "")
         and bool(evidence.get("kill_switch_block_verified"))
         and bool(evidence.get("no_submit_on_kill_switch_verified"))
         and bool(evidence.get("fail_closed_reconciliation_verified"))
@@ -694,15 +695,22 @@ def persist_rollback_verification(
 
     measured = latest_persisted_rollback_evidence(engine, max_age_sec=max_evidence_age_sec)
     evidence_git_commit = _release_evidence_git_commit(git_commit)
+    source_git_commit = str(measured.get("git_commit") or "").strip() or None
+    source_blockers = list(measured.get("rollback_blocking_reasons") or [])
+    if evidence_git_commit and source_git_commit != evidence_git_commit:
+        source_blockers.append("ROLLBACK_SOURCE_COMMIT_MISMATCH")
     verified = (
         evidence_git_commit is not None
+        and source_git_commit == evidence_git_commit
         and bool(measured.get("rollback_evidence_verified"))
         and str(measured.get("rollback_evidence_status") or "").upper() == "COMPLETE"
         and int(measured.get("execution_mutation_attempt_count") or 0) == 0
+        and not source_blockers
     )
     evidence = {
         "verification_contract": ROLLBACK_VERIFICATION_CONTRACT,
         "git_commit": evidence_git_commit,
+        "source_git_commit": source_git_commit,
         "source": measured.get("rollback_evidence_source"),
         "validation_id": measured.get("validation_id"),
         "recorded_at": measured.get("recorded_at"),
@@ -712,7 +720,7 @@ def persist_rollback_verification(
         "fail_closed_reconciliation_verified": bool(measured.get("fail_closed_reconciliation_verified")),
         "repair_actions_non_mutating_verified": bool(measured.get("repair_actions_non_mutating_verified")),
         "execution_mutation_attempt_count": measured.get("execution_mutation_attempt_count"),
-        "blocking_reasons": list(measured.get("rollback_blocking_reasons") or []),
+        "blocking_reasons": source_blockers,
     }
     row = {
         "verification_id": verification_id or f"rollback:{uuid.uuid4().hex}",
