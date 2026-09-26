@@ -358,11 +358,21 @@ class BurnInQualificationEngine:
             if str(full_tests.get("status") or "").upper() != "PASS":
                 blockers.append("FULL_TEST_EVIDENCE_MISSING")
             else:
+                required_steps=full_tests.get("required_steps") or {}
+                required_step_names=(
+                    "Full regression suite",
+                    "Protected safety mutation gate",
+                    "Run offline backtest",
+                    "Verify backtest outputs",
+                )
                 provenance_ok=(
                     str(full_tests.get("source") or "")=="GITHUB_ACTIONS_PUSH"
+                    and str(full_tests.get("repository") or "")=="werim/AlphaForge"
                     and str(full_tests.get("event") or "").lower()=="push"
                     and str(full_tests.get("workflow_path") or "")==".github/workflows/test.yml"
+                    and full_tests.get("run_id") is not None
                     and str(full_tests.get("full_regression_suite") or "").lower()=="success"
+                    and all(str(required_steps.get(name) or "").lower()=="success" for name in required_step_names)
                 )
                 if not provenance_ok:
                     blockers.append("FULL_TEST_EVIDENCE_UNVERIFIED")
