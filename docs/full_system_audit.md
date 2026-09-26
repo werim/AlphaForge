@@ -24,6 +24,7 @@ Audit phase is read-only: no threshold promotion, gate loosening, target manipul
 | #497 | P1 | Documented shared trade-quality authority diverges from RuntimeOrchestrator production gate implementation. |
 | #486 | P1 | Existing open semantic-invariant issue remains required: production-wide enforcement is incomplete/unproven. |
 | #498 | P1 | CI mutation gate protects local guards but not enough cross-component economic/evidence relationships. |
+| #500 | P1 | Production correlation risk limits remain runtime literals/direct config outside canonical managed SSOT. |
 
 ## Audit principles
 
@@ -64,6 +65,7 @@ Severity:
 | Portfolio state | restart restores exposure/daily PnL/drawdown/loss streak/trade counts from DB | PASS | P0 | PAPER portfolio risk-state tests rebuild from campaign evidence and fail closed on incomplete state. |
 | Portfolio sizing authority | one production risk engine exists and is clearly authoritative | **GAP #496** | P1 | `portfolio_risk.py` is production; `portfolio_risk_engine.py` adaptive sizing is apparently only directly consumed by tests. |
 | Candidate sizing SSOT | execution-affecting candidate notional is canonical config/provenance | **GAP #491** | P1 | Runtime paper_candidate_notional default is material but absent from config_registry. |
+| Correlation-limit SSOT | production correlation limits are canonical config/provenance | **GAP #500** | P1 | Runtime enforces direct/default max_correlated_positions and group exposure while generic env path is RESERVED/not wired. |
 | Shared decision authority | protected gates have one implementation across modes | **GAP #497** | P1 | Runtime duplicates several quality gates rather than consuming one authoritative trade-quality decision path. |
 | Semantic invariants | internally impossible evidence fails even when surfaces agree | **GAP #486** | P1 | Validator exists and parity calls it, but no production-wide single-surface enforcement call site was found. |
 | Decision evidence RR stages | candidate/executable/effective RR retain distinct meanings | **BUG #495** | P1 | decision_evidence.raw_rr is candidate RR in BACKTEST and executable RR in runtime. |
@@ -214,7 +216,8 @@ Do not fix findings in arbitrary issue-number order.
                                       │
 #492 executable stop-risk basis ──────┐
 #489 risk_scale propagation ──────────┼─> trustworthy capital-at-risk semantics
-#491 candidate-notional SSOT ─────────┘
+#491 candidate-notional SSOT ─────────┤
+#500 correlation-limit SSOT ───────────┘
                                       │
 #497 single decision authority ────────┐
 #496 single portfolio-risk authority ──┼─> eliminate duplicated semantic authorities
