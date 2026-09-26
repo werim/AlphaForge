@@ -258,6 +258,30 @@ def test_campaign_concentration_breach_blocks(tmp_path):
     _qualify(db,cid,max_symbol_concentration=0.1)
     assert 'SYMBOL_CONCENTRATION_BREACH' in _latest_blockers(db)
 
+def test_campaign_without_qualifying_trades_reports_concentration_insufficient_not_breach(tmp_path):
+    db,cid=_seed_campaign_for_qualification(tmp_path)
+    conn=sqlite3.connect(db)
+    conn.execute("DELETE FROM burnin_trade_outcomes")
+    conn.commit(); conn.close()
+
+    _qualify(db,cid)
+    conn=sqlite3.connect(db)
+    row=conn.execute(
+        "SELECT concentration_status,metrics_json FROM burnin_qualification_snapshots "
+        "WHERE campaign_id=? ORDER BY id DESC LIMIT 1", (cid,)
+    ).fetchone()
+    conn.close()
+    blockers=_latest_blockers(db)
+    metrics=json.loads(row[1])
+
+    assert row[0] == 'INSUFFICIENT_EVIDENCE'
+    assert 'SYMBOL_CONCENTRATION_BREACH' not in blockers
+    assert 'TRADE_CONCENTRATION_BREACH' not in blockers
+    assert 'REGIME_CONCENTRATION_BREACH' not in blockers
+    assert metrics['symbol_concentration'] is None
+    assert metrics['top_trade_contribution'] is None
+    assert metrics['regime_concentration'] is None
+
 def test_campaign_dirty_reconciliation_and_missing_operator_ack_block(tmp_path):
     from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
     db,cid=_seed_campaign_for_qualification(tmp_path); e=_engine(db)
