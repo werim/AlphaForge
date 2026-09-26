@@ -81,7 +81,7 @@ jobs:
         run: pytest -q tests/test_issue441_soak_decision_evidence.py tests/test_autonomous_qualification.py -k "soak or issue441 or fast_qualification_is_isolated_complete_and_machine_readable"
 
       - name: Full regression suite
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || github.head_ref == 'ci/419-isolated-full-regression'
         run: pytest -q
 
       - name: Protected safety mutation gate
