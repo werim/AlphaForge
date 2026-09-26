@@ -336,6 +336,35 @@ def _latest_verified_canary_validation(engine: Engine, *, release_id: str, phase
     }
 
 
+def rollback_verification_evidence_valid(status: Any, evidence: Mapping[str, Any]) -> bool:
+    return (
+        str(status or "").upper() == "PASS"
+        and str(evidence.get("verification_contract") or "") == ROLLBACK_VERIFICATION_CONTRACT
+        and str(evidence.get("source") or "") == "DETERMINISTIC_VALIDATION"
+        and bool(evidence.get("validation_id"))
+        and bool(evidence.get("kill_switch_block_verified"))
+        and bool(evidence.get("no_submit_on_kill_switch_verified"))
+        and bool(evidence.get("fail_closed_reconciliation_verified"))
+        and bool(evidence.get("repair_actions_non_mutating_verified"))
+        and int(evidence.get("execution_mutation_attempt_count") or 0) == 0
+        and list(evidence.get("blocking_reasons") or []) == []
+    )
+
+
+def runbook_verification_evidence_valid(status: Any, evidence: Mapping[str, Any]) -> bool:
+    digest = str(evidence.get("sha256") or "")
+    return (
+        str(status or "").upper() == "PASS"
+        and str(evidence.get("verification_contract") or "") == RUNBOOK_VERIFICATION_CONTRACT
+        and len(digest) == 64
+        and all(ch in "0123456789abcdef" for ch in digest.lower())
+        and int(evidence.get("size_bytes") or 0) > 0
+        and list(evidence.get("required_markers") or []) == list(RUNBOOK_REQUIRED_MARKERS)
+        and list(evidence.get("missing_markers") or []) == []
+        and evidence.get("read_error") in (None, "")
+    )
+
+
 def _latest_verified_rollback(engine: Engine, *, release_id: str, phase: str) -> tuple[str, dict[str, Any] | None]:
     if not read_only_table_exists(engine, ROLLBACK_VERIFICATION_EVENTS_TABLE):
         return "MISSING", None
@@ -352,18 +381,7 @@ def _latest_verified_rollback(engine: Engine, *, release_id: str, phase: str) ->
     if row is None:
         return "MISSING", None
     evidence = dict(_json_load(row["evidence_json"], {}))
-    valid = (
-        str(row["status"] or "").upper() == "PASS"
-        and str(evidence.get("verification_contract") or "") == ROLLBACK_VERIFICATION_CONTRACT
-        and str(evidence.get("source") or "") == "DETERMINISTIC_VALIDATION"
-        and bool(evidence.get("validation_id"))
-        and bool(evidence.get("kill_switch_block_verified"))
-        and bool(evidence.get("no_submit_on_kill_switch_verified"))
-        and bool(evidence.get("fail_closed_reconciliation_verified"))
-        and bool(evidence.get("repair_actions_non_mutating_verified"))
-        and int(evidence.get("execution_mutation_attempt_count") or 0) == 0
-        and list(evidence.get("blocking_reasons") or []) == []
-    )
+    valid = rollback_verification_evidence_valid(row["status"], evidence)
     payload = {
         "verification_id": str(row["verification_id"]),
         "verified_at": str(row["verified_at"]),
@@ -388,18 +406,7 @@ def _latest_verified_runbook(engine: Engine, *, release_id: str, phase: str) -> 
     if row is None:
         return "MISSING", None
     evidence = dict(_json_load(row["evidence_json"], {}))
-    digest = str(evidence.get("sha256") or "")
-    required_markers = list(evidence.get("required_markers") or [])
-    valid = (
-        str(row["status"] or "").upper() == "PASS"
-        and str(evidence.get("verification_contract") or "") == RUNBOOK_VERIFICATION_CONTRACT
-        and len(digest) == 64
-        and all(ch in "0123456789abcdef" for ch in digest.lower())
-        and int(evidence.get("size_bytes") or 0) > 0
-        and required_markers == list(RUNBOOK_REQUIRED_MARKERS)
-        and list(evidence.get("missing_markers") or []) == []
-        and evidence.get("read_error") in (None, "")
-    )
+    valid = runbook_verification_evidence_valid(row["status"], evidence)
     payload = {
         "evidence_id": str(row["evidence_id"]),
         "recorded_at": str(row["recorded_at"]),
