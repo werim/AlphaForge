@@ -1,6 +1,6 @@
 # AlphaForge Full-System Production Semantics Audit
 
-Tracking issue: #488  
+Tracking issue: #488
 Audit branch: `CHATGPT/full-system-audit`
 
 ## Executive status
