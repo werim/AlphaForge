@@ -344,7 +344,6 @@ def _latest_verified_canary_validation(engine: Engine, *, release_id: str, phase
         "event_ts": str(row["event_ts"]),
         "source": CANARY_VALIDATION_SOURCE,
         "verification_contract": CANARY_VALIDATION_CONTRACT,
-        "git_commit": evidence_git_commit,
         **evidence,
     }
 
@@ -668,6 +667,7 @@ def run_canary_mutation_trap_validation(
     evidence = {
         "source": CANARY_VALIDATION_SOURCE,
         "verification_contract": CANARY_VALIDATION_CONTRACT,
+        "git_commit": evidence_git_commit,
         "validation_status": "PASS" if passed else "FAIL",
         "required_actions": required_actions,
         "blocked_actions": blocked_actions,
