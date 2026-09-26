@@ -13,12 +13,16 @@ from alphaforge.rollback_evidence import (
 )
 
 
-def _git_runner(commit="sha-a", status=""):
+def _git_runner(commit="sha-a", status="", tracked=True):
     def run(args, cwd):
         if args == ["rev-parse", "HEAD"]:
             return commit
         if args == ["status", "--porcelain=v1"]:
             return status
+        if args[:3] == ["ls-files", "--error-unmatch", "--"]:
+            if not tracked:
+                raise RuntimeError("not tracked")
+            return args[3]
         raise AssertionError(args)
     return run
 
@@ -229,4 +233,18 @@ def test_campaign_release_safety_rejects_runbook_outside_campaign_repository(tmp
             runbook_path=outside,
             repo_path=tmp_path,
             git_runner=_git_runner(),
+        )
+
+
+def test_campaign_release_safety_rejects_untracked_runbook(tmp_path):
+    engine = _engine()
+    _valid_rollback(engine)
+    runbook = _valid_runbook(tmp_path)
+    with pytest.raises(ValueError, match="RUNBOOK_NOT_TRACKED"):
+        persist_campaign_release_safety_evidence(
+            engine,
+            campaign_id="camp-a",
+            runbook_path=runbook,
+            repo_path=tmp_path,
+            git_runner=_git_runner(tracked=False),
         )
