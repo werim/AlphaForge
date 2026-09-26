@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from alphaforge.release_gates import (
+    rollback_verification_evidence_valid,
+    runbook_verification_evidence_valid,
+)
+
 PASS, BLOCKED, NOT_OBSERVABLE, NEEDS_FIX = "PASS", "BLOCKED", "NOT_OBSERVABLE", "NEEDS_FIX"
 IDS = ("GIT_IDENTITY","WORKTREE_CLEAN","SCHEMA_VALID","PREFLIGHT_PASS","CAMPAIGN_HEALTH","CONFIG_DRIFT","STRATEGY_DRIFT","RECONCILIATION","DUPLICATE_EXECUTION","CONTAMINATION","RUNTIME_ERRORS","LIVE_MUTATION_DISABLED","ACCEPTED_LIFECYCLE_EVIDENCE","REJECT_FORWARD_OUTCOME_EVIDENCE","EXPECTANCY_TEMPORAL_EVIDENCE","EXECUTION_COST_EVIDENCE","RECOVERY_DRILL","SOAK_EVIDENCE","ROLLBACK_EVIDENCE","RUNBOOK_EVIDENCE")
 TABLES = {"burnin_campaigns","burnin_runs","burnin_campaign_runs","burnin_preflight_reports","runtime_state_snapshots","order_decisions","trade_lifecycle_events","burnin_observations","burnin_reject_outcomes","expectancy_evidence","burnin_qualification_snapshots","burnin_recovery_drills","live_rollback_validation_evidence","rollback_verification_events","runbook_evidence","runtime_control_state","runtime_control_audit_events","schema_migrations"}
@@ -37,6 +42,23 @@ def observation_signal_id(row):
     return str(obj(row.get("metrics_json")).get("signal_id") or "").strip()
 def scoped_rows(rows,signal_ids):
     return [row for row in rows if str(row.get("signal_id") or "").strip() in signal_ids]
+def rollback_source_validation_valid(row, expected_validation_id):
+    if not row or str(row.get("validation_id") or "") != str(expected_validation_id or ""):
+        return False
+    try:
+        blockers=json.loads(row.get("blocking_reasons") or "[]")
+    except (TypeError,ValueError,json.JSONDecodeError):
+        blockers=["INVALID_BLOCKERS_JSON"]
+    return (
+        str(row.get("evidence_status") or "").upper()=="COMPLETE"
+        and str(row.get("rollback_evidence_source") or "")=="DETERMINISTIC_VALIDATION"
+        and bool(row.get("kill_switch_block_verified"))
+        and bool(row.get("no_submit_on_kill_switch_verified"))
+        and bool(row.get("fail_closed_reconciliation_verified"))
+        and bool(row.get("repair_actions_non_mutating_verified"))
+        and int(row.get("execution_mutation_attempt_count") or 0)==0
+        and blockers==[]
+    )
 class DB:
     denied={sqlite3.SQLITE_INSERT,sqlite3.SQLITE_UPDATE,sqlite3.SQLITE_DELETE,sqlite3.SQLITE_CREATE_TABLE,sqlite3.SQLITE_DROP_TABLE,sqlite3.SQLITE_ALTER_TABLE,sqlite3.SQLITE_ATTACH,sqlite3.SQLITE_DETACH,sqlite3.SQLITE_TRANSACTION}
     def __init__(self,p): self.p=Path(p).resolve(); self.c=None
@@ -114,8 +136,14 @@ class LiveReadinessAgent:
             cost=acc; keys=("spread_pct","expected_slippage_pct","latency_ms","funding_rate_pct"); absent=[x.get("decision_id") for x in cost if x.get("effective_rr") is None or int(x.get("execution_ctx_missing") or 0) or any(x.get(k) is None for k in keys)]; zero=[x.get("decision_id") for x in cost if all(float(x.get(k) or 0)==0 for k in keys)]; g16=self.miss("EXECUTION_COST_EVIDENCE","burnin_observations + order_decisions","measured non-placeholder costs for active run") if not cost else self.g("EXECUTION_COST_EVIDENCE",NOT_OBSERVABLE if absent else (NEEDS_FIX if zero else PASS),"EXECUTION_COST_CONTEXT_MISSING" if absent else ("PLACEHOLDER_ZERO_COSTS" if zero else "EXECUTION_COST_EVIDENCE_PRESENT"),"burnin_observations + order_decisions",{"missing":absent,"zero":zero},"measured non-placeholder costs for active run")
             g17=self.status(db,"RECOVERY_DRILL","burnin_recovery_drills","campaign_id=?",(self.cid,),"generated_at","recovery drill PASS")
             q=self.latest(db.rows("SELECT * FROM burnin_qualification_snapshots WHERE burnin_run_id=?",(self.scope["burnin_run_id"],)),"generated_at") if "burnin_qualification_snapshots" in tabs else None; soak=q and all(str(q.get(k) or "").upper()==PASS for k in ("status","sample_status","evidence_completeness_status")); g18=self.miss("SOAK_EVIDENCE","burnin_qualification_snapshots","complete PASS qualification") if not q else self.g("SOAK_EVIDENCE",PASS if soak else BLOCKED,"SOAK_QUALIFICATION_PASS" if soak else "SOAK_QUALIFICATION_INCOMPLETE","burnin_qualification_snapshots",q,"complete PASS qualification")
-            v=self.latest(db.rows("SELECT * FROM live_rollback_validation_evidence"),"recorded_at") if "live_rollback_validation_evidence" in tabs else None; rb=self.latest(db.rows("SELECT * FROM rollback_verification_events WHERE release_id=?",(self.scope["release_id"],)),"verified_at") if "rollback_verification_events" in tabs else None; ok=v and rb and str(v.get("evidence_status")).upper()=="COMPLETE" and not int(v.get("execution_mutation_attempt_count") or 0) and str(rb.get("status")).upper()==PASS; g19=self.miss("ROLLBACK_EVIDENCE","rollback evidence tables","complete zero-mutation PASS rollback") if not v or not rb else self.g("ROLLBACK_EVIDENCE",PASS if ok else BLOCKED,"ROLLBACK_EVIDENCE_PASS" if ok else "ROLLBACK_EVIDENCE_INVALID","rollback evidence tables",{"validation":v,"verification":rb},"complete zero-mutation PASS rollback")
-            g20=self.status(db,"RUNBOOK_EVIDENCE","runbook_evidence","release_id=?",(self.scope["release_id"],),"recorded_at","runbook evidence PASS")
+            rb=self.latest(db.rows("SELECT * FROM rollback_verification_events WHERE release_id=?",(self.scope["release_id"],)),"verified_at") if "rollback_verification_events" in tabs else None
+            rb_evidence=obj((rb or {}).get("evidence_json")); validation_id=rb_evidence.get("validation_id")
+            v=db.one("SELECT * FROM live_rollback_validation_evidence WHERE validation_id=?",(validation_id,)) if validation_id and "live_rollback_validation_evidence" in tabs else None
+            rb_ok=bool(rb and rollback_verification_evidence_valid(rb.get("status"),rb_evidence) and rollback_source_validation_valid(v,validation_id))
+            g19=self.miss("ROLLBACK_EVIDENCE","rollback evidence tables","linked deterministic zero-mutation PASS rollback") if not rb else self.g("ROLLBACK_EVIDENCE",PASS if rb_ok else BLOCKED,"ROLLBACK_EVIDENCE_PASS" if rb_ok else "ROLLBACK_EVIDENCE_INVALID","rollback evidence tables",{"validation":v,"verification":rb,"verification_evidence":rb_evidence},"linked deterministic zero-mutation PASS rollback")
+            run=self.latest(db.rows("SELECT * FROM runbook_evidence WHERE release_id=?",(self.scope["release_id"],)),"recorded_at") if "runbook_evidence" in tabs else None
+            run_evidence=obj((run or {}).get("evidence_json")); run_ok=bool(run and runbook_verification_evidence_valid(run.get("status"),run_evidence))
+            g20=self.miss("RUNBOOK_EVIDENCE","runbook_evidence","contract-verified runbook PASS") if not run else self.g("RUNBOOK_EVIDENCE",PASS if run_ok else BLOCKED,"RUNBOOK_EVIDENCE_PASS" if run_ok else "RUNBOOK_EVIDENCE_INVALID","runbook_evidence",{"row":run,"evidence":run_evidence},"contract-verified runbook PASS")
         gs=[g1,g2,g3,g4,g5,g6,g7,g8,g9,g10,g11,g12,g13,g14,g15,g16,g17,g18,g19,g20]; blockers=[x.data() for x in gs if x.status in {BLOCKED,NEEDS_FIX}]; gaps=[x.data() for x in gs if x.status==NOT_OBSERVABLE]
         return {"overall_status":BLOCKED if blockers else "READINESS_INCOMPLETE","generated_at":ts(self.now),"git_commit":self.gm(self.repo).get("commit"),"campaign_id":self.cid,"burnin_run_id":self.scope["burnin_run_id"],"release_id":self.scope["release_id"],"gates":[x.data() for x in gs],"blockers":blockers,"not_observable":gaps,"next_required_evidence":[f"{x.gate_id}:{x.reason}" for x in gs if x.status!=PASS],"authorization":"OBSERVATIONAL_ONLY_NOT_A_LIVE_AUTHORIZATION"}
 def summary(r): return "LIVE readiness observer v1: "+r["overall_status"]+"\n"+"\n".join(f"- {x['gate_id']}: {x['status']} ({x['reason']})" for x in r["gates"] if x["status"]!=PASS)+"\nObservational only; not a LIVE authorization mechanism or execution controller.\n"
