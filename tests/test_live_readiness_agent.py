@@ -9,18 +9,18 @@ NOW=datetime(2026,9,20,18,14,tzinfo=timezone.utc)
 def meta(_): return {"commit":"abc","branch":"feat/live-readiness-agent-v1","dirty":False}
 def make_db(path:Path):
     c=sqlite3.connect(path); c.executescript("""
-    CREATE TABLE schema_migrations(x); CREATE TABLE burnin_campaigns(campaign_id,release_id,campaign_status,active_run_id,git_commit,config_hash,strategy_config_hash,last_heartbeat_at,last_error,symbols_json);
+    CREATE TABLE schema_migrations(x); CREATE TABLE burnin_campaigns(campaign_id,release_id,campaign_status,active_run_id,git_commit,config_hash,strategy_config_hash,last_heartbeat_at,last_error,symbols_json,latest_qualification_id,qualification_status);
     CREATE TABLE burnin_runs(burnin_run_id,status,git_commit,config_hash,strategy_config_hash); CREATE TABLE burnin_campaign_runs(campaign_id,burnin_run_id,status);
     CREATE TABLE burnin_preflight_reports(campaign_id,status,generated_at); CREATE TABLE runtime_state_snapshots(campaign_id,burnin_run_id,reconciliation_status,reconciliation_mismatch_count,recovery_action_required,last_error,timestamp);
     CREATE TABLE order_decisions(decision_id,signal_id,decision,mode,effective_rr,execution_ctx_missing,spread_pct,expected_slippage_pct,latency_ms,funding_rate_pct); CREATE TABLE trade_lifecycle_events(signal_id,lifecycle_state,mode);
     CREATE TABLE burnin_reject_outcomes(burnin_run_id,evidence_complete,forward_label,hypothetical_net_r_after_costs,payload_json); CREATE TABLE expectancy_evidence(campaign_id,run_id,evidence_complete,net_r,decision_time,resolved_at,source_decision_id,evidence_type);
-    CREATE TABLE burnin_qualification_snapshots(burnin_run_id,status,sample_status,evidence_completeness_status,generated_at); CREATE TABLE burnin_recovery_drills(campaign_id,status,generated_at);
+    CREATE TABLE burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,campaign_id,source_run_ids_json,aggregate_evidence_hash,status,sample_status,evidence_completeness_status,generated_at); CREATE TABLE burnin_recovery_drills(campaign_id,status,generated_at);
     CREATE TABLE live_rollback_validation_evidence(validation_id,recorded_at,evidence_status,rollback_evidence_source,kill_switch_block_verified,no_submit_on_kill_switch_verified,fail_closed_reconciliation_verified,repair_actions_non_mutating_verified,execution_mutation_attempt_count,blocking_reasons);
     CREATE TABLE rollback_verification_events(release_id,status,verified_at,evidence_json);
     CREATE TABLE runbook_evidence(release_id,status,recorded_at,evidence_json);
     CREATE TABLE runtime_control_state(mode_requested,mode_running,updated_at); CREATE TABLE runtime_control_audit_events(action,success,event_ts,requested_mode); CREATE TABLE burnin_observations(burnin_run_id,symbol,decision,execution_mode,metrics_json);
     """)
-    c.execute("INSERT INTO burnin_campaigns VALUES(?,?,?,?,?,?,?,?,?,?)",("camp","rel","RUNNING","run","abc","cfg","str","2026-09-20T18:13:59Z",None,'["BTCUSDT"]'))
+    c.execute("INSERT INTO burnin_campaigns VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",("camp","rel","RUNNING","run","abc","cfg","str","2026-09-20T18:13:59Z",None,'["BTCUSDT"]',None,None))
     c.execute("INSERT INTO burnin_runs VALUES(?,?,?,?,?)",("run","RUNNING","abc","cfg","str")); c.execute("INSERT INTO burnin_campaign_runs VALUES(?,?,?)",("camp","run","RUNNING")); c.execute("INSERT INTO burnin_preflight_reports VALUES(?,?,?)",("camp","PASS","2026-09-20T18:00:00Z")); c.execute("INSERT INTO runtime_state_snapshots VALUES(?,?,?,?,?,?,?)",("camp","run","CLEAN",0,0,None,"2026-09-20T18:00:00Z")); c.execute("INSERT INTO runtime_control_state VALUES(?,?,?)",("PAPER","PAPER","2026-09-20T18:00:00Z")); c.execute("INSERT INTO burnin_observations VALUES(?,?,?,?,?)",("run","BTCUSDT",None,"PAPER","{}")); c.commit(); c.close()
 def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", release_id="rel"):
     rollback_evidence={
@@ -54,6 +54,18 @@ def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", releas
     ))
     c.execute("INSERT INTO runbook_evidence VALUES(?,?,?,?)",(
         release_id,"PASS","2026-09-20T18:00:01Z",json.dumps(runbook_evidence),
+    ))
+    c.commit(); c.close()
+
+def seed_soak_snapshot(path:Path, *, status="CANARY_QUALIFIED", sample_status="PASS", evidence_status="PASS", campaign_id="camp", release_id="rel", source_runs=None, qualification_id="q1", aggregate_hash="agg"):
+    source_runs=["run"] if source_runs is None else source_runs
+    c=sqlite3.connect(path)
+    c.execute("INSERT INTO burnin_qualification_snapshots VALUES(?,?,?,?,?,?,?,?,?,?)",(
+        qualification_id,"camp__aggregate",release_id,campaign_id,json.dumps(source_runs),aggregate_hash,
+        status,sample_status,evidence_status,"2026-09-20T18:10:00Z",
+    ))
+    c.execute("UPDATE burnin_campaigns SET latest_qualification_id=?, qualification_status=? WHERE campaign_id='camp'",(
+        qualification_id,status,
     ))
     c.commit(); c.close()
 
@@ -180,3 +192,35 @@ def test_status_only_release_safety_pass_rows_are_blocked(tmp_path):
     r=report(db)
     assert gate(r,"ROLLBACK_EVIDENCE")["status"]==BLOCKED
     assert gate(r,"RUNBOOK_EVIDENCE")["status"]==BLOCKED
+
+
+def test_soak_gate_accepts_canonical_canary_qualified_aggregate_snapshot(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db)
+    seed_soak_snapshot(db)
+    g=gate(report(db),"SOAK_EVIDENCE")
+    assert g["status"]==PASS
+    assert g["reason"]=="SOAK_QUALIFICATION_PASS"
+
+
+def test_soak_gate_rejects_nonqualified_verdicts(tmp_path):
+    for verdict in ("BURN_IN_INSUFFICIENT","BURN_IN_FAILED","CANARY_SUSPENDED"):
+        db=tmp_path/f"{verdict}.db"; make_db(db)
+        seed_soak_snapshot(db,status=verdict)
+        g=gate(report(db),"SOAK_EVIDENCE")
+        assert g["status"]==BLOCKED
+        assert g["reason"]=="SOAK_QUALIFICATION_INCOMPLETE"
+
+
+def test_soak_gate_rejects_scope_mismatch_and_stale_source_run_set(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db)
+    seed_soak_snapshot(db,source_runs=["older-run"])
+    g=gate(report(db),"SOAK_EVIDENCE")
+    assert g["status"]==BLOCKED
+    assert g["reason"]=="SOAK_QUALIFICATION_SCOPE_MISMATCH"
+
+
+def test_unrelated_qualification_snapshot_cannot_satisfy_campaign_soak_gate(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db)
+    seed_soak_snapshot(db,campaign_id="other-campaign",release_id="other-release")
+    g=gate(report(db),"SOAK_EVIDENCE")
+    assert g["status"]==NOT_OBSERVABLE
