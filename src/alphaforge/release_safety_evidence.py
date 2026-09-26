@@ -13,7 +13,7 @@ from alphaforge.release_gates import (
     persist_rollback_verification,
     persist_runbook_evidence,
 )
-from alphaforge.release_identity import GitRunner, require_campaign_checkout
+from alphaforge.release_identity import GitRunner, require_campaign_checkout, require_tracked_repository_file
 
 
 def persist_campaign_release_safety_evidence(
@@ -45,15 +45,19 @@ def persist_campaign_release_safety_evidence(
         git_runner=git_runner,
     )
     requested_runbook = Path(runbook_path).expanduser()
-    resolved_runbook = (
-        requested_runbook.resolve()
-        if requested_runbook.is_absolute()
-        else (repo_root / requested_runbook).resolve()
-    )
     try:
-        resolved_runbook.relative_to(repo_root)
+        resolved_runbook = require_tracked_repository_file(
+            requested_runbook,
+            repo_path=repo_root,
+            git_runner=git_runner,
+        )
     except ValueError as exc:
-        raise ValueError("RUNBOOK_OUTSIDE_CAMPAIGN_REPOSITORY") from exc
+        reason = str(exc)
+        if reason == "RELEASE_EVIDENCE_FILE_OUTSIDE_REPOSITORY":
+            raise ValueError("RUNBOOK_OUTSIDE_CAMPAIGN_REPOSITORY") from exc
+        if reason == "RELEASE_EVIDENCE_FILE_NOT_TRACKED":
+            raise ValueError("RUNBOOK_NOT_TRACKED") from exc
+        raise
     rollback = persist_rollback_verification(
         engine,
         release_id=release_id,
