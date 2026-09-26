@@ -16,7 +16,7 @@ from alphaforge.signal_geometry import (
 )
 
 MTF_REJECT_REASONS = (
-    "MTF_REGIME_UNAVAILABLE", "MTF_SETUP_UNAVAILABLE", "MTF_EXECUTION_UNAVAILABLE",
+    "MTF_REGIME_UNAVAILABLE", "MTF_REGIME_NEUTRAL", "MTF_SETUP_UNAVAILABLE", "MTF_EXECUTION_UNAVAILABLE",
     "MTF_CONTEXT_STALE", "MTF_REGIME_SETUP_MISMATCH", "MTF_SETUP_EXECUTION_MISMATCH",
     "MTF_DIRECTION_MISMATCH", "MTF_NO_VALID_SETUP", "MTF_EXECUTION_NOT_CONFIRMED",
     "MTF_EXECUTION_COUNTER_REGIME", "MTF_GUIDED_SETUP_SIDE_MISMATCH",
@@ -274,9 +274,12 @@ def evaluate_mtf_alignment(regime: Mapping[str, Any] | None, setup: Mapping[str,
     )
     reasons: list[str] = []
 
-    for _, ctx, missing_reason in contexts:
+    for layer, ctx, missing_reason in contexts:
         if not isinstance(ctx, Mapping) or ctx.get("evidence_status") != "COMPLETE":
-            reasons.append(missing_reason)
+            if layer == "regime" and isinstance(ctx, Mapping) and ctx.get("direction") == "NEUTRAL":
+                reasons.append("MTF_REGIME_NEUTRAL")
+            else:
+                reasons.append(missing_reason)
             continue
 
         tf = str(ctx.get("timeframe") or "")
@@ -365,7 +368,7 @@ def evaluate_mtf_alignment(regime: Mapping[str, Any] | None, setup: Mapping[str,
             "regime_alignment": (
                 "PASS"
                 if not any(
-                    r in {"MTF_REGIME_UNAVAILABLE", "MTF_CONTEXT_STALE"}
+                    r in {"MTF_REGIME_UNAVAILABLE", "MTF_REGIME_NEUTRAL", "MTF_CONTEXT_STALE"}
                     for r in reasons
                 )
                 else "FAIL"
