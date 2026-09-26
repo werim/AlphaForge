@@ -246,6 +246,7 @@ class RuntimeMetrics:
     mtf_alignment_pass: int = 0
     mtf_alignment_reject: int = 0
     mtf_regime_missing: int = 0
+    mtf_regime_neutral: int = 0
     mtf_setup_missing: int = 0
     mtf_execution_missing: int = 0
     mtf_execution_not_confirmed: int = 0
@@ -622,6 +623,7 @@ class RuntimeOrchestrator:
                 "mtf_alignment_pass": self.metrics.mtf_alignment_pass,
                 "mtf_alignment_reject": self.metrics.mtf_alignment_reject,
                 "mtf_regime_missing": self.metrics.mtf_regime_missing,
+                "mtf_regime_neutral": self.metrics.mtf_regime_neutral,
                 "mtf_setup_missing": self.metrics.mtf_setup_missing,
                 "mtf_execution_missing": self.metrics.mtf_execution_missing,
                 "mtf_execution_not_confirmed": self.metrics.mtf_execution_not_confirmed,
@@ -2223,6 +2225,7 @@ class RuntimeOrchestrator:
                         mtf=dict(mtf or {}), execution_ctx=execution_ctx)
                     self.metrics.mtf_alignment_reject += 1
                     self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
+                    self.metrics.mtf_regime_neutral += int("MTF_REGIME_NEUTRAL" in reasons)
                     self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
                     self.metrics.mtf_execution_missing += int("MTF_EXECUTION_UNAVAILABLE" in reasons)
                     self.metrics.mtf_execution_not_confirmed += int("MTF_EXECUTION_NOT_CONFIRMED" in reasons)
