@@ -318,7 +318,10 @@ class BurnInQualificationEngine:
             try: cluster=json.loads(r.get("payload_json") or "{}").get("correlation_cluster","UNKNOWN")
             except Exception: cluster="UNKNOWN"
             bycluster[cluster]=bycluster.get(cluster,0)+val
-        sym=(max(bysym.values())/total) if total else 1.0; trade=(top/total) if total else 1.0; reg=(max(byreg.values())/total) if total else 1.0; cluster=(max(bycluster.values())/total) if total else 1.0
+        if total <= 0:
+            metrics.update(symbol_contribution=bysym,regime_contribution=byreg,correlated_cluster_contribution=bycluster,symbol_concentration=None,top_trade_contribution=None,regime_concentration=None,correlated_cluster_concentration=None)
+            return "INSUFFICIENT_EVIDENCE"
+        sym=max(bysym.values())/total; trade=top/total; reg=max(byreg.values())/total; cluster=max(bycluster.values())/total
         metrics.update(symbol_contribution=bysym,regime_contribution=byreg,correlated_cluster_contribution=bycluster,symbol_concentration=sym,top_trade_contribution=trade,regime_concentration=reg,correlated_cluster_concentration=cluster)
         reasons=[]
         if sym>self.thresholds.max_symbol_concentration: reasons.append("SYMBOL_CONCENTRATION_BREACH")
