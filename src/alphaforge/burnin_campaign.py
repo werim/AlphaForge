@@ -316,8 +316,8 @@ def load_active_campaign_attachment(conn: Any, campaign_id: str) -> tuple[dict[s
         return campaign, run, mapping, str(campaign.get("last_error") or "PHASE8_CAMPAIGN_ACTIVE_RUN_NOT_RUNNING")
     return campaign, run, mapping, None
 
-def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|None=None, details: Mapping[str,Any]|None=None) -> str:
-    ts=utc_now()
+def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|None=None, details: Mapping[str,Any]|None=None, event_time: str|None=None) -> str:
+    ts=event_time or utc_now()
     eid="evt_"+canonical_hash({"campaign_id":campaign_id,"type":event_type,"run":burnin_run_id,"at":ts,"details":details or {}})[:24]
     _exec(conn,"INSERT OR IGNORE INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES (:eid,:cid,:bid,:typ,:ts,:det,:sv)",{"eid":eid,"cid":campaign_id,"bid":burnin_run_id,"typ":event_type,"ts":ts,"det":json.dumps(dict(details or {}),sort_keys=True,default=str),"sv":CAMPAIGN_SCHEMA_VERSION})
     return eid
@@ -367,7 +367,14 @@ def persist_terminal_cause(
         "burnin_run_id": burnin_run_id,
         **dict(details or {}),
     }
-    eid = event(conn, campaign_id, event_type, burnin_run_id=burnin_run_id, details=event_details)
+    eid = event(
+        conn,
+        campaign_id,
+        event_type,
+        burnin_run_id=burnin_run_id,
+        details=event_details,
+        event_time=ts,
+    )
     terminal_id = "term_" + canonical_hash({"campaign_id": campaign_id, "burnin_run_id": burnin_run_id})[:24]
     _exec(
         conn,
