@@ -337,3 +337,177 @@ def test_non_attributable_shadow_and_infrastructure_outcomes_are_diagnostic_only
     assert snap.metrics["reject_value_by_reason"] == {"LOW_EFFECTIVE_RR": 1.0}
     assert snap.reject_quality_status == "PASS"
     assert "REJECT_QUALITY_INSUFFICIENT" not in snap.blockers
+
+
+
+def _guided_geometry_metrics(*, stop_pct, min_stop=0.15, max_stop=1.5,
+                             executable_rr=0.0, primary="STOP_TOO_TIGHT"):
+    entry = 100.0
+    stop = entry * (1.0 - stop_pct / 100.0)
+    candidate_rr = 1.2
+    return {
+        "signal_id": f"guided-{stop_pct}",
+        "entry": entry,
+        "sl": stop,
+        "tp": entry + candidate_rr * (entry - stop),
+        "rr": candidate_rr,
+        "candidate_rr": candidate_rr,
+        "executable_raw_rr": executable_rr,
+        "effective_rr": max(executable_rr - 0.03, 0.0),
+        "remaining_execution_penalty": 0.03,
+        "stop_distance_pct": stop_pct,
+        "min_stop_pct": min_stop,
+        "max_stop_pct": max_stop,
+        "primary_reject_reason": primary,
+        "all_failed_gates": (
+            ["STOP_TOO_TIGHT", "RR_TOO_LOW", "LOW_EFFECTIVE_RR"]
+            if primary == "STOP_TOO_TIGHT"
+            else ["LOW_SCORE"]
+        ),
+        "mtf": {
+            "generation": {
+                "mode": "REGIME_GUIDED",
+                "evidence_status": "COMPLETE",
+                "candidate": {
+                    "side": "LONG", "entry": entry, "sl": stop,
+                    "tp": entry + candidate_rr * (entry - stop),
+                    "rr": candidate_rr,
+                },
+            },
+        },
+    }
+
+
+def test_guided_geometry_structural_suppression_blocks_qualification():
+    e = _engine()
+    _run(e)
+    with e.begin() as c:
+        for index, stop_pct in enumerate((0.01, 0.04, 0.10)):
+            c.execute(
+                text("UPDATE burnin_observations SET metrics_json=:metrics "
+                     "WHERE observation_id=:id"),
+                {
+                    "id": f"obs-r-{index}",
+                    "metrics": json.dumps(
+                        _guided_geometry_metrics(stop_pct=stop_pct),
+                        sort_keys=True,
+                    ),
+                },
+            )
+
+    thresholds = BurnInThresholds(
+        minimum_duration_seconds=0,
+        minimum_total_decisions=0,
+        minimum_accepted_trades=0,
+        minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0,
+        minimum_regime_coverage=0,
+        minimum_calibration_sample=0,
+        minimum_geometry_viability_sample=3,
+        require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )
+    engine = BurnInQualificationEngine(e, thresholds)
+    snap = engine.evaluate("r")
+
+    assert snap.metrics["guided_candidate_decisions"] == 3
+    assert snap.metrics["guided_geometry_evaluable_decisions"] == 3
+    assert snap.metrics["guided_below_min_stop_count"] == 3
+    assert snap.metrics["guided_below_min_stop_rate"] == 1.0
+    assert snap.metrics["guided_above_max_stop_count"] == 0
+    assert snap.metrics["guided_within_stop_policy_count"] == 0
+    assert snap.metrics["guided_executable_rr_zero_count"] == 3
+    assert snap.metrics["guided_executable_rr_zero_rate"] == 1.0
+    assert snap.metrics["guided_failed_gate_counts"]["STOP_TOO_TIGHT"] == 3
+    assert snap.metrics["guided_failed_gate_counts"]["LOW_EFFECTIVE_RR"] == 3
+    assert snap.metrics["guided_primary_reject_reason_counts"]["STOP_TOO_TIGHT"] == 3
+    assert snap.metrics["guided_fill_geometry_loss_r_avg"] == 1.2
+    assert snap.metrics["guided_residual_execution_penalty_r_avg"] == 0.03
+    assert snap.metrics["guided_geometry_viability_status"] == "FAIL"
+    blocker = next(
+        item for item in snap.blockers
+        if item.startswith("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:")
+    )
+    assert blocker == "GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:3/3"
+    assert "GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION" in engine.suspension_reasons(snap)
+
+
+def test_guided_geometry_viability_reports_below_above_and_valid_without_false_fail():
+    e = _engine()
+    _run(e)
+    payloads = [
+        _guided_geometry_metrics(stop_pct=0.10, executable_rr=0.5),
+        _guided_geometry_metrics(
+            stop_pct=0.50, executable_rr=1.1, primary="LOW_SCORE",
+        ),
+        _guided_geometry_metrics(
+            stop_pct=2.00, executable_rr=1.0, primary="LOW_SCORE",
+        ),
+    ]
+    with e.begin() as c:
+        for index, payload in enumerate(payloads):
+            c.execute(
+                text("UPDATE burnin_observations SET metrics_json=:metrics "
+                     "WHERE observation_id=:id"),
+                {"id": f"obs-r-{index}",
+                 "metrics": json.dumps(payload, sort_keys=True)},
+            )
+
+    snap = BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=0,
+        minimum_total_decisions=0,
+        minimum_accepted_trades=0,
+        minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0,
+        minimum_regime_coverage=0,
+        minimum_calibration_sample=0,
+        minimum_geometry_viability_sample=3,
+        require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate("r")
+
+    assert snap.metrics["guided_geometry_viability_status"] == "PASS"
+    assert snap.metrics["guided_below_min_stop_count"] == 1
+    assert snap.metrics["guided_below_min_stop_rate"] == 1 / 3
+    assert snap.metrics["guided_above_max_stop_count"] == 1
+    assert snap.metrics["guided_above_max_stop_rate"] == 1 / 3
+    assert snap.metrics["guided_within_stop_policy_count"] == 1
+    assert snap.metrics["guided_within_stop_policy_rate"] == 1 / 3
+    assert snap.metrics["guided_post_mtf_funnel_reach_rate"] == 3 / 10
+    assert not any(
+        item.startswith("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:")
+        for item in snap.blockers
+    )
+
+
+def test_guided_geometry_small_sample_is_warning_not_failure():
+    e = _engine()
+    _run(e)
+    with e.begin() as c:
+        c.execute(
+            text("UPDATE burnin_observations SET metrics_json=:metrics "
+                 "WHERE observation_id='obs-r-0'"),
+            {"metrics": json.dumps(
+                _guided_geometry_metrics(stop_pct=0.01), sort_keys=True
+            )},
+        )
+
+    snap = BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=0,
+        minimum_total_decisions=0,
+        minimum_accepted_trades=0,
+        minimum_closed_trades=0,
+        minimum_rejected_forward_outcomes=0,
+        minimum_regime_coverage=0,
+        minimum_calibration_sample=0,
+        minimum_geometry_viability_sample=3,
+        require_operator_ack=False,
+        require_phase1_6_gates=False,
+    )).evaluate("r")
+
+    assert snap.metrics["guided_geometry_viability_status"] == "INSUFFICIENT"
+    assert "GUIDED_GEOMETRY_VIABILITY_SAMPLE_INSUFFICIENT:1<3" in snap.warnings
+    assert not any(
+        item.startswith("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:")
+        for item in snap.blockers
+    )
