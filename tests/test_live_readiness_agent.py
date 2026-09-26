@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
+import json
 import sqlite3
 from pathlib import Path
 from alphaforge.live_readiness_agent import BLOCKED, NEEDS_FIX, NOT_OBSERVABLE, PASS, LiveReadinessAgent
+from alphaforge.release_gates import ROLLBACK_VERIFICATION_CONTRACT, RUNBOOK_REQUIRED_MARKERS, RUNBOOK_VERIFICATION_CONTRACT
 
 NOW=datetime(2026,9,20,18,14,tzinfo=timezone.utc)
 def meta(_): return {"commit":"abc","branch":"feat/live-readiness-agent-v1","dirty":False}
@@ -13,11 +15,48 @@ def make_db(path:Path):
     CREATE TABLE order_decisions(decision_id,signal_id,decision,mode,effective_rr,execution_ctx_missing,spread_pct,expected_slippage_pct,latency_ms,funding_rate_pct); CREATE TABLE trade_lifecycle_events(signal_id,lifecycle_state,mode);
     CREATE TABLE burnin_reject_outcomes(burnin_run_id,evidence_complete,forward_label,hypothetical_net_r_after_costs,payload_json); CREATE TABLE expectancy_evidence(campaign_id,run_id,evidence_complete,net_r,decision_time,resolved_at,source_decision_id,evidence_type);
     CREATE TABLE burnin_qualification_snapshots(burnin_run_id,status,sample_status,evidence_completeness_status,generated_at); CREATE TABLE burnin_recovery_drills(campaign_id,status,generated_at);
-    CREATE TABLE live_rollback_validation_evidence(recorded_at,evidence_status,execution_mutation_attempt_count); CREATE TABLE rollback_verification_events(release_id,status,verified_at); CREATE TABLE runbook_evidence(release_id,status,recorded_at);
+    CREATE TABLE live_rollback_validation_evidence(validation_id,recorded_at,evidence_status,rollback_evidence_source,kill_switch_block_verified,no_submit_on_kill_switch_verified,fail_closed_reconciliation_verified,repair_actions_non_mutating_verified,execution_mutation_attempt_count,blocking_reasons);
+    CREATE TABLE rollback_verification_events(release_id,status,verified_at,evidence_json);
+    CREATE TABLE runbook_evidence(release_id,status,recorded_at,evidence_json);
     CREATE TABLE runtime_control_state(mode_requested,mode_running,updated_at); CREATE TABLE runtime_control_audit_events(action,success,event_ts,requested_mode); CREATE TABLE burnin_observations(burnin_run_id,symbol,decision,execution_mode,metrics_json);
     """)
     c.execute("INSERT INTO burnin_campaigns VALUES(?,?,?,?,?,?,?,?,?,?)",("camp","rel","RUNNING","run","abc","cfg","str","2026-09-20T18:13:59Z",None,'["BTCUSDT"]'))
     c.execute("INSERT INTO burnin_runs VALUES(?,?,?,?,?)",("run","RUNNING","abc","cfg","str")); c.execute("INSERT INTO burnin_campaign_runs VALUES(?,?,?)",("camp","run","RUNNING")); c.execute("INSERT INTO burnin_preflight_reports VALUES(?,?,?)",("camp","PASS","2026-09-20T18:00:00Z")); c.execute("INSERT INTO runtime_state_snapshots VALUES(?,?,?,?,?,?,?)",("camp","run","CLEAN",0,0,None,"2026-09-20T18:00:00Z")); c.execute("INSERT INTO runtime_control_state VALUES(?,?,?)",("PAPER","PAPER","2026-09-20T18:00:00Z")); c.execute("INSERT INTO burnin_observations VALUES(?,?,?,?,?)",("run","BTCUSDT",None,"PAPER","{}")); c.commit(); c.close()
+def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", release_id="rel"):
+    rollback_evidence={
+        "verification_contract":ROLLBACK_VERIFICATION_CONTRACT,
+        "source":"DETERMINISTIC_VALIDATION",
+        "validation_id":validation_id,
+        "recorded_at":"2026-09-20T18:00:00Z",
+        "age_sec":1.0,
+        "kill_switch_block_verified":True,
+        "no_submit_on_kill_switch_verified":True,
+        "fail_closed_reconciliation_verified":True,
+        "repair_actions_non_mutating_verified":True,
+        "execution_mutation_attempt_count":0,
+        "blocking_reasons":[],
+    }
+    runbook_evidence={
+        "verification_contract":RUNBOOK_VERIFICATION_CONTRACT,
+        "file_name":"RUNBOOK.md",
+        "sha256":"a"*64,
+        "size_bytes":128,
+        "required_markers":list(RUNBOOK_REQUIRED_MARKERS),
+        "missing_markers":[],
+        "read_error":None,
+    }
+    c=sqlite3.connect(path)
+    c.execute("INSERT INTO live_rollback_validation_evidence VALUES(?,?,?,?,?,?,?,?,?,?)",(
+        validation_id,"2026-09-20T18:00:00Z","COMPLETE","DETERMINISTIC_VALIDATION",1,1,1,1,0,"[]",
+    ))
+    c.execute("INSERT INTO rollback_verification_events VALUES(?,?,?,?)",(
+        release_id,"PASS","2026-09-20T18:00:01Z",json.dumps(rollback_evidence),
+    ))
+    c.execute("INSERT INTO runbook_evidence VALUES(?,?,?,?)",(
+        release_id,"PASS","2026-09-20T18:00:01Z",json.dumps(runbook_evidence),
+    ))
+    c.commit(); c.close()
+
 def report(path): return LiveReadinessAgent(path,"camp",now=NOW,git_metadata=meta).evaluate()
 def gate(r,id): return next(x for x in r["gates"] if x["gate_id"]==id)
 def test_target_is_read_only_and_report_is_deterministic(tmp_path):
@@ -110,3 +149,34 @@ def test_unrelated_lifecycle_cannot_satisfy_current_accepted_signal(tmp_path):
     c.commit(); c.close()
 
     assert gate(report(db),"ACCEPTED_LIFECYCLE_EVIDENCE")["status"]==NEEDS_FIX
+
+
+def test_release_safety_gates_require_contract_verified_evidence(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db); seed_release_safety_evidence(db)
+    r=report(db)
+    assert gate(r,"ROLLBACK_EVIDENCE")["status"]==PASS
+    assert gate(r,"RUNBOOK_EVIDENCE")["status"]==PASS
+
+
+def test_newer_unrelated_rollback_validation_cannot_contaminate_release_scope(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db); seed_release_safety_evidence(db,validation_id="linked")
+    c=sqlite3.connect(db)
+    c.execute("INSERT INTO live_rollback_validation_evidence VALUES(?,?,?,?,?,?,?,?,?,?)",(
+        "unrelated","2026-09-20T18:13:00Z","INCOMPLETE","DETERMINISTIC_VALIDATION",0,0,0,0,4,'["UNRELATED_FAILURE"]',
+    ))
+    c.commit(); c.close()
+    assert gate(report(db),"ROLLBACK_EVIDENCE")["status"]==PASS
+
+
+def test_status_only_release_safety_pass_rows_are_blocked(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db); c=sqlite3.connect(db)
+    c.execute("INSERT INTO rollback_verification_events VALUES(?,?,?,?)",(
+        "rel","PASS","2026-09-20T18:00:01Z","{}",
+    ))
+    c.execute("INSERT INTO runbook_evidence VALUES(?,?,?,?)",(
+        "rel","PASS","2026-09-20T18:00:01Z","{}",
+    ))
+    c.commit(); c.close()
+    r=report(db)
+    assert gate(r,"ROLLBACK_EVIDENCE")["status"]==BLOCKED
+    assert gate(r,"RUNBOOK_EVIDENCE")["status"]==BLOCKED
