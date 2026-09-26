@@ -3719,7 +3719,9 @@ class RuntimeOrchestrator:
             for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
                 "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
-                "risk_reward", "effective_rr", "setup_type", "setup_reason", "geometry_source",
+                "risk_reward", "candidate_rr", "expected_fill", "executable_raw_rr",
+                "remaining_execution_penalty", "effective_rr", "execution_cost_semantics",
+                "setup_type", "setup_reason", "geometry_source",
             ):
                 result[key] = None
             result["geometry_status"] = "UNAVAILABLE"
