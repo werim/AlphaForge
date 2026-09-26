@@ -25,6 +25,7 @@ def make_db(path:Path):
 def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", release_id="rel"):
     rollback_evidence={
         "verification_contract":ROLLBACK_VERIFICATION_CONTRACT,
+        "git_commit":"abc",
         "source":"DETERMINISTIC_VALIDATION",
         "validation_id":validation_id,
         "recorded_at":"2026-09-20T18:00:00Z",
@@ -38,6 +39,7 @@ def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", releas
     }
     runbook_evidence={
         "verification_contract":RUNBOOK_VERIFICATION_CONTRACT,
+        "git_commit":"abc",
         "file_name":"RUNBOOK.md",
         "sha256":"a"*64,
         "size_bytes":128,
@@ -224,3 +226,18 @@ def test_unrelated_qualification_snapshot_cannot_satisfy_campaign_soak_gate(tmp_
     seed_soak_snapshot(db,campaign_id="other-campaign",release_id="other-release")
     g=gate(report(db),"SOAK_EVIDENCE")
     assert g["status"]==NOT_OBSERVABLE
+
+
+def test_release_safety_evidence_from_different_commit_is_blocked(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db); seed_release_safety_evidence(db)
+    c=sqlite3.connect(db)
+    rb=json.loads(c.execute("SELECT evidence_json FROM rollback_verification_events").fetchone()[0])
+    rb["git_commit"]="different"
+    c.execute("UPDATE rollback_verification_events SET evidence_json=?",(json.dumps(rb),))
+    run=json.loads(c.execute("SELECT evidence_json FROM runbook_evidence").fetchone()[0])
+    run["git_commit"]="different"
+    c.execute("UPDATE runbook_evidence SET evidence_json=?",(json.dumps(run),))
+    c.commit(); c.close()
+    r=report(db)
+    assert gate(r,"ROLLBACK_EVIDENCE")["status"]==BLOCKED
+    assert gate(r,"RUNBOOK_EVIDENCE")["status"]==BLOCKED
