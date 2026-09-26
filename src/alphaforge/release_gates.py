@@ -22,6 +22,8 @@ RUNBOOK_EVIDENCE_TABLE = "runbook_evidence"
 
 ACK_RISK_PHRASE = "I acknowledge AlphaForge Phase 6 canary risk and LIVE real orders remain disabled"
 MAX_OPERATOR_ACK_TTL_MINUTES = 240
+ROLLBACK_VERIFICATION_CONTRACT = "PHASE6_ROLLBACK_V1"
+RUNBOOK_VERIFICATION_CONTRACT = "PHASE6_RUNBOOK_V1"
 
 CANARY_VALIDATION_EVENT_TYPE = "CANARY_VALIDATION_PASS"
 CANARY_VALIDATION_CONTRACT = "PHASE6_CANARY_MUTATION_TRAP_V1"
@@ -334,19 +336,83 @@ def _latest_verified_canary_validation(engine: Engine, *, release_id: str, phase
     }
 
 
-def _latest_status(engine: Engine, table: str, *, release_id: str, phase: str, status_column: str, time_column: str) -> str | None:
-    if not read_only_table_exists(engine, table):
-        return None
+def rollback_verification_evidence_valid(status: Any, evidence: Mapping[str, Any]) -> bool:
+    return (
+        str(status or "").upper() == "PASS"
+        and str(evidence.get("verification_contract") or "") == ROLLBACK_VERIFICATION_CONTRACT
+        and str(evidence.get("source") or "") == "DETERMINISTIC_VALIDATION"
+        and bool(evidence.get("validation_id"))
+        and bool(evidence.get("kill_switch_block_verified"))
+        and bool(evidence.get("no_submit_on_kill_switch_verified"))
+        and bool(evidence.get("fail_closed_reconciliation_verified"))
+        and bool(evidence.get("repair_actions_non_mutating_verified"))
+        and int(evidence.get("execution_mutation_attempt_count") or 0) == 0
+        and list(evidence.get("blocking_reasons") or []) == []
+    )
+
+
+def runbook_verification_evidence_valid(status: Any, evidence: Mapping[str, Any]) -> bool:
+    digest = str(evidence.get("sha256") or "")
+    return (
+        str(status or "").upper() == "PASS"
+        and str(evidence.get("verification_contract") or "") == RUNBOOK_VERIFICATION_CONTRACT
+        and len(digest) == 64
+        and all(ch in "0123456789abcdef" for ch in digest.lower())
+        and int(evidence.get("size_bytes") or 0) > 0
+        and list(evidence.get("required_markers") or []) == list(RUNBOOK_REQUIRED_MARKERS)
+        and list(evidence.get("missing_markers") or []) == []
+        and evidence.get("read_error") in (None, "")
+    )
+
+
+def _latest_verified_rollback(engine: Engine, *, release_id: str, phase: str) -> tuple[str, dict[str, Any] | None]:
+    if not read_only_table_exists(engine, ROLLBACK_VERIFICATION_EVENTS_TABLE):
+        return "MISSING", None
     try:
         with engine.connect() as conn:
             row = conn.execute(text(f"""
-                SELECT {status_column} AS status FROM {table}
-                WHERE release_id = :release_id AND UPPER(phase) = UPPER(:phase)
-                ORDER BY {time_column} DESC, id DESC LIMIT 1
+                SELECT verification_id, verified_at, status, evidence_json
+                FROM {ROLLBACK_VERIFICATION_EVENTS_TABLE}
+                WHERE release_id=:release_id AND UPPER(phase)=UPPER(:phase)
+                ORDER BY id DESC LIMIT 1
             """), {"release_id": release_id, "phase": phase}).mappings().first()
     except SQLAlchemyError:
-        return None
-    return None if row is None else str(row["status"]).upper()
+        return "MISSING", None
+    if row is None:
+        return "MISSING", None
+    evidence = dict(_json_load(row["evidence_json"], {}))
+    valid = rollback_verification_evidence_valid(row["status"], evidence)
+    payload = {
+        "verification_id": str(row["verification_id"]),
+        "verified_at": str(row["verified_at"]),
+        **evidence,
+    }
+    return ("PASS" if valid else "UNVERIFIED"), payload
+
+
+def _latest_verified_runbook(engine: Engine, *, release_id: str, phase: str) -> tuple[str, dict[str, Any] | None]:
+    if not read_only_table_exists(engine, RUNBOOK_EVIDENCE_TABLE):
+        return "MISSING", None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(f"""
+                SELECT evidence_id, recorded_at, status, evidence_json
+                FROM {RUNBOOK_EVIDENCE_TABLE}
+                WHERE release_id=:release_id AND UPPER(phase)=UPPER(:phase)
+                ORDER BY id DESC LIMIT 1
+            """), {"release_id": release_id, "phase": phase}).mappings().first()
+    except SQLAlchemyError:
+        return "MISSING", None
+    if row is None:
+        return "MISSING", None
+    evidence = dict(_json_load(row["evidence_json"], {}))
+    valid = runbook_verification_evidence_valid(row["status"], evidence)
+    payload = {
+        "evidence_id": str(row["evidence_id"]),
+        "recorded_at": str(row["recorded_at"]),
+        **evidence,
+    }
+    return ("PASS" if valid else "UNVERIFIED"), payload
 
 
 def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHASE6", now: datetime | None = None) -> ReleaseGateSnapshot:
@@ -359,8 +425,8 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
     ack = latest_valid_operator_ack(engine, release_id=release_id, phase=phase, now=now)
     mutation_count = canary_mutation_attempt_count(engine, release_id=release_id, phase=phase)
     canary_validation = _latest_verified_canary_validation(engine, release_id=release_id, phase=phase)
-    rollback_status = _latest_status(engine, ROLLBACK_VERIFICATION_EVENTS_TABLE, release_id=release_id, phase=phase, status_column="status", time_column="verified_at")
-    runbook_status = _latest_status(engine, RUNBOOK_EVIDENCE_TABLE, release_id=release_id, phase=phase, status_column="status", time_column="recorded_at")
+    rollback_status, rollback_evidence = _latest_verified_rollback(engine, release_id=release_id, phase=phase)
+    runbook_status, runbook_evidence = _latest_verified_runbook(engine, release_id=release_id, phase=phase)
     canary_ready = mutation_count == 0 and canary_validation is not None
     rollback_verified = rollback_status == "PASS"
     runbook_verified = runbook_status == "PASS"
@@ -371,14 +437,14 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
         reasons.append("CANARY_EVIDENCE_MISSING")
     elif mutation_count > 0:
         reasons.append("CANARY_MUTATION_ATTEMPTED")
-    if rollback_status is None:
+    if rollback_status == "MISSING":
         reasons.append("ROLLBACK_EVIDENCE_MISSING")
     elif not rollback_verified:
-        reasons.append("ROLLBACK_NOT_VERIFIED")
-    if runbook_status is None:
+        reasons.append("ROLLBACK_EVIDENCE_UNVERIFIED")
+    if runbook_status == "MISSING":
         reasons.append("RUNBOOK_EVIDENCE_MISSING")
     elif not runbook_verified:
-        reasons.append("RUNBOOK_NOT_VERIFIED")
+        reasons.append("RUNBOOK_EVIDENCE_UNVERIFIED")
     passed = not reasons
     return ReleaseGateSnapshot(
         release_id=release_id,
@@ -395,7 +461,9 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
             "operator_ack": ack,
             "canary_validation": canary_validation,
             "rollback_status": rollback_status,
+            "rollback_evidence": rollback_evidence,
             "runbook_status": runbook_status,
+            "runbook_evidence": runbook_evidence,
             **({"full_tests": prior_full_tests} if prior_full_tests is not None else {}),
         },
     )
@@ -609,6 +677,7 @@ def persist_rollback_verification(
         measured.get("rollback_evidence_status") or ""
     ).upper() == "COMPLETE" and int(measured.get("execution_mutation_attempt_count") or 0) == 0
     evidence = {
+        "verification_contract": ROLLBACK_VERIFICATION_CONTRACT,
         "source": measured.get("rollback_evidence_source"),
         "validation_id": measured.get("validation_id"),
         "recorded_at": measured.get("recorded_at"),
@@ -662,7 +731,7 @@ def persist_runbook_evidence(
     digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
     verified = raw is not None and content is not None and not missing_markers
     evidence = {
-        "verification_contract": "PHASE6_RUNBOOK_V1",
+        "verification_contract": RUNBOOK_VERIFICATION_CONTRACT,
         "file_name": path.name,
         "sha256": digest,
         "size_bytes": len(raw) if raw is not None else None,

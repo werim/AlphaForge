@@ -37,6 +37,47 @@ def _qualifying_evidence(e):
 def _qualifying_thresholds():
     return BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,minimum_closed_trades=1,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=1,minimum_regime_sample=1,minimum_calibration_sample=1,max_symbol_concentration=.99,max_trade_contribution=.99,max_regime_concentration=1.0,min_lower_confidence_bound_expectancy=.01,require_operator_ack=False,require_phase1_6_gates=False)
 
+def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
+    from alphaforge.release_gates import (
+        persist_operator_ack,
+        persist_rollback_verification,
+        persist_runbook_evidence,
+        required_operator_ack_text,
+        run_canary_mutation_trap_validation,
+    )
+    from alphaforge.rollback_evidence import persist_rollback_validation_evidence
+
+    persist_operator_ack(
+        e,
+        release_id=release_id,
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text(release_id),
+    )
+    run_canary_mutation_trap_validation(e, release_id=release_id, phase="PHASE6")
+    persist_rollback_validation_evidence(e, {
+        "validation_id": f"rollback-validation:{release_id}",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "PHASE7_TEST_FIXTURE"},
+    })
+    persist_rollback_verification(e, release_id=release_id)
+    runbook = tmp_path / f"{release_id}-RUNBOOK.md"
+    runbook.write_text(
+        "# Test Runbook\n"
+        "## Explicit LIVE boundary\nLIVE remains blocked.\n"
+        "## Suspension conditions\nFail closed.\n"
+        "## Operator workflow\nOperator verifies evidence.\n"
+        "## Phase 9 PAPER Burn-in Operations\n"
+        "Use recovery-drill before promotion and finalize only after qualification.\n",
+        encoding="utf-8",
+    )
+    persist_runbook_evidence(e, release_id=release_id, runbook_path=runbook)
+
+
 def test_missing_costs_block_qualification():
     e=_engine(); _run(e)
     with e.begin() as c:
@@ -102,15 +143,11 @@ def test_missing_phase6_and_operator_ack_block_qualification():
     assert "FULL_TEST_EVIDENCE_MISSING" in snap.blockers
 
 
-def test_optimistic_full_test_pass_without_verified_provenance_is_blocked():
+def test_optimistic_full_test_pass_without_verified_provenance_is_blocked(tmp_path):
     from alphaforge.release_gates import ensure_release_gate_schema, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
     ensure_release_gate_schema(e)
-    persist_operator_ack(e, release_id="rel", phase="PHASE6", acknowledgement_text=required_operator_ack_text("rel"))
-    run_canary_mutation_trap_validation(e, release_id="rel", phase="PHASE6")
-    with e.begin() as c:
-        c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb-unverified','rel','PHASE6','now','PASS','{}')"))
-        c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run-unverified','rel','PHASE6','now','PASS','{}')"))
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
     persist_release_snapshot(e, ReleaseGateSnapshot(
         release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now",
         canary_ready=True, rollback_verified=True, runbook_verified=True,
@@ -125,15 +162,11 @@ def test_optimistic_full_test_pass_without_verified_provenance_is_blocked():
     assert "FULL_TEST_EVIDENCE_UNVERIFIED" in snap.blockers
 
 
-def test_verified_full_test_evidence_for_different_commit_is_blocked():
+def test_verified_full_test_evidence_for_different_commit_is_blocked(tmp_path):
     from alphaforge.release_gates import ensure_release_gate_schema, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
     ensure_release_gate_schema(e)
-    persist_operator_ack(e, release_id="rel", phase="PHASE6", acknowledgement_text=required_operator_ack_text("rel"))
-    run_canary_mutation_trap_validation(e, release_id="rel", phase="PHASE6")
-    with e.begin() as c:
-        c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb-mismatch','rel','PHASE6','now','PASS','{}')"))
-        c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run-mismatch','rel','PHASE6','now','PASS','{}')"))
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
     required={
         "Full regression suite":"success",
         "Protected safety mutation gate":"success",
@@ -171,15 +204,11 @@ def test_suspension_reasons_are_persisted_separately():
     assert {"SPREAD_DEGRADATION","MUTATION_ATTEMPT","RUNBOOK_INVALIDATION","DRAWDOWN_BREACH","ROLLING_EXPECTANCY_BREACH"}.issubset(set(reasons))
 
 
-def test_all_required_phase7_and_phase6_evidence_canary_qualified():
+def test_all_required_phase7_and_phase6_evidence_canary_qualified(tmp_path):
     from alphaforge.release_gates import ensure_release_gate_schema, persist_operator_ack, run_canary_mutation_trap_validation, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
     ensure_release_gate_schema(e)
-    persist_operator_ack(e, release_id="rel", phase="PHASE6", acknowledgement_text=required_operator_ack_text("rel"))
-    run_canary_mutation_trap_validation(e, release_id="rel", phase="PHASE6")
-    with e.begin() as c:
-        c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb','rel','PHASE6','now','PASS','{}')"))
-        c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run','rel','PHASE6','now','PASS','{}')"))
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
     persist_release_snapshot(e, ReleaseGateSnapshot(
         release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now",
         canary_ready=True, rollback_verified=True, runbook_verified=True,
