@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparse, asyncio, contextlib, csv, hashlib, json, math, os, re, sqlite3, subprocess, sys, time, uuid
+import argparse, asyncio, contextlib, csv, hashlib, json, math, os, re, sqlite3, subprocess, sys, threading, time, uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -526,7 +526,10 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
     return agg_id
 
 def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
-    active_campaign_duration(conn, campaign_id)
+    # Aggregation is a read path. Derive active duration without persisting it so
+    # health/status and qualification-due checks never acquire the SQLite writer
+    # slot merely to inspect campaign evidence.
+    observed_duration = active_campaign_duration(conn, campaign_id, persist=False)
     c=get_campaign(conn,campaign_id)
     if not c: return {"status":"UNAVAILABLE","reason":"NO_CAMPAIGN"}
     runs=[_row_dict(r) for r in _exec(conn,"SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:id AND (cr.status != 'FAILED' OR EXISTS (SELECT 1 FROM burnin_observations o WHERE o.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_trade_outcomes t WHERE t.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_reject_outcomes j WHERE j.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_regime_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_execution_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_calibration_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_drawdown_events m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_qualification_snapshots q WHERE q.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_suspension_events s WHERE s.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_reject_labels p WHERE p.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_position_outcomes p WHERE p.burnin_run_id=r.burnin_run_id)) ORDER BY cr.continuation_sequence",{"id":campaign_id}).fetchall()]
@@ -610,7 +613,7 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     if candidate_label_keys & ineligible_ids: integrity_issues.append("LABELS_FOR_INELIGIBLE_REJECTS")
     if duplicate_qualification_outcomes: integrity_issues.append("DUPLICATE_CANONICAL_REJECT_OUTCOMES")
     coverage=(eligible_labels/label_eligible if label_eligible else (1.0 if not eligible_labels else 0.0))
-    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":qualification_unique_labels,"diagnostic_unique_reject_labels_persisted":unique_labels,"non_attributable_reject_labels_persisted":unique_labels-qualification_unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(qualification_resolved),"diagnostic_completed_rejected_forward_outcomes":len(resolved),"duplicate_canonical_rejected_forward_outcomes":duplicate_qualification_outcomes,"non_attributable_or_orphan_rejected_forward_outcomes":len(resolved)-len(qualification_resolved),"qualification_reject_identity_unit":"CANONICAL_DECISION","qualification_reject_identity_mode":identity_mode,"ambiguous_rejected_forward_outcomes":sum(1 for r in qualification_resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"diagnostic_ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
+    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":qualification_unique_labels,"diagnostic_unique_reject_labels_persisted":unique_labels,"non_attributable_reject_labels_persisted":unique_labels-qualification_unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(qualification_resolved),"diagnostic_completed_rejected_forward_outcomes":len(resolved),"duplicate_canonical_rejected_forward_outcomes":duplicate_qualification_outcomes,"non_attributable_or_orphan_rejected_forward_outcomes":len(resolved)-len(qualification_resolved),"qualification_reject_identity_unit":"CANONICAL_DECISION","qualification_reject_identity_mode":identity_mode,"ambiguous_rejected_forward_outcomes":sum(1 for r in qualification_resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"diagnostic_ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(observed_duration),"source_run_ids":run_ids}
     qualification_hash_payload={key:metrics[key] for key in ("sample_count","accepted_count","rejected_count","closed_trade_count","completed_rejected_forward_outcomes","ambiguous_rejected_forward_outcomes","observed_duration_seconds","source_run_ids","qualification_reject_identity_unit","qualification_reject_identity_mode")}
     qualification_hash_payload["reject_outcomes"] = sorted(({
         "reject_decision_id": reject_decision_id_from_outcome(dict(r) if isinstance(r,sqlite3.Row) else dict(r._mapping)),
@@ -981,7 +984,7 @@ class BinanceReadOnlyCandleProvider:
 class BurnInCampaignRunner:
     """Operational campaign worker loop for resolver/maintenance progress without enabling LIVE."""
     def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
-        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0
+        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
 
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
@@ -1001,13 +1004,21 @@ class BurnInCampaignRunner:
         return first_evidence or near_completion or (elapsed >= self.qualification_interval_seconds and (enough_new or evidence_changed))
 
     def _qualify_if_due(self) -> dict[str, Any] | None:
-        if not self._qualification_due():
+        # Resolver and maintenance run in separate worker threads. Qualification
+        # materialization is write-heavy, so allow only one in-flight check/build
+        # per campaign runner. A skipped contender will retry on its next loop.
+        if not self._qualification_lock.acquire(blocking=False):
             return None
-        result = qualify_campaign(self.engine, self.campaign_id, self.thresholds)
-        with self.engine.connect() as conn:
-            self._last_qualification_observation_count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
-        self._last_qualification_monotonic = time.monotonic()
-        return result
+        try:
+            if not self._qualification_due():
+                return None
+            result = qualify_campaign(self.engine, self.campaign_id, self.thresholds)
+            with self.engine.connect() as conn:
+                self._last_qualification_observation_count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
+            self._last_qualification_monotonic = time.monotonic()
+            return result
+        finally:
+            self._qualification_lock.release()
 
     def _best_effort_failure_event(self, original: BaseException, failure_class: str, elapsed: float | None) -> None:
         self._pending_resolver_failure_events.append({"attempt_id": uuid.uuid4().hex, "error": str(original), "failure_count": self.resolver_failure_count, "failure_class": failure_class, "transient_elapsed_seconds": elapsed, "grace_seconds": self.provider_transient_outage_grace_seconds})
