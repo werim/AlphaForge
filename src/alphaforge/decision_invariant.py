@@ -356,9 +356,11 @@ def _incomplete_fields(value: PreSubmitInvariant) -> tuple[str, ...]:
 def assert_pre_submit_invariant_parity(
     reference: Mapping[str, Any],
     *surfaces: Mapping[str, Any],
+    numeric_abs_tol: float = 1e-9,
 ) -> PreSubmitInvariant:
-    """Fail closed on incomplete evidence or any protected semantic drift."""
+    """Fail closed on incomplete, contradictory, or cross-surface drift."""
 
+    assert_pre_submit_semantics(reference, numeric_abs_tol=numeric_abs_tol)
     expected = project_pre_submit_invariant(reference)
     expected_missing = _incomplete_fields(expected)
     if expected_missing:
@@ -366,6 +368,7 @@ def assert_pre_submit_invariant_parity(
             "DECISION_PARITY_EVIDENCE_INCOMPLETE: " + ",".join(expected_missing)
         )
     for payload in surfaces:
+        assert_pre_submit_semantics(payload, numeric_abs_tol=numeric_abs_tol)
         observed = project_pre_submit_invariant(payload)
         observed_missing = _incomplete_fields(observed)
         if observed_missing:
