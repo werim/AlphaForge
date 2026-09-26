@@ -188,6 +188,38 @@ def test_one_release_evidence_commit_mismatch_cannot_be_masked_by_other_passes(t
     assert "RUNBOOK_EVIDENCE_COMMIT_MISMATCH" not in snap.blockers
 
 
+def test_rollback_and_runbook_commit_mismatches_are_independently_blocked(tmp_path):
+    e=_engine(); _run(e)
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    with e.begin() as c:
+        rb=c.execute(text("""
+            SELECT id,evidence_json FROM rollback_verification_events
+            WHERE release_id='rel' ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        rb_payload=json.loads(rb["evidence_json"])
+        rb_payload["git_commit"]="different"
+        rb_payload["source_git_commit"]="different"
+        c.execute(text("UPDATE rollback_verification_events SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(rb_payload,sort_keys=True),"id":rb["id"],
+        })
+        run=c.execute(text("""
+            SELECT id,evidence_json FROM runbook_evidence
+            WHERE release_id='rel' ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        run_payload=json.loads(run["evidence_json"])
+        run_payload["git_commit"]="different"
+        c.execute(text("UPDATE runbook_evidence SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(run_payload,sort_keys=True),"id":run["id"],
+        })
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=0,minimum_accepted_trades=0,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "ROLLBACK_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+    assert "RUNBOOK_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+
+
 def test_verified_full_test_evidence_for_different_commit_is_blocked(tmp_path):
     from alphaforge.release_gates import ensure_release_gate_schema, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
