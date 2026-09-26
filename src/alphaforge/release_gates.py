@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from alphaforge.contracts import canonical_utc_timestamp
+from alphaforge.release_identity import checkout_identity
 
 RELEASE_GATE_SNAPSHOTS_TABLE = "release_gate_snapshots"
 OPERATOR_ACKNOWLEDGEMENTS_TABLE = "operator_acknowledgements"
@@ -76,6 +77,16 @@ def _parse_ts(value: Any) -> datetime | None:
 
 def required_operator_ack_text(release_id: str) -> str:
     return f"{ACK_RISK_PHRASE}; release_id={release_id}"
+
+
+def _release_evidence_git_commit(git_commit: str | None) -> str | None:
+    explicit = str(git_commit or "").strip()
+    if explicit:
+        return explicit
+    identity = checkout_identity()
+    if identity.get("status") != "PASS" or not identity.get("clean"):
+        return None
+    return str(identity.get("git_commit") or "").strip() or None
 
 
 def _operator_ack_semantics(
@@ -320,6 +331,7 @@ def _latest_verified_canary_validation(engine: Engine, *, release_id: str, phase
         and str(evidence.get("source") or "") == CANARY_VALIDATION_SOURCE
         and str(evidence.get("verification_contract") or "") == CANARY_VALIDATION_CONTRACT
         and str(evidence.get("validation_status") or "").upper() == "PASS"
+        and bool(str(evidence.get("git_commit") or "").strip())
         and list(evidence.get("required_actions") or []) == required_actions
         and list(evidence.get("blocked_actions") or []) == required_actions
         and int(evidence.get("isolated_mutation_attempt_count") or 0) == len(required_actions)
@@ -332,6 +344,7 @@ def _latest_verified_canary_validation(engine: Engine, *, release_id: str, phase
         "event_ts": str(row["event_ts"]),
         "source": CANARY_VALIDATION_SOURCE,
         "verification_contract": CANARY_VALIDATION_CONTRACT,
+        "git_commit": evidence_git_commit,
         **evidence,
     }
 
@@ -342,6 +355,7 @@ def rollback_verification_evidence_valid(status: Any, evidence: Mapping[str, Any
         and str(evidence.get("verification_contract") or "") == ROLLBACK_VERIFICATION_CONTRACT
         and str(evidence.get("source") or "") == "DETERMINISTIC_VALIDATION"
         and bool(evidence.get("validation_id"))
+        and bool(str(evidence.get("git_commit") or "").strip())
         and bool(evidence.get("kill_switch_block_verified"))
         and bool(evidence.get("no_submit_on_kill_switch_verified"))
         and bool(evidence.get("fail_closed_reconciliation_verified"))
@@ -356,6 +370,7 @@ def runbook_verification_evidence_valid(status: Any, evidence: Mapping[str, Any]
     return (
         str(status or "").upper() == "PASS"
         and str(evidence.get("verification_contract") or "") == RUNBOOK_VERIFICATION_CONTRACT
+        and bool(str(evidence.get("git_commit") or "").strip())
         and len(digest) == 64
         and all(ch in "0123456789abcdef" for ch in digest.lower())
         and int(evidence.get("size_bytes") or 0) > 0
@@ -593,6 +608,7 @@ def run_canary_mutation_trap_validation(
     *,
     release_id: str,
     phase: str = "PHASE6",
+    git_commit: str | None = None,
 ) -> dict[str, Any]:
     """Exercise mutation surfaces in an isolated DB, then persist only the measured verdict."""
     isolated = create_engine("sqlite+pysqlite:///:memory:", future=True)
@@ -629,7 +645,10 @@ def run_canary_mutation_trap_validation(
         isolated.dispose()
 
     required_actions = list(CANARY_VALIDATION_ACTIONS)
+    evidence_git_commit = _release_evidence_git_commit(git_commit)
     passed = (
+        evidence_git_commit is not None
+        and
         blocked_actions == required_actions
         and isolated_attempts == len(required_actions)
         and isolated_blocked == len(required_actions)
@@ -668,16 +687,22 @@ def persist_rollback_verification(
     phase: str = "PHASE6",
     verification_id: str | None = None,
     max_evidence_age_sec: float = 900.0,
+    git_commit: str | None = None,
 ) -> dict[str, Any]:
     """Persist release-scoped rollback verification from fresh measured evidence only."""
     from alphaforge.rollback_evidence import latest_persisted_rollback_evidence
 
     measured = latest_persisted_rollback_evidence(engine, max_age_sec=max_evidence_age_sec)
-    verified = bool(measured.get("rollback_evidence_verified")) and str(
-        measured.get("rollback_evidence_status") or ""
-    ).upper() == "COMPLETE" and int(measured.get("execution_mutation_attempt_count") or 0) == 0
+    evidence_git_commit = _release_evidence_git_commit(git_commit)
+    verified = (
+        evidence_git_commit is not None
+        and bool(measured.get("rollback_evidence_verified"))
+        and str(measured.get("rollback_evidence_status") or "").upper() == "COMPLETE"
+        and int(measured.get("execution_mutation_attempt_count") or 0) == 0
+    )
     evidence = {
         "verification_contract": ROLLBACK_VERIFICATION_CONTRACT,
+        "git_commit": evidence_git_commit,
         "source": measured.get("rollback_evidence_source"),
         "validation_id": measured.get("validation_id"),
         "recorded_at": measured.get("recorded_at"),
@@ -716,6 +741,7 @@ def persist_runbook_evidence(
     phase: str = "PHASE6",
     runbook_path: str | Path = "RUNBOOK.md",
     evidence_id: str | None = None,
+    git_commit: str | None = None,
 ) -> dict[str, Any]:
     """Verify and persist the release runbook without trusting a caller-supplied PASS flag."""
     path = Path(runbook_path)
@@ -729,9 +755,11 @@ def persist_runbook_evidence(
         read_error = exc.__class__.__name__
     missing_markers = [marker for marker in RUNBOOK_REQUIRED_MARKERS if content is None or marker not in content]
     digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
-    verified = raw is not None and content is not None and not missing_markers
+    evidence_git_commit = _release_evidence_git_commit(git_commit)
+    verified = raw is not None and content is not None and not missing_markers and evidence_git_commit is not None
     evidence = {
         "verification_contract": RUNBOOK_VERIFICATION_CONTRACT,
+        "git_commit": evidence_git_commit,
         "file_name": path.name,
         "sha256": digest,
         "size_bytes": len(raw) if raw is not None else None,
