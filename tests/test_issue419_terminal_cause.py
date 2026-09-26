@@ -51,11 +51,12 @@ def test_authoritative_terminal_cause_is_immutable_and_event_linked(tmp_path):
     assert first["terminal_cause"] == "WORKER_UNCAUGHT_EXCEPTION"
     assert first["terminal_cause_source"] == "WORKER_UNCAUGHT_EXCEPTION"
     event_row = conn.execute(
-        "SELECT event_type,details_json FROM burnin_campaign_events WHERE event_id=?",
+        "SELECT event_type,event_time,details_json FROM burnin_campaign_events WHERE event_id=?",
         (first["terminal_event_id"],),
     ).fetchone()
     assert event_row is not None
     assert event_row["event_type"] == "WORKER_UNCAUGHT_EXCEPTION"
+    assert event_row["event_time"] == first["terminal_at"]
     details = json.loads(event_row["details_json"])
     assert details["terminal_cause"] == first["terminal_cause"]
     assert details["terminal_cause_source"] == first["terminal_cause_source"]
