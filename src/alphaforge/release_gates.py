@@ -8,7 +8,7 @@ from pathlib import Path
 import uuid
 from typing import Any, Mapping
 
-from sqlalchemy import inspect, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -22,6 +22,12 @@ RUNBOOK_EVIDENCE_TABLE = "runbook_evidence"
 
 ACK_RISK_PHRASE = "I acknowledge AlphaForge Phase 6 canary risk and LIVE real orders remain disabled"
 MAX_OPERATOR_ACK_TTL_MINUTES = 240
+
+CANARY_VALIDATION_EVENT_TYPE = "CANARY_VALIDATION_PASS"
+CANARY_VALIDATION_CONTRACT = "PHASE6_CANARY_MUTATION_TRAP_V1"
+CANARY_VALIDATION_SOURCE = "DETERMINISTIC_MUTATION_TRAP_VALIDATION"
+CANARY_VALIDATION_ACTIONS = ("submit", "place", "cancel", "modify", "create")
+_CANARY_VALIDATION_TOKEN = object()
 
 RUNBOOK_REQUIRED_MARKERS = (
     "## Explicit LIVE boundary",
@@ -280,17 +286,52 @@ def canary_mutation_attempt_count(engine: Engine, *, release_id: str, phase: str
         return None
 
 
-def _canary_event_count(engine: Engine, *, release_id: str, phase: str) -> int | None:
+def _latest_verified_canary_validation(engine: Engine, *, release_id: str, phase: str) -> dict[str, Any] | None:
     if not read_only_table_exists(engine, CANARY_RUN_EVENTS_TABLE):
         return None
     try:
         with engine.connect() as conn:
-            return int(conn.execute(text(f"""
-                SELECT COUNT(*) FROM {CANARY_RUN_EVENTS_TABLE}
-                WHERE release_id = :release_id AND UPPER(phase) = UPPER(:phase)
-            """), {"release_id": release_id, "phase": phase}).scalar_one())
+            row = conn.execute(text(f"""
+                SELECT event_id, event_ts, shadow_mode, canary_mode, mutation_attempted,
+                       mutation_blocked, evidence_json
+                FROM {CANARY_RUN_EVENTS_TABLE}
+                WHERE release_id = :release_id
+                  AND UPPER(phase) = UPPER(:phase)
+                  AND event_type = :event_type
+                ORDER BY id DESC LIMIT 1
+            """), {
+                "release_id": release_id,
+                "phase": phase,
+                "event_type": CANARY_VALIDATION_EVENT_TYPE,
+            }).mappings().first()
     except SQLAlchemyError:
         return None
+    if row is None:
+        return None
+    evidence = dict(_json_load(row["evidence_json"], {}))
+    required_actions = list(CANARY_VALIDATION_ACTIONS)
+    valid = (
+        bool(row["shadow_mode"])
+        and bool(row["canary_mode"])
+        and not bool(row["mutation_attempted"])
+        and bool(row["mutation_blocked"])
+        and str(evidence.get("source") or "") == CANARY_VALIDATION_SOURCE
+        and str(evidence.get("verification_contract") or "") == CANARY_VALIDATION_CONTRACT
+        and str(evidence.get("validation_status") or "").upper() == "PASS"
+        and list(evidence.get("required_actions") or []) == required_actions
+        and list(evidence.get("blocked_actions") or []) == required_actions
+        and int(evidence.get("isolated_mutation_attempt_count") or 0) == len(required_actions)
+        and int(evidence.get("isolated_mutation_blocked_count") or 0) == len(required_actions)
+    )
+    if not valid:
+        return None
+    return {
+        "event_id": str(row["event_id"]),
+        "event_ts": str(row["event_ts"]),
+        "source": CANARY_VALIDATION_SOURCE,
+        "verification_contract": CANARY_VALIDATION_CONTRACT,
+        **evidence,
+    }
 
 
 def _latest_status(engine: Engine, table: str, *, release_id: str, phase: str, status_column: str, time_column: str) -> str | None:
@@ -317,16 +358,16 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
             prior_full_tests = dict(candidate)
     ack = latest_valid_operator_ack(engine, release_id=release_id, phase=phase, now=now)
     mutation_count = canary_mutation_attempt_count(engine, release_id=release_id, phase=phase)
-    canary_event_count = _canary_event_count(engine, release_id=release_id, phase=phase)
+    canary_validation = _latest_verified_canary_validation(engine, release_id=release_id, phase=phase)
     rollback_status = _latest_status(engine, ROLLBACK_VERIFICATION_EVENTS_TABLE, release_id=release_id, phase=phase, status_column="status", time_column="verified_at")
     runbook_status = _latest_status(engine, RUNBOOK_EVIDENCE_TABLE, release_id=release_id, phase=phase, status_column="status", time_column="recorded_at")
-    canary_ready = mutation_count == 0 and bool(canary_event_count)
+    canary_ready = mutation_count == 0 and canary_validation is not None
     rollback_verified = rollback_status == "PASS"
     runbook_verified = runbook_status == "PASS"
     reasons: list[str] = []
     if ack is None:
         reasons.append("OPERATOR_ACK_MISSING_OR_EXPIRED")
-    if mutation_count is None or canary_event_count in (None, 0):
+    if mutation_count is None or canary_validation is None:
         reasons.append("CANARY_EVIDENCE_MISSING")
     elif mutation_count > 0:
         reasons.append("CANARY_MUTATION_ATTEMPTED")
@@ -352,7 +393,7 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
         blocking_reasons=reasons,
         evidence={
             "operator_ack": ack,
-            "canary_event_count": canary_event_count,
+            "canary_validation": canary_validation,
             "rollback_status": rollback_status,
             "runbook_status": runbook_status,
             **({"full_tests": prior_full_tests} if prior_full_tests is not None else {}),
@@ -437,7 +478,22 @@ def persist_operator_ack(
     return {**row, "valid": valid, "blocker_reason": blocker}
 
 
-def persist_canary_event(engine: Engine, *, release_id: str, phase: str, event_type: str = "CANARY_CHECK", shadow_mode: bool = True, canary_mode: bool = True, mutation_attempted: bool = False, mutation_blocked: bool = True, evidence: Mapping[str, Any] | None = None, event_id: str | None = None) -> dict[str, Any]:
+def persist_canary_event(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str,
+    event_type: str = "CANARY_CHECK",
+    shadow_mode: bool = True,
+    canary_mode: bool = True,
+    mutation_attempted: bool = False,
+    mutation_blocked: bool = True,
+    evidence: Mapping[str, Any] | None = None,
+    event_id: str | None = None,
+    _validation_token: object | None = None,
+) -> dict[str, Any]:
+    if event_type == CANARY_VALIDATION_EVENT_TYPE and _validation_token is not _CANARY_VALIDATION_TOKEN:
+        raise ValueError("CANARY_VALIDATION_EVENT_REQUIRES_MEASURED_WRITER")
     ensure_release_gate_schema(engine)
     row = {
         "event_id": event_id or f"canary:{uuid.uuid4().hex}",
@@ -462,6 +518,79 @@ def persist_canary_event(engine: Engine, *, release_id: str, phase: str, event_t
             )
         """), row)
     return row
+
+
+def run_canary_mutation_trap_validation(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str = "PHASE6",
+) -> dict[str, Any]:
+    """Exercise mutation surfaces in an isolated DB, then persist only the measured verdict."""
+    isolated = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    validation_release = f"isolated-canary:{uuid.uuid4().hex}"
+    results: dict[str, str] = {}
+    blocked_actions: list[str] = []
+    try:
+        ensure_release_gate_schema(isolated)
+        trap = MutationTrapExecutionAdapter(isolated, release_id=validation_release, phase=phase)
+        for action in CANARY_VALIDATION_ACTIONS:
+            try:
+                getattr(trap, action)()
+            except RuntimeError as exc:
+                result = str(exc)
+                results[action] = result
+                if result == "CANARY_MUTATION_BLOCKED":
+                    blocked_actions.append(action)
+            except Exception as exc:
+                results[action] = f"UNEXPECTED:{exc.__class__.__name__}"
+            else:
+                results[action] = "NOT_BLOCKED"
+        isolated_attempts = canary_mutation_attempt_count(
+            isolated, release_id=validation_release, phase=phase,
+        )
+        with isolated.connect() as conn:
+            isolated_blocked = int(conn.execute(text(f"""
+                SELECT COUNT(*) FROM {CANARY_RUN_EVENTS_TABLE}
+                WHERE release_id=:release_id
+                  AND UPPER(phase)=UPPER(:phase)
+                  AND mutation_attempted=1
+                  AND mutation_blocked=1
+            """), {"release_id": validation_release, "phase": phase}).scalar_one())
+    finally:
+        isolated.dispose()
+
+    required_actions = list(CANARY_VALIDATION_ACTIONS)
+    passed = (
+        blocked_actions == required_actions
+        and isolated_attempts == len(required_actions)
+        and isolated_blocked == len(required_actions)
+    )
+    evidence = {
+        "source": CANARY_VALIDATION_SOURCE,
+        "verification_contract": CANARY_VALIDATION_CONTRACT,
+        "validation_status": "PASS" if passed else "FAIL",
+        "required_actions": required_actions,
+        "blocked_actions": blocked_actions,
+        "action_results": results,
+        "isolated_mutation_attempt_count": isolated_attempts,
+        "isolated_mutation_blocked_count": isolated_blocked,
+        "campaign_release_db_mutation_attempted": False,
+    }
+    event_type = CANARY_VALIDATION_EVENT_TYPE if passed else "CANARY_VALIDATION_FAIL"
+    row = persist_canary_event(
+        engine,
+        release_id=release_id,
+        phase=phase,
+        event_type=event_type,
+        shadow_mode=True,
+        canary_mode=True,
+        mutation_attempted=False,
+        mutation_blocked=True,
+        evidence=evidence,
+        _validation_token=_CANARY_VALIDATION_TOKEN if passed else None,
+    )
+    return {**row, "status": evidence["validation_status"], "evidence": evidence}
 
 
 def persist_rollback_verification(

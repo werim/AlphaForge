@@ -15,6 +15,7 @@ from alphaforge.release_gates import (
     latest_release_snapshot,
     latest_valid_operator_ack,
     persist_canary_event,
+    run_canary_mutation_trap_validation,
     persist_operator_ack,
     persist_release_snapshot,
     persist_rollback_verification,
@@ -151,6 +152,71 @@ def test_dashboard_get_read_only_sqlite_executes_no_create_or_alter(tmp_path) ->
     assert "release_gate_snapshots" not in _schema_tables(verify)
 
 
+def test_arbitrary_canary_event_does_not_satisfy_release_gate(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'canary-unverified.db'}")
+    persist_canary_event(
+        engine,
+        release_id="rel-unverified",
+        phase="PHASE6",
+        event_type="CANARY_CHECK",
+        mutation_attempted=False,
+        mutation_blocked=True,
+        evidence={"source": "manual"},
+    )
+    snapshot = build_release_snapshot(engine, release_id="rel-unverified", phase="PHASE6")
+    assert snapshot.canary_ready is False
+    assert "CANARY_EVIDENCE_MISSING" in snapshot.blocking_reasons
+
+
+def test_direct_canary_validation_pass_cannot_be_spoofed(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'canary-spoof.db'}")
+    with pytest.raises(ValueError, match="CANARY_VALIDATION_EVENT_REQUIRES_MEASURED_WRITER"):
+        persist_canary_event(
+            engine,
+            release_id="rel-spoof",
+            phase="PHASE6",
+            event_type="CANARY_VALIDATION_PASS",
+            mutation_attempted=False,
+            mutation_blocked=True,
+            evidence={"validation_status": "PASS"},
+        )
+
+
+def test_measured_canary_validation_exercises_all_mutation_surfaces_in_isolation(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'canary-measured.db'}")
+    result = run_canary_mutation_trap_validation(
+        engine,
+        release_id="rel-measured",
+        phase="PHASE6",
+    )
+    assert result["status"] == "PASS"
+    evidence = result["evidence"]
+    assert evidence["blocked_actions"] == ["submit", "place", "cancel", "modify", "create"]
+    assert evidence["isolated_mutation_attempt_count"] == 5
+    assert evidence["isolated_mutation_blocked_count"] == 5
+    assert evidence["campaign_release_db_mutation_attempted"] is False
+    assert canary_mutation_attempt_count(
+        engine, release_id="rel-measured", phase="PHASE6"
+    ) == 0
+
+
+def test_real_release_scoped_mutation_attempt_overrides_measured_canary_pass(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'canary-mutation.db'}")
+    run_canary_mutation_trap_validation(engine, release_id="rel-mutation", phase="PHASE6")
+    persist_canary_event(
+        engine,
+        release_id="rel-mutation",
+        phase="PHASE6",
+        event_type="MUTATION_BLOCKED:submit",
+        mutation_attempted=True,
+        mutation_blocked=True,
+        evidence={"method": "submit"},
+    )
+    snapshot = build_release_snapshot(engine, release_id="rel-mutation", phase="PHASE6")
+    assert snapshot.canary_ready is False
+    assert "CANARY_MUTATION_ATTEMPTED" in snapshot.blocking_reasons
+
+
 def test_build_release_snapshot_all_phase6_evidence_canary_ready_not_live_ready(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'snapshot.db'}")
     persist_operator_ack(
@@ -159,7 +225,7 @@ def test_build_release_snapshot_all_phase6_evidence_canary_ready_not_live_ready(
         phase="PHASE6",
         acknowledgement_text=required_operator_ack_text("rel-ready"),
     )
-    persist_canary_event(engine, release_id="rel-ready", phase="PHASE6", mutation_attempted=False)
+    run_canary_mutation_trap_validation(engine, release_id="rel-ready", phase="PHASE6")
     with engine.begin() as conn:
         conn.execute(text("""
             INSERT INTO rollback_verification_events(verification_id, release_id, phase, verified_at, status, evidence_json)
@@ -240,7 +306,7 @@ def test_release_snapshot_consumes_canonical_rollback_and_runbook_writers(tmp_pa
         phase="PHASE6",
         acknowledgement_text=required_operator_ack_text(release_id),
     )
-    persist_canary_event(engine, release_id=release_id, phase="PHASE6", mutation_attempted=False)
+    run_canary_mutation_trap_validation(engine, release_id=release_id, phase="PHASE6")
     persist_rollback_validation_evidence(engine, {
         "validation_id": "rollback-validation:rel-writer-ready",
         "kill_switch_block_verified": True,

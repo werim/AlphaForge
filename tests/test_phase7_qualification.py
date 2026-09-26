@@ -103,11 +103,11 @@ def test_missing_phase6_and_operator_ack_block_qualification():
 
 
 def test_optimistic_full_test_pass_without_verified_provenance_is_blocked():
-    from alphaforge.release_gates import ensure_release_gate_schema, persist_canary_event, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
+    from alphaforge.release_gates import ensure_release_gate_schema, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
     ensure_release_gate_schema(e)
     persist_operator_ack(e, release_id="rel", phase="PHASE6", acknowledgement_text=required_operator_ack_text("rel"))
-    persist_canary_event(e, release_id="rel", phase="PHASE6", mutation_attempted=False)
+    run_canary_mutation_trap_validation(e, release_id="rel", phase="PHASE6")
     with e.begin() as c:
         c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb-unverified','rel','PHASE6','now','PASS','{}')"))
         c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run-unverified','rel','PHASE6','now','PASS','{}')"))
@@ -126,11 +126,11 @@ def test_optimistic_full_test_pass_without_verified_provenance_is_blocked():
 
 
 def test_verified_full_test_evidence_for_different_commit_is_blocked():
-    from alphaforge.release_gates import ensure_release_gate_schema, persist_canary_event, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
+    from alphaforge.release_gates import ensure_release_gate_schema, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
     ensure_release_gate_schema(e)
     persist_operator_ack(e, release_id="rel", phase="PHASE6", acknowledgement_text=required_operator_ack_text("rel"))
-    persist_canary_event(e, release_id="rel", phase="PHASE6", mutation_attempted=False)
+    run_canary_mutation_trap_validation(e, release_id="rel", phase="PHASE6")
     with e.begin() as c:
         c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb-mismatch','rel','PHASE6','now','PASS','{}')"))
         c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run-mismatch','rel','PHASE6','now','PASS','{}')"))
@@ -172,11 +172,11 @@ def test_suspension_reasons_are_persisted_separately():
 
 
 def test_all_required_phase7_and_phase6_evidence_canary_qualified():
-    from alphaforge.release_gates import ensure_release_gate_schema, persist_operator_ack, persist_canary_event, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
+    from alphaforge.release_gates import ensure_release_gate_schema, persist_operator_ack, run_canary_mutation_trap_validation, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
     ensure_release_gate_schema(e)
     persist_operator_ack(e, release_id="rel", phase="PHASE6", acknowledgement_text=required_operator_ack_text("rel"))
-    persist_canary_event(e, release_id="rel", phase="PHASE6", mutation_attempted=False)
+    run_canary_mutation_trap_validation(e, release_id="rel", phase="PHASE6")
     with e.begin() as c:
         c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb','rel','PHASE6','now','PASS','{}')"))
         c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run','rel','PHASE6','now','PASS','{}')"))
