@@ -901,23 +901,50 @@ class AutonomousQualificationHarness:
             delay = max(0.0, target - time.monotonic()) if self._enforce_wall_clock else duration_seconds / segments
             self._sleep(delay)
 
-    def _soak_decision_probe_candidate(self) -> dict[str, Any]:
+    def _soak_decision_probe_candidate(self, *, tight_geometry: bool = False) -> dict[str, Any]:
         now = time.time()
+        entry = 100.0
+        if tight_geometry:
+            # 1 bp planned stop and 1.2R target: a 2 bps adverse PAPER fill
+            # moves through the target and deterministically collapses
+            # executable raw RR to zero.  This mirrors the M0 failure class.
+            stop = 99.99
+            target = 100.012
+            raw_rr = 1.2
+            suffix = "tight"
+        else:
+            stop = 99.5
+            target = 101.5
+            raw_rr = 3.0
+            suffix = "valid"
+
+        guided_candidate = {
+            "side": "LONG",
+            "entry": entry,
+            "sl": stop,
+            "tp": target,
+            "rr": raw_rr,
+            "candidate_rr": raw_rr,
+            "setup_type": "LONG_PULLBACK",
+            "setup_phase": "PULLBACK",
+            "geometry_status": "COMPLETE",
+            "geometry_reason": None,
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "entry_source": "qualification_execution_close",
+            "stop_source": "qualification_setup_support",
+            "target_source": "qualification_setup_resistance",
+            "setup_timeframe": "15m",
+            "execution_timeframe": "1m",
+            "structural_stop": stop,
+            "structural_target": target,
+        }
         return {
-            "signal_id": f"{self._soak_decision_signal_prefix}0001",
+            "signal_id": f"{self._soak_decision_signal_prefix}{suffix}",
             "symbol": "BTCUSDT",
             "source_exchange": "binance",
             "timeframe": "1m",
             "market_ts": now,
-            "side": "LONG",
-            "entry": 100.0,
-            "sl": 99.5,
-            "tp": 101.5,
-            "rr": 3.0,
-            "geometry_status": "COMPLETE",
-            "geometry_source": "QUALIFICATION_DETERMINISTIC_DECISION_PROBE",
-            "setup_type": "QUALIFICATION_PROBE",
-            "setup_reason": "PIPELINE_COVERAGE",
+            **guided_candidate,
             "setup_quality": 0.95,
             "volume_24h_usdt": 100_000_000.0,
             "spread_pct": 0.0002,
@@ -954,31 +981,71 @@ class AutonomousQualificationHarness:
             "orderbook_imbalance": 0.50,
             "orderbook_status": "MEASURED",
             "orderbook_source": "QUALIFICATION_PROBE",
-            "regime": "TREND",
+            "regime": "TRENDING",
             "mtf": {
                 "regime": {
+                    "timeframe": "1h",
                     "regime": "TRENDING",
+                    "direction": "LONG",
                     "evidence_status": "COMPLETE",
                     "alignment": 1.0,
-                }
+                },
+                "setup": {
+                    "timeframe": "15m",
+                    "phase": "PULLBACK",
+                    "trade_side": "LONG",
+                    "direction": "LONG",
+                    "evidence_status": "COMPLETE",
+                    "structural_stop": stop,
+                    "structural_target": target,
+                },
+                "execution": {
+                    "timeframe": "1m",
+                    "direction": "LONG",
+                    "trade_side": "LONG",
+                    "confirmed_for_side": True,
+                    "evidence_status": "COMPLETE",
+                },
+                "alignment": {
+                    "aligned": True,
+                    "direction": "LONG",
+                    "reasons": [],
+                    "generation_mode": "REGIME_GUIDED",
+                    "setup_phase": "PULLBACK",
+                    "timeframes": {"regime": "1h", "setup": "15m", "execution": "1m"},
+                },
+                "generation": {
+                    "mode": "REGIME_GUIDED",
+                    "evidence_status": "COMPLETE",
+                    "candidate": guided_candidate,
+                    "reason": None,
+                },
             },
             "qualification_decision_probe": True,
+            "qualification_geometry_probe": suffix,
         }
 
     def _run_soak_decision_evidence_probe(self, ctx: HarnessContext) -> None:
         if self._soak_decision_probe_done:
             return
         self._soak_decision_probe_done = True
-        candidate = self._soak_decision_probe_candidate()
+        candidates = [
+            self._soak_decision_probe_candidate(tight_geometry=False),
+            self._soak_decision_probe_candidate(tight_geometry=True),
+        ]
         original_scanner = ctx.runtime.market_scanner
 
-        async def probe_scanner() -> list[dict[str, Any]]:
-            return [candidate]
-
         try:
-            ctx.runtime.market_scanner = probe_scanner
             before_executions = ctx.runtime.metrics.executions
-            asyncio.run(ctx.runtime._scan_once())
+            for candidate in candidates:
+                async def probe_scanner(
+                    current: dict[str, Any] = candidate,
+                ) -> list[dict[str, Any]]:
+                    return [current]
+
+                ctx.runtime.market_scanner = probe_scanner
+                asyncio.run(ctx.runtime._scan_once())
+
             if ctx.runtime.metrics.executions != before_executions:
                 raise RuntimeError("QUALIFICATION_DECISION_PROBE_EXECUTED_TRADE")
             ctx.runtime._generate_burnin_snapshot(reason="soak_decision_evidence")
