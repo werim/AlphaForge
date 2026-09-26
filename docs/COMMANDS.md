@@ -1144,6 +1144,541 @@ Get-NetTCPConnection -LocalPort 8000 -State Listen
 
 Yeni işletim akışında tercih edilen arayüz `alphaforge.burnin_ops` komutudur.
 
+
+## M0 fresh PAPER qualification baseline
+
+Bu bölüm, fresh M0 PAPER qualification kampanyasını current validated source üzerinde başlatmak için tek parça operator akışıdır. Amaç trade sayısını artırmak veya threshold gevşetmek değil; current strategy/runtime davranışını, execution-cost gerçekçiliğini, reject attribution'ı ve qualification blocker'larını temiz bir campaign lineage üzerinde ölçmektir.
+
+> **Güvenlik sınırı:** PAPER dışında çalıştırma. `ALPHAFORGE_ENABLE_LIVE_TRADING=false` ve `ALPHAFORGE_ALLOW_LIVE_ORDERS=false` kalmalıdır. Accepted trade sayısını artırmak için score/RR/execution threshold'larını değiştirme.
+>
+> **Source branch kontratı:** Current `burnin_ops preflight` yalnız temiz `dev` veya release ID'ye worktree fingerprint'i bağlanmış `feature/*` branch'ini kabul eder. `main` aynı tree'yi içerse bile doğrudan M0 preflight source branch'i olarak kullanılmaz. Bu kontrat değişirse bu bölüm güncellenmelidir.
+>
+> **SQL:** Campaign/decision/reject/qualification sorgularında `docs/SQLcheat.md` kanonik kaynaktır.
+>
+> **SQLite path:** macOS'ta operator shell'de relative path ile `sqlite3 -readonly "$DB"` açılış hatası görülürse DB'yi tahmin etme veya `-readonly` kaldırma. Bu akış baştan absolute DB path kullanır.
+
+### M0.1 Exact source ve PAPER ortamı
+
+2026-09-26 current baseline için validated `dev` SHA:
+
+```bash
+source .venv/bin/activate
+
+git fetch origin
+git switch dev
+git pull --ff-only origin dev
+
+EXPECTED_SHA="63f462e49aefeafdff1cb94228b726e7cd6f2635"
+
+echo "=== REPO ==="
+pwd
+git branch --show-current
+git rev-parse HEAD
+git status --short
+
+test "$(git rev-parse HEAD)" = "$EXPECTED_SHA" || {
+  echo "ERROR: dev SHA beklenen validated SHA değil"
+  exit 1
+}
+
+test -z "$(git status --porcelain)" || {
+  echo "ERROR: working tree temiz değil"
+  git status --short
+  exit 1
+}
+
+echo "=== DEV / MAIN TREE CHECK ==="
+git rev-parse HEAD^{tree}
+git rev-parse origin/main^{tree}
+
+test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse origin/main^{tree})" || {
+  echo "ERROR: dev ve promoted main aynı tree değil"
+  exit 1
+}
+
+export ALPHAFORGE_EXECUTION_MODE=PAPER
+unset EXECUTION_MODE
+export ALPHAFORGE_ENABLE_LIVE_TRADING=false
+export ALPHAFORGE_ALLOW_LIVE_ORDERS=false
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SHA8="$(git rev-parse --short=8 HEAD)"
+RELEASE_ID="M0_20260926_${SHA8}"
+DB="$REPO_ROOT/data/campaign/${RELEASE_ID}.db"
+
+export RELEASE_ID DB
+
+echo "RELEASE_ID=$RELEASE_ID"
+echo "DB=$DB"
+```
+
+Bu exact baseline için beklenen release kimliği:
+
+```text
+M0_20260926_63f462e4
+```
+
+İlk preflight öncesinde aynı DB zaten varsa fresh evidence ile historical evidence'i karıştırma:
+
+```bash
+if [ -e "$DB" ]; then
+  echo "ERROR: Fresh M0 DB zaten var: $DB"
+  exit 1
+fi
+```
+
+Yeni bir M0 baseline başlatırken `EXPECTED_SHA`, tarih ve `RELEASE_ID` bilinçli olarak yenilenmelidir; eski DB/release ID reuse edilmez.
+
+### M0.2 Config ve read-only reconciliation doğrulaması
+
+Secret değerlerini yazdırmadan canonical config'i kontrol et:
+
+```bash
+python - <<'PY'
+from alphaforge.config import load_config_from_env, load_reconciliation_settings
+
+cfg = load_config_from_env()
+recon = load_reconciliation_settings()
+
+print("EXECUTION_MODE =", cfg.runtime.execution_mode)
+print("READONLY_RECON =", cfg.runtime.enable_binance_readonly_reconciliation)
+print("API_KEY_PRESENT =", bool(recon.api_key.strip()))
+print("API_SECRET_PRESENT =", bool(recon.api_secret.strip()))
+print("LIVE_EXECUTION =", getattr(cfg.runtime, "enable_live_execution", False))
+PY
+```
+
+Ardından:
+
+```bash
+python -m alphaforge.config_check
+```
+
+M0 için beklenen davranış:
+
+- execution mode `PAPER`
+- signed read-only reconciliation enabled
+- API key/secret present, secret değerleri loglanmıyor
+- LIVE execution disabled
+- Binance production read-only market/reconciliation endpoints consistent
+- threshold/config identity current runtime ile aynı
+
+### M0.3 Preflight, schema ve SQLite integrity
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  preflight \
+  --release-id "$RELEASE_ID" \
+  --symbols BTCUSDT,ETHUSDT \
+  --intervals 1h \
+  --output-dir "artifacts/burnin/preflight_${RELEASE_ID}"
+```
+
+**Preflight `PASS` olmadan launch yapma.**
+
+Current M0 baseline'ta özellikle aşağıdaki gate'ler PASS olmalıdır:
+
+- `release_id_reserved_namespace_free`
+- `env_contract_valid`
+- `signed_readonly_reconciliation_available`
+- `git_commit_known`
+- `source_branch_allowed`
+- `source_worktree_identity_bound`
+- `execution_mode_paper`
+- `live_mutation_path_disabled`
+- `schema_current`
+- `runtime_identity_matches_campaign_identity`
+- `execution_cost_identity_complete`
+- `source_provenance_present`
+- `market_data_endpoint_consistent`
+- `no_duplicate_active_campaign`
+- `no_stale_worker_occupying_campaign`
+- `runtime_recovery_scope`
+- `binance_readonly_klines_reachable`
+- `clock_skew_acceptable`
+
+Schema kontrolü:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  db-doctor \
+  --check-only
+```
+
+SQLite integrity:
+
+```bash
+sqlite3 -readonly "$DB" "PRAGMA integrity_check;"
+```
+
+Beklenen:
+
+```text
+ok
+```
+
+`sqlite3` database open error verirse önce absolute path'i doğrula; write mode'a geçme:
+
+```bash
+printf 'DB=%s\n' "$DB"
+test -f "$DB" || { echo "ERROR: DB bulunamadı"; exit 1; }
+ls -lh "$DB"
+sqlite3 -readonly "$DB" "PRAGMA integrity_check;"
+```
+
+### M0.4 Fresh 7-day campaign launch
+
+M0 campaign identity interval'i `1h` olarak tutulur. Guided MTF runtime config içinde `1h regime -> 15m setup -> 1m execution` olarak çalışır; campaign CLI'ya sırf MTF aktif diye `1h,15m,1m` yazılmaz.
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  launch \
+  --release-id "$RELEASE_ID" \
+  --duration-days 7 \
+  --symbols BTCUSDT,ETHUSDT \
+  --intervals 1h \
+  --detach \
+  --attach-timeout-seconds 120
+```
+
+Campaign ID'yi tahmin etme; DB'den al:
+
+```bash
+CID="$(sqlite3 -readonly "$DB" "
+SELECT campaign_id
+FROM burnin_campaigns
+WHERE release_id='$RELEASE_ID'
+ORDER BY created_at DESC
+LIMIT 1;
+")"
+
+RUN_ID="$(sqlite3 -readonly "$DB" "
+SELECT active_run_id
+FROM burnin_campaigns
+WHERE campaign_id='$CID';
+")"
+
+export CID RUN_ID
+
+echo "RELEASE_ID=$RELEASE_ID"
+echo "DB=$DB"
+echo "CID=$CID"
+echo "RUN_ID=$RUN_ID"
+```
+
+### M0.5 İlk status / health / worker log kontrolü
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  status \
+  --campaign-id "$CID"
+
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  health \
+  --campaign-id "$CID"
+```
+
+JSON gerekiyorsa:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  status \
+  --campaign-id "$CID"
+
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  --json \
+  health \
+  --campaign-id "$CID"
+```
+
+Worker logları:
+
+```bash
+echo "=== STDERR ==="
+tail -n 100 "artifacts/burnin/$CID/worker.stderr.log"
+
+echo
+echo "=== STDOUT ==="
+tail -n 100 "artifacts/burnin/$CID/worker.stdout.log"
+```
+
+Canlı stderr:
+
+```bash
+tail -f "artifacts/burnin/$CID/worker.stderr.log"
+```
+
+### M0.6 Initial evidence snapshot
+
+Campaign lineage ve temel sayaçlar:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "
+SELECT
+    c.campaign_id,
+    c.release_id,
+    c.campaign_status,
+    c.active_run_id,
+    c.last_heartbeat_at,
+    c.worker_pid,
+    c.qualification_status,
+    c.evidence_completeness_status,
+    (
+      SELECT COUNT(*)
+      FROM burnin_observations o
+      JOIN burnin_campaign_runs cr
+        ON cr.burnin_run_id=o.burnin_run_id
+      WHERE cr.campaign_id=c.campaign_id
+    ) AS observations,
+    (
+      SELECT COUNT(*)
+      FROM burnin_pending_reject_labels p
+      WHERE p.campaign_id=c.campaign_id
+    ) AS reject_labels,
+    (
+      SELECT COUNT(*)
+      FROM burnin_pending_position_outcomes p
+      WHERE p.campaign_id=c.campaign_id
+    ) AS positions,
+    (
+      SELECT COUNT(*)
+      FROM burnin_qualification_snapshots q
+      WHERE q.campaign_id=c.campaign_id
+    ) AS qualification_snapshots,
+    c.last_error
+FROM burnin_campaigns c
+WHERE c.campaign_id='$CID';
+"
+```
+
+Canonical decision funnel:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "
+WITH campaign_run_ids AS (
+  SELECT burnin_run_id
+  FROM burnin_campaign_runs
+  WHERE campaign_id='$CID'
+),
+canonical AS (
+  SELECT o.*
+  FROM burnin_observations o
+  JOIN campaign_run_ids r
+    ON r.burnin_run_id=o.burnin_run_id
+  WHERE json_valid(COALESCE(o.metrics_json,''))
+    AND UPPER(
+      COALESCE(
+        json_extract(o.metrics_json,'$.observation_kind'),
+        'CANONICAL_DECISION'
+      )
+    )='CANONICAL_DECISION'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM burnin_observations newer
+      WHERE newer.burnin_run_id=o.burnin_run_id
+        AND newer.id < o.id
+        AND COALESCE(
+              json_extract(newer.metrics_json,'$.reject_decision_id'),
+              json_extract(newer.metrics_json,'$.signal_id'),
+              newer.observation_id
+            )
+          =
+            COALESCE(
+              json_extract(o.metrics_json,'$.reject_decision_id'),
+              json_extract(o.metrics_json,'$.signal_id'),
+              o.observation_id
+            )
+        AND UPPER(
+          COALESCE(
+            json_extract(newer.metrics_json,'$.observation_kind'),
+            'CANONICAL_DECISION'
+          )
+        )='CANONICAL_DECISION'
+    )
+)
+SELECT
+  decision,
+  COUNT(*) AS n
+FROM canonical
+GROUP BY decision
+ORDER BY n DESC;
+"
+```
+
+Score / raw RR / effective RR / drag:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "
+WITH ids AS (
+  SELECT DISTINCT json_extract(o.metrics_json,'$.signal_id') AS signal_id
+  FROM burnin_observations o
+  JOIN burnin_campaign_runs cr
+    ON cr.burnin_run_id=o.burnin_run_id
+  WHERE cr.campaign_id='$CID'
+)
+SELECT
+  COUNT(*) AS rows,
+  COUNT(DISTINCT d.decision_id) AS decisions,
+  ROUND(MIN(d.score),4) AS min_score,
+  ROUND(AVG(d.score),4) AS avg_score,
+  ROUND(MAX(d.score),4) AS max_score,
+  ROUND(MIN(d.rr),4) AS min_raw_rr,
+  ROUND(AVG(d.rr),4) AS avg_raw_rr,
+  ROUND(MAX(d.rr),4) AS max_raw_rr,
+  ROUND(MIN(d.effective_rr),4) AS min_effective_rr,
+  ROUND(AVG(d.effective_rr),4) AS avg_effective_rr,
+  ROUND(MAX(d.effective_rr),4) AS max_effective_rr,
+  ROUND(AVG(d.rr-d.effective_rr),4) AS avg_rr_drag
+FROM order_decisions d
+JOIN ids ON ids.signal_id=d.signal_id;
+"
+```
+
+Reject reason distribution:
+
+```bash
+sqlite3 -readonly -header -column "$DB" "
+WITH r AS (
+  SELECT
+    COALESCE(
+      d.reject_reason,
+      json_extract(o.metrics_json,'$.primary_reject_reason'),
+      json_extract(o.metrics_json,'$.reject_reason'),
+      'UNKNOWN'
+    ) AS reject_reason
+  FROM burnin_observations o
+  JOIN burnin_campaign_runs cr
+    ON cr.burnin_run_id=o.burnin_run_id
+  LEFT JOIN order_decisions d
+    ON d.decision_id=json_extract(o.metrics_json,'$.reject_decision_id')
+  WHERE cr.campaign_id='$CID'
+    AND UPPER(COALESCE(o.decision,''))='REJECTED'
+),
+g AS (
+  SELECT reject_reason,COUNT(*) AS n
+  FROM r
+  GROUP BY reject_reason
+)
+SELECT
+  reject_reason,
+  n,
+  ROUND(100.0*n/SUM(n) OVER (),2) AS pct
+FROM g
+ORDER BY n DESC,reject_reason;
+"
+```
+
+Reject resolver/integrity status:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  reject-label-status \
+  --campaign-id "$CID"
+```
+
+### M0.7 Qualification blocker snapshot
+
+```bash
+sqlite3 -readonly -header -column "$DB" "
+SELECT
+  qualification_id,
+  burnin_run_id,
+  release_id,
+  generated_at,
+  status,
+  sample_status,
+  expectancy_status,
+  execution_status,
+  regime_status,
+  reject_quality_status,
+  calibration_status,
+  drawdown_status,
+  concentration_status,
+  reconciliation_status,
+  evidence_completeness_status,
+  blockers_json,
+  warnings_json
+FROM burnin_qualification_snapshots
+WHERE campaign_id='$CID'
+   OR burnin_run_id IN (
+       SELECT burnin_run_id
+       FROM burnin_campaign_runs
+       WHERE campaign_id='$CID'
+   )
+ORDER BY generated_at DESC,id DESC
+LIMIT 1;
+"
+```
+
+Bu snapshot'ta minimum-duration, decision, accepted, closed-trade ve mature reject outcome blocker'larının başlangıçta bulunması normaldir. Bunları kaldırmak için threshold gevşetme. Operasyonel/plumbing blocker ile salt sample insufficiency blocker'ını ayrı değerlendir.
+
+### M0.8 Safe pause / resume
+
+Normal operator pause:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  pause \
+  --campaign-id "$CID"
+```
+
+Doğrula:
+
+```bash
+python -m alphaforge.burnin_ops --db "$DB" status --campaign-id "$CID"
+python -m alphaforge.burnin_ops --db "$DB" health --campaign-id "$CID"
+```
+
+Aynı release/config/strategy/universe/execution-cost identity korunuyorsa resume:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  resume \
+  --campaign-id "$CID"
+```
+
+Identity değiştiyse resume zorlama; fresh preflight + fresh campaign oluştur.
+
+### M0.9 Audit ve rapor
+
+Campaign ilerlerken:
+
+```bash
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  audit \
+  --campaign-id "$CID"
+```
+
+Daily report:
+
+```bash
+REPORT_DIR="artifacts/burnin/$CID/daily_$(date -u +%Y%m%dT%H%M%SZ)"
+
+python -m alphaforge.burnin_ops \
+  --db "$DB" \
+  report \
+  --campaign-id "$CID" \
+  --output-dir "$REPORT_DIR"
+```
+
+Finalize yalnız campaign süresi/evidence gereksinimleri gerçekten tamamlandığında çalıştırılır; blocker'ları bypass etmek için kullanılmaz.
+
+
+---
+
+
 ## 11. Burn-in yardım komutları
 
 ```bash
