@@ -262,3 +262,90 @@ def test_fresh_reject_shadow_diagnostics_are_non_authoritative_and_execution_ali
     assert diagnostics["score_x_executable_rr_matrix"]
     assert diagnostics["score_x_effective_rr_matrix"]
     assert any("LOW_SCORE" in key for key in diagnostics["failed_gate_combinations"])
+
+
+def test_missing_guided_candidate_cannot_leak_shadow_geometry_into_canonical_evidence(tmp_path):
+    _engine, runtime = _runtime(tmp_path)
+    payload = runtime._canonical_reject_payload({
+        "signal_id": "guided-missing-candidate",
+        "symbol": "ETHUSDT",
+        "side": "SHORT",
+        "entry": 2675.0,
+        "sl": 2680.0,
+        "tp": 2668.9945,
+        "rr": 1.2011,
+        "candidate_rr": 1.2011,
+        "expected_fill": 2674.97,
+        "executable_raw_rr": 0.354198,
+        "remaining_execution_penalty": 0.0372,
+        "effective_rr": 0.316998,
+        "score": 0.31,
+        "reason": "NEGATIVE_EXPECTANCY_AFTER_COSTS",
+        "reject_reasons": [
+            "NEGATIVE_EXPECTANCY_AFTER_COSTS",
+            "LOW_EFFECTIVE_RR",
+            "LOW_SCORE",
+            "RR_TOO_LOW",
+        ],
+        "geometry_status": "COMPLETE",
+        "execution_ctx": _execution_ctx(),
+        "mtf": {
+            "generation": {
+                "mode": "REGIME_GUIDED",
+                "evidence_status": "INCOMPLETE",
+                "candidate": None,
+            },
+        },
+    })
+
+    assert payload["geometry_status"] == "UNAVAILABLE"
+    assert payload["geometry_reason"] == "GUIDED_CANDIDATE_UNAVAILABLE"
+    assert payload["reject_quality_attributable"] is False
+    for key in (
+        "entry", "sl", "tp", "rr", "candidate_rr", "expected_fill",
+        "executable_raw_rr", "remaining_execution_penalty", "effective_rr",
+        "execution_cost_semantics",
+    ):
+        assert payload[key] is None
+
+    # The scanner-shadow values remain available only in explicitly
+    # non-authoritative diagnostic evidence.
+    shadow = payload["legacy_shadow_geometry"]
+    assert shadow["entry"] == pytest.approx(2675.0)
+    assert shadow["rr"] == pytest.approx(1.2011)
+    assert shadow["effective_rr"] == pytest.approx(0.316998)
+
+
+def test_effective_rr_gate_evidence_matches_top_level_canonical_value(tmp_path):
+    _engine, runtime = _runtime(tmp_path)
+    payload = runtime._canonical_reject_payload({
+        "signal_id": "effective-rr-invariant",
+        "symbol": "BTCUSDT",
+        "side": "LONG",
+        "entry": 100.0,
+        "sl": 99.0,
+        "tp": 102.0,
+        "rr": 2.0,
+        "candidate_rr": 2.0,
+        "expected_fill": 100.02,
+        "executable_raw_rr": 1.960784,
+        "remaining_execution_penalty": 0.060784,
+        "effective_rr": 0.90,
+        "score": 0.60,
+        "reason": "LOW_EFFECTIVE_RR",
+        "geometry_status": "COMPLETE",
+        "execution_ctx": _execution_ctx(),
+    })
+
+    by_gate = {row["gate"]: row for row in payload["failed_gate_evidence"]}
+    assert payload["effective_rr"] == pytest.approx(0.90)
+    assert by_gate["LOW_EFFECTIVE_RR"]["observed"] == pytest.approx(
+        payload["effective_rr"]
+    )
+    assert payload["effective_rr"] == pytest.approx(
+        max(
+            0.0,
+            payload["executable_raw_rr"] - payload["remaining_execution_penalty"],
+        ),
+        abs=1e-6,
+    )
