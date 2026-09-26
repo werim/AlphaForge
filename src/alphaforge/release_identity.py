@@ -72,3 +72,28 @@ def require_campaign_checkout(
             f"CAMPAIGN_CHECKOUT_COMMIT_MISMATCH:{identity['git_commit']}!={expected}"
         )
     return identity
+
+
+def require_tracked_repository_file(
+    file_path: str | Path,
+    *,
+    repo_path: str | Path = ".",
+    git_runner: GitRunner | None = None,
+) -> Path:
+    root = Path(repo_path).expanduser().resolve()
+    target = Path(file_path).expanduser()
+    resolved = target.resolve() if target.is_absolute() else (root / target).resolve()
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("RELEASE_EVIDENCE_FILE_OUTSIDE_REPOSITORY") from exc
+    runner = git_runner or _git
+    try:
+        tracked = str(
+            runner(["ls-files", "--error-unmatch", "--", relative.as_posix()], root) or ""
+        ).strip()
+    except Exception as exc:
+        raise ValueError("RELEASE_EVIDENCE_FILE_NOT_TRACKED") from exc
+    if not tracked:
+        raise ValueError("RELEASE_EVIDENCE_FILE_NOT_TRACKED")
+    return resolved
