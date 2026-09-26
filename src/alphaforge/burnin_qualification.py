@@ -25,6 +25,7 @@ class BurnInThresholds:
     minimum_regime_sample: int = 20
     minimum_regime_coverage: int = 3
     minimum_calibration_sample: int = 50
+    minimum_geometry_viability_sample: int = 20
     min_lower_confidence_bound_expectancy: float = 0.01
     max_drawdown_pct: float = 0.08
     max_cost_drag_per_trade: float = 0.20
@@ -157,6 +158,13 @@ class BurnInQualificationEngine:
             except SQLAlchemyError:
                 pending_reject_identity = {}
             observation_metrics=[r[0] for r in conn.execute(text("SELECT metrics_json FROM burnin_observations WHERE burnin_run_id=:id"), {"id":burnin_run_id}).all()]
+            canonical_observation_metrics=[
+                r[0] for r in conn.execute(
+                    text(f"SELECT metrics_json FROM burnin_observations o "
+                         f"WHERE burnin_run_id=:id AND {decision_predicate}"),
+                    {"id": burnin_run_id},
+                ).all()
+            ]
             runtime_error_count = self._runtime_error_count(conn, burnin_run_id)
             metrics["runtime_error_count"] = runtime_error_count
             if runtime_error_count > self.thresholds.max_runtime_error_count:
@@ -209,6 +217,10 @@ class BurnInQualificationEngine:
             for name,obs,limit in [("MINIMUM_DURATION",float(run.get("observed_duration_seconds") or 0),self.thresholds.minimum_duration_seconds),("MINIMUM_TOTAL_DECISIONS",samples,self.thresholds.minimum_total_decisions),("MINIMUM_ACCEPTED_TRADES",accepted,self.thresholds.minimum_accepted_trades),("MINIMUM_CLOSED_TRADES",qualified_closed,self.thresholds.minimum_closed_trades),("MINIMUM_REJECTED_FORWARD_OUTCOMES",rejected_fwd,self.thresholds.minimum_rejected_forward_outcomes)]:
                 if obs < limit: sample_status="INSUFFICIENT"; blockers.append(f"{name}:{obs}<{limit}")
             metrics.update(sample_count=samples,accepted_count=accepted,rejected_count=rejected_count,closed_trade_count=qualified_closed,qualified_closed_trade_count=qualified_closed,operational_closed_trade_count=operational_closed,incomplete_closed_trade_count=operational_closed-qualified_closed,open_trade_count=max(0,accepted-operational_closed),completed_rejected_forward_outcomes=len(attributable_rejects),diagnostic_completed_rejected_forward_outcomes=len(completed_rejects),identity_linked_rejected_forward_outcomes=len(identity_linked_rejects),attributable_rejected_forward_outcomes=len(attributable_rejects),non_attributable_rejected_forward_outcomes=len(completed_rejects)-len(attributable_rejects),orphan_rejected_forward_outcomes=len(completed_rejects)-len(identity_linked_rejects),qualification_reject_identity_unit="CANONICAL_DECISION",qualification_reject_identity_mode=identity_mode,pending_rejected_forward_outcomes=pending_rejects,ambiguous_rejected_forward_outcomes=len(qualification_ambiguous_rejects),diagnostic_ambiguous_rejected_forward_outcomes=len(diagnostic_ambiguous_rejects),incomplete_rejected_forward_outcomes=len(incomplete_rejects),rejected_forward_outcomes=rejected_fwd,observed_duration_seconds=derived.get("observed_duration_seconds") or run.get("observed_duration_seconds"))
+            self._check_guided_geometry_viability(
+                canonical_observation_metrics, blockers, warnings, metrics,
+                canonical_decision_count=samples,
+            )
             incomplete_trade_count=operational_closed-qualified_closed
             if incomplete_trade_count: blockers.append(f"INCOMPLETE_COST_EVIDENCE:{incomplete_trade_count}")
             self._compute_expectancy(qualification_trades, blockers, metrics)
@@ -232,6 +244,176 @@ class BurnInQualificationEngine:
             if suspension:
                 self.persist_suspension(conn,snap,suspension)
             return snap
+    def _check_guided_geometry_viability(
+        self,
+        observation_metrics: list[Any],
+        blockers: list[str],
+        warnings: list[str],
+        metrics: dict[str, Any],
+        *,
+        canonical_decision_count: int,
+    ) -> None:
+        """Audit actual guided-MTF decision geometry before qualification.
+
+        This is an evidence gate, not strategy tuning.  It never widens stops or
+        changes execution thresholds.  It makes structural funnel suppression
+        explicit when every sufficiently sampled guided candidate is below the
+        configured minimum stop distance.
+        """
+        rows: list[dict[str, Any]] = []
+        for raw in observation_metrics:
+            try:
+                payload = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            mtf = payload.get("mtf") if isinstance(payload.get("mtf"), dict) else {}
+            generation = (
+                mtf.get("generation")
+                if isinstance(mtf.get("generation"), dict)
+                else {}
+            )
+            if str(generation.get("mode") or "").upper() != "REGIME_GUIDED":
+                continue
+            if not isinstance(generation.get("candidate"), dict):
+                continue
+            rows.append(payload)
+
+        def number(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if math.isfinite(parsed) else None
+
+        evaluable = 0
+        below_min = 0
+        above_max = 0
+        within_policy = 0
+        executable_zero = 0
+        stop_distances: list[float] = []
+        candidate_rrs: list[float] = []
+        executable_rrs: list[float] = []
+        effective_rrs: list[float] = []
+        fill_geometry_losses: list[float] = []
+        residual_penalties: list[float] = []
+        gate_counts: dict[str, int] = {}
+        primary_counts: dict[str, int] = {}
+
+        for payload in rows:
+            stop_distance = number(payload.get("stop_distance_pct"))
+            if stop_distance is None:
+                entry = number(payload.get("entry"))
+                stop = number(payload.get("sl"))
+                if entry is not None and entry > 0 and stop is not None:
+                    stop_distance = abs(entry - stop) / entry * 100.0
+            min_stop = number(payload.get("min_stop_pct"))
+            max_stop = number(payload.get("max_stop_pct"))
+            if (
+                stop_distance is not None
+                and min_stop is not None
+                and max_stop is not None
+            ):
+                evaluable += 1
+                stop_distances.append(stop_distance)
+                if stop_distance < min_stop:
+                    below_min += 1
+                elif stop_distance > max_stop:
+                    above_max += 1
+                else:
+                    within_policy += 1
+
+            candidate_rr = number(payload.get("candidate_rr", payload.get("rr")))
+            executable_rr = number(payload.get("executable_raw_rr"))
+            effective_rr = number(payload.get("effective_rr"))
+            residual = number(payload.get("remaining_execution_penalty"))
+            if candidate_rr is not None:
+                candidate_rrs.append(candidate_rr)
+            if executable_rr is not None:
+                executable_rrs.append(executable_rr)
+                if executable_rr <= 0.0:
+                    executable_zero += 1
+            if effective_rr is not None:
+                effective_rrs.append(effective_rr)
+            if candidate_rr is not None and executable_rr is not None:
+                fill_geometry_losses.append(candidate_rr - executable_rr)
+            if residual is not None:
+                residual_penalties.append(residual)
+
+            failed = payload.get("all_failed_gates")
+            if isinstance(failed, str):
+                try:
+                    failed = json.loads(failed)
+                except json.JSONDecodeError:
+                    failed = []
+            if isinstance(failed, list):
+                for gate in failed:
+                    name = str(gate or "").upper()
+                    if name:
+                        gate_counts[name] = gate_counts.get(name, 0) + 1
+            primary = str(
+                payload.get("primary_reject_reason")
+                or payload.get("reject_reason")
+                or ""
+            ).upper()
+            if primary:
+                primary_counts[primary] = primary_counts.get(primary, 0) + 1
+
+        guided_count = len(rows)
+        rate = lambda count, denominator: (
+            None if denominator <= 0 else count / denominator
+        )
+        average = lambda values: (
+            None if not values else sum(values) / len(values)
+        )
+        metrics.update(
+            guided_candidate_decisions=guided_count,
+            guided_post_mtf_funnel_reach_rate=rate(
+                guided_count, canonical_decision_count
+            ),
+            guided_geometry_evaluable_decisions=evaluable,
+            guided_geometry_unavailable_decisions=guided_count - evaluable,
+            guided_below_min_stop_count=below_min,
+            guided_below_min_stop_rate=rate(below_min, evaluable),
+            guided_above_max_stop_count=above_max,
+            guided_above_max_stop_rate=rate(above_max, evaluable),
+            guided_within_stop_policy_count=within_policy,
+            guided_within_stop_policy_rate=rate(within_policy, evaluable),
+            guided_executable_rr_zero_count=executable_zero,
+            guided_executable_rr_zero_rate=rate(executable_zero, guided_count),
+            guided_stop_distance_pct_min=min(stop_distances) if stop_distances else None,
+            guided_stop_distance_pct_avg=average(stop_distances),
+            guided_stop_distance_pct_max=max(stop_distances) if stop_distances else None,
+            guided_candidate_rr_avg=average(candidate_rrs),
+            guided_executable_rr_avg=average(executable_rrs),
+            guided_effective_rr_avg=average(effective_rrs),
+            guided_fill_geometry_loss_r_avg=average(fill_geometry_losses),
+            guided_residual_execution_penalty_r_avg=average(residual_penalties),
+            guided_failed_gate_counts=gate_counts,
+            guided_primary_reject_reason_counts=primary_counts,
+        )
+
+        minimum = int(self.thresholds.minimum_geometry_viability_sample)
+        if guided_count == 0:
+            metrics["guided_geometry_viability_status"] = "NO_EVIDENCE"
+            return
+        if evaluable < minimum:
+            metrics["guided_geometry_viability_status"] = "INSUFFICIENT"
+            warnings.append(
+                f"GUIDED_GEOMETRY_VIABILITY_SAMPLE_INSUFFICIENT:{evaluable}<{minimum}"
+            )
+            return
+        if below_min == evaluable:
+            metrics["guided_geometry_viability_status"] = "FAIL"
+            blockers.append(
+                f"GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:{below_min}/{evaluable}"
+            )
+            return
+        metrics["guided_geometry_viability_status"] = "PASS"
+        if above_max == evaluable:
+            warnings.append(f"GUIDED_GEOMETRY_ALL_ABOVE_MAX_POLICY:{above_max}/{evaluable}")
+
     def _compute_expectancy(self,trades,blockers,metrics):
         complete=list(trades)
         netrs=sorted(float(r["net_r"]) for r in complete); mean,lcb,ucb=confidence_interval(netrs)
@@ -402,6 +584,8 @@ class BurnInQualificationEngine:
         if float(m.get("max_drawdown_pct") or 0)>self.thresholds.max_drawdown_pct: reasons.append("DRAWDOWN_BREACH")
         if int(m.get("runtime_error_count") or 0)>self.thresholds.max_runtime_error_count: reasons.append("RUNTIME_ERROR_CLUSTER")
         if "PERSISTENCE_FAILURE" in b: reasons.append("PERSISTENCE_FAILURE")
+        if any(item.startswith("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION:") for item in b):
+            reasons.append("GUIDED_GEOMETRY_STRUCTURAL_SUPPRESSION")
         for src,dst in mapping.items():
             if src in b: reasons.append(dst)
         return sorted(set(reasons))
