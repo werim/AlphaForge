@@ -502,8 +502,18 @@ def test_phase9_health_detects_running_without_worker_and_sql_counters(monkeypat
     h = health_payload(conn, camp.campaign_id, max_heartbeat_age=999999)
     assert h["total_decisions"] == 1 and h["accepted_decisions"] == 1
     assert "RUNNING_WITHOUT_WORKER" in h["unhealthy_reasons"]
+
+    # Add one newly-overdue reject so the watchdog sees a transient backlog
+    # warning at the same time as the real worker blocker. The warning must
+    # never become the authoritative terminal cause.
+    from datetime import datetime, timedelta, timezone
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    _health_label(conn, camp, run, "worker-plus-backlog", due_at=past)
+
     w = watch_once(conn, camp.campaign_id)
     assert w["status"] == "RECOVERY_REQUIRED"
+    assert "RESOLVER_BACKLOG_GROWTH" in w["health"]["warning_reasons"]
+    assert "RESOLVER_BACKLOG_GROWTH" not in w["failures"]
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
     assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
     terminal = health_payload(conn, camp.campaign_id, max_heartbeat_age=999999, persist_history=False)
