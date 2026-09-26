@@ -1,4 +1,4 @@
-import json, sqlite3
+import json, sqlite3, threading
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
@@ -258,6 +258,30 @@ def test_campaign_concentration_breach_blocks(tmp_path):
     _qualify(db,cid,max_symbol_concentration=0.1)
     assert 'SYMBOL_CONCENTRATION_BREACH' in _latest_blockers(db)
 
+def test_campaign_without_qualifying_trades_reports_concentration_insufficient_not_breach(tmp_path):
+    db,cid=_seed_campaign_for_qualification(tmp_path)
+    conn=sqlite3.connect(db)
+    conn.execute("DELETE FROM burnin_trade_outcomes")
+    conn.commit(); conn.close()
+
+    _qualify(db,cid)
+    conn=sqlite3.connect(db)
+    row=conn.execute(
+        "SELECT concentration_status,metrics_json FROM burnin_qualification_snapshots "
+        "WHERE campaign_id=? ORDER BY id DESC LIMIT 1", (cid,)
+    ).fetchone()
+    conn.close()
+    blockers=_latest_blockers(db)
+    metrics=json.loads(row[1])
+
+    assert row[0] == 'INSUFFICIENT_EVIDENCE'
+    assert 'SYMBOL_CONCENTRATION_BREACH' not in blockers
+    assert 'TRADE_CONCENTRATION_BREACH' not in blockers
+    assert 'REGIME_CONCENTRATION_BREACH' not in blockers
+    assert metrics['symbol_concentration'] is None
+    assert metrics['top_trade_contribution'] is None
+    assert metrics['regime_concentration'] is None
+
 def test_campaign_dirty_reconciliation_and_missing_operator_ack_block(tmp_path):
     from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
     db,cid=_seed_campaign_for_qualification(tmp_path); e=_engine(db)
@@ -310,6 +334,93 @@ def test_campaign_worker_resolves_open_paper_position(tmp_path):
     assert outcome['exit_reason']=='TP_HIT' and outcome['evidence_complete']==1
     assert json.loads(outcome['payload_json'])['phase']=='CONTINUATION'
     conn.close()
+
+
+def test_sqlite_lock_aggregate_campaign_read_path_does_not_persist_duration(tmp_path, monkeypatch):
+    db=tmp_path/'aggregate-readonly.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
+    camp=create_campaign(conn,release_id='aggregate-readonly',duration_days=1,symbols=[],intervals=[])
+    run=start_or_resume_campaign(conn,camp.campaign_id)
+    conn.execute("UPDATE burnin_campaign_runs SET status='RUNNING',started_at='2026-09-01T10:00:00Z',ended_at=NULL WHERE burnin_run_id=?",(run['burnin_run_id'],))
+    conn.execute("UPDATE burnin_runs SET status='RUNNING',start_time='2026-09-01T10:00:00Z',end_time=NULL,observed_duration_seconds=0 WHERE burnin_run_id=?",(run['burnin_run_id'],))
+    conn.execute("UPDATE burnin_campaigns SET campaign_status='RUNNING',active_run_id=?,observed_duration_seconds=0 WHERE campaign_id=?",(run['burnin_run_id'],camp.campaign_id))
+    conn.execute("INSERT INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES(?,?,?,?,?,?,?)",('aggregate-readonly-operational',camp.campaign_id,run['burnin_run_id'],'PHASE8_CAMPAIGN_RUNTIME_OPERATIONAL','2026-09-01T10:00:00Z','{}','test'))
+    conn.commit()
+    monkeypatch.setattr(campaign_module, 'utc_now', lambda: '2026-09-01T11:00:00Z')
+
+    aggregate=aggregate_campaign(conn,camp.campaign_id)
+
+    assert aggregate['metrics']['observed_duration_seconds'] == pytest.approx(3600.0)
+    assert conn.execute("SELECT observed_duration_seconds FROM burnin_runs WHERE burnin_run_id=?",(run['burnin_run_id'],)).fetchone()[0] == pytest.approx(0.0)
+    assert conn.execute("SELECT observed_duration_seconds FROM burnin_campaigns WHERE campaign_id=?",(camp.campaign_id,)).fetchone()[0] == pytest.approx(0.0)
+    conn.close()
+
+
+def test_sqlite_lock_qualification_is_single_flight_across_worker_threads(tmp_path, monkeypatch):
+    db, cid = _seed_campaign_for_qualification(tmp_path)
+    engine = _engine(db)
+    runner = BurnInCampaignRunner(engine, cid, lambda *_: [])
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    results = []
+
+    monkeypatch.setattr(runner, "_qualification_due", lambda: True)
+
+    def fake_qualify(*_args, **_kwargs):
+        calls.append("qualify")
+        entered.set()
+        assert release.wait(2.0)
+        return {"qualification_id": "single-flight"}
+
+    monkeypatch.setattr(campaign_module, "qualify_campaign", fake_qualify)
+
+    first = threading.Thread(target=lambda: results.append(runner._qualify_if_due()))
+    second = threading.Thread(target=lambda: results.append(runner._qualify_if_due()))
+    first.start()
+    assert entered.wait(2.0)
+    second.start()
+    second.join(2.0)
+    assert not second.is_alive()
+    release.set()
+    first.join(2.0)
+    engine.dispose()
+
+    assert not first.is_alive()
+    assert calls == ["qualify"]
+    assert len(results) == 2
+    assert sum(result is None for result in results) == 1
+    assert sum(isinstance(result, dict) and result.get("qualification_id") == "single-flight" for result in results) == 1
+
+
+def test_sqlite_lock_readonly_health_does_not_persist_history_and_writer_has_busy_timeout(tmp_path):
+    import alphaforge.burnin_ops as burnin_ops
+
+    db = tmp_path/'health-readonly.db'
+    writer = burnin_ops._connect(str(db))
+    try:
+        camp=create_campaign(writer,release_id='health-readonly',duration_days=1,symbols=['BTCUSDT'],intervals=['1m'])
+        start_or_resume_campaign(writer,camp.campaign_id)
+        writer.commit()
+        cid=camp.campaign_id
+        assert writer.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+        assert str(writer.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
+        before = writer.execute("SELECT COUNT(*) FROM burnin_health_history WHERE campaign_id=?",(cid,)).fetchone()[0]
+    finally:
+        writer.close()
+
+    readonly = burnin_ops._connect_readonly(str(db))
+    try:
+        payload = burnin_ops.health_payload(readonly, cid, persist_history=False)
+        assert payload["campaign_id"] == cid
+    finally:
+        readonly.close()
+
+    check = sqlite3.connect(db)
+    try:
+        after = check.execute("SELECT COUNT(*) FROM burnin_health_history WHERE campaign_id=?",(cid,)).fetchone()[0]
+    finally:
+        check.close()
+    assert after == before
 
 
 def test_materialize_lock_retries_with_fresh_connection(tmp_path, monkeypatch):

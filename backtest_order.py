@@ -21,9 +21,10 @@ from alphaforge.multi_timeframe import build_execution_context as build_historic
 from alphaforge.scoring_context import build_signal_payload, empty_stats_context, normalize_scoring_context
 from alphaforge.expectancy_evidence import fetch_expectancy_as_of
 from alphaforge.config import load_config_from_env
-from alphaforge.config_registry import decision_filter_config, effective_config_values
+from alphaforge.config_registry import (decision_filter_config, effective_config_values,
+    resolve_backtest_database_url, resolve_backtest_portfolio_config)
 from alphaforge.lifecycle_contract import normalize_lifecycle_event
-from alphaforge.persistence import init_db, save_order_decision, save_signal, save_trade_lifecycle_event
+from alphaforge.persistence import init_db, save_decision_evidence, save_order_decision, save_signal, save_trade_lifecycle_event
 from alphaforge.portfolio_risk import BacktestPortfolioState, evaluate_portfolio_risk
 from alphaforge.symbol_selector import select_symbol
 from alphaforge.signal_geometry import build_breakout_geometry
@@ -177,24 +178,6 @@ def diagnostic_short_low_score_symbols_from_env() -> tuple[str, ...]:
     raw = str(effective_config_values()["ALPHAFORGE_BACKTEST_SHORT_LOW_SCORE_BREAKDOWN_DIAGNOSTIC_SYMBOLS"]["value"])
     symbols = tuple(s.strip().upper() for s in raw.replace(",", " ").split() if s.strip())
     return symbols or DIAGNOSTIC_PROFILE_DEFAULT_SYMBOLS
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    return str(os.getenv(name, str(default))).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
 
 
 def strategy_guardrail_config_from_env(profile: str = "DEFAULT_FILTERS") -> StrategyQualityGuardrailConfig:
@@ -576,16 +559,9 @@ def _execution_reject_flags(rr: float, market_ctx: Mapping[str, Any]) -> tuple[f
     return breakdown.effective_rr, list(breakdown.reject_flags), data
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() not in {"0", "false", "no", "off", ""}
-
-
 def _rescue_config_from_args(args: Any, runtime_cfg: Any) -> RescueConfig:
     return RescueConfig(
-        enabled=bool(getattr(args, "rescue_enabled", False)) or _env_bool("ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED", False),
+        enabled=bool(getattr(args, "rescue_enabled", False)) or bool(effective_config_values(include_files=False)["ALPHAFORGE_BACKTEST_SHORT_BREAKDOWN_RESCUE_ENABLED"]["value"]),
         modes=tuple(str(getattr(args, "rescue_modes", "BACKTEST") or "BACKTEST").upper().replace(",", " ").split()),
         effective_rr_min=float(getattr(args, "rescue_effective_rr_min", 1.90)),
         score_min=float(getattr(args, "rescue_score_min", 9.0)),
@@ -2150,7 +2126,14 @@ def _sql_nullable_number(value: Any) -> Any:
     except (TypeError, ValueError):
         return None
 
-def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None = None, *, run_id: str | None = None, profile_name: str | None = None) -> List[dict[str, Any]]:
+def _persist_lifecycle_rows(
+    rows: List[LifecycleRow],
+    database_url: str | None = None,
+    *,
+    run_id: str | None = None,
+    profile_name: str | None = None,
+    min_effective_rr: float | None = None,
+) -> List[dict[str, Any]]:
     engine = init_db(database_url)
     persisted_event_ids: set[str] = set()
     decision_counts: dict[str, dict[str, int]] = {}
@@ -2324,111 +2307,94 @@ def _persist_lifecycle_rows(rows: List[LifecycleRow], database_url: str | None =
                 payload={"source_stage": source_stage, "event_flags": row.event_flags},
             )
             diagnostics_json = json.dumps(execution_ctx, sort_keys=True)
-            session.execute(
-                text(
-                    """
-                    INSERT INTO decision_evidence (
-                        evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type,
-                        setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr,
-                        effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason, entry,
-                        sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes, volume_24h_usdt,
-                        spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score, volatility_regime,
-                        cost_penalty, diagnostics_json, portfolio_equity, available_balance, open_position_count, max_open_positions,
-                        total_notional_exposure, max_notional_exposure, symbol_notional_exposure, max_symbol_notional,
-                        side_exposure_long, side_exposure_short, net_exposure, gross_exposure, daily_realized_pnl,
-                        daily_loss_pct, max_daily_loss_pct, rolling_drawdown_pct, consecutive_loss_count,
-                        correlation_group, correlation_group_exposure, correlated_position_count, risk_flags,
-                        portfolio_reject_reason, portfolio_risk_state, portfolio_diagnostics_json,
-                        signal_id, order_id, position_id, lifecycle_id, lifecycle_seq, created_at
-                    ) VALUES (
-                        :evidence_id, :run_id, :profile_id, :profile_name, :mode, :timestamp, :symbol, :side, :setup_type,
-                        :setup_reason, :regime, :lifecycle_state_before, :lifecycle_state_after, :decision, :score, :raw_rr,
-                        :effective_rr, :expectancy, :expectancy_bucket, :reject_reason, :cancel_reason, :close_reason, :entry,
-                        :sl, :tp, :trigger_price, :close_price, :net_pnl_pct, :net_pnl_usdt, :hold_minutes, :volume_24h_usdt,
-                        :spread_pct, :funding_rate_pct, :expected_slippage_pct, :liquidity_score, :volatility_regime,
-                        :cost_penalty, :diagnostics_json, :portfolio_equity, :available_balance, :open_position_count, :max_open_positions,
-                        :total_notional_exposure, :max_notional_exposure, :symbol_notional_exposure, :max_symbol_notional,
-                        :side_exposure_long, :side_exposure_short, :net_exposure, :gross_exposure, :daily_realized_pnl,
-                        :daily_loss_pct, :max_daily_loss_pct, :rolling_drawdown_pct, :consecutive_loss_count,
-                        :correlation_group, :correlation_group_exposure, :correlated_position_count, :risk_flags,
-                        :portfolio_reject_reason, :portfolio_risk_state, :portfolio_diagnostics_json,
-                        :signal_id, :order_id, :position_id, :lifecycle_id, :lifecycle_seq, :created_at
-                    )
-                    ON CONFLICT(evidence_id) DO UPDATE SET
-                        decision=excluded.decision, reject_reason=excluded.reject_reason, cancel_reason=excluded.cancel_reason,
-                        close_reason=excluded.close_reason, diagnostics_json=excluded.diagnostics_json,
-                        portfolio_equity=excluded.portfolio_equity, open_position_count=excluded.open_position_count,
-                        total_notional_exposure=excluded.total_notional_exposure, portfolio_reject_reason=excluded.portfolio_reject_reason,
-                        portfolio_risk_state=excluded.portfolio_risk_state, portfolio_diagnostics_json=excluded.portfolio_diagnostics_json
-                    """
-                ),
-                {
-                    "evidence_id": event_id,
-                    "run_id": run_id or os.getenv("ALPHAFORGE_RUN_ID"),
-                    "profile_id": os.getenv("ALPHAFORGE_PROFILE_ID"),
-                    "profile_name": profile_name or os.getenv("ALPHAFORGE_PROFILE_NAME"),
-                    "mode": "BACKTEST", "timestamp": str(row.timestamp), "symbol": row.symbol, "side": row.side,
-                    "setup_type": row.setup_type, "setup_reason": row.setup_reason, "regime": row.regime,
-                    "lifecycle_state_before": row.status_before, "lifecycle_state_after": lifecycle_state,
-                    "decision": {"ACCEPTED": "ACCEPT", "REJECTED": "REJECT", "PENDING": "WAIT"}.get(decision, decision),
-                    "score": row.score, "raw_rr": row.rr, "effective_rr": effective_rr,
-                    "expectancy": None,
-                    "expectancy_bucket": row.expectancy_bucket, "reject_reason": reject_reason or None,
-                    "cancel_reason": row.cancel_reason or None, "close_reason": row.close_reason or None,
-                    "entry": row.entry, "sl": row.sl, "tp": row.tp, "trigger_price": row.trigger_price or None,
-                    "close_price": row.close_price or None, "net_pnl_pct": row.net_pnl_pct if row.net_pnl_pct != 0.0 else (0.0 if row.close_reason else None),
-                    "net_pnl_usdt": row.net_pnl_usdt if row.net_pnl_usdt != 0.0 else (0.0 if row.close_reason else None),
-                    "hold_minutes": row.hold_minutes if row.hold_minutes != 0.0 else (0.0 if row.close_reason else None),
-                    "volume_24h_usdt": _sql_nullable_number(row.volume_24h_usdt), "spread_pct": _sql_nullable_number(row.spread_pct),
-                    "funding_rate_pct": _sql_nullable_number(row.funding_rate_pct), "expected_slippage_pct": _sql_nullable_number(row.expected_slippage_pct),
-                    "liquidity_score": _sql_nullable_number(row.liquidity_score),
-                    "volatility_regime": None if row.volatility_regime == "UNAVAILABLE_BACKTEST" else row.volatility_regime,
-                    "cost_penalty": _sql_nullable_number(row.cost_penalty), "diagnostics_json": diagnostics_json,
-                    "portfolio_equity": _sql_nullable_number(row.portfolio_equity), "available_balance": _sql_nullable_number(row.available_balance),
-                    "open_position_count": _sql_nullable_number(row.open_position_count), "max_open_positions": _sql_nullable_number(row.max_open_positions),
-                    "total_notional_exposure": _sql_nullable_number(row.total_notional_exposure), "max_notional_exposure": _sql_nullable_number(row.max_notional_exposure),
-                    "symbol_notional_exposure": _sql_nullable_number(row.symbol_notional_exposure), "max_symbol_notional": _sql_nullable_number(row.max_symbol_notional),
-                    "side_exposure_long": _sql_nullable_number(row.side_exposure_long), "side_exposure_short": _sql_nullable_number(row.side_exposure_short),
-                    "net_exposure": _sql_nullable_number(row.net_exposure), "gross_exposure": _sql_nullable_number(row.gross_exposure),
-                    "daily_realized_pnl": _sql_nullable_number(row.daily_realized_pnl), "daily_loss_pct": _sql_nullable_number(row.daily_loss_pct),
-                    "max_daily_loss_pct": _sql_nullable_number(row.max_daily_loss_pct), "rolling_drawdown_pct": _sql_nullable_number(row.rolling_drawdown_pct),
-                    "consecutive_loss_count": _sql_nullable_number(row.consecutive_loss_count), "correlation_group": None if row.correlation_group == "UNAVAILABLE" else row.correlation_group,
-                    "correlation_group_exposure": _sql_nullable_number(row.correlation_group_exposure), "correlated_position_count": _sql_nullable_number(row.correlated_position_count),
-                    "risk_flags": row.risk_flags or None, "portfolio_reject_reason": row.portfolio_reject_reason or None,
-                    "portfolio_risk_state": row.portfolio_risk_state or None, "portfolio_diagnostics_json": row.portfolio_diagnostics_json or None,
-                    "signal_id": signal_id, "order_id": row.order_id or None, "position_id": row.position_id or None,
-                    "lifecycle_id": row.lifecycle_id or f"{row.symbol}:{row.timestamp}", "lifecycle_seq": row.lifecycle_seq or (idx + 1),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                },
+            persisted_decision_evidence = save_decision_evidence(
+                session,
+                evidence_id=event_id,
+                run_id=run_id or os.getenv("ALPHAFORGE_RUN_ID"),
+                profile_id=os.getenv("ALPHAFORGE_PROFILE_ID"),
+                profile_name=profile_name or os.getenv("ALPHAFORGE_PROFILE_NAME"),
+                mode="BACKTEST",
+                timestamp=str(row.timestamp),
+                symbol=row.symbol,
+                side=row.side,
+                setup_type=row.setup_type,
+                setup_reason=row.setup_reason,
+                regime=row.regime,
+                lifecycle_state_before=row.status_before,
+                lifecycle_state_after=lifecycle_state,
+                decision=decision,
+                score=row.score,
+                raw_rr=row.rr,
+                effective_rr=effective_rr,
+                min_effective_rr=min_effective_rr,
+                expectancy=None,
+                expectancy_bucket=row.expectancy_bucket,
+                reject_reason=reject_reason or None,
+                cancel_reason=row.cancel_reason or None,
+                close_reason=row.close_reason or None,
+                entry=row.entry,
+                sl=row.sl,
+                tp=row.tp,
+                trigger_price=row.trigger_price or None,
+                close_price=row.close_price or None,
+                net_pnl_pct=row.net_pnl_pct if row.net_pnl_pct != 0.0 else (0.0 if row.close_reason else None),
+                net_pnl_usdt=row.net_pnl_usdt if row.net_pnl_usdt != 0.0 else (0.0 if row.close_reason else None),
+                hold_minutes=row.hold_minutes if row.hold_minutes != 0.0 else (0.0 if row.close_reason else None),
+                volume_24h_usdt=_sql_nullable_number(row.volume_24h_usdt),
+                spread_pct=_sql_nullable_number(row.spread_pct),
+                funding_rate_pct=_sql_nullable_number(row.funding_rate_pct),
+                expected_slippage_pct=_sql_nullable_number(row.expected_slippage_pct),
+                liquidity_score=_sql_nullable_number(row.liquidity_score),
+                volatility_regime=None if row.volatility_regime == "UNAVAILABLE_BACKTEST" else row.volatility_regime,
+                cost_penalty=_sql_nullable_number(row.cost_penalty),
+                total_cost_pct=_sql_nullable_number(row.total_cost_pct),
+                total_explicit_cost_pct=_sql_nullable_number(row.total_explicit_cost_pct),
+                spread_source=row.spread_source or None,
+                slippage_source=row.slippage_source or None,
+                fee_pct=_sql_nullable_number(row.fee_pct),
+                fee_source=row.fee_source or None,
+                funding_source=row.funding_source or None,
+                latency_ms=_sql_nullable_number(row.latency_ms),
+                latency_source=row.latency_source or None,
+                liquidity_status=row.liquidity_status or None,
+                volatility_penalty_pct=_sql_nullable_number(row.volatility_penalty_pct),
+                volatility_source=row.volatility_source or None,
+                reject_flags=row.reject_flags or None,
+                unavailable_fields=row.unavailable_fields or None,
+                diagnostics_json=diagnostics_json,
+                portfolio_equity=_sql_nullable_number(row.portfolio_equity),
+                available_balance=_sql_nullable_number(row.available_balance),
+                open_position_count=_sql_nullable_number(row.open_position_count),
+                max_open_positions=_sql_nullable_number(row.max_open_positions),
+                total_notional_exposure=_sql_nullable_number(row.total_notional_exposure),
+                max_notional_exposure=_sql_nullable_number(row.max_notional_exposure),
+                symbol_notional_exposure=_sql_nullable_number(row.symbol_notional_exposure),
+                max_symbol_notional=_sql_nullable_number(row.max_symbol_notional),
+                side_exposure_long=_sql_nullable_number(row.side_exposure_long),
+                side_exposure_short=_sql_nullable_number(row.side_exposure_short),
+                net_exposure=_sql_nullable_number(row.net_exposure),
+                gross_exposure=_sql_nullable_number(row.gross_exposure),
+                daily_realized_pnl=_sql_nullable_number(row.daily_realized_pnl),
+                daily_loss_pct=_sql_nullable_number(row.daily_loss_pct),
+                max_daily_loss_pct=_sql_nullable_number(row.max_daily_loss_pct),
+                rolling_drawdown_pct=_sql_nullable_number(row.rolling_drawdown_pct),
+                consecutive_loss_count=_sql_nullable_number(row.consecutive_loss_count),
+                correlation_group=None if row.correlation_group == "UNAVAILABLE" else row.correlation_group,
+                correlation_group_exposure=_sql_nullable_number(row.correlation_group_exposure),
+                correlated_position_count=_sql_nullable_number(row.correlated_position_count),
+                risk_flags=row.risk_flags or None,
+                portfolio_reject_reason=row.portfolio_reject_reason or None,
+                portfolio_risk_state=row.portfolio_risk_state or None,
+                portfolio_diagnostics_json=row.portfolio_diagnostics_json or None,
+                signal_id=signal_id,
+                order_id=row.order_id or None,
+                position_id=row.position_id or None,
+                lifecycle_id=row.lifecycle_id or f"{row.symbol}:{row.timestamp}",
+                lifecycle_seq=row.lifecycle_seq or (idx + 1),
+                created_at=datetime.now(timezone.utc).isoformat(),
             )
-            session.execute(
-                text("""
-                    UPDATE decision_evidence
-                    SET total_cost_pct=:total_cost_pct, total_explicit_cost_pct=:total_explicit_cost_pct, spread_source=:spread_source, slippage_source=:slippage_source,
-                        fee_pct=:fee_pct, fee_source=:fee_source, funding_source=:funding_source,
-                        latency_ms=:latency_ms, latency_source=:latency_source, liquidity_status=:liquidity_status,
-                        volatility_penalty_pct=:volatility_penalty_pct, volatility_source=:volatility_source,
-                        reject_flags=:reject_flags, unavailable_fields=:unavailable_fields
-                    WHERE evidence_id=:evidence_id
-                """),
-                {
-                    "evidence_id": event_id,
-                    "total_cost_pct": _sql_nullable_number(row.total_cost_pct),
-                    "total_explicit_cost_pct": _sql_nullable_number(row.total_explicit_cost_pct),
-                    "spread_source": row.spread_source or None,
-                    "slippage_source": row.slippage_source or None,
-                    "fee_pct": _sql_nullable_number(row.fee_pct),
-                    "fee_source": row.fee_source or None,
-                    "funding_source": row.funding_source or None,
-                    "latency_ms": _sql_nullable_number(row.latency_ms),
-                    "latency_source": row.latency_source or None,
-                    "liquidity_status": row.liquidity_status or None,
-                    "volatility_penalty_pct": _sql_nullable_number(row.volatility_penalty_pct),
-                    "volatility_source": row.volatility_source or None,
-                    "reject_flags": row.reject_flags or None,
-                    "unavailable_fields": row.unavailable_fields or None,
-                },
-            )
+            if not persisted_decision_evidence:
+                raise RuntimeError(f"decision_evidence persistence failed for {event_id}")
         if hasattr(session, "commit"):
             session.commit()
         persisted = session.execute(
@@ -2518,7 +2484,7 @@ def _decision_evidence_rows(database_url: str | None = None, *, mode: str = "BAC
                 """
                 SELECT evidence_id, run_id, profile_id, profile_name, mode, timestamp, symbol, side, setup_type,
                        setup_reason, regime, lifecycle_state_before, lifecycle_state_after, decision, score, raw_rr,
-                       effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason,
+                       effective_rr, min_effective_rr, expectancy, expectancy_bucket, reject_reason, cancel_reason, close_reason,
                        entry, sl, tp, trigger_price, close_price, net_pnl_pct, net_pnl_usdt, hold_minutes,
                        volume_24h_usdt, spread_pct, funding_rate_pct, expected_slippage_pct, liquidity_score,
                        volatility_regime, cost_penalty, diagnostics_json, signal_id, order_id, position_id,
@@ -5007,23 +4973,9 @@ def main():
         "accepted_trades_by_symbol_regime_day": {},
         "high_vol_accepted_trades_by_day": {},
     }
-    portfolio_config = {
-        "max_open_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_OPEN_POSITIONS", os.getenv("ALPHAFORGE_MAX_OPEN_POSITIONS", "3"))),
-        "max_concurrent_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_CONCURRENT_POSITIONS", os.getenv("ALPHAFORGE_MAX_CONCURRENT_POSITIONS", "3"))),
-        "max_notional_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_NOTIONAL_EXPOSURE", os.getenv("ALPHAFORGE_MAX_NOTIONAL_EXPOSURE", str(args.balance)))),
-        "max_symbol_notional": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_SYMBOL_NOTIONAL", os.getenv("ALPHAFORGE_MAX_SYMBOL_NOTIONAL", str(args.balance * 0.5)))),
-        "max_daily_loss_pct": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_DAILY_LOSS_PCT", "0.03")),
-        "max_rolling_drawdown_pct": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_ROLLING_DRAWDOWN_PCT", "0.08")),
-        "max_correlation_group_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_CORRELATION_GROUP_EXPOSURE", str(args.balance * 0.75))),
-        "max_correlated_positions": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_CORRELATED_POSITIONS", "2")),
-        "max_daily_symbol_trades": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_TRADES_SYMBOL_PER_DAY", "2")),
-        "max_daily_global_trades": int(os.getenv("ALPHAFORGE_BACKTEST_MAX_TRADES_GLOBAL_PER_DAY", "6")),
-        "max_same_side_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_SAME_SIDE_EXPOSURE", str(args.balance * 0.75))),
-        "max_net_exposure": float(os.getenv("ALPHAFORGE_BACKTEST_MAX_NET_EXPOSURE", str(args.balance))),
-        "reject_unknown_portfolio_risk": True,
-    }
+    portfolio_config = resolve_backtest_portfolio_config(args.balance, root=ROOT_DIR)
     portfolio_state = BacktestPortfolioState(initial_equity=float(args.balance))
-    backtest_database_url = os.getenv("ALPHAFORGE_DATABASE_URL") or os.getenv("ALPHAFORGE_DB_URL") or f"sqlite+pysqlite:///{Path(args.output_dir) / 'alphaforge_backtest.db'}"
+    backtest_database_url = resolve_backtest_database_url(args.output_dir, root=ROOT_DIR)
     backtest_run_id = os.getenv("ALPHAFORGE_RUN_ID") or Path(args.output_dir).name
     backtest_profile_name = os.getenv("ALPHAFORGE_PROFILE_NAME") or Path(args.output_dir).name
     expectancy_session = Session(init_db(backtest_database_url))
@@ -5197,7 +5149,13 @@ def main():
         adaptive_scope_stats.append(scope_payload)
     _attach_rejected_shadow_to_lifecycle(lifecycle, rejected_shadow)
     expectancy_session.close()
-    persisted_lifecycle_rows = _persist_lifecycle_rows(lifecycle, database_url=backtest_database_url, run_id=backtest_run_id, profile_name=backtest_profile_name)
+    persisted_lifecycle_rows = _persist_lifecycle_rows(
+        lifecycle,
+        database_url=backtest_database_url,
+        run_id=backtest_run_id,
+        profile_name=backtest_profile_name,
+        min_effective_rr=getattr(getattr(cfg, "runtime", cfg), "min_effective_rr", None),
+    )
     persisted_decision_evidence_rows = _decision_evidence_rows(backtest_database_url, run_id=backtest_run_id)
     forward_eval_rows = build_forward_evaluation_rows(
         [{**row, "timestamp": _safe_float(row.get("event_ts"), 0.0)} for row in persisted_lifecycle_rows],

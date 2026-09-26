@@ -502,10 +502,24 @@ def test_phase9_health_detects_running_without_worker_and_sql_counters(monkeypat
     h = health_payload(conn, camp.campaign_id, max_heartbeat_age=999999)
     assert h["total_decisions"] == 1 and h["accepted_decisions"] == 1
     assert "RUNNING_WITHOUT_WORKER" in h["unhealthy_reasons"]
+
+    # Add one newly-overdue reject so the watchdog sees a transient backlog
+    # warning at the same time as the real worker blocker. The warning must
+    # never become the authoritative terminal cause.
+    from datetime import datetime, timedelta, timezone
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    _health_label(conn, camp, run, "worker-plus-backlog", due_at=past)
+
     w = watch_once(conn, camp.campaign_id)
     assert w["status"] == "RECOVERY_REQUIRED"
+    assert "RESOLVER_BACKLOG_GROWTH" in w["health"]["warning_reasons"]
+    assert "RESOLVER_BACKLOG_GROWTH" not in w["failures"]
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
     assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    terminal = health_payload(conn, camp.campaign_id, max_heartbeat_age=999999, persist_history=False)
+    assert terminal["terminal_cause"] == "RUNNING_WITHOUT_WORKER"
+    assert terminal["terminal_cause_source"] == "PHASE9_WATCHDOG_RECOVERY_REQUIRED"
+    assert terminal["terminal_event_id"]
 
 
 def test_watchdog_detects_backlog_growth_and_provider_failures(monkeypatch, tmp_path):
@@ -1305,6 +1319,7 @@ def test_recovery_required_terminalization_requires_explicit_flag_and_complete_e
 
 
 def test_manual_terminalization_event_failure_rolls_back_all_statuses(monkeypatch, tmp_path):
+    import alphaforge.burnin_campaign as campaign_module
     import alphaforge.burnin_ops as ops
     _, conn = _conn(tmp_path)
     camp, run = _campaign(conn)
@@ -1313,11 +1328,16 @@ def test_manual_terminalization_event_failure_rolls_back_all_statuses(monkeypatc
     conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED',worker_pid=NULL WHERE campaign_id=?", (camp.campaign_id,)); conn.commit()
     _prepare_terminalization_evidence(conn, camp, run)
     monkeypatch.setattr(ops, "_authoritative_recovery_exposure", lambda *_: _clean_runtime_recovery(conn))
-    monkeypatch.setattr(ops, "event", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("event failed")))
+    monkeypatch.setattr(campaign_module, "event", lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("event failed")))
     with pytest.raises(sqlite3.OperationalError, match="event failed"):
         ops.terminalize_zero_exposure_recovery(conn, camp.campaign_id)
     assert get_campaign(conn, camp.campaign_id)["campaign_status"] == "RECOVERY_REQUIRED"
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM burnin_terminal_causes WHERE campaign_id=? AND burnin_run_id=?",
+        (camp.campaign_id, run),
+    ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(("mutation", "reason"), [
@@ -2006,6 +2026,9 @@ def test_watch_transient_backlog_growth_keeps_fresh_live_campaign_running(tmp_pa
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
     assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
     assert conn.execute("SELECT COUNT(*) FROM burnin_ops_incidents WHERE campaign_id=? AND incident_type='WATCHDOG_FAILURE'", (camp.campaign_id,)).fetchone()[0] == 0
+    after = health_payload(conn, camp.campaign_id, persist_history=False)
+    assert after["terminal_cause"] is None
+    assert conn.execute("SELECT COUNT(*) FROM burnin_terminal_causes WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == 0
 
 
 def test_watch_sustained_overdue_backlog_growth_still_fail_closes(tmp_path):
@@ -2025,6 +2048,11 @@ def test_watch_sustained_overdue_backlog_growth_still_fail_closes(tmp_path):
     assert "RESOLVER_BACKLOG_SUSTAINED_GROWTH" in result["failures"]
     assert conn.execute("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == "RECOVERY_REQUIRED"
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    terminal = health_payload(conn, camp.campaign_id, persist_history=False)
+    assert terminal["terminal_cause"] == "RESOLVER_BACKLOG_SUSTAINED_GROWTH"
+    assert terminal["terminal_cause_source"] == "PHASE9_WATCHDOG_RECOVERY_REQUIRED"
+    assert terminal["terminal_event_id"]
+    assert terminal["terminal_at"]
 
 
 def test_health_resolver_and_provider_failures_remain_unhealthy(tmp_path):
@@ -2035,3 +2063,271 @@ def test_health_resolver_and_provider_failures_remain_unhealthy(tmp_path):
     reasons = health_payload(conn, camp.campaign_id)["unhealthy_reasons"]
     assert "RESOLVER_FAILURES" in reasons
     assert "REPEATED_PROVIDER_FAILURES" in reasons
+
+
+def _ready_attachment_for_worker_identity_test(conn, camp, run, pid):
+    worker_started = utc_now()
+    conn.execute(
+        "UPDATE burnin_campaigns SET campaign_status='STARTING', worker_pid=?, "
+        "worker_started_at=?, last_heartbeat_at=? WHERE campaign_id=?",
+        (pid, worker_started, worker_started, camp.campaign_id),
+    )
+    conn.execute(
+        "UPDATE burnin_runs SET status='STARTING' WHERE burnin_run_id=?",
+        (run,),
+    )
+    conn.execute(
+        "UPDATE burnin_campaign_runs SET status='STARTING' WHERE burnin_run_id=?",
+        (run,),
+    )
+    event(
+        conn,
+        camp.campaign_id,
+        "PHASE8_CAMPAIGN_ATTACHED",
+        burnin_run_id=run,
+        details={
+            "runtime_instance_id": "runtime:macos-identity",
+            "active_run_id": run,
+        },
+    )
+    conn.commit()
+    return worker_started
+
+
+@pytest.mark.parametrize(
+    "reason,alive",
+    [
+        ("COMMAND_IDENTITY_UNAVAILABLE", True),
+        ("DARWIN_NATIVE_PROBE_ERROR", False),
+    ],
+)
+def test_exact_popen_child_can_complete_attachment_when_darwin_identity_is_unavailable(
+    monkeypatch, tmp_path, reason, alive
+):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    pid = 8401
+    worker_started = _ready_attachment_for_worker_identity_test(conn, camp, run, pid)
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": pid,
+            "alive": alive,
+            "identity_verified": False,
+            "reason": reason,
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": None,
+            "expected_started_at": worker_started,
+            "observed_creation_time": None,
+            "native_error": "simulated" if reason == "DARWIN_NATIVE_PROBE_ERROR" else None,
+            "identity_detail": "simulated-unavailable",
+        },
+    )
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(pid=pid, poll=lambda: None),
+    )
+
+    assert out["status"] == "ATTACHED"
+    assert all(out["checks"].values())
+    assert out["worker_ownership_source"] == "EXACT_POPEN_CHILD_PLUS_RUNTIME_EVIDENCE"
+    assert out["exact_launch_child"] is True
+    assert out["worker_liveness"]["reason"] == reason
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["EXPECTED_COMMAND_MISMATCH", "PROCESS_CREATION_TIME_MISMATCH"],
+)
+def test_exact_popen_child_never_overrides_positive_identity_contradiction(
+    monkeypatch, tmp_path, reason
+):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    pid = 8402
+    worker_started = _ready_attachment_for_worker_identity_test(conn, camp, run, pid)
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": pid,
+            "alive": False,
+            "identity_verified": False,
+            "reason": reason,
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": (
+                "/usr/bin/python -m alphaforge.burnin_cli worker --campaign-id camp_other"
+                if reason == "EXPECTED_COMMAND_MISMATCH"
+                else "/usr/bin/python -m alphaforge.burnin_cli worker --campaign-id " + camp.campaign_id
+            ),
+            "expected_started_at": worker_started,
+            "observed_creation_time": 1.0 if reason == "PROCESS_CREATION_TIME_MISMATCH" else None,
+            "native_error": None,
+            "identity_detail": None,
+        },
+    )
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(pid=pid, poll=lambda: None),
+    )
+
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+    assert out["checks"]["worker_alive"] is False
+    assert out["checks"]["worker_not_exited"] is True
+    assert out["worker_ownership_source"] is None
+    assert out["worker_liveness"]["reason"] == reason
+
+
+def test_unverified_arbitrary_pid_cannot_complete_attachment_without_exact_popen_child(
+    monkeypatch, tmp_path
+):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    pid = 8403
+    worker_started = _ready_attachment_for_worker_identity_test(conn, camp, run, pid)
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": pid,
+            "alive": True,
+            "identity_verified": False,
+            "reason": "COMMAND_IDENTITY_UNAVAILABLE",
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": None,
+            "expected_started_at": worker_started,
+            "observed_creation_time": None,
+            "native_error": None,
+            "identity_detail": "PROCARGS_ARGV_MUTATED_TO_AUXILIARY_VECTOR",
+        },
+    )
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=None,
+    )
+
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+    assert out["checks"]["worker_alive"] is False
+    assert out["exact_launch_child"] is False
+    assert out["worker_ownership_source"] is None
+
+
+def test_popen_pid_mismatch_cannot_use_identity_unavailable_fallback(monkeypatch, tmp_path):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    persisted_pid = 8404
+    worker_started = _ready_attachment_for_worker_identity_test(
+        conn, camp, run, persisted_pid
+    )
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": persisted_pid,
+            "alive": True,
+            "identity_verified": False,
+            "reason": "COMMAND_IDENTITY_UNAVAILABLE",
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": None,
+            "expected_started_at": worker_started,
+            "observed_creation_time": None,
+            "native_error": None,
+            "identity_detail": "simulated-unavailable",
+        },
+    )
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ops.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ops.time, "sleep", lambda _seconds: None)
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=0.5,
+        process=SimpleNamespace(pid=persisted_pid + 1, poll=lambda: None),
+    )
+
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "WORKER_ATTACHMENT_TIMEOUT"
+    assert out["exact_launch_child"] is False
+    assert out["checks"]["worker_alive"] is False
+
+
+def test_real_popen_exit_still_fails_immediately_despite_complete_runtime_evidence(
+    monkeypatch, tmp_path
+):
+    import alphaforge.burnin_ops as ops
+
+    _, conn = _conn(tmp_path)
+    camp, run = _campaign(conn)
+    pid = 8405
+    worker_started = _ready_attachment_for_worker_identity_test(conn, camp, run, pid)
+
+    monkeypatch.setattr(
+        ops,
+        "_campaign_worker_liveness",
+        lambda _campaign: {
+            "pid": pid,
+            "alive": True,
+            "identity_verified": False,
+            "reason": "COMMAND_IDENTITY_UNAVAILABLE",
+            "expected_command_parts": ["alphaforge.burnin", camp.campaign_id],
+            "observed_command": None,
+            "expected_started_at": worker_started,
+            "observed_creation_time": None,
+            "native_error": None,
+            "identity_detail": "simulated-unavailable",
+        },
+    )
+
+    out = verify_worker_attachment(
+        conn,
+        camp.campaign_id,
+        worker_started_at=worker_started,
+        launch_started_at=worker_started,
+        timeout_seconds=10,
+        process=SimpleNamespace(pid=pid, poll=lambda: 17),
+    )
+
+    assert out["status"] == "FAILED"
+    assert out["reason"] == "WORKER_EXITED_BEFORE_ATTACHMENT"
+    assert out["worker_exit_code"] == 17
+    assert out["checks"]["worker_not_exited"] is False
+    assert out["worker_ownership_source"] is None

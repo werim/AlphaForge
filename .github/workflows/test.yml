@@ -1,6 +1,5 @@
 name: Tests
 
-
 on:
   push:
     branches:
@@ -10,12 +9,13 @@ on:
     branches:
       - dev
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: tests-${{ github.event.pull_request.number || github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,42 +25,74 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check diff whitespace
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git diff --check "origin/${GITHUB_BASE_REF}...HEAD"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^..HEAD
+          else
+            git diff --check
+          fi
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Network diagnostic
-        run: |
-          curl -v https://pypi.org
-          dig pypi.org
-          ping -c 4 pypi.org || true
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip config set global.index-url https://pypi.org/simple
-          pip install -r requirements.txt || echo "Falling back to individual installs"
-          pip install sqlalchemy pytest
-
-      - name: Verify imports
-        run: |
-          python -c "import sqlalchemy; print(sqlalchemy.__version__)" || pip install sqlalchemy
-          python -c "import pytest; print(pytest.__version__)" || pip install pytest
+        run: python -m pip install -r requirements.txt
 
       - name: Compile
         run: python -m compileall -q src
 
-      - name: Run tests
+      - name: Cross-surface invariant gate
+        if: github.event_name == 'pull_request'
+        run: pytest -q tests/test_cross_surface_invariants.py tests/test_issue421_decision_invariant.py tests/test_ci_branch_contract.py
+
+      - name: System audit fabric gate
+        if: github.event_name == 'pull_request'
+        run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py
+
+      - name: SQLite contention regression gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_runtime_heartbeat.py
+          pytest -q tests/test_reconciliation_sqlite_contention.py
+          pytest -q tests/test_issue450_sqlite_concurrency.py
+          pytest -q tests/test_phase8_burnin_campaign.py -k "lock"
+
+      - name: Terminal cause regression gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue419_terminal_cause.py
+          pytest -q tests/test_phase9_burnin_ops.py -k "terminal_cause or backlog_growth or sustained_overdue or running_without_worker or manual_terminalization_event_failure"
+
+      - name: Public market-data safety gate
+        if: github.event_name == 'pull_request'
+        run: pytest -q tests/test_exchange_market_scanner.py tests/test_issue438_market_data_supervision.py
+
+      - name: SOAK decision evidence gate
+        if: github.event_name == 'pull_request'
+        run: pytest -q tests/test_issue441_soak_decision_evidence.py tests/test_autonomous_qualification.py -k "soak or issue441 or fast_qualification_is_isolated_complete_and_machine_readable"
+
+      - name: Full regression suite
+        if: github.event_name != 'pull_request'
         run: pytest -q
+
+      - name: Protected safety mutation gate
+        run: python scripts/run_safety_mutations.py
 
       - name: Run offline backtest
         run: |
           PYTHONPATH=src python backtest_order.py --ci --offline --output-dir artifacts/backtest
 
       - name: Verify backtest outputs
-        run: |
-          test -s artifacts/backtest/order_lifecycle.csv
+        run: test -s artifacts/backtest/order_lifecycle.csv
 
       - name: Upload backtest artifacts
         uses: actions/upload-artifact@v4

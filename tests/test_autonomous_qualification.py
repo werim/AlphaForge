@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from pathlib import Path
@@ -12,9 +13,17 @@ from alphaforge.autonomous_qualification import (
     AutonomousQualificationHarness,
     main,
 )
+from alphaforge.exchange_market_scanner import MarketScanRows
 
 
-def test_fast_qualification_is_isolated_complete_and_machine_readable(tmp_path: Path) -> None:
+def test_fast_qualification_is_isolated_complete_and_machine_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_commit = "a" * 40
+    report_commit = "b" * 40
+    commits = iter((start_commit, report_commit))
+    monkeypatch.setattr(qualification_module, "git_commit", lambda: next(commits))
+
     historical = tmp_path / "POST363.db"
     historical.write_bytes(b"historical-sentinel")
     before = historical.read_bytes()
@@ -28,6 +37,15 @@ def test_fast_qualification_is_isolated_complete_and_machine_readable(tmp_path: 
     assert report["unexplained_state_transitions"] == []
     assert report["persistence_gaps"] == []
     assert report["campaign_run_lineage_consistency"] is True
+    assert report["git_commit"] == start_commit
+    assert report["commit_sha"] == start_commit
+    assert report["git_provenance"] == {
+        "authoritative_commit": start_commit,
+        "authoritative_source": "HARNESS_INITIALIZATION",
+        "captured_at": harness.started_at,
+        "report_time_commit": report_commit,
+        "head_changed_during_run": True,
+    }
     assert report["isolation"] == {
         "database": str(harness.db_path),
         "artifact_directory": str(harness.artifact_dir),
@@ -37,9 +55,21 @@ def test_fast_qualification_is_isolated_complete_and_machine_readable(tmp_path: 
         "production_db_discovery": False,
         "active_runtime_reuse": False,
         "market_data_source": "SYNTHETIC",
+        "qualification_scope": "FAULT_INVARIANT_HARNESS",
     }
     assert harness.db_path.parent == harness.run_dir
     assert harness.artifact_dir.parent == harness.run_dir
+    database_artifact = Path(report["database_artifact"]["path"])
+    assert database_artifact == harness.artifact_dir / "qualification.sqlite3"
+    assert database_artifact.is_file()
+    assert report["database_artifact"]["source_database"] == str(harness.db_path)
+    assert report["database_artifact"]["quick_check"] == "ok"
+    assert report["database_artifact"]["size_bytes"] == database_artifact.stat().st_size
+    assert report["database_artifact"]["sha256"] == hashlib.sha256(
+        database_artifact.read_bytes()
+    ).hexdigest()
+    with sqlite3.connect(f"file:{database_artifact}?mode=ro", uri=True) as conn:
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     assert historical.read_bytes() == before
     assert all(item["verdict"] == "PASS" for item in report["faults_injected"])
     assert all(item["injected_at"] and item["expected_behavior"] and item["observed_behavior"]
@@ -50,10 +80,19 @@ def test_fast_qualification_is_isolated_complete_and_machine_readable(tmp_path: 
     machine = json.loads(Path(report["report_paths"]["json"]).read_text())
     human = Path(report["report_paths"]["markdown"]).read_text()
     assert machine["overall_verdict"] == "PASS"
+    assert machine["git_commit"] == start_commit
+    assert machine["database_artifact"] == report["database_artifact"]
     assert machine["report_paths"] == report["report_paths"]
+    assert all(
+        ref.startswith(f"sqlite:{database_artifact}#")
+        for refs in machine["evidence_references"].values()
+        for ref in refs
+    )
     assert "## Invariant matrix" in human
     assert "## Evidence references" in human
     assert "Overall verdict: **PASS**" in human
+    assert f"Git commit: `{start_commit}`" in human
+    assert f"Database artifact: `{database_artifact}`" in human
 
 
 def test_each_harness_instance_gets_new_database_and_artifact_directory(tmp_path: Path) -> None:
@@ -260,4 +299,47 @@ def test_public_soak_uses_the_production_market_scanner_path(
         ]
         assert observed["config"].exchange.hyperliquid.enabled is False
     finally:
+        harness.close()
+
+
+def test_public_probe_persists_scanner_failure_diagnostics(tmp_path: Path) -> None:
+    harness = AutonomousQualificationHarness(
+        mode="SOAK", output_root=tmp_path, soak_hours=6,
+        market_data_source="PUBLIC", sleep=lambda _seconds: None,
+    )
+    ctx = harness._new_context("market_data_diagnostics", qualification_targets=True)
+    rows = MarketScanRows([], diagnostics={
+        "status": "UNAVAILABLE",
+        "provider": "binance",
+        "cause": "TIMEOUT",
+        "endpoint": "premiumIndex",
+        "error_class": "TimeoutError",
+        "http_status": None,
+        "providers": [{
+            "status": "UNAVAILABLE",
+            "provider": "binance",
+            "cause": "TIMEOUT",
+            "endpoint": "premiumIndex",
+            "error_class": "TimeoutError",
+            "http_status": None,
+        }],
+    })
+    try:
+        harness._record_market_data_probe(ctx, rows, 7.583101)
+        with harness.engine.connect() as conn:
+            details = json.loads(conn.exec_driver_sql(
+                "SELECT details_json FROM burnin_campaign_events "
+                "WHERE campaign_id=? AND event_type='QUALIFICATION_MARKET_DATA_PROBE' "
+                "ORDER BY id DESC LIMIT 1",
+                (ctx.campaign_id,),
+            ).scalar_one())
+        assert details["row_count"] == 0
+        assert details["status"] == "UNAVAILABLE"
+        assert details["provider"] == "binance"
+        assert details["cause"] == "TIMEOUT"
+        assert details["endpoint"] == "premiumIndex"
+        assert details["error_class"] == "TimeoutError"
+        assert details["http_status"] is None
+    finally:
+        harness._terminalize(ctx)
         harness.close()

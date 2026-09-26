@@ -51,6 +51,33 @@ def test_dashboard_override_validation(tmp_path):
         write_dashboard_overrides({'ALPHAFORGE_ENABLE_LIVE_TRADING': 'true'}, root=tmp_path)
 
 
+@pytest.mark.parametrize("setting", [s for s in CONFIG_REGISTRY if s.value_type == "float"],
+                         ids=lambda setting: setting.env_name)
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_float_settings_reject_nonfinite_values(setting, value):
+    with pytest.raises(ValueError, match="must be finite"):
+        setting.parse(value)
+
+
+@pytest.mark.parametrize("name", ["MIN_EFFECTIVE_RR", "ALPHAFORGE_MAX_SPREAD_PCT"])
+def test_nonfinite_environment_threshold_fails_configuration(tmp_path, name):
+    from alphaforge.config_registry import effective_config_values
+
+    with pytest.raises(ValueError, match=name + " must be finite"):
+        effective_config_values(env={name: "nan"}, root=tmp_path)
+
+
+def test_nonfinite_dashboard_update_preserves_existing_override_file(tmp_path):
+    write_dashboard_overrides({"MIN_EFFECTIVE_RR": "1.4"}, root=tmp_path)
+    path = tmp_path / "config/runtime_overrides.json"
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="must be finite"):
+        write_dashboard_overrides({
+            "MIN_EFFECTIVE_RR": "1.8", "ALPHAFORGE_MAX_SPREAD_PCT": float("nan"),
+        }, root=tmp_path)
+    assert path.read_bytes() == before
+
+
 def test_all_dashboard_editable_managed_settings_are_documented_in_env_example():
     env_names = _env_names_from_example()
     editable = {s.env_name for s in CONFIG_REGISTRY if s.dashboard_editable and not s.secret}

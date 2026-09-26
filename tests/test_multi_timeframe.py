@@ -9,6 +9,7 @@ from sqlalchemy import text
 from alphaforge.execution import build_execution_context as build_canonical_execution_context
 from alphaforge.burnin import (BurnInRun, bootstrap_burnin_schema,
                                canonical_decision_sql, persist_burnin_run)
+from alphaforge.burnin_campaign import build_phase8_campaign_identity
 from alphaforge.multi_timeframe import (BinanceMTFProvider, build_execution_context,
                                         build_regime_context, build_setup_context, closed_candles,
                                         evaluate_mtf_alignment)
@@ -244,7 +245,9 @@ def test_provider_generates_regime_guided_candidate(monkeypatch):
     rows_by_tf = {
         "1h": _provider_rows([103 - i * .1 for i in range(24)], decision_ms),
         "15m": _provider_rows([100 + i * .1 for i in range(16)], decision_ms),
-        "1m": _provider_rows([101 - i * .1 for i in range(8)], decision_ms),
+        # The 1m confirmation closes inside the final 15m entry zone.  Its
+        # narrow range must refine entry only, never replace 15m structure.
+        "1m": _provider_rows([102.15 - i * .1 for i in range(8)], decision_ms),
     }
     provider = BinanceMTFProvider()
     monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
@@ -264,6 +267,36 @@ def test_provider_generates_regime_guided_candidate(monkeypatch):
     assert candidate["side"] == "SHORT"
     assert candidate["setup_type"] == "SHORT_PULLBACK"
     assert candidate["sl"] > candidate["entry"] > candidate["tp"]
+    assert candidate["sl"] == pytest.approx(mtf["setup"]["structural_stop"])
+    assert candidate["tp"] == pytest.approx(mtf["setup"]["structural_target"])
+    assert candidate["entry_source"] == "execution_close_within_setup_entry_zone"
+    assert candidate["geometry_source"] == "MTF_SETUP_STRUCTURE"
+    assert candidate["rr"] == pytest.approx(
+        (candidate["entry"] - candidate["tp"])
+        / (candidate["sl"] - candidate["entry"])
+    )
+
+
+def test_provider_fails_closed_when_execution_entry_is_outside_setup_zone(monkeypatch):
+    decision_ms = 20_000_000
+    rows_by_tf = {
+        "1h": _provider_rows([103 - i * .1 for i in range(24)], decision_ms),
+        "15m": _provider_rows([100 + i * .1 for i in range(16)], decision_ms),
+        "1m": _provider_rows([101 - i * .1 for i in range(8)], decision_ms),
+    }
+    provider = BinanceMTFProvider()
+    monkeypatch.setattr(provider, "_fetch", lambda _symbol, timeframe: rows_by_tf[timeframe])
+    canonical = {"spread_pct": .0002, "expected_slippage_pct": .0004,
+                 "market_data_latency_ms": 20.0, "liquidity_score": .9}
+
+    mtf = asyncio.run(provider.build("BTCUSDT", canonical, execution_ctx=canonical,
+        decision_ts_ms=decision_ms, regime_timeframe="1h", setup_timeframe="15m",
+        execution_timeframe="1m"))
+
+    assert mtf["generation"]["candidate"] is None
+    assert mtf["generation"]["reason"] == "EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE"
+    assert mtf["alignment"]["aligned"] is False
+    assert mtf["alignment"]["reasons"] == ["EXECUTION_ENTRY_OUTSIDE_SETUP_ZONE"]
 
 
 def test_provider_rollback_mode_retains_legacy_equality_veto(monkeypatch):
@@ -638,6 +671,102 @@ def test_paper_neutral_execution_rejects_before_ai_brain():
     assert "MTF_EXECUTION_UNAVAILABLE" not in rejects[-1]["mtf"]["alignment"]["reasons"]
     assert orchestrator.metrics.mtf_execution_not_confirmed == 1
     assert orchestrator.metrics.mtf_execution_missing == 0
+
+
+def test_mtf_execution_confirmation_shadow_preserves_downstream_authority(tmp_path):
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'shadow-low-effective-rr.db'}")
+    rejects = []
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_execution_confirmation_mode="SHADOW",
+            min_effective_rr=10.0,
+        ),
+        _AlwaysAcceptBrain(),
+        lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_NeutralExecutionProvider(),
+        persistence_engine=engine,
+        on_reject_persist=lambda payload: rejects.append(payload),
+    )
+    runtime._burnin_run_id = "shadow-low-effective-rr"
+
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert rejects[-1]["reason"] == "LOW_EFFECTIVE_RR"
+    assert rejects[-1]["authoritative_reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert rejects[-1]["shadow_mtf_execution_reason"] == "MTF_EXECUTION_NOT_CONFIRMED"
+    assert rejects[-1]["enforce_counterfactual_reject_reason"] == "MTF_EXECUTION_NOT_CONFIRMED"
+    assert runtime.metrics.mtf_execution_confirmation_shadow == 1
+    with engine.connect() as conn:
+        metrics = json.loads(conn.execute(text(
+            "SELECT metrics_json FROM burnin_observations WHERE decision='REJECTED'"
+        )).scalar_one())
+    assert metrics["authoritative_reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert metrics["shadow_mtf_execution_reason"] == "MTF_EXECUTION_NOT_CONFIRMED"
+    assert metrics["mtf_execution_confirmation_mode"] == "SHADOW"
+
+
+def test_mtf_execution_confirmation_shadow_can_reach_paper_accept():
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_execution_confirmation_mode="SHADOW",
+        ),
+        _AlwaysAcceptBrain(),
+        lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_NeutralExecutionProvider(),
+    )
+
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert runtime.metrics.executions == 1
+    assert runtime.metrics.mtf_execution_confirmation_shadow == 1
+
+
+def test_mtf_execution_counter_regime_remains_authoritative_in_shadow_mode():
+    rejects = []
+    runtime = RuntimeOrchestrator(
+        RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            require_mtf_alignment=True,
+            mtf_execution_confirmation_mode="SHADOW",
+        ),
+        SimpleNamespace(),
+        lambda: asyncio.sleep(0, result=[]),
+        mtf_context_provider=_CounterRegimeGuidedProvider(),
+        on_reject_persist=lambda payload: rejects.append(payload),
+    )
+
+    asyncio.run(runtime._process_symbol(_selection()))
+
+    assert rejects[-1]["reason"] == "MTF_EXECUTION_COUNTER_REGIME"
+    assert rejects[-1]["authoritative_reject_reason"] == "MTF_EXECUTION_COUNTER_REGIME"
+    assert rejects[-1].get("shadow_mtf_execution_reason") is None
+
+
+def test_mtf_execution_confirmation_mode_keeps_enforce_compatibility_and_separates_identity():
+    enforce = RuntimeConfig(execution_mode=ExecutionMode.PAPER)
+    shadow = RuntimeConfig(
+        execution_mode=ExecutionMode.PAPER,
+        mtf_execution_confirmation_mode="SHADOW",
+    )
+    enforce_identity = build_phase8_campaign_identity(enforce, ["BTCUSDT"], ["1m"], release_id="shadow-test")
+    shadow_identity = build_phase8_campaign_identity(shadow, ["BTCUSDT"], ["1m"], release_id="shadow-test")
+
+    assert enforce.mtf_execution_confirmation_mode == "ENFORCE"
+    assert "mtf_execution_confirmation_mode" not in enforce_identity["config_payload"]
+    assert "MTF_EXECUTION_CONFIRMATION_MODE" not in enforce_identity["config_payload"]
+    assert shadow_identity["config_payload"]["mtf_execution_confirmation_mode"] == "SHADOW"
+    assert shadow_identity["strategy_payload"]["mtf_execution_confirmation_mode"] == "SHADOW"
+    assert enforce_identity["config_hash"] != shadow_identity["config_hash"]
+    assert enforce_identity["strategy_config_hash"] != shadow_identity["strategy_config_hash"]
+    with pytest.raises(ValueError, match="PAPER-only"):
+        RuntimeConfig(
+            execution_mode=ExecutionMode.LIVE,
+            mtf_execution_confirmation_mode="SHADOW",
+        )
 
 
 @pytest.mark.parametrize(("regime_direction", "setup_direction", "expected_side", "expected_reason"), [

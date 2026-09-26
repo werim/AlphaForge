@@ -8,15 +8,20 @@ from sqlalchemy import create_engine, event, inspect, text
 
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db
+from alphaforge.rollback_evidence import persist_rollback_validation_evidence
 from alphaforge.release_gates import (
     build_release_snapshot,
     canary_mutation_attempt_count,
     latest_release_snapshot,
     latest_valid_operator_ack,
     persist_canary_event,
+    run_canary_mutation_trap_validation,
     persist_operator_ack,
     persist_release_snapshot,
+    persist_rollback_verification,
+    persist_runbook_evidence,
     release_snapshot_by_id,
+    required_operator_ack_text,
 )
 
 
@@ -60,7 +65,14 @@ def test_canonical_pr269_release_schema_names_are_preserved(tmp_path) -> None:
 
 def test_expired_and_malformed_operator_ack_fail_closed(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'ack.db'}")
-    persist_operator_ack(engine, release_id="rel-1", phase="PHASE6", valid_until="2026-01-01T00:00:00Z")
+    persist_operator_ack(
+        engine,
+        release_id="rel-1",
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text("rel-1"),
+        ttl_minutes=60,
+        now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
     assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE6", now=datetime(2026, 7, 10, tzinfo=timezone.utc)) is None
 
     with engine.begin() as conn:
@@ -71,12 +83,46 @@ def test_expired_and_malformed_operator_ack_fail_closed(tmp_path) -> None:
     assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE6", now=datetime(2026, 1, 1, tzinfo=timezone.utc)) is None
 
 
+def test_trivial_operator_ack_text_is_persisted_but_never_valid(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'ack-trivial.db'}")
+    row = persist_operator_ack(
+        engine,
+        release_id="rel-trivial",
+        phase="PHASE6",
+        acknowledgement_text="acknowledged",
+        ttl_minutes=60,
+    )
+    assert row["valid"] is False
+    assert row["blocker_reason"] == "ACK_TEXT_MISSING_RELEASE_OR_RISK_PHRASE"
+    assert latest_valid_operator_ack(engine, release_id="rel-trivial", phase="PHASE6") is None
+
+
+def test_operator_ack_ttl_is_bounded_to_four_hours(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'ack-ttl.db'}")
+    with pytest.raises(ValueError, match="OPERATOR_ACK_TTL_OUT_OF_RANGE"):
+        persist_operator_ack(
+            engine,
+            release_id="rel-ttl",
+            phase="PHASE6",
+            acknowledgement_text=required_operator_ack_text("rel-ttl"),
+            ttl_minutes=241,
+        )
+
+
 def test_release_id_and_phase_must_match_for_operator_ack(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'ack-match.db'}")
-    persist_operator_ack(engine, release_id="rel-1", phase="PHASE6", valid_until="2099-01-01T00:00:00Z")
-    assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE6") is not None
-    assert latest_valid_operator_ack(engine, release_id="rel-2", phase="PHASE6") is None
-    assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE5") is None
+    now=datetime(2026, 7, 10, tzinfo=timezone.utc)
+    persist_operator_ack(
+        engine,
+        release_id="rel-1",
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text("rel-1"),
+        ttl_minutes=60,
+        now=now,
+    )
+    assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE6", now=now) is not None
+    assert latest_valid_operator_ack(engine, release_id="rel-2", phase="PHASE6", now=now) is None
+    assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE5", now=now) is None
 
 
 @pytest.mark.skipif(importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("httpx") is None, reason="fastapi/httpx unavailable")
@@ -106,22 +152,253 @@ def test_dashboard_get_read_only_sqlite_executes_no_create_or_alter(tmp_path) ->
     assert "release_gate_snapshots" not in _schema_tables(verify)
 
 
+def test_arbitrary_canary_event_does_not_satisfy_release_gate(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'canary-unverified.db'}")
+    persist_canary_event(
+        engine,
+        release_id="rel-unverified",
+        phase="PHASE6",
+        event_type="CANARY_CHECK",
+        mutation_attempted=False,
+        mutation_blocked=True,
+        evidence={"source": "manual"},
+    )
+    snapshot = build_release_snapshot(engine, release_id="rel-unverified", phase="PHASE6")
+    assert snapshot.canary_ready is False
+    assert "CANARY_EVIDENCE_MISSING" in snapshot.blocking_reasons
+
+
+def test_direct_canary_validation_pass_cannot_be_spoofed(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'canary-spoof.db'}")
+    with pytest.raises(ValueError, match="CANARY_VALIDATION_EVENT_REQUIRES_MEASURED_WRITER"):
+        persist_canary_event(
+            engine,
+            release_id="rel-spoof",
+            phase="PHASE6",
+            event_type="CANARY_VALIDATION_PASS",
+            mutation_attempted=False,
+            mutation_blocked=True,
+            evidence={"validation_status": "PASS"},
+        )
+
+
+def test_measured_canary_validation_exercises_all_mutation_surfaces_in_isolation(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'canary-measured.db'}")
+    result = run_canary_mutation_trap_validation(
+        engine,
+        release_id="rel-measured",
+        phase="PHASE6",
+    )
+    assert result["status"] == "PASS"
+    evidence = result["evidence"]
+    assert evidence["blocked_actions"] == ["submit", "place", "cancel", "modify", "create"]
+    assert evidence["isolated_mutation_attempt_count"] == 5
+    assert evidence["isolated_mutation_blocked_count"] == 5
+    assert evidence["campaign_release_db_mutation_attempted"] is False
+    assert canary_mutation_attempt_count(
+        engine, release_id="rel-measured", phase="PHASE6"
+    ) == 0
+
+
+def test_real_release_scoped_mutation_attempt_overrides_measured_canary_pass(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'canary-mutation.db'}")
+    run_canary_mutation_trap_validation(engine, release_id="rel-mutation", phase="PHASE6")
+    persist_canary_event(
+        engine,
+        release_id="rel-mutation",
+        phase="PHASE6",
+        event_type="MUTATION_BLOCKED:submit",
+        mutation_attempted=True,
+        mutation_blocked=True,
+        evidence={"method": "submit"},
+    )
+    snapshot = build_release_snapshot(engine, release_id="rel-mutation", phase="PHASE6")
+    assert snapshot.canary_ready is False
+    assert "CANARY_MUTATION_ATTEMPTED" in snapshot.blocking_reasons
+
+
 def test_build_release_snapshot_all_phase6_evidence_canary_ready_not_live_ready(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'snapshot.db'}")
-    persist_operator_ack(engine, release_id="rel-ready", phase="PHASE6", valid_until="2099-01-01T00:00:00Z")
-    persist_canary_event(engine, release_id="rel-ready", phase="PHASE6", mutation_attempted=False)
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO rollback_verification_events(verification_id, release_id, phase, verified_at, status, evidence_json)
-            VALUES ('rollback:rel-ready', 'rel-ready', 'PHASE6', '2026-01-01T00:00:00Z', 'PASS', '{}')
-        """))
-        conn.execute(text("""
-            INSERT INTO runbook_evidence(evidence_id, release_id, phase, recorded_at, status, evidence_json)
-            VALUES ('runbook:rel-ready', 'rel-ready', 'PHASE6', '2026-01-01T00:00:00Z', 'PASS', '{}')
-        """))
+    persist_operator_ack(
+        engine,
+        release_id="rel-ready",
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text("rel-ready"),
+    )
+    run_canary_mutation_trap_validation(engine, release_id="rel-ready", phase="PHASE6")
+    persist_rollback_validation_evidence(engine, {
+        "validation_id": "rollback-validation:rel-ready",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "PHASE6_RELEASE_GATE_TEST"},
+    })
+    persist_rollback_verification(engine, release_id="rel-ready")
+    runbook = tmp_path / "RUNBOOK.md"
+    runbook.write_text(_valid_runbook_text(), encoding="utf-8")
+    persist_runbook_evidence(engine, release_id="rel-ready", runbook_path=runbook)
     snapshot = build_release_snapshot(engine, release_id="rel-ready", phase="PHASE6")
     persist_release_snapshot(engine, snapshot)
 
     assert snapshot.status == "CANARY_READY"
     assert snapshot.blocking_reasons == []
     assert latest_release_snapshot(engine, release_id="rel-ready", phase="PHASE6").status == "CANARY_READY"
+
+
+def _valid_runbook_text() -> str:
+    return """# Test Runbook
+## Explicit LIVE boundary
+LIVE remains blocked.
+## Suspension conditions
+Fail closed.
+## Operator workflow
+Operator verifies evidence.
+## Phase 9 PAPER Burn-in Operations
+Use recovery-drill before promotion and finalize only after qualification.
+"""
+
+
+def test_status_only_rollback_and_runbook_pass_rows_are_unverified(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'release-spoof.db'}")
+    release_id = "rel-spoofed"
+    persist_operator_ack(
+        engine,
+        release_id=release_id,
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text(release_id),
+    )
+    run_canary_mutation_trap_validation(engine, release_id=release_id, phase="PHASE6")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO rollback_verification_events(
+                verification_id,release_id,phase,verified_at,status,evidence_json
+            ) VALUES ('rb-spoof',:release_id,'PHASE6','now','PASS','{}')
+        """), {"release_id": release_id})
+        conn.execute(text("""
+            INSERT INTO runbook_evidence(
+                evidence_id,release_id,phase,recorded_at,status,evidence_json
+            ) VALUES ('run-spoof',:release_id,'PHASE6','now','PASS','{}')
+        """), {"release_id": release_id})
+
+    snapshot = build_release_snapshot(engine, release_id=release_id, phase="PHASE6")
+    assert snapshot.rollback_verified is False
+    assert snapshot.runbook_verified is False
+    assert "ROLLBACK_EVIDENCE_UNVERIFIED" in snapshot.blocking_reasons
+    assert "RUNBOOK_EVIDENCE_UNVERIFIED" in snapshot.blocking_reasons
+
+
+def test_rollback_writer_derives_pass_only_from_fresh_measured_evidence(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'rollback-writer.db'}")
+    failed = persist_rollback_verification(engine, release_id="rel-rollback")
+    assert failed["status"] == "FAIL"
+    assert "ROLLBACK_EVIDENCE_MISSING" in failed["evidence"]["blocking_reasons"]
+
+    persist_rollback_validation_evidence(engine, {
+        "validation_id": "rollback-validation:rel-rollback",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "RELEASE_GATE_WRITER_TEST"},
+    })
+    passed = persist_rollback_verification(engine, release_id="rel-rollback")
+    assert passed["status"] == "PASS"
+    assert passed["evidence"]["source"] == "DETERMINISTIC_VALIDATION"
+    assert passed["evidence"]["execution_mutation_attempt_count"] == 0
+
+
+def test_runbook_writer_hashes_content_and_fails_closed_on_missing_safety_marker(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'runbook-writer.db'}")
+    runbook = tmp_path / "RUNBOOK.md"
+    runbook.write_text(_valid_runbook_text(), encoding="utf-8")
+
+    passed = persist_runbook_evidence(engine, release_id="rel-runbook", runbook_path=runbook)
+    assert passed["status"] == "PASS"
+    assert passed["evidence"]["sha256"]
+    assert passed["evidence"]["missing_markers"] == []
+
+    runbook.write_text("# Incomplete\n## Explicit LIVE boundary\n", encoding="utf-8")
+    failed = persist_runbook_evidence(engine, release_id="rel-runbook", runbook_path=runbook)
+    assert failed["status"] == "FAIL"
+    assert "## Operator workflow" in failed["evidence"]["missing_markers"]
+
+
+def test_release_snapshot_blocks_mixed_commit_safety_evidence(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'mixed-commit.db'}")
+    release_id = "rel-mixed"
+    runbook = tmp_path / "RUNBOOK.md"
+    runbook.write_text(_valid_runbook_text(), encoding="utf-8")
+
+    persist_operator_ack(
+        engine,
+        release_id=release_id,
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text(release_id),
+    )
+    run_canary_mutation_trap_validation(
+        engine, release_id=release_id, phase="PHASE6", git_commit="commit-a"
+    )
+    persist_rollback_validation_evidence(engine, {
+        "validation_id": "rollback-validation:rel-mixed",
+        "git_commit": "commit-a",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "MIXED_COMMIT_TEST"},
+    })
+    persist_rollback_verification(
+        engine, release_id=release_id, git_commit="commit-a"
+    )
+    persist_runbook_evidence(
+        engine, release_id=release_id, runbook_path=runbook, git_commit="commit-b"
+    )
+
+    snapshot = build_release_snapshot(engine, release_id=release_id)
+    assert snapshot.status == "FAIL"
+    assert "RELEASE_EVIDENCE_COMMIT_MISMATCH" in snapshot.blocking_reasons
+    assert snapshot.evidence["release_evidence_git_commits"] == {
+        "canary": "commit-a",
+        "rollback": "commit-a",
+        "runbook": "commit-b",
+    }
+
+
+def test_release_snapshot_consumes_canonical_rollback_and_runbook_writers(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'writer-snapshot.db'}")
+    release_id = "rel-writer-ready"
+    runbook = tmp_path / "RUNBOOK.md"
+    runbook.write_text(_valid_runbook_text(), encoding="utf-8")
+
+    persist_operator_ack(
+        engine,
+        release_id=release_id,
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text(release_id),
+    )
+    run_canary_mutation_trap_validation(engine, release_id=release_id, phase="PHASE6")
+    persist_rollback_validation_evidence(engine, {
+        "validation_id": "rollback-validation:rel-writer-ready",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "RELEASE_GATE_WRITER_TEST"},
+    })
+    persist_rollback_verification(engine, release_id=release_id)
+    persist_runbook_evidence(engine, release_id=release_id, runbook_path=runbook)
+
+    snapshot = build_release_snapshot(engine, release_id=release_id)
+    assert snapshot.status == "CANARY_READY"
+    assert snapshot.rollback_verified is True
+    assert snapshot.runbook_verified is True
+    assert snapshot.blocking_reasons == []

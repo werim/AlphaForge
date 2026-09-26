@@ -1,22 +1,45 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
+from pathlib import Path
 import uuid
 from typing import Any, Mapping
 
-from sqlalchemy import inspect, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from alphaforge.contracts import canonical_utc_timestamp
+from alphaforge.release_identity import checkout_identity
 
 RELEASE_GATE_SNAPSHOTS_TABLE = "release_gate_snapshots"
 OPERATOR_ACKNOWLEDGEMENTS_TABLE = "operator_acknowledgements"
 CANARY_RUN_EVENTS_TABLE = "canary_run_events"
 ROLLBACK_VERIFICATION_EVENTS_TABLE = "rollback_verification_events"
 RUNBOOK_EVIDENCE_TABLE = "runbook_evidence"
+
+ACK_RISK_PHRASE = "I acknowledge AlphaForge Phase 6 canary risk and LIVE real orders remain disabled"
+MAX_OPERATOR_ACK_TTL_MINUTES = 240
+ROLLBACK_VERIFICATION_CONTRACT = "PHASE6_ROLLBACK_V1"
+RUNBOOK_VERIFICATION_CONTRACT = "PHASE6_RUNBOOK_V1"
+
+CANARY_VALIDATION_EVENT_TYPE = "CANARY_VALIDATION_PASS"
+CANARY_VALIDATION_CONTRACT = "PHASE6_CANARY_MUTATION_TRAP_V1"
+CANARY_VALIDATION_SOURCE = "DETERMINISTIC_MUTATION_TRAP_VALIDATION"
+CANARY_VALIDATION_ACTIONS = ("submit", "place", "cancel", "modify", "create")
+_CANARY_VALIDATION_TOKEN = object()
+
+RUNBOOK_REQUIRED_MARKERS = (
+    "## Explicit LIVE boundary",
+    "## Suspension conditions",
+    "## Operator workflow",
+    "## Phase 9 PAPER Burn-in Operations",
+    "recovery-drill",
+    "finalize",
+)
 
 
 @dataclass(slots=True)
@@ -50,6 +73,45 @@ def _parse_ts(value: Any) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def required_operator_ack_text(release_id: str) -> str:
+    return f"{ACK_RISK_PHRASE}; release_id={release_id}"
+
+
+def _release_evidence_git_commit(git_commit: str | None) -> str | None:
+    explicit = str(git_commit or "").strip()
+    if explicit:
+        return explicit
+    identity = checkout_identity()
+    if identity.get("status") != "PASS" or not identity.get("clean"):
+        return None
+    return str(identity.get("git_commit") or "").strip() or None
+
+
+def _operator_ack_semantics(
+    *,
+    release_id: str,
+    acknowledgement_text: Any,
+    acknowledged_at: Any,
+    valid_until: Any,
+    now: datetime | None = None,
+) -> tuple[bool, str | None]:
+    text_value = str(acknowledgement_text or "")
+    acknowledged = _parse_ts(acknowledged_at)
+    expires = _parse_ts(valid_until)
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if ACK_RISK_PHRASE not in text_value or release_id not in text_value:
+        return False, "ACK_TEXT_MISSING_RELEASE_OR_RISK_PHRASE"
+    if acknowledged is None or expires is None:
+        return False, "ACK_TIMESTAMP_INVALID"
+    if expires <= acknowledged:
+        return False, "ACK_EXPIRY_NOT_AFTER_ACK"
+    if (expires - acknowledged) > timedelta(minutes=MAX_OPERATOR_ACK_TTL_MINUTES, seconds=1):
+        return False, "ACK_TTL_EXCEEDS_MAX"
+    if expires <= current:
+        return False, "ACK_EXPIRED"
+    return True, None
 
 
 def read_only_table_exists(engine: Engine, table_name: str) -> bool:
@@ -202,11 +264,14 @@ def latest_valid_operator_ack(engine: Engine, *, release_id: str, phase: str, no
         return None
     if row is None:
         return None
-    valid_until = _parse_ts(row["valid_until"])
-    if valid_until is None:
-        return None
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    if valid_until <= current:
+    valid, _ = _operator_ack_semantics(
+        release_id=release_id,
+        acknowledgement_text=row["acknowledgement_text"],
+        acknowledged_at=row["acknowledged_at"],
+        valid_until=row["valid_until"],
+        now=now,
+    )
+    if not valid:
         return None
     return {
         "ack_id": str(row["ack_id"]),
@@ -234,58 +299,177 @@ def canary_mutation_attempt_count(engine: Engine, *, release_id: str, phase: str
         return None
 
 
-def _canary_event_count(engine: Engine, *, release_id: str, phase: str) -> int | None:
+def _latest_verified_canary_validation(engine: Engine, *, release_id: str, phase: str) -> dict[str, Any] | None:
     if not read_only_table_exists(engine, CANARY_RUN_EVENTS_TABLE):
         return None
     try:
         with engine.connect() as conn:
-            return int(conn.execute(text(f"""
-                SELECT COUNT(*) FROM {CANARY_RUN_EVENTS_TABLE}
-                WHERE release_id = :release_id AND UPPER(phase) = UPPER(:phase)
-            """), {"release_id": release_id, "phase": phase}).scalar_one())
+            row = conn.execute(text(f"""
+                SELECT event_id, event_ts, shadow_mode, canary_mode, mutation_attempted,
+                       mutation_blocked, evidence_json
+                FROM {CANARY_RUN_EVENTS_TABLE}
+                WHERE release_id = :release_id
+                  AND UPPER(phase) = UPPER(:phase)
+                  AND event_type = :event_type
+                ORDER BY id DESC LIMIT 1
+            """), {
+                "release_id": release_id,
+                "phase": phase,
+                "event_type": CANARY_VALIDATION_EVENT_TYPE,
+            }).mappings().first()
     except SQLAlchemyError:
         return None
-
-
-def _latest_status(engine: Engine, table: str, *, release_id: str, phase: str, status_column: str, time_column: str) -> str | None:
-    if not read_only_table_exists(engine, table):
+    if row is None:
         return None
+    evidence = dict(_json_load(row["evidence_json"], {}))
+    required_actions = list(CANARY_VALIDATION_ACTIONS)
+    valid = (
+        bool(row["shadow_mode"])
+        and bool(row["canary_mode"])
+        and not bool(row["mutation_attempted"])
+        and bool(row["mutation_blocked"])
+        and str(evidence.get("source") or "") == CANARY_VALIDATION_SOURCE
+        and str(evidence.get("verification_contract") or "") == CANARY_VALIDATION_CONTRACT
+        and str(evidence.get("validation_status") or "").upper() == "PASS"
+        and bool(str(evidence.get("git_commit") or "").strip())
+        and list(evidence.get("required_actions") or []) == required_actions
+        and list(evidence.get("blocked_actions") or []) == required_actions
+        and int(evidence.get("isolated_mutation_attempt_count") or 0) == len(required_actions)
+        and int(evidence.get("isolated_mutation_blocked_count") or 0) == len(required_actions)
+    )
+    if not valid:
+        return None
+    return {
+        "event_id": str(row["event_id"]),
+        "event_ts": str(row["event_ts"]),
+        "source": CANARY_VALIDATION_SOURCE,
+        "verification_contract": CANARY_VALIDATION_CONTRACT,
+        **evidence,
+    }
+
+
+def rollback_verification_evidence_valid(status: Any, evidence: Mapping[str, Any]) -> bool:
+    return (
+        str(status or "").upper() == "PASS"
+        and str(evidence.get("verification_contract") or "") == ROLLBACK_VERIFICATION_CONTRACT
+        and str(evidence.get("source") or "") == "DETERMINISTIC_VALIDATION"
+        and bool(evidence.get("validation_id"))
+        and bool(str(evidence.get("git_commit") or "").strip())
+        and str(evidence.get("source_git_commit") or "") == str(evidence.get("git_commit") or "")
+        and bool(evidence.get("kill_switch_block_verified"))
+        and bool(evidence.get("no_submit_on_kill_switch_verified"))
+        and bool(evidence.get("fail_closed_reconciliation_verified"))
+        and bool(evidence.get("repair_actions_non_mutating_verified"))
+        and int(evidence.get("execution_mutation_attempt_count") or 0) == 0
+        and list(evidence.get("blocking_reasons") or []) == []
+    )
+
+
+def runbook_verification_evidence_valid(status: Any, evidence: Mapping[str, Any]) -> bool:
+    digest = str(evidence.get("sha256") or "")
+    return (
+        str(status or "").upper() == "PASS"
+        and str(evidence.get("verification_contract") or "") == RUNBOOK_VERIFICATION_CONTRACT
+        and bool(str(evidence.get("git_commit") or "").strip())
+        and len(digest) == 64
+        and all(ch in "0123456789abcdef" for ch in digest.lower())
+        and int(evidence.get("size_bytes") or 0) > 0
+        and list(evidence.get("required_markers") or []) == list(RUNBOOK_REQUIRED_MARKERS)
+        and list(evidence.get("missing_markers") or []) == []
+        and evidence.get("read_error") in (None, "")
+    )
+
+
+def _latest_verified_rollback(engine: Engine, *, release_id: str, phase: str) -> tuple[str, dict[str, Any] | None]:
+    if not read_only_table_exists(engine, ROLLBACK_VERIFICATION_EVENTS_TABLE):
+        return "MISSING", None
     try:
         with engine.connect() as conn:
             row = conn.execute(text(f"""
-                SELECT {status_column} AS status FROM {table}
-                WHERE release_id = :release_id AND UPPER(phase) = UPPER(:phase)
-                ORDER BY {time_column} DESC, id DESC LIMIT 1
+                SELECT verification_id, verified_at, status, evidence_json
+                FROM {ROLLBACK_VERIFICATION_EVENTS_TABLE}
+                WHERE release_id=:release_id AND UPPER(phase)=UPPER(:phase)
+                ORDER BY id DESC LIMIT 1
             """), {"release_id": release_id, "phase": phase}).mappings().first()
     except SQLAlchemyError:
-        return None
-    return None if row is None else str(row["status"]).upper()
+        return "MISSING", None
+    if row is None:
+        return "MISSING", None
+    evidence = dict(_json_load(row["evidence_json"], {}))
+    valid = rollback_verification_evidence_valid(row["status"], evidence)
+    payload = {
+        "verification_id": str(row["verification_id"]),
+        "verified_at": str(row["verified_at"]),
+        **evidence,
+    }
+    return ("PASS" if valid else "UNVERIFIED"), payload
+
+
+def _latest_verified_runbook(engine: Engine, *, release_id: str, phase: str) -> tuple[str, dict[str, Any] | None]:
+    if not read_only_table_exists(engine, RUNBOOK_EVIDENCE_TABLE):
+        return "MISSING", None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(f"""
+                SELECT evidence_id, recorded_at, status, evidence_json
+                FROM {RUNBOOK_EVIDENCE_TABLE}
+                WHERE release_id=:release_id AND UPPER(phase)=UPPER(:phase)
+                ORDER BY id DESC LIMIT 1
+            """), {"release_id": release_id, "phase": phase}).mappings().first()
+    except SQLAlchemyError:
+        return "MISSING", None
+    if row is None:
+        return "MISSING", None
+    evidence = dict(_json_load(row["evidence_json"], {}))
+    valid = runbook_verification_evidence_valid(row["status"], evidence)
+    payload = {
+        "evidence_id": str(row["evidence_id"]),
+        "recorded_at": str(row["recorded_at"]),
+        **evidence,
+    }
+    return ("PASS" if valid else "UNVERIFIED"), payload
 
 
 def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHASE6", now: datetime | None = None) -> ReleaseGateSnapshot:
+    prior = latest_release_snapshot(engine, release_id=release_id, phase=phase)
+    prior_full_tests = None
+    if prior is not None and isinstance(prior.evidence, dict):
+        candidate = prior.evidence.get("full_tests")
+        if isinstance(candidate, dict):
+            prior_full_tests = dict(candidate)
     ack = latest_valid_operator_ack(engine, release_id=release_id, phase=phase, now=now)
     mutation_count = canary_mutation_attempt_count(engine, release_id=release_id, phase=phase)
-    canary_event_count = _canary_event_count(engine, release_id=release_id, phase=phase)
-    rollback_status = _latest_status(engine, ROLLBACK_VERIFICATION_EVENTS_TABLE, release_id=release_id, phase=phase, status_column="status", time_column="verified_at")
-    runbook_status = _latest_status(engine, RUNBOOK_EVIDENCE_TABLE, release_id=release_id, phase=phase, status_column="status", time_column="recorded_at")
-    canary_ready = mutation_count == 0 and bool(canary_event_count)
+    canary_validation = _latest_verified_canary_validation(engine, release_id=release_id, phase=phase)
+    rollback_status, rollback_evidence = _latest_verified_rollback(engine, release_id=release_id, phase=phase)
+    runbook_status, runbook_evidence = _latest_verified_runbook(engine, release_id=release_id, phase=phase)
+    canary_ready = mutation_count == 0 and canary_validation is not None
     rollback_verified = rollback_status == "PASS"
     runbook_verified = runbook_status == "PASS"
+    release_evidence_git_commits = {
+        "canary": str((canary_validation or {}).get("git_commit") or "").strip() or None,
+        "rollback": str((rollback_evidence or {}).get("git_commit") or "").strip() or None,
+        "runbook": str((runbook_evidence or {}).get("git_commit") or "").strip() or None,
+    }
+    verified_commit_values = {
+        value for value in release_evidence_git_commits.values() if value is not None
+    }
     reasons: list[str] = []
+    if len(verified_commit_values) > 1:
+        reasons.append("RELEASE_EVIDENCE_COMMIT_MISMATCH")
     if ack is None:
         reasons.append("OPERATOR_ACK_MISSING_OR_EXPIRED")
-    if mutation_count is None or canary_event_count in (None, 0):
+    if mutation_count is None or canary_validation is None:
         reasons.append("CANARY_EVIDENCE_MISSING")
     elif mutation_count > 0:
         reasons.append("CANARY_MUTATION_ATTEMPTED")
-    if rollback_status is None:
+    if rollback_status == "MISSING":
         reasons.append("ROLLBACK_EVIDENCE_MISSING")
     elif not rollback_verified:
-        reasons.append("ROLLBACK_NOT_VERIFIED")
-    if runbook_status is None:
+        reasons.append("ROLLBACK_EVIDENCE_UNVERIFIED")
+    if runbook_status == "MISSING":
         reasons.append("RUNBOOK_EVIDENCE_MISSING")
     elif not runbook_verified:
-        reasons.append("RUNBOOK_NOT_VERIFIED")
+        reasons.append("RUNBOOK_EVIDENCE_UNVERIFIED")
     passed = not reasons
     return ReleaseGateSnapshot(
         release_id=release_id,
@@ -298,7 +482,16 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
         operator_acknowledged=ack is not None,
         mutation_attempt_count=mutation_count,
         blocking_reasons=reasons,
-        evidence={"operator_ack": ack, "canary_event_count": canary_event_count, "rollback_status": rollback_status, "runbook_status": runbook_status},
+        evidence={
+            "operator_ack": ack,
+            "canary_validation": canary_validation,
+            "rollback_status": rollback_status,
+            "rollback_evidence": rollback_evidence,
+            "runbook_status": runbook_status,
+            "runbook_evidence": runbook_evidence,
+            "release_evidence_git_commits": release_evidence_git_commits,
+            **({"full_tests": prior_full_tests} if prior_full_tests is not None else {}),
+        },
     )
 
 
@@ -324,17 +517,47 @@ def persist_release_snapshot(engine: Engine, snapshot: ReleaseGateSnapshot) -> R
     return snapshot
 
 
-def persist_operator_ack(engine: Engine, *, release_id: str, phase: str, valid_until: str, operator_id: str = "operator", acknowledgement_text: str = "acknowledged", evidence: Mapping[str, Any] | None = None, ack_id: str | None = None) -> dict[str, Any]:
+def persist_operator_ack(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str,
+    acknowledgement_text: str,
+    operator_id: str = "operator",
+    ttl_minutes: int = MAX_OPERATOR_ACK_TTL_MINUTES,
+    evidence: Mapping[str, Any] | None = None,
+    ack_id: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     ensure_release_gate_schema(engine)
+    ttl = int(ttl_minutes)
+    if ttl <= 0 or ttl > MAX_OPERATOR_ACK_TTL_MINUTES:
+        raise ValueError(f"OPERATOR_ACK_TTL_OUT_OF_RANGE:1..{MAX_OPERATOR_ACK_TTL_MINUTES}")
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    acknowledged_at = current.isoformat().replace("+00:00", "Z")
+    valid_until = (current + timedelta(minutes=ttl)).isoformat().replace("+00:00", "Z")
+    valid, blocker = _operator_ack_semantics(
+        release_id=release_id,
+        acknowledgement_text=acknowledgement_text,
+        acknowledged_at=acknowledged_at,
+        valid_until=valid_until,
+        now=current,
+    )
+    evidence_payload = {
+        **dict(evidence or {}),
+        "validation_status": "PASS" if valid else "FAIL",
+        "blocker_reason": blocker,
+        "max_ttl_minutes": MAX_OPERATOR_ACK_TTL_MINUTES,
+    }
     row = {
         "ack_id": ack_id or f"ack:{uuid.uuid4().hex}",
         "release_id": release_id,
         "phase": phase,
-        "acknowledged_at": canonical_utc_timestamp(),
+        "acknowledged_at": acknowledged_at,
         "valid_until": valid_until,
         "operator_id": operator_id,
         "acknowledgement_text": acknowledgement_text,
-        "evidence_json": json.dumps(dict(evidence or {}), sort_keys=True),
+        "evidence_json": json.dumps(evidence_payload, sort_keys=True),
     }
     with engine.begin() as conn:
         conn.execute(text(f"""
@@ -346,10 +569,25 @@ def persist_operator_ack(engine: Engine, *, release_id: str, phase: str, valid_u
                 :acknowledgement_text, :evidence_json
             )
         """), row)
-    return row
+    return {**row, "valid": valid, "blocker_reason": blocker}
 
 
-def persist_canary_event(engine: Engine, *, release_id: str, phase: str, event_type: str = "CANARY_CHECK", shadow_mode: bool = True, canary_mode: bool = True, mutation_attempted: bool = False, mutation_blocked: bool = True, evidence: Mapping[str, Any] | None = None, event_id: str | None = None) -> dict[str, Any]:
+def persist_canary_event(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str,
+    event_type: str = "CANARY_CHECK",
+    shadow_mode: bool = True,
+    canary_mode: bool = True,
+    mutation_attempted: bool = False,
+    mutation_blocked: bool = True,
+    evidence: Mapping[str, Any] | None = None,
+    event_id: str | None = None,
+    _validation_token: object | None = None,
+) -> dict[str, Any]:
+    if event_type == CANARY_VALIDATION_EVENT_TYPE and _validation_token is not _CANARY_VALIDATION_TOKEN:
+        raise ValueError("CANARY_VALIDATION_EVENT_REQUIRES_MEASURED_WRITER")
     ensure_release_gate_schema(engine)
     row = {
         "event_id": event_id or f"canary:{uuid.uuid4().hex}",
@@ -374,6 +612,198 @@ def persist_canary_event(engine: Engine, *, release_id: str, phase: str, event_t
             )
         """), row)
     return row
+
+
+def run_canary_mutation_trap_validation(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str = "PHASE6",
+    git_commit: str | None = None,
+) -> dict[str, Any]:
+    """Exercise mutation surfaces in an isolated DB, then persist only the measured verdict."""
+    isolated = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    validation_release = f"isolated-canary:{uuid.uuid4().hex}"
+    results: dict[str, str] = {}
+    blocked_actions: list[str] = []
+    try:
+        ensure_release_gate_schema(isolated)
+        trap = MutationTrapExecutionAdapter(isolated, release_id=validation_release, phase=phase)
+        for action in CANARY_VALIDATION_ACTIONS:
+            try:
+                getattr(trap, action)()
+            except RuntimeError as exc:
+                result = str(exc)
+                results[action] = result
+                if result == "CANARY_MUTATION_BLOCKED":
+                    blocked_actions.append(action)
+            except Exception as exc:
+                results[action] = f"UNEXPECTED:{exc.__class__.__name__}"
+            else:
+                results[action] = "NOT_BLOCKED"
+        isolated_attempts = canary_mutation_attempt_count(
+            isolated, release_id=validation_release, phase=phase,
+        )
+        with isolated.connect() as conn:
+            isolated_blocked = int(conn.execute(text(f"""
+                SELECT COUNT(*) FROM {CANARY_RUN_EVENTS_TABLE}
+                WHERE release_id=:release_id
+                  AND UPPER(phase)=UPPER(:phase)
+                  AND mutation_attempted=1
+                  AND mutation_blocked=1
+            """), {"release_id": validation_release, "phase": phase}).scalar_one())
+    finally:
+        isolated.dispose()
+
+    required_actions = list(CANARY_VALIDATION_ACTIONS)
+    evidence_git_commit = _release_evidence_git_commit(git_commit)
+    passed = (
+        evidence_git_commit is not None
+        and
+        blocked_actions == required_actions
+        and isolated_attempts == len(required_actions)
+        and isolated_blocked == len(required_actions)
+    )
+    evidence = {
+        "source": CANARY_VALIDATION_SOURCE,
+        "verification_contract": CANARY_VALIDATION_CONTRACT,
+        "git_commit": evidence_git_commit,
+        "validation_status": "PASS" if passed else "FAIL",
+        "required_actions": required_actions,
+        "blocked_actions": blocked_actions,
+        "action_results": results,
+        "isolated_mutation_attempt_count": isolated_attempts,
+        "isolated_mutation_blocked_count": isolated_blocked,
+        "campaign_release_db_mutation_attempted": False,
+    }
+    event_type = CANARY_VALIDATION_EVENT_TYPE if passed else "CANARY_VALIDATION_FAIL"
+    row = persist_canary_event(
+        engine,
+        release_id=release_id,
+        phase=phase,
+        event_type=event_type,
+        shadow_mode=True,
+        canary_mode=True,
+        mutation_attempted=False,
+        mutation_blocked=True,
+        evidence=evidence,
+        _validation_token=_CANARY_VALIDATION_TOKEN if passed else None,
+    )
+    return {**row, "status": evidence["validation_status"], "evidence": evidence}
+
+
+def persist_rollback_verification(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str = "PHASE6",
+    verification_id: str | None = None,
+    max_evidence_age_sec: float = 900.0,
+    git_commit: str | None = None,
+) -> dict[str, Any]:
+    """Persist release-scoped rollback verification from fresh measured evidence only."""
+    from alphaforge.rollback_evidence import latest_persisted_rollback_evidence
+
+    measured = latest_persisted_rollback_evidence(engine, max_age_sec=max_evidence_age_sec)
+    evidence_git_commit = _release_evidence_git_commit(git_commit)
+    source_git_commit = str(measured.get("git_commit") or "").strip() or None
+    source_blockers = list(measured.get("rollback_blocking_reasons") or [])
+    if evidence_git_commit and source_git_commit != evidence_git_commit:
+        source_blockers.append("ROLLBACK_SOURCE_COMMIT_MISMATCH")
+    verified = (
+        evidence_git_commit is not None
+        and source_git_commit == evidence_git_commit
+        and bool(measured.get("rollback_evidence_verified"))
+        and str(measured.get("rollback_evidence_status") or "").upper() == "COMPLETE"
+        and int(measured.get("execution_mutation_attempt_count") or 0) == 0
+        and not source_blockers
+    )
+    evidence = {
+        "verification_contract": ROLLBACK_VERIFICATION_CONTRACT,
+        "git_commit": evidence_git_commit,
+        "source_git_commit": source_git_commit,
+        "source": measured.get("rollback_evidence_source"),
+        "validation_id": measured.get("validation_id"),
+        "recorded_at": measured.get("recorded_at"),
+        "age_sec": measured.get("rollback_evidence_age_sec"),
+        "kill_switch_block_verified": bool(measured.get("kill_switch_block_verified")),
+        "no_submit_on_kill_switch_verified": bool(measured.get("no_submit_on_kill_switch_verified")),
+        "fail_closed_reconciliation_verified": bool(measured.get("fail_closed_reconciliation_verified")),
+        "repair_actions_non_mutating_verified": bool(measured.get("repair_actions_non_mutating_verified")),
+        "execution_mutation_attempt_count": measured.get("execution_mutation_attempt_count"),
+        "blocking_reasons": source_blockers,
+    }
+    row = {
+        "verification_id": verification_id or f"rollback:{uuid.uuid4().hex}",
+        "release_id": release_id,
+        "phase": phase,
+        "verified_at": canonical_utc_timestamp(),
+        "status": "PASS" if verified else "FAIL",
+        "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
+    }
+    ensure_release_gate_schema(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            INSERT INTO {ROLLBACK_VERIFICATION_EVENTS_TABLE}(
+                verification_id, release_id, phase, verified_at, status, evidence_json
+            ) VALUES (
+                :verification_id, :release_id, :phase, :verified_at, :status, :evidence_json
+            )
+        """), row)
+    return {**row, "evidence": evidence}
+
+
+def persist_runbook_evidence(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str = "PHASE6",
+    runbook_path: str | Path = "RUNBOOK.md",
+    evidence_id: str | None = None,
+    git_commit: str | None = None,
+) -> dict[str, Any]:
+    """Verify and persist the release runbook without trusting a caller-supplied PASS flag."""
+    path = Path(runbook_path)
+    raw: bytes | None = None
+    content: str | None = None
+    read_error: str | None = None
+    try:
+        raw = path.read_bytes()
+        content = raw.decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        read_error = exc.__class__.__name__
+    missing_markers = [marker for marker in RUNBOOK_REQUIRED_MARKERS if content is None or marker not in content]
+    digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
+    evidence_git_commit = _release_evidence_git_commit(git_commit)
+    verified = raw is not None and content is not None and not missing_markers and evidence_git_commit is not None
+    evidence = {
+        "verification_contract": RUNBOOK_VERIFICATION_CONTRACT,
+        "git_commit": evidence_git_commit,
+        "file_name": path.name,
+        "sha256": digest,
+        "size_bytes": len(raw) if raw is not None else None,
+        "required_markers": list(RUNBOOK_REQUIRED_MARKERS),
+        "missing_markers": missing_markers,
+        "read_error": read_error,
+    }
+    row = {
+        "evidence_id": evidence_id or f"runbook:{uuid.uuid4().hex}",
+        "release_id": release_id,
+        "phase": phase,
+        "recorded_at": canonical_utc_timestamp(),
+        "status": "PASS" if verified else "FAIL",
+        "evidence_json": json.dumps(evidence, sort_keys=True),
+    }
+    ensure_release_gate_schema(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            INSERT INTO {RUNBOOK_EVIDENCE_TABLE}(
+                evidence_id, release_id, phase, recorded_at, status, evidence_json
+            ) VALUES (
+                :evidence_id, :release_id, :phase, :recorded_at, :status, :evidence_json
+            )
+        """), row)
+    return {**row, "evidence": evidence}
 
 
 class MutationTrapExecutionAdapter:

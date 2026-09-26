@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 from typing import Any, Mapping
 
 EXECUTION_EVIDENCE_COMPLETE_MEASURED = "COMPLETE_MEASURED"
@@ -28,6 +29,308 @@ SOURCE_MODELLED = "MODELLED"
 SOURCE_UNAVAILABLE = "UNAVAILABLE"
 
 
+def execution_context_is_unavailable(execution_ctx: Mapping[str, Any] | None) -> bool:
+    """Return whether the active execution-safety evidence is unavailable.
+
+    When a runtime safety evaluation exists it is authoritative over the raw
+    classifier, because optional/disabled evidence (for example orderbook when
+    its filter is disabled) must not poison persistence/readiness metadata.
+    """
+    ctx = dict(execution_ctx or {})
+    status_raw = ctx.get("safety_evidence_status", ctx.get("evidence_status"))
+    if status_raw is None:
+        return True
+    status = str(status_raw).strip().upper()
+    return status in {
+        "",
+        "UNKNOWN",
+        "UNAVAILABLE",
+        "UNAVAILABLE_BACKTEST",
+        EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING,
+        EXECUTION_EVIDENCE_INVALID_FAKE_ZERO,
+        "NULL",
+    }
+
+
+EXECUTION_COST_REFERENCE_PRICE = "STRATEGY_ENTRY"
+EXECUTION_COST_PERCENTAGE_DENOMINATOR = "STRATEGY_ENTRY"
+EXECUTION_COST_SIGN_CONVENTION = "POSITIVE_IS_ADVERSE"
+PROVENANCE_ACTUAL = "ACTUAL"
+PROVENANCE_ESTIMATED = "ESTIMATED"
+PROVENANCE_ASSUMED = "ASSUMED"
+PROVENANCE_MODELLED = SOURCE_MODELLED
+PROVENANCE_UNAVAILABLE = SOURCE_UNAVAILABLE
+
+_EXECUTION_COST_PROVENANCE = {
+    PROVENANCE_ACTUAL,
+    PROVENANCE_ESTIMATED,
+    PROVENANCE_ASSUMED,
+    PROVENANCE_MODELLED,
+    PROVENANCE_UNAVAILABLE,
+}
+
+
+def _finite_positive_price(value: Any, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite positive price")
+    try:
+        price = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite positive price") from exc
+    if price <= 0.0 or price != price or price in {float("inf"), float("-inf")}:
+        raise ValueError(f"{field} must be a finite positive price")
+    return price
+
+
+def _execution_cost_provenance(value: Any, *, actual_fill_available: bool) -> str:
+    provenance = str(value or PROVENANCE_UNAVAILABLE).strip().upper()
+    if provenance not in _EXECUTION_COST_PROVENANCE:
+        raise ValueError(f"unsupported execution-cost provenance: {provenance}")
+    if not actual_fill_available:
+        return PROVENANCE_UNAVAILABLE
+    return provenance
+
+
+@dataclass(frozen=True)
+class ExecutionCostSemantics:
+    """Canonical entry -> expected fill -> actual fill execution-cost contract.
+
+    All percentage and basis-point values use the strategy entry as denominator.
+    Price deltas are side-normalized so positive always means adverse execution.
+    Fees and other explicit penalties are deliberately outside this value object.
+    """
+
+    side: str
+    entry: float
+    expected_fill: float
+    actual_fill: float | None
+    expected_execution_cost_price: float
+    expected_execution_cost_pct: float
+    expected_execution_cost_bps: float
+    realized_execution_deviation_price: float | None
+    realized_execution_deviation_pct: float | None
+    realized_execution_deviation_bps: float | None
+    total_realized_execution_cost_price: float | None
+    total_realized_execution_cost_pct: float | None
+    total_realized_execution_cost_bps: float | None
+    expected_fill_provenance: str
+    actual_fill_provenance: str
+    decision_timestamp: str | None
+    fill_timestamp: str | None
+    reference_price: str = EXECUTION_COST_REFERENCE_PRICE
+    percentage_denominator: str = EXECUTION_COST_PERCENTAGE_DENOMINATOR
+    sign_convention: str = EXECUTION_COST_SIGN_CONVENTION
+    fee_treatment: str = "SEPARATE_NOT_INCLUDED"
+
+    def decision_time_dict(self) -> dict[str, Any]:
+        """Return only evidence available before submission/fill."""
+        return {
+            "entry": self.entry,
+            "expected_fill": self.expected_fill,
+            "expected_execution_cost_price": self.expected_execution_cost_price,
+            "expected_execution_cost_pct": self.expected_execution_cost_pct,
+            "expected_execution_cost_bps": self.expected_execution_cost_bps,
+            "expected_fill_provenance": self.expected_fill_provenance,
+            "decision_timestamp": self.decision_timestamp,
+            "reference_price": self.reference_price,
+            "percentage_denominator": self.percentage_denominator,
+            "sign_convention": self.sign_convention,
+            "fee_treatment": self.fee_treatment,
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **self.decision_time_dict(),
+            "actual_fill": self.actual_fill,
+            "realized_execution_deviation_price": self.realized_execution_deviation_price,
+            "realized_execution_deviation_pct": self.realized_execution_deviation_pct,
+            "realized_execution_deviation_bps": self.realized_execution_deviation_bps,
+            "total_realized_execution_cost_price": self.total_realized_execution_cost_price,
+            "total_realized_execution_cost_pct": self.total_realized_execution_cost_pct,
+            "total_realized_execution_cost_bps": self.total_realized_execution_cost_bps,
+            "actual_fill_provenance": self.actual_fill_provenance,
+            "fill_timestamp": self.fill_timestamp,
+        }
+
+
+def build_execution_cost_semantics(
+    *,
+    entry: Any,
+    expected_fill: Any,
+    actual_fill: Any | None,
+    side: Any,
+    expected_fill_provenance: str = PROVENANCE_ESTIMATED,
+    actual_fill_provenance: str = PROVENANCE_UNAVAILABLE,
+    decision_timestamp: str | None = None,
+    fill_timestamp: str | None = None,
+) -> ExecutionCostSemantics:
+    """Build the canonical cost decomposition without fees or future inference."""
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side not in {"LONG", "SHORT"}:
+        raise ValueError("side must be LONG or SHORT")
+    entry_price = _finite_positive_price(entry, field="entry")
+    expected_price = _finite_positive_price(expected_fill, field="expected_fill")
+    actual_price = None if actual_fill is None else _finite_positive_price(actual_fill, field="actual_fill")
+    side_sign = 1.0 if normalized_side == "LONG" else -1.0
+
+    expected_cost_price = side_sign * (expected_price - entry_price)
+    expected_cost_pct = expected_cost_price / entry_price
+    if actual_price is None:
+        realized_deviation_price = None
+        total_cost_price = None
+    else:
+        realized_deviation_price = side_sign * (actual_price - expected_price)
+        total_cost_price = side_sign * (actual_price - entry_price)
+
+    expected_provenance = _execution_cost_provenance(
+        expected_fill_provenance, actual_fill_available=True)
+    actual_provenance = _execution_cost_provenance(
+        actual_fill_provenance, actual_fill_available=actual_price is not None)
+    return ExecutionCostSemantics(
+        side=normalized_side,
+        entry=entry_price,
+        expected_fill=expected_price,
+        actual_fill=actual_price,
+        expected_execution_cost_price=expected_cost_price,
+        expected_execution_cost_pct=expected_cost_pct,
+        expected_execution_cost_bps=expected_cost_pct * 10_000.0,
+        realized_execution_deviation_price=realized_deviation_price,
+        realized_execution_deviation_pct=(
+            None if realized_deviation_price is None else realized_deviation_price / entry_price),
+        realized_execution_deviation_bps=(
+            None if realized_deviation_price is None else realized_deviation_price / entry_price * 10_000.0),
+        total_realized_execution_cost_price=total_cost_price,
+        total_realized_execution_cost_pct=(
+            None if total_cost_price is None else total_cost_price / entry_price),
+        total_realized_execution_cost_bps=(
+            None if total_cost_price is None else total_cost_price / entry_price * 10_000.0),
+        expected_fill_provenance=expected_provenance,
+        actual_fill_provenance=actual_provenance,
+        decision_timestamp=decision_timestamp,
+        fill_timestamp=fill_timestamp if actual_price is not None else None,
+    )
+
+
+def weighted_average_fill_price(fills: Any) -> float | None:
+    """Return the quantity-weighted price for canonical ``fills`` ledger rows.
+
+    Empty input means the realized fill is unavailable. Invalid or non-positive
+    price/quantity evidence is rejected instead of being coerced to zero.
+    """
+    rows = list(fills or [])
+    if not rows:
+        return None
+    prices: list[float] = []
+    quantities: list[float] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("fill evidence must be a mapping")
+        price = _finite_positive_price(row.get("price"), field="fill.price")
+        quantity = _finite_positive_price(
+            row.get("qty", row.get("quantity")), field="fill.qty")
+        prices.append(price)
+        quantities.append(quantity)
+    # Scale both factors before summing: finite price*quantity and quantity
+    # values can overflow even when their weighted mean is finite.
+    price_scale = max(prices)
+    quantity_scale = max(quantities)
+    weights = [quantity / quantity_scale for quantity in quantities]
+    weighted_ratio = math.fsum(
+        (price / price_scale) * weight for price, weight in zip(prices, weights)
+    ) / math.fsum(weights)
+    return _finite_positive_price(
+        price_scale * min(weighted_ratio, 1.0), field="weighted_fill")
+
+
+def execution_cost_semantics_from_record(
+    record: Mapping[str, Any],
+) -> ExecutionCostSemantics | None:
+    """Adapt a persisted/legacy fill record to the canonical contract.
+
+    No actual fill is inferred from entry. A legacy ``expected_slippage_pct``
+    may reconstruct expected fill only when side and entry are explicit because
+    it is pre-submit model evidence, not future market state.
+    """
+    raw_side = str(record.get("side") or "").strip().upper()
+    side = {"BUY": "LONG", "SELL": "SHORT"}.get(raw_side, raw_side)
+    if side not in {"LONG", "SHORT"}:
+        return None
+    entry = record.get("entry", record.get("entry_price"))
+    expected_fill = record.get("expected_fill", record.get("expected_fill_price"))
+    if expected_fill is None and record.get("expected_slippage_pct") is not None:
+        try:
+            entry_price = _finite_positive_price(entry, field="entry")
+            expected_pct = abs(float(record["expected_slippage_pct"]))
+        except (TypeError, ValueError, KeyError):
+            return None
+        expected_fill = entry_price * (
+            1.0 + expected_pct if side == "LONG" else 1.0 - expected_pct)
+
+    actual_fill = record.get("actual_fill", record.get("filled_entry_price"))
+    mode = str(record.get("mode") or "").strip().upper()
+    expected_provenance = str(
+        record.get("expected_fill_provenance")
+        or (PROVENANCE_MODELLED if mode == "PAPER" else PROVENANCE_ESTIMATED)
+    )
+    actual_provenance = record.get("actual_fill_provenance")
+    if actual_provenance is None:
+        actual_provenance = (
+            PROVENANCE_MODELLED
+            if actual_fill is not None and mode == "PAPER"
+            else PROVENANCE_UNAVAILABLE
+        )
+    try:
+        return build_execution_cost_semantics(
+            entry=entry,
+            expected_fill=expected_fill,
+            actual_fill=actual_fill,
+            side=side,
+            expected_fill_provenance=expected_provenance,
+            actual_fill_provenance=str(actual_provenance),
+            decision_timestamp=record.get("decision_timestamp", record.get("decision_time")),
+            fill_timestamp=record.get("fill_timestamp", record.get("filled_at")),
+        )
+    except ValueError:
+        return None
+
+
+def build_execution_review_metrics(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return canonical fill-quality evidence plus narrow legacy aliases."""
+    semantics = execution_cost_semantics_from_record(record)
+    if semantics is None:
+        return {
+            "entry_price": record.get("entry_price"),
+            "expected_fill_price": record.get("expected_fill"),
+            "filled_entry_price": record.get("filled_entry_price"),
+            "expected_slippage_pct": None,
+            "realized_slippage_pct": None,
+            "fill_quality_score": None,
+            "actual_fill_provenance": PROVENANCE_UNAVAILABLE,
+            "execution_cost_semantics_status": "UNAVAILABLE",
+        }
+
+    metrics = semantics.as_dict()
+    deviation_pct = semantics.realized_execution_deviation_pct
+    fill_quality = (
+        None
+        if deviation_pct is None
+        else max(0.0, min(1.0, 1.0 - max(deviation_pct, 0.0) * 100.0))
+    )
+    metrics.update({
+        "entry_price": semantics.entry,
+        "expected_fill_price": semantics.expected_fill,
+        "filled_entry_price": semantics.actual_fill,
+        "expected_slippage_pct": semantics.expected_execution_cost_pct,
+        # Compatibility alias: the historical entry -> fill metric is total
+        # realized cost, not actual-vs-expected deviation.
+        "realized_slippage_pct": semantics.total_realized_execution_cost_pct,
+        "actual_slippage_pct_semantics": "TOTAL_REALIZED_EXECUTION_COST_PCT",
+        "fill_quality_score": fill_quality,
+        "execution_cost_semantics_status": "AVAILABLE",
+    })
+    return metrics
+
+
 
 def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: float | None = None) -> dict[str, Any]:
     klines = list(market_ctx.get("recent_klines", []) or [])
@@ -46,12 +349,48 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         except (TypeError, ValueError):
             return None
 
-    measured_spread = _to_float(raw_spread) is not None
-    spread_status = str(market_ctx.get("spread_status", "MEASURED" if measured_spread else "UNAVAILABLE"))
-    spread_source = str(market_ctx.get("spread_source", "BOOK_TICKER" if measured_spread else "UNAVAILABLE"))
+    explicit_spread = _to_float(market_ctx.get("spread_pct"))
+    best_bid = _to_float(market_ctx.get("best_bid"))
+    best_ask = _to_float(market_ctx.get("best_ask"))
+    measured_spread = (
+        explicit_spread is not None
+        or (best_bid is not None and best_bid > 0.0 and best_ask is not None and best_ask > 0.0)
+    ) and _to_float(raw_spread) is not None
+    spread_status = str(
+        market_ctx.get("spread_status", "MEASURED" if measured_spread else "UNAVAILABLE")
+    )
+    spread_source = str(
+        market_ctx.get("spread_source", "BOOK_TICKER" if measured_spread else "UNAVAILABLE")
+    )
+    if not measured_spread:
+        spread_status = "UNAVAILABLE"
+        spread_source = "UNAVAILABLE"
 
-    slippage_status = str(market_ctx.get("slippage_status", "MODEL_ESTIMATE"))
-    slippage_source = str(market_ctx.get("slippage_source", "KLINE_RANGE_MODEL"))
+    slippage_has_evidence = (
+        market_ctx.get("expected_slippage_pct") not in (None, "")
+        or bool(klines)
+    )
+    slippage_status = str(
+        market_ctx.get(
+            "slippage_status",
+            "MODEL_ESTIMATE" if slippage_has_evidence else "UNAVAILABLE",
+        )
+    )
+    slippage_source = str(
+        market_ctx.get(
+            "slippage_source",
+            (
+                "KLINE_RANGE_MODEL"
+                if klines
+                else "EXPLICIT_EXECUTION_SLIPPAGE"
+                if slippage_has_evidence
+                else "UNAVAILABLE"
+            ),
+        )
+    )
+    if not slippage_has_evidence:
+        slippage_status = "UNAVAILABLE"
+        slippage_source = "UNAVAILABLE"
 
     md_latency = _to_float(market_ctx.get("market_data_latency_ms"))
     md_latency_status = str(market_ctx.get("market_data_latency_status", "MEASURED" if md_latency is not None else "UNAVAILABLE"))
@@ -109,7 +448,11 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         liquidity_score = None
     else:
         liquidity_score = float(raw_liquidity)
-    volatility_regime = str(market_ctx.get("volatility_regime", _volatility_regime(klines)))
+    raw_volatility_regime = market_ctx.get("volatility_regime")
+    if raw_volatility_regime in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        volatility_regime = _volatility_regime(klines) if klines else None
+    else:
+        volatility_regime = str(raw_volatility_regime)
 
     liquidity_status = str(market_ctx.get("liquidity_status", "MEASURED" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
     liquidity_source = str(market_ctx.get("liquidity_source", "UNKNOWN" if market_ctx.get("liquidity_score") is not None else "UNAVAILABLE"))
@@ -120,10 +463,15 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
     ))
 
     return {
-        "expected_slippage_pct": max(expected_slippage_pct, 0.0) if slippage_status != "UNAVAILABLE" else None,
+        # Preserve the legacy normalized estimate for MTF/research consumers,
+        # but keep slippage_status=UNAVAILABLE so execution-safety remains fail-closed.
+        "expected_slippage_pct": max(expected_slippage_pct, 0.0),
         "expected_slippage_legacy_pct": max(expected_slippage_pct, 0.0),
         "slippage_status": slippage_status,
         "slippage_source": slippage_source,
+        "expected_slippage_pct_zero_verified": bool(
+            market_ctx.get("expected_slippage_pct_zero_verified", False)
+        ),
         "market_data_latency_ms": max(md_latency, 0.0) if md_latency is not None else None,
         "market_data_latency_status": md_latency_status,
         "market_data_latency_source": md_latency_source,
@@ -133,24 +481,36 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
         "latency_ms": max(execution_latency, 0.0) if execution_latency is not None else None,
         "latency_status": execution_latency_status,
         "latency_source": execution_latency_source,
+        "latency_ms_zero_verified": bool(
+            market_ctx.get("latency_ms_zero_verified", False)
+        ),
         "spread_pct": max(spread_pct, 0.0) if spread_status != "UNAVAILABLE" else None,
         "spread_status": spread_status,
         "spread_source": spread_source,
+        "spread_pct_zero_verified": bool(
+            market_ctx.get("spread_pct_zero_verified", False)
+        ),
         "spread_unit_assumed": spread_unit_assumed,
         "slippage_unit_assumed": slippage_unit_assumed,
         "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
         "orderbook_status": orderbook_status,
         "orderbook_source": orderbook_source,
+        "orderbook_imbalance_zero_verified": bool(
+            market_ctx.get("orderbook_imbalance_zero_verified", False)
+        ),
         "liquidity_score": (max(min(liquidity_score, 1.0), 0.0) if liquidity_score is not None and liquidity_status != "UNAVAILABLE" else None),
         "liquidity_status": liquidity_status,
         "liquidity_source": liquidity_source,
         "funding_rate_pct": funding_val,
         "funding_status": funding_status,
         "funding_source": funding_source,
+        "funding_rate_pct_zero_verified": bool(
+            market_ctx.get("funding_rate_pct_zero_verified", False)
+        ),
         "fee_pct": fee,
         "fee_status": fee_status if fee is not None else "UNAVAILABLE",
         "fee_source": fee_source if fee is not None else "UNAVAILABLE",
-        "volatility_regime": volatility_regime if volatility_status != "UNAVAILABLE" else None,
+        "volatility_regime": volatility_regime if volatility_regime is not None and volatility_status.upper() != "UNAVAILABLE" else None,
         "volatility_status": volatility_status,
         "volatility_source": volatility_source,
         "evidence_status": classify_execution_evidence({
@@ -167,7 +527,7 @@ def build_execution_context(market_ctx: Mapping[str, Any], funding_rate_pct: flo
             "funding_status": funding_status,
             "orderbook_imbalance": max(min(orderbook, 1.0), -1.0) if orderbook is not None else None,
             "orderbook_status": orderbook_status,
-            "volatility_regime": volatility_regime if volatility_status != "UNAVAILABLE" else None,
+            "volatility_regime": volatility_regime if volatility_regime is not None and volatility_status.upper() != "UNAVAILABLE" else None,
             "volatility_status": volatility_status,
         }),
         "spoof_risk": float(market_ctx.get("spoof_risk", 0.0) or 0.0),
@@ -436,6 +796,253 @@ def build_execution_cost_model(execution_ctx: Mapping[str, Any], *, include_miss
         missing_fields=tuple(sorted(set(missing))),
         completeness=completeness,
     )
+def evaluate_execution_safety(
+    execution_ctx: Mapping[str, Any],
+    *,
+    effective_rr: Any,
+    min_effective_rr: float,
+    thresholds: Mapping[str, Any] | None = None,
+    require_measured: bool = False,
+) -> dict[str, Any]:
+    """Authoritative pre-submit execution-safety contract.
+
+    This function does not recompute executable geometry. effective_rr must
+    already reflect the canonical entry -> expected_fill geometry and residual
+    cost treatment chosen by the caller. The contract only validates execution
+    evidence and protected execution thresholds, so a high raw RR can never
+    bypass unknown or unsafe execution conditions.
+    """
+    t = dict(thresholds or {})
+    model = build_execution_cost_model(execution_ctx, include_missing_penalty=False)
+    raw_evidence_status = classify_execution_evidence(
+        execution_ctx, require_measured=require_measured
+    )
+
+    def threshold(*keys: str, default: float) -> float:
+        for key in keys:
+            value = t.get(key)
+            if value not in (None, ""):
+                return float(value)
+        return float(default)
+
+    def number(field: str) -> float | None:
+        value = execution_ctx.get(field)
+        if isinstance(value, bool):
+            return None
+        if value in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed == parsed and parsed not in {float("inf"), float("-inf")} else None
+
+    max_spread = threshold("MAX_SPREAD_PCT", "max_spread_pct", default=0.0025)
+    max_slippage = threshold(
+        "MAX_EXPECTED_SLIPPAGE_PCT", "MAX_SLIPPAGE_PCT", "max_expected_slippage_pct",
+        default=0.002,
+    )
+    max_total_cost = threshold("MAX_TOTAL_COST_PCT", "max_total_cost_pct", default=0.20)
+    min_liquidity = threshold("MIN_LIQUIDITY_SCORE", "min_liquidity_score", default=0.30)
+    max_latency = threshold("MAX_LATENCY_MS", "max_latency_ms", default=2500.0)
+    max_volatility_penalty = threshold(
+        "MAX_VOLATILITY_PENALTY_PCT", "max_volatility_penalty_pct", default=0.20
+    )
+    max_funding = threshold(
+        "MAX_ABS_FUNDING_RATE_PCT", "max_abs_funding_rate_pct", default=0.001
+    )
+    reject_unknown = bool(
+        t.get(
+            "REJECT_UNKNOWN_EXECUTION_CONTEXT",
+            t.get("reject_unknown_execution_context", True),
+        )
+    )
+    orderbook_required = bool(
+        t.get("ENABLE_ORDERBOOK_FILTER", t.get("enable_orderbook_filter", False))
+    )
+
+    status_keys = {
+        "spread_pct": "spread_status",
+        "expected_slippage_pct": "slippage_status",
+        "latency_ms": "latency_status",
+        "liquidity_score": "liquidity_status",
+        "funding_rate_pct": "funding_status",
+        "volatility_regime": "volatility_status",
+        "orderbook_imbalance": "orderbook_status",
+    }
+    critical_fields = [
+        "spread_pct",
+        "expected_slippage_pct",
+        "latency_ms",
+        "liquidity_score",
+    ]
+    if require_measured:
+        critical_fields.extend(["funding_rate_pct", "volatility_regime"])
+    if orderbook_required:
+        critical_fields.append("orderbook_imbalance")
+
+    missing_fields: list[str] = []
+    for field in critical_fields:
+        value = execution_ctx.get(field)
+        status = str(execution_ctx.get(status_keys[field], "") or "").upper()
+        unavailable_value = value in (
+            None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"
+        )
+        unavailable_status = status in UNAVAILABLE_STATUSES
+        not_measured = require_measured and status not in MEASURED_STATUSES
+        if unavailable_value or unavailable_status or not_measured:
+            missing_fields.append(field)
+
+    # A supplied invalid number is corrupt evidence, even when missing-context
+    # policy is relaxed. Status labels cannot make NaN/Infinity measurable.
+    invalid_numeric_fields = [
+        field for field in (
+            "spread_pct", "expected_slippage_pct", "latency_ms",
+            "liquidity_score", "funding_rate_pct", "fee_pct", "orderbook_imbalance",
+        )
+        if execution_ctx.get(field) not in (
+            None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"
+        ) and number(field) is None
+    ]
+    missing_fields.extend(invalid_numeric_fields)
+
+    fake_zero_fields: list[str] = []
+    zero_sensitive_fields = [
+        "spread_pct",
+        "expected_slippage_pct",
+        "latency_ms",
+    ]
+    if require_measured:
+        zero_sensitive_fields.append("funding_rate_pct")
+    if orderbook_required:
+        zero_sensitive_fields.append("orderbook_imbalance")
+    for field in zero_sensitive_fields:
+        value = number(field)
+        status = str(execution_ctx.get(status_keys[field], "") or "").upper()
+        if (
+            require_measured
+            and value == 0.0
+            and status in MEASURED_STATUSES
+            and not bool(execution_ctx.get(f"{field}_zero_verified", False))
+        ):
+            fake_zero_fields.append(field)
+
+    active_statuses = [
+        str(execution_ctx.get(status_keys[field], "") or "").upper()
+        for field in critical_fields
+    ]
+    if fake_zero_fields:
+        evidence_status = EXECUTION_EVIDENCE_INVALID_FAKE_ZERO
+    elif missing_fields:
+        evidence_status = EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+    elif require_measured:
+        evidence_status = EXECUTION_EVIDENCE_COMPLETE_MEASURED
+    elif any(status in ESTIMATED_STATUSES for status in active_statuses):
+        evidence_status = EXECUTION_EVIDENCE_PARTIAL_ESTIMATED
+    elif active_statuses and all(status in MEASURED_STATUSES for status in active_statuses):
+        evidence_status = EXECUTION_EVIDENCE_COMPLETE_MEASURED
+    else:
+        evidence_status = raw_evidence_status
+
+    spread = number("spread_pct")
+    slippage = number("expected_slippage_pct")
+    fee = number("fee_pct")
+    funding = number("funding_rate_pct")
+    latency = number("latency_ms")
+    liquidity = number("liquidity_score")
+    try:
+        effective = float(effective_rr)
+    except (TypeError, ValueError):
+        effective = None
+    if (isinstance(effective_rr, bool) or effective != effective
+            or effective in {float("inf"), float("-inf")}):
+        effective = None
+    total_explicit_cost = round(
+        sum(abs(value) for value in (spread, slippage, fee, funding) if value is not None),
+        10,
+    )
+
+    failed: list[str] = []
+    evidence: list[dict[str, Any]] = []
+
+    def fail(gate: str, observed: Any, limit: Any, comparison: str) -> None:
+        if gate not in failed:
+            failed.append(gate)
+        evidence.append({
+            "gate": gate,
+            "observed": observed,
+            "threshold": limit,
+            "comparison": comparison,
+            "source": "EXECUTION_SAFETY_CONTRACT",
+        })
+
+    if (reject_unknown and missing_fields) or invalid_numeric_fields:
+        fail(
+            "EXECUTION_CONTEXT_UNAVAILABLE",
+            sorted(set(missing_fields)),
+            "AVAILABLE",
+            "required",
+        )
+    if fake_zero_fields:
+        fail(
+            "INVALID_FAKE_ZERO",
+            sorted(set(fake_zero_fields)),
+            "VERIFIED_ZERO_OR_NONZERO",
+            "required",
+        )
+    if spread is not None and spread > max_spread:
+        fail("SPREAD_TOO_HIGH", spread, max_spread, ">")
+    if slippage is not None and slippage > max_slippage:
+        fail("SLIPPAGE_TOO_HIGH", slippage, max_slippage, ">")
+    if total_explicit_cost > max_total_cost:
+        fail("HIGH_TOTAL_COST", total_explicit_cost, max_total_cost, ">")
+    if liquidity is not None and liquidity < min_liquidity:
+        fail("THIN_LIQUIDITY", liquidity, min_liquidity, "<")
+    if latency is not None and latency > max_latency:
+        fail("HIGH_LATENCY", latency, max_latency, ">")
+    if model.volatility_penalty > max_volatility_penalty:
+        fail(
+            "EXCESSIVE_VOLATILITY",
+            model.volatility_penalty,
+            max_volatility_penalty,
+            ">",
+        )
+    if funding is not None and abs(funding) > max_funding:
+        fail("FUNDING_TOO_HIGH", abs(funding), max_funding, ">")
+    if effective is None or effective < float(min_effective_rr):
+        fail("LOW_EFFECTIVE_RR", effective, float(min_effective_rr),
+             "FINITE_RR_REQUIRED" if effective is None else "<")
+
+    priority = (
+        "EXECUTION_CONTEXT_UNAVAILABLE",
+        "INVALID_FAKE_ZERO",
+        "SPREAD_TOO_HIGH",
+        "SLIPPAGE_TOO_HIGH",
+        "HIGH_TOTAL_COST",
+        "THIN_LIQUIDITY",
+        "HIGH_LATENCY",
+        "EXCESSIVE_VOLATILITY",
+        "FUNDING_TOO_HIGH",
+        "LOW_EFFECTIVE_RR",
+    )
+    primary = next((gate for gate in priority if gate in failed), None)
+    return {
+        "accepted": not failed,
+        "primary_reject_reason": primary,
+        "all_failed_gates": list(failed),
+        "failed_gate_evidence": evidence,
+        "execution_evidence_status": evidence_status,
+        "raw_execution_evidence_status": raw_evidence_status,
+        "missing_fields": sorted(set(missing_fields)),
+        "fake_zero_fields": sorted(set(fake_zero_fields)),
+        "total_explicit_cost_pct": total_explicit_cost,
+        "volatility_penalty": model.volatility_penalty,
+        "effective_rr": None if effective is None else round(effective, 6),
+        "min_effective_rr": float(min_effective_rr),
+        "require_measured": bool(require_measured),
+    }
+
+
 def normalize_pct_input(value: Any, *, field: str) -> tuple[float, str]:
     """
     Normalize spread/slippage inputs into fractional rate units.

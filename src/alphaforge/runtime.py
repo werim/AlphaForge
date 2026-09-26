@@ -16,32 +16,45 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Awaitable, Callable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Protocol
 
 from alphaforge.ai_brain import AIBrain, score_reject_reason
 from alphaforge.contracts import LifecycleEventType, canonical_reject_reason, canonical_utc_timestamp, validate_transition
 from alphaforge.order import LifecycleState, OrderExecutionContext, TradingMode, validate_live_order_authorization
-from alphaforge.execution import build_execution_context, build_execution_cost_model
+from alphaforge.execution import (
+    PROVENANCE_ACTUAL,
+    PROVENANCE_ESTIMATED,
+    PROVENANCE_MODELLED,
+    PROVENANCE_UNAVAILABLE,
+    build_execution_context,
+    build_execution_cost_model,
+    evaluate_execution_safety,
+    build_execution_cost_semantics,
+    execution_context_is_unavailable,
+    weighted_average_fill_price,
+)
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
-from alphaforge.runtime_heartbeat import save_runtime_heartbeat
+from alphaforge.runtime_heartbeat import is_sqlite_busy_error, save_runtime_heartbeat
 from alphaforge.runtime_control import RuntimeControlStore
 from alphaforge.exchange_connectivity import ExchangeHealth, check_required_exchanges_health
 from alphaforge.exchange_market_scanner import enrich_selected_market_geometry, scan_exchange_markets
 from alphaforge.binance_reconciliation_provider import BinanceReadonlyReconciliationConfig, BinanceReadonlyReconciliationProvider
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
 from alphaforge.symbol_selector import SymbolSelectionResult, select_symbols
-from alphaforge.persistence import fetch_expectancy_stat_detail, init_db
+from alphaforge.persistence import fetch_expectancy_stat_detail, init_db, save_decision_evidence
 from alphaforge.adaptive_learning import record_rejected_signal_review
 from alphaforge.schema_doctor import load_active_positions, load_pending_orders
 from alphaforge.burnin import BurnInRun, DIAGNOSTIC_OBSERVATION_KIND, bootstrap_burnin_schema, canonical_decision_sql, canonical_hash, config_hash as burnin_config_hash, universe_hash as burnin_universe_hash, persist_burnin_run, persist_burnin_observation, persist_burnin_trade_outcome, update_burnin_run_counters, next_burnin_continuation_sequence
 from alphaforge.burnin_qualification import BurnInQualificationEngine
 from alphaforge.burnin_resolver import persist_pending_position, persist_pending_reject_label, resolve_campaign_batch
-from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
+from alphaforge.burnin_campaign import bootstrap_campaign_schema, get_campaign as get_burnin_campaign, event as burnin_campaign_event, _exec as burnin_campaign_exec, build_phase8_campaign_identity, canonical_paper_source_exchanges, fail_active_campaign_run, pause_campaign_for_provider_failure, terminalize_active_campaign_run, campaign_attachment_identity, run_attachment_identity, identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS, RUNTIME_ATTACHMENT_IDENTITY_FIELDS, CAMPAIGN_RUNTIME_IDENTITY_FIELDS
 from alphaforge.provider_failures import classify_provider_exception, classify_reconciliation_snapshot, TRANSIENT_TRANSPORT, PERMANENT_AUTH_OR_PROTOCOL, UNKNOWN
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot, save_runtime_recovery_event, evaluate_runtime_recovery, build_readonly_reconciliation_probe, persist_reconciliation_cycle, ReconciliationPersistenceFailure
-from alphaforge.config import load_config_from_env, load_reconciliation_settings, runtime_filter_config
+from alphaforge.config import (load_config_from_env, load_reconciliation_settings,
+    normalize_mtf_execution_confirmation_mode, runtime_filter_config)
+from alphaforge.config_registry import managed_config_value
 from alphaforge.agents.orchestrator import AgentGraphConfig, ShadowAgentOrchestrator
 from alphaforge.agents.phase_b import register_phase_b_handlers
 from alphaforge.agents.persistence import (AgentPersistenceStats, AgentTraceRepository,
@@ -50,6 +63,7 @@ from alphaforge.multi_timeframe import BinanceMTFProvider
 from alphaforge.state_direction_shadow import StateDirectionShadowStore, build_state_direction_shadow_draft
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -101,10 +115,16 @@ class RuntimeConfig:
     max_correlated_positions: int = 2
     reject_unknown_portfolio_risk: bool = True
     stale_market_data_sec: float = 15.0
+    max_clock_skew_ms: int = field(default_factory=lambda: int(managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS")))
     min_rr: float = 1.20
     min_effective_rr: float = 1.10
     max_spread_pct: float = 0.0025
     max_expected_slippage_pct: float = 0.0020
+    max_total_cost_pct: float = 0.20
+    min_liquidity_score: float = 0.30
+    max_volatility_penalty_pct: float = 0.20
+    reject_unknown_execution_context: bool = True
+    max_latency_ms: int = 2500
     paper_fee_bps: float | None = 4.0
     paper_execution_latency_ms: float | None = 50.0
     # Explicit PAPER-only portfolio evidence. These values never substitute
@@ -116,6 +136,7 @@ class RuntimeConfig:
     setup_timeframe: str = "15m"
     execution_timeframe: str = "1m"
     mtf_guided_signal_generation_enabled: bool = True
+    mtf_execution_confirmation_mode: str = "ENFORCE"
     regime_direction_threshold: float = 0.0005
     setup_direction_threshold: float = 0.0003
     execution_direction_threshold: float = 0.0005
@@ -135,6 +156,7 @@ class RuntimeConfig:
     block_unknown_expectancy: bool = True
     block_chop_market: bool = True
     require_regime_alignment: bool = True
+    enable_orderbook_filter: bool = False
     stop_too_wide_hard_reject: bool = True
     stop_too_wide_soft_score_min: float = 9.0
     stop_too_wide_soft_effective_rr_min: float = 1.75
@@ -142,6 +164,8 @@ class RuntimeConfig:
     stop_too_wide_extreme_mult: float = 1.50
     max_trades_global_per_day: int = 10
     max_trades_symbol_per_day: int = 2
+    symbol_loss_streak_limit: int = 3
+    global_loss_streak_limit: int = 5
     global_kill_switch: bool = False
     require_live_qualification: bool = True
     enable_shadow_mode: bool = False
@@ -171,6 +195,16 @@ class RuntimeConfig:
     agent_graph_persist_traces: bool = True
     agent_graph_max_pending_runs: int = 64
     agent_graph_database_url: str = "sqlite+pysqlite:///data/runtime/alphaforge_agent_shadow.db"
+
+    def __post_init__(self) -> None:
+        self.mtf_execution_confirmation_mode = normalize_mtf_execution_confirmation_mode(
+            self.mtf_execution_confirmation_mode
+        )
+        if int(self.max_clock_skew_ms) < 0:
+            raise ValueError("max_clock_skew_ms must be >= 0")
+        if (self.mtf_execution_confirmation_mode == "SHADOW"
+                and str(getattr(self.execution_mode, "value", self.execution_mode)).upper() != "PAPER"):
+            raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
 
 
 @dataclass(slots=True)
@@ -215,6 +249,7 @@ class RuntimeMetrics:
     mtf_setup_missing: int = 0
     mtf_execution_missing: int = 0
     mtf_execution_not_confirmed: int = 0
+    mtf_execution_confirmation_shadow: int = 0
     mtf_execution_counter_regime: int = 0
     mtf_direction_mismatch: int = 0
     mtf_stale_context: int = 0
@@ -231,6 +266,9 @@ class RuntimeMetrics:
     malformed_execution_candles_skipped: int = 0
     finalized_signal_replays_skipped: int = 0
     final_decision_lookup_failures: int = 0
+    heartbeat_persistence_failures: int = 0
+    heartbeat_persistence_recoveries: int = 0
+    heartbeat_persistence_degraded: bool = False
     persistence_enabled: bool = False
 
 
@@ -282,6 +320,8 @@ class RuntimeOrchestrator:
     _unknown_exchange_state: bool = field(default=False, init=False)
     _reconciliation_status: str = field(default="UNKNOWN", init=False)
     _reconciliation_persistence_unhealthy: bool = field(default=False, init=False)
+    _heartbeat_persistence_failure_streak: int = field(default=0, init=False)
+    _heartbeat_persistence_failure_threshold: int = field(default=3, init=False)
     _provider_failure_class: str | None = field(default=None, init=False)
     _transient_provider_outage_started_monotonic: float | None = field(default=None, init=False)
     _provider_failure_count: int = field(default=0, init=False)
@@ -307,6 +347,9 @@ class RuntimeOrchestrator:
     _last_scan_rejection_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_advisory_summary: dict[str, int] = field(default_factory=dict, init=False)
     _last_scan_gate_blockers: list[str] = field(default_factory=list, init=False)
+    _market_data_health_status: str = field(default="UNKNOWN", init=False)
+    _market_data_failure_streak: int = field(default=0, init=False)
+    _last_market_data_diagnostics: dict[str, Any] = field(default_factory=dict, init=False)
     _live_order_submission_enabled: bool = field(default=False, init=False)
     _mutation_trap_active: bool = field(default=False, init=False)
     _exchange_health: list[ExchangeHealth] = field(default_factory=list, init=False)
@@ -582,6 +625,7 @@ class RuntimeOrchestrator:
                 "mtf_setup_missing": self.metrics.mtf_setup_missing,
                 "mtf_execution_missing": self.metrics.mtf_execution_missing,
                 "mtf_execution_not_confirmed": self.metrics.mtf_execution_not_confirmed,
+                "mtf_execution_confirmation_shadow": self.metrics.mtf_execution_confirmation_shadow,
                 "mtf_execution_counter_regime": self.metrics.mtf_execution_counter_regime,
                 "mtf_direction_mismatch": self.metrics.mtf_direction_mismatch,
                 "mtf_stale_context": self.metrics.mtf_stale_context,
@@ -616,6 +660,11 @@ class RuntimeOrchestrator:
                 "quality_reject": self.metrics.quality_reject,
                 "quality_defer": self.metrics.quality_defer,
                 "phase_b_errors": self.metrics.phase_b_errors,
+                "heartbeat_persistence_failures": self.metrics.heartbeat_persistence_failures,
+                "heartbeat_persistence_recoveries": self.metrics.heartbeat_persistence_recoveries,
+                "heartbeat_persistence_degraded": self.metrics.heartbeat_persistence_degraded,
+                "heartbeat_persistence_failure_streak": self._heartbeat_persistence_failure_streak,
+                "heartbeat_persistence_failure_threshold": self._heartbeat_persistence_failure_threshold,
             },
         )
 
@@ -639,6 +688,10 @@ class RuntimeOrchestrator:
             flags.append("EXCHANGE_STATE_UNKNOWN")
         if self._exchange_read_only_status == "LOCAL_ONLY":
             flags.append("LOCAL_ONLY_DIAGNOSTIC_RECONCILIATION")
+        if self._market_data_health_status == "DEGRADED":
+            flags.append("MARKET_DATA_DEGRADED")
+        elif self._market_data_health_status == "UNAVAILABLE":
+            flags.append("MARKET_DATA_UNAVAILABLE")
         effective_status = status or self._runtime_status
         if effective_status == "OPERATING" and self._execution_reconciliation_blocked():
             effective_status = "RECOVERY_REQUIRED"
@@ -678,7 +731,7 @@ class RuntimeOrchestrator:
             recovery_action_required=self._recovery_required,
             fail_closed_reason=self._fail_closed_reason,
             runtime_flags=flags,
-            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count},
+            diagnostics_json={"metrics": self.metrics.__dict__ if hasattr(self.metrics, "__dict__") else str(self.metrics), "diagnostic_mode": self.config.diagnostic_mode, "local_only_reconciliation_override": self._exchange_read_only_status == "LOCAL_ONLY", "recovery_scope_decision": self._recovery_decision, "provider_failure_class": self._provider_failure_class, "provider_failure_count": self._provider_failure_count, "market_data": {"health_status": self._market_data_health_status, "failure_streak": self._market_data_failure_streak, **self._last_market_data_diagnostics}},
         )
 
     def _execution_reconciliation_blocked(self) -> bool:
@@ -851,10 +904,29 @@ class RuntimeOrchestrator:
         finally:
             self._runtime_status = "STOPPING"
             self._last_shutdown_time = canonical_utc_timestamp()
-            self._finalize_burnin_run(status="FAILED" if self._fatal_task_exception else "COMPLETED")
+            finalize_status = (
+                "FAILED" if self._fatal_task_exception
+                else "RECOVERY_REQUIRED" if self._recovery_required
+                else "COMPLETED"
+            )
+            self._finalize_burnin_run(status=finalize_status)
             self._generate_burnin_snapshot(reason="shutdown")
-            self._persist_runtime_heartbeat(runtime_state="STOPPING")
-            self._persist_runtime_state_snapshot("FAILED" if self._fatal_task_exception else "CLEAN_SHUTDOWN")
+            try:
+                self._persist_runtime_heartbeat(runtime_state="STOPPING")
+            except OperationalError as exc:
+                if not is_sqlite_busy_error(exc):
+                    raise
+                logger.warning("shutdown_heartbeat_persistence_skipped reason=SQLITE_BUSY")
+            try:
+                self._persist_runtime_state_snapshot(
+                    "FAILED" if self._fatal_task_exception
+                    else "RECOVERY_REQUIRED" if self._recovery_required
+                    else "CLEAN_SHUTDOWN"
+                )
+            except OperationalError as exc:
+                if not is_sqlite_busy_error(exc):
+                    raise
+                logger.warning("shutdown_runtime_state_persistence_skipped reason=SQLITE_BUSY")
             await self._shutdown_tasks()
         if self._fatal_task_exception is not None:
             reason = "MARKET_SCAN_LOOP_FAILED" if self._fatal_task_name == "market_scan_loop" else f"RUNTIME_TASK_FAILED:{self._fatal_task_name}"
@@ -1067,6 +1139,24 @@ class RuntimeOrchestrator:
             "execution_cost_unit": "R",
         }
 
+    @staticmethod
+    def _canonical_market_regime(payload: Mapping[str, Any]) -> str:
+        """Prefer complete MTF market-regime evidence over legacy decision labels."""
+        mtf = payload.get("mtf") if isinstance(payload.get("mtf"), Mapping) else {}
+        regime_layer = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
+        mtf_regime = regime_layer.get("regime")
+        mtf_evidence_status = str(regime_layer.get("evidence_status") or "").upper()
+        if mtf_regime and mtf_evidence_status == "COMPLETE":
+            return str(mtf_regime).upper()
+        execution_ctx = payload.get("execution_ctx") if isinstance(payload.get("execution_ctx"), Mapping) else {}
+        fallback = (
+            payload.get("regime")
+            or execution_ctx.get("volatility_regime")
+            or payload.get("volatility_regime")
+            or "UNKNOWN"
+        )
+        return str(fallback)
+
     def _persist_burnin_decision(self, payload: Mapping[str, Any], *,
                                  lifecycle_state: str | None = None,
                                  conn: Any | None = None) -> None:
@@ -1082,14 +1172,25 @@ class RuntimeOrchestrator:
             return
         try:
             execution_ctx = dict(payload.get("execution_ctx") or {})
+            canonical_regime = self._canonical_market_regime(payload)
+            source_regime = payload.get("regime")
+            legacy_decision_regime = payload.get("legacy_decision_regime")
+            if (legacy_decision_regime is None and source_regime is not None
+                    and str(source_regime).upper() != str(canonical_regime).upper()):
+                legacy_decision_regime = source_regime
             missing = [name for name in ("signal_id", "symbol", "decision") if not payload.get(name)]
             def persist(target: Any) -> None:
-                campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+                campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
                 runtime_identity = campaign_id or f"standalone:{self._burnin_run_id}"
                 metrics = {k: payload.get(k) for k in ("score", "rr", "candidate_rr",
                     "expected_fill", "executable_raw_rr", "remaining_execution_penalty",
                     "effective_rr", "confidence", "spread_pct", "expected_slippage_pct",
-                    "latency_ms", "funding_rate_pct")}
+                    "latency_ms", "funding_rate_pct", "entry", "sl", "tp",
+                    "entry_source", "stop_source", "target_source", "setup_timeframe",
+                    "execution_timeframe", "structural_stop", "structural_target",
+                    "all_failed_gates", "failed_gate_evidence", "stop_distance_pct",
+                    "min_signal_score", "min_raw_rr", "min_effective_rr",
+                    "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
                                 "setup_identity": payload.get("setup_identity"),
@@ -1097,11 +1198,17 @@ class RuntimeOrchestrator:
                                 "geometry_status": payload.get("geometry_status"),
                                 "geometry_reason": payload.get("geometry_reason"),
                                 "geometry_source": payload.get("geometry_source"),
+                                "canonical_market_regime": canonical_regime,
+                                "legacy_decision_regime": legacy_decision_regime,
                                 "mtf": payload.get("mtf"),
                                 "base_exec_direction": payload.get("base_exec_direction"),
                                 "resolved_state": payload.get("resolved_state"),
                                 "final_direction": payload.get("final_direction"),
-                                "override_reason": payload.get("override_reason")})
+                                "override_reason": payload.get("override_reason"),
+                                "mtf_execution_confirmation_mode": payload.get("mtf_execution_confirmation_mode", "ENFORCE"),
+                                "shadow_mtf_execution_reason": payload.get("shadow_mtf_execution_reason"),
+                                "authoritative_reject_reason": payload.get("authoritative_reject_reason"),
+                                "enforce_counterfactual_reject_reason": payload.get("enforce_counterfactual_reject_reason")})
                 if str(payload.get("decision") or "").upper() == "REJECTED":
                     metrics.update({
                         "primary_reject_reason": payload.get("primary_reject_reason"),
@@ -1120,7 +1227,123 @@ class RuntimeOrchestrator:
                     if setup_identity else
                     f"obs:{payload.get('signal_id')}:{payload.get('decision')}:{canonical_utc_timestamp()}"
                 )
-                persist_burnin_observation(target, observation_id=observation_id, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=payload.get("regime") or execution_ctx.get("volatility_regime") or payload.get("volatility_regime") or "UNKNOWN", decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
+                persist_burnin_observation(target, observation_id=observation_id, burnin_run_id=self._burnin_run_id, release_id=os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), execution_mode=self.config.execution_mode.value, symbol=payload.get("symbol"), interval=payload.get("timeframe"), regime=canonical_regime, decision=payload.get("decision"), lifecycle_state=lifecycle_state, metrics=metrics, source_provenance={"provider": self.scanner_source or "UNKNOWN", "source_exchange": payload.get("source_exchange"), "campaign_id": campaign_id, "runtime_identity": runtime_identity}, missing_fields=missing)
+                decision_upper = str(payload.get("decision") or "").upper()
+                reject_reason = (
+                    payload.get("primary_reject_reason")
+                    or payload.get("reject_reason")
+                    or payload.get("reason")
+                    if decision_upper == "REJECTED"
+                    else None
+                )
+                portfolio_diagnostics = payload.get("portfolio_diagnostics")
+                portfolio_snapshot = (
+                    dict(portfolio_diagnostics.get("snapshot") or {})
+                    if isinstance(portfolio_diagnostics, Mapping)
+                    else {}
+                )
+                diagnostics = {
+                    "observation_id": observation_id,
+                    "campaign_id": campaign_id,
+                    "candidate_rr": payload.get("candidate_rr"),
+                    "planned_entry": payload.get("entry"),
+                    "expected_fill": payload.get("expected_fill"),
+                    "executable_raw_rr": payload.get("executable_raw_rr"),
+                    "remaining_execution_penalty": payload.get("remaining_execution_penalty"),
+                    "execution_cost_semantics": payload.get("execution_cost_semantics"),
+                    "geometry_status": payload.get("geometry_status"),
+                    "geometry_reason": payload.get("geometry_reason"),
+                    "geometry_source": payload.get("geometry_source"),
+                    "all_failed_gates": payload.get("all_failed_gates"),
+                    "failed_gate_evidence": payload.get("failed_gate_evidence"),
+                    "reject_execution_basis": payload.get("reject_execution_basis"),
+                    "no_submit_verified": self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
+                    "execution_ctx": execution_ctx,
+                }
+                evidence_id = "runtime_decision:" + canonical_hash({
+                    "burnin_run_id": self._burnin_run_id,
+                    "observation_id": observation_id,
+                })[:24]
+                persisted_evidence = save_decision_evidence(
+                    target,
+                    evidence_id=evidence_id,
+                    run_id=self._burnin_run_id,
+                    profile_id=payload.get("profile_id"),
+                    profile_name=payload.get("profile_name"),
+                    mode=self.config.execution_mode.value,
+                    timestamp=payload.get("decision_time") or payload.get("decision_timestamp"),
+                    symbol=payload.get("symbol"),
+                    side=payload.get("side"),
+                    setup_type=payload.get("setup_type"),
+                    setup_reason=payload.get("setup_reason"),
+                    regime=canonical_regime,
+                    lifecycle_state_before=payload.get("lifecycle_state_before"),
+                    lifecycle_state_after=lifecycle_state,
+                    decision=payload.get("decision"),
+                    score=payload.get("score"),
+                    raw_rr=payload.get("executable_raw_rr") if payload.get("executable_raw_rr") is not None else payload.get("rr"),
+                    effective_rr=payload.get("effective_rr"),
+                    min_effective_rr=payload.get("min_effective_rr") if payload.get("min_effective_rr") is not None else float(self.config.min_effective_rr),
+                    expectancy=payload.get("expectancy"),
+                    expectancy_bucket=payload.get("expectancy_bucket"),
+                    reject_reason=reject_reason,
+                    entry=payload.get("expected_fill") if payload.get("expected_fill") is not None else payload.get("entry"),
+                    sl=payload.get("sl") if payload.get("sl") is not None else payload.get("structural_stop"),
+                    tp=payload.get("tp") if payload.get("tp") is not None else payload.get("structural_target"),
+                    volume_24h_usdt=execution_ctx.get("volume_24h_usdt"),
+                    spread_pct=execution_ctx.get("spread_pct"),
+                    funding_rate_pct=execution_ctx.get("funding_rate_pct"),
+                    expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
+                    liquidity_score=execution_ctx.get("liquidity_score"),
+                    volatility_regime=execution_ctx.get("volatility_regime"),
+                    cost_penalty=payload.get("remaining_execution_penalty") if payload.get("remaining_execution_penalty") is not None else execution_ctx.get("cost_penalty"),
+                    total_cost_pct=execution_ctx.get("total_cost_pct"),
+                    total_explicit_cost_pct=execution_ctx.get("total_explicit_cost_pct"),
+                    spread_source=execution_ctx.get("spread_source"),
+                    slippage_source=execution_ctx.get("slippage_source"),
+                    fee_pct=execution_ctx.get("fee_pct"),
+                    fee_source=execution_ctx.get("fee_source"),
+                    funding_source=execution_ctx.get("funding_source"),
+                    latency_ms=execution_ctx.get("latency_ms"),
+                    latency_source=execution_ctx.get("latency_source"),
+                    liquidity_status=execution_ctx.get("liquidity_status"),
+                    volatility_penalty_pct=execution_ctx.get("volatility_penalty_pct"),
+                    volatility_source=execution_ctx.get("volatility_source"),
+                    reject_flags=payload.get("all_failed_gates") or payload.get("reject_reasons"),
+                    unavailable_fields=execution_ctx.get("unavailable_fields"),
+                    diagnostics_json=diagnostics,
+                    portfolio_equity=portfolio_snapshot.get("equity"),
+                    available_balance=portfolio_snapshot.get("available_balance"),
+                    open_position_count=portfolio_snapshot.get("open_position_count"),
+                    max_open_positions=portfolio_snapshot.get("max_open_positions"),
+                    total_notional_exposure=portfolio_snapshot.get("total_notional_exposure"),
+                    max_notional_exposure=portfolio_snapshot.get("max_notional_exposure"),
+                    symbol_notional_exposure=portfolio_snapshot.get("symbol_notional_exposure"),
+                    max_symbol_notional=portfolio_snapshot.get("max_symbol_notional"),
+                    side_exposure_long=portfolio_snapshot.get("side_exposure_long"),
+                    side_exposure_short=portfolio_snapshot.get("side_exposure_short"),
+                    net_exposure=portfolio_snapshot.get("net_exposure"),
+                    gross_exposure=portfolio_snapshot.get("gross_exposure"),
+                    daily_realized_pnl=portfolio_snapshot.get("daily_realized_pnl"),
+                    daily_loss_pct=portfolio_snapshot.get("daily_loss_pct"),
+                    max_daily_loss_pct=portfolio_snapshot.get("max_daily_loss_pct"),
+                    rolling_drawdown_pct=portfolio_snapshot.get("rolling_drawdown_pct"),
+                    consecutive_loss_count=portfolio_snapshot.get("consecutive_loss_count"),
+                    correlation_group=portfolio_snapshot.get("correlation_group"),
+                    correlation_group_exposure=portfolio_snapshot.get("correlation_group_exposure"),
+                    correlated_position_count=portfolio_snapshot.get("correlated_position_count"),
+                    risk_flags=payload.get("risk_flags"),
+                    portfolio_reject_reason=payload.get("portfolio_reject_reason"),
+                    portfolio_risk_state=payload.get("portfolio_risk_state"),
+                    portfolio_diagnostics_json=portfolio_diagnostics,
+                    signal_id=payload.get("signal_id"),
+                    order_id=payload.get("order_id"),
+                    position_id=payload.get("position_id"),
+                    lifecycle_id=payload.get("lifecycle_id"),
+                    lifecycle_seq=payload.get("lifecycle_seq"),
+                )
+                if not persisted_evidence:
+                    raise RuntimeError("DECISION_EVIDENCE_PERSISTENCE_FAILED")
                 update_burnin_run_counters(target, self._burnin_run_id)
             if conn is not None:
                 persist(conn)
@@ -1273,7 +1496,17 @@ class RuntimeOrchestrator:
         engine = self._resolve_persistence_engine()
         if engine is None:
             raise RuntimeError("LIVE qualification requires runtime persistence engine")
-        evaluator = LiveReadinessEvaluator(engine)
+        readiness_campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        evaluator = LiveReadinessEvaluator(
+            engine,
+            evidence_mode=ExecutionMode.PAPER.value,
+            campaign_id=readiness_campaign_id,
+            burnin_run_id=self._burnin_run_id,
+            release_id=os.getenv("ALPHAFORGE_RELEASE_ID") or self.config.phase7_burnin_release_id,
+            runtime_instance_id=self.runtime_instance_id,
+            min_effective_rr=self.config.min_effective_rr,
+            require_run_scope=True,
+        )
         mode_parity = self._build_mode_parity_evidence(min_sample_count=3)
         readiness_inputs: dict[str, dict[str, Any]] = {
             "mode_parity": self._readiness_input_metadata("mode_parity", self, mode_parity),
@@ -1412,7 +1645,8 @@ class RuntimeOrchestrator:
             return None
         if risk_distance <= 0 or reward_distance <= 0:
             return 0.0
-        return reward_distance / risk_distance
+        executable_rr = reward_distance / risk_distance
+        return executable_rr if math.isfinite(executable_rr) else 0.0
 
     def _expected_fill_price(self, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> tuple[float | None, float | None]:
         try:
@@ -1422,10 +1656,21 @@ class RuntimeOrchestrator:
         if not math.isfinite(entry) or entry <= 0:
             return None, None
         if self.config.execution_mode is ExecutionMode.PAPER:
-            slippage_pct = max(float(self.paper_slippage_bps), 0.0) / 10_000.0
+            try:
+                if self.paper_slippage_bps is not None:
+                    slippage_pct = max(float(self.paper_slippage_bps), 0.0) / 10_000.0
+                elif execution_ctx.get("expected_slippage_pct") is not None:
+                    slippage_pct = max(float(execution_ctx.get("expected_slippage_pct")), 0.0)
+                else:
+                    return None, None
+            except (TypeError, ValueError):
+                return None, None
         else:
             try:
-                slippage_pct = max(float(execution_ctx.get("expected_slippage_pct") or 0.0), 0.0)
+                raw_slippage = execution_ctx.get("expected_slippage_pct")
+                if raw_slippage is None:
+                    return None, None
+                slippage_pct = max(float(raw_slippage), 0.0)
             except (TypeError, ValueError):
                 return None, None
         side = str(market_ctx.get("side") or "LONG").strip().upper()
@@ -1434,7 +1679,7 @@ class RuntimeOrchestrator:
         fill = entry * (1.0 + slippage_pct if side == "LONG" else 1.0 - slippage_pct)
         return round(fill, 8), slippage_pct
 
-    def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, float | None]:
+    def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
         candidate_rr = float(raw_rr or 0.0)
         expected_fill, fill_slippage_pct = self._expected_fill_price(market_ctx, execution_ctx)
         executable_raw_rr = self._fill_adjusted_raw_rr(
@@ -1451,10 +1696,36 @@ class RuntimeOrchestrator:
             # including the modelled exit-slippage half.
             remaining_penalty = max(model.total_penalty - model.slippage_penalty / 2.0, 0.0)
         effective_rr = max(executable_raw_rr - remaining_penalty, 0.0)
+        cost_semantics = None
+        if expected_fill is not None:
+            try:
+                cost_semantics = build_execution_cost_semantics(
+                    entry=market_ctx.get("entry"),
+                    expected_fill=expected_fill,
+                    actual_fill=None,
+                    side=market_ctx.get("side"),
+                    expected_fill_provenance=(
+                        PROVENANCE_MODELLED
+                        if self.config.execution_mode is ExecutionMode.PAPER
+                        else PROVENANCE_ESTIMATED
+                    ),
+                    decision_timestamp=market_ctx.get("decision_timestamp"),
+                ).decision_time_dict()
+            except ValueError:
+                # Canonical metrics are unavailable when side/price evidence is
+                # incomplete; existing effective-RR behavior remains authoritative.
+                cost_semantics = None
         return {
             "candidate_rr": round(candidate_rr, 6),
             "expected_fill": expected_fill,
             "fill_slippage_pct": fill_slippage_pct,
+            "expected_execution_cost_price": (
+                cost_semantics.get("expected_execution_cost_price") if cost_semantics else None),
+            "expected_execution_cost_pct": (
+                cost_semantics.get("expected_execution_cost_pct") if cost_semantics else None),
+            "expected_execution_cost_bps": (
+                cost_semantics.get("expected_execution_cost_bps") if cost_semantics else None),
+            "execution_cost_semantics": cost_semantics,
             "executable_raw_rr": round(executable_raw_rr, 6),
             "remaining_execution_penalty": round(remaining_penalty, 6),
             "effective_rr": round(effective_rr, 6),
@@ -1510,7 +1781,10 @@ class RuntimeOrchestrator:
             "missing_field_count": missing_field_count,
             "no_order_submission_verified": True,
             "no_submit_verified": True,
-            "execution_context_complete": all(str(c.get("execution_context", {}).get("evidence_status", "")).upper() not in {"", "UNAVAILABLE", "UNKNOWN"} for c in comparisons),
+            "execution_context_complete": all(
+                not execution_context_is_unavailable(c.get("execution_context"))
+                for c in comparisons
+            ),
             "comparison_fields": list(compare_fields),
             "samples": comparisons,
             "generated_at": canonical_utc_timestamp(),
@@ -1547,6 +1821,20 @@ class RuntimeOrchestrator:
             return
         self.metrics.scans += 1
         candidates = await self.market_scanner()
+        market_data_diagnostics = dict(getattr(candidates, "diagnostics", {}) or {})
+        market_data_status = str(
+            market_data_diagnostics.get("status")
+            or ("AVAILABLE" if candidates else "VALID_EMPTY")
+        ).upper()
+        self._last_market_data_diagnostics = market_data_diagnostics
+        if market_data_status == "UNAVAILABLE":
+            self._market_data_failure_streak += 1
+            self._market_data_health_status = (
+                "UNAVAILABLE" if self._market_data_failure_streak >= 2 else "DEGRADED"
+            )
+        else:
+            self._market_data_failure_streak = 0
+            self._market_data_health_status = market_data_status
         if self._burnin_run_id and self._campaign_symbols:
             candidates = [candidate for candidate in candidates
                           if str(candidate.get("symbol") or "").upper() in self._campaign_symbols
@@ -1580,7 +1868,11 @@ class RuntimeOrchestrator:
         self._last_scan_rejection_summary = reject_reasons
         self._last_scan_advisory_summary = advisory_reasons
         if not candidates:
-            self._last_scan_gate_blockers = ["NO_MARKET_CANDIDATES"]
+            self._last_scan_gate_blockers = (
+                ["MARKET_DATA_UNAVAILABLE"]
+                if self._market_data_health_status in {"DEGRADED", "UNAVAILABLE"}
+                else ["NO_MARKET_CANDIDATES"]
+            )
         elif not selected:
             self._last_scan_gate_blockers = ["NO_TRADABLE_SYMBOLS_AFTER_SELECTION"]
         else:
@@ -1714,7 +2006,26 @@ class RuntimeOrchestrator:
         self._assert_campaign_candidate(selection.symbol, market_ctx.get("source_exchange"),
                                         "PROCESS_SYMBOL")
         market_ctx.setdefault("mode", self.config.execution_mode.value)
-        if self.config.execution_mode is ExecutionMode.PAPER and self.config.paper_fee_bps is not None:
+        if self.config.execution_mode is ExecutionMode.PAPER:
+            try:
+                paper_slippage_bps = float(self.paper_slippage_bps)
+                if paper_slippage_bps < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                paper_slippage_bps = None
+            if market_ctx.get("expected_slippage_pct") in (None, ""):
+                if paper_slippage_bps is not None:
+                    market_ctx.update(
+                        expected_slippage_pct=paper_slippage_bps / 10_000.0,
+                        slippage_status="MODEL_ESTIMATE",
+                        slippage_source="CONFIGURED_PAPER_ASSUMPTION",
+                    )
+                else:
+                    market_ctx.update(
+                        slippage_status="UNAVAILABLE",
+                        slippage_source="UNAVAILABLE",
+                    )
+
             try:
                 paper_fee_bps = float(self.config.paper_fee_bps)
                 if paper_fee_bps < 0:
@@ -1879,6 +2190,23 @@ class RuntimeOrchestrator:
                         self._persist_geometry_diagnostic(selection.symbol, market_ctx, geometry_reason)
                         return
                     reasons = list(dict.fromkeys([geometry_reason, *reasons]))
+                shadow_mtf_execution_reason = (
+                    "MTF_EXECUTION_NOT_CONFIRMED"
+                    if (
+                        self.config.mtf_execution_confirmation_mode == "SHADOW"
+                        and reasons == ["MTF_EXECUTION_NOT_CONFIRMED"]
+                    )
+                    else None
+                )
+                if shadow_mtf_execution_reason:
+                    market_ctx.update(
+                        mtf_execution_confirmation_mode="SHADOW",
+                        shadow_mtf_execution_reason=shadow_mtf_execution_reason,
+                        enforce_counterfactual_reject_reason=shadow_mtf_execution_reason,
+                        authoritative_reject_reason=None,
+                    )
+                    self.metrics.mtf_execution_not_confirmed += 1
+                    self.metrics.mtf_execution_confirmation_shadow += 1
                 reason = reasons[0]
                 canonical_setup_reject = setup_phase in {"NO_SETUP", "INVALID", "OVEREXTENDED"}
                 if canonical_setup_reject and setup_identity is not None:
@@ -1889,31 +2217,33 @@ class RuntimeOrchestrator:
                     signal_id = f"runtime:{hashlib.sha256(setup_identity.encode('utf-8')).hexdigest()[:24]}"
                 else:
                     reject_decision_id = None
-                self._prepare_state_direction_shadow(
-                    symbol=selection.symbol, signal_id=signal_id, market_ctx=market_ctx,
-                    mtf=dict(mtf or {}), execution_ctx=execution_ctx)
-                self.metrics.mtf_alignment_reject += 1
-                self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
-                self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
-                self.metrics.mtf_execution_missing += int("MTF_EXECUTION_UNAVAILABLE" in reasons)
-                self.metrics.mtf_execution_not_confirmed += int("MTF_EXECUTION_NOT_CONFIRMED" in reasons)
-                self.metrics.mtf_execution_counter_regime += int("MTF_EXECUTION_COUNTER_REGIME" in reasons)
-                self.metrics.mtf_stale_context += int("MTF_CONTEXT_STALE" in reasons)
-                self.metrics.mtf_direction_mismatch += int(any(
-                    "MISMATCH" in item or item == "MTF_EXECUTION_COUNTER_REGIME" for item in reasons
-                ))
-                await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
-                reject_payload = {**market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
-                    "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED",
-                    "reason": reason, "reject_reason": reason, "confidence": 0.0, "score": None,
-                    "rr": market_ctx.get("rr"), "effective_rr": None, "explanation": "mtf_alignment_gate",
-                    "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf,
-                    "primary_reject_reason": reason, "reject_reasons": reasons}
-                if reject_decision_id is not None:
-                    reject_payload["reject_decision_id"] = reject_decision_id
-                await self._persist_reject(reject_payload)
-                await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
-                return
+                if not shadow_mtf_execution_reason:
+                    self._prepare_state_direction_shadow(
+                        symbol=selection.symbol, signal_id=signal_id, market_ctx=market_ctx,
+                        mtf=dict(mtf or {}), execution_ctx=execution_ctx)
+                    self.metrics.mtf_alignment_reject += 1
+                    self.metrics.mtf_regime_missing += int("MTF_REGIME_UNAVAILABLE" in reasons)
+                    self.metrics.mtf_setup_missing += int("MTF_SETUP_UNAVAILABLE" in reasons)
+                    self.metrics.mtf_execution_missing += int("MTF_EXECUTION_UNAVAILABLE" in reasons)
+                    self.metrics.mtf_execution_not_confirmed += int("MTF_EXECUTION_NOT_CONFIRMED" in reasons)
+                    self.metrics.mtf_execution_counter_regime += int("MTF_EXECUTION_COUNTER_REGIME" in reasons)
+                    self.metrics.mtf_stale_context += int("MTF_CONTEXT_STALE" in reasons)
+                    self.metrics.mtf_direction_mismatch += int(any(
+                        "MISMATCH" in item or item == "MTF_EXECUTION_COUNTER_REGIME" for item in reasons
+                    ))
+                    await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
+                    reject_payload = {**market_ctx, "signal_id": signal_id, "symbol": selection.symbol,
+                        "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED",
+                        "reason": reason, "reject_reason": reason, "confidence": 0.0, "score": None,
+                        "rr": market_ctx.get("rr"), "effective_rr": None, "explanation": "mtf_alignment_gate",
+                        "execution_ctx": execution_ctx, "timeframe": self.config.execution_timeframe, "mtf": mtf,
+                        "primary_reject_reason": reason, "reject_reasons": reasons,
+                        "authoritative_reject_reason": reason}
+                    if reject_decision_id is not None:
+                        reject_payload["reject_decision_id"] = reject_decision_id
+                    await self._persist_reject(reject_payload)
+                    await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
+                    return
             if setup_identity is not None and self._setup_decision_recorded(
                     setup_identity, decision="ACCEPTED"):
                 return
@@ -1982,7 +2312,8 @@ class RuntimeOrchestrator:
                         reject_payload,
                     )
                     return
-            self.metrics.mtf_alignment_pass += 1
+            if alignment.get("aligned"):
+                self.metrics.mtf_alignment_pass += 1
         if geometry_required and str(market_ctx.get("geometry_status") or "").upper() != "COMPLETE":
             reason = str(market_ctx.get("geometry_reason") or "GEOMETRY_INCOMPLETE").upper()
             if self._execution_candle_decision_identity(selection.symbol, market_ctx) is None:
@@ -2002,21 +2333,95 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value,
                                              selection.symbol, reject_payload)
             return
+        market_ctx.setdefault("decision_timestamp", canonical_utc_timestamp())
         raw_rr = market_ctx.get("rr")
         rr_metrics = self._execution_rr_metrics(raw_rr, market_ctx, execution_ctx)
         effective_rr = float(rr_metrics["effective_rr"] or 0.0)
         market_ctx.update(rr_metrics)
+        execution_safety = None
+        if self.config.execution_mode in {
+            ExecutionMode.PAPER,
+            ExecutionMode.LIVE_PRECHECK,
+        }:
+            execution_safety = evaluate_execution_safety(
+                execution_ctx,
+                effective_rr=effective_rr,
+                min_effective_rr=self.config.min_effective_rr,
+                thresholds=self._canonical_filter_config(),
+                require_measured=self.config.execution_mode is ExecutionMode.LIVE_PRECHECK,
+            )
+            execution_ctx = {
+                **execution_ctx,
+                "safety_evidence_status": execution_safety.get("execution_evidence_status"),
+                "safety_missing_fields": list(execution_safety.get("missing_fields") or []),
+                "safety_fake_zero_fields": list(execution_safety.get("fake_zero_fields") or []),
+                "safety_all_failed_gates": list(execution_safety.get("all_failed_gates") or []),
+                "unavailable_fields": list(execution_safety.get("missing_fields") or []),
+                "total_explicit_cost_pct": execution_safety.get("total_explicit_cost_pct"),
+                "volatility_penalty_pct": execution_safety.get("volatility_penalty"),
+            }
+            market_ctx["execution_ctx"] = execution_ctx
+            market_ctx["execution_safety"] = execution_safety
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if self._kill_switch_active():
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
             return
         if risk_reject is not None:
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": risk_reject, "confidence": 0.0, "score": 0.0, "rr": raw_rr, "effective_rr": effective_rr, "explanation": "runtime_risk_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": risk_reject})
+            return
+        legacy_pre_ai_execution_reason = None
+        if execution_safety is not None:
+            failed_execution_gates = set(execution_safety.get("all_failed_gates") or [])
+            legacy_pre_ai_execution_reason = next(
+                (
+                    gate
+                    for gate in (
+                        "SPREAD_TOO_HIGH",
+                        "SLIPPAGE_TOO_HIGH",
+                        "FUNDING_TOO_HIGH",
+                    )
+                    if gate in failed_execution_gates
+                ),
+                None,
+            )
+        if legacy_pre_ai_execution_reason is not None:
+            reject_payload = {
+                "signal_id": signal_id,
+                "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
+                "decision": "REJECTED",
+                "reason": legacy_pre_ai_execution_reason,
+                "primary_reject_reason": legacy_pre_ai_execution_reason,
+                "confidence": 0.0,
+                "score": 0.0,
+                "rr": raw_rr,
+                "candidate_rr": rr_metrics["candidate_rr"],
+                "expected_fill": rr_metrics["expected_fill"],
+                "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                "effective_rr": effective_rr,
+                "explanation": "legacy_pre_ai_execution_gate",
+                "execution_ctx": execution_ctx,
+                "execution_safety": execution_safety,
+                "spread_pct": execution_ctx.get("spread_pct"),
+                "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                "latency_ms": execution_ctx.get("latency_ms"),
+                "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                "liquidity_score": execution_ctx.get("liquidity_score"),
+                "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                "volatility_regime": execution_ctx.get("volatility_regime"),
+            }
+            await self._persist_reject({**market_ctx, **reject_payload})
+            await self._emit_lifecycle_event(
+                LifecycleState.SIGNAL_REJECTED.value,
+                selection.symbol,
+                {**reject_payload, "reject_reason": legacy_pre_ai_execution_reason},
+            )
             return
         signal_payload = self._build_signal(selection, market_ctx, signal_id=signal_id)
         signal_payload["reject_decision_id"] = self._canonical_reject_decision_id({
@@ -2039,7 +2444,7 @@ class RuntimeOrchestrator:
         self.metrics.last_decision_ts = canonical_utc_timestamp()
 
         if self._kill_switch_active():
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": "KILL_SWITCH_ACTIVE", "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "runtime_control_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": "KILL_SWITCH_ACTIVE"})
             return
@@ -2069,7 +2474,7 @@ class RuntimeOrchestrator:
                 "execution_ctx": execution_ctx,
                 "spread_pct": execution_ctx.get("spread_pct"),
                 "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
-                "latency_ms": execution_ctx.get("market_data_latency_ms"),
+                "latency_ms": execution_ctx.get("latency_ms"),
                 "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
                 "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
                 "volatility_regime": execution_ctx.get("volatility_regime"),
@@ -2088,9 +2493,47 @@ class RuntimeOrchestrator:
 
         if effective_rr < self.config.min_effective_rr:
             reject_reason = "LOW_EFFECTIVE_RR"
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "canonical_effective_rr_gate", "execution_ctx": execution_ctx, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, {**reject_payload, "reject_reason": reject_reason})
+            return
+
+        if execution_safety is not None and not bool(execution_safety.get("accepted")):
+            reject_reason = str(
+                execution_safety.get("primary_reject_reason") or "BAD_EXECUTION"
+            )
+            reject_payload = {
+                "signal_id": signal_id,
+                "symbol": selection.symbol,
+                "mode": self.config.execution_mode.value,
+                "phase": "final",
+                "decision": "REJECTED",
+                "reason": reject_reason,
+                "primary_reject_reason": reject_reason,
+                "confidence": order_plan.confidence,
+                "score": getattr(score_ctx, "total_score", None),
+                "rr": signal_payload.get("risk_reward"),
+                "candidate_rr": rr_metrics["candidate_rr"],
+                "expected_fill": rr_metrics["expected_fill"],
+                "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                "effective_rr": effective_rr,
+                "explanation": "canonical_execution_safety_gate",
+                "execution_ctx": execution_ctx,
+                "execution_safety": execution_safety,
+                "spread_pct": execution_ctx.get("spread_pct"),
+                "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                "latency_ms": execution_ctx.get("latency_ms"),
+                "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                "liquidity_score": execution_ctx.get("liquidity_score"),
+                "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                "volatility_regime": execution_ctx.get("volatility_regime"),
+            }
+            await self._persist_reject({**market_ctx, **reject_payload})
+            await self._emit_lifecycle_event(
+                LifecycleState.SIGNAL_REJECTED.value,
+                selection.symbol,
+                {**reject_payload, "reject_reason": reject_reason},
+            )
             return
 
         candidate_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
@@ -2100,14 +2543,59 @@ class RuntimeOrchestrator:
             "MARKET_CONTEXT" if inferred_equity is not None and candidate_notional is not None
             else "MISSING"
         )
+        portfolio_now = time.time()
+        historical_risk: dict[str, Any] = {
+            "daily_realized_pnl": None,
+            "rolling_peak_equity": None,
+            "rolling_drawdown_pct": None,
+            "consecutive_loss_count": None,
+            "symbol_consecutive_loss_count": None,
+            "trades_today_symbol": None,
+            "trades_today_global": None,
+            "persisted_cooldown_until": None,
+            "risk_state_complete": None,
+            "risk_state_source": None,
+            "risk_state_missing_fields": [],
+        }
+        cooldown_until = dict(self._symbol_cooldown_until)
         if self.config.execution_mode is ExecutionMode.PAPER:
-            if inferred_equity is None and self.config.paper_initial_equity is not None:
+            attached_campaign_id = (
+                self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+            )
+            if attached_campaign_id:
+                historical_risk = self._paper_portfolio_risk_state(
+                    selection.symbol,
+                    now_ts=portfolio_now,
+                )
+                portfolio_evidence_source = str(
+                    historical_risk.get("risk_state_source")
+                    or "PAPER_RISK_STATE_UNKNOWN"
+                )
+                if (
+                    historical_risk.get("risk_state_source")
+                    == "BURNIN_CAMPAIGN_EVIDENCE"
+                ):
+                    inferred_equity = historical_risk.get("equity")
+                    available_balance = historical_risk.get("available_balance")
+                elif inferred_equity is None:
+                    inferred_equity = historical_risk.get("equity")
+                    available_balance = historical_risk.get("available_balance")
+                persisted_cooldown_until = historical_risk.get(
+                    "persisted_cooldown_until"
+                )
+                if persisted_cooldown_until is not None:
+                    cooldown_until[selection.symbol] = max(
+                        float(cooldown_until.get(selection.symbol, 0.0) or 0.0),
+                        float(persisted_cooldown_until),
+                    )
+            elif inferred_equity is None and self.config.paper_initial_equity is not None:
                 inferred_equity = self.config.paper_initial_equity
                 available_balance = self.config.paper_initial_equity
                 portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
             if candidate_notional is None and self.config.paper_candidate_notional is not None:
                 candidate_notional = self.config.paper_candidate_notional
-                portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
+                if not attached_campaign_id:
+                    portfolio_evidence_source = "CONFIGURED_PAPER_ACCOUNT"
                 market_ctx["notional"] = candidate_notional
         elif candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
@@ -2120,14 +2608,26 @@ class RuntimeOrchestrator:
             available_balance=available_balance,
             open_positions={k: {"notional": v, "side": self._active_position_sides.get(k, "UNKNOWN")} for k, v in self._active_positions.items()},
             config=self.config,
-            now=time.time(),
-            cooldown_until=self._symbol_cooldown_until,
+            now=portfolio_now,
+            cooldown_until=cooldown_until,
+            daily_realized_pnl=historical_risk.get("daily_realized_pnl"),
+            trades_today_symbol=historical_risk.get("trades_today_symbol"),
+            trades_today_global=historical_risk.get("trades_today_global"),
+            consecutive_loss_count=historical_risk.get("consecutive_loss_count"),
+            symbol_consecutive_loss_count=historical_risk.get("symbol_consecutive_loss_count"),
+            rolling_peak_equity=historical_risk.get("rolling_peak_equity"),
+            rolling_drawdown_pct=historical_risk.get("rolling_drawdown_pct"),
+            risk_state_complete=historical_risk.get("risk_state_complete"),
+            risk_state_source=historical_risk.get("risk_state_source"),
+            risk_state_missing_fields=list(
+                historical_risk.get("risk_state_missing_fields") or []
+            ),
         )
         portfolio_decision = evaluate_portfolio_risk({"symbol": selection.symbol, "side": market_ctx.get("side"), "entry": market_ctx.get("entry"), "quantity": market_ctx.get("quantity", market_ctx.get("qty")), "notional": candidate_notional}, snapshot, self.config, mode=self.config.execution_mode.value)
         portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
         if not portfolio_decision.accepted:
             reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
-            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("market_data_latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
+            reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
             await self._persist_reject({**market_ctx, **reject_payload})
             await self._emit_lifecycle_event(LifecycleState.SIGNAL_REJECTED.value, selection.symbol, reject_payload)
             return
@@ -2146,9 +2646,16 @@ class RuntimeOrchestrator:
             await self._emit_lifecycle_event(LifecycleEventType.ENTRY_SUBMITTED.value, selection.symbol, {})
         accepted_burnin_payload = {
             "signal_id": signal_id,
-            "decision_time": canonical_utc_timestamp(),
+            "decision_time": market_ctx["decision_timestamp"],
             "setup_identity": market_ctx.get("setup_identity"),
             "symbol": selection.symbol,
+            "side": market_ctx.get("side"),
+            "entry": market_ctx.get("entry"),
+            "sl": market_ctx.get("sl"),
+            "tp": market_ctx.get("tp"),
+            "regime": signal_payload.get("regime") or market_ctx.get("regime"),
+            "setup_type": signal_payload.get("setup") or signal_payload.get("setup_type"),
+            "setup_reason": signal_payload.get("setup_reason"),
             "source_exchange": market_ctx.get("source_exchange"),
             "mode": self.config.execution_mode.value,
             "decision": "ACCEPTED",
@@ -2156,9 +2663,14 @@ class RuntimeOrchestrator:
             "rr": signal_payload.get("risk_reward"),
             "candidate_rr": rr_metrics["candidate_rr"],
             "expected_fill": rr_metrics["expected_fill"],
+            "expected_execution_cost_price": rr_metrics["expected_execution_cost_price"],
+            "expected_execution_cost_pct": rr_metrics["expected_execution_cost_pct"],
+            "expected_execution_cost_bps": rr_metrics["expected_execution_cost_bps"],
+            "execution_cost_semantics": rr_metrics["execution_cost_semantics"],
             "executable_raw_rr": rr_metrics["executable_raw_rr"],
             "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
             "effective_rr": effective_rr,
+            "min_effective_rr": float(self.config.min_effective_rr),
             "confidence": order_plan.confidence,
             "execution_ctx": execution_ctx,
             "timeframe": self.config.execution_timeframe,
@@ -2167,6 +2679,23 @@ class RuntimeOrchestrator:
             "resolved_state": market_ctx.get("resolved_state"),
             "final_direction": market_ctx.get("final_direction"),
             "override_reason": market_ctx.get("override_reason"),
+            "mtf_execution_confirmation_mode": market_ctx.get("mtf_execution_confirmation_mode", "ENFORCE"),
+            "shadow_mtf_execution_reason": market_ctx.get("shadow_mtf_execution_reason"),
+            "authoritative_reject_reason": None,
+            "enforce_counterfactual_reject_reason": market_ctx.get("enforce_counterfactual_reject_reason"),
+            "geometry_status": market_ctx.get("geometry_status"),
+            "geometry_reason": market_ctx.get("geometry_reason"),
+            "geometry_source": market_ctx.get("geometry_source"),
+            "entry_source": market_ctx.get("entry_source"),
+            "stop_source": market_ctx.get("stop_source"),
+            "target_source": market_ctx.get("target_source"),
+            "setup_timeframe": market_ctx.get("setup_timeframe"),
+            "execution_timeframe": market_ctx.get("execution_timeframe"),
+            "structural_stop": market_ctx.get("structural_stop"),
+            "structural_target": market_ctx.get("structural_target"),
+            "portfolio_risk_state": portfolio_decision.risk_state,
+            "portfolio_diagnostics": portfolio_decision.diagnostics,
+            "risk_flags": portfolio_decision.risk_flags,
         }
         self._record_state_direction_shadow(
             {**accepted_burnin_payload, "side": market_ctx.get("side"),
@@ -2256,6 +2785,92 @@ class RuntimeOrchestrator:
             },
         )
 
+    def _canonical_execution_result(
+        self,
+        result: Mapping[str, Any],
+        decision: Mapping[str, Any],
+        market_ctx: Mapping[str, Any],
+        *,
+        mode: ExecutionMode,
+    ) -> dict[str, Any]:
+        """Attach canonical entry -> expected_fill -> actual_fill evidence.
+
+        This is evidence-only normalization after an execution result exists.
+        It must not change authorization, order selection, threshold decisions,
+        or whether an order is submitted. Invalid/missing fill evidence remains
+        explicit UNAVAILABLE rather than failing an already-completed submit.
+        """
+        normalized = dict(result)
+        if mode not in {ExecutionMode.PAPER, ExecutionMode.LIVE}:
+            return normalized
+
+        execution_ctx = dict(market_ctx.get("execution_ctx") or {})
+        expected_fill = normalized.get("expected_fill", market_ctx.get("expected_fill"))
+        if expected_fill is None:
+            expected_fill, _ = self._expected_fill_price(market_ctx, execution_ctx)
+
+        actual_fill = normalized.get("actual_fill")
+        fills = normalized.get("fills")
+        if fills is not None:
+            try:
+                weighted_fill = weighted_average_fill_price(fills)
+            except ValueError:
+                normalized["execution_cost_semantics"] = None
+                normalized["execution_cost_semantics_status"] = "UNAVAILABLE_INVALID_FILL_LEDGER"
+                normalized["actual_fill_provenance"] = PROVENANCE_UNAVAILABLE
+                return normalized
+            if weighted_fill is not None:
+                actual_fill = weighted_fill
+                normalized["weighted_average_fill_price"] = weighted_fill
+        if actual_fill is None:
+            actual_fill = normalized.get("fill_price")
+
+        expected_provenance = (
+            PROVENANCE_MODELLED if mode is ExecutionMode.PAPER else PROVENANCE_ESTIMATED
+        )
+        actual_provenance = (
+            PROVENANCE_MODELLED
+            if mode is ExecutionMode.PAPER and actual_fill is not None
+            else PROVENANCE_ACTUAL
+            if mode is ExecutionMode.LIVE and actual_fill is not None
+            else PROVENANCE_UNAVAILABLE
+        )
+
+        if expected_fill is None:
+            normalized["execution_cost_semantics"] = None
+            normalized["execution_cost_semantics_status"] = "UNAVAILABLE_EXPECTED_FILL"
+            normalized["actual_fill_provenance"] = actual_provenance
+            return normalized
+
+        try:
+            semantics = build_execution_cost_semantics(
+                entry=market_ctx.get("entry"),
+                expected_fill=expected_fill,
+                actual_fill=actual_fill,
+                side=market_ctx.get("side"),
+                expected_fill_provenance=expected_provenance,
+                actual_fill_provenance=actual_provenance,
+                decision_timestamp=decision.get("decision_time"),
+                fill_timestamp=(
+                    normalized.get("fill_timestamp")
+                    or normalized.get("filled_at")
+                    if actual_fill is not None
+                    else None
+                ),
+            )
+        except ValueError:
+            normalized["execution_cost_semantics"] = None
+            normalized["execution_cost_semantics_status"] = "UNAVAILABLE_INVALID_PRICE_OR_SIDE"
+            normalized["actual_fill_provenance"] = actual_provenance
+            return normalized
+
+        normalized["expected_fill"] = semantics.expected_fill
+        normalized["actual_fill"] = semantics.actual_fill
+        normalized["actual_fill_provenance"] = semantics.actual_fill_provenance
+        normalized["execution_cost_semantics"] = semantics.as_dict()
+        normalized["execution_cost_semantics_status"] = "AVAILABLE"
+        return normalized
+
     async def _execute(self, symbol: str, decision: dict[str, Any], market_ctx: Mapping[str, Any]) -> bool | None:
         self._assert_campaign_candidate(symbol, market_ctx.get("source_exchange"), "PAPER_EXECUTION")
         if self._kill_switch_active():
@@ -2281,6 +2896,7 @@ class RuntimeOrchestrator:
         else:
             result = {"mode": mode.value, "status": "simulated", "symbol": symbol}
 
+        result = self._canonical_execution_result(result, decision, market_ctx, mode=mode)
         self.metrics.executions += 1
         order_id = str(result.get("order_id") or f"{symbol}:{canonical_utc_timestamp()}")
         result_status = str(result.get("status", "")).lower()
@@ -2292,16 +2908,21 @@ class RuntimeOrchestrator:
         await self._emit_lifecycle_event(LifecycleState.ORDER_PLACED.value, symbol, {"decision": decision, "result": dict(result)})
         if result_status == "no_submit_verified":
             return
-        if result_status == "partial_fill":
-            await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result), "fill_state": "partial"})
-        elif result_status in {"rejected", "exchange_reject"}:
+        if result_status in {"rejected", "exchange_reject"}:
             await self._emit_lifecycle_event(LifecycleState.ORDER_REJECTED.value, symbol, {"reason": "exchange_rejected_order", "result": dict(result)})
             return
         elif result_status in {"timeout", "error", "missing_ack"}:
             await self._record_incident(symbol, LifecycleState.ENTRY_TIMEOUT.value, "execution_uncertain_state")
             await self._reconcile_symbol_state(symbol, result, market_ctx)
             return
-        await self._emit_lifecycle_event(LifecycleState.POSITION_OPENED.value, symbol, {"result": dict(result)})
+        await self._emit_lifecycle_event(
+            LifecycleState.POSITION_OPENED.value,
+            symbol,
+            {
+                "result": dict(result),
+                **({"fill_state": "partial"} if result_status == "partial_fill" else {}),
+            },
+        )
         self._generate_burnin_snapshot(reason="periodic")
         self._active_positions[symbol] = float(paper_notional or market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional") or 0.0)
         self._active_position_sides[symbol] = str(market_ctx.get("side") or "UNKNOWN").upper()
@@ -2318,7 +2939,13 @@ class RuntimeOrchestrator:
         setup = mtf.get("setup") if isinstance(mtf.get("setup"), Mapping) else {}
         execution = mtf.get("execution") if isinstance(mtf.get("execution"), Mapping) else {}
         regime = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
-        fill = float(result.get("fill_price") or market_ctx.get("entry"))
+        actual_fill = result.get("actual_fill", result.get("fill_price"))
+        expected_fill = result.get("expected_fill", market_ctx.get("expected_fill"))
+        if expected_fill is None:
+            expected_fill, _ = self._expected_fill_price(market_ctx, execution_ctx)
+        if actual_fill is None or expected_fill is None:
+            raise RuntimeError("PAPER_FILL_EVIDENCE_UNAVAILABLE")
+        fill = float(actual_fill)
         planned_entry = float(market_ctx.get("entry"))
         requested_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
         if requested_notional is None:
@@ -2333,10 +2960,33 @@ class RuntimeOrchestrator:
         if not math.isfinite(fill) or fill <= 0 or not math.isfinite(notional) or notional <= 0:
             raise RuntimeError("PAPER_POSITION_SIZE_INVALID")
         quantity = notional / fill
+        if str(result.get("status") or "").lower() == "partial_fill":
+            fills = result.get("fills")
+            if not isinstance(fills, list) or not fills:
+                raise RuntimeError("PAPER_PARTIAL_FILL_QUANTITY_UNAVAILABLE")
+            try:
+                filled_quantity = sum(float(row["qty"]) for row in fills)
+            except (KeyError, TypeError, ValueError):
+                raise RuntimeError("PAPER_PARTIAL_FILL_QUANTITY_UNAVAILABLE") from None
+            if not math.isfinite(filled_quantity) or filled_quantity <= 0 or filled_quantity > quantity:
+                raise RuntimeError("PAPER_PARTIAL_FILL_QUANTITY_INVALID")
+            quantity = filled_quantity
+            notional = fill * quantity
         stop = float(market_ctx.get("sl"))
         risk_usd = abs(fill - stop) * quantity
         if not math.isfinite(risk_usd) or risk_usd <= 0:
             raise RuntimeError("PAPER_POSITION_RISK_INVALID")
+        fill_timestamp = str(result.get("fill_timestamp") or canonical_utc_timestamp())
+        cost_semantics = build_execution_cost_semantics(
+            entry=planned_entry,
+            expected_fill=expected_fill,
+            actual_fill=fill,
+            side=market_ctx.get("side"),
+            expected_fill_provenance=PROVENANCE_MODELLED,
+            actual_fill_provenance=PROVENANCE_MODELLED,
+            decision_timestamp=decision.get("decision_time"),
+            fill_timestamp=fill_timestamp,
+        )
         provenance = {
             "provider": self.scanner_source or "UNKNOWN",
             "source_exchange": market_ctx.get("source_exchange"),
@@ -2345,9 +2995,16 @@ class RuntimeOrchestrator:
             "execution_cost_model_unit": "R",
             "execution_cost_model": dict(model.__dict__),
             "entry_slippage_embedded_in_fill": True,
+            "entry_slippage_additional_cost": 0.0,
             "fill_slippage_pct": market_ctx.get("fill_slippage_pct"),
             "candidate_rr": market_ctx.get("candidate_rr", market_ctx.get("rr")),
-            "expected_fill": market_ctx.get("expected_fill", fill),
+            "expected_fill": expected_fill,
+            "actual_fill": fill,
+            "actual_fill_provenance": PROVENANCE_MODELLED,
+            "fill_timestamp": fill_timestamp,
+            "fill_state": "PARTIAL" if str(result.get("status") or "").lower() == "partial_fill" else "FILLED",
+            "filled_quantity": quantity,
+            "execution_cost_semantics": cost_semantics.as_dict(),
             "executable_raw_rr": market_ctx.get("executable_raw_rr"),
             "remaining_execution_penalty": market_ctx.get("remaining_execution_penalty"),
             "effective_rr_at_entry": market_ctx.get(
@@ -2371,7 +3028,7 @@ class RuntimeOrchestrator:
                 signal_id=decision.get("signal_id"), source_decision_id=source_decision_id,
                 decision_time=decision.get("decision_time"), symbol=symbol, side=market_ctx.get("side"),
                 setup_type=market_ctx.get("setup") or market_ctx.get("setup_type") or setup.get("phase"),
-                entry_time=canonical_utc_timestamp(), planned_entry=planned_entry, simulated_fill=fill,
+                entry_time=fill_timestamp, planned_entry=planned_entry, simulated_fill=fill,
                 stop=market_ctx.get("sl"), target=market_ctx.get("tp"), quantity=quantity,
                 notional=notional, entry_spread=model.spread_penalty * risk_usd / 2.0,
                 entry_slippage=0.0, entry_fee=model.fee_penalty * risk_usd / 2.0,
@@ -2379,6 +3036,274 @@ class RuntimeOrchestrator:
                 source_provenance=provenance,
             )
         return notional
+
+    @staticmethod
+    def _portfolio_risk_dt(value: Any) -> datetime | None:
+        if value in (None, ""):
+            return None
+        try:
+            if isinstance(value, (int, float)):
+                raw = float(value)
+                seconds = raw / 1000.0 if raw > 10_000_000_000 else raw
+                return datetime.fromtimestamp(seconds, tz=timezone.utc)
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
+
+    def _paper_portfolio_risk_state(
+        self,
+        symbol: str,
+        *,
+        now_ts: float,
+    ) -> dict[str, Any]:
+        """Reconstruct PAPER risk history from canonical campaign evidence.
+
+        Accepted trade counts come from burnin_pending_position_outcomes so an
+        open position counts immediately. Realized PnL, equity, drawdown and
+        loss streaks come only from evidence-complete burnin_trade_outcomes.
+        Continuation runs in the same campaign are intentionally included;
+        unrelated campaigns/runs are excluded.
+        """
+        initial_equity = self.config.paper_initial_equity
+        missing: list[str] = []
+        try:
+            initial = float(initial_equity) if initial_equity is not None else None
+        except (TypeError, ValueError):
+            initial = None
+        if initial is None or not math.isfinite(initial) or initial <= 0:
+            missing.append("paper_initial_equity")
+
+        campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+        if not campaign_id:
+            return {
+                "equity": initial,
+                "available_balance": initial,
+                "daily_realized_pnl": 0.0 if not missing else None,
+                "rolling_peak_equity": initial if not missing else None,
+                "rolling_drawdown_pct": 0.0 if not missing else None,
+                "consecutive_loss_count": 0 if not missing else None,
+                "symbol_consecutive_loss_count": 0 if not missing else None,
+                "trades_today_symbol": 0 if not missing else None,
+                "trades_today_global": 0 if not missing else None,
+                "persisted_cooldown_until": None,
+                "risk_state_complete": not missing,
+                "risk_state_source": "RUNTIME_SESSION_UNSCOPED",
+                "risk_state_missing_fields": missing,
+            }
+
+        engine = self._resolve_persistence_engine()
+        if engine is None:
+            missing.append("persistence_engine")
+            return {
+                "equity": None,
+                "available_balance": None,
+                "daily_realized_pnl": None,
+                "rolling_peak_equity": None,
+                "rolling_drawdown_pct": None,
+                "consecutive_loss_count": None,
+                "symbol_consecutive_loss_count": None,
+                "trades_today_symbol": None,
+                "trades_today_global": None,
+                "persisted_cooldown_until": None,
+                "risk_state_complete": False,
+                "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+                "risk_state_missing_fields": missing,
+            }
+
+        try:
+            with engine.connect() as conn:
+                accepted_rows = conn.execute(text("""
+                    SELECT p.trade_id,p.burnin_run_id,p.symbol,p.entry_time,p.status,
+                           p.evidence_complete AS pending_evidence_complete,
+                           cr.campaign_id AS lineage_campaign_id
+                    FROM burnin_pending_position_outcomes p
+                    LEFT JOIN burnin_campaign_runs cr
+                      ON cr.campaign_id=p.campaign_id
+                     AND cr.burnin_run_id=p.burnin_run_id
+                    WHERE p.campaign_id=:campaign_id
+                    ORDER BY p.entry_time,p.id
+                """), {"campaign_id": campaign_id}).mappings().all()
+                outcome_rows = conn.execute(text("""
+                    SELECT t.trade_id,t.burnin_run_id,t.symbol,t.closed_at,t.net_pnl,
+                           t.exit_reason,t.evidence_complete
+                    FROM burnin_trade_outcomes t
+                    JOIN burnin_campaign_runs cr
+                      ON cr.burnin_run_id=t.burnin_run_id
+                    WHERE cr.campaign_id=:campaign_id
+                    ORDER BY t.closed_at,t.id
+                """), {"campaign_id": campaign_id}).mappings().all()
+        except Exception as exc:
+            logger.error(
+                "paper_portfolio_risk_state_load_failed campaign_id=%s error=%s",
+                campaign_id,
+                exc,
+            )
+            return {
+                "equity": None,
+                "available_balance": None,
+                "daily_realized_pnl": None,
+                "rolling_peak_equity": None,
+                "rolling_drawdown_pct": None,
+                "consecutive_loss_count": None,
+                "symbol_consecutive_loss_count": None,
+                "trades_today_symbol": None,
+                "trades_today_global": None,
+                "persisted_cooldown_until": None,
+                "risk_state_complete": False,
+                "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+                "risk_state_missing_fields": ["portfolio_risk_state_query_failed"],
+            }
+
+        now_dt = datetime.fromtimestamp(float(now_ts), tz=timezone.utc)
+        today = now_dt.date()
+        symbol_u = str(symbol or "").upper()
+        accepted_ids: set[str] = set()
+        accepted_status_by_trade: dict[str, str] = {}
+        accepted_symbol_by_trade: dict[str, str] = {}
+        accepted_run_by_trade: dict[str, str] = {}
+        accepted_entry_by_trade: dict[str, datetime | None] = {}
+        accepted_complete_by_trade: dict[str, bool] = {}
+        closed_pending_ids: set[str] = set()
+        trades_today_global = 0
+        trades_today_symbol = 0
+        latest_symbol_entry: datetime | None = None
+
+        for row in accepted_rows:
+            trade_id = str(row.get("trade_id") or "")
+            row_symbol = str(row.get("symbol") or "").upper()
+            entry_dt = self._portfolio_risk_dt(row.get("entry_time"))
+            status = str(row.get("status") or "").upper()
+            if not trade_id:
+                missing.append("accepted_trade_id")
+                continue
+            if trade_id in accepted_ids:
+                missing.append(f"duplicate_accepted_trade:{trade_id}")
+                continue
+            accepted_ids.add(trade_id)
+            burnin_run_id = str(row.get("burnin_run_id") or "")
+            lineage_campaign_id = str(row.get("lineage_campaign_id") or "")
+            accepted_status_by_trade[trade_id] = status
+            accepted_symbol_by_trade[trade_id] = row_symbol
+            accepted_run_by_trade[trade_id] = burnin_run_id
+            accepted_entry_by_trade[trade_id] = entry_dt
+            accepted_complete_by_trade[trade_id] = (
+                int(row.get("pending_evidence_complete") or 0) == 1
+            )
+            if lineage_campaign_id != str(campaign_id):
+                missing.append(f"accepted_trade_lineage:{trade_id}")
+            if not row_symbol:
+                missing.append(f"accepted_trade_symbol:{trade_id}")
+            if entry_dt is None or entry_dt > now_dt:
+                missing.append(f"accepted_trade_entry_time:{trade_id}")
+            else:
+                if entry_dt.date() == today:
+                    trades_today_global += 1
+                    if row_symbol == symbol_u:
+                        trades_today_symbol += 1
+                if row_symbol == symbol_u and (
+                    latest_symbol_entry is None or entry_dt > latest_symbol_entry
+                ):
+                    latest_symbol_entry = entry_dt
+            if status == "CLOSED":
+                closed_pending_ids.add(trade_id)
+            elif status != "OPEN":
+                missing.append(f"accepted_trade_status:{trade_id}:{status or 'UNKNOWN'}")
+
+        if initial is None:
+            current_equity = None
+            peak_equity = None
+        else:
+            current_equity = initial
+            peak_equity = initial
+
+        daily_realized_pnl = 0.0
+        consecutive_losses = 0
+        symbol_consecutive_losses = 0
+        outcome_ids: set[str] = set()
+
+        for row in outcome_rows:
+            trade_id = str(row.get("trade_id") or "")
+            row_symbol = str(row.get("symbol") or "").upper()
+            closed_dt = self._portfolio_risk_dt(row.get("closed_at"))
+            evidence_complete = int(row.get("evidence_complete") or 0) == 1
+            try:
+                net_pnl = float(row.get("net_pnl"))
+            except (TypeError, ValueError):
+                net_pnl = None
+            accepted_entry = accepted_entry_by_trade.get(trade_id)
+            accepted_symbol = accepted_symbol_by_trade.get(trade_id)
+            accepted_run = accepted_run_by_trade.get(trade_id)
+            outcome_run = str(row.get("burnin_run_id") or "")
+            if (
+                not trade_id
+                or trade_id not in accepted_ids
+                or trade_id in outcome_ids
+                or accepted_status_by_trade.get(trade_id) != "CLOSED"
+                or not accepted_complete_by_trade.get(trade_id, False)
+                or accepted_symbol != row_symbol
+                or accepted_run != outcome_run
+                or not evidence_complete
+                or closed_dt is None
+                or accepted_entry is None
+                or closed_dt < accepted_entry
+                or closed_dt > now_dt
+                or net_pnl is None
+                or not math.isfinite(net_pnl)
+            ):
+                missing.append(f"realized_trade_outcome:{trade_id or 'UNKNOWN'}")
+                continue
+            outcome_ids.add(trade_id)
+            if current_equity is not None and peak_equity is not None:
+                current_equity += net_pnl
+                peak_equity = max(peak_equity, current_equity)
+            if closed_dt.date() == today:
+                daily_realized_pnl += net_pnl
+
+            exit_reason = str(row.get("exit_reason") or "").upper()
+            is_loss = net_pnl < 0 or exit_reason == "SL_HIT"
+            is_win = net_pnl > 0 or exit_reason == "TP_HIT"
+            if is_loss:
+                consecutive_losses += 1
+            elif is_win:
+                consecutive_losses = 0
+            if row_symbol == symbol_u:
+                if is_loss:
+                    symbol_consecutive_losses += 1
+                elif is_win:
+                    symbol_consecutive_losses = 0
+
+        for trade_id in sorted(closed_pending_ids - outcome_ids):
+            missing.append(f"closed_trade_outcome_missing:{trade_id}")
+
+        rolling_drawdown_pct = None
+        if current_equity is not None and peak_equity is not None and peak_equity > 0:
+            rolling_drawdown_pct = max(0.0, (peak_equity - current_equity) / peak_equity)
+
+        cooldown_until = None
+        if latest_symbol_entry is not None:
+            cooldown_until = latest_symbol_entry.timestamp() + float(self.config.symbol_cooldown_sec)
+
+        complete = not missing
+        return {
+            "equity": current_equity if complete else None,
+            "available_balance": current_equity if complete else None,
+            "daily_realized_pnl": daily_realized_pnl if complete else None,
+            "rolling_peak_equity": peak_equity if complete else None,
+            "rolling_drawdown_pct": rolling_drawdown_pct if complete else None,
+            "consecutive_loss_count": consecutive_losses if complete else None,
+            "symbol_consecutive_loss_count": (
+                symbol_consecutive_losses if complete else None
+            ),
+            "trades_today_symbol": trades_today_symbol if complete else None,
+            "trades_today_global": trades_today_global if complete else None,
+            "persisted_cooldown_until": cooldown_until,
+            "risk_state_complete": complete,
+            "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+            "risk_state_missing_fields": sorted(set(missing)),
+        }
 
     def _sync_resolved_paper_positions(self) -> None:
         if self.config.execution_mode != ExecutionMode.PAPER or not self._campaign_id:
@@ -2425,10 +3350,10 @@ class RuntimeOrchestrator:
                 confidence=order_plan.confidence,
                 explanation=explanation,
                 execution_ctx=execution_ctx,
-                execution_ctx_missing=str(execution_ctx.get("evidence_status", "")).upper() in {"", "UNAVAILABLE", "UNKNOWN"},
+                execution_ctx_missing=execution_context_is_unavailable(execution_ctx),
                 expected_slippage_pct=execution_ctx.get("expected_slippage_pct"),
                 spread_pct=execution_ctx.get("spread_pct"),
-                latency_ms=execution_ctx.get("market_data_latency_ms"),
+                latency_ms=execution_ctx.get("latency_ms"),
                 funding_rate_pct=execution_ctx.get("funding_rate_pct"),
                 orderbook_imbalance=execution_ctx.get("orderbook_imbalance"),
                 volatility_regime=execution_ctx.get("volatility_regime"),
@@ -2444,13 +3369,34 @@ class RuntimeOrchestrator:
         fill, slip = self._expected_fill_price(market_ctx, execution_ctx)
         if fill is None or slip is None:
             raise RuntimeError("PAPER_EXECUTABLE_FILL_UNAVAILABLE")
+        fill_timestamp = canonical_utc_timestamp()
+        try:
+            cost_semantics = build_execution_cost_semantics(
+                entry=market_ctx.get("entry"),
+                expected_fill=fill,
+                actual_fill=fill,
+                side=market_ctx.get("side"),
+                expected_fill_provenance=PROVENANCE_MODELLED,
+                actual_fill_provenance=PROVENANCE_MODELLED,
+                decision_timestamp=decision.get("decision_time"),
+                fill_timestamp=fill_timestamp,
+            ).as_dict()
+        except ValueError:
+            # Preserve non-campaign compatibility for legacy callers without a
+            # side; canonical side-normalized evidence remains unavailable.
+            cost_semantics = None
         return {
             "mode": ExecutionMode.PAPER.value,
             "symbol": symbol,
             "status": "filled",
             "order_type": decision.get("order_type", "MARKET"),
             "expected_slippage_pct": slip,
+            "expected_fill": fill,
+            "actual_fill": fill,
             "fill_price": fill,
+            "fill_provenance": PROVENANCE_MODELLED,
+            "fill_timestamp": fill_timestamp,
+            "execution_cost_semantics": cost_semantics,
         }
 
     async def _persist_reject(self, payload: dict[str, Any]) -> None:
@@ -2528,6 +3474,119 @@ class RuntimeOrchestrator:
         self.metrics.rejects_persisted = count
         return count
 
+    def _reject_gate_audit(self, payload: Mapping[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+        """Return non-authoritative multi-gate evidence for a final reject.
+
+        This audit never changes the canonical primary reject reason or decision.
+        It snapshots decision-time observed values against the runtime thresholds
+        so downstream analysis can distinguish overlapping failures.
+        """
+        execution = dict(payload.get("execution_ctx") or {})
+        failed: list[str] = []
+        evidence: list[dict[str, Any]] = []
+
+        def number(value: Any) -> float | None:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if math.isfinite(parsed) else None
+
+        def add(gate: str, observed: Any, threshold: Any, comparison: str, source: str = "RUNTIME_THRESHOLD") -> None:
+            gate = str(gate).upper()
+            if gate not in failed:
+                failed.append(gate)
+            evidence.append({
+                "gate": gate,
+                "observed": observed,
+                "threshold": threshold,
+                "comparison": comparison,
+                "source": source,
+            })
+
+        execution_safety = payload.get("execution_safety")
+        if isinstance(execution_safety, Mapping):
+            safety_evidence = execution_safety.get("failed_gate_evidence")
+            if isinstance(safety_evidence, (list, tuple)):
+                for row in safety_evidence:
+                    if not isinstance(row, Mapping) or not row.get("gate"):
+                        continue
+                    add(
+                        str(row.get("gate")),
+                        row.get("observed"),
+                        row.get("threshold"),
+                        str(row.get("comparison") or "SAFETY_CONTRACT"),
+                        str(row.get("source") or "EXECUTION_SAFETY_CONTRACT"),
+                    )
+
+        supplied = payload.get("all_failed_gates")
+        if isinstance(supplied, (list, tuple)):
+            for gate in supplied:
+                if gate:
+                    add(str(gate), None, None, "SUPPLIED", "UPSTREAM_DIAGNOSTIC")
+
+        primary = canonical_reject_reason(
+            payload.get("primary_reject_reason") or payload.get("reason") or payload.get("reject_reason")
+        )
+        if primary and primary != "UNKNOWN":
+            add(primary, None, None, "PRIMARY", "AUTHORITATIVE_PRIMARY")
+
+        market_time_evidence = payload.get("market_time_evidence")
+        if isinstance(market_time_evidence, Mapping):
+            market_time_reason = str(market_time_evidence.get("reason") or "").upper()
+            if market_time_reason in {
+                "INVALID_MARKET_TIMESTAMP",
+                "MARKET_TIMESTAMP_UNIT_MISMATCH",
+                "MARKET_TIMESTAMP_IN_FUTURE",
+                "STALE_MARKET_DATA",
+            }:
+                add(
+                    market_time_reason,
+                    market_time_evidence.get("observed"),
+                    market_time_evidence.get("reject_threshold"),
+                    str(market_time_evidence.get("comparison") or "MARKET_TIME_CONTRACT"),
+                    "MARKET_TIME_CONTRACT",
+                )
+
+        score = number(payload.get("score"))
+        if score is not None and score < float(self.config.min_signal_score):
+            add("LOW_SCORE", score, float(self.config.min_signal_score), "<")
+
+        raw_rr = number(payload.get("candidate_rr", payload.get("rr", payload.get("raw_rr"))))
+        if raw_rr is not None and raw_rr < float(self.config.min_rr):
+            add("RR_TOO_LOW", raw_rr, float(self.config.min_rr), "<")
+
+        effective_rr = number(payload.get("effective_rr"))
+        if effective_rr is not None and effective_rr < float(self.config.min_effective_rr):
+            add("LOW_EFFECTIVE_RR", effective_rr, float(self.config.min_effective_rr), "<")
+
+        entry = number(payload.get("entry", payload.get("entry_price")))
+        stop = number(payload.get("sl", payload.get("stop_loss", payload.get("stop"))))
+        if entry is not None and entry > 0 and stop is not None:
+            stop_distance_pct = abs(entry - stop) / entry * 100.0
+            if stop_distance_pct < float(self.config.min_sl_pct):
+                add("STOP_TOO_TIGHT", stop_distance_pct, float(self.config.min_sl_pct), "<")
+            if stop_distance_pct > float(self.config.max_sl_pct):
+                add("STOP_TOO_WIDE", stop_distance_pct, float(self.config.max_sl_pct), ">")
+
+        spread = number(payload.get("spread_pct", execution.get("spread_pct")))
+        if spread is not None and spread > float(self.config.max_spread_pct):
+            add("SPREAD_TOO_HIGH", spread, float(self.config.max_spread_pct), ">")
+
+        slippage = number(payload.get("expected_slippage_pct", execution.get("expected_slippage_pct")))
+        if slippage is not None and slippage > float(self.config.max_expected_slippage_pct):
+            add("SLIPPAGE_TOO_HIGH", slippage, float(self.config.max_expected_slippage_pct), ">")
+
+        funding = number(payload.get("funding_rate_pct", execution.get("funding_rate_pct")))
+        if funding is not None and abs(funding) > float(self.config.max_abs_funding_rate_pct):
+            add("FUNDING_TOO_HIGH", abs(funding), float(self.config.max_abs_funding_rate_pct), ">")
+
+        volume = number(payload.get("volume_24h_usdt"))
+        if volume is not None and volume < float(self.config.min_liquidity_usd):
+            add("THIN_LIQUIDITY", volume, float(self.config.min_liquidity_usd), "<")
+
+        return failed, evidence
+
     def _canonical_reject_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         result=dict(payload); execution=dict(result.get("execution_ctx") or {}); signal_id=str(result.get("signal_id") or "")
         supplied_reasons = result.get("reject_reasons")
@@ -2540,6 +3599,13 @@ class RuntimeOrchestrator:
         reject_reasons = list(dict.fromkeys([primary_reject_reason, *reject_reasons]))
         mtf = result.get("mtf") if isinstance(result.get("mtf"), Mapping) else {}
         regime_layer = mtf.get("regime") if isinstance(mtf.get("regime"), Mapping) else {}
+        mtf_regime = regime_layer.get("regime")
+        if mtf_regime and str(regime_layer.get("evidence_status") or "").upper() == "COMPLETE":
+            source_regime = result.get("regime")
+            if (source_regime is not None
+                    and str(source_regime).upper() != str(mtf_regime).upper()):
+                result["legacy_decision_regime"] = source_regime
+            result["regime"] = str(mtf_regime).upper()
         generation = mtf.get("generation") if isinstance(mtf.get("generation"), Mapping) else {}
         guided_generation = generation.get("mode") == "REGIME_GUIDED"
         guided_candidate = (guided_generation and generation.get("evidence_status") == "COMPLETE"
@@ -2548,6 +3614,7 @@ class RuntimeOrchestrator:
         forward_label_subject = ("GUIDED_CANDIDATE" if guided_candidate else
                                  "LEGACY_SCANNER_SHADOW_CANDIDATE" if guided_generation else
                                  "LEGACY_CANDIDATE")
+        all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
         if guided_without_candidate:
             shadow_geometry = {key: result.get(key) for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "tp", "target",
@@ -2558,7 +3625,13 @@ class RuntimeOrchestrator:
                 **shadow_geometry,
                 "attributable": False,
                 "non_attributable_reason": "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT",
+                "all_failed_gates": list(all_failed_gates),
+                "failed_gate_evidence": list(failed_gate_evidence),
             }
+            # The scanner-shadow gates are diagnostic only. Do not leak them
+            # back into canonical multi-gate evidence for a missing guided candidate.
+            all_failed_gates = []
+            failed_gate_evidence = []
             for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
                 "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
@@ -2569,7 +3642,23 @@ class RuntimeOrchestrator:
             result["geometry_reason"] = "GUIDED_CANDIDATE_UNAVAILABLE"
             result["reject_quality_attributable"] = False
             result["non_attributable_reason"] = "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
-        campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
+            if primary_reject_reason == "LOW_EFFECTIVE_RR":
+                # LOW_EFFECTIVE_RR requires attributable canonical guided geometry.
+                # Preserve the legacy scanner diagnosis only as shadow evidence.
+                result["legacy_shadow_geometry"]["reject_reason"] = primary_reject_reason
+                result["source_primary_reject_reason"] = primary_reject_reason
+                primary_reject_reason = "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+                reject_reasons = [
+                    primary_reject_reason,
+                    *[reason for reason in reject_reasons if reason != "LOW_EFFECTIVE_RR"],
+                ]
+                reject_reasons = list(dict.fromkeys(reject_reasons))
+                result["reason"] = primary_reject_reason
+                if result.get("reject_reason") is not None:
+                    result["reject_reason"] = primary_reject_reason
+                result["authoritative_reject_reason"] = primary_reject_reason
+        all_failed_gates, failed_gate_evidence = self._reject_gate_audit(result)
+        campaign_id = (self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")) if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         supplied_reject_decision_id = result.get("reject_decision_id")
         reject_decision_id = self._canonical_reject_decision_id(result)
@@ -2578,6 +3667,12 @@ class RuntimeOrchestrator:
         result.update({
             "reject_decision_id":str(reject_decision_id), "decision":"REJECTED",
             "primary_reject_reason": primary_reject_reason, "reject_reasons": reject_reasons,
+            "all_failed_gates": list(dict.fromkeys([*all_failed_gates, *reject_reasons])),
+            "failed_gate_evidence": failed_gate_evidence,
+            "authoritative_reject_reason": result.get("authoritative_reject_reason") or primary_reject_reason,
+            "mtf_execution_confirmation_mode": result.get(
+                "mtf_execution_confirmation_mode", self.config.mtf_execution_confirmation_mode
+            ),
             "decision_timestamp":result.get("decision_timestamp") or canonical_utc_timestamp(),
             "timeframe":result.get("timeframe") or result.get("interval"),
             "entry":result.get("entry", result.get("entry_price")), "sl":result.get("sl", result.get("stop_loss", result.get("stop"))),
@@ -2586,15 +3681,29 @@ class RuntimeOrchestrator:
             "spread_pct":result.get("spread_pct",execution.get("spread_pct")), "expected_slippage_pct":result.get("expected_slippage_pct",execution.get("expected_slippage_pct")),
             "funding_rate_pct":result.get("funding_rate_pct",execution.get("funding_rate_pct")), "liquidity_score":result.get("liquidity_score",execution.get("liquidity_score")),
             "volatility_regime":result.get("volatility_regime",execution.get("volatility_regime")),
-            "campaign_id": result.get("campaign_id") or campaign_id,
-            "runtime_identity": result.get("runtime_identity") or runtime_identity,
+            "campaign_id": campaign_id or result.get("campaign_id"),
+            "runtime_identity": runtime_identity or result.get("runtime_identity"),
             "forward_label_subject": (forward_label_subject if guided_generation
                                       else result.get("forward_label_subject") or forward_label_subject),
+        })
+        try:
+            entry_value = float(result.get("entry"))
+            stop_value = float(result.get("sl"))
+            stop_distance_pct = abs(entry_value - stop_value) / entry_value * 100.0 if entry_value > 0 else None
+        except (TypeError, ValueError):
+            stop_distance_pct = None
+        result.update({
+            "stop_distance_pct": stop_distance_pct,
+            "min_signal_score": float(self.config.min_signal_score),
+            "min_raw_rr": float(self.config.min_rr),
+            "min_effective_rr": float(self.config.min_effective_rr),
+            "min_stop_pct": float(self.config.min_sl_pct),
+            "max_stop_pct": float(self.config.max_sl_pct),
         })
         return result
 
     def _canonical_reject_decision_id(self, payload: Mapping[str, Any]) -> str:
-        campaign_id = os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") if self._burnin_run_id else None
+        campaign_id = (self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")) if self._burnin_run_id else None
         runtime_identity = (campaign_id or f"standalone:{self._burnin_run_id}") if self._burnin_run_id else None
         return "reject:" + canonical_hash({
             "runtime_identity": runtime_identity,
@@ -2608,11 +3717,19 @@ class RuntimeOrchestrator:
     def _reject_campaign_id(self) -> str | None:
         if not self._burnin_run_id:
             return None
-        return os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or f"standalone:{self._burnin_run_id}"
+        return self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID") or f"standalone:{self._burnin_run_id}"
 
     def _persist_pending_reject(self, payload: Mapping[str, Any], *, conn: Any | None = None) -> str | None:
         """Durably enqueue eligible PAPER rejects; incomplete geometry remains auditable."""
         if self.config.execution_mode != ExecutionMode.PAPER or not self._burnin_run_id:
+            return None
+        reject_reason = str(payload.get("reason") or payload.get("reject_reason") or "").upper()
+        if reject_reason in {
+            "INVALID_MARKET_TIMESTAMP",
+            "MARKET_TIMESTAMP_UNIT_MISMATCH",
+            "MARKET_TIMESTAMP_IN_FUTURE",
+            "STALE_MARKET_DATA",
+        }:
             return None
         engine, campaign_id = self._resolve_persistence_engine(), self._reject_campaign_id()
         if engine is None or campaign_id is None:
@@ -2624,6 +3741,59 @@ class RuntimeOrchestrator:
                            if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE"
                            and isinstance(payload.get("legacy_shadow_geometry"), Mapping) else {})
         label_geometry = shadow_geometry or payload
+        planned_entry = label_geometry.get("entry", label_geometry.get("entry_price"))
+        expected_fill = None if shadow_geometry else payload.get("expected_fill")
+        derived_rr_metrics: Mapping[str, Any] = {}
+        if not shadow_geometry and expected_fill is None:
+            try:
+                expected_fill, _ = self._expected_fill_price(label_geometry, execution_ctx)
+                if expected_fill is not None:
+                    derived_rr_metrics = self._execution_rr_metrics(
+                        payload.get("candidate_rr", payload.get("rr", payload.get("raw_rr"))),
+                        label_geometry,
+                        execution_ctx,
+                    )
+                    expected_fill = derived_rr_metrics.get("expected_fill", expected_fill)
+            except (TypeError, ValueError):
+                expected_fill = None
+                derived_rr_metrics = {}
+        try:
+            executable_entry = float(expected_fill) if expected_fill is not None else None
+            if executable_entry is not None and (not math.isfinite(executable_entry) or executable_entry <= 0):
+                executable_entry = None
+        except (TypeError, ValueError):
+            executable_entry = None
+        execution_aligned = executable_entry is not None and not shadow_geometry
+        label_entry = executable_entry if execution_aligned else planned_entry
+        embedded_entry_slippage_cost = costs.get("entry_slippage_cost")
+        if execution_aligned and embedded_entry_slippage_cost is not None:
+            # The entry-side slippage is already represented by expected_fill.
+            # Keep the explicit field at zero to preserve the complete R-cost
+            # schema while preventing a second deduction in reject resolution.
+            costs = {**costs, "entry_slippage_cost": 0.0}
+        attributable = payload.get("reject_quality_attributable") is not False and execution_aligned
+        non_attributable_reason = payload.get("non_attributable_reason")
+        if shadow_geometry:
+            attributable = False
+            non_attributable_reason = non_attributable_reason or "LEGACY_SHADOW_NOT_GUIDED_EQUIVALENT"
+        elif not execution_aligned:
+            attributable = False
+            non_attributable_reason = non_attributable_reason or "EXECUTION_PARITY_BASIS_UNAVAILABLE"
+        try:
+            initial_risk = abs(float(planned_entry) - float(
+                label_geometry.get("sl", label_geometry.get("stop_loss", label_geometry.get("stop")))
+            ))
+            fill_shift_initial_risk_ratio = (
+                abs(float(executable_entry) - float(planned_entry)) / initial_risk
+                if execution_aligned and initial_risk > 0 else None
+            )
+        except (TypeError, ValueError):
+            fill_shift_initial_risk_ratio = None
+        reject_execution_basis = (
+            "EXPECTED_FILL_RUNTIME_PARITY" if execution_aligned
+            else "LEGACY_SCANNER_SHADOW" if shadow_geometry
+            else "PLANNED_ENTRY_LEGACY"
+        )
         try:
             def persist(target: Any) -> str | None:
                 return persist_pending_reject_label(
@@ -2631,7 +3801,7 @@ class RuntimeOrchestrator:
                     reject_decision_id=str(payload.get("reject_decision_id") or ""), signal_id=signal_id or None,
                     symbol=payload.get("symbol"), side=label_geometry.get("side"),
                     decision_timestamp=payload.get("decision_timestamp") or canonical_utc_timestamp(), timeframe=payload.get("timeframe"),
-                    entry=label_geometry.get("entry", label_geometry.get("entry_price")),
+                    entry=label_entry,
                     stop=label_geometry.get("sl", label_geometry.get("stop_loss", label_geometry.get("stop"))),
                     target=label_geometry.get("tp", label_geometry.get("take_profit", label_geometry.get("target"))),
                     horizon_bars=self.config.reject_forward_horizon_bars,
@@ -2640,8 +3810,32 @@ class RuntimeOrchestrator:
                     source_provenance={"provider": self.scanner_source or "UNKNOWN", "timeframe": payload.get("timeframe"),
                                        "forward_label_subject": payload.get("forward_label_subject"),
                                        "forward_label_side": label_geometry.get("side"),
-                                       "reject_quality_attributable": payload.get("reject_quality_attributable"),
-                                       "non_attributable_reason": payload.get("non_attributable_reason"),
+                                       "reject_quality_attributable": attributable,
+                                       "non_attributable_reason": non_attributable_reason,
+                                       "reject_execution_basis": reject_execution_basis,
+                                       "planned_entry": planned_entry,
+                                       "executable_entry": executable_entry,
+                                       "score": payload.get("score"),
+                                       "candidate_raw_rr": payload.get("candidate_rr", payload.get("rr")),
+                                       "executable_raw_rr": payload.get("executable_raw_rr", derived_rr_metrics.get("executable_raw_rr")),
+                                       "remaining_execution_penalty": payload.get("remaining_execution_penalty", derived_rr_metrics.get("remaining_execution_penalty")),
+                                       "effective_rr_at_decision": payload.get("effective_rr"),
+                                       "counterfactual_effective_rr": (
+                                           None if payload.get("effective_rr") is not None
+                                           else derived_rr_metrics.get("effective_rr")
+                                       ),
+                                       "min_signal_score": payload.get("min_signal_score"),
+                                       "min_raw_rr": payload.get("min_raw_rr"),
+                                       "min_effective_rr": payload.get("min_effective_rr"),
+                                       "min_stop_pct": payload.get("min_stop_pct"),
+                                       "max_stop_pct": payload.get("max_stop_pct"),
+                                       "entry_slippage_embedded_in_fill": bool(execution_aligned),
+                                       "embedded_entry_slippage_cost": embedded_entry_slippage_cost,
+                                       "fill_shift_initial_risk_ratio": fill_shift_initial_risk_ratio,
+                                       "stop_distance_pct": payload.get("stop_distance_pct"),
+                                       "all_failed_gates": payload.get("all_failed_gates"),
+                                       "failed_gate_evidence": payload.get("failed_gate_evidence"),
+                                       "execution_cost_semantics": payload.get("execution_cost_semantics", derived_rr_metrics.get("execution_cost_semantics")),
                                        "campaign_intervals": list(self._campaign_intervals),
                                        "regime_timeframe": self.config.regime_timeframe,
                                        "setup_timeframe": self.config.setup_timeframe,
@@ -2872,7 +4066,13 @@ class RuntimeOrchestrator:
             return None
 
     def _canonical_final_decision_recorded(self, signal_id: str) -> bool | None:
-        """Return durable PAPER finalization state; lookup failure is fail-closed."""
+        """Return durable PAPER finalization state; lookup failure is fail-closed.
+
+        An accepted PAPER fill is authoritative even when its final evidence is
+        in decision_evidence or the campaign position rather than a final-phase
+        order_decisions row. The position also closes the crash window before
+        the post-fill decision evidence transaction.
+        """
         if self.config.execution_mode is not ExecutionMode.PAPER:
             return False
         engine = self._resolve_persistence_engine()
@@ -2880,14 +4080,45 @@ class RuntimeOrchestrator:
             return False
         try:
             with engine.connect() as conn:
-                return conn.execute(text("""
-                    SELECT 1 FROM order_decisions
+                final_rows = conn.execute(text("""
+                    SELECT decision_id, symbol, decision FROM order_decisions
                     WHERE signal_id=:signal_id
                       AND UPPER(COALESCE(mode, ''))='PAPER'
                       AND LOWER(COALESCE(phase, ''))='final'
                       AND UPPER(COALESCE(decision, '')) IN ('ACCEPTED', 'REJECTED')
+                """), {"signal_id": signal_id}).fetchall()
+                if not self._burnin_run_id:
+                    if self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID"):
+                        return None
+                    return bool(final_rows)
+                for row in final_rows:
+                    if str(row.decision).upper() == "REJECTED" and row.decision_id == self._canonical_reject_decision_id({
+                        "signal_id": signal_id, "symbol": row.symbol,
+                    }):
+                        return True
+                if conn.execute(text("""
+                    SELECT 1 FROM decision_evidence
+                    WHERE signal_id=:signal_id AND run_id=:burnin_run_id
+                      AND UPPER(COALESCE(mode, ''))='PAPER'
+                      AND ((UPPER(COALESCE(decision, ''))='ACCEPT'
+                            AND lifecycle_state_after='POSITION_OPENED')
+                           OR (UPPER(COALESCE(decision, ''))='REJECT'
+                               AND lifecycle_state_after='SIGNAL_REJECTED'))
                     LIMIT 1
-                """), {"signal_id": signal_id}).first() is not None
+                """), {"signal_id": signal_id, "burnin_run_id": self._burnin_run_id}).first() is not None:
+                    return True
+                campaign_id = self._campaign_id or os.getenv("ALPHAFORGE_BURNIN_CAMPAIGN_ID")
+                if not campaign_id:
+                    return False
+                return conn.execute(text("""
+                    SELECT 1 FROM burnin_pending_position_outcomes
+                    WHERE signal_id=:signal_id AND burnin_run_id=:burnin_run_id
+                      AND campaign_id=:campaign_id
+                    LIMIT 1
+                """), {
+                    "signal_id": signal_id, "burnin_run_id": self._burnin_run_id,
+                    "campaign_id": campaign_id,
+                }).first() is not None
         except Exception as exc:
             self.metrics.final_decision_lookup_failures += 1
             logger.exception(
@@ -2978,10 +4209,118 @@ class RuntimeOrchestrator:
             )
         self.metrics.burnin_observations += 1
 
-    def _evaluate_runtime_risk(self, symbol: str, market_ctx: Mapping[str, Any]) -> str | None:
+    def _evaluate_market_timestamp(
+        self, market_ts_raw: Any, *, now: float
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Validate provider market time in canonical epoch-seconds semantics."""
+        configured_skew_ms = int(self.config.max_clock_skew_ms)
+        allowed_future_skew_sec = configured_skew_ms / 1000.0
+        stale_limit_sec = float(self.config.stale_market_data_sec)
+        evidence: dict[str, Any] = {
+            "raw_market_ts": market_ts_raw,
+            "runtime_now_sec": now,
+            "configured_max_clock_skew_ms": configured_skew_ms,
+            "allowed_future_skew_sec": allowed_future_skew_sec,
+            "stale_market_data_sec": stale_limit_sec,
+            "policy_source": "CONFIG_REGISTRY:ALPHAFORGE_MAX_CLOCK_SKEW_MS",
+            "expected_unit": "epoch_seconds",
+        }
+
+        if market_ts_raw in (None, "") or isinstance(market_ts_raw, bool):
+            evidence.update({
+                "status": "REJECT",
+                "reason": "INVALID_MARKET_TIMESTAMP",
+                "observed": market_ts_raw,
+                "reject_threshold": "FINITE_EPOCH_SECONDS",
+                "comparison": "VALID_TIMESTAMP_REQUIRED",
+            })
+            return "INVALID_MARKET_TIMESTAMP", evidence
+
+        try:
+            market_ts = float(market_ts_raw)
+        except (TypeError, ValueError):
+            evidence.update({
+                "status": "REJECT",
+                "reason": "INVALID_MARKET_TIMESTAMP",
+                "observed": str(market_ts_raw),
+                "reject_threshold": "FINITE_EPOCH_SECONDS",
+                "comparison": "VALID_TIMESTAMP_REQUIRED",
+            })
+            return "INVALID_MARKET_TIMESTAMP", evidence
+
+        evidence["market_ts_sec"] = market_ts
+        if not math.isfinite(market_ts):
+            evidence.update({
+                "status": "REJECT",
+                "reason": "INVALID_MARKET_TIMESTAMP",
+                "observed": str(market_ts_raw),
+                "reject_threshold": "FINITE_EPOCH_SECONDS",
+                "comparison": "IS_FINITE",
+            })
+            return "INVALID_MARKET_TIMESTAMP", evidence
+
+        # Detect the common seconds/milliseconds conversion error without
+        # accepting or silently normalizing it. The 100x ratio is unit-shape
+        # detection only; the allowed clock skew remains registry-authoritative.
+        milliseconds_as_seconds = market_ts / 1000.0
+        unit_detection_window_sec = max(stale_limit_sec, allowed_future_skew_sec, 1.0)
+        if (
+            now > 0.0
+            and market_ts > now * 100.0
+            and abs(milliseconds_as_seconds - now) <= unit_detection_window_sec
+        ):
+            evidence.update({
+                "status": "REJECT",
+                "reason": "MARKET_TIMESTAMP_UNIT_MISMATCH",
+                "observed": market_ts,
+                "normalized_candidate_seconds": milliseconds_as_seconds,
+                "detected_unit": "epoch_milliseconds",
+                "reject_threshold": "EPOCH_SECONDS",
+                "comparison": "UNIT_MUST_MATCH",
+            })
+            return "MARKET_TIMESTAMP_UNIT_MISMATCH", evidence
+
+        future_delta_sec = market_ts - now
+        if future_delta_sec > allowed_future_skew_sec:
+            evidence.update({
+                "status": "REJECT",
+                "reason": "MARKET_TIMESTAMP_IN_FUTURE",
+                "observed": market_ts,
+                "future_delta_sec": future_delta_sec,
+                "reject_threshold": now + allowed_future_skew_sec,
+                "comparison": "<=",
+            })
+            return "MARKET_TIMESTAMP_IN_FUTURE", evidence
+
+        age_sec = now - market_ts
+        if age_sec > stale_limit_sec:
+            evidence.update({
+                "status": "REJECT",
+                "reason": "STALE_MARKET_DATA",
+                "observed": market_ts,
+                "age_sec": age_sec,
+                "reject_threshold": now - stale_limit_sec,
+                "comparison": ">=",
+            })
+            return "STALE_MARKET_DATA", evidence
+
+        evidence.update({
+            "status": "PASS",
+            "reason": None,
+            "observed": market_ts,
+            "future_delta_sec": max(0.0, future_delta_sec),
+            "age_sec": max(0.0, age_sec),
+            "reject_threshold": now + allowed_future_skew_sec,
+            "comparison": "<=",
+        })
+        return None, evidence
+
+    def _evaluate_runtime_risk(self, symbol: str, market_ctx: MutableMapping[str, Any]) -> str | None:
         now = time.time()
         if self._reconciliation_persistence_unhealthy:
             return "RECONCILIATION_PERSISTENCE_FAILED"
+        if self.metrics.heartbeat_persistence_degraded:
+            return "RUNTIME_DB_UNAVAILABLE"
         if self._fail_closed_reason:
             return self._fail_closed_reason
         if self._recovery_required:
@@ -3002,20 +4341,16 @@ class RuntimeOrchestrator:
             return "MAX_CONCURRENT_POSITIONS"
         if now < self._symbol_cooldown_until.get(symbol, 0.0):
             return "SYMBOL_COOLDOWN"
-        market_ts_raw = market_ctx.get("market_ts", now)
-        market_ts = float(now if market_ts_raw in (None, "") else market_ts_raw)
-        if (now - market_ts) > self.config.stale_market_data_sec:
+
+        market_time_reject, market_time_evidence = self._evaluate_market_timestamp(
+            market_ctx.get("market_ts"), now=now
+        )
+        market_ctx["market_time_evidence"] = market_time_evidence
+        if market_time_reject == "STALE_MARKET_DATA":
             self._stale_market_data_symbols.add(symbol)
-            return "STALE_MARKET_DATA"
-        spread_pct = float(market_ctx.get("spread_pct", 0.0) or 0.0)
-        if spread_pct > self.config.max_spread_pct:
-            return "SPREAD_TOO_HIGH"
-        slippage = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
-        if slippage > self.config.max_expected_slippage_pct:
-            return "SLIPPAGE_TOO_HIGH"
-        funding = abs(float(market_ctx.get("funding_rate_pct", 0.0) or 0.0))
-        if funding > self.config.max_abs_funding_rate_pct:
-            return "FUNDING_TOO_HIGH"
+        if market_time_reject is not None:
+            return market_time_reject
+
         liquidity = float(market_ctx.get("volume_24h_usdt", self.config.min_liquidity_usd) or 0.0)
         if liquidity < self.config.min_liquidity_usd:
             return "THIN_LIQUIDITY"
@@ -3033,12 +4368,92 @@ class RuntimeOrchestrator:
         }
         await self._emit_lifecycle_event(LifecycleEventType.RECONCILIATION_REPAIR.value, symbol, {"reason": f"reconcile_{reason}", "snapshot": snapshot})
 
+    def _mark_heartbeat_persistence_recovery_required(self) -> bool:
+        """Persist the controlled recovery transition before allowing runtime exit.
+
+        Returning False means SQLite is still contended.  The runtime remains
+        alive but fail-closed and retries this transition on the next heartbeat
+        cycle, so the outer campaign supervisor never has to infer a terminal
+        cause from an unexplained runtime exit.
+        """
+        self._runtime_status = "RECOVERY_REQUIRED"
+        self._recovery_required = True
+        self._fail_closed_reason = "SUSTAINED_HEARTBEAT_PERSISTENCE_FAILURE"
+        engine = self._resolve_persistence_engine()
+        if engine is None or not self._campaign_id:
+            return True
+        try:
+            with engine.begin() as conn:
+                terminalize_active_campaign_run(
+                    conn,
+                    self._campaign_id,
+                    run_status="RECOVERY_REQUIRED",
+                    campaign_status="RECOVERY_REQUIRED",
+                    reason=self._fail_closed_reason,
+                    event_type="RUNTIME_PERSISTENCE_RECOVERY_REQUIRED",
+                    details={
+                        "runtime_instance_id": self.runtime_instance_id,
+                        "failure_streak": self._heartbeat_persistence_failure_streak,
+                        "failure_threshold": self._heartbeat_persistence_failure_threshold,
+                    },
+                    clear_worker_metadata=False,
+                )
+            return True
+        except OperationalError as exc:
+            if not is_sqlite_busy_error(exc):
+                raise
+            logger.error(
+                "heartbeat_persistence_recovery_state_not_persisted reason=SQLITE_BUSY "
+                "failure_streak=%s threshold=%s",
+                self._heartbeat_persistence_failure_streak,
+                self._heartbeat_persistence_failure_threshold,
+            )
+            return False
+
     async def _heartbeat_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
                 self.metrics.last_heartbeat_ts = time.time()
-                self._persist_runtime_heartbeat()
-                self._persist_runtime_state_snapshot("OPERATING")
+                if (
+                    self._recovery_required
+                    and self._fail_closed_reason == "SUSTAINED_HEARTBEAT_PERSISTENCE_FAILURE"
+                ):
+                    if self._mark_heartbeat_persistence_recovery_required():
+                        self.shutdown()
+                        return
+                    await asyncio.sleep(self.config.heartbeat_interval_sec)
+                    continue
+
+                was_degraded = self.metrics.heartbeat_persistence_degraded
+                try:
+                    self._persist_runtime_heartbeat()
+                    self._persist_runtime_state_snapshot("OPERATING")
+                except OperationalError as exc:
+                    if not is_sqlite_busy_error(exc):
+                        raise
+                    self._heartbeat_persistence_failure_streak += 1
+                    self.metrics.heartbeat_persistence_failures += 1
+                    self.metrics.heartbeat_persistence_degraded = True
+                    logger.warning(
+                        "heartbeat_persistence_degraded reason=SQLITE_BUSY failure_streak=%s threshold=%s",
+                        self._heartbeat_persistence_failure_streak,
+                        self._heartbeat_persistence_failure_threshold,
+                    )
+                    if self._heartbeat_persistence_failure_streak >= self._heartbeat_persistence_failure_threshold:
+                        if self._mark_heartbeat_persistence_recovery_required():
+                            self.shutdown()
+                            return
+                    await asyncio.sleep(self.config.heartbeat_interval_sec)
+                    continue
+
+                if was_degraded:
+                    self.metrics.heartbeat_persistence_recoveries += 1
+                    logger.info(
+                        "heartbeat_persistence_recovered prior_failure_streak=%s",
+                        self._heartbeat_persistence_failure_streak,
+                    )
+                self._heartbeat_persistence_failure_streak = 0
+                self.metrics.heartbeat_persistence_degraded = False
                 logger.info(
                     "runtime_heartbeat=%s persistence_enabled=%s top_selection_reject_reasons=%s top_selection_advisory_reasons=%s decision_gate_blockers=%s",
                     self.metrics,
@@ -3281,6 +4696,83 @@ def execution_mode_from_env(raw_mode: str | None) -> ExecutionMode:
         raise ValueError(f"Unsupported EXECUTION_MODE={raw_mode!r}. Expected BACKTEST/PAPER/LIVE_PRECHECK/LIVE") from exc
 
 
+def _runtime_config_from_app_config(cfg: Any, mode: ExecutionMode) -> RuntimeConfig:
+    """Freeze typed application config into the runtime startup snapshot."""
+    return RuntimeConfig(
+        execution_mode=mode,
+        min_signal_score=cfg.runtime.min_signal_score,
+        scan_interval_sec=cfg.runtime.scan_interval_sec,
+        heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec,
+        reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars,
+        reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec,
+        max_symbols_per_scan=cfg.runtime.max_symbols_per_scan,
+        max_reject_log_entries=cfg.runtime.max_reject_log_entries,
+        max_concurrent_positions=cfg.runtime.max_concurrent_positions,
+        symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec,
+        max_notional_exposure=cfg.runtime.max_notional_exposure,
+        max_symbol_notional=cfg.runtime.max_symbol_notional,
+        max_daily_loss_pct=cfg.runtime.max_daily_loss_pct,
+        stale_market_data_sec=cfg.runtime.stale_market_data_sec,
+        max_clock_skew_ms=cfg.runtime.max_clock_skew_ms,
+        min_rr=cfg.runtime.min_rr,
+        min_effective_rr=cfg.runtime.min_effective_rr,
+        max_spread_pct=cfg.runtime.max_spread_pct,
+        max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct,
+        max_total_cost_pct=cfg.runtime.max_total_cost_pct,
+        min_liquidity_score=cfg.runtime.min_liquidity_score,
+        max_volatility_penalty_pct=cfg.runtime.max_volatility_penalty_pct,
+        reject_unknown_execution_context=cfg.runtime.reject_unknown_execution_context,
+        max_latency_ms=cfg.runtime.max_latency_ms,
+        paper_fee_bps=cfg.runtime.paper_fee_bps,
+        paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms,
+        market_data_base_url=cfg.exchange.binance.market_data_base_url,
+        regime_timeframe=cfg.runtime.regime_timeframe,
+        setup_timeframe=cfg.runtime.setup_timeframe,
+        execution_timeframe=cfg.runtime.execution_timeframe,
+        mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled,
+        mtf_execution_confirmation_mode=cfg.runtime.mtf_execution_confirmation_mode,
+        regime_direction_threshold=cfg.runtime.regime_direction_threshold,
+        setup_direction_threshold=cfg.runtime.setup_direction_threshold,
+        execution_direction_threshold=cfg.runtime.execution_direction_threshold,
+        enable_state_direction_resolution=cfg.runtime.enable_state_direction_resolution,
+        paper_decision_timeframe=cfg.runtime.execution_timeframe,
+        require_mtf_alignment=False,
+        max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct,
+        min_liquidity_usd=cfg.runtime.min_liquidity_usd,
+        min_sl_pct=cfg.runtime.min_sl_pct,
+        max_sl_pct=cfg.runtime.max_sl_pct,
+        min_atr_pct=cfg.runtime.min_atr_pct,
+        max_atr_pct=cfg.runtime.max_atr_pct,
+        block_unknown_expectancy=cfg.runtime.block_unknown_expectancy,
+        block_chop_market=cfg.runtime.block_chop_market,
+        require_regime_alignment=cfg.runtime.require_regime_alignment,
+        enable_orderbook_filter=cfg.runtime.enable_orderbook_filter,
+        stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject,
+        stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min,
+        stop_too_wide_soft_effective_rr_min=cfg.runtime.stop_too_wide_soft_effective_rr_min,
+        stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale,
+        stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult,
+        max_trades_global_per_day=cfg.runtime.max_trades_global_per_day,
+        max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day,
+        symbol_loss_streak_limit=cfg.runtime.symbol_loss_streak_limit,
+        global_loss_streak_limit=cfg.runtime.global_loss_streak_limit,
+        global_kill_switch=cfg.runtime.global_kill_switch,
+        require_live_qualification=cfg.runtime.require_live_qualification,
+        enable_shadow_mode=cfg.runtime.enable_shadow_mode,
+        enable_canary_mode=cfg.runtime.enable_canary_mode,
+        operator_live_acknowledged=cfg.runtime.operator_live_acknowledged,
+        allow_live_orders=cfg.runtime.allow_live_orders,
+        live_trading_enabled=cfg.runtime.live_enabled,
+        reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec,
+        reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec,
+        provider_transient_outage_grace_seconds=cfg.runtime.provider_transient_outage_grace_seconds,
+        require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live,
+        required_live_exchanges=cfg.runtime.required_live_exchanges,
+        exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec,
+        enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation,
+    )
+
+
 def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session_factory: Any | None = None) -> RuntimeOrchestrator:
     cfg = load_config_from_env()
     mode = execution_mode_from_env(cfg.runtime.execution_mode)
@@ -3296,7 +4788,7 @@ def _build_runtime_from_env(*, persistence_engine: Engine | None = None, session
         table_names = [str(row[0]) for row in rows]
     logger.info("runtime_db_bootstrap persistence_enabled=%s resolved_db_url=%s schema_initialized=%s tables=%s", persistence_enabled, resolved_database_url, True, table_names)
     brain = AIBrain(session_factory=SessionLocal, min_accept_score=cfg.runtime.min_signal_score)
-    config = RuntimeConfig(execution_mode=mode, min_signal_score=cfg.runtime.min_signal_score, scan_interval_sec=cfg.runtime.scan_interval_sec, heartbeat_interval_sec=cfg.runtime.heartbeat_interval_sec, reject_forward_horizon_bars=cfg.runtime.reject_forward_horizon_bars, reject_resolver_interval_sec=cfg.runtime.reject_resolver_interval_sec, max_symbols_per_scan=cfg.runtime.max_symbols_per_scan, max_reject_log_entries=cfg.runtime.max_reject_log_entries, max_concurrent_positions=cfg.runtime.max_concurrent_positions, symbol_cooldown_sec=cfg.runtime.symbol_cooldown_sec, max_notional_exposure=cfg.runtime.max_notional_exposure, max_symbol_notional=cfg.runtime.max_symbol_notional, max_daily_loss_pct=cfg.runtime.max_daily_loss_pct, stale_market_data_sec=cfg.runtime.stale_market_data_sec, max_spread_pct=cfg.runtime.max_spread_pct, max_abs_funding_rate_pct=cfg.runtime.max_abs_funding_rate_pct, global_kill_switch=cfg.runtime.global_kill_switch, require_live_qualification=cfg.runtime.require_live_qualification, enable_shadow_mode=cfg.runtime.enable_shadow_mode, enable_canary_mode=cfg.runtime.enable_canary_mode, operator_live_acknowledged=cfg.runtime.operator_live_acknowledged, allow_live_orders=cfg.runtime.allow_live_orders, live_trading_enabled=cfg.runtime.live_enabled, reconciliation_interval_sec=cfg.runtime.reconciliation_interval_sec, reconciliation_timeout_sec=cfg.runtime.reconciliation_timeout_sec, provider_transient_outage_grace_seconds=cfg.runtime.provider_transient_outage_grace_seconds, require_exchange_connectivity_for_live=cfg.runtime.require_exchange_connectivity_for_live, required_live_exchanges=cfg.runtime.required_live_exchanges, exchange_connectivity_timeout_sec=cfg.runtime.exchange_connectivity_timeout_sec, enable_binance_readonly_reconciliation=cfg.runtime.enable_binance_readonly_reconciliation, min_rr=cfg.runtime.min_rr, min_effective_rr=cfg.runtime.min_effective_rr, max_expected_slippage_pct=cfg.runtime.max_expected_slippage_pct, min_liquidity_usd=cfg.runtime.min_liquidity_usd, min_sl_pct=cfg.runtime.min_sl_pct, max_sl_pct=cfg.runtime.max_sl_pct, min_atr_pct=cfg.runtime.min_atr_pct, max_atr_pct=cfg.runtime.max_atr_pct, block_unknown_expectancy=cfg.runtime.block_unknown_expectancy, block_chop_market=cfg.runtime.block_chop_market, require_regime_alignment=cfg.runtime.require_regime_alignment, stop_too_wide_hard_reject=cfg.runtime.stop_too_wide_hard_reject, stop_too_wide_soft_score_min=cfg.runtime.stop_too_wide_soft_score_min, stop_too_wide_max_risk_scale=cfg.runtime.stop_too_wide_max_risk_scale, stop_too_wide_extreme_mult=cfg.runtime.stop_too_wide_extreme_mult, max_trades_global_per_day=cfg.runtime.max_trades_global_per_day, max_trades_symbol_per_day=cfg.runtime.max_trades_symbol_per_day, paper_fee_bps=cfg.runtime.paper_fee_bps, paper_execution_latency_ms=cfg.runtime.paper_execution_latency_ms, market_data_base_url=cfg.exchange.binance.market_data_base_url, regime_timeframe=cfg.runtime.regime_timeframe, setup_timeframe=cfg.runtime.setup_timeframe, execution_timeframe=cfg.runtime.execution_timeframe, mtf_guided_signal_generation_enabled=cfg.runtime.mtf_guided_signal_generation_enabled, regime_direction_threshold=cfg.runtime.regime_direction_threshold, setup_direction_threshold=cfg.runtime.setup_direction_threshold, execution_direction_threshold=cfg.runtime.execution_direction_threshold, enable_state_direction_resolution=cfg.runtime.enable_state_direction_resolution, paper_decision_timeframe=cfg.runtime.execution_timeframe, require_mtf_alignment=False)
+    config = _runtime_config_from_app_config(cfg, mode)
     config.agent_graph_enabled = cfg.runtime.agent_graph_enabled
     config.agent_graph_shadow = cfg.runtime.agent_graph_shadow
     config.agent_graph_max_steps = cfg.runtime.agent_graph_max_steps

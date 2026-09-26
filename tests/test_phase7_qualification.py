@@ -37,6 +37,48 @@ def _qualifying_evidence(e):
 def _qualifying_thresholds():
     return BurnInThresholds(minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,minimum_closed_trades=1,minimum_rejected_forward_outcomes=1,minimum_regime_coverage=1,minimum_regime_sample=1,minimum_calibration_sample=1,max_symbol_concentration=.99,max_trade_contribution=.99,max_regime_concentration=1.0,min_lower_confidence_bound_expectancy=.01,require_operator_ack=False,require_phase1_6_gates=False)
 
+def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
+    from alphaforge.release_gates import (
+        persist_operator_ack,
+        persist_rollback_verification,
+        persist_runbook_evidence,
+        required_operator_ack_text,
+        run_canary_mutation_trap_validation,
+    )
+    from alphaforge.rollback_evidence import persist_rollback_validation_evidence
+
+    persist_operator_ack(
+        e,
+        release_id=release_id,
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text(release_id),
+    )
+    run_canary_mutation_trap_validation(e, release_id=release_id, phase="PHASE6", git_commit="abc")
+    persist_rollback_validation_evidence(e, {
+        "validation_id": f"rollback-validation:{release_id}",
+        "git_commit": "abc",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "PHASE7_TEST_FIXTURE"},
+    })
+    persist_rollback_verification(e, release_id=release_id, git_commit="abc")
+    runbook = tmp_path / f"{release_id}-RUNBOOK.md"
+    runbook.write_text(
+        "# Test Runbook\n"
+        "## Explicit LIVE boundary\nLIVE remains blocked.\n"
+        "## Suspension conditions\nFail closed.\n"
+        "## Operator workflow\nOperator verifies evidence.\n"
+        "## Phase 9 PAPER Burn-in Operations\n"
+        "Use recovery-drill before promotion and finalize only after qualification.\n",
+        encoding="utf-8",
+    )
+    persist_runbook_evidence(e, release_id=release_id, runbook_path=runbook, git_commit="abc")
+
+
 def test_missing_costs_block_qualification():
     e=_engine(); _run(e)
     with e.begin() as c:
@@ -102,6 +144,111 @@ def test_missing_phase6_and_operator_ack_block_qualification():
     assert "FULL_TEST_EVIDENCE_MISSING" in snap.blockers
 
 
+def test_optimistic_full_test_pass_without_verified_provenance_is_blocked(tmp_path):
+    from alphaforge.release_gates import ensure_release_gate_schema, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
+    e=_engine(); _run(e)
+    ensure_release_gate_schema(e)
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    persist_release_snapshot(e, ReleaseGateSnapshot(
+        release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now",
+        canary_ready=True, rollback_verified=True, runbook_verified=True,
+        operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[],
+        evidence={"full_tests":{"status":"PASS"}},
+    ))
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "FULL_TEST_EVIDENCE_UNVERIFIED" in snap.blockers
+
+
+def test_one_release_evidence_commit_mismatch_cannot_be_masked_by_other_passes(tmp_path):
+    e=_engine(); _run(e)
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    with e.begin() as c:
+        row=c.execute(text("""
+            SELECT id,evidence_json FROM canary_run_events
+            WHERE release_id='rel' AND event_type='CANARY_VALIDATION_PASS'
+            ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        payload=json.loads(row["evidence_json"])
+        payload["git_commit"]="different"
+        c.execute(text("UPDATE canary_run_events SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(payload,sort_keys=True),
+            "id":row["id"],
+        })
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=0,minimum_accepted_trades=0,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "CANARY_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+    assert "ROLLBACK_EVIDENCE_COMMIT_MISMATCH" not in snap.blockers
+    assert "RUNBOOK_EVIDENCE_COMMIT_MISMATCH" not in snap.blockers
+
+
+def test_rollback_and_runbook_commit_mismatches_are_independently_blocked(tmp_path):
+    e=_engine(); _run(e)
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    with e.begin() as c:
+        rb=c.execute(text("""
+            SELECT id,evidence_json FROM rollback_verification_events
+            WHERE release_id='rel' ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        rb_payload=json.loads(rb["evidence_json"])
+        rb_payload["git_commit"]="different"
+        rb_payload["source_git_commit"]="different"
+        c.execute(text("UPDATE rollback_verification_events SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(rb_payload,sort_keys=True),"id":rb["id"],
+        })
+        run=c.execute(text("""
+            SELECT id,evidence_json FROM runbook_evidence
+            WHERE release_id='rel' ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        run_payload=json.loads(run["evidence_json"])
+        run_payload["git_commit"]="different"
+        c.execute(text("UPDATE runbook_evidence SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(run_payload,sort_keys=True),"id":run["id"],
+        })
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=0,minimum_accepted_trades=0,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "ROLLBACK_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+    assert "RUNBOOK_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+
+
+def test_verified_full_test_evidence_for_different_commit_is_blocked(tmp_path):
+    from alphaforge.release_gates import ensure_release_gate_schema, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
+    e=_engine(); _run(e)
+    ensure_release_gate_schema(e)
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    required={
+        "Full regression suite":"success",
+        "Protected safety mutation gate":"success",
+        "Run offline backtest":"success",
+        "Verify backtest outputs":"success",
+    }
+    persist_release_snapshot(e, ReleaseGateSnapshot(
+        release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now",
+        canary_ready=True, rollback_verified=True, runbook_verified=True,
+        operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[],
+        evidence={"full_tests":{
+            "status":"PASS","source":"GITHUB_ACTIONS_PUSH","repository":"werim/AlphaForge",
+            "run_id":99,"event":"push","workflow_path":".github/workflows/test.yml",
+            "head_sha":"different","full_regression_suite":"success","required_steps":required,
+        }},
+    ))
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "FULL_TEST_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+
+
 def test_suspension_reasons_are_persisted_separately():
     e=_engine(); _run(e)
     th=BurnInThresholds(require_operator_ack=False, require_phase1_6_gates=False)
@@ -115,16 +262,32 @@ def test_suspension_reasons_are_persisted_separately():
     assert {"SPREAD_DEGRADATION","MUTATION_ATTEMPT","RUNBOOK_INVALIDATION","DRAWDOWN_BREACH","ROLLING_EXPECTANCY_BREACH"}.issubset(set(reasons))
 
 
-def test_all_required_phase7_and_phase6_evidence_canary_qualified():
-    from alphaforge.release_gates import ensure_release_gate_schema, persist_operator_ack, persist_canary_event, persist_release_snapshot, ReleaseGateSnapshot
+def test_all_required_phase7_and_phase6_evidence_canary_qualified(tmp_path):
+    from alphaforge.release_gates import ensure_release_gate_schema, persist_operator_ack, run_canary_mutation_trap_validation, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
     ensure_release_gate_schema(e)
-    persist_operator_ack(e, release_id="rel", phase="PHASE6", valid_until="2099-01-01T00:00:00Z")
-    persist_canary_event(e, release_id="rel", phase="PHASE6", mutation_attempted=False)
-    with e.begin() as c:
-        c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb','rel','PHASE6','now','PASS','{}')"))
-        c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run','rel','PHASE6','now','PASS','{}')"))
-    persist_release_snapshot(e, ReleaseGateSnapshot(release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now", canary_ready=True, rollback_verified=True, runbook_verified=True, operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[], evidence={"full_tests":{"status":"PASS"}}))
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    persist_release_snapshot(e, ReleaseGateSnapshot(
+        release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now",
+        canary_ready=True, rollback_verified=True, runbook_verified=True,
+        operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[],
+        evidence={"full_tests":{
+            "status":"PASS",
+            "source":"GITHUB_ACTIONS_PUSH",
+            "repository":"werim/AlphaForge",
+            "run_id":12345,
+            "event":"push",
+            "workflow_path":".github/workflows/test.yml",
+            "head_sha":"abc",
+            "full_regression_suite":"success",
+            "required_steps":{
+                "Full regression suite":"success",
+                "Protected safety mutation gate":"success",
+                "Run offline backtest":"success",
+                "Verify backtest outputs":"success",
+            },
+        }},
+    ))
     with e.begin() as c:
         for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
             c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,closed_at,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING','2026-01-01T01:00:00Z',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"all-o{i}","sym":sym})

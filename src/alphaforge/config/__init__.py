@@ -5,9 +5,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset
+from alphaforge.config_registry import decision_filter_config, effective_config_values, effective_config_subset, managed_config_value
 from alphaforge.env_contract import dotenv_status, repository_root, resolve_binance_environment
 from alphaforge.database_defaults import resolve_runtime_database_url
+
+
+MTF_EXECUTION_CONFIRMATION_MODES = frozenset({"ENFORCE", "SHADOW"})
+
+
+def normalize_mtf_execution_confirmation_mode(value: object) -> str:
+    mode = str(value or "ENFORCE").strip().upper()
+    if mode not in MTF_EXECUTION_CONFIRMATION_MODES:
+        raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE must be ENFORCE or SHADOW")
+    return mode
 
 
 def _clean_env_value(raw: str | None) -> str | None:
@@ -79,10 +89,15 @@ class RuntimeSettings:
     max_symbol_notional: float = 50_000.0
     max_daily_loss_pct: float = 0.03
     stale_market_data_sec: float = 15.0
+    max_clock_skew_ms: int = field(default_factory=lambda: int(managed_config_value("ALPHAFORGE_MAX_CLOCK_SKEW_MS")))
     min_rr: float = 1.20
     min_effective_rr: float = 1.10
     max_spread_pct: float = 0.0025
     max_expected_slippage_pct: float = 0.0020
+    max_total_cost_pct: float = 0.20
+    min_liquidity_score: float = 0.30
+    max_volatility_penalty_pct: float = 0.20
+    reject_unknown_execution_context: bool = True
     paper_fee_bps: float = 4.0
     paper_execution_latency_ms: float = 50.0
     market_data_base_url: str = "https://fapi.binance.com"
@@ -90,6 +105,7 @@ class RuntimeSettings:
     setup_timeframe: str = "15m"
     execution_timeframe: str = "1m"
     mtf_guided_signal_generation_enabled: bool = True
+    mtf_execution_confirmation_mode: str = "ENFORCE"
     regime_direction_threshold: float = 0.0005
     setup_direction_threshold: float = 0.0003
     execution_direction_threshold: float = 0.0005
@@ -99,6 +115,8 @@ class RuntimeSettings:
     min_liquidity_usd: float = 5_000_000.0
     max_trades_global_per_day: int = 10
     max_trades_symbol_per_day: int = 2
+    symbol_loss_streak_limit: int = 3
+    global_loss_streak_limit: int = 5
     min_sl_pct: float = 0.15
     max_sl_pct: float = 1.5
     min_atr_pct: float = 0.25
@@ -304,40 +322,65 @@ class AlphaForgeConfig:
 
 
 
+CROSS_SURFACE_FILTER_FIELDS: dict[str, str] = {
+    "MIN_TRADE_SCORE": "min_signal_score",
+    "MIN_RR": "min_rr",
+    "MIN_EFFECTIVE_RR": "min_effective_rr",
+    "MIN_SL_PCT": "min_sl_pct",
+    "MAX_SL_PCT": "max_sl_pct",
+    "MAX_SPREAD_PCT": "max_spread_pct",
+    "MAX_EXPECTED_SLIPPAGE_PCT": "max_expected_slippage_pct",
+    "MAX_TOTAL_COST_PCT": "max_total_cost_pct",
+    "MIN_LIQUIDITY_SCORE": "min_liquidity_score",
+    "MAX_VOLATILITY_PENALTY_PCT": "max_volatility_penalty_pct",
+    "REJECT_UNKNOWN_EXECUTION_CONTEXT": "reject_unknown_execution_context",
+    "MIN_ATR_PCT": "min_atr_pct",
+    "MAX_ATR_PCT": "max_atr_pct",
+    "BLOCK_UNKNOWN_EXPECTANCY": "block_unknown_expectancy",
+    "BLOCK_CHOP_MARKET": "block_chop_market",
+    "REQUIRE_REGIME_ALIGNMENT": "require_regime_alignment",
+    "ENABLE_ORDERBOOK_FILTER": "enable_orderbook_filter",
+    "STOP_TOO_WIDE_HARD_REJECT": "stop_too_wide_hard_reject",
+    "STOP_TOO_WIDE_SOFT_SCORE_MIN": "stop_too_wide_soft_score_min",
+    "STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN": "stop_too_wide_soft_effective_rr_min",
+    "STOP_TOO_WIDE_MAX_RISK_SCALE": "stop_too_wide_max_risk_scale",
+    "STOP_TOO_WIDE_EXTREME_MULT": "stop_too_wide_extreme_mult",
+    "MAX_TRADES_PER_SYMBOL_PER_DAY": "max_trades_symbol_per_day",
+    "MAX_TRADES_GLOBAL_PER_DAY": "max_trades_global_per_day",
+    "SYMBOL_LOSS_STREAK_LIMIT": "symbol_loss_streak_limit",
+    "GLOBAL_LOSS_STREAK_LIMIT": "global_loss_streak_limit",
+    "MAX_ABS_FUNDING_RATE_PCT": "max_abs_funding_rate_pct",
+    "MAX_LATENCY_MS": "max_latency_ms",
+}
+
+
 def runtime_filter_config(runtime: RuntimeSettings, *, mode: str | None = None) -> dict[str, object]:
-    cfg = decision_filter_config(mode or runtime.execution_mode)
+    """Build the decision surface from the immutable startup config snapshot.
+
+    decision_filter_config supplies stable derived/mode fields. Every
+    behavior-affecting shared threshold is then overwritten from the supplied
+    runtime snapshot so a post-startup env/dashboard change cannot silently
+    alter a running process.
+    """
+    mode_value = str(getattr(mode or runtime.execution_mode, "value", mode or runtime.execution_mode)).upper()
+    cfg = decision_filter_config(mode_value)
     cfg.update({
-        "MIN_TRADE_SCORE": runtime.min_signal_score,
-        "MIN_RR": runtime.min_rr,
-        "MIN_EFFECTIVE_RR": runtime.min_effective_rr,
-        "MAX_SPREAD_PCT": runtime.max_spread_pct,
-        "MAX_EXPECTED_SLIPPAGE_PCT": runtime.max_expected_slippage_pct,
-        "MIN_SL_PCT": getattr(runtime, "min_sl_pct", 0.15),
-        "MAX_SL_PCT": getattr(runtime, "max_sl_pct", 1.5),
-        "MIN_ATR_PCT": getattr(runtime, "min_atr_pct", 0.25),
-        "MAX_ATR_PCT": getattr(runtime, "max_atr_pct", 3.0),
-        "BLOCK_UNKNOWN_EXPECTANCY": getattr(runtime, "block_unknown_expectancy", True),
-        "BLOCK_CHOP_MARKET": getattr(runtime, "block_chop_market", True),
-        "REQUIRE_REGIME_ALIGNMENT": getattr(runtime, "require_regime_alignment", True),
+        key: getattr(runtime, attr)
+        for key, attr in CROSS_SURFACE_FILTER_FIELDS.items()
+    })
+    cfg.update({
+        "MODE": mode_value,
+        "MAX_SLIPPAGE_PCT": runtime.max_expected_slippage_pct,
         "ENABLE_STATE_DIRECTION_RESOLUTION": getattr(runtime, "enable_state_direction_resolution", False),
-        "ENABLE_ORDERBOOK_FILTER": getattr(runtime, "enable_orderbook_filter", False),
-        "STOP_TOO_WIDE_HARD_REJECT": getattr(runtime, "stop_too_wide_hard_reject", True),
-        "STOP_TOO_WIDE_SOFT_SCORE_MIN": getattr(runtime, "stop_too_wide_soft_score_min", 9.0),
-        "STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN": getattr(runtime, "stop_too_wide_soft_effective_rr_min", 1.75),
-        "STOP_TOO_WIDE_MAX_RISK_SCALE": getattr(runtime, "stop_too_wide_max_risk_scale", 0.50),
-        "STOP_TOO_WIDE_EXTREME_MULT": getattr(runtime, "stop_too_wide_extreme_mult", 1.50),
         "SYMBOL_COOLDOWN_MINUTES": runtime.symbol_cooldown_sec / 60.0,
-        "MAX_TRADES_PER_SYMBOL_PER_DAY": getattr(runtime, "max_trades_symbol_per_day", 2),
-        "MAX_TRADES_GLOBAL_PER_DAY": getattr(runtime, "max_trades_global_per_day", 10),
         "STALE_MARKET_DATA_SEC": runtime.stale_market_data_sec,
         "MAX_CONCURRENT_POSITIONS": runtime.max_concurrent_positions,
-        "MAX_ABS_FUNDING_RATE_PCT": runtime.max_abs_funding_rate_pct,
         "MIN_LIQUIDITY_USD": runtime.min_liquidity_usd,
         "min_volume_24h_usdt": runtime.min_liquidity_usd,
         "max_spread_pct": runtime.max_spread_pct,
         "max_abs_funding_rate_pct": runtime.max_abs_funding_rate_pct,
     })
-    if str(mode or runtime.execution_mode).upper() == "PAPER":
+    if mode_value == "PAPER":
         cfg.update({
             "PAPER_INITIAL_EQUITY": getattr(runtime, "paper_initial_equity", 1_000.0),
             "PAPER_CANDIDATE_NOTIONAL": getattr(runtime, "paper_candidate_notional", 10.0),
@@ -360,6 +403,12 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
     if str(managed["BINANCE_ENVIRONMENT"]["source"]).startswith("alias (BINANCE_TESTNET)"):
         endpoint_env["BINANCE_TESTNET"] = endpoint_env.pop("BINANCE_ENVIRONMENT")
     resolved_binance = resolve_binance_environment(endpoint_env)
+    mtf_execution_confirmation_mode = normalize_mtf_execution_confirmation_mode(
+        val("MTF_EXECUTION_CONFIRMATION_MODE")
+    )
+    if (mtf_execution_confirmation_mode == "SHADOW"
+            and str(val("ALPHAFORGE_EXECUTION_MODE")).upper() != "PAPER"):
+        raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE=SHADOW is PAPER-only")
     runtime = RuntimeSettings(
         execution_mode=str(val("ALPHAFORGE_EXECUTION_MODE")).upper(),
         paper_enabled=val("ALPHAFORGE_ENABLE_PAPER_TRADING"),
@@ -377,10 +426,15 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         max_symbol_notional=val("ALPHAFORGE_MAX_SYMBOL_NOTIONAL"),
         max_daily_loss_pct=val("ALPHAFORGE_MAX_DAILY_LOSS_PCT"),
         stale_market_data_sec=val("ALPHAFORGE_STALE_MARKET_DATA_SEC"),
+        max_clock_skew_ms=int(val("ALPHAFORGE_MAX_CLOCK_SKEW_MS")),
         min_rr=val("ALPHAFORGE_MIN_RR"),
         min_effective_rr=val("MIN_EFFECTIVE_RR"),
         max_spread_pct=val("ALPHAFORGE_MAX_SPREAD_PCT"),
         max_expected_slippage_pct=val("ALPHAFORGE_MAX_EXPECTED_SLIPPAGE_PCT"),
+        max_total_cost_pct=val("ALPHAFORGE_MAX_TOTAL_COST_PCT"),
+        min_liquidity_score=val("ALPHAFORGE_MIN_LIQUIDITY_SCORE"),
+        max_volatility_penalty_pct=val("ALPHAFORGE_MAX_VOLATILITY_PENALTY_PCT"),
+        reject_unknown_execution_context=val("ALPHAFORGE_REJECT_UNKNOWN_EXECUTION_CONTEXT"),
         paper_fee_bps=val("ALPHAFORGE_PAPER_FEE_BPS"),
         paper_execution_latency_ms=val("ALPHAFORGE_PAPER_EXECUTION_LATENCY_MS"),
         market_data_base_url=str(val("ALPHAFORGE_BINANCE_MARKET_DATA_BASE_URL")).rstrip("/"),
@@ -388,6 +442,7 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         setup_timeframe=val("ALPHAFORGE_SETUP_TIMEFRAME"),
         execution_timeframe=val("ALPHAFORGE_EXECUTION_TIMEFRAME"),
         mtf_guided_signal_generation_enabled=val("ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED"),
+        mtf_execution_confirmation_mode=mtf_execution_confirmation_mode,
         regime_direction_threshold=val("ALPHAFORGE_REGIME_DIRECTION_THRESHOLD"),
         setup_direction_threshold=val("ALPHAFORGE_SETUP_DIRECTION_THRESHOLD"),
         execution_direction_threshold=val("ALPHAFORGE_EXECUTION_DIRECTION_THRESHOLD"),
@@ -397,6 +452,8 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         min_liquidity_usd=val("MIN_LIQUIDITY_USD"),
         max_trades_global_per_day=val("ALPHAFORGE_MAX_TRADES_GLOBAL_PER_DAY"),
         max_trades_symbol_per_day=val("ALPHAFORGE_MAX_TRADES_SYMBOL_PER_DAY"),
+        symbol_loss_streak_limit=val("ALPHAFORGE_SYMBOL_LOSS_STREAK_LIMIT"),
+        global_loss_streak_limit=val("ALPHAFORGE_GLOBAL_LOSS_STREAK_LIMIT"),
         min_sl_pct=val("ALPHAFORGE_MIN_SL_PCT"), max_sl_pct=val("ALPHAFORGE_MAX_SL_PCT"),
         min_atr_pct=val("ALPHAFORGE_MIN_ATR_PCT"), max_atr_pct=val("ALPHAFORGE_MAX_ATR_PCT"),
         block_unknown_expectancy=val("ALPHAFORGE_BLOCK_UNKNOWN_EXPECTANCY"), block_chop_market=val("ALPHAFORGE_BLOCK_CHOP_MARKET"),
@@ -422,9 +479,9 @@ def load_config_from_env(*, env: Mapping[str, str] | None = None, root: Path | N
         reconciliation_interval_sec=val("ALPHAFORGE_RECONCILIATION_INTERVAL_SEC"),
         reconciliation_timeout_sec=val("ALPHAFORGE_RECONCILIATION_TIMEOUT_SEC"),
         provider_transient_outage_grace_seconds=val("ALPHAFORGE_PROVIDER_TRANSIENT_OUTAGE_GRACE_SECONDS"),
-        require_exchange_connectivity_for_live=_bool_env(env, "ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE", True),
-        required_live_exchanges=_comma_list(_clean_env_value(env.get("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
-        exchange_connectivity_timeout_sec=_float_env(env, "ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC", 2.0),
+        require_exchange_connectivity_for_live=val("ALPHAFORGE_REQUIRE_EXCHANGE_CONNECTIVITY_FOR_LIVE"),
+        required_live_exchanges=_comma_list(str(val("ALPHAFORGE_REQUIRED_LIVE_EXCHANGES")), ("binance",)),
+        exchange_connectivity_timeout_sec=val("ALPHAFORGE_EXCHANGE_CONNECTIVITY_TIMEOUT_SEC"),
         enable_binance_readonly_reconciliation=val("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION"),
         binance_reconciliation_recv_window_ms=int(val("ALPHAFORGE_BINANCE_RECV_WINDOW_MS")),
         binance_reconciliation_trade_lookback_ms=val("ALPHAFORGE_BINANCE_RECONCILIATION_TRADE_LOOKBACK_MS"),

@@ -37,6 +37,8 @@ New exports must not emit `CREATED` as the first lifecycle state. Unknown lifecy
 
 Campaign PAPER positions are persisted in `burnin_pending_position_outcomes`. Empty generic `orders` or `positions` tables do not, by themselves, mean that attached-campaign PAPER position evidence is missing.
 
+PAPER replay finality is based on durable evidence for the same signal and run: a scope-matched final reject decision or reject evidence, accepted `decision_evidence` after `POSITION_OPENED`, or an attached campaign's pending/closed position. The position closes the crash window before post-fill decision evidence is written. A final decision for the same signal in another campaign must not suppress processing; an internal AI acceptance alone is not fill evidence.
+
 ## Required fields
 
 Lifecycle rows should preserve, when available:

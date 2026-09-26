@@ -1,0 +1,74 @@
+{
+  "schema_version": "system_golden.v1",
+  "scenario": "mtf_conflict",
+  "mode": "PAPER",
+  "symbol": "BTCUSDT",
+  "side": "LONG",
+  "frozen_market_event": {
+    "event_id": "golden:mtf_conflict",
+    "timestamp": "2026-01-01T00:00:00Z",
+    "closed_candle": true,
+    "runtime_config": {"require_mtf_alignment": true},
+    "market_context": {
+      "source_exchange": "binance",
+      "timeframe": "1m",
+      "entry": 100.0,
+      "sl": 99.0,
+      "tp": 103.0,
+      "rr": 3.0,
+      "side": "LONG",
+      "setup": "LONG_CONTINUATION",
+      "geometry_status": "COMPLETE",
+      "geometry_source": "FROZEN_REPLAY",
+      "volume_24h_usdt": 90000000.0,
+      "spread_pct": 0.0002,
+      "spread_status": "MEASURED",
+      "expected_slippage_pct": 0.0002,
+      "slippage_status": "MODEL_ESTIMATE",
+      "liquidity_score": 0.95,
+      "liquidity_status": "MEASURED",
+      "funding_rate_pct": 0.0,
+      "funding_status": "MEASURED",
+      "orderbook_imbalance": 0.1,
+      "orderbook_status": "MEASURED",
+      "volatility_regime": "normal",
+      "volatility_status": "MEASURED",
+      "mtf": {
+        "setup": {"phase": "CONTINUATION"},
+        "regime": {"regime": "TRENDING"},
+        "alignment": {
+          "aligned": false,
+          "direction": null,
+          "reasons": ["MTF_SETUP_EXECUTION_MISMATCH"]
+        }
+      }
+    }
+  },
+  "expected": {
+    "decision": "REJECT",
+    "full_chain": [
+      "market_event",
+      "decision",
+      "failed_gates",
+      "geometry",
+      "expected_fill",
+      "effective_rr",
+      "portfolio_state",
+      "persistence",
+      "resolver",
+      "readiness",
+      "audit"
+    ],
+    "failed_gates": [
+      "MTF_SETUP_EXECUTION_MISMATCH"
+    ],
+    "geometry_status": "COMPLETE",
+    "expected_fill_status": "NOT_SUBMITTED",
+    "effective_rr_status": "NOT_APPLICABLE",
+    "portfolio_state": "NOT_EVALUATED",
+    "persistence": "REJECT_DECISION_DURABLE",
+    "resolver": "REJECT_LABEL_PENDING",
+    "readiness": "BLOCKED_INSUFFICIENT_SAMPLE",
+    "audit": "CANONICAL_REJECT"
+  }
+}

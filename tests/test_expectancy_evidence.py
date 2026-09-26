@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -72,6 +73,21 @@ def test_future_rows_cannot_change_prior_as_of_result_and_scope_isolated() -> No
         after = _fetch(session, "2026-01-01T01:00:00Z", run_id="run-a", campaign_id="camp-a", release_id="release-a")
         assert after == before
         assert after == _fetch(session, "2026-01-01T01:00:00Z", run_id="run-a", campaign_id="camp-a", release_id="release-a")
+
+
+@pytest.mark.parametrize("scope_field", ["run_id", "campaign_id", "release_id"])
+def test_each_expectancy_scope_filter_independently_excludes_foreign_evidence(scope_field):
+    scope = {"run_id": "run-a", "campaign_id": "camp-a", "release_id": "release-a"}
+    foreign = dict(scope)
+    foreign[scope_field] = "foreign"
+    with _session() as session:
+        assert _record(session, "same-scope", resolved_at="2026-01-01T01:00:00Z", net_r=0.5)
+        assert _record(session, "foreign-scope", resolved_at="2026-01-01T01:00:00Z",
+                       net_r=-5.0, **foreign)
+        session.commit()
+        stats = _fetch(session, "2026-01-01T01:00:00Z", **scope)
+        assert stats["sample_size"] == 1
+        assert stats["symbol"] == {"BTCUSDT": 0.5}
 
 
 def test_reader_is_sql_only_and_does_not_use_created_at_for_eligibility(monkeypatch) -> None:

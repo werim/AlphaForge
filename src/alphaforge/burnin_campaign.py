@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparse, asyncio, contextlib, csv, hashlib, json, os, re, sqlite3, subprocess, sys, time, uuid
+import argparse, asyncio, contextlib, csv, hashlib, json, math, os, re, sqlite3, subprocess, sys, threading, time, uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -33,6 +33,7 @@ PHASE8_DDL = [
 """CREATE TABLE IF NOT EXISTS burnin_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL UNIQUE,release_id TEXT NOT NULL,campaign_status TEXT NOT NULL,created_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,expected_duration_seconds REAL,observed_duration_seconds REAL,target_decisions INTEGER,target_closed_trades INTEGER,target_reject_forward_outcomes INTEGER,active_run_id TEXT,config_hash TEXT NOT NULL,strategy_config_hash TEXT NOT NULL,universe_hash TEXT NOT NULL,git_commit TEXT NOT NULL,execution_cost_config_hash TEXT,source_provenance_json TEXT NOT NULL,symbols_json TEXT NOT NULL,intervals_json TEXT NOT NULL,restart_count INTEGER NOT NULL DEFAULT 0,last_heartbeat_at TEXT,last_error TEXT,qualification_status TEXT,latest_qualification_id TEXT,evidence_completeness_status TEXT NOT NULL DEFAULT 'UNKNOWN',schema_version TEXT NOT NULL,UNIQUE(campaign_id, release_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,continuation_sequence INTEGER NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,created_at TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(campaign_id,burnin_run_id),UNIQUE(campaign_id,continuation_sequence))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_events (id INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT,event_type TEXT NOT NULL,event_time TEXT NOT NULL,details_json TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_terminal_causes (id INTEGER PRIMARY KEY AUTOINCREMENT,terminal_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT,terminal_cause TEXT NOT NULL,terminal_cause_source TEXT NOT NULL,terminal_event_id TEXT NOT NULL,terminal_at TEXT NOT NULL,run_status TEXT,campaign_status TEXT,details_json TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(campaign_id,burnin_run_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_reject_labels (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_label_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,reject_decision_id TEXT NOT NULL,signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,decision_timestamp TEXT NOT NULL,timeframe TEXT,horizon_bars INTEGER,entry REAL,stop REAL,target REAL,horizon_seconds REAL,execution_cost_assumptions_json TEXT NOT NULL,regime TEXT,reject_reason TEXT,source_provenance_json TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,evidence_complete INTEGER NOT NULL DEFAULT 0,last_error TEXT,claim_token TEXT,claimed_at TEXT,created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(reject_decision_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_position_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_position_id TEXT NOT NULL UNIQUE,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,signal_id TEXT,source_decision_id TEXT,decision_time TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,setup_type TEXT,entry_time TEXT NOT NULL,planned_entry REAL,simulated_fill REAL,stop REAL,target REAL,quantity REAL,notional REAL,entry_spread REAL,entry_slippage REAL,entry_fee REAL,regime TEXT,source_provenance_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'OPEN',exit_time TEXT,exit_price REAL,exit_reason TEXT,gross_pnl REAL,gross_r REAL,exit_spread REAL,exit_slippage REAL,exit_fee REAL,funding REAL,latency_impact_penalty REAL,total_execution_cost REAL,net_pnl REAL,net_r REAL,hold_duration_seconds REAL,mfe REAL,mae REAL,evidence_complete INTEGER NOT NULL DEFAULT 0,missing_fields_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(trade_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_exports (id INTEGER PRIMARY KEY AUTOINCREMENT,export_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,output_dir TEXT NOT NULL,manifest_path TEXT NOT NULL,generated_at TEXT NOT NULL,evidence_hash TEXT NOT NULL,checksums_json TEXT NOT NULL,status TEXT NOT NULL,schema_version TEXT NOT NULL)""",
@@ -133,6 +134,16 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
         getattr(runtime_config, "mtf_guided_signal_generation_enabled", True)
     )
     config_payload["multi_timeframe"]["guided_signal_generation_enabled"] = config_payload["mtf_guided_signal_generation_enabled"]
+    mtf_execution_confirmation_mode = str(
+        getattr(runtime_config, "mtf_execution_confirmation_mode", "ENFORCE")
+    ).strip().upper() or "ENFORCE"
+    if mtf_execution_confirmation_mode not in {"ENFORCE", "SHADOW"}:
+        raise ValueError("MTF_EXECUTION_CONFIRMATION_MODE must be ENFORCE or SHADOW")
+    # Preserve existing ENFORCE campaign hashes. SHADOW changes decisions and
+    # must therefore be explicit in every prospective campaign identity.
+    if mtf_execution_confirmation_mode == "SHADOW":
+        config_payload["mtf_execution_confirmation_mode"] = mtf_execution_confirmation_mode
+        config_payload["multi_timeframe"]["execution_confirmation_mode"] = mtf_execution_confirmation_mode
     # Read-only compatibility labels for older exporters. They no longer define
     # strategy identity independently of the explicit three-layer contract.
     config_payload["decision_setup_timeframe"] = config_payload["execution_timeframe"]
@@ -157,6 +168,8 @@ def build_phase8_campaign_identity(runtime_config: Any, symbols: Sequence[str], 
             getattr(runtime_config, "enable_state_direction_resolution", False)
         ),
     }
+    if mtf_execution_confirmation_mode == "SHADOW":
+        strategy_payload["mtf_execution_confirmation_mode"] = mtf_execution_confirmation_mode
     effective_paper_slippage_bps = paper_slippage_bps if paper_slippage_bps is not None else getattr(runtime_config, "paper_slippage_bps", DEFAULT_PHASE8_PAPER_SLIPPAGE_BPS)
     execution_cost_payload = {
         "min_effective_rr": getattr(runtime_config, "min_effective_rr", None),
@@ -303,9 +316,93 @@ def load_active_campaign_attachment(conn: Any, campaign_id: str) -> tuple[dict[s
         return campaign, run, mapping, str(campaign.get("last_error") or "PHASE8_CAMPAIGN_ACTIVE_RUN_NOT_RUNNING")
     return campaign, run, mapping, None
 
-def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|None=None, details: Mapping[str,Any]|None=None) -> None:
-    eid="evt_"+canonical_hash({"campaign_id":campaign_id,"type":event_type,"run":burnin_run_id,"at":utc_now(),"details":details or {}})[:24]
-    _exec(conn,"INSERT OR IGNORE INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES (:eid,:cid,:bid,:typ,:ts,:det,:sv)",{"eid":eid,"cid":campaign_id,"bid":burnin_run_id,"typ":event_type,"ts":utc_now(),"det":json.dumps(dict(details or {}),sort_keys=True,default=str),"sv":CAMPAIGN_SCHEMA_VERSION})
+def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|None=None, details: Mapping[str,Any]|None=None, event_time: str|None=None) -> str:
+    ts=event_time or utc_now()
+    eid="evt_"+canonical_hash({"campaign_id":campaign_id,"type":event_type,"run":burnin_run_id,"at":ts,"details":details or {}})[:24]
+    _exec(conn,"INSERT OR IGNORE INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES (:eid,:cid,:bid,:typ,:ts,:det,:sv)",{"eid":eid,"cid":campaign_id,"bid":burnin_run_id,"typ":event_type,"ts":ts,"det":json.dumps(dict(details or {}),sort_keys=True,default=str),"sv":CAMPAIGN_SCHEMA_VERSION})
+    return eid
+
+
+def get_terminal_cause(conn: Any, campaign_id: str, burnin_run_id: str | None = None) -> dict[str, Any] | None:
+    """Return the immutable terminal-cause record for one continuation, if present."""
+    if burnin_run_id is None:
+        campaign = get_campaign(conn, campaign_id)
+        burnin_run_id = campaign.get("active_run_id") if campaign else None
+    try:
+        row = _exec(
+            conn,
+            "SELECT * FROM burnin_terminal_causes WHERE campaign_id=:cid AND burnin_run_id IS :bid ORDER BY id LIMIT 1",
+            {"cid": campaign_id, "bid": burnin_run_id},
+        ).fetchone()
+    except (sqlite3.OperationalError, OperationalError) as exc:
+        if "no such table: burnin_terminal_causes" in str(getattr(exc, "orig", exc)).lower():
+            return None
+        raise
+    return None if row is None else _row_dict(row)
+
+
+def persist_terminal_cause(
+    conn: Any,
+    campaign_id: str,
+    burnin_run_id: str | None,
+    *,
+    reason: str,
+    event_type: str,
+    run_status: str | None,
+    campaign_status: str | None,
+    details: Mapping[str, Any] | None = None,
+    terminal_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist the first authoritative cause for a run terminal transition."""
+    existing = get_terminal_cause(conn, campaign_id, burnin_run_id)
+    if existing is not None:
+        return existing
+    ts = terminal_at or utc_now()
+    source = str(event_type)
+    event_details = {
+        "reason": reason,
+        "terminal_cause": reason,
+        "terminal_cause_source": source,
+        "campaign_id": campaign_id,
+        "burnin_run_id": burnin_run_id,
+        **dict(details or {}),
+    }
+    eid = event(
+        conn,
+        campaign_id,
+        event_type,
+        burnin_run_id=burnin_run_id,
+        details=event_details,
+        event_time=ts,
+    )
+    terminal_id = "term_" + canonical_hash({"campaign_id": campaign_id, "burnin_run_id": burnin_run_id})[:24]
+    _exec(
+        conn,
+        """INSERT OR IGNORE INTO burnin_terminal_causes(
+            terminal_id,campaign_id,burnin_run_id,terminal_cause,terminal_cause_source,
+            terminal_event_id,terminal_at,run_status,campaign_status,details_json,schema_version
+        ) VALUES (
+            :terminal_id,:cid,:bid,:cause,:source,:event_id,:terminal_at,
+            :run_status,:campaign_status,:details,:schema_version
+        )""",
+        {
+            "terminal_id": terminal_id,
+            "cid": campaign_id,
+            "bid": burnin_run_id,
+            "cause": reason,
+            "source": source,
+            "event_id": eid,
+            "terminal_at": ts,
+            "run_status": run_status,
+            "campaign_status": campaign_status,
+            "details": json.dumps(event_details, sort_keys=True, default=str),
+            "schema_version": CAMPAIGN_SCHEMA_VERSION,
+        },
+    )
+    persisted = get_terminal_cause(conn, campaign_id, burnin_run_id)
+    if persisted is None:
+        raise RuntimeError("TERMINAL_CAUSE_PERSISTENCE_FAILED")
+    return persisted
 
 def mark_attached_campaign_operational(conn: Any, campaign_id: str, run_id: str, *, runtime_instance_id: str) -> None:
     """Let the operational worker own STARTING -> RUNNING persistence."""
@@ -352,9 +449,18 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
     old=c.get("active_run_id"); seq=int((_exec(conn,"SELECT COALESCE(MAX(continuation_sequence),-1)+1 FROM burnin_campaign_runs WHERE campaign_id=:id",{"id":campaign_id}).fetchone()[0]) or 0)
     if old and resume:
         ts = utc_now()
-        _exec(conn,"UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'",{"bid":old,"ts":ts})
-        _exec(conn,"UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'",{"cid":campaign_id,"bid":old,"ts":ts})
-        event(conn,campaign_id,"RECOVERY_REQUIRED",burnin_run_id=old)
+        old_run_transition = _exec(conn,"UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'",{"bid":old,"ts":ts})
+        old_mapping_transition = _exec(conn,"UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'",{"cid":campaign_id,"bid":old,"ts":ts})
+        if old_run_transition.rowcount or old_mapping_transition.rowcount:
+            persist_terminal_cause(
+                conn, campaign_id, old,
+                reason="CONTINUATION_REPLACED_BY_RESUME",
+                event_type="RECOVERY_REQUIRED",
+                run_status="RECOVERY_REQUIRED",
+                campaign_status=str(c.get("campaign_status") or "RUNNING"),
+                details={"transition": "RUNNING->RECOVERY_REQUIRED", "continuation_sequence": seq},
+                terminal_at=ts,
+            )
     run_id=f"{campaign_id}_run_{seq:04d}"
     run=BurnInRun(run_id,c["release_id"],phase="PHASE8",execution_mode="PAPER",continuation_sequence=seq,start_time=utc_now(),status="RUNNING",git_commit=c["git_commit"],config_hash=c["config_hash"],strategy_config_hash=c["strategy_config_hash"],universe_hash=c["universe_hash"],source_provenance=c["source_provenance"],symbols=c["symbols"],intervals=c["intervals"],expected_duration_seconds=c.get("expected_duration_seconds"))
     persist_burnin_run(conn,run)
@@ -364,18 +470,35 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
     return {"campaign_id":campaign_id,"burnin_run_id":run_id,"continuation_sequence":seq,"status":"RUNNING"}
 
 def terminalize_active_campaign_run(conn: Any, campaign_id: str, *, run_status: str, campaign_status: str, reason: str, event_type: str, details: Mapping[str, Any] | None = None, clear_worker_metadata: bool = True) -> None:
-    """Atomically preserve a terminal continuation outcome and its accurate cause."""
+    """Atomically terminalize an active continuation while preserving the first cause."""
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
     run_id, ts = c.get("active_run_id"), utc_now()
-    existing = _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND burnin_run_id IS :bid AND event_type=:event AND details_json LIKE :reason LIMIT 1", {"cid": campaign_id, "bid": run_id, "event": event_type, "reason": f'%"reason": "{reason}"%' }).fetchone()
+    run_row = _exec(conn, "SELECT status FROM burnin_runs WHERE burnin_run_id=:bid", {"bid": run_id}).fetchone() if run_id else None
+    current_run_status = str(run_row[0]) if run_row else None
+    terminal_target = run_status in {"FAILED", "RECOVERY_REQUIRED"} or campaign_status in {"FAILED", "RECOVERY_REQUIRED"}
+    transitioning = str(c.get("campaign_status") or "") in {"STARTING", "RUNNING"} or current_run_status in {"STARTING", "RUNNING"}
+
+    if terminal_target and transitioning:
+        persist_terminal_cause(
+            conn, campaign_id, run_id,
+            reason=reason,
+            event_type=event_type,
+            run_status=run_status,
+            campaign_status=campaign_status,
+            details=details,
+            terminal_at=ts,
+        )
+
     if run_id:
         _exec(conn, "UPDATE burnin_runs SET status=:status, end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status IN ('STARTING','RUNNING')", {"status": run_status, "bid": run_id, "ts": ts})
         _exec(conn, "UPDATE burnin_campaign_runs SET status=:status, ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status IN ('STARTING','RUNNING')", {"status": run_status, "cid": campaign_id, "bid": run_id, "ts": ts})
     metadata = ", worker_pid=NULL, worker_started_at=NULL" if clear_worker_metadata else ""
-    _exec(conn, f"UPDATE burnin_campaigns SET campaign_status=:status, last_error=:reason{metadata} WHERE campaign_id=:cid", {"status": campaign_status, "reason": reason, "cid": campaign_id})
-    if not existing:
+    if terminal_target:
+        _exec(conn, f"UPDATE burnin_campaigns SET campaign_status=:status, last_error=:reason{metadata} WHERE campaign_id=:cid AND campaign_status IN ('STARTING','RUNNING')", {"status": campaign_status, "reason": reason, "cid": campaign_id})
+    else:
+        _exec(conn, f"UPDATE burnin_campaigns SET campaign_status=:status, last_error=:reason{metadata} WHERE campaign_id=:cid", {"status": campaign_status, "reason": reason, "cid": campaign_id})
         event(conn, campaign_id, event_type, burnin_run_id=run_id, details={"reason": reason, "campaign_id": campaign_id, "burnin_run_id": run_id, **dict(details or {})})
 
 
@@ -462,6 +585,10 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
         SELECT reject_outcome_id || ':agg:' || :cid, :agg, release_id, reject_reason, symbol, regime, decision_time, hypothetical_entry, hypothetical_stop, hypothetical_target, forward_label, would_tp, would_sl, timeout, ambiguous, hypothetical_gross_r, hypothetical_net_r_after_costs, avoided_loss, missed_profit, execution_invalidated, evidence_horizon, evidence_complete,
         json_set(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{{}}' END,
           '$.forward_label_subject', COALESCE(json_extract(payload_json,'$.forward_label_subject'), (SELECT json_extract(p.source_provenance_json,'$.forward_label_subject') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=substr(burnin_reject_outcomes.reject_outcome_id,6) AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1)),
+          '$.reject_execution_basis', COALESCE(json_extract(payload_json,'$.reject_execution_basis'), (SELECT json_extract(p.source_provenance_json,'$.reject_execution_basis') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=json_extract(burnin_reject_outcomes.payload_json,'$.reject_decision_id') AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1)),
+          '$.execution_aligned', CASE WHEN COALESCE(json_extract(payload_json,'$.reject_execution_basis'), (SELECT json_extract(p.source_provenance_json,'$.reject_execution_basis') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=json_extract(burnin_reject_outcomes.payload_json,'$.reject_decision_id') AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1))='EXPECTED_FILL_RUNTIME_PARITY' THEN 1 ELSE 0 END,
+          '$.reject_quality_attributable', CASE WHEN COALESCE(json_extract(payload_json,'$.reject_quality_attributable'), (SELECT json_extract(p.source_provenance_json,'$.reject_quality_attributable') FROM burnin_pending_reject_labels p WHERE p.reject_decision_id=json_extract(burnin_reject_outcomes.payload_json,'$.reject_decision_id') AND p.burnin_run_id=burnin_reject_outcomes.burnin_run_id AND p.campaign_id=:cid LIMIT 1), 1)=1
+            THEN 1 ELSE 0 END,
           '$.canonical_pending_linked', CASE WHEN EXISTS(
             SELECT 1 FROM burnin_pending_reject_labels p
             JOIN burnin_observations co ON co.burnin_run_id=p.burnin_run_id
@@ -510,7 +637,10 @@ def materialize_campaign_aggregate(conn: Any, campaign_id: str) -> str:
     return agg_id
 
 def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
-    active_campaign_duration(conn, campaign_id)
+    # Aggregation is a read path. Derive active duration without persisting it so
+    # health/status and qualification-due checks never acquire the SQLite writer
+    # slot merely to inspect campaign evidence.
+    observed_duration = active_campaign_duration(conn, campaign_id, persist=False)
     c=get_campaign(conn,campaign_id)
     if not c: return {"status":"UNAVAILABLE","reason":"NO_CAMPAIGN"}
     runs=[_row_dict(r) for r in _exec(conn,"SELECT r.* FROM burnin_runs r JOIN burnin_campaign_runs cr ON cr.burnin_run_id=r.burnin_run_id WHERE cr.campaign_id=:id AND (cr.status != 'FAILED' OR EXISTS (SELECT 1 FROM burnin_observations o WHERE o.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_trade_outcomes t WHERE t.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_reject_outcomes j WHERE j.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_regime_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_execution_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_calibration_metrics m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_drawdown_events m WHERE m.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_qualification_snapshots q WHERE q.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_suspension_events s WHERE s.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_reject_labels p WHERE p.burnin_run_id=r.burnin_run_id) OR EXISTS (SELECT 1 FROM burnin_pending_position_outcomes p WHERE p.burnin_run_id=r.burnin_run_id)) ORDER BY cr.continuation_sequence",{"id":campaign_id}).fetchall()]
@@ -594,7 +724,7 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     if candidate_label_keys & ineligible_ids: integrity_issues.append("LABELS_FOR_INELIGIBLE_REJECTS")
     if duplicate_qualification_outcomes: integrity_issues.append("DUPLICATE_CANONICAL_REJECT_OUTCOMES")
     coverage=(eligible_labels/label_eligible if label_eligible else (1.0 if not eligible_labels else 0.0))
-    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":qualification_unique_labels,"diagnostic_unique_reject_labels_persisted":unique_labels,"non_attributable_reject_labels_persisted":unique_labels-qualification_unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(qualification_resolved),"diagnostic_completed_rejected_forward_outcomes":len(resolved),"duplicate_canonical_rejected_forward_outcomes":duplicate_qualification_outcomes,"non_attributable_or_orphan_rejected_forward_outcomes":len(resolved)-len(qualification_resolved),"qualification_reject_identity_unit":"CANONICAL_DECISION","qualification_reject_identity_mode":identity_mode,"ambiguous_rejected_forward_outcomes":sum(1 for r in qualification_resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"diagnostic_ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(c.get("observed_duration_seconds") or 0),"source_run_ids":run_ids}
+    metrics={"sample_count":len(obs),"accepted_count":sum(1 for r in obs if str(gv(r,"decision") or '').upper()=='ACCEPTED'),"rejected_count":rejected_count,"canonical_rejected_decisions":rejected_count,"label_eligible_rejects":label_eligible,"label_ineligible_rejects":len(ineligible_ids),"label_ineligible_by_reason":ineligible_by_reason,"unique_reject_labels_persisted":qualification_unique_labels,"diagnostic_unique_reject_labels_persisted":unique_labels,"non_attributable_reject_labels_persisted":unique_labels-qualification_unique_labels,"eligible_reject_labels_persisted":eligible_labels,"reject_label_coverage":min(1.0,coverage),"reject_label_integrity_status":"FAIL" if integrity_issues else "PASS","reject_label_integrity_issues":integrity_issues,"closed_trade_count":len(closed),"completed_rejected_forward_outcomes":len(qualification_resolved),"diagnostic_completed_rejected_forward_outcomes":len(resolved),"duplicate_canonical_rejected_forward_outcomes":duplicate_qualification_outcomes,"non_attributable_or_orphan_rejected_forward_outcomes":len(resolved)-len(qualification_resolved),"qualification_reject_identity_unit":"CANONICAL_DECISION","qualification_reject_identity_mode":identity_mode,"ambiguous_rejected_forward_outcomes":sum(1 for r in qualification_resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"diagnostic_ambiguous_rejected_forward_outcomes":sum(1 for r in resolved if str(gv(r,'forward_label')).upper()=='AMBIGUOUS'),"observed_duration_seconds":float(observed_duration),"source_run_ids":run_ids}
     qualification_hash_payload={key:metrics[key] for key in ("sample_count","accepted_count","rejected_count","closed_trade_count","completed_rejected_forward_outcomes","ambiguous_rejected_forward_outcomes","observed_duration_seconds","source_run_ids","qualification_reject_identity_unit","qualification_reject_identity_mode")}
     qualification_hash_payload["reject_outcomes"] = sorted(({
         "reject_decision_id": reject_decision_id_from_outcome(dict(r) if isinstance(r,sqlite3.Row) else dict(r._mapping)),
@@ -603,7 +733,138 @@ def aggregate_campaign(conn: Any, campaign_id: str) -> dict[str,Any]:
     } for r in qualification_resolved), key=lambda item: str(item["reject_decision_id"]))
     metrics["evidence_hash"]=canonical_hash({"campaign_id":campaign_id,"qualification_evidence":qualification_hash_payload})
     metrics["mtf_execution_threshold_calibration"] = execution_threshold_calibration(conn, campaign_id)
+    metrics["reject_candidate_feasibility_shadow"] = reject_candidate_feasibility_shadow(conn, campaign_id)
     return {"status":"OK","campaign_id":campaign_id,"release_id":c["release_id"],"metrics":metrics,"evidence_hash":metrics["evidence_hash"]}
+
+def reject_candidate_feasibility_shadow(conn: Any, campaign_id: str) -> dict[str, Any]:
+    """Execution-aligned reject feasibility diagnostics; never authoritative."""
+    rows=_exec(conn,"""SELECT o.forward_label,o.hypothetical_net_r_after_costs,o.ambiguous,
+        o.payload_json,p.source_provenance_json
+        FROM burnin_reject_outcomes o
+        JOIN burnin_pending_reject_labels p
+          ON p.reject_decision_id=json_extract(o.payload_json,'$.reject_decision_id')
+         AND p.pending_label_id=json_extract(o.payload_json,'$.pending_label_id')
+         AND p.burnin_run_id=o.burnin_run_id
+        JOIN burnin_campaign_runs cr
+          ON cr.campaign_id=p.campaign_id AND cr.burnin_run_id=p.burnin_run_id
+        WHERE p.campaign_id=:cid AND o.evidence_complete=1""",{"cid":campaign_id}).fetchall()
+
+    aligned=[]
+    legacy_count=0
+    for raw in rows:
+        r=_row_dict(raw)
+        try:
+            payload=json.loads(r.get("payload_json") or "{}")
+            provenance=json.loads(r.get("source_provenance_json") or "{}")
+        except (TypeError,json.JSONDecodeError):
+            continue
+        if provenance.get("reject_execution_basis") != "EXPECTED_FILL_RUNTIME_PARITY":
+            legacy_count += 1
+            continue
+        if provenance.get("reject_quality_attributable") is False:
+            continue
+        if provenance.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE":
+            continue
+        aligned.append({
+            "score": provenance.get("score"),
+            "candidate_raw_rr": provenance.get("candidate_raw_rr"),
+            "executable_raw_rr": provenance.get("executable_raw_rr"),
+            "effective_rr": (
+                provenance.get("effective_rr_at_decision")
+                if provenance.get("effective_rr_at_decision") is not None
+                else provenance.get("counterfactual_effective_rr")
+            ),
+            "effective_rr_source": (
+                "DECISION_TIME"
+                if provenance.get("effective_rr_at_decision") is not None
+                else "COUNTERFACTUAL_RUNTIME_PARITY"
+            ),
+            "fill_shift_initial_risk_ratio": provenance.get("fill_shift_initial_risk_ratio"),
+            "stop_distance_pct": provenance.get("stop_distance_pct"),
+            "min_stop_pct": provenance.get("min_stop_pct"),
+            "max_stop_pct": provenance.get("max_stop_pct"),
+            "all_failed_gates": provenance.get("all_failed_gates") or payload.get("all_failed_gates") or [],
+            "forward_label": r.get("forward_label"),
+            "net_r": r.get("hypothetical_net_r_after_costs"),
+            "ambiguous": bool(r.get("ambiguous")),
+        })
+
+    def finite(value: Any) -> float | None:
+        try:
+            parsed=float(value)
+        except (TypeError,ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    def distribution(field: str) -> dict[str, Any]:
+        values=[v for row in aligned for v in [finite(row.get(field))] if v is not None]
+        return {
+            "count":len(values),
+            "min":None if not values else min(values),
+            "avg":None if not values else sum(values)/len(values),
+            "max":None if not values else max(values),
+        }
+
+    effective_matrix={}
+    executable_matrix={}
+    stop_buckets={"BELOW_MIN":{"count":0,"net_r":[]},
+                  "WITHIN_BOUNDS":{"count":0,"net_r":[]},
+                  "ABOVE_MAX":{"count":0,"net_r":[]},
+                  "UNKNOWN":{"count":0,"net_r":[]}}
+    gate_combinations={}
+    def add_matrix(matrix: dict[str, Any], *, score: float | None, rr_value: float | None, row: Mapping[str, Any]) -> None:
+        if score is None or rr_value is None:
+            return
+        score_low=math.floor(score/0.05)*0.05
+        rr_low=math.floor(rr_value/0.10)*0.10
+        key=f"{score_low:.2f}-{score_low+0.05:.2f}|{rr_low:.2f}-{rr_low+0.10:.2f}"
+        cell=matrix.setdefault(key,{"count":0,"tp":0,"sl":0,"net_r":[]})
+        cell["count"]+=1
+        cell["tp"]+=int(row.get("forward_label")=="TP_BEFORE_SL")
+        cell["sl"]+=int(row.get("forward_label")=="SL_BEFORE_TP")
+        net=finite(row.get("net_r"))
+        if net is not None and not row.get("ambiguous"):
+            cell["net_r"].append(net)
+
+    for row in aligned:
+        score=finite(row.get("score"))
+        add_matrix(effective_matrix, score=score, rr_value=finite(row.get("effective_rr")), row=row)
+        add_matrix(executable_matrix, score=score, rr_value=finite(row.get("executable_raw_rr")), row=row)
+        stop=finite(row.get("stop_distance_pct")); min_stop=finite(row.get("min_stop_pct")); max_stop=finite(row.get("max_stop_pct"))
+        bucket=("UNKNOWN" if stop is None or min_stop is None or max_stop is None
+                else "BELOW_MIN" if stop < min_stop
+                else "ABOVE_MAX" if stop > max_stop
+                else "WITHIN_BOUNDS")
+        stop_buckets[bucket]["count"]+=1
+        net=finite(row.get("net_r"))
+        if net is not None and not row.get("ambiguous"): stop_buckets[bucket]["net_r"].append(net)
+        gates=tuple(sorted(set(str(x) for x in (row.get("all_failed_gates") or []))))
+        gate_key="|".join(gates) if gates else "NONE"
+        gate_combinations[gate_key]=gate_combinations.get(gate_key,0)+1
+
+    for matrix in (effective_matrix, executable_matrix):
+        for cell in matrix.values():
+            nets=cell.pop("net_r")
+            cell["avg_net_r"]=None if not nets else sum(nets)/len(nets)
+    for bucket in stop_buckets.values():
+        nets=bucket.pop("net_r")
+        bucket["avg_net_r"]=None if not nets else sum(nets)/len(nets)
+
+    return {
+        "authoritative":False,
+        "purpose":"SHADOW_DIAGNOSTIC_ONLY",
+        "execution_basis":"EXPECTED_FILL_RUNTIME_PARITY",
+        "sample_count":len(aligned),
+        "legacy_or_unaligned_rows_excluded":legacy_count,
+        "candidate_raw_rr":distribution("candidate_raw_rr"),
+        "executable_raw_rr":distribution("executable_raw_rr"),
+        "effective_rr":distribution("effective_rr"),
+        "fill_shift_initial_risk_ratio":distribution("fill_shift_initial_risk_ratio"),
+        "stop_distance_performance":stop_buckets,
+        "score_x_executable_rr_matrix":executable_matrix,
+        "score_x_effective_rr_matrix":effective_matrix,
+        "failed_gate_combinations":gate_combinations,
+    }
 
 def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[str, Any]]:
     """Outcome quality by observed execution strength; never selects/relaxes a gate."""
@@ -639,6 +900,7 @@ def execution_threshold_calibration(conn: Any, campaign_id: str) -> list[dict[st
             if identity_mode != LEGACY_REJECT_IDENTITY_MODE and key not in canonical_ids: continue
             if payload.get("reject_quality_attributable") is False: continue
             if payload.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE" or provenance.get("forward_label_subject") == "LEGACY_SCANNER_SHADOW_CANDIDATE": continue
+            if provenance.get("reject_execution_basis") != "EXPECTED_FILL_RUNTIME_PARITY": continue
             strength=float((((provenance.get("mtf") or {}).get("execution") or {}).get("ma_delta_strength")))
         except (TypeError,ValueError,json.JSONDecodeError):
             continue
@@ -833,7 +1095,7 @@ class BinanceReadOnlyCandleProvider:
 class BurnInCampaignRunner:
     """Operational campaign worker loop for resolver/maintenance progress without enabling LIVE."""
     def __init__(self, engine: Engine, campaign_id: str, candle_provider: Any, *, runtime_factory: Any | None = None, resolver_interval_seconds: float = 30.0, qualification_interval_seconds: float = 300.0, maintenance_interval_seconds: float = 30.0, resolver_failure_threshold: int = 3, provider_transient_outage_grace_seconds: float = 300.0, qualification_observation_threshold: int = 25, thresholds: BurnInThresholds | None = None) -> None:
-        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0
+        self.engine = configure_sqlite_engine(engine); self.campaign_id = campaign_id; self.candle_provider = candle_provider; self.runtime_factory = runtime_factory; self.resolver_interval_seconds = resolver_interval_seconds; self.qualification_interval_seconds = qualification_interval_seconds; self.maintenance_interval_seconds = maintenance_interval_seconds; self.resolver_failure_threshold = resolver_failure_threshold; self.provider_transient_outage_grace_seconds = max(0.0, provider_transient_outage_grace_seconds); self.qualification_observation_threshold = max(1, qualification_observation_threshold); self.thresholds = thresholds; self.resolver_failure_count = 0; self._provider_failure_active = False; self._pending_resolver_failure_events: list[dict[str, Any]] = []; self._attached_runtime: Any | None = None; self._transient_failure_started_monotonic: float | None = None; self._stop_event: asyncio.Event | None = None; self._last_qualification_monotonic = 0.0; self._last_qualification_observation_count = 0; self._qualification_lock = threading.Lock()
 
     def _qualification_due(self) -> bool:
         with self.engine.connect() as conn:
@@ -853,13 +1115,21 @@ class BurnInCampaignRunner:
         return first_evidence or near_completion or (elapsed >= self.qualification_interval_seconds and (enough_new or evidence_changed))
 
     def _qualify_if_due(self) -> dict[str, Any] | None:
-        if not self._qualification_due():
+        # Resolver and maintenance run in separate worker threads. Qualification
+        # materialization is write-heavy, so allow only one in-flight check/build
+        # per campaign runner. A skipped contender will retry on its next loop.
+        if not self._qualification_lock.acquire(blocking=False):
             return None
-        result = qualify_campaign(self.engine, self.campaign_id, self.thresholds)
-        with self.engine.connect() as conn:
-            self._last_qualification_observation_count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
-        self._last_qualification_monotonic = time.monotonic()
-        return result
+        try:
+            if not self._qualification_due():
+                return None
+            result = qualify_campaign(self.engine, self.campaign_id, self.thresholds)
+            with self.engine.connect() as conn:
+                self._last_qualification_observation_count = int(_exec(conn, f"SELECT COUNT(*) FROM burnin_observations o JOIN burnin_campaign_runs cr ON cr.burnin_run_id=o.burnin_run_id WHERE cr.campaign_id=:cid AND {canonical_decision_sql('o')}", {"cid": self.campaign_id}).scalar() or 0)
+            self._last_qualification_monotonic = time.monotonic()
+            return result
+        finally:
+            self._qualification_lock.release()
 
     def _best_effort_failure_event(self, original: BaseException, failure_class: str, elapsed: float | None) -> None:
         self._pending_resolver_failure_events.append({"attempt_id": uuid.uuid4().hex, "error": str(original), "failure_count": self.resolver_failure_count, "failure_class": failure_class, "transient_elapsed_seconds": elapsed, "grace_seconds": self.provider_transient_outage_grace_seconds})

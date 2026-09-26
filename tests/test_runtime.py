@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import inspect
 import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -335,7 +336,7 @@ def test_runtime_exception_persists_diagnostic_error_lifecycle() -> None:
             raise ValueError("decision pipeline blew up")
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "side": "LONG", "spread_pct": 0.0001, "funding_rate_pct": 0.0, "volume_24h_usdt": 95_000_000, "volatility_pct": 0.3, "trend_strength": 0.85, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "side": "LONG", "market_ts": time.time(), "spread_pct": 0.0001, "funding_rate_pct": 0.0, "volume_24h_usdt": 95_000_000, "volatility_pct": 0.3, "trend_strength": 0.85, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -477,6 +478,96 @@ def _canonical_rejected_count(engine: object, campaign_id: str) -> int:
             ) AND UPPER(COALESCE(o.decision, ''))='REJECTED'
               AND {canonical_decision_sql('o')}
         """), {"cid": campaign_id}).scalar_one())
+
+
+def test_complete_mtf_regime_is_canonical_across_negative_expectancy_reject_evidence(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, _campaign_id, _run_id = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "regime-authority")
+    payload = _canonical_reject_payload("runtime:regime-authority")
+    payload.update({
+        "reason": "NEGATIVE_EXPECTANCY_AFTER_COSTS",
+        "regime": "UNFAVORABLE",
+        "geometry_status": "COMPLETE",
+        "rr": 1.2,
+        "candidate_rr": 1.2,
+        "effective_rr": 0.9,
+        "mtf": {
+            "regime": {
+                "regime": "TRENDING",
+                "evidence_status": "COMPLETE",
+                "direction": "SHORT",
+            }
+        },
+    })
+
+    asyncio.run(runtime._persist_reject(payload))
+
+    with engine.connect() as conn:
+        observation = conn.execute(text(
+            "SELECT regime,metrics_json FROM burnin_observations WHERE decision='REJECTED'"
+        )).one()
+        decision_regime = conn.execute(text(
+            "SELECT regime FROM decision_evidence WHERE signal_id='runtime:regime-authority' AND decision='REJECT'"
+        )).scalar_one()
+        review_regime = conn.execute(text(
+            "SELECT regime FROM rejected_signal_reviews WHERE signal_id='runtime:regime-authority'"
+        )).scalar_one()
+        pending_regime = conn.execute(text(
+            "SELECT regime FROM burnin_pending_reject_labels WHERE signal_id='runtime:regime-authority'"
+        )).scalar_one()
+
+    metrics = json.loads(observation[1])
+    assert observation[0] == "TRENDING"
+    assert decision_regime == "TRENDING"
+    assert review_regime == "TRENDING"
+    assert pending_regime == "TRENDING"
+    assert metrics["canonical_market_regime"] == "TRENDING"
+    assert metrics["legacy_decision_regime"] == "UNFAVORABLE"
+    assert metrics["mtf"]["regime"]["regime"] == "TRENDING"
+
+
+def test_incomplete_mtf_regime_does_not_override_legacy_regime() -> None:
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None,
+    )
+    payload = runtime._canonical_reject_payload({
+        "signal_id": "runtime:incomplete-regime", "symbol": "BTCUSDT",
+        "reason": "NEGATIVE_EXPECTANCY_AFTER_COSTS", "regime": "UNFAVORABLE",
+        "mtf": {"regime": {"regime": "TRENDING", "evidence_status": "INCOMPLETE"}},
+    })
+
+    assert payload["regime"] == "UNFAVORABLE"
+    assert "legacy_decision_regime" not in payload
+
+
+def test_accepted_burnin_persistence_prefers_complete_mtf_regime(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'accepted-regime-authority.db'}")
+    runtime = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    runtime._burnin_run_id = "accepted-regime-authority-run"
+    runtime._persist_burnin_decision({
+        "signal_id": "accepted-regime-authority", "symbol": "ETHUSDT",
+        "decision": "ACCEPTED", "regime": "TREND", "timeframe": "1m",
+        "mtf": {"regime": {"regime": "TRENDING", "evidence_status": "COMPLETE"}},
+    })
+
+    with engine.connect() as conn:
+        observation = conn.execute(text(
+            "SELECT regime,metrics_json FROM burnin_observations WHERE decision='ACCEPTED'"
+        )).one()
+        decision_regime = conn.execute(text(
+            "SELECT regime FROM decision_evidence WHERE signal_id='accepted-regime-authority' AND decision='ACCEPT'"
+        )).scalar_one()
+
+    metrics = json.loads(observation[1])
+    assert observation[0] == "TRENDING"
+    assert decision_regime == "TRENDING"
+    assert metrics["canonical_market_regime"] == "TRENDING"
+    assert metrics["legacy_decision_regime"] == "TREND"
 
 
 def test_same_canonical_reject_persisted_twice_counts_once(
@@ -727,7 +818,13 @@ def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> Non
     orchestrator._persist_burnin_decision({
         "signal_id": "accepted-1", "symbol": "BTCUSDT", "decision": "ACCEPTED",
         "timeframe": "1m", "geometry_status": "COMPLETE", "score": 0.8,
-        "rr": 2.0, "effective_rr": 1.8,
+        "rr": 2.0, "candidate_rr": 2.0, "executable_raw_rr": 1.9,
+        "effective_rr": 1.8, "entry": 100.0, "sl": 95.0, "tp": 110.0,
+        "geometry_source": "MTF_SETUP_STRUCTURE",
+        "entry_source": "execution_close_within_setup_entry_zone",
+        "stop_source": "setup_window_support", "target_source": "setup_window_resistance",
+        "setup_timeframe": "15m", "execution_timeframe": "1m",
+        "structural_stop": 95.0, "structural_target": 110.0,
     })
 
     with engine.connect() as conn:
@@ -736,6 +833,13 @@ def test_accepted_burnin_decision_has_no_reject_causality(tmp_path: Path) -> Non
         )).scalar_one())
     assert "primary_reject_reason" not in metrics
     assert "reject_reasons" not in metrics
+    assert metrics["geometry_source"] == "MTF_SETUP_STRUCTURE"
+    assert metrics["entry_source"] == "execution_close_within_setup_entry_zone"
+    assert metrics["stop_source"] == "setup_window_support"
+    assert metrics["target_source"] == "setup_window_resistance"
+    assert metrics["setup_timeframe"] == "15m"
+    assert metrics["structural_stop"] == pytest.approx(95.0)
+    assert metrics["structural_target"] == pytest.approx(110.0)
 
 
 def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path: Path) -> None:
@@ -782,6 +886,51 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
     assert tuple(pending[:4]) == ("LONG", 100.0, 90.0, 112.0)
     assert provenance["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
     assert provenance["reject_quality_attributable"] is False
+
+
+def test_guided_null_low_effective_rr_is_not_authoritative(tmp_path: Path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'guided-null-low-rr.db'}")
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        ai_brain=_brain(), market_scanner=lambda: None, persistence_engine=engine,
+    )
+    orchestrator._burnin_run_id = "guided-null-low-rr-run"
+    source = {
+        "signal_id": "guided-null-low-rr", "symbol": "ETHUSDT", "side": "LONG",
+        "entry": 100.0, "sl": 99.0, "tp": 101.2, "rr": 1.2,
+        "effective_rr": 0.84, "geometry_status": "COMPLETE",
+        "reason": "LOW_EFFECTIVE_RR",
+        "mtf": {"generation": {"mode": "REGIME_GUIDED", "candidate": None,
+                                "evidence_status": "INCOMPLETE"}},
+    }
+    payload = orchestrator._canonical_reject_payload(source)
+
+    assert payload["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
+    assert payload["geometry_status"] == "UNAVAILABLE"
+    assert payload["rr"] is None and payload["effective_rr"] is None
+    assert payload["reject_quality_attributable"] is False
+    assert payload["primary_reject_reason"] == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+    assert payload["authoritative_reject_reason"] == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+    assert payload["reason"] == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+    assert "LOW_EFFECTIVE_RR" not in payload["reject_reasons"]
+    assert "LOW_EFFECTIVE_RR" not in payload["all_failed_gates"]
+    assert "LOW_EFFECTIVE_RR" in payload["legacy_shadow_geometry"]["all_failed_gates"]
+    assert payload["source_primary_reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert payload["legacy_shadow_geometry"]["reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert payload["legacy_shadow_geometry"]["effective_rr"] == pytest.approx(0.84)
+
+    asyncio.run(orchestrator._persist_reject(source))
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT reject_reason, raw_rr, effective_rr, payload_json
+            FROM rejected_signal_reviews
+            WHERE signal_id='guided-null-low-rr'
+        """)).one()
+    persisted = json.loads(row.payload_json)
+    assert row.reject_reason == "MTF_GUIDED_GEOMETRY_UNAVAILABLE"
+    assert row.raw_rr is None and row.effective_rr is None
+    assert persisted["source_primary_reject_reason"] == "LOW_EFFECTIVE_RR"
+    assert persisted["legacy_shadow_geometry"]["reject_reason"] == "LOW_EFFECTIVE_RR"
 
 
 def test_real_guided_rejected_candidate_remains_attributable() -> None:
@@ -906,7 +1055,7 @@ def test_reconciliation_event_on_timeout_like_execution_state(monkeypatch) -> No
             return {"status": "timeout", "order_id": "abc-1"}
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.LIVE, live_trading_enabled=True, allow_live_orders=True, operator_live_acknowledged=True),
@@ -1025,7 +1174,7 @@ def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest
     monkeypatch.setattr(runtime_module, "evaluate_portfolio_risk", capture_portfolio_evidence)
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": time.time(), "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
@@ -1115,7 +1264,7 @@ def test_mtf_reject_starts_new_same_symbol_signal_after_open_position(
         diagnostics={"inputs": {
             "source_exchange": "fixture",
             "timeframe": "1m",
-            "market_ts": 99_999_999_999.0,
+            "market_ts": time.time(),
             "entry": 100.0,
             "sl": 99.0,
             "tp": 102.0,
@@ -1140,7 +1289,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
 
     async def scanner() -> list[dict]:
         return [{"symbol": "ETHUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
-                 "rr": 3.0, "side": "LONG", "market_ts": 99999999999.0,
+                 "rr": 3.0, "side": "LONG", "market_ts": time.time(),
                  "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002,
                  "volatility_pct": 0.4, "trend_strength": 0.9,
                  "liquidity_score": 0.9, "chop_score": 0.1}]
@@ -1157,6 +1306,25 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
             calls.append(("accepted_observation", lifecycle_state)),
     )
     monkeypatch.setattr(RuntimeOrchestrator, "_generate_burnin_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_paper_portfolio_risk_state",
+        lambda self, symbol, now_ts: {
+            "equity": 1000.0,
+            "available_balance": 1000.0,
+            "daily_realized_pnl": 0.0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.0,
+            "consecutive_loss_count": 0,
+            "symbol_consecutive_loss_count": 0,
+            "trades_today_symbol": 0,
+            "trades_today_global": 0,
+            "persisted_cooldown_until": None,
+            "risk_state_complete": True,
+            "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+            "risk_state_missing_fields": [],
+        },
+    )
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
         ai_brain=_AlwaysAcceptBrain(), market_scanner=scanner,
@@ -1172,7 +1340,7 @@ def test_paper_accepted_observation_follows_pending_position_persistence(
 def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing() -> None:
     rejects: list[dict] = []
     market = {"entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG",
-              "market_ts": 99_999_999_999.0, "volume_24h_usdt": 90_000_000.0,
+              "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0,
               "spread_pct": .0002, "expected_slippage_pct": .0002,
               "liquidity_score": .9}
     selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
@@ -1196,7 +1364,7 @@ def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing(
 def test_effective_rr_gate_still_rejects_before_paper_portfolio_and_execution() -> None:
     rejects: list[dict] = []
     market = {"entry": 100.0, "sl": 99.0, "tp": 101.05, "rr": 1.05, "side": "LONG",
-              "market_ts": 99_999_999_999.0, "volume_24h_usdt": 90_000_000.0,
+              "market_ts": time.time(), "volume_24h_usdt": 90_000_000.0,
               "spread_pct": .0002, "expected_slippage_pct": .0002,
               "liquidity_score": .9}
     selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
@@ -1436,7 +1604,20 @@ def test_live_precheck_uses_paper_decision_pipeline_and_does_not_submit(tmp_path
     adapter = _MutationTrapAdapter()
 
     async def scanner() -> list[dict]:
-        return [{"symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0, "rr": 3.0, "side": "LONG", "market_ts": 9999999999.0, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volume_24h_usdt": 90_000_000, "spread_pct": 0.0002, "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0, "volatility_pct": 0.4, "trend_strength": 0.9, "liquidity_score": 0.9, "chop_score": 0.1}]
+        return [{
+            "symbol": "BTCUSDT", "entry": 100.0, "sl": 99.0, "tp": 103.0,
+            "rr": 3.0, "side": "LONG", "market_ts": time.time(),
+            "equity": 100000.0, "available_balance": 100000.0, "notional": 1000.0,
+            "volume_24h_usdt": 90_000_000,
+            "spread_pct": 0.0002, "spread_status": "MEASURED",
+            "expected_slippage_pct": 0.0002, "slippage_status": "MEASURED",
+            "latency_ms": 50.0, "latency_status": "MEASURED",
+            "liquidity_score": 0.9, "liquidity_status": "MEASURED",
+            "funding_rate_pct": 0.00005, "funding_status": "MEASURED",
+            "orderbook_imbalance": 0.1, "orderbook_status": "MEASURED",
+            "volatility_regime": "normal", "volatility_status": "MEASURED",
+            "volatility_pct": 0.4, "trend_strength": 0.9, "chop_score": 0.1,
+        }]
 
     orchestrator = RuntimeOrchestrator(
         config=RuntimeConfig(execution_mode=ExecutionMode.LIVE_PRECHECK),

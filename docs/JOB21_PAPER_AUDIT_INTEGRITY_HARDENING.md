@@ -1,5 +1,10 @@
 # JOB-21 PAPER Audit Integrity Hardening
 
+> **Historical implementation record.** Counts, defects and remaining blockers in
+> this document describe the JOB-21 evidence snapshot. Later lifecycle/runtime work
+> changed the current state. Use `README.md`, `docs/decision_lifecycle_contract.md`,
+> `docs/SQLcheat.md`, and current production tests for operational truth.
+
 ## Objective
 
 Harden PAPER runtime SQL evidence and repair the narrow lifecycle transition defect revealed by the latest exported audit reports. This increment is defensive and observation-oriented: it does not change thresholds, scoring, effective-RR formulas, order submission behavior, LIVE activation, or trade frequency targets.

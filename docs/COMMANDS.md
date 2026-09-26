@@ -8,11 +8,13 @@ This is observational only. It is not a LIVE authorization mechanism and not an 
 
 # AlphaForge Komut Rehberi
 
-> **Son şema/CLI doğrulaması:** 2026-09-15, `dev` branch. Aşağıdaki campaign/PAPER komutlarında `burnin_ops` kanonik arayüzü esas alınır.
+> **Rehber bakım tarihi:** 2026-09-25, `dev` branch. Campaign/PAPER komutlarında `burnin_ops`; SQL tablo/kolon/ilişki ve audit sorgularında `docs/SQLcheat.md` kanonik kaynaktır.
 
 Bu sayfa AlphaForge'u kurmak, güncellemek, test etmek, BACKTEST/PAPER çalıştırmak, dashboard açmak ve çok günlük PAPER burn-in kampanyasını yönetmek için doğrulanmış komutları tek yerde toplar.
 
 > **Güvenlik:** AlphaForge varsayılan olarak LIVE-ready değildir. Bu rehber PAPER ve BACKTEST işletimine odaklanır. LIVE modu veya gerçek emir yolu, yerel readiness kanıtları ve bütün fail-closed güvenlik kapıları geçmeden açılmamalıdır.
+>
+> **SQL güvenlik kuralı:** `docs/SQLcheat.md` SQL için source of truth'tur. Bu dosyadaki gömülü SQL örnekleri yalnızca operasyon kolaylığı içindir; tablo/kolon/ilişki veya sorgu `SQLcheat.md` ile çelişirse `SQLcheat.md` esas alınır. Aktif PAPER DB incelemelerinde `sqlite3 -readonly` kullan; `no such table/column` hatasında önce `SQLcheat.md`, sonra `PRAGMA table_info(...)` ile doğrula.
 
 ---
 
@@ -36,6 +38,9 @@ Konumu doğrula:
 
 ```bash
 pwd
+git rev-parse --show-toplevel
+git remote get-url origin
+git branch --show-current
 git status
 ```
 
@@ -43,6 +48,9 @@ PowerShell:
 
 ```powershell
 Get-Location
+git rev-parse --show-toplevel
+git remote get-url origin
+git branch --show-current
 git status
 ```
 
@@ -69,7 +77,7 @@ git rev-parse --short HEAD
 git log -1 --oneline
 ```
 
-Burn-in preflight temiz çalışma ağacı bekler. `git status` çıktısında commitlenmemiş değişiklik bırakma.
+Burn-in preflight temiz çalışma ağacı bekler. `git status` çıktısında commitlenmemiş değişiklik bırakma. Birden fazla AlphaForge çalışma kopyası varsa (`Public`, `Documents` vb.) DB veya campaign komutundan önce `git rev-parse --show-toplevel` ile doğru kopyada olduğunu doğrula.
 
 ---
 
@@ -280,11 +288,12 @@ export DB
 $DB="data/runtime/alphaforge_runtime.db"
 ```
 
-Dosyayı kontrol et:
+Dosyayı kontrol et. Özellikle kopyala-yapıştır sonrası `DB=\<...>` gibi literal kaçış/angle-bracket karakterlerinin değişkene girmediğini doğrula:
 
 macOS / Linux:
 
 ```bash
+printf 'DB shell-escaped: %q\n' "$DB"
 ls -lh "$DB"
 ```
 
@@ -297,13 +306,13 @@ Get-Item $DB
 SQLite bütünlük kontrolü:
 
 ```bash
-sqlite3 "$DB" "PRAGMA integrity_check;"
+sqlite3 -readonly "$DB" "PRAGMA integrity_check;"
 ```
 
 PowerShell:
 
 ```powershell
-sqlite3 $DB "PRAGMA integrity_check;"
+sqlite3 -readonly $DB "PRAGMA integrity_check;"
 ```
 
 Beklenen çıktı:
@@ -381,6 +390,544 @@ pytest -q --lf
 ```bash
 pytest -q --ff
 ```
+
+---
+
+## 7.1 Güvenli autonomous qualification: FAST + SOAK
+
+`alphaforge.autonomous_qualification` normal PAPER campaign'ına bağlanan bir komut değildir. Her çalıştırmada seçilen output root altında yeni bir `alphaforge-qualification-*` klasörü, izole `qualification.sqlite3` ve ayrı artifacts dizini oluşturur. Harness süreç içinde PAPER modunu zorlar, LIVE order submission'ı kapatır ve production DB keşfi/aktif runtime reuse yapmaz.
+
+> **Kural:** Aktif PAPER DB yolunu bu harness'e verme. CLI'da `--db` seçeneği yoktur. Public SOAK dış market-data erişilebilirliğini doğrular; `--market-data synthetic` yalnız offline/synthetic stabilite kanıtıdır ve public-feed release gate'inin yerine geçmez.
+
+### 7.1.1 Exact SHA + test + FAST önkoşulu
+
+SOAK'ı release edeceğin exact commit üzerinde çalıştır. Commit/config değişirse eski FAST/SOAK sonucu yeni SHA'yı qualify etmez.
+
+```bash
+git status --short
+git rev-parse HEAD
+pytest -q
+
+OUT="/private/tmp/alphaforge-autonomous-qualification"
+mkdir -p "$OUT"
+
+.venv/bin/python -m alphaforge.autonomous_qualification \
+  --mode fast \
+  --output-root "$OUT"
+FAST_RC=$?
+echo "FAST_RC=$FAST_RC"
+```
+
+Exit code: `0=PASS`, `1=NEEDS_FIX`, `2=BLOCKED`. FAST `PASS` olmadan release SOAK'a geçme.
+
+### 7.1.2 6 saatlik public SOAK — güvenli detached starter (macOS)
+
+`--soak-hours` yalnız `6..24` kabul eder. Release-quality dış feed kanıtı için `public` kullan. Aşağıdaki starter exact SHA'yı kaydeder, dirty working tree'yi reddeder, SOAK'ı `nohup` ile terminalden ayırır, `caffeinate -w` ile yalnız SOAK PID yaşadığı sürece Mac'in uyumasını engeller ve başlangıçta process/artifact oluşumunu fail-fast doğrular.
+
+> **Önkoşul:** Bu starter'ı yalnız aynı exact SHA üzerinde full test suite ve FAST `PASS` sonrasında çalıştır. SOAK devam ederken checkout/branch değiştirme, repo dosyalarını düzenleme veya aynı output root altında manuel dosya değiştirme.
+
+```bash
+set -euo pipefail
+
+SHA="$(git rev-parse HEAD)"
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "ERROR: working tree dirty; final SOAK başlatılmadı"
+  git status --short
+  exit 1
+fi
+
+test -x .venv/bin/python || { echo "ERROR: .venv/bin/python bulunamadı"; exit 1; }
+command -v caffeinate >/dev/null 2>&1 || { echo "ERROR: caffeinate bulunamadı"; exit 1; }
+
+OUTROOT="/private/tmp/alphaforge-final-soak-${SHA:0:8}"
+LOG="/private/tmp/alphaforge-final-soak-${SHA:0:8}.log"
+CAFFEINE_LOG="/private/tmp/alphaforge-final-caffeinate-${SHA:0:8}.log"
+
+mkdir -p "$OUTROOT"
+
+echo "=== START FINAL 6H PUBLIC SOAK ==="
+echo "SHA=$SHA"
+echo "OUTROOT=$OUTROOT"
+echo "LOG=$LOG"
+
+nohup .venv/bin/python -u -m alphaforge.autonomous_qualification \
+  --mode soak \
+  --soak-hours 6 \
+  --market-data public \
+  --output-root "$OUTROOT" \
+  >"$LOG" 2>&1 < /dev/null &
+
+SOAK_PID=$!
+
+nohup caffeinate -w "$SOAK_PID" \
+  >"$CAFFEINE_LOG" 2>&1 < /dev/null &
+
+CAFFEINE_PID=$!
+
+ROOT=""
+for _ in {1..30}; do
+  if ! kill -0 "$SOAK_PID" 2>/dev/null; then
+    echo "ERROR: SOAK process erken öldü"
+    tail -100 "$LOG" || true
+    exit 1
+  fi
+  ROOT="$(ls -td "$OUTROOT"/alphaforge-qualification-* 2>/dev/null | head -n 1 || true)"
+  [ -n "$ROOT" ] && break
+  sleep 1
+done
+
+if [ -z "$ROOT" ]; then
+  echo "ERROR: qualification run directory 30 saniye içinde oluşmadı"
+  tail -100 "$LOG" || true
+  exit 1
+fi
+
+if ! kill -0 "$CAFFEINE_PID" 2>/dev/null; then
+  echo "ERROR: caffeinate process erken öldü"
+  cat "$CAFFEINE_LOG" || true
+  exit 1
+fi
+
+echo
+echo "=== FINAL SOAK IDENTITY ==="
+echo "SOAK_PID=$SOAK_PID"
+echo "CAFFEINE_PID=$CAFFEINE_PID"
+echo "SHA=$SHA"
+echo "ROOT=$ROOT"
+echo "LOG=$LOG"
+echo "CAFFEINE_LOG=$CAFFEINE_LOG"
+
+echo
+echo "=== PROCESS CHECK ==="
+ps -p "$SOAK_PID" -o pid=,etime=,state=,command=
+ps -p "$CAFFEINE_PID" -o pid=,etime=,state=,command=
+
+echo
+echo "=== FILES ==="
+find "$ROOT" -maxdepth 2 -type f -print 2>/dev/null
+
+echo
+echo "=== LOG ==="
+tail -30 "$LOG"
+```
+
+Harness 30 saniyede bir safety/resource sample alır; public market-data scan her 10 sample'da bir, yani yaklaşık 5 dakikada bir çalışır. Starter terminale geri döndükten sonra SOAK arka planda devam eder; izleme sorgularını ikinci terminalden çalıştır.
+
+SOAK PID ve logları sonradan tekrar bulmak için starter çıktısındaki `SOAK_PID`, `ROOT` ve `LOG` değerlerini sakla. SOAK process'i bittiğinde `caffeinate -w` de kendiliğinden sona erer.
+
+Offline karşılaştırma gerekiyorsa:
+
+```bash
+.venv/bin/python -m alphaforge.autonomous_qualification \
+  --mode soak \
+  --soak-hours 6 \
+  --market-data synthetic \
+  --output-root "$OUT"
+```
+
+Synthetic SOAK external exchange availability kanıtı değildir.
+
+### 7.1.3 İzole SOAK DB/artifact yollarını bul
+
+```bash
+SHA="$(git rev-parse HEAD)"
+OUTROOT="/private/tmp/alphaforge-final-soak-${SHA:0:8}"
+RUN_DIR="$(ls -td "$OUTROOT"/alphaforge-qualification-* 2>/dev/null | head -n 1)"
+[ -n "$RUN_DIR" ] || { echo "qualification run bulunamadı"; exit 1; }
+
+QDB="$RUN_DIR/qualification.sqlite3"
+SAMPLES="$RUN_DIR/artifacts/soak-resource-samples.jsonl"
+REPORT="$RUN_DIR/artifacts/qualification-report.json"
+
+printf 'RUN_DIR=%s\nQDB=%s\nSAMPLES=%s\nREPORT=%s\n' \
+  "$RUN_DIR" "$QDB" "$SAMPLES" "$REPORT"
+test -f "$QDB"
+```
+
+SOAK campaign kimliğini tahmin etme; izole DB'den al:
+
+```bash
+CID="$(sqlite3 -readonly "$QDB" "
+SELECT campaign_id
+FROM burnin_campaigns
+WHERE release_id GLOB 'AQH-*-soak_normal_market_data'
+ORDER BY created_at DESC
+LIMIT 1;
+")"
+
+[ -n "$CID" ] || { echo "SOAK campaign henüz oluşmadı"; exit 1; }
+echo "CID=$CID"
+```
+
+### 7.1.4 SOAK canlı durum — yalnız read-only
+
+Aşağıdaki üç blok yalnız izole `QDB` üzerinde `sqlite3 -readonly` kullanır. Çalışan SOAK'a write, attach, migration, pause/resume veya runtime müdahalesi yapmaz.
+
+#### SOAK STATUS — tek atımlık özet
+
+`scans`, `empty_scans`, açık PAPER pozisyonu, canonical reject ve reject-label backlog sayaçlarını tek satırda gör:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+WITH campaign_run_ids AS (
+  SELECT burnin_run_id
+  FROM burnin_campaign_runs
+  WHERE campaign_id='$CID'
+),
+canonical AS (
+  SELECT o.*
+  FROM burnin_observations o
+  JOIN campaign_run_ids r
+    ON r.burnin_run_id=o.burnin_run_id
+  WHERE json_valid(COALESCE(o.metrics_json,''))
+    AND UPPER(COALESCE(json_extract(o.metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='CANONICAL_DECISION'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM burnin_observations newer
+      WHERE newer.burnin_run_id=o.burnin_run_id
+        AND newer.id < o.id
+        AND COALESCE(
+              json_extract(newer.metrics_json,'$.reject_decision_id'),
+              json_extract(newer.metrics_json,'$.signal_id'),
+              newer.observation_id
+            ) = COALESCE(
+              json_extract(o.metrics_json,'$.reject_decision_id'),
+              json_extract(o.metrics_json,'$.signal_id'),
+              o.observation_id
+            )
+        AND UPPER(COALESCE(json_extract(newer.metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='CANONICAL_DECISION'
+    )
+),
+probes AS (
+  SELECT
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+)
+SELECT
+  (SELECT campaign_status FROM burnin_campaigns WHERE campaign_id='$CID') AS campaign_status,
+  (SELECT active_run_id FROM burnin_campaigns WHERE campaign_id='$CID') AS active_run_id,
+  (SELECT COUNT(*) FROM probes) AS scans,
+  COALESCE((SELECT SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END) FROM probes),0) AS empty_scans,
+  COALESCE((SELECT status FROM probes ORDER BY probe_index DESC LIMIT 1),'NO_SCAN_YET') AS last_scan_status,
+  COALESCE((SELECT row_count FROM probes ORDER BY probe_index DESC LIMIT 1),0) AS last_scan_rows,
+  (SELECT COUNT(*) FROM burnin_pending_position_outcomes
+   WHERE campaign_id='$CID' AND UPPER(status)='OPEN') AS open_positions,
+  (SELECT COUNT(*) FROM canonical
+   WHERE UPPER(COALESCE(decision,''))='REJECTED') AS rejects,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID') AS reject_labels_total,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID'
+     AND UPPER(status) IN ('PENDING','READY','RESOLVING')) AS reject_pending;
+"
+```
+
+#### SOAK WATCH — 30 saniyede bir
+
+Aynı sayaçları 30 saniyede bir yenile. Durdurmak için `Ctrl+C`:
+
+```bash
+while true; do
+  clear
+  date
+  echo "SOAK: $CID"
+  echo
+
+  sqlite3 -readonly -header -column "$QDB" "
+WITH campaign_run_ids AS (
+  SELECT burnin_run_id FROM burnin_campaign_runs WHERE campaign_id='$CID'
+),
+canonical AS (
+  SELECT o.*
+  FROM burnin_observations o
+  JOIN campaign_run_ids r ON r.burnin_run_id=o.burnin_run_id
+  WHERE json_valid(COALESCE(o.metrics_json,''))
+    AND UPPER(COALESCE(json_extract(o.metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='CANONICAL_DECISION'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM burnin_observations newer
+      WHERE newer.burnin_run_id=o.burnin_run_id
+        AND newer.id < o.id
+        AND COALESCE(json_extract(newer.metrics_json,'$.reject_decision_id'),json_extract(newer.metrics_json,'$.signal_id'),newer.observation_id)
+          = COALESCE(json_extract(o.metrics_json,'$.reject_decision_id'),json_extract(o.metrics_json,'$.signal_id'),o.observation_id)
+        AND UPPER(COALESCE(json_extract(newer.metrics_json,'$.observation_kind'),'CANONICAL_DECISION'))='CANONICAL_DECISION'
+    )
+),
+probes AS (
+  SELECT
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+)
+SELECT
+  (SELECT COUNT(*) FROM probes) AS scans,
+  COALESCE((SELECT SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END) FROM probes),0) AS empty_scans,
+  COALESCE((SELECT row_count FROM probes ORDER BY probe_index DESC LIMIT 1),0) AS last_scan_rows,
+  COALESCE((SELECT status FROM probes ORDER BY probe_index DESC LIMIT 1),'NO_SCAN_YET') AS last_scan_status,
+  (SELECT COUNT(*) FROM burnin_pending_position_outcomes
+   WHERE campaign_id='$CID' AND UPPER(status)='OPEN') AS open_positions,
+  (SELECT COUNT(*) FROM canonical
+   WHERE UPPER(COALESCE(decision,''))='REJECTED') AS rejects,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID') AS reject_labels_total,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID'
+     AND UPPER(status) IN ('PENDING','READY','RESOLVING')) AS reject_pending;
+"
+
+  sleep 30
+done
+```
+
+`scans` yaklaşık 5 dakikada bir artar. `open_positions` bu qualification SOAK'ında normalde `0` kalmalıdır; harness decision probe rejection-biased ve no-submit tasarlanmıştır.
+
+#### SOAK HEALTH — DB-backed güvenlik özeti
+
+Campaign/run lineage, son runtime snapshot, heartbeat/reconciliation durumu, backlog ve persistence-failure sayısını tek satırda kontrol et:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+WITH latest_state AS (
+  SELECT *
+  FROM runtime_state_snapshots
+  WHERE campaign_id='$CID'
+  ORDER BY id DESC
+  LIMIT 1
+),
+probe AS (
+  SELECT
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status,
+    event_time
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+  ORDER BY id DESC
+  LIMIT 1
+)
+SELECT
+  c.campaign_status,
+  cr.status AS campaign_run_status,
+  br.status AS burnin_run_status,
+  c.last_heartbeat_at AS campaign_heartbeat_at,
+  ls.runtime_status,
+  ROUND(ls.heartbeat_age_sec,1) AS heartbeat_age_sec,
+  ls.exchange_read_only_status,
+  ls.reconciliation_status,
+  ls.reconciliation_mismatch_count,
+  ls.kill_switch_active,
+  ls.recovery_action_required,
+  ls.fail_closed_reason,
+  ls.last_error AS runtime_last_error,
+  COALESCE((SELECT status FROM probe),'NO_SCAN_YET') AS last_scan_status,
+  COALESCE((SELECT row_count FROM probe),0) AS last_scan_rows,
+  (SELECT COUNT(*) FROM burnin_pending_position_outcomes
+   WHERE campaign_id='$CID' AND UPPER(status)='OPEN') AS open_positions,
+  (SELECT COUNT(*) FROM burnin_pending_reject_labels
+   WHERE campaign_id='$CID'
+     AND UPPER(status) IN ('PENDING','READY','RESOLVING')) AS reject_backlog,
+  (SELECT COUNT(*) FROM exchange_reconciliation_events e
+   WHERE e.instance_id=ls.instance_id
+     AND e.status='PERSISTENCE_FAILED') AS soak_persistence_failures,
+  c.last_error AS campaign_last_error
+FROM burnin_campaigns c
+LEFT JOIN burnin_campaign_runs cr
+  ON cr.campaign_id=c.campaign_id AND cr.burnin_run_id=c.active_run_id
+LEFT JOIN burnin_runs br
+  ON br.burnin_run_id=c.active_run_id
+LEFT JOIN latest_state ls ON 1=1
+WHERE c.campaign_id='$CID';
+"
+```
+
+Sağlıklı çalışan SOAK sırasında beklenen ana durum: campaign/run/mapping `RUNNING`, runtime `OPERATING`, heartbeat fresh, `exchange_read_only_status` available/healthy, reconciliation `CLEAN`, mismatch `0`, `open_positions=0`, SOAK runtime'ına scoped `soak_persistence_failures=0`, fail-closed/recovery alanları boş olmalı. Public probe geçici olarak empty olabilir; final gate ayrıca recovery, empty-rate ve consecutive-empty kurallarını uygular.
+
+> **Önemli:** 30 saniyelik resource/safety invariant'ları SQLite'ta authoritative değildir. RSS/DB/artifact growth, queue-depth ve bütün sample invariant'ları için `soak-resource-samples.jsonl`; final verdict için `qualification-report.json` esas alınır.
+
+
+Campaign/run durumu:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT
+  c.campaign_id,
+  c.release_id,
+  c.campaign_status,
+  c.active_run_id,
+  c.last_heartbeat_at,
+  c.last_error,
+  cr.continuation_sequence,
+  cr.status AS campaign_run_status,
+  br.status AS burnin_run_status
+FROM burnin_campaigns c
+LEFT JOIN burnin_campaign_runs cr
+  ON cr.campaign_id=c.campaign_id AND cr.burnin_run_id=c.active_run_id
+LEFT JOIN burnin_runs br
+  ON br.burnin_run_id=c.active_run_id
+WHERE c.campaign_id='$CID';
+"
+```
+
+Public market-data probe özeti:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+WITH p AS (
+  SELECT
+    CAST(json_extract(details_json,'$.probe_index') AS INTEGER) AS probe_index,
+    CAST(json_extract(details_json,'$.row_count') AS INTEGER) AS row_count,
+    json_extract(details_json,'$.status') AS status,
+    event_time
+  FROM burnin_campaign_events
+  WHERE campaign_id='$CID'
+    AND event_type='QUALIFICATION_MARKET_DATA_PROBE'
+), x AS (
+  SELECT
+    *,
+    LAG(CASE WHEN row_count=0 THEN 1 ELSE 0 END)
+      OVER (ORDER BY probe_index) AS previous_empty
+  FROM p
+)
+SELECT
+  COUNT(*) AS probes,
+  SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END) AS empty_probes,
+  MAX(1, CAST(COUNT(*)/20 AS INTEGER)) AS allowed_empty_probes,
+  ROUND(100.0*SUM(CASE WHEN row_count=0 THEN 1 ELSE 0 END)
+        / NULLIF(COUNT(*),0), 2) AS empty_pct,
+  SUM(CASE WHEN row_count=0 AND previous_empty=1 THEN 1 ELSE 0 END)
+    AS consecutive_empty_pairs,
+  (SELECT status FROM p ORDER BY probe_index DESC LIMIT 1) AS last_status,
+  (SELECT row_count FROM p ORDER BY probe_index DESC LIMIT 1) AS last_row_count
+FROM x;
+"
+```
+
+Son probe/recovery kayıtları:
+
+```bash
+sqlite3 -readonly -header -column "$QDB" "
+SELECT
+  id, event_time, event_type,
+  json_extract(details_json,'$.probe_index') AS probe_index,
+  json_extract(details_json,'$.row_count') AS row_count,
+  json_extract(details_json,'$.status') AS status,
+  json_extract(details_json,'$.latency_seconds') AS latency_seconds,
+  json_extract(details_json,'$.empty_probe_count') AS recovered_empty_count,
+  json_extract(details_json,'$.cause') AS cause,
+  json_extract(details_json,'$.error_class') AS error_class,
+  json_extract(details_json,'$.http_status') AS http_status
+FROM burnin_campaign_events
+WHERE campaign_id='$CID'
+  AND event_type IN ('QUALIFICATION_MARKET_DATA_PROBE','QUALIFICATION_MARKET_DATA_RECOVERED')
+ORDER BY id DESC
+LIMIT 20;
+"
+```
+
+Resource/safety samples SQL tablosunda değildir; canonical canlı örnek dosyası `soak-resource-samples.jsonl`'dır. Son sample'ı kompakt gör:
+
+```bash
+python - "$SAMPLES" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+rows = [line for line in path.read_text().splitlines() if line.strip()]
+if not rows:
+    raise SystemExit("henüz SOAK sample yok")
+s = json.loads(rows[-1])
+failed = [name for name, passed in s.get("invariants", {}).items() if not passed]
+print("at=", s.get("at"))
+print("elapsed_seconds=", s.get("elapsed_seconds"))
+print("heartbeat_age_seconds=", s.get("heartbeat_age_seconds"))
+print("reconciliation_status=", s.get("reconciliation_status"))
+print("resolver_status=", s.get("resolver_status"))
+print("pending_resolver_backlog=", s.get("pending_resolver_backlog"))
+print("pending_reject_backlog=", s.get("pending_reject_backlog"))
+print("queue_depths=", s.get("queue_depths"))
+print("paper_executions=", s.get("paper_executions"))
+print("failed_invariants=", failed)
+PY
+```
+
+### 7.1.5 SOAK tamamlanınca final raporu oku
+
+```bash
+test -f "$REPORT" || { echo "final report henüz yok"; exit 1; }
+
+python - "$REPORT" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    r = json.load(f)
+
+soak = next((x for x in r.get("faults_injected", [])
+             if x.get("name") == "soak_normal_market_data"), {})
+obs = soak.get("observed_behavior", {})
+resources = r.get("soak_resources") or {}
+
+print("overall_verdict=", r.get("overall_verdict"))
+print("mode=", r.get("mode"))
+print("duration_seconds=", r.get("actual_wall_clock_duration_seconds"))
+print("isolation=", r.get("isolation"))
+print("soak_verdict=", soak.get("verdict"))
+print("market_data_probes=", len(obs.get("market_data_probes") or []))
+print("empty_market_data_probes=", obs.get("empty_market_data_probes"))
+print("max_consecutive_empty_market_data_probes=",
+      obs.get("max_consecutive_empty_market_data_probes"))
+print("growth_flags=", resources.get("growth_flags"))
+print("resource_sample_count=", resources.get("sample_count"))
+print("invariant_failures=", r.get("invariant_failures"))
+print("soak_sample_invariant_failures=", r.get("soak_sample_invariant_failures"))
+print("persistence_gaps=", r.get("persistence_gaps"))
+print("unexplained_state_transitions=", r.get("unexplained_state_transitions"))
+print("campaign_run_lineage_consistency=", r.get("campaign_run_lineage_consistency"))
+print("soak_checks=")
+for name, passed in sorted((soak.get("invariant_checks") or {}).items()):
+    print(f"  {name}={passed}")
+PY
+```
+
+### 7.1.6 Public SOAK PASS gate'i
+
+Harness'in mevcut gate mantığında release-quality public SOAK için en az şunlar birlikte sağlanmalıdır:
+
+- full wall-clock süre tamamlanmış olmalı;
+- normal market data görülmüş ve final probe available olmalı;
+- `max_consecutive_empty_market_data_probes <= 1` olmalı; yani boş bir 5 dakikalık probe bir sonraki probe'da toparlanmalı;
+- empty probe sayısı `<= max(1, probes // 20)` olmalı;
+- bütün 30 saniyelik safety invariant sample'ları geçmeli;
+- reconciliation her sample arasında CLEAN kalmalı, resolver sağlıklı olmalı ve worker canlı kalmalı;
+- harness SOAK decision probe canonical PAPER evidence üretmeli fakat order submit/PAPER execution oluşturmamalı;
+- resource `growth_flags` boş olmalı ve monitor error olmamalı;
+- persistence gap, unexplained worker transition veya campaign/run lineage drift olmamalı.
+
+Resource gate ayrıca RSS growth `>128 MiB`, artifact growth `>64 MiB`, DB growth `>max(64 MiB, 160 KiB × sample_count)`, son 12 sample'da `>8 MiB` sürekli artan RSS ve queue/backlog `>32` durumlarını flag eder.
+
+Full repository suite + FAST + full **public** SOAK aynı exact code/config üzerinde `PASS` olmadan bunu release qualification olarak kullanma. Bu gate LIVE trading yetkisi vermez; yalnız yeni gerçek PAPER burn-in'e geçiş için kanıttır.
+
+### 7.1.7 SOAK'ı erken durdurma
+
+Foreground harness için terminalde:
+
+```text
+Ctrl+C
+```
+
+Harness `finally` cleanup yolunda aktif qualification context'lerini terminalize eder ve process-local environment'ı geri yükler. Ancak erken kesilmiş run tam wall-clock gate'ini karşılamaz ve geçerli `PASS` olarak kullanılamaz; exact SHA/config üzerinde baştan tam SOAK çalıştır.
+
+SOAK SQL sorgularının daha ayrıntılı ve kanonik kopyası için `docs/SQLcheat.md` içindeki **Autonomous qualification / SOAK isolated database** bölümünü kullan.
 
 ---
 
@@ -693,7 +1240,7 @@ macOS / Linux:
 python -m alphaforge.burnin_ops \
   --db "$DB" \
   launch \
-  --release-id "$RID" \
+  --release-id "$RELEASE_ID" \
   --duration-days 7 \
   --symbols BTCUSDT,ETHUSDT \
   --intervals 1h \
@@ -736,7 +1283,7 @@ $CID="camp_xxxxxxxxxxxxxxxx"
 ## 14. Son kampanya ID'sini SQL'den bul
 
 ```bash
-sqlite3 "$DB" <<'SQL'
+sqlite3 -readonly "$DB" <<'SQL'
 .headers on
 .mode column
 SELECT
@@ -757,7 +1304,7 @@ SQL
 PowerShell tek satır:
 
 ```powershell
-sqlite3 $DB "SELECT campaign_id,release_id,campaign_status,active_run_id,worker_pid,created_at,last_heartbeat_at,last_error FROM burnin_campaigns ORDER BY created_at DESC LIMIT 10;"
+sqlite3 -readonly $DB "SELECT campaign_id,release_id,campaign_status,active_run_id,worker_pid,created_at,last_heartbeat_at,last_error FROM burnin_campaigns ORDER BY created_at DESC LIMIT 10;"
 ```
 
 ---
@@ -790,7 +1337,7 @@ python -m alphaforge.burnin_ops --db $DB status --campaign-id $CID
 SQL:
 
 Current campaign için tek sorguda accepted closed PAPER trades vs resolved rejected forward outcomes:
-sqlite3 -header -column "$DB" <<'SQL'
+sqlite3 -readonly -header -column "$DB" <<'SQL'
 WITH accepted AS (
     SELECT
         'ACCEPTED_CLOSED' AS cohort,
@@ -837,7 +1384,7 @@ SELECT * FROM rejected;
 SQL
 ---
 Rejectleri ayrıca TP / SL / timeout / ambiguous görmek için:
-sqlite3 -header -column "$DB" <<'SQL'
+sqlite3 -readonly -header -column "$DB" <<'SQL'
 SELECT
     reject_reason,
     COUNT(*) AS n,
@@ -1207,7 +1754,7 @@ python -m alphaforge.burnin_cli \
 ## 27. Kampanya özeti
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1230,7 +1777,7 @@ SQL
 ## 28. Son kampanya olayları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 .width 6 28 38 38 100
@@ -1250,7 +1797,7 @@ SQL
 ## 29. Run kayıtları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT *
@@ -1263,7 +1810,7 @@ SQL
 ## 30. Health geçmişi
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1281,7 +1828,7 @@ SQL
 ## 31. Incident geçmişi
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1300,7 +1847,7 @@ SQL
 ## 32. Recovery drill kayıtları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1318,7 +1865,7 @@ SQL
 ## 33. Integrity audit kayıtları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1337,7 +1884,7 @@ SQL
 ## 34. Final release decision
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1356,7 +1903,7 @@ SQL
 ## 35. Karar sayıları
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1376,7 +1923,7 @@ SQL
 ## 36. Reject nedenleri
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT
@@ -1398,13 +1945,13 @@ SQL
 Önce tablo şemasını doğrula:
 
 ```bash
-sqlite3 "$DB" ".schema burnin_trade_outcomes"
+sqlite3 -readonly "$DB" ".schema burnin_trade_outcomes"
 ```
 
 Sonra açık kayıtları say:
 
 ```bash
-sqlite3 "$DB" <<SQL
+sqlite3 -readonly "$DB" <<SQL
 .headers on
 .mode column
 SELECT COUNT(*) AS open_trade_outcomes
@@ -1418,184 +1965,10 @@ AND closed_at IS NULL;
 SQL
 ```
 
-## SQL tüm kampanya 
-Kampanya bilgileri:
+## SQL tüm kampanya
 
-```bash
-sqlite3 -header -column data/campaign/POSTDBFX.db "
--- ============================================================
--- 1) CAMPAIGN / RUN SUMMARY
--- ============================================================
-SELECT
-    c.campaign_id,
-    c.release_id,
-    c.status AS campaign_status,
-    r.burnin_run_id,
-    r.status AS run_status,
-    r.started_at,
-    r.ended_at,
-    r.observed_duration_seconds
-FROM burnin_campaigns c
-LEFT JOIN burnin_campaign_runs r
-  ON r.campaign_id = c.campaign_id
-WHERE c.campaign_id = 'camp_bd9dc5aeadac0b59';
+> **Kaldırılan legacy örnek:** Bu bölümde daha önce `POSTDBFX.db` ve `camp_bd9dc5aeadac0b59` gibi sabit DB/campaign kimlikleri içeren çalıştırılabilir bir SQL bloğu vardı. Yanlış kampanyaya sorgu çalıştırma ve stale şema kullanma riski nedeniyle kaldırıldı. Güncel campaign/reject/accepted-trade sorguları için `docs/SQLcheat.md` kullan; aşağıdaki B–H bölümleri de yalnız read-only operasyon örnekleri olarak tutulur.
 
--- ============================================================
--- 2) ACCEPTED TRADE OUTCOMES — REALIZED EVIDENCE
--- ============================================================
-SELECT
-    symbol,
-    regime,
-    side,
-    COUNT(*) AS n,
-    SUM(CASE WHEN tp_hit = 1 THEN 1 ELSE 0 END) AS tp,
-    SUM(CASE WHEN sl_hit = 1 THEN 1 ELSE 0 END) AS sl,
-    ROUND(AVG(net_pnl_pct), 6) AS avg_net_pnl_pct,
-    ROUND(SUM(net_pnl_pct), 6) AS total_net_pnl_pct,
-    ROUND(AVG(actual_slippage_pct), 6) AS avg_actual_slippage_pct,
-    ROUND(AVG(spread_pct), 6) AS avg_spread_pct,
-    ROUND(AVG(effective_rr), 4) AS avg_effective_rr
-FROM closed_trade_reviews
-WHERE created_at >= (
-    SELECT started_at
-    FROM burnin_campaign_runs
-    WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-    ORDER BY started_at
-    LIMIT 1
-)
-GROUP BY symbol, regime, side
-ORDER BY total_net_pnl_pct DESC;
-
--- ============================================================
--- 3) REJECT FORWARD OUTCOMES — DIAGNOSTIC QUALITY
--- ============================================================
-SELECT
-    reject_reason,
-    symbol,
-    regime,
-    COUNT(*) AS n,
-    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
-    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
-    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
-    SUM(CASE WHEN timeout = 1 THEN 1 ELSE 0 END) AS timeout,
-    ROUND(
-      100.0 * SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END)
-      / NULLIF(SUM(CASE WHEN ambiguous = 0 THEN 1 ELSE 0 END), 0),
-      1
-    ) AS tp_pct_non_ambiguous,
-    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
-    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r,
-    SUM(CASE WHEN execution_invalidated = 1 THEN 1 ELSE 0 END) AS execution_invalidated
-FROM burnin_reject_outcomes
-WHERE burnin_run_id = 'camp_bd9dc5aeadac0b59_run_0000'
-GROUP BY reject_reason, symbol, regime
-ORDER BY total_net_r DESC;
-
--- ============================================================
--- 4) REJECT REASON TOP-LEVEL SUMMARY
--- ============================================================
-SELECT
-    reject_reason,
-    COUNT(*) AS n,
-    SUM(CASE WHEN would_tp = 1 THEN 1 ELSE 0 END) AS tp,
-    SUM(CASE WHEN would_sl = 1 THEN 1 ELSE 0 END) AS sl,
-    SUM(CASE WHEN ambiguous = 1 THEN 1 ELSE 0 END) AS ambiguous,
-    ROUND(AVG(hypothetical_net_r_after_costs), 4) AS avg_net_r,
-    ROUND(SUM(hypothetical_net_r_after_costs), 4) AS total_net_r
-FROM burnin_reject_outcomes
-WHERE burnin_run_id = 'camp_bd9dc5aeadac0b59_run_0000'
-GROUP BY reject_reason
-ORDER BY total_net_r DESC;
-
--- ============================================================
--- 5) REJECT ATTRIBUTION / PROVENANCE
--- ============================================================
-SELECT
-    COALESCE(
-      json_extract(source_provenance_json, '$.forward_label_subject'),
-      'UNKNOWN'
-    ) AS subject,
-    COALESCE(
-      json_extract(source_provenance_json, '$.reject_quality_attributable'),
-      0
-    ) AS attributable,
-    status,
-    COUNT(*) AS n
-FROM burnin_pending_reject_labels
-WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-GROUP BY subject, attributable, status
-ORDER BY attributable DESC, subject, status;
-
--- ============================================================
--- 6) IDENTITY INTEGRITY
--- ============================================================
-SELECT
-    COUNT(*) AS pending_labels,
-    SUM(
-      CASE WHEN EXISTS (
-        SELECT 1
-        FROM rejected_signal_reviews r
-        WHERE r.reject_decision_id = p.reject_decision_id
-      ) THEN 1 ELSE 0 END
-    ) AS linked_reviews,
-    SUM(
-      CASE WHEN EXISTS (
-        SELECT 1
-        FROM order_decisions d
-        WHERE d.decision_id = p.reject_decision_id
-      ) THEN 1 ELSE 0 END
-    ) AS linked_core_decisions
-FROM burnin_pending_reject_labels p
-WHERE p.campaign_id = 'camp_bd9dc5aeadac0b59';
-
--- ============================================================
--- 7) RESOLVER / PROVIDER FAILURE CLASSIFICATION
--- ============================================================
-SELECT
-    event_type,
-    COUNT(*) AS n,
-    MIN(event_time) AS first_seen,
-    MAX(event_time) AS last_seen
-FROM burnin_campaign_events
-WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-  AND (
-       event_type LIKE '%RESOLVER%'
-       OR event_type LIKE '%PROVIDER%'
-       OR event_type LIKE '%FAIL%'
-  )
-GROUP BY event_type
-ORDER BY n DESC;
-
--- ============================================================
--- 8) EXACT RESOLVER FAILURE PATTERN
--- ============================================================
-SELECT
-    json_extract(details_json, '$.error') AS error,
-    COUNT(*) AS n
-FROM burnin_campaign_events
-WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-  AND event_type = 'RESOLVER_BATCH_FAILED'
-GROUP BY error
-ORDER BY n DESC;
-
--- ============================================================
--- 9) REJECT LABEL FINAL STATUS
--- ============================================================
-SELECT
-    status,
-    COUNT(*) AS n,
-    SUM(CASE WHEN evidence_complete = 1 THEN 1 ELSE 0 END) AS complete
-FROM burnin_pending_reject_labels
-WHERE campaign_id = 'camp_bd9dc5aeadac0b59'
-GROUP BY status
-ORDER BY n DESC;
-
--- ============================================================
--- 10) DB HEALTH
--- ============================================================
-PRAGMA quick_check;
-"
-```
 ---
 
 # Süreç ve Hata Teşhisi
@@ -1605,20 +1978,20 @@ PRAGMA quick_check;
 Kampanya PID'sini getir:
 
 ```bash
-sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
+sqlite3 -readonly "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
 ```
 
 macOS / Linux:
 
 ```bash
-PID=$(sqlite3 "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';")
+PID=$(sqlite3 -readonly "$DB" "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';")
 ps -p "$PID" -o pid,ppid,etime,state,command
 ```
 
 PowerShell:
 
 ```powershell
-$PID_FROM_DB=sqlite3 $DB "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
+$PID_FROM_DB=sqlite3 -readonly $DB "SELECT worker_pid FROM burnin_campaigns WHERE campaign_id='$CID';"
 Get-Process -Id $PID_FROM_DB
 ```
 
@@ -1708,7 +2081,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CID"
 python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CID"
 tail -n 200 "artifacts/burnin/$CID/worker.stderr.log"
 tail -n 200 "artifacts/burnin/$CID/worker.stdout.log"
-sqlite3 "$DB" "PRAGMA integrity_check;"
+sqlite3 -readonly "$DB" "PRAGMA integrity_check;"
 ```
 
 Ardından son 30 kampanya olayını ve ilgili run kayıtlarını SQL ile çıkar.
@@ -1953,11 +2326,11 @@ $env:ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS = "64"
 $env:ALPHAFORGE_AGENT_GRAPH_ENABLED = "false" # disable
 
 $DB = "data/runtime/alphaforge_runtime.db"
-sqlite3 $DB "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
-sqlite3 $DB "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
+sqlite3 -readonly $DB "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
+sqlite3 -readonly $DB "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
 # Confirm the shadow tables have no triggers and compare order/lifecycle counts before and after a shadow-only test.
-sqlite3 $DB "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
-sqlite3 $DB "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
+sqlite3 -readonly $DB "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
+sqlite3 -readonly $DB "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
 pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
 pytest -q
 ```
@@ -1972,10 +2345,10 @@ export ALPHAFORGE_AGENT_GRAPH_MAX_PENDING_RUNS=64
 export ALPHAFORGE_AGENT_GRAPH_ENABLED=false # disable
 
 DB=data/runtime/alphaforge_runtime.db
-sqlite3 "$DB" "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
-sqlite3 "$DB" "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
-sqlite3 "$DB" "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
-sqlite3 "$DB" "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
+sqlite3 -readonly "$DB" "SELECT correlation_id,decision_id,graph_status,shadow_only FROM agent_runs ORDER BY id DESC LIMIT 20;"
+sqlite3 -readonly "$DB" "SELECT correlation_id,stage,status,primary_reason,skipped_reason FROM agent_stage_events ORDER BY id DESC LIMIT 40;"
+sqlite3 -readonly "$DB" "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('agent_runs','agent_stage_events');"
+sqlite3 -readonly "$DB" "SELECT (SELECT count(*) FROM orders) AS orders_count,(SELECT count(*) FROM trade_lifecycle_events) AS lifecycle_count;"
 pytest -q tests/test_agent_contracts.py tests/test_agent_orchestrator.py tests/test_agent_persistence.py
 pytest -q
 ```
@@ -2173,7 +2546,7 @@ kendi gerçek değerlerinle değiştir.
 ## B.1 Campaign + active continuation tek satır özet
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     c.campaign_id,
     c.release_id,
@@ -2206,7 +2579,7 @@ WHERE c.campaign_id = '$CID';
 ## B.2 Tüm continuation geçmişi
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     continuation_sequence,
     burnin_run_id,
@@ -2229,7 +2602,7 @@ Beklenti:
 ## B.3 Son 50 campaign event
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     id,
     event_time,
@@ -2246,7 +2619,7 @@ LIMIT 50;
 ## B.4 Resolver / provider / failure event özeti
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     event_type,
     COUNT(*) AS n,
@@ -2268,7 +2641,7 @@ ORDER BY n DESC, event_type;
 ## B.5 Resolver batch hata metinleri
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COALESCE(json_extract(details_json, '$.error'), 'NO_ERROR_FIELD') AS error,
     COUNT(*) AS n,
@@ -2289,7 +2662,7 @@ ORDER BY n DESC;
 ## C.1 Açık / kapanmış campaign PAPER pozisyonları
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     status,
     COUNT(*) AS n,
@@ -2306,7 +2679,7 @@ ORDER BY status;
 ## C.2 Açık pozisyon detayları
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     pending_position_id,
     trade_id,
@@ -2335,7 +2708,7 @@ ORDER BY entry_time;
 ## C.3 Kapanmış PAPER sonuç özeti
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COUNT(*) AS closed_trades,
     SUM(CASE WHEN net_r > 0 THEN 1 ELSE 0 END) AS winners,
@@ -2364,7 +2737,7 @@ WHERE campaign_id = '$CID'
 ## C.4 Sonuçları sembol / side / regime bazında
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     symbol,
     side,
@@ -2389,7 +2762,7 @@ ORDER BY total_net_r DESC;
 ## C.5 Exit reason dağılımı
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COALESCE(exit_reason,'UNKNOWN') AS exit_reason,
     COUNT(*) AS n,
@@ -2406,7 +2779,7 @@ ORDER BY n DESC;
 ## C.6 Execution-cost drag
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COUNT(*) AS n,
     ROUND(AVG(entry_spread), 8) AS avg_entry_spread,
@@ -2433,7 +2806,7 @@ WHERE campaign_id = '$CID'
 ## D.1 Label durumları
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     status,
     COUNT(*) AS n,
@@ -2450,7 +2823,7 @@ ORDER BY n DESC;
 ## D.2 Reject reason + label maturity
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COALESCE(reject_reason,'UNKNOWN') AS reject_reason,
     status,
@@ -2466,7 +2839,7 @@ ORDER BY n DESC, reject_reason;
 ## D.3 Reject attribution / provenance
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COALESCE(
       json_extract(source_provenance_json, '$.forward_label_subject'),
@@ -2488,7 +2861,7 @@ ORDER BY attributable DESC, subject, status;
 ## D.4 Reject forward-outcome sonuçları — bütün continuation'lar
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 WITH campaign_runs AS (
     SELECT burnin_run_id
     FROM burnin_campaign_runs
@@ -2516,7 +2889,7 @@ ORDER BY total_net_r DESC;
 ## D.5 Reject reason top-level kalite özeti
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 WITH campaign_runs AS (
     SELECT burnin_run_id
     FROM burnin_campaign_runs
@@ -2548,7 +2921,7 @@ ORDER BY total_net_r DESC;
 ## E.1 Pending label → rejected review / core decision bağlantısı
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     COUNT(*) AS labels,
     SUM(
@@ -2573,7 +2946,7 @@ WHERE p.campaign_id = '$CID';
 ## E.2 Duplicate reject label identity
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     reject_decision_id,
     COUNT(*) AS n
@@ -2590,7 +2963,7 @@ Beklenen: **0 satır**.
 ## E.3 Duplicate continuation sequence / run identity
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT 'continuation_sequence' AS kind, continuation_sequence AS identity, COUNT(*) AS n
 FROM burnin_campaign_runs
 WHERE campaign_id = '$CID'
@@ -2616,13 +2989,13 @@ Beklenen: **0 satır**.
 Önce şemayı gör:
 
 ```bash
-sqlite3 "$DB" ".schema burnin_qualification_snapshots"
+sqlite3 -readonly "$DB" ".schema burnin_qualification_snapshots"
 ```
 
 Son snapshot:
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT *
 FROM burnin_qualification_snapshots
 WHERE campaign_id = '$CID'
@@ -2634,7 +3007,7 @@ LIMIT 1;
 Campaign tablosundaki pointer ile karşılaştır:
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     campaign_id,
     campaign_status,
@@ -2657,13 +3030,13 @@ snapshot age/fresh/stale alanlarıyla birlikte yorumla.
 Önce şema:
 
 ```bash
-sqlite3 "$DB" ".schema runtime_state_snapshots"
+sqlite3 -readonly "$DB" ".schema runtime_state_snapshots"
 ```
 
 Son campaign runtime snapshot:
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 SELECT
     id,
     timestamp,
@@ -2692,7 +3065,7 @@ LIMIT 5;
 Günlük operasyon için en kullanışlı özet:
 
 ```bash
-sqlite3 -header -column "$DB" "
+sqlite3 -readonly -header -column "$DB" "
 -- CAMPAIGN
 SELECT
     campaign_id,
@@ -2782,7 +3155,7 @@ python -m alphaforge.burnin_ops --db "$DB" --json status --campaign-id "$CID"
 python -m alphaforge.burnin_ops --db "$DB" --json health --campaign-id "$CID"
 python -m alphaforge.burnin_ops --db "$DB" --json watch --campaign-id "$CID"
 python -m alphaforge.burnin_ops --db "$DB" --json reject-label-status --campaign-id "$CID"
-sqlite3 "$DB" "PRAGMA quick_check;"
+sqlite3 -readonly "$DB" "PRAGMA quick_check;"
 ```
 
 İstatistiksel yorum sırası:
@@ -2802,18 +3175,20 @@ sqlite3 "$DB" "PRAGMA quick_check;"
 
 ---
 
-# J. Şema keşfi — sorgu yazmadan önce
+# J. SQLcheat-first — şema keşfi yalnızca uyuşmazlıkta
+
+Normal akışta önce `docs/SQLcheat.md` kullan. Aşağıdaki discovery komutları yalnızca seçtiğin DB'nin canonical dokümandan farklı olduğundan şüpheleniyorsan veya `no such table/column` hatası alıyorsan kullanılmalıdır. Aktif campaign DB'yi discovery amacıyla açarken read-only kal.
 
 Tablolar:
 
 ```bash
-sqlite3 "$DB" ".tables"
+sqlite3 -readonly "$DB" ".tables"
 ```
 
 Campaign tabloları:
 
 ```bash
-sqlite3 "$DB" "
+sqlite3 -readonly "$DB" "
 SELECT name
 FROM sqlite_master
 WHERE type='table'
@@ -2829,13 +3204,13 @@ ORDER BY name;
 Kolonlar:
 
 ```bash
-sqlite3 "$DB" "PRAGMA table_info(burnin_campaigns);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_campaign_runs);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_pending_position_outcomes);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_pending_reject_labels);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_reject_outcomes);"
-sqlite3 "$DB" "PRAGMA table_info(burnin_qualification_snapshots);"
-sqlite3 "$DB" "PRAGMA table_info(runtime_state_snapshots);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_campaigns);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_campaign_runs);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_pending_position_outcomes);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_pending_reject_labels);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_reject_outcomes);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(burnin_qualification_snapshots);"
+sqlite3 -readonly "$DB" "PRAGMA table_info(runtime_state_snapshots);"
 ```
 
 Bir sorgu eski branch veya eski DB şeması nedeniyle `no such column/table` verirse,

@@ -1,3 +1,186 @@
+# #421 P2-D/P2-E completion and P2-F current-state cleanup — 2026-09-24
+
+### Added
+- Deterministic production-chain replay for all 23 frozen golden scenarios, including partial fill, stale/future data, provider outage, orphan exposure and durable restart replay.
+- Bounded qualification for rapid decision persistence, resolver backlog, reconciliation volume, audit ingestion, repeated reject outcomes and concurrent readiness/audit reads against active PAPER writes.
+### Changed
+- Current README, version, mutation and qualification guidance now reflects completed P2-D/P2-E coverage and the remaining exact-final-SHA release gate.
+- Point-in-time BACKTEST, architecture and JOB-21 notes are explicitly marked historical so fixed score/RR and completed blocker descriptions are not mistaken for current behavior.
+### Fixed
+- Restart replay now proves zero duplicate execution and idempotent resolution from the same durable campaign database.
+- Stale documentation that reported only 17 of 23 replay scenarios and P2-E as missing.
+### Removed
+- None.
+### Breaking Changes
+- None. No production threshold, lifecycle, schema, export, migration, cost or LIVE-authorization change.
+### Known Issues
+- Fresh FAST and public six-hour SOAK must pass on the exact final `dev` SHA before #421 is complete. LIVE NOT READY.
+
+## Historical changelog entries
+
+Entries below preserve the repository state at the time of each change.
+
+# #421 P2-D full-chain replay expansion — 2026-09-24
+
+### Added
+- Frozen profitable LONG/SHORT, losing LONG, ambiguous TP+SL, execution-gate, correlated-portfolio, incomplete-geometry, resolved correct/false-reject, delayed-open-position and MTF mismatch PAPER replays across decision, persistence, resolver, readiness and isolated audit, each repeated for deterministic semantics; real SIGKILL cold-start replay protection.
+### Changed
+- Attached campaign identity takes precedence over environment and caller-supplied reject metadata; accepted decision JSON retains geometry status/reason; finalized PAPER lookup recognizes durable accepted evidence and scopes rejects to the current campaign/run.
+### Fixed
+- Reject forward labels escaping an attached campaign without an environment campaign ID; forged reject payload scope; repeated processing of a durable accepted PAPER signal; a final reject from another campaign falsely suppressing a reused signal; stale `decision_evidence` writer guidance; golden expectations that used generic portfolio, geometry and MTF labels instead of canonical production reasons, conflated missing execution evidence with missing geometry, mislabeled execution rejects as portfolio blocks, and reversed correct versus false reject outcomes.
+### Removed
+- None.
+### Breaking Changes
+- No schema or API break. Prospective attached-campaign reject identities may differ from previously incorrect standalone IDs; historical rows are untouched.
+### Known Issues
+- Seventeen of 23 golden cases run the production full chain. Partial-fill runtime semantics and five other P2-D cases remain; P2-E load and P1-E release qualification remain; LIVE NOT READY.
+
+# #421 P2-C seeded safety properties — 2026-09-24
+
+### Added
+- Reproducible property tests for geometry, partial fills, costs, time and identity.
+### Changed
+- Weighted fills use scaled finite arithmetic; overflowing executable RR fails closed as zero.
+### Fixed
+- NaN weighted fills from large finite rows and infinite RR from extreme positive-risk geometry.
+- Boolean fill price/quantity accepted as numeric one.
+### Removed
+- None.
+### Breaking Changes
+- Boolean fill evidence now rejects; unrepresentable RR no longer propagates infinity. Schema/exports unchanged.
+### Known Issues
+- Seeded tests are bounded. Full-chain replay, load and final release qualification remain; LIVE NOT READY.
+
+# #421 P2-B targeted safety mutation gate — 2026-09-24
+
+### Added
+- Disposable 25-candidate mutation runner and CI gate for protected safety invariants.
+- Independent campaign/run/release scope regressions.
+### Changed
+- Portfolio risk tests assert the reject exists before inspecting its reason.
+### Fixed
+- Scope regressions that previously survived deletion of one identity filter.
+### Removed
+- None.
+### Breaking Changes
+- None; runtime, schema, exports and campaign evidence unchanged.
+### Known Issues
+- Property tests, deterministic replay, bounded load and final release qualification remain; LIVE NOT READY.
+
+# Finite managed configuration repair — 2026-09-24
+
+### Added
+- 159 non-finite setting/environment/override-preservation regression cases.
+### Changed
+- Registry float values require finite numbers before bounds validation.
+### Fixed
+- NaN bypassing configured safety bounds and unbounded infinity acceptance.
+### Removed
+- None.
+### Breaking Changes
+- Non-finite managed configuration now fails validation; defaults, bounds and schema unchanged.
+### Known Issues
+- Direct runtime-config construction and other numeric consumers remain audit scope. P2-B remains open; LIVE NOT READY.
+
+# Invalid execution-number safety repair — 2026-09-24
+
+### Added
+- 80 regressions for corrupt execution numbers, invalid RR, PAPER rejection and SQLite/lifecycle evidence.
+### Changed
+- Supplied invalid numeric evidence blocks even when missing-context policy is relaxed.
+### Fixed
+- NaN/infinity and malformed numbers bypassing execution gates; invalid effective RR bypassing its minimum gate.
+### Removed
+- Fabricated zero fallback for invalid effective RR in the safety evaluator.
+### Breaking Changes
+- Invalid safety-result effective RR is None; valid input behavior and schema are unchanged.
+### Known Issues
+- Other numeric consumers and threshold configuration require separate audit. P2-B remains open; LIVE NOT READY.
+
+# CHATGPT CI trigger repair — 2026-09-24
+
+### Added
+- Regression protection for CHATGPT push qualification and core CI commands.
+### Changed
+- Existing Tests workflow also runs on CHATGPT pushes.
+### Fixed
+- Missing automatic CI trigger for the required development branch; README identifies exact-commit qualification.
+### Removed
+- None.
+### Breaking Changes
+- None; runtime, schema, lifecycle and persistence unchanged.
+### Known Issues
+- P2-B mutation coverage and final release qualification remain open; LIVE NOT READY.
+
+# Canonical execution-cost semantics — 2026-09-22
+
+### Added
+- One side-normalized `entry -> expected_fill -> actual_fill` contract with price, percent, and bps representations, explicit strategy-entry denominator, provenance, timestamps, and fee separation.
+- Deterministic quantity-weighted fill pricing for existing `fills.qty`/`fills.price` evidence.
+- Focused LONG/SHORT, partial-fill, decomposition, causality, provenance, unavailable-evidence, persistence, and no-double-count regressions.
+
+### Changed
+- Prospective PAPER accepted-position provenance records expected cost, modelled actual fill, realized deviation, total realized cost, and decision/fill timestamps in existing JSON evidence.
+- Closed-trade fill quality now measures adverse actual-vs-expected deviation through the shared canonical helper.
+- New `closed_trade_reviews.actual_slippage_pct` values retain the legacy column but have explicit canonical meaning: signed total strategy-entry-to-actual-fill execution-cost percent.
+
+### Fixed
+- Expected entry movement can no longer be confused with additional post-model fill deviation.
+- LONG/SHORT direction and favorable fills are no longer erased by absolute-value actual-slippage math.
+- Missing actual-fill evidence no longer becomes a fabricated zero by falling back to strategy entry.
+- PAPER simulated fills are explicitly `MODELLED`, not exchange-observed `ACTUAL`.
+
+### Removed
+- Duplicate post-fill slippage formulas from `order.py` and `ai_brain.py`.
+
+### Breaking Changes
+- No trading or schema break. Consumers interpreting newly written `actual_slippage_pct` as unsigned actual-vs-expected slippage must switch to the explicit canonical JSON fields; historical rows are not rewritten.
+
+### Known Issues
+- Generic LIVE adapter fills are not yet canonically persisted or grouped, so the weighted-average helper is not wired into LIVE execution.
+- #374 rejected-trade execution alignment remains intentionally out of scope.
+- One unrelated exact-float strategy-diagnostics assertion fails in the local full suite. LIVE remains NOT READY.
+
+# MTF structural RR geometry — 2026-09-21
+
+### Added
+- 15m setup-window structural stop/target evidence and auditable geometry provenance: source labels, structural levels, setup/execution timeframes, candidate RR, executable RR, and effective RR.
+- Deterministic LONG/SHORT, threshold-independence, no-forced-target, missing-structure, and 1m-refinement regressions.
+
+### Changed
+- Regime-guided candidates now calculate reward/risk from a 1m execution entry within the 15m entry zone and independently derived 15m support/resistance levels.
+- `MIN_RR` remains a downstream quality filter; changing it cannot move structural TP.
+
+### Fixed
+- 1m two-candle noise and the historical `1.2 + breakout/body` reward formula no longer manufacture MTF candidate targets near `MIN_RR`.
+
+### Breaking Changes
+- Prospective guided candidates without favorable 15m structure, or whose 1m execution price lies outside the 15m entry zone, reject fail-closed instead of receiving synthetic target geometry. No schema or LIVE-order authorization change.
+
+### Known Issues
+- Structural levels use the existing closed 15m setup window; fresh PAPER evidence is required before any policy conclusion. Historical campaign databases remain immutable. LIVE remains NOT READY.
+# MTF execution-confirmation SHADOW experiment — 2026-09-21
+
+### Added
+- PAPER-only `MTF_EXECUTION_CONFIRMATION_MODE=ENFORCE|SHADOW`, defaulting to ENFORCE.
+- JSON decision evidence for authoritative reject reason, shadow MTF reason, and ENFORCE counterfactual reason.
+
+### Changed
+- In SHADOW only, an exact `MTF_EXECUTION_NOT_CONFIRMED` result continues through existing downstream decision gates.
+- Prospective SHADOW campaign/config identity includes the mode; ENFORCE compatibility hashes are unchanged.
+
+### Fixed
+- None.
+
+### Removed
+- None.
+
+### Breaking Changes
+- None. SHADOW is a new prospective PAPER experiment and cannot run in LIVE/BACKTEST.
+
+### Known Issues
+- SHADOW evidence must not be mixed with ENFORCE qualification evidence. LIVE remains NOT READY.
+
 # PAPER execution-candle replay idempotency — 2026-09-21
 
 ### Added

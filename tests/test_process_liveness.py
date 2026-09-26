@@ -83,3 +83,127 @@ def test_posix_dead_pid_still_fails(monkeypatch):
     monkeypatch.setattr(liveness.sys, 'platform', 'linux')
     monkeypatch.setattr(liveness, '_posix_process', lambda _pid: (False, None, None))
     assert not liveness.process_is_alive(48, expected_started_at='2026-09-01T00:00:00Z')
+
+
+def test_darwin_procargs_parser_reads_only_exact_argv():
+    argv = [
+        "/usr/bin/python3",
+        "-m",
+        "alphaforge.burnin_cli",
+        "worker",
+        "--campaign-id=camp_macos",
+    ]
+    raw = (
+        len(argv).to_bytes(4, byteorder=liveness.sys.byteorder, signed=True)
+        + b"/usr/bin/python3\0\0"
+        + b"\0".join(item.encode() for item in argv)
+        + b"\0"
+        + b"PATH=/usr/bin\0SECRET_TOKEN=must-not-leak\0"
+    )
+    command, reason = liveness._parse_darwin_procargs(raw)
+    assert reason is None
+    assert command == " ".join(argv)
+    assert "SECRET_TOKEN" not in command
+
+
+def test_darwin_procargs_parser_rejects_auxiliary_vector_as_command():
+    raw = (
+        (5).to_bytes(4, byteorder=liveness.sys.byteorder, signed=True)
+        + b"/usr/bin/python3\0"
+        + (b"\0" * 32)
+        + b"ptr_munge=\0\0\0\0\0"
+        + b"main_stack=\0"
+    )
+    command, reason = liveness._parse_darwin_procargs(raw)
+    assert command is None
+    assert reason == "PROCARGS_ARGV_MUTATED_TO_AUXILIARY_VECTOR"
+
+
+def test_macos_command_identity_unavailable_is_structured_not_wrong_command(monkeypatch):
+    expected = datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(liveness.os, "name", "posix")
+    monkeypatch.setattr(liveness.sys, "platform", "darwin")
+    monkeypatch.setattr(liveness, "_darwin_process", lambda _pid: (True, expected, None))
+
+    result = liveness.process_liveness_diagnostics(
+        49,
+        expected_command_parts=("alphaforge.burnin", "camp_macos"),
+        expected_started_at="2026-09-01T00:00:00Z",
+    )
+
+    assert result.alive is True
+    assert result.identity_verified is False
+    assert result.reason == "COMMAND_IDENTITY_UNAVAILABLE"
+    assert result.observed_command is None
+
+
+def test_macos_wrong_campaign_command_fails_closed_with_diagnostic(monkeypatch):
+    expected = datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(liveness.os, "name", "posix")
+    monkeypatch.setattr(liveness.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        liveness,
+        "_darwin_process",
+        lambda _pid: (
+            True,
+            expected,
+            "/usr/bin/python -m alphaforge.burnin_cli worker --campaign-id camp_other",
+        ),
+    )
+
+    result = liveness.process_liveness_diagnostics(
+        50,
+        expected_command_parts=("alphaforge.burnin", "camp_expected"),
+        expected_started_at="2026-09-01T00:00:00Z",
+    )
+
+    assert result.alive is False
+    assert result.identity_verified is False
+    assert result.reason == "EXPECTED_COMMAND_MISMATCH"
+    assert result.observed_command.endswith("camp_other")
+
+
+def test_macos_creation_time_mismatch_fails_closed_with_diagnostic(monkeypatch):
+    expected = datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(liveness.os, "name", "posix")
+    monkeypatch.setattr(liveness.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        liveness,
+        "_darwin_process",
+        lambda _pid: (
+            True,
+            expected + 3600,
+            "/usr/bin/python -m alphaforge.burnin_cli worker --campaign-id camp_macos",
+        ),
+    )
+
+    result = liveness.process_liveness_diagnostics(
+        51,
+        expected_command_parts=("alphaforge.burnin", "camp_macos"),
+        expected_started_at="2026-09-01T00:00:00Z",
+    )
+
+    assert result.alive is False
+    assert result.reason == "PROCESS_CREATION_TIME_MISMATCH"
+    assert result.observed_creation_time == expected + 3600
+
+
+def test_macos_native_probe_error_is_distinct_from_pid_absent(monkeypatch):
+    monkeypatch.setattr(liveness.os, "name", "posix")
+    monkeypatch.setattr(liveness.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        liveness.os,
+        "kill",
+        lambda *_args: (_ for _ in ()).throw(OSError("native probe failed")),
+    )
+
+    result = liveness.process_liveness_diagnostics(
+        52,
+        expected_command_parts=("alphaforge.burnin", "camp_macos"),
+        expected_started_at="2026-09-01T00:00:00Z",
+    )
+
+    assert result.alive is False
+    assert result.identity_verified is False
+    assert result.reason == "DARWIN_NATIVE_PROBE_ERROR"
+    assert "native probe failed" in str(result.native_error)

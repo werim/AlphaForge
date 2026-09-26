@@ -138,6 +138,23 @@ def test_mtf_guided_signal_generation_env_controls_provider(
     engine.dispose()
 
 
+def test_mtf_execution_confirmation_mode_is_default_enforce_and_shadow_is_paper_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "PAPER")
+    monkeypatch.delenv("MTF_EXECUTION_CONFIRMATION_MODE", raising=False)
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'mtf-default.sqlite3'}")
+    assert _build_runtime_from_env(persistence_engine=engine).config.mtf_execution_confirmation_mode == "ENFORCE"
+
+    monkeypatch.setenv("MTF_EXECUTION_CONFIRMATION_MODE", "shadow")
+    assert _build_runtime_from_env(persistence_engine=engine).config.mtf_execution_confirmation_mode == "SHADOW"
+
+    monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "LIVE")
+    with pytest.raises(ValueError, match="PAPER-only"):
+        _build_runtime_from_env(persistence_engine=engine)
+    engine.dispose()
+
+
 def test_live_reconciliation_enabled_requires_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPHAFORGE_EXECUTION_MODE", "LIVE")
     monkeypatch.setenv("ALPHAFORGE_ENABLE_BINANCE_READONLY_RECONCILIATION", "true")

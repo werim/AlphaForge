@@ -4,6 +4,7 @@ import asyncio
 import json
 import socket
 import sqlite3
+import time
 from urllib import error
 
 from sqlalchemy import text
@@ -355,7 +356,7 @@ def test_final_paper_boundary_rechecks_after_earlier_clean_gate(tmp_path):
     runtime._unknown_exchange_state = False
     runtime._exchange_read_only_status = "AVAILABLE"
     runtime._reconciliation_status = "CLEAN"
-    assert runtime._evaluate_runtime_risk("BTCUSDT", {"market_ts": 99999999999}) is None
+    assert runtime._evaluate_runtime_risk("BTCUSDT", {"market_ts": time.time()}) is None
     runtime._unknown_exchange_state = True
     runtime._exchange_read_only_status = "UNAVAILABLE"
     runtime._reconciliation_status = "EXCHANGE_STATE_UNKNOWN"

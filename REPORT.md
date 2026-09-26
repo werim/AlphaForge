@@ -1,3 +1,214 @@
+# #421 P2-D/P2-E completion and P2-F documentation consistency — 2026-09-24
+
+## Why / root cause
+
+P2-D had one unwired golden case: `restart_replay`. The current documentation also stopped at 17 production-chain replays, described P2-E as missing, and left point-in-time BACKTEST/JOB notes using present-tense language about fixed score/RR and completed lifecycle defects. P2-E still needed direct bounded evidence for the six load surfaces named by #421.
+
+## Change / behavior
+
+`tests/test_issue421_full_chain_replay.py` and `tests/fixtures/system_golden/restart_replay.json` now replay a finalized accepted signal through a fresh runtime on the same database, require zero duplicate execution/lifecycle rows, and prove repeated resolver closure is idempotent. The complete pack now exercises all 23 frozen scenarios through production decision, persistence, resolver, readiness and isolated audit behavior.
+
+`tests/test_issue421_bounded_load.py` adds bounded real-SQL qualification for 64 rapid decisions/reject labels, backlog resolution, audit ingestion/re-ingestion, unique reconciliation cycles and concurrent readiness/audit readers during active PAPER writes. Assertions require exact evidence counts, drained resolved queues, immutable finalization, no duplicate cycles, no lock starvation and completion inside a conservative bound. Existing persistent-lock tests retain the explicit safety timeout/fail-closed contract.
+
+README, VERSION, CHANGELOG, the mutation guide and qualification guide now state the current P2-D/P2-E status and remaining exact-final-SHA FAST/SOAK gate. `docs/backtest_lifecycle_review.md`, `docs/architecture_audit_2026-05-11.md` and `docs/JOB21_PAPER_AUDIT_INTEGRITY_HARDENING.md` remain intact as historical evidence but are explicitly labeled point-in-time records. No historical audit results were rewritten.
+
+## Validation / impact
+
+P2-D focused replay/crash validation passed 31 tests; exact-head CI run 35984711551 passed on `91b1f1b4db119a223939599ae342e04ecd58215f`. P2-E focused and adjacent load, contention, resolver and audit validation passed 50 tests; exact-head CI run 35986274853 passed on `21f0054be516512a4b4b211a5a7ff6473ed2f9d7`. No production code, threshold, cost formula, schema/CSV shape, migration, active PAPER database, historical evidence or LIVE authorization changed in P2-E/P2-F. The macOS detached PAPER worker attachment fix from `972307ab2f1a0ebd904fdec4a785b1c371300187` remains in the lineage.
+
+The remaining #421 work is P1-E: merge the complete lineage to `dev`, establish its exact final SHA, then run FAST and the public six-hour SOAK on that same SHA. Older qualification reports do not qualify it. LIVE remains NOT READY.
+
+## Historical surgery reports
+
+Reports below describe the repository state at their recorded commit and remain immutable historical context.
+
+# #421 P2-D deterministic full-chain replay expansion — 2026-09-24
+
+## Why / root cause
+
+The P2-A golden pack declared full-chain expectations but exercised only a pre-submit projection. Initial frozen replays exposed campaign identity, accepted replay-finality and geometry evidence gaps; `489f495` repaired them and passed exact-head CI. The pack also lacked production-chain proof for accepted outcomes, execution rejects, portfolio limits, closed-candle geometry failures and resolved reject quality. Several reject fixtures contained stale gate names and evidence semantics, including reversed correct/false reject outcomes: a target-first counterfactual is missed profit, while a stop-first counterfactual is avoided loss.
+
+## Change / behavior
+
+`src/alphaforge/runtime.py` gives the attached campaign/run identity precedence over caller-supplied reject metadata. Seventeen P2-A fixtures now carry frozen market input across accepted outcomes, ambiguous closure, execution gates, correlated portfolio exposure, incomplete geometry, resolved reject quality, delayed resolution and MTF mismatch. `tests/test_issue421_full_chain_replay.py` drives real AIBrain scoring, PAPER runtime, persisted lifecycle/decisions, resolver eligibility/outcomes, readiness and isolated append-only audit ingestion twice per scenario. The new MTF cases enable production alignment enforcement and prove canonical `MTF_REGIME_SETUP_MISMATCH` and `MTF_SETUP_EXECUTION_MISMATCH` decisions, rather than the fixtures' old generic labels. Both preserve complete geometry, create eligible campaign labels, and execute no order. Existing delayed, resolved reject, ambiguous, SIGKILL cold-start and cross-campaign identity regressions remain.
+
+## Validation / impact
+
+Seventeen replay scenarios and 63 affected replay/MTF tests passed. Readiness remains blocked. No schema/CSV shape, migration, threshold, cost, LIVE authorization or active campaign database change. Previously persisted historical rows are untouched. Six golden scenarios remain, including partial-fill runtime semantics; bounded load/release qualification also remains. Push recommendation: CHATGPT only, followed by exact-SHA CI; LIVE NOT READY.
+
+# #421 P2-C deterministic safety properties — 2026-09-24
+
+## Why / root cause
+
+Valid finite partial-fill price and quantity values could overflow both notional and total quantity, producing NaN for the weighted fill. A valid positive-risk but extreme geometry could produce infinite executable RR. Boolean fill price/quantity was accepted as numeric one. These cases violate finite execution evidence and could contaminate downstream decisions.
+
+## Change / behavior
+
+`src/alphaforge/execution.py` now rejects boolean prices/quantities and computes the weighted fill after scaling finite prices and quantities; a still-unrepresentable result fails validation. `src/alphaforge/runtime.py` converts an overflowing reward/risk quotient to 0.0, which fails the existing minimum effective-RR gate. Thresholds, score, cost formulas and LIVE authorization are unchanged. `tests/test_issue421_safety_properties.py` uses fixed seeds to check LONG/SHORT geometry, adverse fill and cost monotonicity, partial-fill order/split invariance and quantity, future/pre-decision candle exclusion, and isolated SQL run/campaign/release scope. Four new cases failed before the fix. `docs/execution_cost_semantics.md`, `docs/safety_mutation_testing.md`, README, VERSION, REPORT and CHANGELOG reflect current behavior.
+
+## Validation / impact
+
+9 property tests, 167 focused execution/geometry/identity regressions and 238 adjacent runtime/backtest/execution tests passed. The existing mutation gate remained 25/25 KILLED, with no survivors/errors. Compileall and diff checks passed. No schema/CSV shape, migration, lifecycle ordering, historical-data rewrite or active campaign mutation. Compatibility: boolean fill evidence now rejects; extreme previously NaN weighted fills become finite when representable; overflowing executable RR becomes 0.0. Remaining limitations: deterministic bounded samples are not exhaustive, and direct numeric consumers outside these contracts need separate audit. P2-D replay, P2-E load and P1-E exact-commit release evidence remain. LIVE remains NOT READY. Push recommendation: CHATGPT only, then qualify exact SHA in CI.
+
+# #421 P2-B targeted safety mutation gate — 2026-09-24
+
+## Why / root cause
+
+Ordinary green tests did not prove individual protected guards were independently detected. In-memory probes showed the existing expectancy scope test survived deletion of any one campaign/run/release filter because all three foreign IDs changed together. A broader audit mapped the #421 P2-B candidates to production source and test nodes.
+
+## Change / behavior
+
+`tests/test_expectancy_evidence.py` now varies one identity dimension at a time. `tests/test_issue421_portfolio_risk_state.py` asserts a reject exists before inspecting its reason, so a missing risk veto fails as an assertion rather than an IndexError. `scripts/run_safety_mutations.py` copies `src` and `tests` into a disposable directory, checks a clean baseline, applies each unique one-at-a-time production mutation, and credits only an assertion failure. It reports survivors and harness errors separately. `.github/workflows/test.yml` runs this gate before the full suite. `docs/safety_mutation_testing.md` and README document the scope and limits; VERSION/REPORT/CHANGELOG record the change.
+
+The 25 candidates cover effective RR, unknown execution context, seven execution hard gates, planned versus expected fill, entry slippage double counting, run/campaign/release/mode scope, diagnostic shadow authority, accepted-window completeness, reconciliation CLEAN, final kill-switch reread, five runtime portfolio-risk inputs and future timestamps. Local result on the working tree: 14 baseline test nodes passed; 25 KILLED, 0 SURVIVED, 0 ERROR. Another 252 related regressions, compileall and diff checks passed. Pushed exact-SHA CI remains the final gate.
+
+## Impact / risks
+
+No production runtime behavior, lifecycle ordering, persistence schema, CSV export, migration, cost formula, threshold, campaign database or historical evidence changed. CI time grows by a focused mutation run; baseline/anchor errors fail closed. The runner uses temporary copies and removes them. Test compatibility is unchanged except clearer assertions. Mutation coverage is targeted, not a global score; P2-C property tests, P2-D full-chain replay, P2-E bounded load and P1-E exact-commit FAST/SOAK remain. LIVE remains NOT READY. Push recommendation: CHATGPT only after local verification, then qualify its exact SHA.
+
+# Finite managed configuration repair — 2026-09-24
+
+The canonical ConfigSetting.parse float branch accepted NaN because both range comparisons evaluate false. Confirmed MIN_EFFECTIVE_RR=nan and ALPHAFORGE_MAX_SPREAD_PCT=nan parsed successfully, allowing safety comparisons to become ineffective. Infinities were only rejected where a corresponding bound existed.
+
+Changed `src/alphaforge/config_registry.py` to require math.isfinite immediately after float parsing. Existing bounds/defaults remain unchanged. `tests/test_config_registry.py` adds 156 cases across all 52 float settings plus two environment-path checks and an override-file preservation test. NaN cases exposed false acceptance; infinity cases also standardize finite-value rejection rather than relying on bounds. README records the shared environment/dashboard contract. VERSION/REPORT/CHANGELOG updated.
+
+No runtime architecture, lifecycle, schema, export, migration, campaign or historical-evidence mutation. Compatibility: non-finite managed configuration now raises ValueError instead of entering runtime; operators must supply valid finite settings. Dashboard validation fails before writing the file. Direct construction bypassing the registry is not covered by this patch. LIVE remains NOT READY. Push recommendation: CHATGPT only, then exact-SHA CI; prior commit's CI is not qualification for this patch.
+
+# Non-finite execution evidence fail-open repair — 2026-09-24
+
+## Why / root cause
+
+During #421 P2-B inspection, direct safety evaluation accepted NaN/infinite effective RR and invalid spread/liquidity/funding numbers. PAPER `_process_symbol()` also executed with NaN spread, liquidity or funding. Missing-field detection trusted presence/status labels while numeric parsing returned None, silently bypassing comparisons. NaN effective RR also bypassed the minimum comparison.
+
+## Change and evidence
+
+`src/alphaforge/execution.py` now identifies supplied invalid numeric fields independently of missing-context policy, records them as unavailable, and rejects using EXECUTION_CONTEXT_UNAVAILABLE. Invalid effective RR returns None and LOW_EFFECTIVE_RR with FINITE_RR_REQUIRED comparison evidence. Valid numeric thresholds, scoring, cost formulas and authorization are unchanged. Optional absent fields keep their prior policy; optional supplied corrupt numbers now reject.
+
+`tests/test_issue421_execution_safety.py` adds 80 regression cases: numeric field/value/policy combinations, invalid RR, real PAPER process-symbol rejects, and an isolated SQLite run using the real lifecycle writer. The first 79 cases failed before the repair. Persistence regression verifies canonical REJECT decision evidence, unavailable-field attribution, and SIGNAL_CREATED -> SIGNAL_REJECTED without order placement.
+
+Other files changed: `README.md`, `docs/execution_cost_semantics.md`, `VERSION.md`, `REPORT.md`, `CHANGELOG.md`. Canonical SQL and lifecycle docs were inspected; their schema/state contracts need no changes.
+
+## Validation / impact
+
+121 focused execution-safety tests and 299 adjacent execution, RR geometry, parity, runtime, persistence, CSV and backtest tests passed. Compileall and diff whitespace checks passed. No schema/CSV shape change, migration, DB/evidence artifact mutation or historical backfill. Compatibility change: invalid RR safety-result values are None instead of zero/NaN/infinity; corrupt supplied numeric evidence rejects even under relaxed missing-context policy.
+
+Remaining limitations: this patch hardens the canonical PAPER/LIVE_PRECHECK evaluator, not every numeric normalizer or mode. Raw diagnostic payloads can still retain non-finite input; finite configuration threshold validation is separate follow-up. No LIVE enablement. Push recommendation: CHATGPT only, then require CI for the new exact SHA before continuing. Previous prerequisite b711ca7 passed run 35920220623; it does not qualify this patch.
+
+# CHATGPT CI trigger repair — 2026-09-24
+
+The current Tests workflow excluded CHATGPT pushes, preventing automatic exact-commit qualification for the required development branch. Added CHATGPT to its push trigger without changing existing branch triggers or test jobs.
+
+Files changed: `.github/workflows/test.yml`, `tests/test_ci_branch_contract.py`, `README.md`, `VERSION.md`, `REPORT.md`, `CHANGELOG.md`. README now identifies the applicable qualification workflow and exact-SHA evidence requirement. A regression test protects the CHATGPT trigger and existing compile/full-suite/offline-smoke commands.
+
+Validation: 6 focused CI and audit-contract tests passed; compileall passed. Remote CI is pending the push. Runtime, lifecycle, persistence, exports, schema, compatibility and migrations are unchanged; no database or historical evidence changes. Push recommendation: push only CHATGPT, then qualify that exact SHA. Remaining limitations: P2-B is not implemented yet; separate main-only Python 3.10 workflow conflicts with the declared Python 3.11 minimum and requires follow-up. LIVE remains NOT READY.
+
+# Issue #369 canonical execution-cost semantics surgery report — 2026-09-22
+
+## Why the patch was needed / root cause
+
+AlphaForge had correct but distributed pre-submit execution-cost behavior and an ambiguous post-fill label. Runtime PAPER already moved strategy entry to an adverse expected fill and protected effective RR from deducting that embedded entry movement twice. Separately, closed-trade review code in both `order.py` and `ai_brain.py` calculated `abs(actual_fill - entry) / entry` and called it `realized_slippage_pct` / `actual_slippage_pct`. That value was total entry-to-fill movement, not actual-versus-expected deviation; absolute-value handling also discarded LONG/SHORT direction and could classify favorable movement as cost. Missing fill evidence could be replaced with entry and become a fabricated zero.
+
+## Current-state audit
+
+- Candidate strategy entry: `RuntimeOrchestrator._process_symbol()` receives/enriches `market_ctx["entry"]`; MTF-guided candidates may replace it with the #378 1m refinement inside the 15m structural zone before RR/cost evaluation.
+- Expected/modelled fill: `runtime.py::_expected_fill_price()` applies the configured PAPER slippage assumption or pre-submit expected-slippage evidence with adverse LONG/SHORT direction.
+- Effective RR: `runtime.py::_execution_rr_metrics()` recomputes raw RR from expected fill/SL/TP, then subtracts only remaining model penalties. Its existing `model.total_penalty - model.slippage_penalty / 2` rule prevents the modeled entry move from being deducted again.
+- PAPER accepted fill: `runtime.py::_simulate_paper_execution()` deterministically fills at expected fill; `_persist_pending_paper_position()` writes `planned_entry`, `simulated_fill`, separate entry spread/fee fields, and provenance JSON.
+- LIVE fill: `runtime.py::_execute()` delegates to `RealExecutionAdapter.submit()`. There is no authoritative LIVE fill persistence/aggregation contract in this path, so this patch does not infer one or label adapter data `ACTUAL` automatically.
+- Partial fills: the canonical `fills` table has `qty`, `price`, `fee`, and `filled_at`; reconciliation consumes fill rows for duplicate detection. No weighted-average function previously existed, and `partial_fill` was lifecycle-only.
+- Accepted outcomes: `burnin_pending_position_outcomes` and `burnin_trade_outcomes` keep spread, entry/exit slippage, fees, funding, latency, total execution cost, net PnL/R, and JSON provenance. Resolver cost subtraction is unchanged.
+- Reject handoff: `burnin_pending_reject_labels.execution_cost_assumptions_json`, order-decision execution context, and observation JSON are the prospective decision-time surfaces #374 can extend. No #374 forward resolver behavior is implemented here.
+- Ambiguous actual-slippage field: `closed_trade_reviews.actual_slippage_pct` was populated from the entry-to-filled-entry absolute movement. It is retained as a compatibility column, but new rows now use canonical signed total realized execution-cost percent and JSON explicitly records `actual_slippage_pct_semantics=TOTAL_REALIZED_EXECUTION_COST_PCT`.
+
+## Canonical contract
+
+For side factor `+1` LONG and `-1` SHORT:
+
+- `expected_execution_cost_price = side_factor * (expected_fill - entry)`
+- `realized_execution_deviation_price = side_factor * (actual_fill - expected_fill)`
+- `total_realized_execution_cost_price = side_factor * (actual_fill - entry)`
+
+Positive means adverse execution for both sides. Every percentage divides its side-normalized price quantity by strategy `entry`; bps is percent-as-fraction multiplied by 10,000. Therefore expected cost plus realized deviation equals total realized cost within normal floating-point precision.
+
+Current runtime expected fill embeds only its established expected-slippage component. Spread, fees, funding, latency, liquidity, volatility, and modeled exit slippage remain separately attributable in the existing cost/effective-RR pipeline.
+
+Decision-time evidence contains only entry, expected fill/cost, expected-fill provenance, and decision timestamp. `decision_time_dict()` cannot expose actual fill, realized deviation, total realized cost, or fill timestamp. Fill-time values exist only when actual/simulated fill evidence exists; otherwise they remain `None` with `UNAVAILABLE` provenance. PAPER fills are explicitly `MODELLED`. Exchange `ACTUAL` is accepted only when a caller supplies that provenance. Fees and all other explicit penalties are outside this price-deviation value object.
+
+## Files changed
+
+- `src/alphaforge/execution.py`: adds the single deterministic execution-cost value object, record adapter, review metrics, provenance rules, and quantity-weighted fill-price helper.
+- `src/alphaforge/runtime.py`: attaches decision-time expected-cost evidence, emits modelled PAPER fill-time evidence/timestamps, and persists the contract in existing position provenance JSON without changing effective-RR math.
+- `src/alphaforge/order.py`, `src/alphaforge/ai_brain.py`: replace duplicate ambiguous post-fill formulas with the shared contract; stop fabricating actual fill from entry.
+- `tests/test_execution_cost_semantics.py`: adds LONG/SHORT sign, decomposition, denominator, unavailable, provenance, partial-fill, fee separation, no-double-count, timestamp-causality, persistence, and legacy-alias regressions.
+- `tests/test_execution_layer.py`: supplies explicit side evidence to legacy review tests.
+- `VERSION.md`, `REPORT.md`, `CHANGELOG.md`: document behavior, persistence, compatibility, validation, and #374 handoff.
+
+## Runtime, lifecycle, persistence, export, and compatibility impact
+
+Trading thresholds, scoring, expectancy gates, stop rules, spread/slippage/funding/liquidity/volatility gates, sizing, order type, MTF geometry, SHADOW authority, LIVE authorization, and Binance mutation permissions are unchanged. Lifecycle sequencing is unchanged. Existing effective-RR and PAPER geometry protections remain authoritative.
+
+No schema or export migration is required. Prospective accepted PAPER position provenance now contains entry, expected fill, modelled actual fill, the three cost families, provenance, decision/fill timestamps, reference denominator, sign convention, and explicit fee separation. Existing normalized entry spread/fee fields remain independently attributable. Historical rows and `actual_slippage_pct` values are not backfilled or rewritten.
+
+The new weighted-average helper consumes the existing fill-ledger shape (`qty`/`price`) and rejects invalid/non-positive evidence. It is deliberately not wired into generic LIVE submission because there is no authoritative persisted adapter fill group to aggregate yet; doing so would invent live behavior.
+
+## Tests executed
+
+- `pytest -q tests/test_execution_cost_semantics.py tests/test_execution_layer.py tests/test_paper_rr_geometry.py` — 42 passed.
+- Relevant execution/runtime/PAPER/position/MTF/SHADOW/LIVE-safety selection — 221 passed, 4 dependency warnings.
+- Additional BACKTEST parity, burn-in, runtime-state/control/config, readiness, reconciliation selection — 194 passed.
+- Full `pytest -q` before the direct-persistence compatibility adjustment — 1,780 passed, 3 skipped, 3 failed; the two #369-related failures were fixed and their parameterized regression now passes. The remaining failure is an unrelated exact-float assertion (`0.3` vs `0.30000000000000004`) in `tests/test_strategy_quality_guardrails.py`, a file untouched by this patch.
+- Full suite excluding only that confirmed unrelated assertion — 1,782 passed, 3 skipped, 1 deselected, with 120 dependency deprecation warnings.
+- `python -m py_compile src/alphaforge/execution.py src/alphaforge/runtime.py src/alphaforge/order.py src/alphaforge/ai_brain.py tests/test_execution_cost_semantics.py` — passed.
+- `git diff --check` — passed.
+- CI's `flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics` could not run because flake8 is not installed; `python -m flake8`, `python -m pyflakes`, and `ruff` are also unavailable. No tooling was installed for convenience.
+
+## Risks, limitations, migration, and #374 handoff
+
+#374 can now persist/query entry, expected fill, expected execution cost, provenance, and decision timestamp without future reconstruction, then add prospective rejected-trade realized alignment when a real/modelled fill becomes available. It can use the same helper for actual fill, realized deviation, total cost, and quantity-weighted partial fills. Fees and other penalties remain separate inputs.
+
+Out of scope: rejected-trade forward execution resolution, LIVE adapter fill persistence, historical backfill, campaign migration, and threshold/policy changes. No active PAPER campaign or historical database was accessed, started, paused, resumed, migrated, or mutated. Review and merge are appropriate after CI; do not infer LIVE readiness.
+
+# MTF candidate RR structural geometry — 2026-09-21
+
+## Root cause and behavior
+Guided MTF candidates previously called the shared two-candle geometry helper with 1m execution candles. That helper placed its stop from those tiny candles and manufactured target distance from `1.2 + breakout/body` reward math. The persistent RR arithmetic and existing fill/cost gates were not changed.
+
+The guided path now derives 15m setup-window support/resistance as structural stop/target, accepts a 1m close only as an entry refinement inside the setup entry zone, and calculates raw RR directly as reward divided by risk. Missing, invalid, non-favorable, or out-of-zone geometry rejects with an explicit deterministic reason. `MIN_RR` remains exclusively a quality filter.
+
+## Safety, evidence, and compatibility
+The execution-aware pipeline remains candidate RR -> fill-adjusted executable RR -> remaining execution penalty -> effective RR -> existing gate. SHADOW treatment of replaced legacy geometry is unchanged. Accepted/rejected JSON evidence contains source/timeframe/structural-level provenance without a schema migration. No PAPER database, campaign state, qualification threshold, cost assumption, or LIVE-order permission was changed.
+
+The implementation is intentionally conservative: closed setup-window extrema are the existing available structural evidence, not a fabricated forecast or RR multiplier. A fresh, separately authorized PAPER comparison campaign is required after review/merge; do not resume or mutate prior evidence campaigns, and do not infer LIVE readiness.
+
+Focused structural, MTF, runtime, order-filter, legacy-geometry, scanner, and executable-RR validation passed 156 tests. Changed Python modules compiled; `git diff --check` and the CI-style F821 selection both passed.
+# MTF execution-confirmation SHADOW experiment surgery report — 2026-09-21
+
+## Why and root cause
+
+The runtime treated every MTF alignment reason as an immediate authoritative reject in `RuntimeOrchestrator._process_symbol`. This made the one intended experiment—observing 1m execution non-confirmation through the normal downstream pipeline—impossible without broadly disabling MTF.
+
+## Files changed and behavior
+
+- `src/alphaforge/runtime.py`: adds the narrow `ENFORCE|SHADOW` mode to `RuntimeConfig`. SHADOW bypasses only the exact singleton `MTF_EXECUTION_NOT_CONFIRMED` reason; `MTF_EXECUTION_COUNTER_REGIME`, 1h/15m failures, and every other MTF reason retain their existing authoritative path. The candidate then uses the unchanged score, raw/effective-RR, execution-cost, portfolio, and execution pipeline.
+- `src/alphaforge/config/__init__.py`, `src/alphaforge/config_registry.py`, `.env.test.example`: register default `MTF_EXECUTION_CONFIRMATION_MODE=ENFORCE`, normalize its values, and refuse SHADOW outside PAPER.
+- `src/alphaforge/burnin_campaign.py`: prospective SHADOW config and strategy identities include the mode. ENFORCE preserves prior hash payloads to avoid breaking existing campaign attachments.
+- `docs/SQLcheat.md`: documents JSON evidence fields and a read-only comparison query.
+- `tests/test_multi_timeframe.py`, `tests/test_runtime_env_config.py`: cover ENFORCE, SHADOW downstream rejection/acceptance, counter-regime authority, SQL evidence, identity separation, and PAPER/LIVE boundaries.
+
+## Persistence, lifecycle, and compatibility
+
+No schema migration, CSV/export shape, historical-row rewrite, execution-cost formula, score threshold, raw-RR threshold, effective-RR threshold, reject resolver contract, live mutation path, or Binance write call changed. Existing-schema JSON metrics now carry `authoritative_reject_reason`, `shadow_mtf_execution_reason`, `enforce_counterfactual_reject_reason`, and `mtf_execution_confirmation_mode`. SHADOW accepts/rejects retain the actual final lifecycle; ENFORCE and counter-regime retain the existing immediate MTF reject lifecycle.
+
+## Tests and remaining risk
+
+`python -m pytest -q tests/test_multi_timeframe.py tests/test_runtime_env_config.py tests/test_env_wiring_contract.py --disable-warnings --maxfail=1` passed: 193 tests. `python -m compileall -q src/alphaforge` and `git diff --check` passed before documentation updates.
+
+Risk is intentional experimental decision divergence in SHADOW. Do not mix SHADOW and ENFORCE campaign evidence; use a new PAPER campaign, release ID, database, and config identity. Do not launch T05 from this task, do not resume T04, and do not infer LIVE readiness.
+
+## Recommended T05 configuration
+
+Use a fresh PAPER-only campaign with `MTF_EXECUTION_CONFIRMATION_MODE=SHADOW`, all existing MTF timeframes and thresholds unchanged, `ALPHAFORGE_ENABLE_LIVE_TRADING=false`, and `ALPHAFORGE_ALLOW_LIVE_ORDERS=false`. Keep `ALPHAFORGE_MTF_GUIDED_SIGNAL_GENERATION_ENABLED` at its current campaign setting; do not add an MTF-off switch or change score/RR/cost controls.
+
 # PAPER execution-candle replay idempotency surgery report — 2026-09-21
 
 ## Why the patch was needed and confirmed root cause
@@ -668,7 +879,7 @@ Rebase or port the patch onto current `origin/dev` before review because the wor
 Copying the BACKTEST diagnostic profile into `.env` made PAPER preflight derive `MODE=BACKTEST` and inactive runtime limits, so candidate and forced-PAPER runtime identities differed. Copyable templates also supplied non-operational reserved values, producing avoidable warnings. Authenticated reconciliation placeholders correctly failed closed but the operator contract did not clearly distinguish intentional credential blockers from template drift.
 
 ## Minimal correction
-`.env.example` now identifies itself as the canonical PAPER runtime/burn-in profile, keeps production Binance REST/WS derived from `BINANCE_ENVIRONMENT=production`, and explicitly marks both read-only credential fields as must-fill. `.env.test.example` is BACKTEST-only with PAPER runtime and authenticated reconciliation disabled. Reserved inventory is absent from PAPER/LIVE runtime profiles and remains empty in the diagnostic inventory. README and `docs/KOMUTLAR.md` direct PAPER operators to `.env.example`, use only canonical `ALPHAFORGE_EXECUTION_MODE`, and explain that runtime limits are derived rather than configured independently.
+`.env.example` now identifies itself as the canonical PAPER runtime/burn-in profile, keeps production Binance REST/WS derived from `BINANCE_ENVIRONMENT=production`, and explicitly marks both read-only credential fields as must-fill. `.env.test.example` is BACKTEST-only with PAPER runtime and authenticated reconciliation disabled. Reserved inventory is absent from PAPER/LIVE runtime profiles and remains empty in the diagnostic inventory. README and `docs/COMMANDS.md` direct PAPER operators to `.env.example`, use only canonical `ALPHAFORGE_EXECUTION_MODE`, and explain that runtime limits are derived rather than configured independently.
 
 ## Safety, compatibility, and validation
 LIVE enablement and real-order authorization remain false; PAPER preflight remains no-submit and reconciliation remains signed/read-only. No lifecycle, persistence, export, database, schema, or strategy-threshold behavior changed. Existing user `.env` files are not rewritten. Focused env-contract and Phase 9 identity/preflight coverage passes 23 tests, including exact candidate/runtime payload/hash equality and intentional placeholder credential rejection. Operators must replace both placeholders with matching read-only Binance credentials before preflight can pass authenticated reconciliation.
@@ -1062,7 +1273,7 @@ Terminalization remains separate. The existing `BEGIN IMMEDIATE` phase re-reads 
 
 ## Files, compatibility, tests, and risks
 
-`src/alphaforge/runtime_state.py` owns append-only canonical evidence persistence and additive completion of reduced historical snapshot schemas. `src/alphaforge/burnin_ops.py` owns the guarded bridge and unchanged terminal transaction authority. `tests/test_phase9_burnin_ops.py` covers zero/nonzero decision histories, exact audit identity, provider failure, no fake snapshot, and existing race/replay gates. `docs/KOMUTLAR.md` documents operator results. There are no export changes, Control Center writes, LIVE changes, freshness widening, or `ACTIVE_CAMPAIGN_STATUSES` changes. Migration is additive only for legacy reduced runtime snapshot tables. Provider ambiguity and any exposure remain fail-closed. LIVE remains NOT READY; merge recommendation depends on the full suite passing.
+`src/alphaforge/runtime_state.py` owns append-only canonical evidence persistence and additive completion of reduced historical snapshot schemas. `src/alphaforge/burnin_ops.py` owns the guarded bridge and unchanged terminal transaction authority. `tests/test_phase9_burnin_ops.py` covers zero/nonzero decision histories, exact audit identity, provider failure, no fake snapshot, and existing race/replay gates. `docs/COMMANDS.md` documents operator results. There are no export changes, Control Center writes, LIVE changes, freshness widening, or `ACTIVE_CAMPAIGN_STATUSES` changes. Migration is additive only for legacy reduced runtime snapshot tables. Provider ambiguity and any exposure remain fail-closed. LIVE remains NOT READY; merge recommendation depends on the full suite passing.
 
 ## Example results
 
@@ -1171,7 +1382,7 @@ Issue #309 requires a shared deterministic boundary before future agents can be 
 
 ## Files and behavior
 
-`src/alphaforge/agents/` adds immutable contracts, the fixed shadow orchestrator, and additive SQL repository. The config registry/loader and environment examples add six typed controls. `runtime.py` schedules a copied legacy decision after rejection persistence or an accepted decision, never awaits the graph on the order path, and records only new shadow metrics. `persistence.py` bootstraps isolated trace tables. Agent tests cover determinism, validation, bounds, hard rejects, failure isolation, duplicate-safe SQL, null unavailable values, and disabled defaults. `docs/agent_graph.md` and `docs/KOMUTLAR.md` document design and operation.
+`src/alphaforge/agents/` adds immutable contracts, the fixed shadow orchestrator, and additive SQL repository. The config registry/loader and environment examples add six typed controls. `runtime.py` schedules a copied legacy decision after rejection persistence or an accepted decision, never awaits the graph on the order path, and records only new shadow metrics. `persistence.py` bootstraps isolated trace tables. Agent tests cover determinism, validation, bounds, hard rejects, failure isolation, duplicate-safe SQL, null unavailable values, and disabled defaults. `docs/agent_graph.md` and `docs/COMMANDS.md` document design and operation.
 
 ## Lifecycle, persistence, schema, compatibility, and migration
 
@@ -1885,7 +2096,7 @@ No lifecycle, schema, persistence, reconciliation, or export contract changed. T
 Operators lacked one database-wide, non-mutating view of campaign/continuation lineage, worker freshness, attachment identity, pending PAPER evidence, runtime reconciliation state, and conservative cleanup classification. Existing campaign commands bootstrap schemas and are campaign-specific, making them unsuitable as a forensic first action on an uncertain database.
 
 ## Files and behavior
-`burnin_ops diagnose-db` opens an existing SQLite file with `mode=ro` and `query_only`, performs no bootstrap, and reports every campaign, active and historical continuations, PID/liveness/heartbeat, release/config/strategy/universe/execution-cost identity, open PAPER positions, pending order count or explicit unknown, pending reject labels, latest reconciliation/recovery state, and stale/orphaned continuation rows. Its plan only recommends archival for terminal campaigns with verified zero runtime/local exposure and no pending labels; ambiguous state remains manual review. Evidence deletion, unknown-to-zero conversion, and automatic LIVE/reconciliation clearing are explicitly disabled. Tests hash the database before and after diagnosis and verify fail-closed unknown exposure. `docs/KOMUTLAR.md` now provides argparse-compatible PowerShell and Bash flows.
+`burnin_ops diagnose-db` opens an existing SQLite file with `mode=ro` and `query_only`, performs no bootstrap, and reports every campaign, active and historical continuations, PID/liveness/heartbeat, release/config/strategy/universe/execution-cost identity, open PAPER positions, pending order count or explicit unknown, pending reject labels, latest reconciliation/recovery state, and stale/orphaned continuation rows. Its plan only recommends archival for terminal campaigns with verified zero runtime/local exposure and no pending labels; ambiguous state remains manual review. Evidence deletion, unknown-to-zero conversion, and automatic LIVE/reconciliation clearing are explicitly disabled. Tests hash the database before and after diagnosis and verify fail-closed unknown exposure. `docs/COMMANDS.md` now provides argparse-compatible PowerShell and Bash flows.
 
 ## Lifecycle, persistence, compatibility, and migration
 No lifecycle transition or database row is written by diagnosis. No schema, CSV, or evidence-package format changed, and no migration is required. The command tolerates databases without runtime lineage by reporting pending orders/reconciliation as unknown rather than zero. Existing launch, recovery, runtime, strategy, score, RR, and acceptance logic is unchanged.
@@ -2338,7 +2549,7 @@ Regression coverage creates an empty temporary SQLite path exclusively through `
 
 **Why/root cause.** `burnin_ops._db_path()` checked legacy `ALPHAFORGE_DB_PATH` before loading the canonical URL, unlike runtime and `burnin_cli`. The previous documentation patch also removed useful lifecycle operations and contained foreground launch, invalid DB-doctor, and raw-process credential checks.
 
-**Files and behavior.** `burnin_ops.py` now preserves explicit `--db`, bootstraps the canonical dotenv contract, and delegates URL/legacy/default precedence to `database_defaults.resolve_runtime_database_url`. Regression tests set both environment forms and prove runtime plus both burn-in CLIs select the URL, while explicit CLI input remains highest. `docs/KOMUTLAR.md` restores the full guide and corrects detached launch, DB-doctor syntax, canonical-loader credential booleans, canonical DB use, lifecycle operations, SQL, and troubleshooting.
+**Files and behavior.** `burnin_ops.py` now preserves explicit `--db`, bootstraps the canonical dotenv contract, and delegates URL/legacy/default precedence to `database_defaults.resolve_runtime_database_url`. Regression tests set both environment forms and prove runtime plus both burn-in CLIs select the URL, while explicit CLI input remains highest. `docs/COMMANDS.md` restores the full guide and corrects detached launch, DB-doctor syntax, canonical-loader credential booleans, canonical DB use, lifecycle operations, SQL, and troubleshooting.
 
 **Lifecycle/persistence/export/schema/compatibility.** No lifecycle, reconciliation, MTF, campaign identity, persistence, export, or schema behavior changed. No DB is created, moved, mutated, or deleted by this follow-up. Legacy `ALPHAFORGE_DB_PATH` remains supported below the canonical URL.
 

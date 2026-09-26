@@ -220,7 +220,7 @@ class BurnInQualificationEngine:
             exec_status=self._compute_execution(execm, blockers, metrics)
             conc_status=self._compute_concentration(qualification_trades, blockers, metrics)
             rec_status=self._check_reconciliation(blockers, metrics)
-            self._check_phase_gates(release_id, blockers, metrics)
+            self._check_phase_gates(release_id, blockers, metrics, expected_git_commit=str(run.get("git_commit") or ""))
             evidence_status="PASS" if not any(b in {"BURNIN_SCHEMA_OR_EVIDENCE_MISSING"} or b.startswith("MISSING_PROVENANCE") or b.startswith("INCOMPLETE_COST") for b in blockers) else "FAIL"
             missing_markers=("MISSING","INSUFFICIENT","NO_","BURNIN_SCHEMA")
             status="CANARY_QUALIFIED" if not blockers else ("BURN_IN_INSUFFICIENT" if any(any(m in b for m in missing_markers) for b in blockers) or sample_status=="INSUFFICIENT" else "BURN_IN_FAILED")
@@ -318,7 +318,10 @@ class BurnInQualificationEngine:
             try: cluster=json.loads(r.get("payload_json") or "{}").get("correlation_cluster","UNKNOWN")
             except Exception: cluster="UNKNOWN"
             bycluster[cluster]=bycluster.get(cluster,0)+val
-        sym=(max(bysym.values())/total) if total else 1.0; trade=(top/total) if total else 1.0; reg=(max(byreg.values())/total) if total else 1.0; cluster=(max(bycluster.values())/total) if total else 1.0
+        if total <= 0:
+            metrics.update(symbol_contribution=bysym,regime_contribution=byreg,correlated_cluster_contribution=bycluster,symbol_concentration=None,top_trade_contribution=None,regime_concentration=None,correlated_cluster_concentration=None)
+            return "INSUFFICIENT_EVIDENCE"
+        sym=max(bysym.values())/total; trade=top/total; reg=max(byreg.values())/total; cluster=max(bycluster.values())/total
         metrics.update(symbol_contribution=bysym,regime_contribution=byreg,correlated_cluster_contribution=bycluster,symbol_concentration=sym,top_trade_contribution=trade,regime_concentration=reg,correlated_cluster_concentration=cluster)
         reasons=[]
         if sym>self.thresholds.max_symbol_concentration: reasons.append("SYMBOL_CONCENTRATION_BREACH")
@@ -333,7 +336,7 @@ class BurnInQualificationEngine:
         if not snap or not status or status=="UNKNOWN": blockers.append("RECONCILIATION_EVIDENCE_MISSING"); return "NO_EVIDENCE"
         if status not in {"CLEAN","NOT_REQUIRED_BACKTEST"}: blockers.append("RECONCILIATION_NOT_CLEAN"); return "FAIL"
         return "PASS"
-    def _check_phase_gates(self,release_id,blockers,metrics):
+    def _check_phase_gates(self,release_id,blockers,metrics,expected_git_commit=""):
         if not (self.thresholds.require_operator_ack or self.thresholds.require_phase1_6_gates): return
         phase="PHASE6"
         if self.thresholds.require_operator_ack and latest_valid_operator_ack(self.engine, release_id=release_id, phase=phase) is None: blockers.append("OPERATOR_ACK_MISSING_OR_EXPIRED")
@@ -350,7 +353,48 @@ class BurnInQualificationEngine:
             elif int(mutation)>0: blockers.append("MUTATION_ATTEMPT_DETECTED")
             if not gate.get("rollback_verified"): blockers.append("ROLLBACK_NOT_VERIFIED")
             if not gate.get("runbook_verified"): blockers.append("RUNBOOK_NOT_VERIFIED")
-            if not bool((evidence.get("full_tests") or evidence.get("tests_passing_evidence") or {}).get("status") == "PASS" or gate.get("full_tests_passed", False)): blockers.append("FULL_TEST_EVIDENCE_MISSING")
+            commit_bound_evidence=(
+                ("CANARY", evidence.get("canary_validation") or {}),
+                ("ROLLBACK", evidence.get("rollback_evidence") or {}),
+                ("RUNBOOK", evidence.get("runbook_evidence") or {}),
+            )
+            metrics["release_evidence_git_commits"]={
+                name: item.get("git_commit") for name,item in commit_bound_evidence
+            }
+            if expected_git_commit:
+                for name,item in commit_bound_evidence:
+                    if not item:
+                        continue
+                    evidence_commit=str(item.get("git_commit") or "").strip()
+                    if not evidence_commit:
+                        blockers.append(f"{name}_EVIDENCE_COMMIT_MISSING")
+                    elif evidence_commit != expected_git_commit:
+                        blockers.append(f"{name}_EVIDENCE_COMMIT_MISMATCH")
+            full_tests=evidence.get("full_tests") or evidence.get("tests_passing_evidence") or {}
+            metrics["full_test_evidence"] = full_tests
+            if str(full_tests.get("status") or "").upper() != "PASS":
+                blockers.append("FULL_TEST_EVIDENCE_MISSING")
+            else:
+                required_steps=full_tests.get("required_steps") or {}
+                required_step_names=(
+                    "Full regression suite",
+                    "Protected safety mutation gate",
+                    "Run offline backtest",
+                    "Verify backtest outputs",
+                )
+                provenance_ok=(
+                    str(full_tests.get("source") or "")=="GITHUB_ACTIONS_PUSH"
+                    and str(full_tests.get("repository") or "")=="werim/AlphaForge"
+                    and str(full_tests.get("event") or "").lower()=="push"
+                    and str(full_tests.get("workflow_path") or "")==".github/workflows/test.yml"
+                    and full_tests.get("run_id") is not None
+                    and str(full_tests.get("full_regression_suite") or "").lower()=="success"
+                    and all(str(required_steps.get(name) or "").lower()=="success" for name in required_step_names)
+                )
+                if not provenance_ok:
+                    blockers.append("FULL_TEST_EVIDENCE_UNVERIFIED")
+                if expected_git_commit and str(full_tests.get("head_sha") or "") != expected_git_commit:
+                    blockers.append("FULL_TEST_EVIDENCE_COMMIT_MISMATCH")
     def suspension_reasons(self,snap: BurnInQualificationSnapshot)->list[str]:
         m=snap.metrics; b=set(snap.blockers); reasons=[]
         mapping={"SPREAD_DEGRADATION":"SPREAD_DEGRADATION","SLIPPAGE_SPIKE":"SLIPPAGE_SPIKE","LATENCY_DEGRADATION":"LATENCY_DEGRADATION","FILL_DEGRADATION":"FILL_DEGRADATION","REJECT_QUALITY_INSUFFICIENT":"REJECT_QUALITY_COLLAPSE","CALIBRATION_QUALITY_INSUFFICIENT":"CALIBRATION_DRIFT","RECONCILIATION_NOT_CLEAN":"RECONCILIATION_FAILURE","STALE_DATA_CLUSTER":"STALE_DATA_CLUSTER","MUTATION_ATTEMPT_DETECTED":"MUTATION_ATTEMPT","OPERATOR_ACK_MISSING_OR_EXPIRED":"OPERATOR_ACK_EXPIRY","ROLLBACK_NOT_VERIFIED":"ROLLBACK_INVALIDATION","RUNBOOK_NOT_VERIFIED":"RUNBOOK_INVALIDATION","SYMBOL_CONCENTRATION_BREACH":"SYMBOL_CONCENTRATION_BREACH","TRADE_CONCENTRATION_BREACH":"TRADE_CONCENTRATION_BREACH","REGIME_CONCENTRATION_BREACH":"REGIME_CONCENTRATION_BREACH"}

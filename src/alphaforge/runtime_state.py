@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-import json, os, sqlite3, time, uuid
+import json, os, random, sqlite3, time, uuid
 from typing import Any, Mapping
 
 from sqlalchemy import inspect, text
@@ -191,6 +191,7 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
     campaign_state_query_errors: list[str] = []
     availability = {
         "active_positions_available": False,
+        "paper_campaign_positions_available": False,
         "pending_orders_available": False,
         "orphan_evidence_available": False,
         "kill_switch_available": False,
@@ -220,6 +221,26 @@ def evaluate_runtime_recovery(engine: Engine, *, mode: str, campaign_id: str | N
                 query_errors.append(err); local_exposure_query_errors.append(err)
                 return 0
         exposure["active_positions"] = count("positions", "active_positions_available")
+        # PAPER campaign positions are authoritative exposure too. A hard crash
+        # can happen after the simulated fill is durably persisted but before
+        # the in-memory/generic position mirrors advance. Ignoring this table
+        # would allow a cold restart to report zero local exposure.
+        if str(mode).upper() == "PAPER":
+            try:
+                has_campaign_positions = conn.execute(text(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                    "AND name='burnin_pending_position_outcomes'"
+                )).scalar_one()
+                if has_campaign_positions:
+                    paper_open = int(conn.execute(text(
+                        "SELECT COUNT(*) FROM burnin_pending_position_outcomes "
+                        "WHERE status='OPEN'"
+                    )).scalar_one() or 0)
+                    exposure["active_positions"] += paper_open
+                availability["paper_campaign_positions_available"] = True
+            except Exception as exc:
+                err = f"burnin_pending_position_outcomes:{type(exc).__name__}:{exc}"
+                query_errors.append(err); local_exposure_query_errors.append(err)
         exposure["pending_orders"] = count("orders", "pending_orders_available")
         try:
             row = conn.execute(text("SELECT status, orphan_order_count, orphan_position_count FROM exchange_reconciliation_events ORDER BY id DESC LIMIT 1")).mappings().first()
@@ -381,7 +402,9 @@ def persist_reconciliation_cycle(engine: Engine, *, cycle_id: str, findings: lis
                 raise
             if attempt == 3 or time.monotonic() >= deadline:
                 raise ReconciliationPersistenceFailure(f"SQLITE_BUSY reconciliation persistence after {attempt + 1} attempts; cycle_id={cycle_id}") from exc
-            time.sleep(min(backoffs[attempt], max(0.0, deadline - time.monotonic())))
+            remaining = max(0.0, deadline - time.monotonic())
+            base_sleep = min(backoffs[attempt], remaining)
+            time.sleep(min(base_sleep * random.uniform(0.80, 1.20), remaining))
     raise AssertionError("unreachable")
 
 

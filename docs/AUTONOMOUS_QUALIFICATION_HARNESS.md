@@ -28,7 +28,7 @@ Run a six-hour SOAK qualification:
   --output-root /private/tmp/alphaforge-autonomous-qualification
 ```
 
-Use `--json` for the full machine-readable result on stdout. Each run also writes `qualification-report.json` and `qualification-report.md` beneath its unique artifact directory. Exit status is `0` for `PASS`, `1` for `NEEDS_FIX`, and `2` for a harness setup/environment `BLOCKED` result. A product-path scenario exception is captured as `NEEDS_FIX`, followed by automatic teardown.
+Use `--json` for the full machine-readable result on stdout. Each run also writes `qualification-report.json` and `qualification-report.md` beneath its unique artifact directory. Final reports pin the Git commit captured when the harness was initialized, record the report-time HEAD and whether it changed during the run, and create a transactionally consistent `artifacts/qualification.sqlite3` snapshot with SHA-256 and `PRAGMA quick_check` metadata before teardown. Evidence references point at that preserved database artifact rather than the disposable runtime database path. Exit status is `0` for `PASS`, `1` for `NEEDS_FIX`, and `2` for a harness setup/environment `BLOCKED` result. A product-path scenario exception is captured as `NEEDS_FIX`, followed by automatic teardown.
 
 ## Architecture
 
@@ -100,7 +100,11 @@ The SOAK resource gate flags RSS growth over 128 MiB, artifact growth over 64 Mi
 
 A release may proceed to a **new** real PAPER burn-in only when the full repository suite passes in an isolated test checkout, FAST passes in a new temporary workspace, the full public SOAK finishes `PASS`, and its report shows no safety invariant failures, resource flags, persistence gaps, unexplained exits, or campaign lineage drift. This gate does not authorize LIVE trading or launch a burn-in itself.
 
-## Current validation and limits
+## Historical validation and current limits
+
+The validation counts and six-hour runs below are historical evidence for the
+commits that produced them. They do not qualify a newer SHA; release qualification
+must run FAST and public SOAK again on the exact code/config being released.
 
 The focused runtime, reconciliation, contention, campaign, watchdog, qualification, readiness, and harness set passed 325 tests for the initial harness. The SOAK sampling/feed-gap regressions passed 12 tests. The updated full suite in a new isolated `/private/tmp` checkout passed 1,535 tests with 3 skips. The fresh FAST qualification passed all 15 injected faults and 17 total scenario/cross-scenario checks with zero invariant failures, persistence gaps, unexplained exits, or inconsistent campaign lineage.
 

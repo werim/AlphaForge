@@ -1,3 +1,87 @@
+# AlphaForge 0.1.0 — #421 P2-F current-state documentation — 2026-09-24
+
+- Current phase: implementation and regression work is complete through P2-E. All 23 P2-A golden scenarios replay deterministically through PAPER decision, scoped SQLite evidence, lifecycle, resolver, readiness and isolated audit surfaces. P2-E adds bounded decision persistence, resolver backlog, reconciliation volume, audit ingestion, repeated-outcome and concurrent read-only qualification.
+- Runtime maturity/alignment: the protected BACKTEST/PAPER/LIVE_PRECHECK invariant, execution and portfolio fail-closed gates, complete-window resolvers, future-time rejection, SQLite contention recovery, real SIGKILL restart recovery and macOS detached PAPER worker attachment fix are present in this lineage. Thresholds, cost policy and LIVE authorization are unchanged; LIVE stays disabled.
+- Lifecycle/persistence: restart replay consults durable accepted finality and resolver outcomes remain immutable/idempotent. Bounded load preserves exact row counts, unique reconciliation cycles, resolved queues and append-only audit identities while readiness/audit readers run against active PAPER writes. No schema/export migration, historical evidence rewrite or active campaign database change.
+- Validation: P2-D focused replay/crash tests passed 31 tests and exact-head CI run 35984711551 passed on `91b1f1b`; P2-E focused and adjacent load/contention/resolver/audit tests passed 50 tests and exact-head CI run 35986274853 passed on `21f0054`. P2-F marks obsolete point-in-time documents and synchronizes current guidance. Fresh FAST and public six-hour SOAK on the exact final `dev` SHA remain the #421 release gate. Last audit: 2026-09-24. LIVE NOT READY.
+
+## Historical version entries
+
+Entries below are point-in-time records. Their “current” wording applies to the commit described by that entry, not current HEAD.
+
+# AlphaForge 0.1.0 — #421 P2-D full-chain replay in progress — 2026-09-24
+
+- Current phase: seventeen P2-A golden cases replay through real PAPER scoring/decision, lifecycle and SQLite persistence, resolver, readiness and isolated audit ingestion. The first fifteen passed exact-head CI on `b871305`.
+- Runtime maturity/alignment: attached PAPER campaigns own reject labels, reject identities and decision observations without relying on an environment variable; caller-supplied reject metadata cannot override that attachment. Durable accepted evidence prevents repeated PAPER execution, and an unrelated campaign's reject cannot suppress the same signal. BACKTEST and LIVE behavior, thresholds and costs are unchanged; LIVE stays disabled.
+- Lifecycle/execution/persistence: profitable LONG/SHORT, losing LONG, ambiguous TP+SL, execution gates, correlated portfolio exposure, incomplete geometry, reject outcomes, delayed resolution and MTF mismatch paths replay with stable semantics. MTF replays use canonical `MTF_REGIME_SETUP_MISMATCH` and `MTF_SETUP_EXECUTION_MISMATCH` reasons and retain eligible forward-label geometry. The delayed case retains one durable open position and no premature outcome. Ambiguous closure remains evidence-incomplete and non-authoritative. A real SIGKILL cold-start position blocks replay. PAPER fills remain modeled. No schema/export migration or historical evidence rewrite.
+- Validation: seventeen replay scenarios and 63 affected replay/MTF tests passed; exact-head CI for this extension remains required. Known risks: 6 other golden cases still lack production full-chain replay, including partial-fill runtime semantics; P2-E load, P2-F documentation sweep and P1-E release qualification remain. Last audit: 2026-09-24. LIVE NOT READY.
+
+# #421 P2-C seeded safety properties — 2026-09-24
+
+- Current phase: P2-C deterministic property contracts for geometry, partial fills, cost monotonicity, time boundaries, and run/campaign/release identity. P2-B exact-head CI passed on b3800e8; this patch still needs its own exact-head CI.
+- Runtime maturity/alignment: extreme finite fill ledgers now return finite weighted means; boolean fill price/quantity is rejected. Unrepresentable executable RR returns 0.0 and cannot pass the effective-RR gate. Ordinary finite geometry, costs, thresholds and mode policies are unchanged; LIVE remains disabled.
+- Lifecycle/persistence: no state ordering, schema, export, migration, campaign or historical evidence change. The property suite uses isolated in-memory SQL and frozen timestamps.
+- Validation: 9 property tests, 167 focused and 238 adjacent regressions passed; the existing mutation gate remained 25/25 KILLED, with no survivors/errors. Compileall/diff checks passed. Known risks: this is bounded seeded coverage, not exhaustive proof. P2-D replay, P2-E load and P1-E release qualification remain. LIVE NOT READY. Last audit: 2026-09-24.
+
+# #421 P2-B targeted safety mutation gate — 2026-09-24
+
+- Current phase: P2-B focused mutation qualification; 25 named source mutations and 14 baseline test nodes passed locally (25 KILLED, 0 SURVIVED, 0 ERROR). Another 252 related regressions, compileall and diff checks passed. Exact pushed CI for this change is pending.
+- Runtime maturity/alignment: no production decision, threshold, cost, mode or authorization logic changed. The gate protects PAPER execution and portfolio paths, readiness scope, accepted resolver completeness, market time and final LIVE authorization reread without enabling LIVE.
+- Lifecycle/persistence/execution realism: existing tests check rejects, isolated SQLite evidence, scope and position-window behavior. No schema/export change, migration, historical backfill or campaign mutation.
+- Risks: focused mutations are not exhaustive; P2-C properties, P2-D replay, P2-E load and P1-E release qualification remain. LIVE NOT READY. Last audit: 2026-09-24.
+
+# Finite configuration threshold validation — 2026-09-24
+
+- Current phase: #421 audit / P2-B preparation; canonical configuration NaN bypass repaired.
+- Runtime maturity/alignment: all registry-managed float settings reject NaN and infinities before range checks across environment/dashboard consumers. Defaults and thresholds are unchanged; LIVE remains disabled.
+- Lifecycle/persistence/execution realism: no lifecycle, database, schema, export or cost-formula changes. Invalid dashboard updates preserve the existing override file; no campaign data was touched.
+- Validation: focused registry/environment and adjacent dashboard/configuration regressions, compileall and diff checks; exact pushed CI still required. Preceding execution-number repair 1b2671f passed exact-head CI.
+- Known risks: direct manually constructed runtime configs and other numeric consumers remain separate audit scope. P2-B/release qualification incomplete; LIVE NOT READY. Last audit: 2026-09-24.
+
+# Invalid execution-number safety repair — 2026-09-24
+
+- Current phase: #421 audit / P2-B preparation; reproduced numeric fail-open repaired before mutation work.
+- Runtime maturity: canonical safety evaluation blocks NaN, infinities, malformed numeric strings and booleans; invalid effective RR remains unavailable and rejects.
+- Alignment/lifecycle: PAPER and LIVE_PRECHECK share the repaired guard; invalid PAPER evidence reaches SIGNAL_REJECTED without execution. Other mode paths are unchanged; this is not full numeric hardening of BACKTEST/LIVE.
+- Persistence/execution realism: existing unavailable-field and reject evidence used; no schema/export migration, historical rewrite or campaign mutation.
+- Validation: 121 focused and 299 adjacent tests passed; compileall/diff checks passed. Preceding CI prerequisite b711ca7 passed exact-head CI; this patch still requires its own pushed CI.
+- Known risks: other numeric consumers/normalizers and configuration thresholds need separate audit; P2-B and release qualification remain incomplete. LIVE NOT READY. Last audit: 2026-09-24.
+
+# CHATGPT exact-commit CI prerequisite — 2026-09-24
+
+- Current phase: #421 P2-B preparation; existing Tests workflow now includes CHATGPT pushes.
+- Runtime maturity/alignment, lifecycle, execution realism, persistence and schema: unchanged.
+- Validation: six focused CI/audit contract tests and compileall passed locally; pushed exact-head CI remains pending.
+- Critical risks: mutation coverage and final release qualification remain incomplete. LIVE NOT READY; last audit 2026-09-24.
+
+# Canonical execution-cost semantics — 2026-09-22
+
+- Current version/phase: prospective `execution_cost_semantics_v1` contract on `fix/canonical-execution-cost-semantics`, based on merged PR #379 (`b833f27`).
+- Runtime maturity: `strategy entry -> expected/modelled fill -> actual/realized fill` is now one side-normalized contract. Positive cost is adverse for LONG and SHORT; every percentage/bps metric uses strategy entry as denominator; fees remain separate.
+- BACKTEST/PAPER/LIVE alignment: the authoritative effective-RR pipeline and its existing embedded-entry-slippage no-double-count rule are unchanged. PAPER simulated fills are `MODELLED`, never exchange `ACTUAL`. LIVE submission/authorization is unchanged and does not infer missing fill evidence.
+- Lifecycle/persistence: decision-time JSON contains only entry, expected fill, expected cost, decision timestamp, and provenance. Fill-time PAPER provenance adds modelled actual fill, realized deviation, total realized cost, and fill timestamp. Missing actual fills remain NULL/None/UNAVAILABLE. No schema migration, historical backfill, campaign launch, or campaign mutation.
+- Partial fills: the existing `fills.qty`/`fills.price` ledger now has one deterministic quantity-weighted average helper; it is not wired into the generic LIVE adapter until that adapter supplies authoritative persisted fill groups.
+- Validation: 1,782 tests pass with 3 skips when the one unrelated exact-float assertion in `test_strategy_quality_guardrails.py` is deselected; all focused and relevant execution/runtime/PAPER/position/MTF/SHADOW/LIVE-safety suites pass. LIVE remains NOT READY.
+- Known critical risks: generic LIVE fill persistence/aggregation is still adapter-defined, historical `actual_slippage_pct` rows are not reinterpreted/backfilled, and #374 must add rejected-trade alignment prospectively from decision-time evidence. Last audit date: 2026-09-22. Live readiness verdict: NOT LIVE READY.
+
+# MTF structural RR geometry — 2026-09-21
+
+- Current version/phase: prospective `mtf_setup_structure_v1` PAPER decision-geometry correction on `fix/structural-mtf-rr-geometry`.
+- Runtime maturity: 1h remains regime selection; 15m closed setup candles now provide support/resistance-based structural stop and target; 1m can refine only an entry that lies inside the 15m entry zone. Candidate RR is the independently calculated reward/risk ratio and contains no `MIN_RR` target construction.
+- BACKTEST/PAPER/LIVE alignment: execution-cost and effective-RR gates remain unchanged. The existing `MIN_RR` quality filter can reject low structural opportunity, and `LOW_EFFECTIVE_RR` still rejects otherwise valid geometry after fill/cost effects.
+- Lifecycle/persistence: absent, invalid, or non-favorable structure fails closed with explicit geometry reasons. Existing JSON decision/MTF evidence now carries geometry source, entry/stop/target source, timeframes, structural levels, candidate RR, executable RR, and effective RR; no schema migration or historical campaign mutation is required.
+- Validation: 156 focused structural, MTF, runtime, order-filter, legacy-geometry, scanner, and executable-RR tests passed; changed modules compiled, `git diff --check` passed, and the CI-style F821 lint selection reported zero findings.
+- Known critical risks: setup-window extrema are deliberately conservative historical support/resistance evidence, not a forecast of future liquidity. A fresh PAPER campaign is required for prospective distribution evidence; LIVE remains NOT READY.
+# MTF execution-confirmation SHADOW experiment — 2026-09-21
+
+- Current version/phase: minimal prospective PAPER-only experiment on `experiment/mtf-execution-shadow`; no campaign was launched, resumed, migrated, or mutated.
+- Runtime maturity: 1h regime, 15m setup, and `MTF_EXECUTION_COUNTER_REGIME` remain authoritative. `MTF_EXECUTION_NOT_CONFIRMED` is ENFORCE by default; in explicitly configured PAPER SHADOW mode it is persisted as counterfactual evidence and continues to the existing score, raw-RR, effective-RR, execution-cost, and risk gates.
+- BACKTEST/PAPER/LIVE alignment: ENFORCE preserves the prior behavior and identity. SHADOW is rejected outside PAPER at config and direct-runtime construction; LIVE authorization, adapters, and Binance mutation behavior are unchanged.
+- Lifecycle coverage: SHADOW candidates follow the existing final lifecycle for their actual downstream outcome. MTF counter-regime and all non-shadow MTF reasons retain the existing immediate `SIGNAL_REJECTED` progression.
+- Persistence/identity: no schema migration or export-column change. Canonical observation JSON now records mode, shadow reason, ENFORCE counterfactual reason, and final authoritative reason. SHADOW is included in prospective campaign/config and strategy hashes; ENFORCE retains legacy hashes for compatibility.
+- Validation: 193 focused MTF, runtime-env, and configuration-contract tests passed. `compileall` and `git diff --check` passed before documentation updates.
+- Known critical risks: SHADOW evidence is experimental and must not be mixed with ENFORCE qualification evidence. A fresh, isolated PAPER campaign is required for outcome analysis; LIVE remains NOT READY. Last audit date: 2026-09-21.
+
 # PAPER execution-candle replay idempotency — 2026-09-21
 
 - Current version/phase: prospective PAPER replay-safety fix on `fix/paper-execution-candle-replay-idempotency`; no campaign was launched, resumed, paused, migrated, or mutated.

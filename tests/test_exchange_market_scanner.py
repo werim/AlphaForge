@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
-from urllib import request
+import socket
+from urllib import error, request
 
 import pytest
 
-from alphaforge.config import load_config_from_env
+from alphaforge.config import load_config_from_env, runtime_filter_config
 from alphaforge.exchange_market_scanner import (_binance_kline_geometry, _fetch_json_with_latency,
-    enrich_selected_market_geometry, scan_exchange_markets)
-from alphaforge.execution import build_execution_context, build_execution_cost_model
+    _scan_binance, enrich_selected_market_geometry, scan_exchange_markets)
+from alphaforge.execution import (
+    build_execution_context,
+    build_execution_cost_model,
+    evaluate_execution_safety,
+)
 from alphaforge.signal_geometry import build_breakout_geometry_with_diagnostics
 
 
@@ -61,6 +66,7 @@ def test_scan_exchange_markets_uses_public_endpoints_only(monkeypatch: pytest.Mo
     assert any(row.get("source_exchange") == "binance" for row in rows)
     assert any(row.get("source_exchange") == "hyperliquid" for row in rows)
     assert all("symbol" in row and "entry" in row for row in rows)
+    assert rows.diagnostics["status"] == "AVAILABLE"
 
 
 def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,6 +94,59 @@ def test_binance_bookticker_spread_maps_correctly(monkeypatch: pytest.MonkeyPatc
     assert btc["funding_status"] == "MEASURED"
     assert btc["market_data_latency_ms"] is not None
     assert btc["market_data_latency_source"] == "BINANCE_PUBLIC_HTTP_RTT"
+
+
+def test_binance_missing_funding_rate_remains_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT"}],
+        ]),
+    )
+
+    btc = asyncio.run(scan_exchange_markets(load_config_from_env()))[0]
+
+    assert btc["funding_rate_pct"] is None
+    assert btc["funding_status"] == "UNAVAILABLE"
+    assert btc["funding_source"] == "UNAVAILABLE"
+    assert btc["funding_rate_pct_zero_verified"] is False
+
+
+def test_binance_explicit_zero_funding_is_verified_measured_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+            [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000", "priceChangePercent": "1"}],
+            [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+            [{"symbol": "BTCUSDT", "lastFundingRate": "0.00000000"}],
+        ]),
+    )
+
+    btc = asyncio.run(scan_exchange_markets(load_config_from_env()))[0]
+    ctx = build_execution_context({
+        **btc,
+        "expected_slippage_pct": 0.0002,
+        "slippage_status": "MEASURED",
+        "expected_slippage_pct_zero_verified": True,
+        "latency_ms": 50.0,
+        "latency_status": "MEASURED",
+        "liquidity_status": "MEASURED",
+        "orderbook_imbalance": 0.1,
+        "orderbook_status": "MEASURED",
+        "volatility_regime": "normal",
+        "volatility_status": "MEASURED",
+    })
+
+    assert btc["funding_rate_pct"] == pytest.approx(0.0)
+    assert btc["funding_status"] == "MEASURED"
+    assert btc["funding_rate_pct_zero_verified"] is True
+    assert ctx["funding_rate_pct_zero_verified"] is True
 
 
 def test_binance_public_http_latency_is_monotonic_round_trip_milliseconds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,6 +222,28 @@ def test_binance_closed_1m_candles_supply_canonical_trade_geometry(monkeypatch: 
     assert execution_ctx["volatility_status"] == "MEASURED"
     assert execution_ctx["volatility_source"] == "BINANCE_CLOSED_1M_KLINES"
     assert build_execution_cost_model(execution_ctx).volatility_penalty == pytest.approx(0.12)
+
+    paper_ctx = build_execution_context({
+        **btc,
+        "expected_slippage_pct": 0.0002,
+        "slippage_status": "MODEL_ESTIMATE",
+        "slippage_source": "CONFIGURED_PAPER_ASSUMPTION",
+        "latency_ms": 50.0,
+        "latency_status": "MODEL_ESTIMATE",
+        "latency_source": "CONFIGURED_PAPER_ASSUMPTION",
+        "fee_pct": 0.0004,
+        "fee_status": "CONFIGURED",
+        "fee_source": "CONFIGURED_PAPER_ASSUMPTION",
+    })
+    safety = evaluate_execution_safety(
+        paper_ctx,
+        effective_rr=2.0,
+        min_effective_rr=cfg.runtime.min_effective_rr,
+        thresholds=runtime_filter_config(cfg.runtime, mode="PAPER"),
+    )
+    assert safety["accepted"] is True
+    assert safety["execution_evidence_status"] == "PARTIAL_ESTIMATED"
+    assert safety["missing_fields"] == []
 
 
 def test_binance_invalid_or_missing_range_does_not_fabricate_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,6 +341,39 @@ def test_scan_exchange_markets_returns_empty_on_malformed_binance_payload(monkey
     cfg = load_config_from_env()
     rows = asyncio.run(scan_exchange_markets(cfg))
     assert rows == []
+    assert rows.diagnostics["status"] == "UNAVAILABLE"
+    assert rows.diagnostics["cause"] == "MALFORMED_PAYLOAD"
+    assert rows.diagnostics["endpoint"] == "ticker_24hr"
+
+
+@pytest.mark.parametrize(
+    ("exc", "cause", "http_status"),
+    [
+        (TimeoutError("timed out"), "TIMEOUT", None),
+        (OSError("network down"), "NETWORK_ERROR", None),
+        (error.URLError(socket.gaierror(-2, "name resolution failed")), "DNS_FAILURE", None),
+        (error.HTTPError("https://example.invalid", 429, "rate limited", None, None), "HTTP_429", 429),
+        (error.HTTPError("https://example.invalid", 503, "unavailable", None, None), "HTTP_5XX", 503),
+        (json.JSONDecodeError("invalid json", "{", 1), "JSON_DECODE_ERROR", None),
+    ],
+)
+def test_binance_provider_failures_are_queryable_and_not_valid_empty(
+    monkeypatch: pytest.MonkeyPatch, exc: BaseException, cause: str, http_status: int | None,
+) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+
+    def _raise(*_args, **_kwargs):
+        raise exc
+
+    monkeypatch.setattr("alphaforge.exchange_market_scanner._fetch_json", _raise)
+    rows = _scan_binance(load_config_from_env(), timeout_sec=0.1)
+
+    assert rows == []
+    assert rows.diagnostics["status"] == "UNAVAILABLE"
+    assert rows.diagnostics["provider"] == "binance"
+    assert rows.diagnostics["cause"] == cause
+    assert rows.diagnostics["endpoint"] == "exchangeInfo"
+    assert rows.diagnostics["http_status"] == http_status
 
 
 def test_scan_exchange_markets_handles_exchange_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,6 +384,77 @@ def test_scan_exchange_markets_handles_exchange_failure(monkeypatch: pytest.Monk
     cfg = load_config_from_env()
     rows = asyncio.run(scan_exchange_markets(cfg))
     assert rows == []
+    assert rows.diagnostics["status"] == "UNAVAILABLE"
+    assert rows.diagnostics["provider"] == "binance"
+    assert rows.diagnostics["cause"] == "TIMEOUT"
+    assert rows.diagnostics["endpoint"] == "exchangeInfo"
+    assert rows.diagnostics["error_class"] == "TimeoutError"
+
+
+def test_binance_premium_index_timeout_is_not_reported_as_valid_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    payloads = iter([
+        {"symbols": [{"symbol": "BTCUSDT", "status": "TRADING"}]},
+        [{"symbol": "BTCUSDT", "lastPrice": "100", "quoteVolume": "90000000",
+          "priceChangePercent": "1"}],
+        [{"symbol": "BTCUSDT", "bidPrice": "99.9", "askPrice": "100.1"}],
+    ])
+
+    class _Resp:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(self.payload).encode("utf-8")
+
+    calls = {"count": 0}
+
+    def _open(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 4:
+            raise TimeoutError("premium index timed out")
+        return _Resp(next(payloads))
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    rows = asyncio.run(scan_exchange_markets(load_config_from_env()))
+
+    assert rows == []
+    assert rows.diagnostics["status"] == "UNAVAILABLE"
+    assert rows.diagnostics["provider"] == "binance"
+    assert rows.diagnostics["cause"] == "TIMEOUT"
+    assert rows.diagnostics["endpoint"] == "premiumIndex"
+    assert rows.diagnostics["error_class"] == "TimeoutError"
+    assert rows.diagnostics["http_status"] is None
+
+
+def test_valid_empty_binance_response_remains_distinct_from_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERLIQUID_ENABLED", "false")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        _urlopen_multi([
+            {"symbols": []},
+            [],
+            [],
+            [],
+        ]),
+    )
+
+    rows = asyncio.run(scan_exchange_markets(load_config_from_env()))
+
+    assert rows == []
+    assert rows.diagnostics["status"] == "VALID_EMPTY"
+    assert rows.diagnostics["cause"] == "NO_CANDIDATES"
+    assert rows.diagnostics["error_class"] is None
 
 
 def test_hyperliquid_mid_only_sets_unavailable_spread(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -7,9 +7,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from alphaforge.alert_delivery import AlertDeliveryProbeConfig, WebhookAlertDeliveryEvidenceProvider, capture_alert_delivery_evidence, latest_persisted_alert_delivery_evidence
+from alphaforge.burnin import persist_burnin_observation
+from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
-from alphaforge.release_gates import build_release_snapshot, persist_canary_event, persist_operator_ack, persist_release_snapshot
+from alphaforge.release_gates import build_release_snapshot, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, persist_rollback_verification, persist_runbook_evidence, required_operator_ack_text
 from alphaforge.rollback_evidence import persist_rollback_validation_evidence
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
@@ -28,23 +30,31 @@ def _seed_valid(session: Session) -> None:
     session.execute(text("""
         INSERT INTO decision_evidence (
             evidence_id, mode, timestamp, symbol, side, lifecycle_state_before, lifecycle_state_after,
-            decision, score, raw_rr, effective_rr, expectancy_bucket, reject_reason,
+            decision, score, raw_rr, effective_rr, min_effective_rr, expectancy_bucket, reject_reason,
             cost_penalty, total_cost_pct, total_explicit_cost_pct, spread_pct, expected_slippage_pct, liquidity_score,
             diagnostics_json, portfolio_equity, open_position_count, max_open_positions, total_notional_exposure, max_notional_exposure,
             symbol_notional_exposure, max_symbol_notional, daily_loss_pct, max_daily_loss_pct, rolling_drawdown_pct,
             correlation_group, correlation_group_exposure, correlated_position_count, portfolio_reject_reason,
             portfolio_risk_state, portfolio_diagnostics_json, signal_id, lifecycle_seq, created_at
         ) VALUES
-            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.2, 'LOW', 'HIGH_SPREAD',
+            ('de-1', 'PAPER', '2026-01-01T00:00:01Z', 'BTCUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.0, 1.4, 1.2, 1.6, 'LOW', 'HIGH_SPREAD',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.5, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 4000, 5000, 1000, 2000, 0.01, 0.05, 0.02, 'CRYPTO_MAJOR_BTC', 4000, 1, 'MAX_NOTIONAL_EXPOSURE', 'MAX_NOTIONAL_EXPOSURE', '{"engine":"evaluate_portfolio_risk"}', 's-1', 2, '2026-01-01T00:00:01Z'),
-            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 1.8, 'HIGH', '',
+            ('de-2', 'PAPER', '2026-01-01T00:00:01Z', 'ETHUSDT', 'LONG', 'SIGNAL_CREATED', 'WAITING_ENTRY_ZONE', 'ACCEPT', 8.2, 2.0, 1.8, 1.6, 'HIGH', '',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.8, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 1000, 5000, 500, 2000, 0.01, 0.05, 0.02, 'CRYPTO_MAJOR_ETH', 500, 1, '', 'ACCEPTED', '{"engine":"evaluate_portfolio_risk"}', 's-2', 2, '2026-01-01T00:00:01Z'),
-            ('de-3', 'BACKTEST', '2026-01-01T00:00:01Z', 'SOLUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.1, 1.5, 1.2, 'LOW', 'CORRELATION_OVEREXPOSURE',
+            ('de-3', 'BACKTEST', '2026-01-01T00:00:01Z', 'SOLUSDT', 'LONG', 'SIGNAL_CREATED', 'SIGNAL_REJECTED', 'REJECT', 7.1, 1.5, 1.2, 1.6, 'LOW', 'CORRELATION_OVEREXPOSURE',
              0.2, 0.011, 0.011, 0.01, 0.001, 0.5, '{"spread_penalty": 0.2, "total_explicit_cost_pct": 0.011, "cost_penalty_rr": 0.2}',
              10000, 1, 3, 4500, 5000, 500, 2000, 0.01, 0.05, 0.02, 'CRYPTO_HIGH_BETA_ALT', 4500, 2, 'CORRELATION_OVEREXPOSURE', 'CORRELATION_OVEREXPOSURE', '{"engine":"evaluate_portfolio_risk"}', 's-3', 2, '2026-01-01T00:00:01Z')
         ON CONFLICT(evidence_id) DO NOTHING
+    """))
+    session.execute(text("""
+        UPDATE decision_evidence
+        SET funding_rate_pct=0.0001,
+            latency_ms=50.0,
+            volatility_regime='normal',
+            unavailable_fields='[]'
+        WHERE evidence_id IN ('de-1','de-2','de-3')
     """))
     session.commit()
 
@@ -89,17 +99,16 @@ def _persist_verified_rollback(engine) -> None:
 
 
 def _persist_verified_phase6_release(engine, *, release_id: str = "default", phase: str = "PHASE6") -> None:
-    persist_operator_ack(engine, release_id=release_id, phase=phase, valid_until="2099-01-01T00:00:00Z", evidence={"source": "readiness-test"})
-    persist_canary_event(engine, release_id=release_id, phase=phase, mutation_attempted=False, mutation_blocked=True, evidence={"source": "readiness-test"})
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO rollback_verification_events(verification_id, release_id, phase, verified_at, status, evidence_json)
-            VALUES ('rollback:phase6-readiness-test', :release_id, :phase, '2026-01-01T00:00:00Z', 'PASS', '{}')
-        """), {"release_id": release_id, "phase": phase})
-        conn.execute(text("""
-            INSERT INTO runbook_evidence(evidence_id, release_id, phase, recorded_at, status, evidence_json)
-            VALUES ('runbook:phase6-readiness-test', :release_id, :phase, '2026-01-01T00:00:00Z', 'PASS', '{}')
-        """), {"release_id": release_id, "phase": phase})
+    persist_operator_ack(
+        engine,
+        release_id=release_id,
+        phase=phase,
+        acknowledgement_text=required_operator_ack_text(release_id),
+        evidence={"source": "readiness-test"},
+    )
+    run_canary_mutation_trap_validation(engine, release_id=release_id, phase=phase)
+    persist_rollback_verification(engine, release_id=release_id, phase=phase)
+    persist_runbook_evidence(engine, release_id=release_id, phase=phase, runbook_path="RUNBOOK.md")
     persist_release_snapshot(engine, build_release_snapshot(engine, release_id=release_id, phase=phase))
 
 def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, persist_rollback: bool = True, persist_runtime_snapshot: bool = True):
@@ -110,9 +119,11 @@ def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, 
         capture_alert_delivery_evidence(engine, _StaticProvider(_verified_alert()))
     if persist_live_heartbeat:
         save_runtime_heartbeat(engine, runtime_instance_id="runtime:live-qualified-test", execution_mode="LIVE", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
-    if persist_rollback:
-        _persist_verified_rollback(engine)
+    _persist_verified_rollback(engine)
     _persist_verified_phase6_release(engine)
+    if not persist_rollback:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM live_rollback_validation_evidence"))
     if persist_runtime_snapshot:
         save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="LIVE_PRECHECK", requested_mode="LIVE_PRECHECK", actual_mode="LIVE_PRECHECK", runtime_status="RECONCILED", heartbeat_age_sec=1.0, instance_id="runtime:phase5-readiness", kill_switch_active=False, unknown_exchange_state=False, exchange_read_only_status="AVAILABLE", reconciliation_status="CLEAN", recovery_action_required=False))
     return engine
@@ -144,7 +155,7 @@ def _evaluate(engine, observations=None, **overrides):
         "tests_passing_evidence": _tests_evidence(),
     }
     kwargs.update(overrides)
-    return LiveReadinessEvaluator(engine).evaluate(**kwargs)
+    return LiveReadinessEvaluator(engine, min_effective_rr=1.6).evaluate(**kwargs)
 
 
 def test_live_readiness_pass_and_persistence() -> None:
@@ -464,6 +475,53 @@ def test_phase3_execution_gate_blocks_when_each_required_check_fails() -> None:
         assert report.verdict == "NOT_LIVE_READY"
 
 
+def test_phase3_readiness_recognizes_canonical_execution_safety_reject_names() -> None:
+    canonical_reasons = (
+        "SPREAD_TOO_HIGH",
+        "SLIPPAGE_TOO_HIGH",
+        "HIGH_TOTAL_COST",
+        "THIN_LIQUIDITY",
+        "HIGH_LATENCY",
+        "EXECUTION_CONTEXT_UNAVAILABLE",
+        "INVALID_FAKE_ZERO",
+        "EXCESSIVE_VOLATILITY",
+        "FUNDING_TOO_HIGH",
+        "LOW_EFFECTIVE_RR",
+    )
+    for reason in canonical_reasons:
+        engine = _engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE decision_evidence SET reject_reason=:reason WHERE evidence_id='de-1'"),
+                {"reason": reason},
+            )
+        with engine.connect() as conn:
+            checks = {
+                check.name: check
+                for check in LiveReadinessEvaluator(engine, min_effective_rr=1.6)._check_persistence(conn)
+            }
+        assert checks["execution_rejects_persisted"].passed is True, reason
+
+
+def test_phase3_readiness_blocks_all_critical_execution_context_gaps() -> None:
+    mutations = (
+        "UPDATE decision_evidence SET latency_ms=NULL WHERE evidence_id='de-2'",
+        "UPDATE decision_evidence SET funding_rate_pct=NULL WHERE evidence_id='de-2'",
+        "UPDATE decision_evidence SET volatility_regime=NULL WHERE evidence_id='de-2'",
+        "UPDATE decision_evidence SET unavailable_fields='[\"latency_ms\"]' WHERE evidence_id='de-2'",
+    )
+    for sql in mutations:
+        engine = _engine()
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        with engine.connect() as conn:
+            checks = {
+                check.name: check
+                for check in LiveReadinessEvaluator(engine, min_effective_rr=1.6)._check_persistence(conn)
+            }
+        assert checks["no_accepted_trade_with_missing_critical_execution_context"].passed is False
+
+
 def test_phase6_readiness_fails_when_release_evidence_absent() -> None:
     engine = _engine()
     with engine.begin() as conn:
@@ -487,3 +545,278 @@ def test_phase6_all_gates_pass_still_blocks_real_live_orders() -> None:
     assert report.qualified is False
     assert report.verdict == "LIVE_REAL_ORDERS_BLOCKED"
     assert any(g.name == "phase6_release_gates_verified" and g.passed for g in (report.gates or []))
+
+
+def _seed_scoped_readiness_run(engine) -> tuple[str, str]:
+    with engine.begin() as conn:
+        campaign = create_campaign(
+            conn,
+            release_id="scope-rel",
+            duration_days=1,
+            symbols=["BTCUSDT", "ETHUSDT"],
+            intervals=["1m"],
+        )
+        run = start_or_resume_campaign(conn, campaign.campaign_id)
+        run_id = str(run["burnin_run_id"])
+        persist_burnin_observation(
+            conn,
+            observation_id="scope-reject",
+            burnin_run_id=run_id,
+            release_id=campaign.release_id,
+            execution_mode="PAPER",
+            symbol="BTCUSDT",
+            decision="REJECTED",
+            lifecycle_state="SIGNAL_REJECTED",
+            metrics={"signal_id": "s-1", "reject_decision_id": "d-1"},
+        )
+        persist_burnin_observation(
+            conn,
+            observation_id="scope-accept",
+            burnin_run_id=run_id,
+            release_id=campaign.release_id,
+            execution_mode="PAPER",
+            symbol="ETHUSDT",
+            decision="ACCEPTED",
+            lifecycle_state="CANCELLED",
+            metrics={"signal_id": "s-2"},
+        )
+        conn.execute(
+            text("UPDATE decision_evidence SET run_id=:run_id WHERE UPPER(mode)='PAPER'"),
+            {"run_id": run_id},
+        )
+    return campaign.campaign_id, run_id
+
+
+def test_readiness_run_scope_ignores_dirty_neighbor_evidence() -> None:
+    engine = _engine()
+    campaign_id, run_id = _seed_scoped_readiness_run(engine)
+
+    with Session(engine) as session:
+        save_order_decision(
+            session,
+            decision_id="dirty-decision",
+            signal_id="dirty-signal",
+            symbol="SOLUSDT",
+            mode="PAPER",
+            decision="REJECTED",
+            reject_reason="DECISION_PARITY_MISMATCH",
+            score=1.0,
+            rr=1.0,
+            parity_result="DECISION_PARITY_MISMATCH",
+        )
+        save_trade_lifecycle_event(
+            session,
+            event_id="dirty-event",
+            signal_id="dirty-signal",
+            symbol="SOLUSDT",
+            mode="PAPER",
+            lifecycle_state="ENTRY_TRIGGERED",
+            event_ts="2026-01-01T00:00:00Z",
+        )
+        session.execute(text("""
+            INSERT INTO decision_evidence(
+                evidence_id,run_id,mode,timestamp,symbol,decision,reject_reason,
+                diagnostics_json,spread_pct,expected_slippage_pct,funding_rate_pct,
+                volume_24h_usdt,liquidity_score,created_at
+            ) VALUES(
+                'dirty-evidence','other-run','PAPER','2026-01-01T00:00:00Z','SOLUSDT','REJECT',
+                'DECISION_PARITY_MISMATCH','DECISION_PARITY_MISMATCH UNAVAILABLE',
+                0,0,0,0,0,'2026-01-01T00:00:00Z'
+            )
+        """))
+        session.commit()
+
+    evaluator = LiveReadinessEvaluator(
+        engine,
+        evidence_mode="PAPER",
+        campaign_id=campaign_id,
+        require_run_scope=True,
+    )
+    assert evaluator.burnin_run_id == run_id
+    assert evaluator._scope_check().passed is True
+
+    with engine.connect() as conn:
+        lifecycle = {check.name: check for check in evaluator._check_lifecycle(conn)}
+        persistence = {check.name: check for check in evaluator._check_persistence(conn)}
+        stats = {check.name: check for check in evaluator._check_stats(conn)}
+
+    assert lifecycle["lifecycle_no_orphans"].passed is True
+    assert lifecycle["lifecycle_error_free"].passed is True
+    assert persistence["phase2_no_decision_parity_mismatch"].passed is True
+    assert persistence["phase2_no_fake_zero_execution_evidence"].passed is True
+    assert persistence["phase2_decision_evidence_rows_present"].details == "decision_evidence_rows=2"
+    assert stats["reject_rate_sanity"].details.endswith("total=2")
+
+
+def test_readiness_mode_scope_ignores_backtest_only_poison() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO decision_evidence(
+                evidence_id,mode,timestamp,symbol,decision,reject_reason,diagnostics_json,
+                spread_pct,expected_slippage_pct,funding_rate_pct,volume_24h_usdt,
+                liquidity_score,created_at
+            ) VALUES(
+                'backtest-poison','BACKTEST','2026-01-01T00:00:00Z','SOLUSDT','REJECT',
+                'DECISION_PARITY_MISMATCH','DECISION_PARITY_MISMATCH UNAVAILABLE',
+                0,0,0,0,0,'2026-01-01T00:00:00Z'
+            )
+        """))
+    with engine.connect() as conn:
+        checks = {check.name: check for check in LiveReadinessEvaluator(engine, evidence_mode="PAPER")._check_persistence(conn)}
+    assert checks["phase2_no_decision_parity_mismatch"].passed is True
+    assert checks["phase2_no_fake_zero_execution_evidence"].passed is True
+
+
+def test_required_readiness_scope_fails_closed_when_campaign_run_is_missing() -> None:
+    engine = _engine()
+    evaluator = LiveReadinessEvaluator(
+        engine,
+        evidence_mode="PAPER",
+        campaign_id="missing-campaign",
+        require_run_scope=True,
+    )
+    scope = evaluator._scope_check()
+    assert scope.passed is False
+    assert "burnin_run_id=UNRESOLVED" in scope.details
+    with engine.connect() as conn:
+        persistence = {check.name: check for check in evaluator._check_persistence(conn)}
+        stats = {check.name: check for check in evaluator._check_stats(conn)}
+    assert persistence["phase2_decision_evidence_rows_present"].passed is False
+    assert persistence["phase2_decision_evidence_rows_present"].details == "decision_evidence_rows=0"
+    assert stats["reject_rate_sanity"].passed is False
+    assert stats["reject_rate_sanity"].details.endswith("total=0")
+
+
+def test_scoped_release_gate_does_not_borrow_default_release() -> None:
+    engine = _engine()
+    check = LiveReadinessEvaluator(
+        engine,
+        release_id="different-release",
+        require_run_scope=True,
+    )._check_release_gates()[0]
+    assert check.passed is False
+    assert "different-release" in check.details
+
+
+def test_scoped_runtime_state_does_not_borrow_other_instance() -> None:
+    engine = _engine()
+    checks = {
+        check.name: check
+        for check in LiveReadinessEvaluator(
+            engine,
+            runtime_instance_id="runtime:not-present",
+        )._check_runtime_state_snapshot()
+    }
+    assert checks["runtime_state_snapshot_present"].passed is False
+
+
+def test_scoped_precheck_startup_snapshot_does_not_require_paper_run_attachment() -> None:
+    engine = _engine(persist_runtime_snapshot=False)
+    save_runtime_state_snapshot(
+        engine,
+        RuntimeStateSnapshot(
+            mode="LIVE_PRECHECK",
+            requested_mode="LIVE_PRECHECK",
+            actual_mode="LIVE_PRECHECK",
+            runtime_status="STARTUP",
+            heartbeat_age_sec=1.0,
+            instance_id="runtime:precheck-current",
+            campaign_id="camp-current",
+            burnin_run_id=None,
+            release_id="rel-current",
+            kill_switch_active=False,
+            unknown_exchange_state=False,
+            exchange_read_only_status="AVAILABLE",
+            reconciliation_status="CLEAN",
+            recovery_action_required=False,
+        ),
+    )
+    checks = {
+        check.name: check
+        for check in LiveReadinessEvaluator(
+            engine,
+            campaign_id="camp-current",
+            burnin_run_id=None,
+            release_id="rel-current",
+            runtime_instance_id="runtime:precheck-current",
+        )._check_runtime_state_snapshot()
+    }
+    assert checks["runtime_state_snapshot_present"].passed is True
+    assert checks["runtime_db_persistence_verified"].passed is True
+
+
+def test_effective_rr_readiness_uses_persisted_decision_threshold_not_current_config() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE decision_evidence SET effective_rr=1.35, min_effective_rr=1.10 WHERE evidence_id='de-2'"
+        ))
+
+    with engine.connect() as conn:
+        low_threshold = {
+            check.name: check
+            for check in LiveReadinessEvaluator(engine, min_effective_rr=9.9)._check_persistence(conn)
+        }
+    assert low_threshold["effective_rr_threshold_provenance_valid"].passed is True
+    assert low_threshold["no_accepted_trade_with_effective_rr_below_threshold"].passed is True
+    assert "source=decision_evidence.min_effective_rr" in low_threshold[
+        "no_accepted_trade_with_effective_rr_below_threshold"
+    ].details
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE decision_evidence SET min_effective_rr=1.60 WHERE evidence_id='de-2'"
+        ))
+
+    with engine.connect() as conn:
+        high_threshold = {
+            check.name: check
+            for check in LiveReadinessEvaluator(engine, min_effective_rr=1.1)._check_persistence(conn)
+        }
+    assert high_threshold["effective_rr_threshold_provenance_valid"].passed is True
+    assert high_threshold["no_accepted_trade_with_effective_rr_below_threshold"].passed is False
+
+
+def test_effective_rr_readiness_missing_or_invalid_row_threshold_fails_closed() -> None:
+    engine = _engine()
+    for value in (None, 0.0, -0.1):
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE decision_evidence SET min_effective_rr=:value WHERE evidence_id='de-2'"),
+                {"value": value},
+            )
+        with engine.connect() as conn:
+            checks = {
+                check.name: check
+                for check in LiveReadinessEvaluator(engine, min_effective_rr=0.1)._check_persistence(conn)
+            }
+        assert checks["effective_rr_threshold_provenance_valid"].passed is False
+        assert checks["no_accepted_trade_with_effective_rr_below_threshold"].passed is False
+        assert checks["no_accepted_trade_with_missing_critical_execution_context"].passed is False
+        assert "invalid_or_missing_threshold_rows=1" in checks[
+            "no_accepted_trade_with_effective_rr_below_threshold"
+        ].details
+
+
+def test_phase3_gate_requires_valid_effective_rr_threshold_provenance() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE decision_evidence SET min_effective_rr=NULL WHERE evidence_id='de-2'"))
+    report = LiveReadinessEvaluator(engine, min_effective_rr=1.6).evaluate(
+        mode_parity=_parity(),
+        reconciliation_snapshot=_reconciliation(),
+        observability_snapshot=_operational(),
+        canary_enabled=True,
+        shadow_mode_enabled=True,
+        operator_ack=True,
+        dashboard_security=_dashboard_security(),
+        timesfm_evidence=_timesfm_evidence(),
+        paper_burnin_report=_paper_burnin(),
+        tests_passing_evidence=_tests_evidence(),
+    )
+    checks = {check.name: check for check in report.checks}
+    gates = {gate.name: gate for gate in report.gates or []}
+    assert checks["effective_rr_threshold_provenance_valid"].passed is False
+    assert gates["phase3_execution_realism_complete"].passed is False
+    assert report.verdict == "NOT_LIVE_READY"
