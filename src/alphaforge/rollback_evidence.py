@@ -274,6 +274,7 @@ def main() -> None:
     args = parser.parse_args()
     result = asyncio.run(run_deterministic_rollback_validation(create_engine(args.database_url, future=True)))
     print(json.dumps(result, sort_keys=True))
+    raise SystemExit(0 if str(result.get("evidence_status") or "").upper() == "COMPLETE" else 2)
 
 
 if __name__ == "__main__":
