@@ -1051,3 +1051,51 @@ def test_issue481_min_stop_boundary_reaches_scoring_unchanged(side, stop, target
     assert reject["tp"] == pytest.approx(target)
     assert reject["primary_reject_reason"] != "STOP_TOO_TIGHT"
     assert "STOP_TOO_TIGHT" not in reject["all_failed_gates"]
+
+
+def test_neutral_regime_is_distinct_from_unavailable_regime_evidence():
+    regime = {
+        "timeframe": "1h",
+        "regime": "CHOPPY",
+        "direction": "NEUTRAL",
+        "last_closed_candle_ms": NOW,
+        "evidence_status": "INCOMPLETE",
+    }
+    setup = {
+        "timeframe": "15m",
+        "direction": "NONE",
+        "trade_side": None,
+        "phase": "INVALID",
+        "generation_mode": "REGIME_GUIDED",
+        "last_closed_candle_ms": NOW,
+        "evidence_status": "INCOMPLETE",
+    }
+    execution = {
+        "timeframe": "1m",
+        "direction": "NEUTRAL",
+        "trigger": None,
+        "confirmed_for_side": False,
+        "last_closed_candle_ms": NOW,
+        "evidence_status": "COMPLETE",
+    }
+
+    result = evaluate_mtf_alignment(
+        regime, setup, execution, decision_ts_ms=NOW,
+    )
+
+    assert result["aligned"] is False
+    assert result["final_direction"] == "NO_TRADE"
+    assert result["reasons"][0] == "MTF_REGIME_NEUTRAL"
+    assert "MTF_REGIME_UNAVAILABLE" not in result["reasons"]
+    assert result["regime_alignment"] == "FAIL"
+
+
+def test_missing_regime_context_remains_unavailable():
+    _, setup, execution = aligned()
+
+    result = evaluate_mtf_alignment(
+        None, setup, execution, decision_ts_ms=NOW,
+    )
+
+    assert "MTF_REGIME_UNAVAILABLE" in result["reasons"]
+    assert "MTF_REGIME_NEUTRAL" not in result["reasons"]
