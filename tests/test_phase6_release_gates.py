@@ -328,6 +328,49 @@ def test_runbook_writer_hashes_content_and_fails_closed_on_missing_safety_marker
     assert "## Operator workflow" in failed["evidence"]["missing_markers"]
 
 
+def test_release_snapshot_blocks_mixed_commit_safety_evidence(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'mixed-commit.db'}")
+    release_id = "rel-mixed"
+    runbook = tmp_path / "RUNBOOK.md"
+    runbook.write_text(_valid_runbook_text(), encoding="utf-8")
+
+    persist_operator_ack(
+        engine,
+        release_id=release_id,
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text(release_id),
+    )
+    run_canary_mutation_trap_validation(
+        engine, release_id=release_id, phase="PHASE6", git_commit="commit-a"
+    )
+    persist_rollback_validation_evidence(engine, {
+        "validation_id": "rollback-validation:rel-mixed",
+        "git_commit": "commit-a",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "MIXED_COMMIT_TEST"},
+    })
+    persist_rollback_verification(
+        engine, release_id=release_id, git_commit="commit-a"
+    )
+    persist_runbook_evidence(
+        engine, release_id=release_id, runbook_path=runbook, git_commit="commit-b"
+    )
+
+    snapshot = build_release_snapshot(engine, release_id=release_id)
+    assert snapshot.status == "FAIL"
+    assert "RELEASE_EVIDENCE_COMMIT_MISMATCH" in snapshot.blocking_reasons
+    assert snapshot.evidence["release_evidence_git_commits"] == {
+        "canary": "commit-a",
+        "rollback": "commit-a",
+        "runbook": "commit-b",
+    }
+
+
 def test_release_snapshot_consumes_canonical_rollback_and_runbook_writers(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'writer-snapshot.db'}")
     release_id = "rel-writer-ready"

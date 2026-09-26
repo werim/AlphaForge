@@ -353,6 +353,23 @@ class BurnInQualificationEngine:
             elif int(mutation)>0: blockers.append("MUTATION_ATTEMPT_DETECTED")
             if not gate.get("rollback_verified"): blockers.append("ROLLBACK_NOT_VERIFIED")
             if not gate.get("runbook_verified"): blockers.append("RUNBOOK_NOT_VERIFIED")
+            commit_bound_evidence=(
+                ("CANARY", evidence.get("canary_validation") or {}),
+                ("ROLLBACK", evidence.get("rollback_evidence") or {}),
+                ("RUNBOOK", evidence.get("runbook_evidence") or {}),
+            )
+            metrics["release_evidence_git_commits"]={
+                name: item.get("git_commit") for name,item in commit_bound_evidence
+            }
+            if expected_git_commit:
+                for name,item in commit_bound_evidence:
+                    if not item:
+                        continue
+                    evidence_commit=str(item.get("git_commit") or "").strip()
+                    if not evidence_commit:
+                        blockers.append(f"{name}_EVIDENCE_COMMIT_MISSING")
+                    elif evidence_commit != expected_git_commit:
+                        blockers.append(f"{name}_EVIDENCE_COMMIT_MISMATCH")
             full_tests=evidence.get("full_tests") or evidence.get("tests_passing_evidence") or {}
             metrics["full_test_evidence"] = full_tests
             if str(full_tests.get("status") or "").upper() != "PASS":

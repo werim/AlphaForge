@@ -144,6 +144,7 @@ def test_init_db_bootstraps_live_rollback_validation_evidence_schema(tmp_path) -
         "recorded_at",
         "evidence_status",
         "rollback_evidence_source",
+        "git_commit",
         "kill_switch_block_verified",
         "no_submit_on_kill_switch_verified",
         "fail_closed_reconciliation_verified",

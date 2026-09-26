@@ -53,9 +53,10 @@ def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
         phase="PHASE6",
         acknowledgement_text=required_operator_ack_text(release_id),
     )
-    run_canary_mutation_trap_validation(e, release_id=release_id, phase="PHASE6")
+    run_canary_mutation_trap_validation(e, release_id=release_id, phase="PHASE6", git_commit="abc")
     persist_rollback_validation_evidence(e, {
         "validation_id": f"rollback-validation:{release_id}",
+        "git_commit": "abc",
         "kill_switch_block_verified": True,
         "no_submit_on_kill_switch_verified": True,
         "fail_closed_reconciliation_verified": True,
@@ -64,7 +65,7 @@ def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
         "blocking_reasons": [],
         "evidence_payload": {"validation_scope": "PHASE7_TEST_FIXTURE"},
     })
-    persist_rollback_verification(e, release_id=release_id)
+    persist_rollback_verification(e, release_id=release_id, git_commit="abc")
     runbook = tmp_path / f"{release_id}-RUNBOOK.md"
     runbook.write_text(
         "# Test Runbook\n"
@@ -75,7 +76,7 @@ def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
         "Use recovery-drill before promotion and finalize only after qualification.\n",
         encoding="utf-8",
     )
-    persist_runbook_evidence(e, release_id=release_id, runbook_path=runbook)
+    persist_runbook_evidence(e, release_id=release_id, runbook_path=runbook, git_commit="abc")
 
 
 def test_missing_costs_block_qualification():
@@ -160,6 +161,63 @@ def test_optimistic_full_test_pass_without_verified_provenance_is_blocked(tmp_pa
         minimum_calibration_sample=0
     )).evaluate("r")
     assert "FULL_TEST_EVIDENCE_UNVERIFIED" in snap.blockers
+
+
+def test_one_release_evidence_commit_mismatch_cannot_be_masked_by_other_passes(tmp_path):
+    e=_engine(); _run(e)
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    with e.begin() as c:
+        row=c.execute(text("""
+            SELECT id,evidence_json FROM canary_run_events
+            WHERE release_id='rel' AND event_type='CANARY_VALIDATION_PASS'
+            ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        payload=json.loads(row["evidence_json"])
+        payload["git_commit"]="different"
+        c.execute(text("UPDATE canary_run_events SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(payload,sort_keys=True),
+            "id":row["id"],
+        })
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=0,minimum_accepted_trades=0,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "CANARY_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+    assert "ROLLBACK_EVIDENCE_COMMIT_MISMATCH" not in snap.blockers
+    assert "RUNBOOK_EVIDENCE_COMMIT_MISMATCH" not in snap.blockers
+
+
+def test_rollback_and_runbook_commit_mismatches_are_independently_blocked(tmp_path):
+    e=_engine(); _run(e)
+    _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel")
+    with e.begin() as c:
+        rb=c.execute(text("""
+            SELECT id,evidence_json FROM rollback_verification_events
+            WHERE release_id='rel' ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        rb_payload=json.loads(rb["evidence_json"])
+        rb_payload["git_commit"]="different"
+        rb_payload["source_git_commit"]="different"
+        c.execute(text("UPDATE rollback_verification_events SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(rb_payload,sort_keys=True),"id":rb["id"],
+        })
+        run=c.execute(text("""
+            SELECT id,evidence_json FROM runbook_evidence
+            WHERE release_id='rel' ORDER BY id DESC LIMIT 1
+        """)).mappings().first()
+        run_payload=json.loads(run["evidence_json"])
+        run_payload["git_commit"]="different"
+        c.execute(text("UPDATE runbook_evidence SET evidence_json=:payload WHERE id=:id"), {
+            "payload":json.dumps(run_payload,sort_keys=True),"id":run["id"],
+        })
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=0,minimum_accepted_trades=0,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "ROLLBACK_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+    assert "RUNBOOK_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
 
 
 def test_verified_full_test_evidence_for_different_commit_is_blocked(tmp_path):

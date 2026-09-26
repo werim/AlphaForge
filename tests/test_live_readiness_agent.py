@@ -15,7 +15,7 @@ def make_db(path:Path):
     CREATE TABLE order_decisions(decision_id,signal_id,decision,mode,effective_rr,execution_ctx_missing,spread_pct,expected_slippage_pct,latency_ms,funding_rate_pct); CREATE TABLE trade_lifecycle_events(signal_id,lifecycle_state,mode);
     CREATE TABLE burnin_reject_outcomes(burnin_run_id,evidence_complete,forward_label,hypothetical_net_r_after_costs,payload_json); CREATE TABLE expectancy_evidence(campaign_id,run_id,evidence_complete,net_r,decision_time,resolved_at,source_decision_id,evidence_type);
     CREATE TABLE burnin_qualification_snapshots(qualification_id,burnin_run_id,release_id,campaign_id,source_run_ids_json,aggregate_evidence_hash,status,sample_status,evidence_completeness_status,generated_at); CREATE TABLE burnin_recovery_drills(campaign_id,status,generated_at);
-    CREATE TABLE live_rollback_validation_evidence(validation_id,recorded_at,evidence_status,rollback_evidence_source,kill_switch_block_verified,no_submit_on_kill_switch_verified,fail_closed_reconciliation_verified,repair_actions_non_mutating_verified,execution_mutation_attempt_count,blocking_reasons);
+    CREATE TABLE live_rollback_validation_evidence(validation_id,recorded_at,evidence_status,rollback_evidence_source,git_commit,kill_switch_block_verified,no_submit_on_kill_switch_verified,fail_closed_reconciliation_verified,repair_actions_non_mutating_verified,execution_mutation_attempt_count,blocking_reasons);
     CREATE TABLE rollback_verification_events(release_id,status,verified_at,evidence_json);
     CREATE TABLE runbook_evidence(release_id,status,recorded_at,evidence_json);
     CREATE TABLE runtime_control_state(mode_requested,mode_running,updated_at); CREATE TABLE runtime_control_audit_events(action,success,event_ts,requested_mode); CREATE TABLE burnin_observations(burnin_run_id,symbol,decision,execution_mode,metrics_json);
@@ -25,6 +25,8 @@ def make_db(path:Path):
 def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", release_id="rel"):
     rollback_evidence={
         "verification_contract":ROLLBACK_VERIFICATION_CONTRACT,
+        "git_commit":"abc",
+        "source_git_commit":"abc",
         "source":"DETERMINISTIC_VALIDATION",
         "validation_id":validation_id,
         "recorded_at":"2026-09-20T18:00:00Z",
@@ -38,6 +40,7 @@ def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", releas
     }
     runbook_evidence={
         "verification_contract":RUNBOOK_VERIFICATION_CONTRACT,
+        "git_commit":"abc",
         "file_name":"RUNBOOK.md",
         "sha256":"a"*64,
         "size_bytes":128,
@@ -46,8 +49,8 @@ def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", releas
         "read_error":None,
     }
     c=sqlite3.connect(path)
-    c.execute("INSERT INTO live_rollback_validation_evidence VALUES(?,?,?,?,?,?,?,?,?,?)",(
-        validation_id,"2026-09-20T18:00:00Z","COMPLETE","DETERMINISTIC_VALIDATION",1,1,1,1,0,"[]",
+    c.execute("INSERT INTO live_rollback_validation_evidence VALUES(?,?,?,?,?,?,?,?,?,?,?)",(
+        validation_id,"2026-09-20T18:00:00Z","COMPLETE","DETERMINISTIC_VALIDATION","abc",1,1,1,1,0,"[]",
     ))
     c.execute("INSERT INTO rollback_verification_events VALUES(?,?,?,?)",(
         release_id,"PASS","2026-09-20T18:00:01Z",json.dumps(rollback_evidence),
@@ -173,8 +176,8 @@ def test_release_safety_gates_require_contract_verified_evidence(tmp_path):
 def test_newer_unrelated_rollback_validation_cannot_contaminate_release_scope(tmp_path):
     db=tmp_path/"campaign.db"; make_db(db); seed_release_safety_evidence(db,validation_id="linked")
     c=sqlite3.connect(db)
-    c.execute("INSERT INTO live_rollback_validation_evidence VALUES(?,?,?,?,?,?,?,?,?,?)",(
-        "unrelated","2026-09-20T18:13:00Z","INCOMPLETE","DETERMINISTIC_VALIDATION",0,0,0,0,4,'["UNRELATED_FAILURE"]',
+    c.execute("INSERT INTO live_rollback_validation_evidence VALUES(?,?,?,?,?,?,?,?,?,?,?)",(
+        "unrelated","2026-09-20T18:13:00Z","INCOMPLETE","DETERMINISTIC_VALIDATION","abc",0,0,0,0,4,'["UNRELATED_FAILURE"]',
     ))
     c.commit(); c.close()
     assert gate(report(db),"ROLLBACK_EVIDENCE")["status"]==PASS
@@ -224,3 +227,18 @@ def test_unrelated_qualification_snapshot_cannot_satisfy_campaign_soak_gate(tmp_
     seed_soak_snapshot(db,campaign_id="other-campaign",release_id="other-release")
     g=gate(report(db),"SOAK_EVIDENCE")
     assert g["status"]==NOT_OBSERVABLE
+
+
+def test_release_safety_evidence_from_different_commit_is_blocked(tmp_path):
+    db=tmp_path/"campaign.db"; make_db(db); seed_release_safety_evidence(db)
+    c=sqlite3.connect(db)
+    rb=json.loads(c.execute("SELECT evidence_json FROM rollback_verification_events").fetchone()[0])
+    rb["git_commit"]="different"
+    c.execute("UPDATE rollback_verification_events SET evidence_json=?",(json.dumps(rb),))
+    run=json.loads(c.execute("SELECT evidence_json FROM runbook_evidence").fetchone()[0])
+    run["git_commit"]="different"
+    c.execute("UPDATE runbook_evidence SET evidence_json=?",(json.dumps(run),))
+    c.commit(); c.close()
+    r=report(db)
+    assert gate(r,"ROLLBACK_EVIDENCE")["status"]==BLOCKED
+    assert gate(r,"RUNBOOK_EVIDENCE")["status"]==BLOCKED

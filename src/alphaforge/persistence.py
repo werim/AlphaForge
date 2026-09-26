@@ -653,6 +653,7 @@ def _ensure_sqlite_rollback_evidence_schema(conn: Any) -> None:
                 recorded_at TEXT NOT NULL,
                 evidence_status TEXT NOT NULL,
                 rollback_evidence_source TEXT NOT NULL,
+                git_commit TEXT,
                 kill_switch_block_verified INTEGER NOT NULL,
                 no_submit_on_kill_switch_verified INTEGER NOT NULL,
                 fail_closed_reconciliation_verified INTEGER NOT NULL,
@@ -672,6 +673,9 @@ def _ensure_sqlite_rollback_evidence_schema(conn: Any) -> None:
             """
         )
     )
+    rollback_columns = _sqlite_columns(conn, "live_rollback_validation_evidence")
+    if rollback_columns and "git_commit" not in rollback_columns:
+        conn.execute(text("ALTER TABLE live_rollback_validation_evidence ADD COLUMN git_commit TEXT"))
 
 
 def _apply_sqlite_migrations(conn: Any) -> None:
@@ -684,6 +688,7 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         ("2026_06_23_core_identifier_normalization", "Add normalized lifecycle identifier columns and safe join indexes."),
         ("2026_07_06_phase2_decision_evidence", "Add SQL-backed decision evidence export surface for lifecycle/dashboard reconciliation."),
         ("2026_09_22_decision_threshold_provenance", "Add decision-time min_effective_rr provenance to durable decision evidence."),
+        ("2026_09_26_rollback_evidence_git_provenance", "Add exact git commit provenance to rollback validation evidence."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_core_identifier_schema(conn)

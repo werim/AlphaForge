@@ -42,7 +42,7 @@ def observation_signal_id(row):
     return str(obj(row.get("metrics_json")).get("signal_id") or "").strip()
 def scoped_rows(rows,signal_ids):
     return [row for row in rows if str(row.get("signal_id") or "").strip() in signal_ids]
-def rollback_source_validation_valid(row, expected_validation_id):
+def rollback_source_validation_valid(row, expected_validation_id, expected_git_commit):
     if not row or str(row.get("validation_id") or "") != str(expected_validation_id or ""):
         return False
     try:
@@ -52,6 +52,7 @@ def rollback_source_validation_valid(row, expected_validation_id):
     return (
         str(row.get("evidence_status") or "").upper()=="COMPLETE"
         and str(row.get("rollback_evidence_source") or "")=="DETERMINISTIC_VALIDATION"
+        and str(row.get("git_commit") or "")==str(expected_git_commit or "")
         and bool(row.get("kill_switch_block_verified"))
         and bool(row.get("no_submit_on_kill_switch_verified"))
         and bool(row.get("fail_closed_reconciliation_verified"))
@@ -164,10 +165,20 @@ class LiveReadinessAgent:
             rb=self.latest(db.rows("SELECT * FROM rollback_verification_events WHERE release_id=?",(self.scope["release_id"],)),"verified_at") if "rollback_verification_events" in tabs else None
             rb_evidence=obj((rb or {}).get("evidence_json")); validation_id=rb_evidence.get("validation_id")
             v=db.one("SELECT * FROM live_rollback_validation_evidence WHERE validation_id=?",(validation_id,)) if validation_id and "live_rollback_validation_evidence" in tabs else None
-            rb_ok=bool(rb and rollback_verification_evidence_valid(rb.get("status"),rb_evidence) and rollback_source_validation_valid(v,validation_id))
+            expected_release_commit=str((c or {}).get("git_commit") or "")
+            rb_ok=bool(
+                rb
+                and rollback_verification_evidence_valid(rb.get("status"),rb_evidence)
+                and rollback_source_validation_valid(v,validation_id,expected_release_commit)
+                and str(rb_evidence.get("git_commit") or "")==expected_release_commit
+            )
             g19=self.miss("ROLLBACK_EVIDENCE","rollback evidence tables","linked deterministic zero-mutation PASS rollback") if not rb else self.g("ROLLBACK_EVIDENCE",PASS if rb_ok else BLOCKED,"ROLLBACK_EVIDENCE_PASS" if rb_ok else "ROLLBACK_EVIDENCE_INVALID","rollback evidence tables",{"validation":v,"verification":rb,"verification_evidence":rb_evidence},"linked deterministic zero-mutation PASS rollback")
             run=self.latest(db.rows("SELECT * FROM runbook_evidence WHERE release_id=?",(self.scope["release_id"],)),"recorded_at") if "runbook_evidence" in tabs else None
-            run_evidence=obj((run or {}).get("evidence_json")); run_ok=bool(run and runbook_verification_evidence_valid(run.get("status"),run_evidence))
+            run_evidence=obj((run or {}).get("evidence_json")); run_ok=bool(
+                run
+                and runbook_verification_evidence_valid(run.get("status"),run_evidence)
+                and str(run_evidence.get("git_commit") or "")==expected_release_commit
+            )
             g20=self.miss("RUNBOOK_EVIDENCE","runbook_evidence","contract-verified runbook PASS") if not run else self.g("RUNBOOK_EVIDENCE",PASS if run_ok else BLOCKED,"RUNBOOK_EVIDENCE_PASS" if run_ok else "RUNBOOK_EVIDENCE_INVALID","runbook_evidence",{"row":run,"evidence":run_evidence},"contract-verified runbook PASS")
         gs=[g1,g2,g3,g4,g5,g6,g7,g8,g9,g10,g11,g12,g13,g14,g15,g16,g17,g18,g19,g20]; blockers=[x.data() for x in gs if x.status in {BLOCKED,NEEDS_FIX}]; gaps=[x.data() for x in gs if x.status==NOT_OBSERVABLE]
         return {"overall_status":BLOCKED if blockers else "READINESS_INCOMPLETE","generated_at":ts(self.now),"git_commit":self.gm(self.repo).get("commit"),"campaign_id":self.cid,"burnin_run_id":self.scope["burnin_run_id"],"release_id":self.scope["release_id"],"gates":[x.data() for x in gs],"blockers":blockers,"not_observable":gaps,"next_required_evidence":[f"{x.gate_id}:{x.reason}" for x in gs if x.status!=PASS],"authorization":"OBSERVATIONAL_ONLY_NOT_A_LIVE_AUTHORIZATION"}

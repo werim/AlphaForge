@@ -12,6 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from alphaforge.contracts import canonical_utc_timestamp
+from alphaforge.release_identity import checkout_identity
 from alphaforge.reconciliation import ReconciliationEngine, summarize_findings
 
 MAX_EVIDENCE_AGE_SEC = 900.0
@@ -34,6 +35,7 @@ def ensure_rollback_evidence_schema(engine: Engine) -> None:
                 recorded_at TEXT NOT NULL,
                 evidence_status TEXT NOT NULL,
                 rollback_evidence_source TEXT NOT NULL,
+                git_commit TEXT,
                 kill_switch_block_verified INTEGER NOT NULL,
                 no_submit_on_kill_switch_verified INTEGER NOT NULL,
                 fail_closed_reconciliation_verified INTEGER NOT NULL,
@@ -47,6 +49,9 @@ def ensure_rollback_evidence_schema(engine: Engine) -> None:
             CREATE INDEX IF NOT EXISTS ix_live_rollback_validation_recorded_at
             ON live_rollback_validation_evidence(recorded_at DESC, id DESC)
         """))
+        columns = {str(row[1]) for row in conn.execute(text("PRAGMA table_info(live_rollback_validation_evidence)")).all()}
+        if "git_commit" not in columns:
+            conn.execute(text("ALTER TABLE live_rollback_validation_evidence ADD COLUMN git_commit TEXT"))
 
 
 def _safe_payload(payload: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -70,12 +75,20 @@ def persist_rollback_validation_evidence(engine: Engine, evidence: Mapping[str, 
     }
     mutation_count = max(0, int(evidence.get("execution_mutation_attempt_count", 0) or 0))
     reasons = [str(reason)[:120] for reason in list(evidence.get("blocking_reasons") or [])]
-    complete = all(checks.values()) and mutation_count == 0 and not reasons
+    evidence_git_commit = str(evidence.get("git_commit") or "").strip()
+    if not evidence_git_commit:
+        identity = checkout_identity()
+        if identity.get("status") == "PASS" and identity.get("clean"):
+            evidence_git_commit = str(identity.get("git_commit") or "").strip()
+    if not evidence_git_commit:
+        reasons.append("ROLLBACK_EVIDENCE_GIT_IDENTITY_MISSING")
+    complete = all(checks.values()) and mutation_count == 0 and bool(evidence_git_commit) and not reasons
     row = {
         "validation_id": str(evidence.get("validation_id") or f"rollback-validation:{uuid.uuid4().hex}")[:160],
         "recorded_at": str(evidence.get("recorded_at") or canonical_utc_timestamp()),
         "evidence_status": "COMPLETE" if complete else "INCOMPLETE",
         "rollback_evidence_source": EVIDENCE_SOURCE,
+        "git_commit": evidence_git_commit or None,
         **checks,
         "execution_mutation_attempt_count": mutation_count,
         "blocking_reasons": reasons,
@@ -85,12 +98,12 @@ def persist_rollback_validation_evidence(engine: Engine, evidence: Mapping[str, 
     with engine.begin() as conn:
         conn.execute(text("""
             INSERT INTO live_rollback_validation_evidence(
-                validation_id, recorded_at, evidence_status, rollback_evidence_source,
+                validation_id, recorded_at, evidence_status, rollback_evidence_source, git_commit,
                 kill_switch_block_verified, no_submit_on_kill_switch_verified,
                 fail_closed_reconciliation_verified, repair_actions_non_mutating_verified,
                 execution_mutation_attempt_count, blocking_reasons, evidence_payload
             ) VALUES (
-                :validation_id, :recorded_at, :evidence_status, :rollback_evidence_source,
+                :validation_id, :recorded_at, :evidence_status, :rollback_evidence_source, :git_commit,
                 :kill_switch_block_verified, :no_submit_on_kill_switch_verified,
                 :fail_closed_reconciliation_verified, :repair_actions_non_mutating_verified,
                 :execution_mutation_attempt_count, :blocking_reasons, :evidence_payload
@@ -118,17 +131,22 @@ def _timestamp(value: Any) -> datetime | None:
 def latest_persisted_rollback_evidence(engine: Engine, *, max_age_sec: float = MAX_EVIDENCE_AGE_SEC, now: datetime | None = None) -> dict[str, Any]:
     missing = {
         "rollback_evidence_source": "UNVERIFIED", "rollback_evidence_persisted": False,
+        "git_commit": None,
         "rollback_evidence_verified": False, "rollback_evidence_status": "INCOMPLETE",
         "kill_switch_block_verified": False, "no_submit_on_kill_switch_verified": False,
         "fail_closed_reconciliation_verified": False, "repair_actions_non_mutating_verified": False,
         "execution_mutation_attempt_count": None, "rollback_blocking_reasons": ["ROLLBACK_EVIDENCE_MISSING"],
     }
     try:
-        if not inspect(engine).has_table("live_rollback_validation_evidence"):
+        inspector = inspect(engine)
+        if not inspector.has_table("live_rollback_validation_evidence"):
             return missing
+        columns = {str(column["name"]) for column in inspector.get_columns("live_rollback_validation_evidence")}
+        if "git_commit" not in columns:
+            return {**missing, "rollback_evidence_persisted": True, "rollback_blocking_reasons": ["ROLLBACK_EVIDENCE_GIT_COMMIT_MISSING"]}
         with engine.connect() as conn:
             row = conn.execute(text("""
-                SELECT validation_id, recorded_at, evidence_status, rollback_evidence_source,
+                SELECT validation_id, recorded_at, evidence_status, rollback_evidence_source, git_commit,
                        kill_switch_block_verified, no_submit_on_kill_switch_verified,
                        fail_closed_reconciliation_verified, repair_actions_non_mutating_verified,
                        execution_mutation_attempt_count, blocking_reasons, evidence_payload
@@ -154,6 +172,7 @@ def latest_persisted_rollback_evidence(engine: Engine, *, max_age_sec: float = M
     valid = (
         str(row["evidence_status"]).upper() == "COMPLETE"
         and str(row["rollback_evidence_source"]).upper() == EVIDENCE_SOURCE
+        and bool(str(row["git_commit"] or "").strip())
         and bool(row["kill_switch_block_verified"])
         and bool(row["no_submit_on_kill_switch_verified"])
         and bool(row["fail_closed_reconciliation_verified"])
@@ -163,6 +182,7 @@ def latest_persisted_rollback_evidence(engine: Engine, *, max_age_sec: float = M
     )
     return {
         "validation_id": str(row["validation_id"]), "recorded_at": str(row["recorded_at"]),
+        "git_commit": str(row["git_commit"] or "") or None,
         "rollback_evidence_source": EVIDENCE_SOURCE if valid else "UNVERIFIED",
         "rollback_evidence_persisted": True, "rollback_evidence_verified": valid,
         "rollback_evidence_status": "COMPLETE" if valid else "INCOMPLETE",
@@ -254,6 +274,7 @@ def main() -> None:
     args = parser.parse_args()
     result = asyncio.run(run_deterministic_rollback_validation(create_engine(args.database_url, future=True)))
     print(json.dumps(result, sort_keys=True))
+    raise SystemExit(0 if str(result.get("evidence_status") or "").upper() == "COMPLETE" else 2)
 
 
 if __name__ == "__main__":
