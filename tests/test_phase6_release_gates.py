@@ -20,6 +20,7 @@ from alphaforge.release_gates import (
     persist_rollback_verification,
     persist_runbook_evidence,
     release_snapshot_by_id,
+    required_operator_ack_text,
 )
 
 
@@ -63,7 +64,14 @@ def test_canonical_pr269_release_schema_names_are_preserved(tmp_path) -> None:
 
 def test_expired_and_malformed_operator_ack_fail_closed(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'ack.db'}")
-    persist_operator_ack(engine, release_id="rel-1", phase="PHASE6", valid_until="2026-01-01T00:00:00Z")
+    persist_operator_ack(
+        engine,
+        release_id="rel-1",
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text("rel-1"),
+        ttl_minutes=60,
+        now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
     assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE6", now=datetime(2026, 7, 10, tzinfo=timezone.utc)) is None
 
     with engine.begin() as conn:
@@ -74,12 +82,46 @@ def test_expired_and_malformed_operator_ack_fail_closed(tmp_path) -> None:
     assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE6", now=datetime(2026, 1, 1, tzinfo=timezone.utc)) is None
 
 
+def test_trivial_operator_ack_text_is_persisted_but_never_valid(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'ack-trivial.db'}")
+    row = persist_operator_ack(
+        engine,
+        release_id="rel-trivial",
+        phase="PHASE6",
+        acknowledgement_text="acknowledged",
+        ttl_minutes=60,
+    )
+    assert row["valid"] is False
+    assert row["blocker_reason"] == "ACK_TEXT_MISSING_RELEASE_OR_RISK_PHRASE"
+    assert latest_valid_operator_ack(engine, release_id="rel-trivial", phase="PHASE6") is None
+
+
+def test_operator_ack_ttl_is_bounded_to_four_hours(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'ack-ttl.db'}")
+    with pytest.raises(ValueError, match="OPERATOR_ACK_TTL_OUT_OF_RANGE"):
+        persist_operator_ack(
+            engine,
+            release_id="rel-ttl",
+            phase="PHASE6",
+            acknowledgement_text=required_operator_ack_text("rel-ttl"),
+            ttl_minutes=241,
+        )
+
+
 def test_release_id_and_phase_must_match_for_operator_ack(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'ack-match.db'}")
-    persist_operator_ack(engine, release_id="rel-1", phase="PHASE6", valid_until="2099-01-01T00:00:00Z")
-    assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE6") is not None
-    assert latest_valid_operator_ack(engine, release_id="rel-2", phase="PHASE6") is None
-    assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE5") is None
+    now=datetime(2026, 7, 10, tzinfo=timezone.utc)
+    persist_operator_ack(
+        engine,
+        release_id="rel-1",
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text("rel-1"),
+        ttl_minutes=60,
+        now=now,
+    )
+    assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE6", now=now) is not None
+    assert latest_valid_operator_ack(engine, release_id="rel-2", phase="PHASE6", now=now) is None
+    assert latest_valid_operator_ack(engine, release_id="rel-1", phase="PHASE5", now=now) is None
 
 
 @pytest.mark.skipif(importlib.util.find_spec("fastapi") is None or importlib.util.find_spec("httpx") is None, reason="fastapi/httpx unavailable")
@@ -111,7 +153,12 @@ def test_dashboard_get_read_only_sqlite_executes_no_create_or_alter(tmp_path) ->
 
 def test_build_release_snapshot_all_phase6_evidence_canary_ready_not_live_ready(tmp_path) -> None:
     engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'snapshot.db'}")
-    persist_operator_ack(engine, release_id="rel-ready", phase="PHASE6", valid_until="2099-01-01T00:00:00Z")
+    persist_operator_ack(
+        engine,
+        release_id="rel-ready",
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text("rel-ready"),
+    )
     persist_canary_event(engine, release_id="rel-ready", phase="PHASE6", mutation_attempted=False)
     with engine.begin() as conn:
         conn.execute(text("""
@@ -187,7 +234,12 @@ def test_release_snapshot_consumes_canonical_rollback_and_runbook_writers(tmp_pa
     runbook = tmp_path / "RUNBOOK.md"
     runbook.write_text(_valid_runbook_text(), encoding="utf-8")
 
-    persist_operator_ack(engine, release_id=release_id, phase="PHASE6", valid_until="2099-01-01T00:00:00Z")
+    persist_operator_ack(
+        engine,
+        release_id=release_id,
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text(release_id),
+    )
     persist_canary_event(engine, release_id=release_id, phase="PHASE6", mutation_attempted=False)
     persist_rollback_validation_evidence(engine, {
         "validation_id": "rollback-validation:rel-writer-ready",
