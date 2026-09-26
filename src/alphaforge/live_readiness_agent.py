@@ -42,7 +42,7 @@ def observation_signal_id(row):
     return str(obj(row.get("metrics_json")).get("signal_id") or "").strip()
 def scoped_rows(rows,signal_ids):
     return [row for row in rows if str(row.get("signal_id") or "").strip() in signal_ids]
-def rollback_source_validation_valid(row, expected_validation_id):
+def rollback_source_validation_valid(row, expected_validation_id, expected_git_commit):
     if not row or str(row.get("validation_id") or "") != str(expected_validation_id or ""):
         return False
     try:
@@ -52,6 +52,7 @@ def rollback_source_validation_valid(row, expected_validation_id):
     return (
         str(row.get("evidence_status") or "").upper()=="COMPLETE"
         and str(row.get("rollback_evidence_source") or "")=="DETERMINISTIC_VALIDATION"
+        and str(row.get("git_commit") or "")==str(expected_git_commit or "")
         and bool(row.get("kill_switch_block_verified"))
         and bool(row.get("no_submit_on_kill_switch_verified"))
         and bool(row.get("fail_closed_reconciliation_verified"))
@@ -168,7 +169,7 @@ class LiveReadinessAgent:
             rb_ok=bool(
                 rb
                 and rollback_verification_evidence_valid(rb.get("status"),rb_evidence)
-                and rollback_source_validation_valid(v,validation_id)
+                and rollback_source_validation_valid(v,validation_id,expected_release_commit)
                 and str(rb_evidence.get("git_commit") or "")==expected_release_commit
             )
             g19=self.miss("ROLLBACK_EVIDENCE","rollback evidence tables","linked deterministic zero-mutation PASS rollback") if not rb else self.g("ROLLBACK_EVIDENCE",PASS if rb_ok else BLOCKED,"ROLLBACK_EVIDENCE_PASS" if rb_ok else "ROLLBACK_EVIDENCE_INVALID","rollback evidence tables",{"validation":v,"verification":rb,"verification_evidence":rb_evidence},"linked deterministic zero-mutation PASS rollback")
