@@ -312,7 +312,7 @@ def test_campaign_worker_resolves_open_paper_position(tmp_path):
     conn.close()
 
 
-def test_aggregate_campaign_read_path_does_not_persist_duration(tmp_path, monkeypatch):
+def test_sqlite_lock_aggregate_campaign_read_path_does_not_persist_duration(tmp_path, monkeypatch):
     db=tmp_path/'aggregate-readonly.db'; conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     camp=create_campaign(conn,release_id='aggregate-readonly',duration_days=1,symbols=[],intervals=[])
     run=start_or_resume_campaign(conn,camp.campaign_id)
@@ -331,7 +331,7 @@ def test_aggregate_campaign_read_path_does_not_persist_duration(tmp_path, monkey
     conn.close()
 
 
-def test_qualification_is_single_flight_across_worker_threads(tmp_path, monkeypatch):
+def test_sqlite_lock_qualification_is_single_flight_across_worker_threads(tmp_path, monkeypatch):
     db, cid = _seed_campaign_for_qualification(tmp_path)
     engine = _engine(db)
     runner = BurnInCampaignRunner(engine, cid, lambda *_: [])
@@ -368,7 +368,7 @@ def test_qualification_is_single_flight_across_worker_threads(tmp_path, monkeypa
     assert sum(isinstance(result, dict) and result.get("qualification_id") == "single-flight" for result in results) == 1
 
 
-def test_readonly_health_does_not_persist_history_and_writer_has_busy_timeout(tmp_path):
+def test_sqlite_lock_readonly_health_does_not_persist_history_and_writer_has_busy_timeout(tmp_path):
     import alphaforge.burnin_ops as burnin_ops
 
     db, cid = _seed_campaign_for_qualification(tmp_path)
