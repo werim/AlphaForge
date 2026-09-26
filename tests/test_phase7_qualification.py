@@ -56,6 +56,7 @@ def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
     run_canary_mutation_trap_validation(e, release_id=release_id, phase="PHASE6", git_commit="abc")
     persist_rollback_validation_evidence(e, {
         "validation_id": f"rollback-validation:{release_id}",
+        "git_commit": "abc",
         "kill_switch_block_verified": True,
         "no_submit_on_kill_switch_verified": True,
         "fail_closed_reconciliation_verified": True,
