@@ -972,6 +972,7 @@ def test_issue481_guided_sub_min_stop_rejects_before_ai_scoring(side, stop, targ
             execution_mode=ExecutionMode.PAPER,
             require_mtf_alignment=True,
             min_sl_pct=0.15,
+            min_rr=1.5,
             paper_fee_bps=0.0,
             paper_execution_latency_ms=0.0,
         ),
