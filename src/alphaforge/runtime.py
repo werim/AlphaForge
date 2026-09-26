@@ -2362,6 +2362,84 @@ class RuntimeOrchestrator:
             }
             market_ctx["execution_ctx"] = execution_ctx
             market_ctx["execution_safety"] = execution_safety
+
+        # Guided MTF structural geometry is market evidence, not a target to be
+        # widened until it passes policy.  Reject a sub-minimum structural stop
+        # before AIBrain scoring so the causal geometry failure remains the
+        # authoritative primary reason instead of being hidden by downstream
+        # score/expectancy effects.  Wide-stop softening still depends on score
+        # and effective RR, so that policy deliberately remains downstream.
+        mtf_for_geometry = (
+            market_ctx.get("mtf") if isinstance(market_ctx.get("mtf"), Mapping) else {}
+        )
+        generation_for_geometry = (
+            mtf_for_geometry.get("generation")
+            if isinstance(mtf_for_geometry.get("generation"), Mapping)
+            else {}
+        )
+        guided_geometry = (
+            self.config.execution_mode is ExecutionMode.PAPER
+            and str(generation_for_geometry.get("mode") or "").upper() == "REGIME_GUIDED"
+            and str(generation_for_geometry.get("evidence_status") or "").upper() == "COMPLETE"
+            and isinstance(generation_for_geometry.get("candidate"), Mapping)
+        )
+        if guided_geometry:
+            try:
+                planned_entry = float(market_ctx.get("entry"))
+                planned_stop = float(market_ctx.get("sl"))
+            except (TypeError, ValueError):
+                planned_entry = planned_stop = float("nan")
+            if (
+                math.isfinite(planned_entry)
+                and planned_entry > 0.0
+                and math.isfinite(planned_stop)
+            ):
+                stop_distance_pct = abs(planned_entry - planned_stop) / planned_entry * 100.0
+                market_ctx.update(
+                    stop_distance_pct=stop_distance_pct,
+                    min_stop_pct=float(self.config.min_sl_pct),
+                    max_stop_pct=float(self.config.max_sl_pct),
+                )
+                if stop_distance_pct < float(self.config.min_sl_pct):
+                    reject_reason = "STOP_TOO_TIGHT"
+                    reject_payload = {
+                        "signal_id": signal_id,
+                        "symbol": selection.symbol,
+                        "mode": self.config.execution_mode.value,
+                        "phase": "final",
+                        "decision": "REJECTED",
+                        "reason": reject_reason,
+                        "reject_reason": reject_reason,
+                        "primary_reject_reason": reject_reason,
+                        "reject_reasons": [reject_reason],
+                        "confidence": 0.0,
+                        "score": None,
+                        "rr": raw_rr,
+                        "candidate_rr": rr_metrics["candidate_rr"],
+                        "expected_fill": rr_metrics["expected_fill"],
+                        "executable_raw_rr": rr_metrics["executable_raw_rr"],
+                        "remaining_execution_penalty": rr_metrics["remaining_execution_penalty"],
+                        "effective_rr": effective_rr,
+                        "execution_cost_semantics": rr_metrics.get("execution_cost_semantics"),
+                        "explanation": "guided_geometry_viability_gate",
+                        "execution_ctx": execution_ctx,
+                        "execution_safety": execution_safety,
+                        "spread_pct": execution_ctx.get("spread_pct"),
+                        "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"),
+                        "latency_ms": execution_ctx.get("latency_ms"),
+                        "funding_rate_pct": execution_ctx.get("funding_rate_pct"),
+                        "liquidity_score": execution_ctx.get("liquidity_score"),
+                        "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"),
+                        "volatility_regime": execution_ctx.get("volatility_regime"),
+                    }
+                    await self._persist_reject({**market_ctx, **reject_payload})
+                    await self._emit_lifecycle_event(
+                        LifecycleState.SIGNAL_REJECTED.value,
+                        selection.symbol,
+                        {**market_ctx, **reject_payload},
+                    )
+                    return
+
         risk_reject = self._evaluate_runtime_risk(selection.symbol, market_ctx)
         await self._emit_lifecycle_event(LifecycleState.SIGNAL_CREATED.value, selection.symbol, {"reason": "", "signal_id": signal_id})
         if self._kill_switch_active():
