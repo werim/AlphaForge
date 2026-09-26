@@ -1531,7 +1531,17 @@ def terminalize_zero_exposure_recovery(conn: sqlite3.Connection, campaign_id: st
         if any(result.rowcount != 1 for result in updates):
             conn.rollback()
             return {"status": "FAIL_CLOSED", "campaign_id": campaign_id, "burnin_run_id": expected_run_id, "failure_reasons": ["CONDITIONAL_UPDATE_ROWCOUNT_MISMATCH"], "rowcounts": [r.rowcount for r in updates]}
-        event(conn, campaign_id, "PHASE9_MANUAL_ZERO_EXPOSURE_TERMINALIZED", burnin_run_id=expected_run_id, details=details)
+        persist_terminal_cause(
+            conn,
+            campaign_id,
+            expected_run_id,
+            reason="MANUAL_ZERO_EXPOSURE_TERMINALIZED",
+            event_type="PHASE9_MANUAL_ZERO_EXPOSURE_TERMINALIZED",
+            run_status="FAILED",
+            campaign_status="FAILED",
+            details=details,
+            terminal_at=now,
+        )
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -1686,9 +1696,23 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
             zero_exposure_failed_startup = recovery_safe
             prechecks["zero_exposure_failed_startup_terminalizable"] = zero_exposure_failed_startup
     if zero_exposure_failed_startup:
+        prior_campaign_status = str(campaign.get("campaign_status") or "")
         conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (campaign_id,))
         evidence = {"old_run_id": old_run, "old_status": old_status, "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "run_decisions": run_decisions, "policy": "SAFE_TERMINALIZATION"}
-        event(conn, campaign_id, "PHASE9_ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED", burnin_run_id=old_run, details=evidence)
+        if prior_campaign_status in {"STARTING", "RUNNING"} or old_status in {"STARTING", "RUNNING"}:
+            persist_terminal_cause(
+                conn,
+                campaign_id,
+                old_run,
+                reason="ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED",
+                event_type="PHASE9_ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED",
+                run_status=old_status,
+                campaign_status="FAILED",
+                details=evidence,
+            )
+        else:
+            # Historical terminal evidence is not backfilled by #419.
+            event(conn, campaign_id, "PHASE9_ZERO_EXPOSURE_STARTUP_FAILURE_TERMINALIZED", burnin_run_id=old_run, details=evidence)
         payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now(), "terminalized": old_run})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "PASS", "checks": {**prechecks, "safe_terminalization": True}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_before, "resume": None, "attach": None, "terminalization": evidence}}
         conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], "PASS", json.dumps(payload["checks"]), json.dumps(payload["before"]), json.dumps(payload["after"], default=str), PHASE9_SCHEMA_VERSION))
         conn.commit()
@@ -1696,17 +1720,33 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
     if stale_dead_worker and recovery_safe:
         # PID metadata is attachment evidence, not a prerequisite for recovery.
         # Terminalize both linked rows before allocating a successor.
-        ts = utc_now()
-        conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status='RUNNING'", (ts, old_run))
-        conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,?) WHERE campaign_id=? AND burnin_run_id=? AND status='RUNNING'", (ts, campaign_id, old_run))
-        conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', worker_pid=NULL, worker_started_at=NULL, last_error='DEAD_WORKER_ZERO_EXPOSURE_RECOVERY_REQUIRED' WHERE campaign_id=?", (campaign_id,))
         evidence = {"old_run_id": old_run, "old_status": old_status, "worker_pid": old_pid, "worker_alive": old_alive, "heartbeat_at": campaign.get("last_heartbeat_at"), "campaign_exposure": exposure, "runtime_recovery": runtime_recovery, "transition": "RUNNING->RECOVERY_REQUIRED"}
-        event(conn, campaign_id, "PHASE9_STALE_CONTINUATION_RECOVERED", burnin_run_id=old_run, details=evidence)
+        terminalize_active_campaign_run(
+            conn,
+            campaign_id,
+            run_status="RECOVERY_REQUIRED",
+            campaign_status="RECOVERY_REQUIRED",
+            reason="DEAD_WORKER_ZERO_EXPOSURE_RECOVERY_REQUIRED",
+            event_type="PHASE9_STALE_CONTINUATION_RECOVERED",
+            details=evidence,
+        )
         persist_incident(conn, campaign_id, "STALE_CONTINUATION_ZERO_EXPOSURE", evidence)
         conn.commit()
     elif not all((bool(old_pid), old_alive, old_status == "RUNNING")):
+        prior_campaign_status = str(campaign.get("campaign_status") or "")
         conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='RECOVERY_DRILL_PRECHECK_FAILED' WHERE campaign_id=?", (campaign_id,))
         failure_reason = "UNRESOLVED_RUNTIME_EXPOSURE_OR_RECONCILIATION" if stale_dead_worker else "STALE_OR_INVALID_CONTINUATION_REQUIRES_MANUAL_RECOVERY"
+        if prior_campaign_status in {"STARTING", "RUNNING"}:
+            persist_terminal_cause(
+                conn,
+                campaign_id,
+                old_run,
+                reason="RECOVERY_DRILL_PRECHECK_FAILED",
+                event_type="RECOVERY_DRILL_PRECHECK_FAILED",
+                run_status=old_status,
+                campaign_status="RECOVERY_REQUIRED",
+                details={"failure_reason": failure_reason},
+            )
         failure = {"reason": failure_reason, "prechecks": prechecks, "old_run_id": old_run, "runtime_recovery": runtime_recovery, "transition_attempted": None}
         persist_incident(conn, campaign_id, "RECOVERY_DRILL_PRECHECK_FAILED", failure)
         payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now(), "precheck": prechecks})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "FAIL", "checks": {**prechecks, "failure_reasons": [failure["reason"]]}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_before, "resume": None, "attach": None, "failure": failure}}
@@ -1714,8 +1754,20 @@ def recovery_drill(conn: sqlite3.Connection, campaign_id: str, *, attach_timeout
         return payload
     terminated = True if stale_dead_worker else _stop_worker(old_pid)
     if not terminated:
+        prior_campaign_status = str((get_campaign(conn, campaign_id) or {}).get("campaign_status") or "")
         conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='RECOVERY_DRILL_WORKER_TERMINATION_FAILED' WHERE campaign_id=?", (campaign_id,))
         failure = {"reason": "RECOVERY_DRILL_WORKER_TERMINATION_FAILED", "worker_pid": old_pid, "active_run_id": old_run, "transition_attempted": None}
+        if prior_campaign_status in {"STARTING", "RUNNING"}:
+            persist_terminal_cause(
+                conn,
+                campaign_id,
+                old_run,
+                reason="RECOVERY_DRILL_WORKER_TERMINATION_FAILED",
+                event_type="RECOVERY_DRILL_WORKER_TERMINATION_FAILED",
+                run_status=old_status,
+                campaign_status="RECOVERY_REQUIRED",
+                details=failure,
+            )
         persist_incident(conn, campaign_id, "RECOVERY_DRILL_WORKER_TERMINATION_FAILED", failure)
         payload = {"drill_id": "drill_" + canonical_hash({"cid": campaign_id, "at": utc_now(), "termination_failed": old_pid})[:20], "campaign_id": campaign_id, "generated_at": utc_now(), "status": "FAIL", "checks": {**prechecks, "worker_terminated": False, "no_resume_attempted": True, "failure_reasons": [failure["reason"]]}, "before": {"run_ids": runs_before, "pending_reject_ids": pending_ids_before, "open_position_ids": position_ids_before, "source_hash": old_hash}, "after": {"run_ids": runs_before, "resume": None, "attach": None, "failure": failure}}
         conn.execute("INSERT OR REPLACE INTO burnin_recovery_drills(drill_id,campaign_id,generated_at,status,checks_json,before_json,after_json,schema_version) VALUES (?,?,?,?,?,?,?,?)", (payload["drill_id"], campaign_id, payload["generated_at"], "FAIL", json.dumps(payload["checks"]), json.dumps(payload["before"]), json.dumps(payload["after"]), PHASE9_SCHEMA_VERSION)); conn.commit()
