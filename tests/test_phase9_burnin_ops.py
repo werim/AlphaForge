@@ -2006,6 +2006,9 @@ def test_watch_transient_backlog_growth_keeps_fresh_live_campaign_running(tmp_pa
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
     assert conn.execute("SELECT status FROM burnin_campaign_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RUNNING"
     assert conn.execute("SELECT COUNT(*) FROM burnin_ops_incidents WHERE campaign_id=? AND incident_type='WATCHDOG_FAILURE'", (camp.campaign_id,)).fetchone()[0] == 0
+    after = health_payload(conn, camp.campaign_id, persist_history=False)
+    assert after["terminal_cause"] is None
+    assert conn.execute("SELECT COUNT(*) FROM burnin_terminal_causes WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == 0
 
 
 def test_watch_sustained_overdue_backlog_growth_still_fail_closes(tmp_path):
@@ -2025,6 +2028,11 @@ def test_watch_sustained_overdue_backlog_growth_still_fail_closes(tmp_path):
     assert "RESOLVER_BACKLOG_SUSTAINED_GROWTH" in result["failures"]
     assert conn.execute("SELECT campaign_status FROM burnin_campaigns WHERE campaign_id=?", (camp.campaign_id,)).fetchone()[0] == "RECOVERY_REQUIRED"
     assert conn.execute("SELECT status FROM burnin_runs WHERE burnin_run_id=?", (run,)).fetchone()[0] == "RECOVERY_REQUIRED"
+    terminal = health_payload(conn, camp.campaign_id, persist_history=False)
+    assert terminal["terminal_cause"] == "RESOLVER_BACKLOG_SUSTAINED_GROWTH"
+    assert terminal["terminal_cause_source"] == "PHASE9_WATCHDOG_RECOVERY_REQUIRED"
+    assert terminal["terminal_event_id"]
+    assert terminal["terminal_at"]
 
 
 def test_health_resolver_and_provider_failures_remain_unhealthy(tmp_path):
