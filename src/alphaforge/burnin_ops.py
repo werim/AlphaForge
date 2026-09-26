@@ -65,6 +65,10 @@ def _connect(db: str) -> sqlite3.Connection:
     init_db(f"sqlite+pysqlite:///{Path(db).expanduser().resolve()}").dispose()
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     bootstrap_ops_schema(conn)
     return conn
 
@@ -90,6 +94,7 @@ def _connect_readonly(db: str) -> sqlite3.Connection:
         raise FileNotFoundError(f"database_not_found:{path}")
     conn = sqlite3.connect(_readonly_sqlite_uri(str(path)), uri=True)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA query_only=ON")
     return conn
 
@@ -1010,7 +1015,7 @@ def cleanup_dead_worker(conn: sqlite3.Connection, campaign_id: str) -> bool:
     conn.commit()
     return True
 
-def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_age: float = 120.0, max_open_positions: int = 25) -> dict[str, Any]:
+def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_age: float = 120.0, max_open_positions: int = 25, persist_history: bool = True) -> dict[str, Any]:
     campaign = get_campaign(conn, campaign_id)
     if not campaign:
         return {"status": "UNAVAILABLE", "unhealthy_reasons": ["NO_CAMPAIGN"], "campaign_id": campaign_id}
@@ -1148,9 +1153,10 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
     payload["status"] = "UNHEALTHY" if unhealthy else ("DEGRADED" if warnings else "HEALTHY")
     payload["unhealthy_reasons"] = unhealthy
     payload["warning_reasons"] = warnings
-    hid = "health_" + canonical_hash({"campaign_id": campaign_id, "at": utc_now(), "payload": payload})[:20]
-    conn.execute("INSERT OR REPLACE INTO burnin_health_history(health_id,campaign_id,generated_at,status,unhealthy_reasons_json,payload_json,schema_version) VALUES (?,?,?,?,?,?,?)", (hid, campaign_id, utc_now(), payload["status"], json.dumps(unhealthy), json.dumps(payload, sort_keys=True, default=str), PHASE9_SCHEMA_VERSION))
-    conn.commit()
+    if persist_history:
+        hid = "health_" + canonical_hash({"campaign_id": campaign_id, "at": utc_now(), "payload": payload})[:20]
+        conn.execute("INSERT OR REPLACE INTO burnin_health_history(health_id,campaign_id,generated_at,status,unhealthy_reasons_json,payload_json,schema_version) VALUES (?,?,?,?,?,?,?)", (hid, campaign_id, utc_now(), payload["status"], json.dumps(unhealthy), json.dumps(payload, sort_keys=True, default=str), PHASE9_SCHEMA_VERSION))
+        conn.commit()
     return payload
 
 
@@ -1995,10 +2001,16 @@ def _main(argv: Sequence[str] | None = None) -> int:
         if args.cmd == "launch":
             out = launch_campaign(db, args.release_id, args.duration_days, _symbols(args.symbols), _intervals(args.intervals), detach=args.detach, attach_timeout_seconds=args.attach_timeout_seconds)
             print(json.dumps(out, indent=2, sort_keys=True, default=str)); return 0 if out.get("status") in {"LAUNCHED", "FOREGROUND_STOPPED"} else 1
-        conn = _connect(db)
         if args.cmd in {"health", "status"}:
-            out = health_payload(conn, args.campaign_id); code = 0 if out.get("status") == "HEALTHY" else 1
-        elif args.cmd == "watch":
+            readonly = _connect_readonly(db)
+            try:
+                out = health_payload(readonly, args.campaign_id, persist_history=False)
+            finally:
+                readonly.close()
+            print(json.dumps(out, indent=2, sort_keys=True, default=str))
+            return 0 if out.get("status") == "HEALTHY" else 1
+        conn = _connect(db)
+        if args.cmd == "watch":
             out = watch_once(conn, args.campaign_id); code = 0 if out.get("status") == "OK" else 2
         elif args.cmd == "pause":
             pause_campaign(conn, args.campaign_id); conn.commit(); out = {"status": "PAUSED", "campaign_id": args.campaign_id}; code = 0
