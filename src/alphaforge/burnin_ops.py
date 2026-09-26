@@ -15,7 +15,8 @@ from alphaforge.burnin_campaign import (
     aggregate_campaign, bootstrap_campaign_schema, build_phase8_campaign_identity,
     check_campaign_completion, create_campaign, event, export_campaign_bundle,
     get_campaign, pause_campaign, qualify_campaign, start_or_resume_campaign,
-    update_campaign_heartbeat, _exec,
+    update_campaign_heartbeat, _exec, get_terminal_cause, persist_terminal_cause,
+    terminalize_active_campaign_run,
     fail_active_campaign_run, campaign_attachment_identity, run_attachment_identity,
     identity_mismatches, load_active_campaign_attachment, ATTACHMENT_IDENTITY_FIELDS,
     release_id_validation,
@@ -773,14 +774,15 @@ def verify_worker_attachment(conn: sqlite3.Connection, campaign_id: str, *, work
 
 
 def _mark_campaign_failed(conn: sqlite3.Connection, campaign_id: str, reason: str, details: Mapping[str, Any] | None = None) -> None:
-    campaign = get_campaign(conn, campaign_id)
-    active_run_id = campaign.get("active_run_id") if campaign else None
-    ts = utc_now()
-    if active_run_id:
-        conn.execute("UPDATE burnin_runs SET status='FAILED', end_time=COALESCE(end_time, ?) WHERE burnin_run_id=? AND status IN ('STARTING','RUNNING')", (ts, active_run_id))
-        conn.execute("UPDATE burnin_campaign_runs SET status='FAILED', ended_at=COALESCE(ended_at, ?) WHERE campaign_id=? AND burnin_run_id=? AND status IN ('STARTING','RUNNING')", (ts, campaign_id, active_run_id))
-    conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', last_error=?, worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (reason, campaign_id))
-    event(conn, campaign_id, "PHASE9_CAMPAIGN_FAILED", details={"reason": reason, **dict(details or {})})
+    terminalize_active_campaign_run(
+        conn,
+        campaign_id,
+        run_status="FAILED",
+        campaign_status="FAILED",
+        reason=reason,
+        event_type="PHASE9_CAMPAIGN_FAILED",
+        details=details,
+    )
     conn.commit()
 
 
@@ -1006,14 +1008,58 @@ def cleanup_dead_worker(conn: sqlite3.Connection, campaign_id: str) -> bool:
     pid = campaign.get("worker_pid")
     if not pid or _pid_alive(pid):
         return False
-    run_id, now = campaign.get("active_run_id"), utc_now()
-    if run_id:
-        conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status IN ('STARTING','RUNNING')", (now, run_id))
-        conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,?) WHERE campaign_id=? AND burnin_run_id=? AND status IN ('STARTING','RUNNING')", (now, campaign_id, run_id))
-    conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='DEAD_WORKER_RECOVERY_REQUIRED', worker_pid=NULL, worker_started_at=NULL WHERE campaign_id=?", (campaign_id,))
-    event(conn, campaign_id, "PHASE9_DEAD_WORKER_RECOVERY_REQUIRED", burnin_run_id=run_id, details={"worker_pid": pid, "last_heartbeat_at": campaign.get("last_heartbeat_at"), "evidence_preserved": True})
+    terminalize_active_campaign_run(
+        conn,
+        campaign_id,
+        run_status="RECOVERY_REQUIRED",
+        campaign_status="RECOVERY_REQUIRED",
+        reason="DEAD_WORKER_RECOVERY_REQUIRED",
+        event_type="PHASE9_DEAD_WORKER_RECOVERY_REQUIRED",
+        details={
+            "worker_pid": pid,
+            "last_heartbeat_at": campaign.get("last_heartbeat_at"),
+            "evidence_preserved": True,
+        },
+    )
     conn.commit()
     return True
+
+
+def _terminal_cause_status_fields(conn: sqlite3.Connection, campaign: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose persisted cause only; never infer it from current health warnings."""
+    campaign_id = str(campaign.get("campaign_id") or "")
+    run_id = campaign.get("active_run_id")
+    record = get_terminal_cause(conn, campaign_id, run_id)
+    if record is not None:
+        return {
+            "terminal_cause": record.get("terminal_cause"),
+            "terminal_cause_source": record.get("terminal_cause_source"),
+            "terminal_event_id": record.get("terminal_event_id"),
+            "terminal_at": record.get("terminal_at"),
+        }
+    run_status = None
+    terminal_at = None
+    if run_id:
+        row = conn.execute(
+            "SELECT status,ended_at FROM burnin_campaign_runs WHERE campaign_id=? AND burnin_run_id=?",
+            (campaign_id, run_id),
+        ).fetchone()
+        if row is not None:
+            run_status, terminal_at = str(row["status"]), row["ended_at"]
+    terminal_state = str(campaign.get("campaign_status") or "") in {"FAILED", "RECOVERY_REQUIRED"} or run_status in {"FAILED", "RECOVERY_REQUIRED"}
+    if terminal_state:
+        return {
+            "terminal_cause": "UNKNOWN_LEGACY_TERMINAL_CAUSE",
+            "terminal_cause_source": "LEGACY_NO_AUTHORITATIVE_RECORD",
+            "terminal_event_id": None,
+            "terminal_at": terminal_at,
+        }
+    return {
+        "terminal_cause": None,
+        "terminal_cause_source": None,
+        "terminal_event_id": None,
+        "terminal_at": None,
+    }
 
 def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_age: float = 120.0, max_open_positions: int = 25, persist_history: bool = True) -> dict[str, Any]:
     campaign = get_campaign(conn, campaign_id)
@@ -1103,6 +1149,7 @@ def health_payload(conn: sqlite3.Connection, campaign_id: str, *, max_heartbeat_
         "resolver_backlog_growth": backlog_growth, "resolver_backlog_growth_streak": backlog_growth_streak,
         "resolver_backlog_sustained_growth": sustained_backlog_growth,
         "evidence_completeness_regression": evidence_regression, "aggregate_contamination": aggregate_contamination, "duplicate_continuation_sequence": duplicate_seq,
+        **_terminal_cause_status_fields(conn, campaign),
     }
     runtime_cfg = load_config_from_env().runtime
     payload["multi_timeframe"] = {"regime_timeframe": runtime_cfg.regime_timeframe,
@@ -1182,13 +1229,18 @@ def watch_once(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
     if failures:
         persist_incident(conn, campaign_id, "WATCHDOG_FAILURE", {"failures": failures, "health": health})
         if not cleaned_dead_worker and (get_campaign(conn, campaign_id) or {}).get("campaign_status") in {"STARTING", "RUNNING"}:
-            campaign = get_campaign(conn, campaign_id) or {}
-            run_id = campaign.get("active_run_id")
-            terminal_at = campaign.get("last_heartbeat_at") or utc_now()
-            if run_id:
-                conn.execute("UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,?) WHERE burnin_run_id=? AND status IN ('STARTING','RUNNING')", (terminal_at, run_id))
-                conn.execute("UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,?) WHERE campaign_id=? AND burnin_run_id=? AND status IN ('STARTING','RUNNING')", (terminal_at, campaign_id, run_id))
-            conn.execute("UPDATE burnin_campaigns SET campaign_status='RECOVERY_REQUIRED', last_error='WATCHDOG_FAILURE' WHERE campaign_id=?", (campaign_id,))
+            primary_failures = [reason for reason in failures if reason not in {"FAILED", "RECOVERY_REQUIRED"}]
+            terminal_cause = primary_failures[0] if primary_failures else "WATCHDOG_FAILURE"
+            terminalize_active_campaign_run(
+                conn,
+                campaign_id,
+                run_status="RECOVERY_REQUIRED",
+                campaign_status="RECOVERY_REQUIRED",
+                reason=terminal_cause,
+                event_type="PHASE9_WATCHDOG_RECOVERY_REQUIRED",
+                details={"failures": failures, "health_status": health.get("status")},
+                clear_worker_metadata=False,
+            )
         conn.commit()
     return {"status": "OK" if not failures else "RECOVERY_REQUIRED", "failures": failures, "health": health, "cleaned_dead_worker": cleaned_dead_worker}
 
