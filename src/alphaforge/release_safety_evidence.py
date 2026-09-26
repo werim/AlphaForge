@@ -38,11 +38,22 @@ def persist_campaign_release_safety_evidence(
 
     release_id = str(campaign["release_id"])
     campaign_git_commit = str(campaign["git_commit"] or "")
+    repo_root = Path(repo_path).expanduser().resolve()
     identity = require_campaign_checkout(
         campaign_git_commit,
-        repo_path=repo_path,
+        repo_path=repo_root,
         git_runner=git_runner,
     )
+    requested_runbook = Path(runbook_path).expanduser()
+    resolved_runbook = (
+        requested_runbook.resolve()
+        if requested_runbook.is_absolute()
+        else (repo_root / requested_runbook).resolve()
+    )
+    try:
+        resolved_runbook.relative_to(repo_root)
+    except ValueError as exc:
+        raise ValueError("RUNBOOK_OUTSIDE_CAMPAIGN_REPOSITORY") from exc
     rollback = persist_rollback_verification(
         engine,
         release_id=release_id,
@@ -54,7 +65,7 @@ def persist_campaign_release_safety_evidence(
         engine,
         release_id=release_id,
         phase=phase,
-        runbook_path=runbook_path,
+        runbook_path=resolved_runbook,
         git_commit=campaign_git_commit,
     )
     snapshot = build_release_snapshot(engine, release_id=release_id, phase=phase)
@@ -68,6 +79,7 @@ def persist_campaign_release_safety_evidence(
         "campaign_git_commit": campaign_git_commit,
         "checkout_git_commit": str(identity["git_commit"]),
         "phase": phase,
+        "runbook_repo_path": str(resolved_runbook.relative_to(repo_root)),
         "status": "PASS" if rollback_pass and runbook_pass else "FAIL",
         "rollback": rollback,
         "runbook": runbook,
