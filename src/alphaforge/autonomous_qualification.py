@@ -901,23 +901,50 @@ class AutonomousQualificationHarness:
             delay = max(0.0, target - time.monotonic()) if self._enforce_wall_clock else duration_seconds / segments
             self._sleep(delay)
 
-    def _soak_decision_probe_candidate(self) -> dict[str, Any]:
+    def _soak_decision_probe_candidate(self, *, tight_geometry: bool = False) -> dict[str, Any]:
         now = time.time()
+        entry = 100.0
+        if tight_geometry:
+            # 1 bp planned stop and 1.2R target: a 2 bps adverse PAPER fill
+            # moves through the target and deterministically collapses
+            # executable raw RR to zero.  This mirrors the M0 failure class.
+            stop = 99.99
+            target = 100.012
+            raw_rr = 1.2
+            suffix = "tight"
+        else:
+            stop = 99.5
+            target = 101.5
+            raw_rr = 3.0
+            suffix = "valid"
+
+        guided_candidate = {
+            "side": "LONG",
+            "entry": entry,
+            "sl": stop,
+            "tp": target,
+            "rr": raw_rr,
+            "candidate_rr": raw_rr,
+            "setup_type": "LONG_PULLBACK",
+            "setup_phase": "PULLBACK",
+            "geometry_status": "COMPLETE",
+            "geometry_reason": None,
+            "geometry_source": "MTF_SETUP_STRUCTURE",
+            "entry_source": "qualification_execution_close",
+            "stop_source": "qualification_setup_support",
+            "target_source": "qualification_setup_resistance",
+            "setup_timeframe": "15m",
+            "execution_timeframe": "1m",
+            "structural_stop": stop,
+            "structural_target": target,
+        }
         return {
-            "signal_id": f"{self._soak_decision_signal_prefix}0001",
+            "signal_id": f"{self._soak_decision_signal_prefix}{suffix}",
             "symbol": "BTCUSDT",
             "source_exchange": "binance",
             "timeframe": "1m",
             "market_ts": now,
-            "side": "LONG",
-            "entry": 100.0,
-            "sl": 99.5,
-            "tp": 101.5,
-            "rr": 3.0,
-            "geometry_status": "COMPLETE",
-            "geometry_source": "QUALIFICATION_DETERMINISTIC_DECISION_PROBE",
-            "setup_type": "QUALIFICATION_PROBE",
-            "setup_reason": "PIPELINE_COVERAGE",
+            **guided_candidate,
             "setup_quality": 0.95,
             "volume_24h_usdt": 100_000_000.0,
             "spread_pct": 0.0002,
@@ -954,31 +981,71 @@ class AutonomousQualificationHarness:
             "orderbook_imbalance": 0.50,
             "orderbook_status": "MEASURED",
             "orderbook_source": "QUALIFICATION_PROBE",
-            "regime": "TREND",
+            "regime": "TRENDING",
             "mtf": {
                 "regime": {
+                    "timeframe": "1h",
                     "regime": "TRENDING",
+                    "direction": "LONG",
                     "evidence_status": "COMPLETE",
                     "alignment": 1.0,
-                }
+                },
+                "setup": {
+                    "timeframe": "15m",
+                    "phase": "PULLBACK",
+                    "trade_side": "LONG",
+                    "direction": "LONG",
+                    "evidence_status": "COMPLETE",
+                    "structural_stop": stop,
+                    "structural_target": target,
+                },
+                "execution": {
+                    "timeframe": "1m",
+                    "direction": "LONG",
+                    "trade_side": "LONG",
+                    "confirmed_for_side": True,
+                    "evidence_status": "COMPLETE",
+                },
+                "alignment": {
+                    "aligned": True,
+                    "direction": "LONG",
+                    "reasons": [],
+                    "generation_mode": "REGIME_GUIDED",
+                    "setup_phase": "PULLBACK",
+                    "timeframes": {"regime": "1h", "setup": "15m", "execution": "1m"},
+                },
+                "generation": {
+                    "mode": "REGIME_GUIDED",
+                    "evidence_status": "COMPLETE",
+                    "candidate": guided_candidate,
+                    "reason": None,
+                },
             },
             "qualification_decision_probe": True,
+            "qualification_geometry_probe": suffix,
         }
 
     def _run_soak_decision_evidence_probe(self, ctx: HarnessContext) -> None:
         if self._soak_decision_probe_done:
             return
         self._soak_decision_probe_done = True
-        candidate = self._soak_decision_probe_candidate()
+        candidates = [
+            self._soak_decision_probe_candidate(tight_geometry=False),
+            self._soak_decision_probe_candidate(tight_geometry=True),
+        ]
         original_scanner = ctx.runtime.market_scanner
 
-        async def probe_scanner() -> list[dict[str, Any]]:
-            return [candidate]
-
         try:
-            ctx.runtime.market_scanner = probe_scanner
             before_executions = ctx.runtime.metrics.executions
-            asyncio.run(ctx.runtime._scan_once())
+            for candidate in candidates:
+                async def probe_scanner(
+                    current: dict[str, Any] = candidate,
+                ) -> list[dict[str, Any]]:
+                    return [current]
+
+                ctx.runtime.market_scanner = probe_scanner
+                asyncio.run(ctx.runtime._scan_once())
+
             if ctx.runtime.metrics.executions != before_executions:
                 raise RuntimeError("QUALIFICATION_DECISION_PROBE_EXECUTED_TRADE")
             ctx.runtime._generate_burnin_snapshot(reason="soak_decision_evidence")
@@ -990,17 +1057,75 @@ class AutonomousQualificationHarness:
         finally:
             ctx.runtime.market_scanner = original_scanner
 
-    def _soak_decision_evidence(self, ctx: HarnessContext) -> dict[str, int]:
+    def _soak_decision_evidence(self, ctx: HarnessContext) -> dict[str, Any]:
         params = {
             "bid": ctx.burnin_run_id,
             "prefix": f"{self._soak_decision_signal_prefix}%",
         }
         canonical = canonical_decision_sql("o")
+        guided_scope = (
+            "o.burnin_run_id=:bid "
+            "AND json_extract(o.metrics_json,'$.signal_id') LIKE :prefix "
+            "AND UPPER(COALESCE(json_extract(o.metrics_json,'$.mtf.generation.mode'),''))="
+            "'REGIME_GUIDED'"
+        )
         with self.engine.connect() as conn:
             def scalar(sql: str) -> int:
                 return int(conn.execute(text(sql), params).scalar_one() or 0)
 
-            evidence = {
+            geometry = conn.execute(text(f"""
+                SELECT
+                    COUNT(*) AS guided_candidate_decisions,
+                    SUM(CASE
+                        WHEN CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL)
+                           < CAST(json_extract(o.metrics_json,'$.min_stop_pct') AS REAL)
+                        THEN 1 ELSE 0 END) AS guided_below_min_stop,
+                    SUM(CASE
+                        WHEN CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL)
+                           >= CAST(json_extract(o.metrics_json,'$.min_stop_pct') AS REAL)
+                         AND CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL)
+                           <= CAST(json_extract(o.metrics_json,'$.max_stop_pct') AS REAL)
+                        THEN 1 ELSE 0 END) AS guided_valid_stop_decisions,
+                    SUM(CASE
+                        WHEN UPPER(COALESCE(
+                            json_extract(o.metrics_json,'$.primary_reject_reason'),''
+                        ))='STOP_TOO_TIGHT'
+                        THEN 1 ELSE 0 END) AS guided_stop_too_tight_primary,
+                    SUM(CASE
+                        WHEN CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL)
+                           < CAST(json_extract(o.metrics_json,'$.min_stop_pct') AS REAL)
+                         AND UPPER(COALESCE(
+                            json_extract(o.metrics_json,'$.primary_reject_reason'),''
+                         ))<>'STOP_TOO_TIGHT'
+                        THEN 1 ELSE 0 END) AS guided_unattributed_stop_violations,
+                    SUM(CASE
+                        WHEN CAST(json_extract(o.metrics_json,'$.executable_raw_rr') AS REAL)=0.0
+                        THEN 1 ELSE 0 END) AS guided_executable_rr_zero,
+                    MIN(CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL))
+                        AS guided_min_stop_distance_pct,
+                    AVG(CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL))
+                        AS guided_avg_stop_distance_pct,
+                    MAX(CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL))
+                        AS guided_max_stop_distance_pct,
+                    AVG(CAST(json_extract(o.metrics_json,'$.candidate_rr') AS REAL))
+                        AS guided_avg_candidate_rr,
+                    AVG(CAST(json_extract(o.metrics_json,'$.executable_raw_rr') AS REAL))
+                        AS guided_avg_executable_rr,
+                    AVG(CAST(json_extract(o.metrics_json,'$.effective_rr') AS REAL))
+                        AS guided_avg_effective_rr,
+                    AVG(
+                        CAST(json_extract(o.metrics_json,'$.candidate_rr') AS REAL)
+                        - CAST(json_extract(o.metrics_json,'$.executable_raw_rr') AS REAL)
+                    ) AS guided_avg_fill_geometry_loss_r,
+                    AVG(CAST(
+                        json_extract(o.metrics_json,'$.remaining_execution_penalty') AS REAL
+                    )) AS guided_avg_residual_penalty_r
+                FROM burnin_observations o
+                WHERE {guided_scope}
+                  AND {canonical}
+            """), params).mappings().one()
+
+            evidence: dict[str, Any] = {
                 "canonical_decisions": scalar(
                     f"SELECT COUNT(*) FROM burnin_observations o "
                     f"WHERE o.burnin_run_id=:bid AND {canonical}"
@@ -1048,13 +1173,44 @@ class AutonomousQualificationHarness:
                           <> UPPER(COALESCE(json_extract(o.metrics_json,'$.mtf.regime.regime'),''))
                     """
                 ),
+                "guided_rr_gate_failures": scalar(f"""
+                    SELECT COUNT(*)
+                    FROM burnin_observations o, json_each(
+                        COALESCE(json_extract(o.metrics_json,'$.all_failed_gates'),'[]')
+                    ) gate
+                    WHERE {guided_scope}
+                      AND UPPER(CAST(gate.value AS TEXT))='RR_TOO_LOW'
+                      AND {canonical}
+                """),
+                "guided_effective_rr_gate_failures": scalar(f"""
+                    SELECT COUNT(*)
+                    FROM burnin_observations o, json_each(
+                        COALESCE(json_extract(o.metrics_json,'$.all_failed_gates'),'[]')
+                    ) gate
+                    WHERE {guided_scope}
+                      AND UPPER(CAST(gate.value AS TEXT))='LOW_EFFECTIVE_RR'
+                      AND {canonical}
+                """),
             }
+            for key, value in dict(geometry).items():
+                if key.startswith("guided_") and key.endswith((
+                    "_decisions", "_stop", "_primary", "_violations", "_zero"
+                )):
+                    evidence[key] = int(value or 0)
+                else:
+                    evidence[key] = None if value is None else float(value)
         return evidence
 
     def _soak_decision_evidence_checks(
-        self, ctx: HarnessContext, evidence: Mapping[str, int]
+        self, ctx: HarnessContext, evidence: Mapping[str, Any]
     ) -> dict[str, bool]:
         canonical_decisions = int(evidence.get("canonical_decisions") or 0)
+        guided_decisions = int(evidence.get("guided_candidate_decisions") or 0)
+        guided_below_min = int(evidence.get("guided_below_min_stop") or 0)
+        guided_valid = int(evidence.get("guided_valid_stop_decisions") or 0)
+        guided_tight_primary = int(evidence.get("guided_stop_too_tight_primary") or 0)
+        unattributed = int(evidence.get("guided_unattributed_stop_violations") or 0)
+        executable_zero = int(evidence.get("guided_executable_rr_zero") or 0)
         return {
             "canonical_decision_evidence_nonzero": canonical_decisions > 0,
             "decision_evidence_persisted":
@@ -1070,6 +1226,18 @@ class AutonomousQualificationHarness:
                 int(evidence.get("qualification_snapshots") or 0) > 0,
             "canonical_regime_evidence_consistent":
                 int(evidence.get("complete_mtf_regime_mismatches") or 0) == 0,
+            # Full-chain semantic probes deliberately include one valid guided
+            # geometry and one sub-minimum/collapsed geometry.  This prevents a
+            # green SOAK from proving only worker/persistence health while the
+            # strategy path is structurally suppressing every candidate.
+            "guided_geometry_semantic_probe_exercised":
+                guided_decisions >= 2 and guided_below_min >= 1 and guided_valid >= 1,
+            "guided_geometry_policy_violation_attributed":
+                unattributed == 0 and guided_tight_primary == guided_below_min,
+            "guided_geometry_not_structurally_suppressed":
+                guided_valid > 0 and guided_below_min < guided_decisions,
+            "guided_fill_collapse_observed":
+                executable_zero >= 1 and executable_zero < guided_decisions,
             "decision_probe_no_submit":
                 self._soak_decision_probe_done
                 and self._soak_decision_probe_error is None

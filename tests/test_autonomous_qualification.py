@@ -343,3 +343,68 @@ def test_public_probe_persists_scanner_failure_diagnostics(tmp_path: Path) -> No
     finally:
         harness._terminalize(ctx)
         harness.close()
+
+
+
+def test_issue481_soak_exercises_guided_geometry_semantics(tmp_path: Path) -> None:
+    harness = AutonomousQualificationHarness(
+        mode="SOAK", output_root=tmp_path, soak_hours=6,
+        sleep=lambda _seconds: None,
+    )
+    ctx = harness._new_context("issue481_semantic_probe", qualification_targets=True)
+    try:
+        harness._run_soak_decision_evidence_probe(ctx)
+        evidence = harness._soak_decision_evidence(ctx)
+        checks = harness._soak_decision_evidence_checks(ctx, evidence)
+
+        assert evidence["guided_candidate_decisions"] == 2
+        assert evidence["guided_below_min_stop"] == 1
+        assert evidence["guided_valid_stop_decisions"] == 1
+        assert evidence["guided_stop_too_tight_primary"] == 1
+        assert evidence["guided_unattributed_stop_violations"] == 0
+        assert evidence["guided_executable_rr_zero"] == 1
+        assert evidence["guided_min_stop_distance_pct"] == pytest.approx(0.01)
+        assert evidence["guided_max_stop_distance_pct"] == pytest.approx(0.5)
+        assert evidence["guided_avg_fill_geometry_loss_r"] > 0.0
+        assert evidence["guided_avg_residual_penalty_r"] >= 0.0
+        assert checks["guided_geometry_semantic_probe_exercised"] is True
+        assert checks["guided_geometry_policy_violation_attributed"] is True
+        assert checks["guided_geometry_not_structurally_suppressed"] is True
+        assert checks["guided_fill_collapse_observed"] is True
+        assert checks["decision_probe_no_submit"] is True
+    finally:
+        harness._terminalize(ctx)
+        harness.close()
+
+
+def test_issue481_soak_blocks_structural_geometry_suppression(tmp_path: Path) -> None:
+    harness = AutonomousQualificationHarness(
+        mode="SOAK", output_root=tmp_path, soak_hours=6,
+        sleep=lambda _seconds: None,
+    )
+    ctx = harness._new_context("issue481_suppression_guard", qualification_targets=True)
+    try:
+        evidence = {
+            "canonical_decisions": 2,
+            "decision_evidence": 2,
+            "order_decisions": 1,
+            "rejected_decisions": 2,
+            "rejected_signal_reviews": 2,
+            "pending_reject_labels": 2,
+            "qualification_snapshots": 1,
+            "complete_mtf_regime_mismatches": 0,
+            "guided_candidate_decisions": 2,
+            "guided_below_min_stop": 2,
+            "guided_valid_stop_decisions": 0,
+            "guided_stop_too_tight_primary": 2,
+            "guided_unattributed_stop_violations": 0,
+            "guided_executable_rr_zero": 2,
+        }
+        checks = harness._soak_decision_evidence_checks(ctx, evidence)
+
+        assert checks["guided_geometry_policy_violation_attributed"] is True
+        assert checks["guided_geometry_not_structurally_suppressed"] is False
+        assert checks["guided_fill_collapse_observed"] is False
+    finally:
+        harness._terminalize(ctx)
+        harness.close()
