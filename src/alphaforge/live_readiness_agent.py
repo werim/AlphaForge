@@ -135,7 +135,32 @@ class LiveReadinessAgent:
             g15=self.g("EXPECTANCY_TEMPORAL_EVIDENCE",PASS if valid else NOT_OBSERVABLE,"TEMPORAL_EXPECTANCY_EVIDENCE_PRESENT" if valid else "AUTHORITATIVE_EVIDENCE_MISSING","expectancy_evidence",{"rows":len(ev),"valid":len(valid)},"timestamp-bounded attributable expectancy exists")
             cost=acc; keys=("spread_pct","expected_slippage_pct","latency_ms","funding_rate_pct"); absent=[x.get("decision_id") for x in cost if x.get("effective_rr") is None or int(x.get("execution_ctx_missing") or 0) or any(x.get(k) is None for k in keys)]; zero=[x.get("decision_id") for x in cost if all(float(x.get(k) or 0)==0 for k in keys)]; g16=self.miss("EXECUTION_COST_EVIDENCE","burnin_observations + order_decisions","measured non-placeholder costs for active run") if not cost else self.g("EXECUTION_COST_EVIDENCE",NOT_OBSERVABLE if absent else (NEEDS_FIX if zero else PASS),"EXECUTION_COST_CONTEXT_MISSING" if absent else ("PLACEHOLDER_ZERO_COSTS" if zero else "EXECUTION_COST_EVIDENCE_PRESENT"),"burnin_observations + order_decisions",{"missing":absent,"zero":zero},"measured non-placeholder costs for active run")
             g17=self.status(db,"RECOVERY_DRILL","burnin_recovery_drills","campaign_id=?",(self.cid,),"generated_at","recovery drill PASS")
-            q=self.latest(db.rows("SELECT * FROM burnin_qualification_snapshots WHERE burnin_run_id=?",(self.scope["burnin_run_id"],)),"generated_at") if "burnin_qualification_snapshots" in tabs else None; soak=q and all(str(q.get(k) or "").upper()==PASS for k in ("status","sample_status","evidence_completeness_status")); g18=self.miss("SOAK_EVIDENCE","burnin_qualification_snapshots","complete PASS qualification") if not q else self.g("SOAK_EVIDENCE",PASS if soak else BLOCKED,"SOAK_QUALIFICATION_PASS" if soak else "SOAK_QUALIFICATION_INCOMPLETE","burnin_qualification_snapshots",q,"complete PASS qualification")
+            qualification_id=(c or {}).get("latest_qualification_id")
+            q=db.one(
+                "SELECT * FROM burnin_qualification_snapshots WHERE qualification_id=? AND campaign_id=? AND release_id=?",
+                (qualification_id,self.cid,self.scope["release_id"]),
+            ) if qualification_id and "burnin_qualification_snapshots" in tabs else None
+            try: q_source_runs=json.loads((q or {}).get("source_run_ids_json") or "[]")
+            except (TypeError,ValueError,json.JSONDecodeError): q_source_runs=[]
+            q_scope_ok=bool(
+                q
+                and str(q.get("campaign_id") or "")==self.cid
+                and str(q.get("release_id") or "")==str(self.scope["release_id"] or "")
+                and str(self.scope["burnin_run_id"] or "") in {str(x) for x in q_source_runs}
+                and bool(q.get("aggregate_evidence_hash"))
+            )
+            soak=bool(
+                q_scope_ok
+                and str((c or {}).get("qualification_status") or "").upper()=="CANARY_QUALIFIED"
+                and str(q.get("status") or "").upper()=="CANARY_QUALIFIED"
+                and str(q.get("sample_status") or "").upper()==PASS
+                and str(q.get("evidence_completeness_status") or "").upper()==PASS
+            )
+            if not q:
+                g18=self.miss("SOAK_EVIDENCE","burnin_campaigns.latest_qualification_id + burnin_qualification_snapshots","latest campaign-linked CANARY_QUALIFIED snapshot")
+            else:
+                reason="SOAK_QUALIFICATION_PASS" if soak else ("SOAK_QUALIFICATION_SCOPE_MISMATCH" if not q_scope_ok else "SOAK_QUALIFICATION_INCOMPLETE")
+                g18=self.g("SOAK_EVIDENCE",PASS if soak else BLOCKED,reason,"burnin_campaigns.latest_qualification_id + burnin_qualification_snapshots",{"snapshot":q,"source_run_ids":q_source_runs,"campaign_qualification_status":(c or {}).get("qualification_status")},"latest campaign-linked CANARY_QUALIFIED snapshot with PASS sample/evidence")
             rb=self.latest(db.rows("SELECT * FROM rollback_verification_events WHERE release_id=?",(self.scope["release_id"],)),"verified_at") if "rollback_verification_events" in tabs else None
             rb_evidence=obj((rb or {}).get("evidence_json")); validation_id=rb_evidence.get("validation_id")
             v=db.one("SELECT * FROM live_rollback_validation_evidence WHERE validation_id=?",(validation_id,)) if validation_id and "live_rollback_validation_evidence" in tabs else None
