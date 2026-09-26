@@ -1057,17 +1057,75 @@ class AutonomousQualificationHarness:
         finally:
             ctx.runtime.market_scanner = original_scanner
 
-    def _soak_decision_evidence(self, ctx: HarnessContext) -> dict[str, int]:
+    def _soak_decision_evidence(self, ctx: HarnessContext) -> dict[str, Any]:
         params = {
             "bid": ctx.burnin_run_id,
             "prefix": f"{self._soak_decision_signal_prefix}%",
         }
         canonical = canonical_decision_sql("o")
+        guided_scope = (
+            "o.burnin_run_id=:bid "
+            "AND json_extract(o.metrics_json,'$.signal_id') LIKE :prefix "
+            "AND UPPER(COALESCE(json_extract(o.metrics_json,'$.mtf.generation.mode'),''))="
+            "'REGIME_GUIDED'"
+        )
         with self.engine.connect() as conn:
             def scalar(sql: str) -> int:
                 return int(conn.execute(text(sql), params).scalar_one() or 0)
 
-            evidence = {
+            geometry = conn.execute(text(f"""
+                SELECT
+                    COUNT(*) AS guided_candidate_decisions,
+                    SUM(CASE
+                        WHEN CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL)
+                           < CAST(json_extract(o.metrics_json,'$.min_stop_pct') AS REAL)
+                        THEN 1 ELSE 0 END) AS guided_below_min_stop,
+                    SUM(CASE
+                        WHEN CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL)
+                           >= CAST(json_extract(o.metrics_json,'$.min_stop_pct') AS REAL)
+                         AND CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL)
+                           <= CAST(json_extract(o.metrics_json,'$.max_stop_pct') AS REAL)
+                        THEN 1 ELSE 0 END) AS guided_valid_stop_decisions,
+                    SUM(CASE
+                        WHEN UPPER(COALESCE(
+                            json_extract(o.metrics_json,'$.primary_reject_reason'),''
+                        ))='STOP_TOO_TIGHT'
+                        THEN 1 ELSE 0 END) AS guided_stop_too_tight_primary,
+                    SUM(CASE
+                        WHEN CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL)
+                           < CAST(json_extract(o.metrics_json,'$.min_stop_pct') AS REAL)
+                         AND UPPER(COALESCE(
+                            json_extract(o.metrics_json,'$.primary_reject_reason'),''
+                         ))<>'STOP_TOO_TIGHT'
+                        THEN 1 ELSE 0 END) AS guided_unattributed_stop_violations,
+                    SUM(CASE
+                        WHEN CAST(json_extract(o.metrics_json,'$.executable_raw_rr') AS REAL)=0.0
+                        THEN 1 ELSE 0 END) AS guided_executable_rr_zero,
+                    MIN(CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL))
+                        AS guided_min_stop_distance_pct,
+                    AVG(CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL))
+                        AS guided_avg_stop_distance_pct,
+                    MAX(CAST(json_extract(o.metrics_json,'$.stop_distance_pct') AS REAL))
+                        AS guided_max_stop_distance_pct,
+                    AVG(CAST(json_extract(o.metrics_json,'$.candidate_rr') AS REAL))
+                        AS guided_avg_candidate_rr,
+                    AVG(CAST(json_extract(o.metrics_json,'$.executable_raw_rr') AS REAL))
+                        AS guided_avg_executable_rr,
+                    AVG(CAST(json_extract(o.metrics_json,'$.effective_rr') AS REAL))
+                        AS guided_avg_effective_rr,
+                    AVG(
+                        CAST(json_extract(o.metrics_json,'$.candidate_rr') AS REAL)
+                        - CAST(json_extract(o.metrics_json,'$.executable_raw_rr') AS REAL)
+                    ) AS guided_avg_fill_geometry_loss_r,
+                    AVG(CAST(
+                        json_extract(o.metrics_json,'$.remaining_execution_penalty') AS REAL
+                    )) AS guided_avg_residual_penalty_r
+                FROM burnin_observations o
+                WHERE {guided_scope}
+                  AND {canonical}
+            """), params).mappings().one()
+
+            evidence: dict[str, Any] = {
                 "canonical_decisions": scalar(
                     f"SELECT COUNT(*) FROM burnin_observations o "
                     f"WHERE o.burnin_run_id=:bid AND {canonical}"
@@ -1115,13 +1173,44 @@ class AutonomousQualificationHarness:
                           <> UPPER(COALESCE(json_extract(o.metrics_json,'$.mtf.regime.regime'),''))
                     """
                 ),
+                "guided_rr_gate_failures": scalar(f"""
+                    SELECT COUNT(*)
+                    FROM burnin_observations o, json_each(
+                        COALESCE(json_extract(o.metrics_json,'$.all_failed_gates'),'[]')
+                    ) gate
+                    WHERE {guided_scope}
+                      AND UPPER(CAST(gate.value AS TEXT))='RR_TOO_LOW'
+                      AND {canonical}
+                """),
+                "guided_effective_rr_gate_failures": scalar(f"""
+                    SELECT COUNT(*)
+                    FROM burnin_observations o, json_each(
+                        COALESCE(json_extract(o.metrics_json,'$.all_failed_gates'),'[]')
+                    ) gate
+                    WHERE {guided_scope}
+                      AND UPPER(CAST(gate.value AS TEXT))='LOW_EFFECTIVE_RR'
+                      AND {canonical}
+                """),
             }
+            for key, value in dict(geometry).items():
+                if key.startswith("guided_") and key.endswith((
+                    "_decisions", "_stop", "_primary", "_violations", "_zero"
+                )):
+                    evidence[key] = int(value or 0)
+                else:
+                    evidence[key] = None if value is None else float(value)
         return evidence
 
     def _soak_decision_evidence_checks(
-        self, ctx: HarnessContext, evidence: Mapping[str, int]
+        self, ctx: HarnessContext, evidence: Mapping[str, Any]
     ) -> dict[str, bool]:
         canonical_decisions = int(evidence.get("canonical_decisions") or 0)
+        guided_decisions = int(evidence.get("guided_candidate_decisions") or 0)
+        guided_below_min = int(evidence.get("guided_below_min_stop") or 0)
+        guided_valid = int(evidence.get("guided_valid_stop_decisions") or 0)
+        guided_tight_primary = int(evidence.get("guided_stop_too_tight_primary") or 0)
+        unattributed = int(evidence.get("guided_unattributed_stop_violations") or 0)
+        executable_zero = int(evidence.get("guided_executable_rr_zero") or 0)
         return {
             "canonical_decision_evidence_nonzero": canonical_decisions > 0,
             "decision_evidence_persisted":
@@ -1137,6 +1226,18 @@ class AutonomousQualificationHarness:
                 int(evidence.get("qualification_snapshots") or 0) > 0,
             "canonical_regime_evidence_consistent":
                 int(evidence.get("complete_mtf_regime_mismatches") or 0) == 0,
+            # Full-chain semantic probes deliberately include one valid guided
+            # geometry and one sub-minimum/collapsed geometry.  This prevents a
+            # green SOAK from proving only worker/persistence health while the
+            # strategy path is structurally suppressing every candidate.
+            "guided_geometry_semantic_probe_exercised":
+                guided_decisions >= 2 and guided_below_min >= 1 and guided_valid >= 1,
+            "guided_geometry_policy_violation_attributed":
+                unattributed == 0 and guided_tight_primary == guided_below_min,
+            "guided_geometry_not_structurally_suppressed":
+                guided_valid > 0 and guided_below_min < guided_decisions,
+            "guided_fill_collapse_observed":
+                executable_zero >= 1 and executable_zero < guided_decisions,
             "decision_probe_no_submit":
                 self._soak_decision_probe_done
                 and self._soak_decision_probe_error is None
