@@ -139,6 +139,7 @@ def _safe_payload(payload: Mapping[str, Any] | None) -> str:
         "mtf_alignment_pass",
         "mtf_alignment_reject",
         "mtf_regime_missing",
+        "mtf_regime_neutral",
         "mtf_setup_missing",
         "mtf_execution_missing",
         "mtf_execution_not_confirmed",
