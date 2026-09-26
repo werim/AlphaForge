@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
+from pathlib import Path
 import uuid
 from typing import Any, Mapping
 
@@ -17,6 +19,15 @@ OPERATOR_ACKNOWLEDGEMENTS_TABLE = "operator_acknowledgements"
 CANARY_RUN_EVENTS_TABLE = "canary_run_events"
 ROLLBACK_VERIFICATION_EVENTS_TABLE = "rollback_verification_events"
 RUNBOOK_EVIDENCE_TABLE = "runbook_evidence"
+
+RUNBOOK_REQUIRED_MARKERS = (
+    "## Explicit LIVE boundary",
+    "## Suspension conditions",
+    "## Operator workflow",
+    "## Phase 9 PAPER Burn-in Operations",
+    "recovery-drill",
+    "finalize",
+)
 
 
 @dataclass(slots=True)
@@ -374,6 +385,103 @@ def persist_canary_event(engine: Engine, *, release_id: str, phase: str, event_t
             )
         """), row)
     return row
+
+
+def persist_rollback_verification(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str = "PHASE6",
+    verification_id: str | None = None,
+    max_evidence_age_sec: float = 900.0,
+) -> dict[str, Any]:
+    """Persist release-scoped rollback verification from fresh measured evidence only."""
+    from alphaforge.rollback_evidence import latest_persisted_rollback_evidence
+
+    measured = latest_persisted_rollback_evidence(engine, max_age_sec=max_evidence_age_sec)
+    verified = bool(measured.get("rollback_evidence_verified")) and str(
+        measured.get("rollback_evidence_status") or ""
+    ).upper() == "COMPLETE" and int(measured.get("execution_mutation_attempt_count") or 0) == 0
+    evidence = {
+        "source": measured.get("rollback_evidence_source"),
+        "validation_id": measured.get("validation_id"),
+        "recorded_at": measured.get("recorded_at"),
+        "age_sec": measured.get("rollback_evidence_age_sec"),
+        "kill_switch_block_verified": bool(measured.get("kill_switch_block_verified")),
+        "no_submit_on_kill_switch_verified": bool(measured.get("no_submit_on_kill_switch_verified")),
+        "fail_closed_reconciliation_verified": bool(measured.get("fail_closed_reconciliation_verified")),
+        "repair_actions_non_mutating_verified": bool(measured.get("repair_actions_non_mutating_verified")),
+        "execution_mutation_attempt_count": measured.get("execution_mutation_attempt_count"),
+        "blocking_reasons": list(measured.get("rollback_blocking_reasons") or []),
+    }
+    row = {
+        "verification_id": verification_id or f"rollback:{uuid.uuid4().hex}",
+        "release_id": release_id,
+        "phase": phase,
+        "verified_at": canonical_utc_timestamp(),
+        "status": "PASS" if verified else "FAIL",
+        "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
+    }
+    ensure_release_gate_schema(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            INSERT INTO {ROLLBACK_VERIFICATION_EVENTS_TABLE}(
+                verification_id, release_id, phase, verified_at, status, evidence_json
+            ) VALUES (
+                :verification_id, :release_id, :phase, :verified_at, :status, :evidence_json
+            )
+        """), row)
+    return {**row, "evidence": evidence}
+
+
+def persist_runbook_evidence(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str = "PHASE6",
+    runbook_path: str | Path = "RUNBOOK.md",
+    evidence_id: str | None = None,
+) -> dict[str, Any]:
+    """Verify and persist the release runbook without trusting a caller-supplied PASS flag."""
+    path = Path(runbook_path)
+    raw: bytes | None = None
+    content: str | None = None
+    read_error: str | None = None
+    try:
+        raw = path.read_bytes()
+        content = raw.decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        read_error = exc.__class__.__name__
+    missing_markers = [marker for marker in RUNBOOK_REQUIRED_MARKERS if content is None or marker not in content]
+    digest = hashlib.sha256(raw).hexdigest() if raw is not None else None
+    verified = raw is not None and content is not None and not missing_markers
+    evidence = {
+        "verification_contract": "PHASE6_RUNBOOK_V1",
+        "file_name": path.name,
+        "sha256": digest,
+        "size_bytes": len(raw) if raw is not None else None,
+        "required_markers": list(RUNBOOK_REQUIRED_MARKERS),
+        "missing_markers": missing_markers,
+        "read_error": read_error,
+    }
+    row = {
+        "evidence_id": evidence_id or f"runbook:{uuid.uuid4().hex}",
+        "release_id": release_id,
+        "phase": phase,
+        "recorded_at": canonical_utc_timestamp(),
+        "status": "PASS" if verified else "FAIL",
+        "evidence_json": json.dumps(evidence, sort_keys=True),
+    }
+    ensure_release_gate_schema(engine)
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+            INSERT INTO {RUNBOOK_EVIDENCE_TABLE}(
+                evidence_id, release_id, phase, recorded_at, status, evidence_json
+            ) VALUES (
+                :evidence_id, :release_id, :phase, :recorded_at, :status, :evidence_json
+            )
+        """), row)
+    return {**row, "evidence": evidence}
 
 
 class MutationTrapExecutionAdapter:
