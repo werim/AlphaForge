@@ -80,7 +80,8 @@ def test_campaign_release_safety_requires_existing_campaign(tmp_path):
             engine,
             campaign_id="missing",
             runbook_path=_valid_runbook(tmp_path),
-            git_runner=_git_runner(),
+            repo_path=tmp_path,
+        git_runner=_git_runner(),
         )
 
 
@@ -90,6 +91,7 @@ def test_missing_rollback_source_fails_closed_but_records_runbook(tmp_path):
         engine,
         campaign_id="camp-a",
         runbook_path=_valid_runbook(tmp_path),
+        repo_path=tmp_path,
         git_runner=_git_runner(),
     )
     assert result["status"] == "FAIL"
@@ -109,6 +111,7 @@ def test_stale_rollback_source_cannot_be_promoted_to_release_pass(tmp_path):
         campaign_id="camp-a",
         runbook_path=_valid_runbook(tmp_path),
         rollback_max_age_sec=900,
+        repo_path=tmp_path,
         git_runner=_git_runner(),
     )
     assert result["status"] == "FAIL"
@@ -125,6 +128,7 @@ def test_invalid_runbook_fails_even_with_fresh_verified_rollback(tmp_path):
         engine,
         campaign_id="camp-a",
         runbook_path=runbook,
+        repo_path=tmp_path,
         git_runner=_git_runner(),
     )
     assert result["status"] == "FAIL"
@@ -141,6 +145,7 @@ def test_valid_rollback_and_runbook_are_scoped_to_campaign_release_without_other
         engine,
         campaign_id="camp-a",
         runbook_path=_valid_runbook(tmp_path),
+        repo_path=tmp_path,
         git_runner=_git_runner(),
     )
     assert result["status"] == "PASS"
@@ -187,6 +192,7 @@ def test_campaign_release_safety_rejects_mismatched_checkout_before_writing_evid
             engine,
             campaign_id="camp-a",
             runbook_path=_valid_runbook(tmp_path),
+            repo_path=tmp_path,
             git_runner=_git_runner("different-sha"),
         )
     with engine.connect() as conn:
@@ -202,5 +208,25 @@ def test_campaign_release_safety_rejects_dirty_checkout_before_writing_evidence(
             engine,
             campaign_id="camp-a",
             runbook_path=_valid_runbook(tmp_path),
+            repo_path=tmp_path,
             git_runner=_git_runner("sha-a", " M local.py"),
+        )
+
+
+def test_campaign_release_safety_rejects_runbook_outside_campaign_repository(tmp_path):
+    engine = _engine()
+    _valid_rollback(engine)
+    outside = tmp_path.parent / "outside-runbook.md"
+    outside.write_text(
+        "# Test Runbook\n## Explicit LIVE boundary\n## Suspension conditions\n"
+        "## Operator workflow\n## Phase 9 PAPER Burn-in Operations\nrecovery-drill finalize\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="RUNBOOK_OUTSIDE_CAMPAIGN_REPOSITORY"):
+        persist_campaign_release_safety_evidence(
+            engine,
+            campaign_id="camp-a",
+            runbook_path=outside,
+            repo_path=tmp_path,
+            git_runner=_git_runner(),
         )
