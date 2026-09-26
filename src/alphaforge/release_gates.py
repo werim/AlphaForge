@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -19,6 +19,9 @@ OPERATOR_ACKNOWLEDGEMENTS_TABLE = "operator_acknowledgements"
 CANARY_RUN_EVENTS_TABLE = "canary_run_events"
 ROLLBACK_VERIFICATION_EVENTS_TABLE = "rollback_verification_events"
 RUNBOOK_EVIDENCE_TABLE = "runbook_evidence"
+
+ACK_RISK_PHRASE = "I acknowledge AlphaForge Phase 6 canary risk and LIVE real orders remain disabled"
+MAX_OPERATOR_ACK_TTL_MINUTES = 240
 
 RUNBOOK_REQUIRED_MARKERS = (
     "## Explicit LIVE boundary",
@@ -61,6 +64,35 @@ def _parse_ts(value: Any) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def required_operator_ack_text(release_id: str) -> str:
+    return f"{ACK_RISK_PHRASE}; release_id={release_id}"
+
+
+def _operator_ack_semantics(
+    *,
+    release_id: str,
+    acknowledgement_text: Any,
+    acknowledged_at: Any,
+    valid_until: Any,
+    now: datetime | None = None,
+) -> tuple[bool, str | None]:
+    text_value = str(acknowledgement_text or "")
+    acknowledged = _parse_ts(acknowledged_at)
+    expires = _parse_ts(valid_until)
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if ACK_RISK_PHRASE not in text_value or release_id not in text_value:
+        return False, "ACK_TEXT_MISSING_RELEASE_OR_RISK_PHRASE"
+    if acknowledged is None or expires is None:
+        return False, "ACK_TIMESTAMP_INVALID"
+    if expires <= acknowledged:
+        return False, "ACK_EXPIRY_NOT_AFTER_ACK"
+    if (expires - acknowledged) > timedelta(minutes=MAX_OPERATOR_ACK_TTL_MINUTES, seconds=1):
+        return False, "ACK_TTL_EXCEEDS_MAX"
+    if expires <= current:
+        return False, "ACK_EXPIRED"
+    return True, None
 
 
 def read_only_table_exists(engine: Engine, table_name: str) -> bool:
@@ -213,11 +245,14 @@ def latest_valid_operator_ack(engine: Engine, *, release_id: str, phase: str, no
         return None
     if row is None:
         return None
-    valid_until = _parse_ts(row["valid_until"])
-    if valid_until is None:
-        return None
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    if valid_until <= current:
+    valid, _ = _operator_ack_semantics(
+        release_id=release_id,
+        acknowledgement_text=row["acknowledgement_text"],
+        acknowledged_at=row["acknowledged_at"],
+        valid_until=row["valid_until"],
+        now=now,
+    )
+    if not valid:
         return None
     return {
         "ack_id": str(row["ack_id"]),
@@ -347,17 +382,47 @@ def persist_release_snapshot(engine: Engine, snapshot: ReleaseGateSnapshot) -> R
     return snapshot
 
 
-def persist_operator_ack(engine: Engine, *, release_id: str, phase: str, valid_until: str, operator_id: str = "operator", acknowledgement_text: str = "acknowledged", evidence: Mapping[str, Any] | None = None, ack_id: str | None = None) -> dict[str, Any]:
+def persist_operator_ack(
+    engine: Engine,
+    *,
+    release_id: str,
+    phase: str,
+    acknowledgement_text: str,
+    operator_id: str = "operator",
+    ttl_minutes: int = MAX_OPERATOR_ACK_TTL_MINUTES,
+    evidence: Mapping[str, Any] | None = None,
+    ack_id: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     ensure_release_gate_schema(engine)
+    ttl = int(ttl_minutes)
+    if ttl <= 0 or ttl > MAX_OPERATOR_ACK_TTL_MINUTES:
+        raise ValueError(f"OPERATOR_ACK_TTL_OUT_OF_RANGE:1..{MAX_OPERATOR_ACK_TTL_MINUTES}")
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    acknowledged_at = current.isoformat().replace("+00:00", "Z")
+    valid_until = (current + timedelta(minutes=ttl)).isoformat().replace("+00:00", "Z")
+    valid, blocker = _operator_ack_semantics(
+        release_id=release_id,
+        acknowledgement_text=acknowledgement_text,
+        acknowledged_at=acknowledged_at,
+        valid_until=valid_until,
+        now=current,
+    )
+    evidence_payload = {
+        **dict(evidence or {}),
+        "validation_status": "PASS" if valid else "FAIL",
+        "blocker_reason": blocker,
+        "max_ttl_minutes": MAX_OPERATOR_ACK_TTL_MINUTES,
+    }
     row = {
         "ack_id": ack_id or f"ack:{uuid.uuid4().hex}",
         "release_id": release_id,
         "phase": phase,
-        "acknowledged_at": canonical_utc_timestamp(),
+        "acknowledged_at": acknowledged_at,
         "valid_until": valid_until,
         "operator_id": operator_id,
         "acknowledgement_text": acknowledgement_text,
-        "evidence_json": json.dumps(dict(evidence or {}), sort_keys=True),
+        "evidence_json": json.dumps(evidence_payload, sort_keys=True),
     }
     with engine.begin() as conn:
         conn.execute(text(f"""
@@ -369,7 +434,7 @@ def persist_operator_ack(engine: Engine, *, release_id: str, phase: str, valid_u
                 :acknowledgement_text, :evidence_json
             )
         """), row)
-    return row
+    return {**row, "valid": valid, "blocker_reason": blocker}
 
 
 def persist_canary_event(engine: Engine, *, release_id: str, phase: str, event_type: str = "CANARY_CHECK", shadow_mode: bool = True, canary_mode: bool = True, mutation_attempted: bool = False, mutation_blocked: bool = True, evidence: Mapping[str, Any] | None = None, event_id: str | None = None) -> dict[str, Any]:
