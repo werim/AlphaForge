@@ -328,11 +328,16 @@ def get_terminal_cause(conn: Any, campaign_id: str, burnin_run_id: str | None = 
     if burnin_run_id is None:
         campaign = get_campaign(conn, campaign_id)
         burnin_run_id = campaign.get("active_run_id") if campaign else None
-    row = _exec(
-        conn,
-        "SELECT * FROM burnin_terminal_causes WHERE campaign_id=:cid AND burnin_run_id IS :bid ORDER BY id LIMIT 1",
-        {"cid": campaign_id, "bid": burnin_run_id},
-    ).fetchone()
+    try:
+        row = _exec(
+            conn,
+            "SELECT * FROM burnin_terminal_causes WHERE campaign_id=:cid AND burnin_run_id IS :bid ORDER BY id LIMIT 1",
+            {"cid": campaign_id, "bid": burnin_run_id},
+        ).fetchone()
+    except (sqlite3.OperationalError, OperationalError) as exc:
+        if "no such table: burnin_terminal_causes" in str(getattr(exc, "orig", exc)).lower():
+            return None
+        raise
     return None if row is None else _row_dict(row)
 
 
