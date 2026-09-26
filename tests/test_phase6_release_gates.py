@@ -20,6 +20,7 @@ from alphaforge.release_gates import (
     persist_rollback_verification,
     persist_runbook_evidence,
     release_snapshot_by_id,
+    required_operator_ack_text,
 )
 
 
