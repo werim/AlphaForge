@@ -35,6 +35,7 @@ def test_deterministic_validator_proves_guard_without_submit() -> None:
     loaded = latest_persisted_rollback_evidence(engine)
     assert saved["evidence_status"] == "COMPLETE"
     assert loaded["rollback_evidence_verified"] is True
+    assert loaded["git_commit"]
     assert loaded["execution_mutation_attempt_count"] == 0
     assert loaded["evidence_payload"]["guard_reject_reason"] in {"GLOBAL_KILL_SWITCH", "KILL_SWITCH_ACTIVE"}
     assert loaded["evidence_payload"]["incident_rows_before"] == loaded["evidence_payload"]["incident_rows_after"]
@@ -85,6 +86,16 @@ def test_malformed_persisted_payload_fails_closed() -> None:
     persist_rollback_validation_evidence(engine, _complete_evidence())
     with engine.begin() as conn:
         conn.execute(text("UPDATE live_rollback_validation_evidence SET evidence_payload=:payload"), {"payload": "not-json"})
+    loaded = latest_persisted_rollback_evidence(engine)
+    assert loaded["rollback_evidence_verified"] is False
+    assert loaded["rollback_blocking_reasons"] == ["ROLLBACK_EVIDENCE_INVALID"]
+
+
+def test_rollback_evidence_missing_git_commit_fails_closed() -> None:
+    engine = init_db("sqlite+pysqlite:///:memory:")
+    persist_rollback_validation_evidence(engine, _complete_evidence())
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE live_rollback_validation_evidence SET git_commit=NULL"))
     loaded = latest_persisted_rollback_evidence(engine)
     assert loaded["rollback_evidence_verified"] is False
     assert loaded["rollback_blocking_reasons"] == ["ROLLBACK_EVIDENCE_INVALID"]
