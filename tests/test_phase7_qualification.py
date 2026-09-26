@@ -53,7 +53,7 @@ def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
         phase="PHASE6",
         acknowledgement_text=required_operator_ack_text(release_id),
     )
-    run_canary_mutation_trap_validation(e, release_id=release_id, phase="PHASE6")
+    run_canary_mutation_trap_validation(e, release_id=release_id, phase="PHASE6", git_commit="abc")
     persist_rollback_validation_evidence(e, {
         "validation_id": f"rollback-validation:{release_id}",
         "kill_switch_block_verified": True,
@@ -64,7 +64,7 @@ def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
         "blocking_reasons": [],
         "evidence_payload": {"validation_scope": "PHASE7_TEST_FIXTURE"},
     })
-    persist_rollback_verification(e, release_id=release_id)
+    persist_rollback_verification(e, release_id=release_id, git_commit="abc")
     runbook = tmp_path / f"{release_id}-RUNBOOK.md"
     runbook.write_text(
         "# Test Runbook\n"
@@ -75,7 +75,7 @@ def _persist_verified_phase6_release_safety(e, tmp_path, release_id="rel"):
         "Use recovery-drill before promotion and finalize only after qualification.\n",
         encoding="utf-8",
     )
-    persist_runbook_evidence(e, release_id=release_id, runbook_path=runbook)
+    persist_runbook_evidence(e, release_id=release_id, runbook_path=runbook, git_commit="abc")
 
 
 def test_missing_costs_block_qualification():
