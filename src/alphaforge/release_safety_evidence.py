@@ -13,6 +13,7 @@ from alphaforge.release_gates import (
     persist_rollback_verification,
     persist_runbook_evidence,
 )
+from alphaforge.release_identity import GitRunner, require_campaign_checkout
 
 
 def persist_campaign_release_safety_evidence(
@@ -22,6 +23,8 @@ def persist_campaign_release_safety_evidence(
     phase: str = "PHASE6",
     runbook_path: str | Path = "RUNBOOK.md",
     rollback_max_age_sec: float = 900.0,
+    repo_path: str | Path = ".",
+    git_runner: GitRunner | None = None,
 ) -> dict[str, object]:
     """Persist rollback/runbook evidence for the release owned by one campaign."""
     with engine.connect() as conn:
@@ -34,17 +37,25 @@ def persist_campaign_release_safety_evidence(
         raise ValueError("CAMPAIGN_NOT_FOUND")
 
     release_id = str(campaign["release_id"])
+    campaign_git_commit = str(campaign["git_commit"] or "")
+    identity = require_campaign_checkout(
+        campaign_git_commit,
+        repo_path=repo_path,
+        git_runner=git_runner,
+    )
     rollback = persist_rollback_verification(
         engine,
         release_id=release_id,
         phase=phase,
         max_evidence_age_sec=rollback_max_age_sec,
+        git_commit=campaign_git_commit,
     )
     runbook = persist_runbook_evidence(
         engine,
         release_id=release_id,
         phase=phase,
         runbook_path=runbook_path,
+        git_commit=campaign_git_commit,
     )
     snapshot = build_release_snapshot(engine, release_id=release_id, phase=phase)
     persist_release_snapshot(engine, snapshot)
@@ -54,7 +65,8 @@ def persist_campaign_release_safety_evidence(
     return {
         "campaign_id": str(campaign["campaign_id"]),
         "release_id": release_id,
-        "campaign_git_commit": str(campaign["git_commit"] or ""),
+        "campaign_git_commit": campaign_git_commit,
+        "checkout_git_commit": str(identity["git_commit"]),
         "phase": phase,
         "status": "PASS" if rollback_pass and runbook_pass else "FAIL",
         "rollback": rollback,
@@ -84,6 +96,7 @@ def main() -> None:
     parser.add_argument("--phase", default="PHASE6")
     parser.add_argument("--runbook", default="RUNBOOK.md")
     parser.add_argument("--rollback-max-age-sec", type=float, default=900.0)
+    parser.add_argument("--repo", default=".")
     args = parser.parse_args()
     if args.rollback_max_age_sec <= 0:
         parser.error("--rollback-max-age-sec must be > 0")
@@ -96,6 +109,7 @@ def main() -> None:
             phase=args.phase,
             runbook_path=args.runbook,
             rollback_max_age_sec=args.rollback_max_age_sec,
+            repo_path=args.repo,
         )
     finally:
         engine.dispose()
