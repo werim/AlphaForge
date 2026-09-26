@@ -30,7 +30,16 @@ def _mark_worker_failed(db: str, campaign_id: str, message: str) -> None:
     conn=sqlite3.connect(db); conn.row_factory=sqlite3.Row
     try:
         bootstrap_campaign_schema(conn)
-        conn.execute("UPDATE burnin_campaigns SET campaign_status='FAILED', last_error=? WHERE campaign_id=?", (message, campaign_id)); conn.commit()
+        terminalize_active_campaign_run(
+            conn,
+            campaign_id,
+            run_status="FAILED",
+            campaign_status="FAILED",
+            reason=message,
+            event_type="WORKER_STARTUP_EXITED",
+            details={"startup_failure": True},
+        )
+        conn.commit()
     finally: conn.close()
 
 def _launch_detached_worker(db: str, campaign_id: str) -> dict[str, object]:

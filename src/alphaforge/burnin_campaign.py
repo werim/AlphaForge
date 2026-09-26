@@ -33,6 +33,7 @@ PHASE8_DDL = [
 """CREATE TABLE IF NOT EXISTS burnin_campaigns (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL UNIQUE,release_id TEXT NOT NULL,campaign_status TEXT NOT NULL,created_at TEXT NOT NULL,started_at TEXT,completed_at TEXT,expected_duration_seconds REAL,observed_duration_seconds REAL,target_decisions INTEGER,target_closed_trades INTEGER,target_reject_forward_outcomes INTEGER,active_run_id TEXT,config_hash TEXT NOT NULL,strategy_config_hash TEXT NOT NULL,universe_hash TEXT NOT NULL,git_commit TEXT NOT NULL,execution_cost_config_hash TEXT,source_provenance_json TEXT NOT NULL,symbols_json TEXT NOT NULL,intervals_json TEXT NOT NULL,restart_count INTEGER NOT NULL DEFAULT 0,last_heartbeat_at TEXT,last_error TEXT,qualification_status TEXT,latest_qualification_id TEXT,evidence_completeness_status TEXT NOT NULL DEFAULT 'UNKNOWN',schema_version TEXT NOT NULL,UNIQUE(campaign_id, release_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_runs (id INTEGER PRIMARY KEY AUTOINCREMENT,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,continuation_sequence INTEGER NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,created_at TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(campaign_id,burnin_run_id),UNIQUE(campaign_id,continuation_sequence))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_events (id INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT,event_type TEXT NOT NULL,event_time TEXT NOT NULL,details_json TEXT NOT NULL,schema_version TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS burnin_terminal_causes (id INTEGER PRIMARY KEY AUTOINCREMENT,terminal_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT,terminal_cause TEXT NOT NULL,terminal_cause_source TEXT NOT NULL,terminal_event_id TEXT NOT NULL,terminal_at TEXT NOT NULL,run_status TEXT,campaign_status TEXT,details_json TEXT NOT NULL,schema_version TEXT NOT NULL,UNIQUE(campaign_id,burnin_run_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_reject_labels (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_label_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,reject_decision_id TEXT NOT NULL,signal_id TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,decision_timestamp TEXT NOT NULL,timeframe TEXT,horizon_bars INTEGER,entry REAL,stop REAL,target REAL,horizon_seconds REAL,execution_cost_assumptions_json TEXT NOT NULL,regime TEXT,reject_reason TEXT,source_provenance_json TEXT NOT NULL,due_at TEXT NOT NULL,status TEXT NOT NULL,evidence_complete INTEGER NOT NULL DEFAULT 0,last_error TEXT,claim_token TEXT,claimed_at TEXT,created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(reject_decision_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_pending_position_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT,pending_position_id TEXT NOT NULL UNIQUE,trade_id TEXT NOT NULL,campaign_id TEXT NOT NULL,burnin_run_id TEXT NOT NULL,signal_id TEXT,source_decision_id TEXT,decision_time TEXT,symbol TEXT NOT NULL,side TEXT NOT NULL,setup_type TEXT,entry_time TEXT NOT NULL,planned_entry REAL,simulated_fill REAL,stop REAL,target REAL,quantity REAL,notional REAL,entry_spread REAL,entry_slippage REAL,entry_fee REAL,regime TEXT,source_provenance_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'OPEN',exit_time TEXT,exit_price REAL,exit_reason TEXT,gross_pnl REAL,gross_r REAL,exit_spread REAL,exit_slippage REAL,exit_fee REAL,funding REAL,latency_impact_penalty REAL,total_execution_cost REAL,net_pnl REAL,net_r REAL,hold_duration_seconds REAL,mfe REAL,mae REAL,evidence_complete INTEGER NOT NULL DEFAULT 0,missing_fields_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,resolved_at TEXT,schema_version TEXT NOT NULL,UNIQUE(trade_id))""",
 """CREATE TABLE IF NOT EXISTS burnin_campaign_exports (id INTEGER PRIMARY KEY AUTOINCREMENT,export_id TEXT NOT NULL UNIQUE,campaign_id TEXT NOT NULL,output_dir TEXT NOT NULL,manifest_path TEXT NOT NULL,generated_at TEXT NOT NULL,evidence_hash TEXT NOT NULL,checksums_json TEXT NOT NULL,status TEXT NOT NULL,schema_version TEXT NOT NULL)""",
@@ -315,9 +316,93 @@ def load_active_campaign_attachment(conn: Any, campaign_id: str) -> tuple[dict[s
         return campaign, run, mapping, str(campaign.get("last_error") or "PHASE8_CAMPAIGN_ACTIVE_RUN_NOT_RUNNING")
     return campaign, run, mapping, None
 
-def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|None=None, details: Mapping[str,Any]|None=None) -> None:
-    eid="evt_"+canonical_hash({"campaign_id":campaign_id,"type":event_type,"run":burnin_run_id,"at":utc_now(),"details":details or {}})[:24]
-    _exec(conn,"INSERT OR IGNORE INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES (:eid,:cid,:bid,:typ,:ts,:det,:sv)",{"eid":eid,"cid":campaign_id,"bid":burnin_run_id,"typ":event_type,"ts":utc_now(),"det":json.dumps(dict(details or {}),sort_keys=True,default=str),"sv":CAMPAIGN_SCHEMA_VERSION})
+def event(conn: Any, campaign_id: str, event_type: str, *, burnin_run_id: str|None=None, details: Mapping[str,Any]|None=None, event_time: str|None=None) -> str:
+    ts=event_time or utc_now()
+    eid="evt_"+canonical_hash({"campaign_id":campaign_id,"type":event_type,"run":burnin_run_id,"at":ts,"details":details or {}})[:24]
+    _exec(conn,"INSERT OR IGNORE INTO burnin_campaign_events(event_id,campaign_id,burnin_run_id,event_type,event_time,details_json,schema_version) VALUES (:eid,:cid,:bid,:typ,:ts,:det,:sv)",{"eid":eid,"cid":campaign_id,"bid":burnin_run_id,"typ":event_type,"ts":ts,"det":json.dumps(dict(details or {}),sort_keys=True,default=str),"sv":CAMPAIGN_SCHEMA_VERSION})
+    return eid
+
+
+def get_terminal_cause(conn: Any, campaign_id: str, burnin_run_id: str | None = None) -> dict[str, Any] | None:
+    """Return the immutable terminal-cause record for one continuation, if present."""
+    if burnin_run_id is None:
+        campaign = get_campaign(conn, campaign_id)
+        burnin_run_id = campaign.get("active_run_id") if campaign else None
+    try:
+        row = _exec(
+            conn,
+            "SELECT * FROM burnin_terminal_causes WHERE campaign_id=:cid AND burnin_run_id IS :bid ORDER BY id LIMIT 1",
+            {"cid": campaign_id, "bid": burnin_run_id},
+        ).fetchone()
+    except (sqlite3.OperationalError, OperationalError) as exc:
+        if "no such table: burnin_terminal_causes" in str(getattr(exc, "orig", exc)).lower():
+            return None
+        raise
+    return None if row is None else _row_dict(row)
+
+
+def persist_terminal_cause(
+    conn: Any,
+    campaign_id: str,
+    burnin_run_id: str | None,
+    *,
+    reason: str,
+    event_type: str,
+    run_status: str | None,
+    campaign_status: str | None,
+    details: Mapping[str, Any] | None = None,
+    terminal_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist the first authoritative cause for a run terminal transition."""
+    existing = get_terminal_cause(conn, campaign_id, burnin_run_id)
+    if existing is not None:
+        return existing
+    ts = terminal_at or utc_now()
+    source = str(event_type)
+    event_details = {
+        "reason": reason,
+        "terminal_cause": reason,
+        "terminal_cause_source": source,
+        "campaign_id": campaign_id,
+        "burnin_run_id": burnin_run_id,
+        **dict(details or {}),
+    }
+    eid = event(
+        conn,
+        campaign_id,
+        event_type,
+        burnin_run_id=burnin_run_id,
+        details=event_details,
+        event_time=ts,
+    )
+    terminal_id = "term_" + canonical_hash({"campaign_id": campaign_id, "burnin_run_id": burnin_run_id})[:24]
+    _exec(
+        conn,
+        """INSERT OR IGNORE INTO burnin_terminal_causes(
+            terminal_id,campaign_id,burnin_run_id,terminal_cause,terminal_cause_source,
+            terminal_event_id,terminal_at,run_status,campaign_status,details_json,schema_version
+        ) VALUES (
+            :terminal_id,:cid,:bid,:cause,:source,:event_id,:terminal_at,
+            :run_status,:campaign_status,:details,:schema_version
+        )""",
+        {
+            "terminal_id": terminal_id,
+            "cid": campaign_id,
+            "bid": burnin_run_id,
+            "cause": reason,
+            "source": source,
+            "event_id": eid,
+            "terminal_at": ts,
+            "run_status": run_status,
+            "campaign_status": campaign_status,
+            "details": json.dumps(event_details, sort_keys=True, default=str),
+            "schema_version": CAMPAIGN_SCHEMA_VERSION,
+        },
+    )
+    persisted = get_terminal_cause(conn, campaign_id, burnin_run_id)
+    if persisted is None:
+        raise RuntimeError("TERMINAL_CAUSE_PERSISTENCE_FAILED")
+    return persisted
 
 def mark_attached_campaign_operational(conn: Any, campaign_id: str, run_id: str, *, runtime_instance_id: str) -> None:
     """Let the operational worker own STARTING -> RUNNING persistence."""
@@ -364,9 +449,18 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
     old=c.get("active_run_id"); seq=int((_exec(conn,"SELECT COALESCE(MAX(continuation_sequence),-1)+1 FROM burnin_campaign_runs WHERE campaign_id=:id",{"id":campaign_id}).fetchone()[0]) or 0)
     if old and resume:
         ts = utc_now()
-        _exec(conn,"UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'",{"bid":old,"ts":ts})
-        _exec(conn,"UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'",{"cid":campaign_id,"bid":old,"ts":ts})
-        event(conn,campaign_id,"RECOVERY_REQUIRED",burnin_run_id=old)
+        old_run_transition = _exec(conn,"UPDATE burnin_runs SET status='RECOVERY_REQUIRED', end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status='RUNNING'",{"bid":old,"ts":ts})
+        old_mapping_transition = _exec(conn,"UPDATE burnin_campaign_runs SET status='RECOVERY_REQUIRED', ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status='RUNNING'",{"cid":campaign_id,"bid":old,"ts":ts})
+        if old_run_transition.rowcount or old_mapping_transition.rowcount:
+            persist_terminal_cause(
+                conn, campaign_id, old,
+                reason="CONTINUATION_REPLACED_BY_RESUME",
+                event_type="RECOVERY_REQUIRED",
+                run_status="RECOVERY_REQUIRED",
+                campaign_status=str(c.get("campaign_status") or "RUNNING"),
+                details={"transition": "RUNNING->RECOVERY_REQUIRED", "continuation_sequence": seq},
+                terminal_at=ts,
+            )
     run_id=f"{campaign_id}_run_{seq:04d}"
     run=BurnInRun(run_id,c["release_id"],phase="PHASE8",execution_mode="PAPER",continuation_sequence=seq,start_time=utc_now(),status="RUNNING",git_commit=c["git_commit"],config_hash=c["config_hash"],strategy_config_hash=c["strategy_config_hash"],universe_hash=c["universe_hash"],source_provenance=c["source_provenance"],symbols=c["symbols"],intervals=c["intervals"],expected_duration_seconds=c.get("expected_duration_seconds"))
     persist_burnin_run(conn,run)
@@ -376,18 +470,35 @@ def start_or_resume_campaign(conn: Any, campaign_id: str, *, resume: bool=False,
     return {"campaign_id":campaign_id,"burnin_run_id":run_id,"continuation_sequence":seq,"status":"RUNNING"}
 
 def terminalize_active_campaign_run(conn: Any, campaign_id: str, *, run_status: str, campaign_status: str, reason: str, event_type: str, details: Mapping[str, Any] | None = None, clear_worker_metadata: bool = True) -> None:
-    """Atomically preserve a terminal continuation outcome and its accurate cause."""
+    """Atomically terminalize an active continuation while preserving the first cause."""
     c = get_campaign(conn, campaign_id)
     if not c:
         raise KeyError("campaign not found")
     run_id, ts = c.get("active_run_id"), utc_now()
-    existing = _exec(conn, "SELECT 1 FROM burnin_campaign_events WHERE campaign_id=:cid AND burnin_run_id IS :bid AND event_type=:event AND details_json LIKE :reason LIMIT 1", {"cid": campaign_id, "bid": run_id, "event": event_type, "reason": f'%"reason": "{reason}"%' }).fetchone()
+    run_row = _exec(conn, "SELECT status FROM burnin_runs WHERE burnin_run_id=:bid", {"bid": run_id}).fetchone() if run_id else None
+    current_run_status = str(run_row[0]) if run_row else None
+    terminal_target = run_status in {"FAILED", "RECOVERY_REQUIRED"} or campaign_status in {"FAILED", "RECOVERY_REQUIRED"}
+    transitioning = str(c.get("campaign_status") or "") in {"STARTING", "RUNNING"} or current_run_status in {"STARTING", "RUNNING"}
+
+    if terminal_target and transitioning:
+        persist_terminal_cause(
+            conn, campaign_id, run_id,
+            reason=reason,
+            event_type=event_type,
+            run_status=run_status,
+            campaign_status=campaign_status,
+            details=details,
+            terminal_at=ts,
+        )
+
     if run_id:
         _exec(conn, "UPDATE burnin_runs SET status=:status, end_time=COALESCE(end_time,:ts) WHERE burnin_run_id=:bid AND status IN ('STARTING','RUNNING')", {"status": run_status, "bid": run_id, "ts": ts})
         _exec(conn, "UPDATE burnin_campaign_runs SET status=:status, ended_at=COALESCE(ended_at,:ts) WHERE campaign_id=:cid AND burnin_run_id=:bid AND status IN ('STARTING','RUNNING')", {"status": run_status, "cid": campaign_id, "bid": run_id, "ts": ts})
     metadata = ", worker_pid=NULL, worker_started_at=NULL" if clear_worker_metadata else ""
-    _exec(conn, f"UPDATE burnin_campaigns SET campaign_status=:status, last_error=:reason{metadata} WHERE campaign_id=:cid", {"status": campaign_status, "reason": reason, "cid": campaign_id})
-    if not existing:
+    if terminal_target:
+        _exec(conn, f"UPDATE burnin_campaigns SET campaign_status=:status, last_error=:reason{metadata} WHERE campaign_id=:cid AND campaign_status IN ('STARTING','RUNNING')", {"status": campaign_status, "reason": reason, "cid": campaign_id})
+    else:
+        _exec(conn, f"UPDATE burnin_campaigns SET campaign_status=:status, last_error=:reason{metadata} WHERE campaign_id=:cid", {"status": campaign_status, "reason": reason, "cid": campaign_id})
         event(conn, campaign_id, event_type, burnin_run_id=run_id, details={"reason": reason, "campaign_id": campaign_id, "burnin_run_id": run_id, **dict(details or {})})
 
 

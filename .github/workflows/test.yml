@@ -66,6 +66,12 @@ jobs:
           pytest -q tests/test_issue450_sqlite_concurrency.py
           pytest -q tests/test_phase8_burnin_campaign.py -k "lock"
 
+      - name: Terminal cause regression gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue419_terminal_cause.py
+          pytest -q tests/test_phase9_burnin_ops.py -k "terminal_cause or backlog_growth or sustained_overdue or running_without_worker"
+
       - name: Public market-data safety gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_exchange_market_scanner.py tests/test_issue438_market_data_supervision.py
