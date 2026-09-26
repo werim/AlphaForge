@@ -16,6 +16,16 @@ from alphaforge.rollback_evidence import (
 )
 
 
+def _git_runner(commit="sha-a", status=""):
+    def run(args, cwd):
+        if args == ["rev-parse", "HEAD"]:
+            return commit
+        if args == ["status", "--porcelain=v1"]:
+            return status
+        raise AssertionError(args)
+    return run
+
+
 def _engine():
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     ensure_release_gate_schema(engine)
@@ -81,6 +91,7 @@ def test_missing_rollback_source_fails_closed_but_records_runbook(tmp_path):
         engine,
         campaign_id="camp-a",
         runbook_path=_valid_runbook(tmp_path),
+        git_runner=_git_runner(),
     )
     assert result["status"] == "FAIL"
     assert result["rollback"]["status"] == "FAIL"
@@ -99,6 +110,7 @@ def test_stale_rollback_source_cannot_be_promoted_to_release_pass(tmp_path):
         campaign_id="camp-a",
         runbook_path=_valid_runbook(tmp_path),
         rollback_max_age_sec=900,
+        git_runner=_git_runner(),
     )
     assert result["status"] == "FAIL"
     assert result["rollback"]["status"] == "FAIL"
@@ -115,6 +127,7 @@ def test_invalid_runbook_fails_even_with_fresh_verified_rollback(tmp_path):
         engine,
         campaign_id="camp-a",
         runbook_path=runbook,
+        git_runner=_git_runner(),
     )
     assert result["status"] == "FAIL"
     assert result["rollback"]["status"] == "PASS"
@@ -130,6 +143,7 @@ def test_valid_rollback_and_runbook_are_scoped_to_campaign_release_without_other
         engine,
         campaign_id="camp-a",
         runbook_path=_valid_runbook(tmp_path),
+        git_runner=_git_runner(),
     )
     assert result["status"] == "PASS"
     assert result["release_id"] == "rel-a"
@@ -161,3 +175,30 @@ def test_valid_rollback_and_runbook_are_scoped_to_campaign_release_without_other
     assert snapshot.runbook_verified is True
     assert snapshot.operator_acknowledged is False
     assert snapshot.canary_ready is False
+
+
+def test_campaign_release_safety_rejects_mismatched_checkout_before_writing_evidence(tmp_path):
+    engine = _engine()
+    _valid_rollback(engine)
+    with pytest.raises(ValueError, match="CAMPAIGN_CHECKOUT_COMMIT_MISMATCH"):
+        persist_campaign_release_safety_evidence(
+            engine,
+            campaign_id="camp-a",
+            runbook_path=_valid_runbook(tmp_path),
+            git_runner=_git_runner("different-sha"),
+        )
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM rollback_verification_events")).scalar_one() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM runbook_evidence")).scalar_one() == 0
+
+
+def test_campaign_release_safety_rejects_dirty_checkout_before_writing_evidence(tmp_path):
+    engine = _engine()
+    _valid_rollback(engine)
+    with pytest.raises(ValueError, match="WORKTREE_DIRTY"):
+        persist_campaign_release_safety_evidence(
+            engine,
+            campaign_id="camp-a",
+            runbook_path=_valid_runbook(tmp_path),
+            git_runner=_git_runner("sha-a", " M local.py"),
+        )
