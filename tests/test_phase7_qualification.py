@@ -172,7 +172,7 @@ def test_suspension_reasons_are_persisted_separately():
 
 
 def test_all_required_phase7_and_phase6_evidence_canary_qualified():
-    from alphaforge.release_gates import ensure_release_gate_schema, persist_operator_ack, persist_canary_event, persist_release_snapshot, ReleaseGateSnapshot
+    from alphaforge.release_gates import ensure_release_gate_schema, persist_operator_ack, persist_canary_event, persist_release_snapshot, required_operator_ack_text, ReleaseGateSnapshot
     e=_engine(); _run(e)
     ensure_release_gate_schema(e)
     persist_operator_ack(e, release_id="rel", phase="PHASE6", acknowledgement_text=required_operator_ack_text("rel"))
