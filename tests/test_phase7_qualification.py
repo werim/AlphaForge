@@ -154,6 +154,8 @@ def test_all_required_phase7_and_phase6_evidence_canary_qualified():
         evidence={"full_tests":{
             "status":"PASS",
             "source":"GITHUB_ACTIONS_PUSH",
+            "repository":"werim/AlphaForge",
+            "run_id":12345,
             "event":"push",
             "workflow_path":".github/workflows/test.yml",
             "head_sha":"abc",
