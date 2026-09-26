@@ -11,7 +11,7 @@ from alphaforge.burnin import persist_burnin_observation
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
-from alphaforge.release_gates import build_release_snapshot, persist_canary_event, persist_operator_ack, persist_release_snapshot
+from alphaforge.release_gates import build_release_snapshot, persist_canary_event, persist_operator_ack, persist_release_snapshot, required_operator_ack_text
 from alphaforge.rollback_evidence import persist_rollback_validation_evidence
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
@@ -99,7 +99,7 @@ def _persist_verified_rollback(engine) -> None:
 
 
 def _persist_verified_phase6_release(engine, *, release_id: str = "default", phase: str = "PHASE6") -> None:
-    persist_operator_ack(engine, release_id=release_id, phase=phase, valid_until="2099-01-01T00:00:00Z", evidence={"source": "readiness-test"})
+    persist_operator_ack(engine, release_id=release_id, phase=phase, acknowledgement_text=required_operator_ack_text(release_id), evidence={"source": "readiness-test"})
     persist_canary_event(engine, release_id=release_id, phase=phase, mutation_attempted=False, mutation_blocked=True, evidence={"source": "readiness-test"})
     with engine.begin() as conn:
         conn.execute(text("""
