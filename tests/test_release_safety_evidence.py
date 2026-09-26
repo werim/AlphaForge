@@ -45,6 +45,7 @@ def _engine():
 def _valid_rollback(engine, *, validation_id="rollback-valid", recorded_at=None):
     payload = {
         "validation_id": validation_id,
+        "git_commit": "sha-a",
         "kill_switch_block_verified": True,
         "no_submit_on_kill_switch_verified": True,
         "fail_closed_reconciliation_verified": True,
