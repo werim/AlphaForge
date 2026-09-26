@@ -70,7 +70,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           pytest -q tests/test_issue419_terminal_cause.py
-          pytest -q tests/test_phase9_burnin_ops.py -k "terminal_cause or backlog_growth or sustained_overdue or running_without_worker"
+          pytest -q tests/test_phase9_burnin_ops.py -k "terminal_cause or backlog_growth or sustained_overdue or running_without_worker or manual_terminalization_event_failure"
 
       - name: Public market-data safety gate
         if: github.event_name == 'pull_request'
