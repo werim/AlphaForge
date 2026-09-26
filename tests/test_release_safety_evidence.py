@@ -5,10 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import create_engine, text
 
-from alphaforge.release_gates import (
-    ensure_release_gate_schema,
-    latest_release_snapshot,
-)
+from alphaforge.release_gates import ensure_release_gate_schema, latest_release_snapshot
 from alphaforge.release_safety_evidence import persist_campaign_release_safety_evidence
 from alphaforge.rollback_evidence import (
     ensure_rollback_evidence_schema,
@@ -82,6 +79,7 @@ def test_campaign_release_safety_requires_existing_campaign(tmp_path):
             engine,
             campaign_id="missing",
             runbook_path=_valid_runbook(tmp_path),
+            git_runner=_git_runner(),
         )
 
 
@@ -97,6 +95,7 @@ def test_missing_rollback_source_fails_closed_but_records_runbook(tmp_path):
     assert result["rollback"]["status"] == "FAIL"
     assert "ROLLBACK_EVIDENCE_MISSING" in result["rollback"]["evidence"]["blocking_reasons"]
     assert result["runbook"]["status"] == "PASS"
+    assert result["runbook"]["evidence"]["git_commit"] == "sha-a"
     assert "ROLLBACK_EVIDENCE_UNVERIFIED" in result["release_gate_blockers"]
 
 
@@ -104,7 +103,6 @@ def test_stale_rollback_source_cannot_be_promoted_to_release_pass(tmp_path):
     engine = _engine()
     stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
     _valid_rollback(engine, recorded_at=stale)
-
     result = persist_campaign_release_safety_evidence(
         engine,
         campaign_id="camp-a",
@@ -122,7 +120,6 @@ def test_invalid_runbook_fails_even_with_fresh_verified_rollback(tmp_path):
     _valid_rollback(engine)
     runbook = tmp_path / "RUNBOOK.md"
     runbook.write_text("# Missing required safety sections\n", encoding="utf-8")
-
     result = persist_campaign_release_safety_evidence(
         engine,
         campaign_id="camp-a",
@@ -131,6 +128,7 @@ def test_invalid_runbook_fails_even_with_fresh_verified_rollback(tmp_path):
     )
     assert result["status"] == "FAIL"
     assert result["rollback"]["status"] == "PASS"
+    assert result["rollback"]["evidence"]["git_commit"] == "sha-a"
     assert result["runbook"]["status"] == "FAIL"
     assert result["runbook"]["evidence"]["missing_markers"]
 
@@ -138,7 +136,6 @@ def test_invalid_runbook_fails_even_with_fresh_verified_rollback(tmp_path):
 def test_valid_rollback_and_runbook_are_scoped_to_campaign_release_without_other_gate_mutations(tmp_path):
     engine = _engine()
     _valid_rollback(engine)
-
     result = persist_campaign_release_safety_evidence(
         engine,
         campaign_id="camp-a",
@@ -147,8 +144,12 @@ def test_valid_rollback_and_runbook_are_scoped_to_campaign_release_without_other
     )
     assert result["status"] == "PASS"
     assert result["release_id"] == "rel-a"
+    assert result["campaign_git_commit"] == "sha-a"
+    assert result["checkout_git_commit"] == "sha-a"
     assert result["rollback"]["status"] == "PASS"
+    assert result["rollback"]["evidence"]["git_commit"] == "sha-a"
     assert result["runbook"]["status"] == "PASS"
+    assert result["runbook"]["evidence"]["git_commit"] == "sha-a"
     assert result["safety"] == {
         "operator_ack_created": False,
         "canary_evidence_created": False,
