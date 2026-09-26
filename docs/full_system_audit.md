@@ -23,6 +23,7 @@ Audit phase is read-only: no threshold promotion, gate loosening, target manipul
 | #496 | P1 | Duplicate portfolio-risk engines: production uses portfolio_risk.py; adaptive portfolio_risk_engine.py appears test-only/non-authoritative. |
 | #497 | P1 | Documented shared trade-quality authority diverges from RuntimeOrchestrator production gate implementation. |
 | #486 | P1 | Existing open semantic-invariant issue remains required: production-wide enforcement is incomplete/unproven. |
+| #498 | P1 | CI mutation gate protects local guards but not enough cross-component economic/evidence relationships. |
 
 ## Audit principles
 
@@ -171,7 +172,8 @@ Until those are fixed and revalidated with fresh evidence, a CANARY qualificatio
 - empirical stop/ATR/volatility policy calibration;
 - metric naming/observability cleanup;
 - legacy/dead-path quarantine;
-- documentation consolidation.
+- documentation consolidation;
+- extend safety mutation coverage for cross-component invariants (#498).
 
 ## What is already strong
 
