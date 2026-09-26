@@ -52,6 +52,8 @@ def test_each_protected_dimension_is_fail_closed(field, value):
     expected_error = (
         "DECISION_PARITY_EVIDENCE_INCOMPLETE"
         if field == "execution_evidence_status" and value == "INCOMPLETE"
+        else "DECISION_SEMANTIC_INVARIANT_VIOLATION"
+        if field in {"decision", "all_failed_gates"}
         else "DECISION_PARITY_MISMATCH"
     )
     with pytest.raises(ValueError, match=expected_error):
