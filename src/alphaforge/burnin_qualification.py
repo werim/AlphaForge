@@ -220,7 +220,7 @@ class BurnInQualificationEngine:
             exec_status=self._compute_execution(execm, blockers, metrics)
             conc_status=self._compute_concentration(qualification_trades, blockers, metrics)
             rec_status=self._check_reconciliation(blockers, metrics)
-            self._check_phase_gates(release_id, blockers, metrics)
+            self._check_phase_gates(release_id, blockers, metrics, expected_git_commit=str(run.get("git_commit") or ""))
             evidence_status="PASS" if not any(b in {"BURNIN_SCHEMA_OR_EVIDENCE_MISSING"} or b.startswith("MISSING_PROVENANCE") or b.startswith("INCOMPLETE_COST") for b in blockers) else "FAIL"
             missing_markers=("MISSING","INSUFFICIENT","NO_","BURNIN_SCHEMA")
             status="CANARY_QUALIFIED" if not blockers else ("BURN_IN_INSUFFICIENT" if any(any(m in b for m in missing_markers) for b in blockers) or sample_status=="INSUFFICIENT" else "BURN_IN_FAILED")
@@ -336,7 +336,7 @@ class BurnInQualificationEngine:
         if not snap or not status or status=="UNKNOWN": blockers.append("RECONCILIATION_EVIDENCE_MISSING"); return "NO_EVIDENCE"
         if status not in {"CLEAN","NOT_REQUIRED_BACKTEST"}: blockers.append("RECONCILIATION_NOT_CLEAN"); return "FAIL"
         return "PASS"
-    def _check_phase_gates(self,release_id,blockers,metrics):
+    def _check_phase_gates(self,release_id,blockers,metrics,expected_git_commit=""):
         if not (self.thresholds.require_operator_ack or self.thresholds.require_phase1_6_gates): return
         phase="PHASE6"
         if self.thresholds.require_operator_ack and latest_valid_operator_ack(self.engine, release_id=release_id, phase=phase) is None: blockers.append("OPERATOR_ACK_MISSING_OR_EXPIRED")
@@ -353,7 +353,21 @@ class BurnInQualificationEngine:
             elif int(mutation)>0: blockers.append("MUTATION_ATTEMPT_DETECTED")
             if not gate.get("rollback_verified"): blockers.append("ROLLBACK_NOT_VERIFIED")
             if not gate.get("runbook_verified"): blockers.append("RUNBOOK_NOT_VERIFIED")
-            if not bool((evidence.get("full_tests") or evidence.get("tests_passing_evidence") or {}).get("status") == "PASS" or gate.get("full_tests_passed", False)): blockers.append("FULL_TEST_EVIDENCE_MISSING")
+            full_tests=evidence.get("full_tests") or evidence.get("tests_passing_evidence") or {}
+            metrics["full_test_evidence"] = full_tests
+            if str(full_tests.get("status") or "").upper() != "PASS":
+                blockers.append("FULL_TEST_EVIDENCE_MISSING")
+            else:
+                provenance_ok=(
+                    str(full_tests.get("source") or "")=="GITHUB_ACTIONS_PUSH"
+                    and str(full_tests.get("event") or "").lower()=="push"
+                    and str(full_tests.get("workflow_path") or "")==".github/workflows/test.yml"
+                    and str(full_tests.get("full_regression_suite") or "").lower()=="success"
+                )
+                if not provenance_ok:
+                    blockers.append("FULL_TEST_EVIDENCE_UNVERIFIED")
+                if expected_git_commit and str(full_tests.get("head_sha") or "") != expected_git_commit:
+                    blockers.append("FULL_TEST_EVIDENCE_COMMIT_MISMATCH")
     def suspension_reasons(self,snap: BurnInQualificationSnapshot)->list[str]:
         m=snap.metrics; b=set(snap.blockers); reasons=[]
         mapping={"SPREAD_DEGRADATION":"SPREAD_DEGRADATION","SLIPPAGE_SPIKE":"SLIPPAGE_SPIKE","LATENCY_DEGRADATION":"LATENCY_DEGRADATION","FILL_DEGRADATION":"FILL_DEGRADATION","REJECT_QUALITY_INSUFFICIENT":"REJECT_QUALITY_COLLAPSE","CALIBRATION_QUALITY_INSUFFICIENT":"CALIBRATION_DRIFT","RECONCILIATION_NOT_CLEAN":"RECONCILIATION_FAILURE","STALE_DATA_CLUSTER":"STALE_DATA_CLUSTER","MUTATION_ATTEMPT_DETECTED":"MUTATION_ATTEMPT","OPERATOR_ACK_MISSING_OR_EXPIRED":"OPERATOR_ACK_EXPIRY","ROLLBACK_NOT_VERIFIED":"ROLLBACK_INVALIDATION","RUNBOOK_NOT_VERIFIED":"RUNBOOK_INVALIDATION","SYMBOL_CONCENTRATION_BREACH":"SYMBOL_CONCENTRATION_BREACH","TRADE_CONCENTRATION_BREACH":"TRADE_CONCENTRATION_BREACH","REGIME_CONCENTRATION_BREACH":"REGIME_CONCENTRATION_BREACH"}
