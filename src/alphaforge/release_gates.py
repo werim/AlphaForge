@@ -274,6 +274,12 @@ def _latest_status(engine: Engine, table: str, *, release_id: str, phase: str, s
 
 
 def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHASE6", now: datetime | None = None) -> ReleaseGateSnapshot:
+    prior = latest_release_snapshot(engine, release_id=release_id, phase=phase)
+    prior_full_tests = None
+    if prior is not None and isinstance(prior.evidence, dict):
+        candidate = prior.evidence.get("full_tests")
+        if isinstance(candidate, dict):
+            prior_full_tests = dict(candidate)
     ack = latest_valid_operator_ack(engine, release_id=release_id, phase=phase, now=now)
     mutation_count = canary_mutation_attempt_count(engine, release_id=release_id, phase=phase)
     canary_event_count = _canary_event_count(engine, release_id=release_id, phase=phase)
@@ -309,7 +315,13 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
         operator_acknowledged=ack is not None,
         mutation_attempt_count=mutation_count,
         blocking_reasons=reasons,
-        evidence={"operator_ack": ack, "canary_event_count": canary_event_count, "rollback_status": rollback_status, "runbook_status": runbook_status},
+        evidence={
+            "operator_ack": ack,
+            "canary_event_count": canary_event_count,
+            "rollback_status": rollback_status,
+            "runbook_status": runbook_status,
+            **({"full_tests": prior_full_tests} if prior_full_tests is not None else {}),
+        },
     )
 
 

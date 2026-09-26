@@ -102,6 +102,62 @@ def test_missing_phase6_and_operator_ack_block_qualification():
     assert "FULL_TEST_EVIDENCE_MISSING" in snap.blockers
 
 
+def test_optimistic_full_test_pass_without_verified_provenance_is_blocked():
+    from alphaforge.release_gates import ensure_release_gate_schema, persist_canary_event, persist_operator_ack, persist_release_snapshot, ReleaseGateSnapshot
+    e=_engine(); _run(e)
+    ensure_release_gate_schema(e)
+    persist_operator_ack(e, release_id="rel", phase="PHASE6", valid_until="2099-01-01T00:00:00Z")
+    persist_canary_event(e, release_id="rel", phase="PHASE6", mutation_attempted=False)
+    with e.begin() as c:
+        c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb-unverified','rel','PHASE6','now','PASS','{}')"))
+        c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run-unverified','rel','PHASE6','now','PASS','{}')"))
+    persist_release_snapshot(e, ReleaseGateSnapshot(
+        release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now",
+        canary_ready=True, rollback_verified=True, runbook_verified=True,
+        operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[],
+        evidence={"full_tests":{"status":"PASS"}},
+    ))
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "FULL_TEST_EVIDENCE_UNVERIFIED" in snap.blockers
+
+
+def test_verified_full_test_evidence_for_different_commit_is_blocked():
+    from alphaforge.release_gates import ensure_release_gate_schema, persist_canary_event, persist_operator_ack, persist_release_snapshot, ReleaseGateSnapshot
+    e=_engine(); _run(e)
+    ensure_release_gate_schema(e)
+    persist_operator_ack(e, release_id="rel", phase="PHASE6", valid_until="2099-01-01T00:00:00Z")
+    persist_canary_event(e, release_id="rel", phase="PHASE6", mutation_attempted=False)
+    with e.begin() as c:
+        c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb-mismatch','rel','PHASE6','now','PASS','{}')"))
+        c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run-mismatch','rel','PHASE6','now','PASS','{}')"))
+    required={
+        "Full regression suite":"success",
+        "Protected safety mutation gate":"success",
+        "Run offline backtest":"success",
+        "Verify backtest outputs":"success",
+    }
+    persist_release_snapshot(e, ReleaseGateSnapshot(
+        release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now",
+        canary_ready=True, rollback_verified=True, runbook_verified=True,
+        operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[],
+        evidence={"full_tests":{
+            "status":"PASS","source":"GITHUB_ACTIONS_PUSH","repository":"werim/AlphaForge",
+            "run_id":99,"event":"push","workflow_path":".github/workflows/test.yml",
+            "head_sha":"different","full_regression_suite":"success","required_steps":required,
+        }},
+    ))
+    snap=BurnInQualificationEngine(e, BurnInThresholds(
+        minimum_duration_seconds=1,minimum_total_decisions=1,minimum_accepted_trades=1,
+        minimum_closed_trades=0,minimum_rejected_forward_outcomes=0,minimum_regime_coverage=0,
+        minimum_calibration_sample=0
+    )).evaluate("r")
+    assert "FULL_TEST_EVIDENCE_COMMIT_MISMATCH" in snap.blockers
+
+
 def test_suspension_reasons_are_persisted_separately():
     e=_engine(); _run(e)
     th=BurnInThresholds(require_operator_ack=False, require_phase1_6_gates=False)
@@ -124,7 +180,27 @@ def test_all_required_phase7_and_phase6_evidence_canary_qualified():
     with e.begin() as c:
         c.execute(text("INSERT INTO rollback_verification_events(verification_id,release_id,phase,verified_at,status,evidence_json) VALUES ('rb','rel','PHASE6','now','PASS','{}')"))
         c.execute(text("INSERT INTO runbook_evidence(evidence_id,release_id,phase,recorded_at,status,evidence_json) VALUES ('run','rel','PHASE6','now','PASS','{}')"))
-    persist_release_snapshot(e, ReleaseGateSnapshot(release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now", canary_ready=True, rollback_verified=True, runbook_verified=True, operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[], evidence={"full_tests":{"status":"PASS"}}))
+    persist_release_snapshot(e, ReleaseGateSnapshot(
+        release_id="rel", phase="PHASE6", status="CANARY_READY", generated_at="now",
+        canary_ready=True, rollback_verified=True, runbook_verified=True,
+        operator_acknowledged=True, mutation_attempt_count=0, blocking_reasons=[],
+        evidence={"full_tests":{
+            "status":"PASS",
+            "source":"GITHUB_ACTIONS_PUSH",
+            "repository":"werim/AlphaForge",
+            "run_id":12345,
+            "event":"push",
+            "workflow_path":".github/workflows/test.yml",
+            "head_sha":"abc",
+            "full_regression_suite":"success",
+            "required_steps":{
+                "Full regression suite":"success",
+                "Protected safety mutation gate":"success",
+                "Run offline backtest":"success",
+                "Verify backtest outputs":"success",
+            },
+        }},
+    ))
     with e.begin() as c:
         for i,sym in enumerate(["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"]):
             c.execute(text("INSERT INTO burnin_trade_outcomes(outcome_id,burnin_run_id,release_id,symbol,regime,closed_at,gross_r,gross_pnl,spread_cost,entry_slippage_cost,exit_slippage_cost,fee_cost,funding_cost,latency_cost,volatility_penalty,liquidity_penalty,total_execution_cost,net_r,net_pnl,evidence_complete,missing_cost_fields_json,payload_json,schema_version) VALUES (:id,'r','rel',:sym,'TRENDING','2026-01-01T01:00:00Z',1,1,.01,.01,.01,.01,.01,.01,0,0,.06,.6,.6,1,'[]','{}','v')"), {"id":f"all-o{i}","sym":sym})
