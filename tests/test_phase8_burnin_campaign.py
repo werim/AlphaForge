@@ -371,9 +371,13 @@ def test_sqlite_lock_qualification_is_single_flight_across_worker_threads(tmp_pa
 def test_sqlite_lock_readonly_health_does_not_persist_history_and_writer_has_busy_timeout(tmp_path):
     import alphaforge.burnin_ops as burnin_ops
 
-    db, cid = _seed_campaign_for_qualification(tmp_path)
+    db = tmp_path/'health-readonly.db'
     writer = burnin_ops._connect(str(db))
     try:
+        camp=create_campaign(writer,release_id='health-readonly',duration_days=1,symbols=['BTCUSDT'],intervals=['1m'])
+        start_or_resume_campaign(writer,camp.campaign_id)
+        writer.commit()
+        cid=camp.campaign_id
         assert writer.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
         assert str(writer.execute("PRAGMA journal_mode").fetchone()[0]).lower() == "wal"
         before = writer.execute("SELECT COUNT(*) FROM burnin_health_history WHERE campaign_id=?",(cid,)).fetchone()[0]
