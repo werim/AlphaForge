@@ -328,7 +328,7 @@ def test_effective_rr_gate_evidence_matches_top_level_canonical_value(tmp_path):
         "rr": 2.0,
         "candidate_rr": 2.0,
         "expected_fill": 100.02,
-        "executable_raw_rr": 1.960784,
+        "executable_raw_rr": 0.960784,
         "remaining_execution_penalty": 0.060784,
         "effective_rr": 0.90,
         "score": 0.60,
