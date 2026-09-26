@@ -653,6 +653,7 @@ def _ensure_sqlite_rollback_evidence_schema(conn: Any) -> None:
                 recorded_at TEXT NOT NULL,
                 evidence_status TEXT NOT NULL,
                 rollback_evidence_source TEXT NOT NULL,
+                git_commit TEXT,
                 kill_switch_block_verified INTEGER NOT NULL,
                 no_submit_on_kill_switch_verified INTEGER NOT NULL,
                 fail_closed_reconciliation_verified INTEGER NOT NULL,
@@ -672,6 +673,9 @@ def _ensure_sqlite_rollback_evidence_schema(conn: Any) -> None:
             """
         )
     )
+    rollback_columns = _sqlite_columns(conn, "live_rollback_validation_evidence")
+    if rollback_columns and "git_commit" not in rollback_columns:
+        conn.execute(text("ALTER TABLE live_rollback_validation_evidence ADD COLUMN git_commit TEXT"))
 
 
 def _apply_sqlite_migrations(conn: Any) -> None:
