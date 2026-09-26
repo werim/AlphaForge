@@ -226,15 +226,20 @@ def test_build_release_snapshot_all_phase6_evidence_canary_ready_not_live_ready(
         acknowledgement_text=required_operator_ack_text("rel-ready"),
     )
     run_canary_mutation_trap_validation(engine, release_id="rel-ready", phase="PHASE6")
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO rollback_verification_events(verification_id, release_id, phase, verified_at, status, evidence_json)
-            VALUES ('rollback:rel-ready', 'rel-ready', 'PHASE6', '2026-01-01T00:00:00Z', 'PASS', '{}')
-        """))
-        conn.execute(text("""
-            INSERT INTO runbook_evidence(evidence_id, release_id, phase, recorded_at, status, evidence_json)
-            VALUES ('runbook:rel-ready', 'rel-ready', 'PHASE6', '2026-01-01T00:00:00Z', 'PASS', '{}')
-        """))
+    persist_rollback_validation_evidence(engine, {
+        "validation_id": "rollback-validation:rel-ready",
+        "kill_switch_block_verified": True,
+        "no_submit_on_kill_switch_verified": True,
+        "fail_closed_reconciliation_verified": True,
+        "repair_actions_non_mutating_verified": True,
+        "execution_mutation_attempt_count": 0,
+        "blocking_reasons": [],
+        "evidence_payload": {"validation_scope": "PHASE6_RELEASE_GATE_TEST"},
+    })
+    persist_rollback_verification(engine, release_id="rel-ready")
+    runbook = tmp_path / "RUNBOOK.md"
+    runbook.write_text(_valid_runbook_text(), encoding="utf-8")
+    persist_runbook_evidence(engine, release_id="rel-ready", runbook_path=runbook)
     snapshot = build_release_snapshot(engine, release_id="rel-ready", phase="PHASE6")
     persist_release_snapshot(engine, snapshot)
 
@@ -254,6 +259,35 @@ Operator verifies evidence.
 ## Phase 9 PAPER Burn-in Operations
 Use recovery-drill before promotion and finalize only after qualification.
 """
+
+
+def test_status_only_rollback_and_runbook_pass_rows_are_unverified(tmp_path) -> None:
+    engine = init_db(f"sqlite+pysqlite:///{tmp_path / 'release-spoof.db'}")
+    release_id = "rel-spoofed"
+    persist_operator_ack(
+        engine,
+        release_id=release_id,
+        phase="PHASE6",
+        acknowledgement_text=required_operator_ack_text(release_id),
+    )
+    run_canary_mutation_trap_validation(engine, release_id=release_id, phase="PHASE6")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO rollback_verification_events(
+                verification_id,release_id,phase,verified_at,status,evidence_json
+            ) VALUES ('rb-spoof',:release_id,'PHASE6','now','PASS','{}')
+        """), {"release_id": release_id})
+        conn.execute(text("""
+            INSERT INTO runbook_evidence(
+                evidence_id,release_id,phase,recorded_at,status,evidence_json
+            ) VALUES ('run-spoof',:release_id,'PHASE6','now','PASS','{}')
+        """), {"release_id": release_id})
+
+    snapshot = build_release_snapshot(engine, release_id=release_id, phase="PHASE6")
+    assert snapshot.rollback_verified is False
+    assert snapshot.runbook_verified is False
+    assert "ROLLBACK_EVIDENCE_UNVERIFIED" in snapshot.blocking_reasons
+    assert "RUNBOOK_EVIDENCE_UNVERIFIED" in snapshot.blocking_reasons
 
 
 def test_rollback_writer_derives_pass_only_from_fresh_measured_evidence(tmp_path) -> None:
