@@ -26,6 +26,7 @@ def seed_release_safety_evidence(path:Path, *, validation_id="rb-source", releas
     rollback_evidence={
         "verification_contract":ROLLBACK_VERIFICATION_CONTRACT,
         "git_commit":"abc",
+        "source_git_commit":"abc",
         "source":"DETERMINISTIC_VALIDATION",
         "validation_id":validation_id,
         "recorded_at":"2026-09-20T18:00:00Z",
