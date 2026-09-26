@@ -11,7 +11,7 @@ from alphaforge.burnin import persist_burnin_observation
 from alphaforge.burnin_campaign import create_campaign, start_or_resume_campaign
 from alphaforge.live_readiness import LiveReadinessEvaluator
 from alphaforge.persistence import init_db, save_order_decision, save_trade_lifecycle_event
-from alphaforge.release_gates import build_release_snapshot, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, required_operator_ack_text
+from alphaforge.release_gates import build_release_snapshot, run_canary_mutation_trap_validation, persist_operator_ack, persist_release_snapshot, persist_rollback_verification, persist_runbook_evidence, required_operator_ack_text
 from alphaforge.rollback_evidence import persist_rollback_validation_evidence
 from alphaforge.runtime_heartbeat import save_runtime_heartbeat
 from alphaforge.runtime_state import RuntimeStateSnapshot, save_runtime_state_snapshot
@@ -99,17 +99,16 @@ def _persist_verified_rollback(engine) -> None:
 
 
 def _persist_verified_phase6_release(engine, *, release_id: str = "default", phase: str = "PHASE6") -> None:
-    persist_operator_ack(engine, release_id=release_id, phase=phase, acknowledgement_text=required_operator_ack_text(release_id), evidence={"source": "readiness-test"})
+    persist_operator_ack(
+        engine,
+        release_id=release_id,
+        phase=phase,
+        acknowledgement_text=required_operator_ack_text(release_id),
+        evidence={"source": "readiness-test"},
+    )
     run_canary_mutation_trap_validation(engine, release_id=release_id, phase=phase)
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO rollback_verification_events(verification_id, release_id, phase, verified_at, status, evidence_json)
-            VALUES ('rollback:phase6-readiness-test', :release_id, :phase, '2026-01-01T00:00:00Z', 'PASS', '{}')
-        """), {"release_id": release_id, "phase": phase})
-        conn.execute(text("""
-            INSERT INTO runbook_evidence(evidence_id, release_id, phase, recorded_at, status, evidence_json)
-            VALUES ('runbook:phase6-readiness-test', :release_id, :phase, '2026-01-01T00:00:00Z', 'PASS', '{}')
-        """), {"release_id": release_id, "phase": phase})
+    persist_rollback_verification(engine, release_id=release_id, phase=phase)
+    persist_runbook_evidence(engine, release_id=release_id, phase=phase, runbook_path="RUNBOOK.md")
     persist_release_snapshot(engine, build_release_snapshot(engine, release_id=release_id, phase=phase))
 
 def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, persist_rollback: bool = True, persist_runtime_snapshot: bool = True):
@@ -120,9 +119,11 @@ def _engine(*, persist_alert: bool = True, persist_live_heartbeat: bool = True, 
         capture_alert_delivery_evidence(engine, _StaticProvider(_verified_alert()))
     if persist_live_heartbeat:
         save_runtime_heartbeat(engine, runtime_instance_id="runtime:live-qualified-test", execution_mode="LIVE", scanner_source="EXCHANGE_PUBLIC_MARKET_DATA")
-    if persist_rollback:
-        _persist_verified_rollback(engine)
+    _persist_verified_rollback(engine)
     _persist_verified_phase6_release(engine)
+    if not persist_rollback:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM live_rollback_validation_evidence"))
     if persist_runtime_snapshot:
         save_runtime_state_snapshot(engine, RuntimeStateSnapshot(mode="LIVE_PRECHECK", requested_mode="LIVE_PRECHECK", actual_mode="LIVE_PRECHECK", runtime_status="RECONCILED", heartbeat_age_sec=1.0, instance_id="runtime:phase5-readiness", kill_switch_active=False, unknown_exchange_state=False, exchange_read_only_status="AVAILABLE", reconciliation_status="CLEAN", recovery_action_required=False))
     return engine
