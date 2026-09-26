@@ -446,7 +446,17 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
     canary_ready = mutation_count == 0 and canary_validation is not None
     rollback_verified = rollback_status == "PASS"
     runbook_verified = runbook_status == "PASS"
+    release_evidence_git_commits = {
+        "canary": str((canary_validation or {}).get("git_commit") or "").strip() or None,
+        "rollback": str((rollback_evidence or {}).get("git_commit") or "").strip() or None,
+        "runbook": str((runbook_evidence or {}).get("git_commit") or "").strip() or None,
+    }
+    verified_commit_values = {
+        value for value in release_evidence_git_commits.values() if value is not None
+    }
     reasons: list[str] = []
+    if len(verified_commit_values) > 1:
+        reasons.append("RELEASE_EVIDENCE_COMMIT_MISMATCH")
     if ack is None:
         reasons.append("OPERATOR_ACK_MISSING_OR_EXPIRED")
     if mutation_count is None or canary_validation is None:
@@ -480,6 +490,7 @@ def build_release_snapshot(engine: Engine, *, release_id: str, phase: str = "PHA
             "rollback_evidence": rollback_evidence,
             "runbook_status": runbook_status,
             "runbook_evidence": runbook_evidence,
+            "release_evidence_git_commits": release_evidence_git_commits,
             **({"full_tests": prior_full_tests} if prior_full_tests is not None else {}),
         },
     )
