@@ -263,6 +263,9 @@ def test_paper_risk_state_reconstructs_restart_and_continuation_history(tmp_path
     assert state1["available_balance"] == pytest.approx(1005.0)
     assert state1["rolling_peak_equity"] == pytest.approx(1010.0)
     assert state1["rolling_drawdown_pct"] == pytest.approx(5.0 / 1010.0)
+    assert state1["max_drawdown_pct"] == pytest.approx(10.0 / 1000.0)
+    assert state1["max_drawdown_peak_equity"] == pytest.approx(1000.0)
+    assert state1["max_drawdown_trough_equity"] == pytest.approx(990.0)
     assert state1["consecutive_loss_count"] == 1
     assert state1["symbol_consecutive_loss_count"] == 2
     for key in (
@@ -270,6 +273,9 @@ def test_paper_risk_state_reconstructs_restart_and_continuation_history(tmp_path
         "daily_realized_pnl",
         "rolling_peak_equity",
         "rolling_drawdown_pct",
+        "max_drawdown_pct",
+        "max_drawdown_peak_equity",
+        "max_drawdown_trough_equity",
         "consecutive_loss_count",
         "symbol_consecutive_loss_count",
         "trades_today_symbol",
@@ -300,6 +306,9 @@ def test_paper_risk_state_excludes_other_campaign_history(tmp_path) -> None:
     assert state["risk_state_complete"] is True
     assert state["equity"] == pytest.approx(1000.0)
     assert state["daily_realized_pnl"] == pytest.approx(0.0)
+    assert state["max_drawdown_pct"] == pytest.approx(0.0)
+    assert state["max_drawdown_peak_equity"] == pytest.approx(1000.0)
+    assert state["max_drawdown_trough_equity"] == pytest.approx(1000.0)
     assert state["trades_today_symbol"] == 0
     assert state["trades_today_global"] == 0
     assert state["consecutive_loss_count"] == 0
