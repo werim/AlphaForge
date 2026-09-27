@@ -115,7 +115,7 @@ def _wide_softenable_market() -> dict:
         "market_data_latency_ms": 10.0,
         "market_data_latency_status": "MEASURED",
         "market_data_latency_source": "TEST",
-        "funding_rate_pct": 0.0,
+        "funding_rate_pct": 0.00001,
         "funding_status": "MEASURED",
         "funding_source": "TEST",
         "liquidity_score": 1.0,
