@@ -247,6 +247,29 @@ def test_campaign_bad_calibration_and_metric_rows_alone_block(tmp_path):
     _qualify(db,cid)
     assert 'CALIBRATION_QUALITY_INSUFFICIENT' in _latest_blockers(db)
 
+def test_campaign_aggregate_does_not_promote_missing_execution_measurements(tmp_path):
+    db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
+    conn.execute("UPDATE burnin_execution_metrics SET spread_current=NULL,status='STABLE'")
+    conn.commit(); conn.close()
+    result=_qualify(db,cid)
+    blockers=_latest_blockers(db)
+    assert result["status"] != "CANARY_QUALIFIED"
+    assert any(
+        blocker.startswith("EXECUTION_INSUFFICIENT_EVIDENCE:")
+        and "spread_current" in blocker
+        for blocker in blockers
+    )
+    conn=sqlite3.connect(db)
+    row=conn.execute(
+        "SELECT spread_current FROM burnin_execution_metrics "
+        "WHERE burnin_run_id=? ORDER BY id DESC LIMIT 1",
+        (f"{cid}__aggregate",),
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] is None
+
+
 def test_campaign_excessive_drawdown_blocks(tmp_path):
     db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
     conn.execute("UPDATE burnin_drawdown_events SET drawdown_pct=0.5"); conn.commit(); conn.close()
