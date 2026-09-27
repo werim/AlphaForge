@@ -1492,9 +1492,10 @@ def test_paper_portfolio_evidence_remains_fail_closed_when_defaults_are_missing(
     selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
                                 diagnostics={"inputs": market})
     orchestrator = RuntimeOrchestrator(
-        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER,
-                             paper_initial_equity=None,
-                             paper_candidate_notional=None),
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            paper_initial_equity=None,
+        ),
         ai_brain=_AlwaysAcceptBrain(), market_scanner=lambda: None,
         on_reject_persist=lambda payload: rejects.append(payload),
     )
@@ -1516,7 +1517,11 @@ def test_effective_rr_gate_still_rejects_before_paper_portfolio_and_execution() 
     selection = SimpleNamespace(symbol="BTCUSDT", regime_hint="TREND",
                                 diagnostics={"inputs": market})
     orchestrator = RuntimeOrchestrator(
-        config=RuntimeConfig(execution_mode=ExecutionMode.PAPER),
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.PAPER,
+            # Isolate the post-cost gate: raw RR 1.05 must first clear MIN_RR.
+            min_rr=1.0,
+        ),
         ai_brain=_AlwaysAcceptBrain(), market_scanner=lambda: None,
         on_reject_persist=lambda payload: rejects.append(payload),
     )
@@ -1709,6 +1714,8 @@ class _ParityBrain:
     def score_signal(self, signal_payload, market_ctx, regime_ctx, stats_ctx):
         class _Score:
             total_score = 0.88
+            components = {}
+            probabilistic = {"raw_expectancy": 0.2}
         return _Score()
 
     def choose_order_plan(self, signal_payload, market_ctx, score_ctx):
