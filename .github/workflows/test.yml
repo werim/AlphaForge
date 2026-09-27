@@ -54,6 +54,12 @@ jobs:
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_cross_surface_invariants.py tests/test_issue421_decision_invariant.py tests/test_ci_branch_contract.py
 
+      - name: Shared trade-quality authority gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue497_trade_quality_authority.py
+          pytest -q tests/test_trade_quality.py tests/test_backtest_filter_switches.py tests/test_backtest_paper_pre_submit_parity.py tests/test_agent_phase_b.py
+
       - name: System audit fabric gate
         if: github.event_name == 'pull_request'
         run: pytest -q tests/test_system_audit_fabric_l0.py tests/test_system_audit_fabric_l1.py tests/test_system_audit_fabric_l2.py tests/test_system_audit_fabric_contract.py
