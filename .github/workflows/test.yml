@@ -126,7 +126,7 @@ jobs:
         run: |
           pytest -q tests/test_issue496_portfolio_risk_authority.py
           pytest -q tests/test_portfolio_risk_engine.py
-          pytest -q tests/test_live_readiness.py -k "portfolio or phase4"
+          pytest -q tests/test_live_readiness.py -k "phase3_execution_gate_blocks_when_each_required_check_fails or final_gate_missing_each_individual_gate_blocks_real_orders"
 
       - name: Protected safety mutation gate
         run: python scripts/run_safety_mutations.py
