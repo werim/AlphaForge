@@ -1901,14 +1901,18 @@ class RuntimeOrchestrator:
             else {}
         )
         score = getattr(score_ctx, "total_score", None)
+        score_probabilistic = getattr(score_ctx, "probabilistic", {})
+        if not isinstance(score_probabilistic, Mapping):
+            score_probabilistic = {}
         raw_rr, _ = self._finite_numeric(
             ("signal.risk_reward", signal_payload.get("risk_reward")),
             ("market.candidate_rr", quality_market_ctx.get("candidate_rr")),
             ("market.rr", quality_market_ctx.get("rr")),
         )
-        expectancy, _ = self._finite_numeric(
+        expectancy, expectancy_source = self._finite_numeric(
             ("market.expectancy", quality_market_ctx.get("expectancy")),
             ("signal.expectancy", signal_payload.get("expectancy")),
+            ("score.raw_expectancy", score_probabilistic.get("raw_expectancy")),
         )
         quality_market_ctx.update(
             {
@@ -1971,6 +1975,7 @@ class RuntimeOrchestrator:
         diagnostics = {
             **dict(decision.diagnostics or {}),
             "shared_quality_authority": "alphaforge.order.evaluate_trade_quality",
+            "expectancy_source": expectancy_source,
         }
         return {
             "accepted": bool(decision.accepted),
