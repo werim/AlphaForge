@@ -57,9 +57,9 @@ def mutations() -> list[Mutation]:
         cases.append(Mutation(name, EXECUTION, anchored, "    if False:\n        fail",
                               SAFETY_TEST + "::test_each_protected_execution_gate_independently_kills_acceptance"))
     cases.extend([
-        Mutation("planned_entry_as_fill", RUNTIME,
-                 'fill = entry * (1.0 + slippage_pct if side == "LONG" else 1.0 - slippage_pct)',
-                 "fill = entry", "tests/test_paper_rr_geometry.py::test_two_bps_fill_collapses_tight_stop_rr_symmetrically"),
+        Mutation("planned_entry_as_fill", EXECUTION,
+                 'fill = entry_price * (1.0 + slip if normalized_side == "LONG" else 1.0 - slip)',
+                 "fill = entry_price", "tests/test_paper_rr_geometry.py::test_two_bps_fill_collapses_tight_stop_rr_symmetrically"),
         Mutation("double_count_entry_slippage", RUNTIME,
                  "model.total_penalty - model.slippage_penalty / 2.0, 0.0)",
                  "model.total_penalty, 0.0)",
