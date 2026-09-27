@@ -25,6 +25,7 @@ Audit phase is read-only: no threshold promotion, gate loosening, target manipul
 | #486 | P1 | Existing open semantic-invariant issue remains required: production-wide enforcement is incomplete/unproven. |
 | #498 | P1 | CI mutation gate protects local guards but not enough cross-component economic/evidence relationships. |
 | #500 | P1 | Production correlation risk limits remain runtime literals/direct config outside canonical managed SSOT. |
+| #501 | P1 | Direct RuntimeConfig literal defaults can diverge from canonical registry policy and contaminate tests/harnesses. |
 | #502 | P2 | Microstructure authority incomplete: orderbook/spoof optional; absorption not execution-gating. |
 | #503 | P2 | Leveraged derivatives realism lacks liquidation/margin and hold-aware funding authority. |
 | #504 | P2 | Canonical MTF regime authority collapses broad regime vocabulary to TRENDING/CHOPPY/UNKNOWN. |
@@ -72,6 +73,7 @@ Severity:
 | Portfolio sizing authority | one production risk engine exists and is clearly authoritative | **GAP #496** | P1 | `portfolio_risk.py` is production; `portfolio_risk_engine.py` adaptive sizing is apparently only directly consumed by tests. |
 | Candidate sizing SSOT | execution-affecting candidate notional is canonical config/provenance | **GAP #491** | P1 | Runtime paper_candidate_notional default is material but absent from config_registry. |
 | Correlation-limit SSOT | production correlation limits are canonical config/provenance | **GAP #500** | P1 | Runtime enforces direct/default max_correlated_positions and group exposure while generic env path is RESERVED/not wired. |
+| Runtime default authority | direct RuntimeConfig construction matches canonical registry defaults | **GAP #501** | P1 | Normal env bootstrap is canonical, but direct RuntimeConfig literals can retain stale threshold defaults and affect tests/harnesses. |
 | Shared decision authority | protected gates have one implementation across modes | **GAP #497** | P1 | Runtime duplicates several quality gates rather than consuming one authoritative trade-quality decision path. |
 | Semantic invariants | internally impossible evidence fails even when surfaces agree | **GAP #486** | P1 | Validator exists and parity calls it, but no production-wide single-surface enforcement call site was found. |
 | Decision evidence RR stages | candidate/executable/effective RR retain distinct meanings | **BUG #495** | P1 | decision_evidence.raw_rr is candidate RR in BACKTEST and executable RR in runtime. |
@@ -181,7 +183,8 @@ Until those are fixed and revalidated with fresh evidence, a CANARY qualificatio
 8. #495 explicit RR-stage persistence.
 9. #496 single portfolio-risk authority.
 10. #491 candidate-notional SSOT.
-11. #507 account-wide runtime ownership/fencing.
+11. #501 single default authority for RuntimeConfig/registry.
+12. #507 account-wide runtime ownership/fencing.
 
 ### P2/P3 after safety/evidence closure
 - #502 authoritative microstructure coverage;
