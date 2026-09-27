@@ -480,6 +480,26 @@ def test_phase3_execution_gate_blocks_when_each_required_check_fails() -> None:
         assert report.verdict == "NOT_LIVE_READY"
 
 
+def test_phase3_readiness_rejects_legacy_ambiguous_raw_rr_as_execution_evidence() -> None:
+    engine = _engine()
+    with engine.begin() as conn:
+        conn.execute(text(
+            """UPDATE decision_evidence
+               SET candidate_raw_rr=NULL,
+                   executable_raw_rr=NULL,
+                   remaining_execution_penalty=NULL,
+                   rr_basis='LEGACY_AMBIGUOUS_RAW_RR'
+               WHERE mode='PAPER'"""
+        ))
+    with engine.connect() as conn:
+        checks = {
+            check.name: check
+            for check in LiveReadinessEvaluator(engine, min_effective_rr=1.6)._check_persistence(conn)
+        }
+    assert checks["effective_rr_available"].passed is False
+    assert checks["no_accepted_trade_with_missing_critical_execution_context"].passed is False
+
+
 def test_phase3_readiness_recognizes_canonical_execution_safety_reject_names() -> None:
     canonical_reasons = (
         "SPREAD_TOO_HIGH",
