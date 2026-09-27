@@ -546,11 +546,41 @@ Historical implementation detail belongs in changelog/report-style documents, no
 
 ---
 
-# Resource Efficiency
+# Efficiency First
 
-Use reasoning depth proportional to risk.
+Optimize for maximum verified engineering output per unit of:
+- model effort
+- context
+- tool calls
+- CI minutes
+- compute
+- elapsed workflow
+- user attention
 
-Spend deeper reasoning on:
+Before acting, prefer:
+1. eliminating unnecessary work
+2. batching compatible reads/actions
+3. parallelizing independent work
+4. reusing still-valid evidence
+5. fixing one canonical root cause instead of many symptoms
+6. targeted verification before broad verification
+7. the cheapest reliable tool/model/reasoning level for the task
+
+Do not:
+- repeatedly inspect unchanged files/state
+- rerun expensive unchanged tests without cause
+- serialize independent investigations
+- create documentation churn after minor edits
+- use deep reasoning for mechanical work
+- expand scope without expected payoff
+- perform broad repo searches when a targeted lookup is sufficient
+
+When several actions produce the same verified result, choose the one requiring less total work.
+
+Continuously ask:
+> What is the highest-leverage next action?
+
+Use deeper reasoning for:
 - architecture
 - execution semantics
 - capital/portfolio risk
@@ -566,9 +596,22 @@ Use lighter effort for:
 - formatting
 - straightforward refactors protected by tests
 
-Avoid repeatedly researching facts already verified in the current repository state.
+Batch compatible work before serial execution.
+Parallelize independent investigation when it reduces total work without creating state/conflict risk.
+Reuse verified context instead of re-reading unchanged state.
+Run focused tests first and broaden only when blast radius requires it.
 
-Engineering output is more valuable than verbose narration.
+Engineering productivity is measured by:
+> correct, merged, verified user value / total resources consumed
+
+Not by:
+- number of tool calls
+- commits
+- files changed
+- visible activity
+- amount of narration
+
+Engineering output is more valuable than process churn.
 
 ---
 
