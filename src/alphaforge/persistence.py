@@ -1001,7 +1001,12 @@ DECISION_EVIDENCE_COLUMNS: tuple[str, ...] = (
 )
 
 _DECISION_EVIDENCE_JSON_FIELDS = {
-    "diagnostics_json", "portfolio_diagnostics_json", "risk_flags", "reject_flags", "unavailable_fields",
+    "diagnostics_json",
+    "portfolio_diagnostics_json",
+    "risk_flags",
+    "reject_flags",
+    "unavailable_fields",
+    "execution_cost_semantics",
 }
 
 
