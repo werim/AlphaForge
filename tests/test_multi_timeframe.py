@@ -494,6 +494,7 @@ def _runtime_candidate():
     return {"symbol": "BTCUSDT", "source_exchange": "binance", "side": "LONG",
             "entry": 100.0, "sl": 99.0, "tp": 102.0, "rr": 2.0,
             "setup_type": "BREAKOUT_UP", "geometry_status": "COMPLETE",
+            "volatility_regime": "normal",
             "spread_pct": .0002, "market_data_latency_ms": 20.0,
             "liquidity_score": .9, "volume_24h_usdt": 100_000_000,
             "market_ts": time.time(), "timeframe": "1m", "equity": 100_000.0,
