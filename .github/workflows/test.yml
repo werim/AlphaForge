@@ -82,6 +82,13 @@ jobs:
           pytest -q tests/test_issue441_soak_decision_evidence.py tests/test_autonomous_qualification.py -k "soak or issue441 or fast_qualification_is_isolated_complete_and_machine_readable"
           pytest -q tests/test_phase7_qualification.py -k "guided_geometry"
 
+      - name: Burn-in execution evidence gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_phase7_qualification.py -k "execution_metrics"
+          pytest -q tests/test_phase8_burnin_campaign.py -k "execution_measurements"
+          pytest -q tests/test_runtime.py -k "execution_reject_metric_uses_db_canonical_count"
+
       - name: Full regression suite
         if: github.event_name != 'pull_request'
         run: pytest -q

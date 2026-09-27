@@ -477,20 +477,93 @@ class BurnInQualificationEngine:
         if maxdd>self.thresholds.max_drawdown_pct or unresolved: blockers.append("DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER"); return "FAIL"
         return "PASS"
     def _compute_execution(self,execm,blockers,metrics):
-        if not execm: blockers.append("EXECUTION_INSUFFICIENT_EVIDENCE"); return "INSUFFICIENT_EVIDENCE"
-        def ratio(cur,base): return None if cur is None or base in (None,0) else float(cur)/float(base)
-        sr=ratio(execm.get("spread_current"),execm.get("spread_baseline")); slr=ratio(execm.get("slippage_current"),execm.get("slippage_baseline")); lr=ratio(execm.get("latency_current"),execm.get("latency_baseline")); fill_delta=None if execm.get("fill_probability_current") is None or execm.get("fill_probability_baseline") is None else float(execm.get("fill_probability_baseline"))-float(execm.get("fill_probability_current"))
-        stale=float(execm.get("stale_data_count") or 0)/max(1,int(execm.get("execution_rejects") or 0)+1)
-        metrics.update(spread_degradation_ratio=sr,slippage_degradation_ratio=slr,latency_degradation_ratio=lr,fill_probability_change=fill_delta,timeout_rate=execm.get("timeout_rate"),stale_data_rate=stale,execution_status=execm.get("status"))
+        if not execm:
+            blockers.append("EXECUTION_INSUFFICIENT_EVIDENCE")
+            metrics.update(
+                execution_status="INSUFFICIENT_EVIDENCE",
+                execution_missing_fields=["burnin_execution_metrics"],
+            )
+            return "INSUFFICIENT_EVIDENCE"
+
+        mandatory_fields = (
+            "spread_baseline", "spread_current",
+            "slippage_baseline", "slippage_current",
+            "latency_baseline", "latency_current",
+            "fill_probability_baseline", "fill_probability_current",
+            "timeout_rate", "stale_data_count", "execution_rejects",
+            "reconciliation_quality",
+        )
+        missing = [field for field in mandatory_fields if execm.get(field) is None]
+        numeric_fields = (
+            "spread_baseline", "spread_current",
+            "slippage_baseline", "slippage_current",
+            "latency_baseline", "latency_current",
+            "fill_probability_baseline", "fill_probability_current",
+            "timeout_rate",
+        )
+        invalid_numeric = []
+        for field in numeric_fields:
+            value = execm.get(field)
+            if value is None:
+                continue
+            try:
+                if not math.isfinite(float(value)):
+                    invalid_numeric.append(field)
+            except (TypeError, ValueError):
+                invalid_numeric.append(field)
+        if missing or invalid_numeric:
+            evidence_gaps = sorted(set(missing + invalid_numeric))
+            metrics.update(
+                spread_degradation_ratio=None,
+                slippage_degradation_ratio=None,
+                latency_degradation_ratio=None,
+                fill_probability_change=None,
+                timeout_rate=execm.get("timeout_rate"),
+                stale_data_rate=None,
+                execution_status="INSUFFICIENT_EVIDENCE",
+                execution_missing_fields=evidence_gaps,
+            )
+            blockers.append(
+                "EXECUTION_INSUFFICIENT_EVIDENCE:"
+                + ",".join(evidence_gaps)
+            )
+            return "INSUFFICIENT_EVIDENCE"
+
+        def ratio(cur,base):
+            cur_value=float(cur); base_value=float(base)
+            if base_value == 0.0:
+                return 1.0 if cur_value == 0.0 else math.inf
+            return cur_value/base_value
+
+        sr=ratio(execm.get("spread_current"),execm.get("spread_baseline"))
+        slr=ratio(execm.get("slippage_current"),execm.get("slippage_baseline"))
+        lr=ratio(execm.get("latency_current"),execm.get("latency_baseline"))
+        fill_delta=float(execm.get("fill_probability_baseline"))-float(execm.get("fill_probability_current"))
+        stale=float(execm.get("stale_data_count"))/max(1,int(execm.get("execution_rejects"))+1)
+        metrics.update(
+            spread_degradation_ratio=sr,
+            slippage_degradation_ratio=slr,
+            latency_degradation_ratio=lr,
+            fill_probability_change=fill_delta,
+            timeout_rate=float(execm.get("timeout_rate")),
+            stale_data_rate=stale,
+            execution_status=execm.get("status"),
+            execution_missing_fields=[],
+        )
         reasons=[]
-        if str(execm.get("status") or "").upper() in {"DEGRADED","SEVERELY_DEGRADED","INSUFFICIENT_EVIDENCE"}: reasons.append(f"EXECUTION_{str(execm.get('status')).upper()}")
-        if sr and sr>self.thresholds.max_spread_degradation_ratio: reasons.append("SPREAD_DEGRADATION")
-        if slr and slr>self.thresholds.max_slippage_degradation_ratio: reasons.append("SLIPPAGE_SPIKE")
-        if lr and lr>self.thresholds.max_latency_degradation_ratio: reasons.append("LATENCY_DEGRADATION")
-        if fill_delta and fill_delta>self.thresholds.max_fill_degradation_ratio: reasons.append("FILL_DEGRADATION")
+        status=str(execm.get("status") or "").upper()
+        if status in {"DEGRADED","SEVERELY_DEGRADED","INSUFFICIENT_EVIDENCE","FAIL"}:
+            reasons.append(f"EXECUTION_{status}")
+        if sr>self.thresholds.max_spread_degradation_ratio: reasons.append("SPREAD_DEGRADATION")
+        if slr>self.thresholds.max_slippage_degradation_ratio: reasons.append("SLIPPAGE_SPIKE")
+        if lr>self.thresholds.max_latency_degradation_ratio: reasons.append("LATENCY_DEGRADATION")
+        if fill_delta>self.thresholds.max_fill_degradation_ratio: reasons.append("FILL_DEGRADATION")
         if stale>self.thresholds.max_stale_data_rate: reasons.append("STALE_DATA_CLUSTER")
         blockers.extend(reasons)
+        if status == "INSUFFICIENT_EVIDENCE":
+            return "INSUFFICIENT_EVIDENCE"
         return "PASS" if not reasons else "FAIL"
+
     def _compute_concentration(self,trades,blockers,metrics):
         complete=list(trades)
         total=sum(max(0.0,float(r.get("net_pnl") if r.get("net_pnl") is not None else r.get("net_r") or 0)) for r in complete)
