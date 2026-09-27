@@ -486,7 +486,13 @@ class LiveReadinessEvaluator:
             phase3_breakdown_rows = evidence_count(
                 "cost_penalty IS NOT NULL AND (diagnostics_json LIKE '%spread_penalty%' OR diagnostics_json LIKE '%cost_penalty%')"
             )
-            phase3_effective_rr_rows = evidence_count("raw_rr IS NOT NULL AND effective_rr IS NOT NULL")
+            phase3_effective_rr_rows = evidence_count(
+                """candidate_raw_rr IS NOT NULL
+                   AND executable_raw_rr IS NOT NULL
+                   AND remaining_execution_penalty IS NOT NULL
+                   AND effective_rr IS NOT NULL
+                   AND UPPER(COALESCE(rr_basis,''))='EXPECTED_FILL_RUNTIME_PARITY'"""
+            )
             phase3_execution_reject_rows = evidence_count(
                 "UPPER(COALESCE(reject_reason,'')) IN ('LOW_EFFECTIVE_RR','HIGH_SPREAD','SPREAD_TOO_HIGH','HIGH_SLIPPAGE','SLIPPAGE_TOO_HIGH','HIGH_TOTAL_COST','LOW_LIQUIDITY','THIN_LIQUIDITY','HIGH_LATENCY','BAD_EXECUTION','EXECUTION_CONTEXT_UNAVAILABLE','INVALID_FAKE_ZERO','EXCESSIVE_VOLATILITY_PENALTY','EXCESSIVE_VOLATILITY','FUNDING_UNAVAILABLE','FUNDING_TOO_HIGH')"
             )
@@ -496,7 +502,10 @@ class LiveReadinessEvaluator:
             )
             phase3_missing_critical_accepted = evidence_count(
                 """UPPER(COALESCE(decision,''))='ACCEPT'
-                   AND (effective_rr IS NULL OR min_effective_rr IS NULL OR min_effective_rr <= 0
+                   AND (candidate_raw_rr IS NULL OR executable_raw_rr IS NULL
+                        OR remaining_execution_penalty IS NULL
+                        OR UPPER(COALESCE(rr_basis,''))<>'EXPECTED_FILL_RUNTIME_PARITY'
+                        OR effective_rr IS NULL OR min_effective_rr IS NULL OR min_effective_rr <= 0
                         OR cost_penalty IS NULL OR spread_pct IS NULL
                         OR expected_slippage_pct IS NULL OR liquidity_score IS NULL
                         OR latency_ms IS NULL OR funding_rate_pct IS NULL
