@@ -89,6 +89,14 @@ jobs:
           pytest -q tests/test_phase8_burnin_campaign.py -k "execution_measurements"
           pytest -q tests/test_runtime.py -k "execution_reject_metric_uses_db_canonical_count"
 
+      - name: Burn-in drawdown evidence gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_phase7_qualification.py -k "drawdown or recovery_status"
+          pytest -q tests/test_phase8_burnin_campaign.py -k "drawdown"
+          pytest -q tests/test_issue421_portfolio_risk_state.py -k "restart_and_continuation_history or excludes_other_campaign_history"
+          pytest -q tests/test_runtime.py -k "periodic_metrics_persist_measured_drawdown or periodic_metrics_do_not_fabricate_drawdown"
+
       - name: Full regression suite
         if: github.event_name != 'pull_request'
         run: pytest -q

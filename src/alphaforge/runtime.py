@@ -1406,12 +1406,45 @@ class RuntimeOrchestrator:
         if engine is None:
             return
         now = canonical_utc_timestamp()
+        drawdown_state = self._paper_portfolio_risk_state("", now_ts=time.time())
+        drawdown_complete = bool(
+            drawdown_state.get("risk_state_complete")
+            and drawdown_state.get("max_drawdown_pct") is not None
+            and drawdown_state.get("max_drawdown_peak_equity") is not None
+            and drawdown_state.get("max_drawdown_trough_equity") is not None
+            and drawdown_state.get("rolling_drawdown_pct") is not None
+            and drawdown_state.get("consecutive_loss_count") is not None
+        )
         try:
             with engine.begin() as conn:
                 canonical_run_rejects = self._canonical_persisted_reject_count(
                     conn, campaign_scope=False)
                 conn.execute(text("""INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,status,generated_at,schema_version) VALUES (:bid,:rel,'CURRENT',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,:rejects,:stale,:recon,'INSUFFICIENT_EVIDENCE',:ts,'phase7_burnin_v1')"""), {"bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "rejects": canonical_run_rejects, "stale": len(self._stale_market_data_symbols), "recon": self._reconciliation_status, "ts": now})
-                conn.execute(text("""INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_pct,consecutive_losses,rolling_expectancy,resolved,payload_json,schema_version) VALUES (:id,:bid,:rel,NULL,NULL,0,0,NULL,1,:payload,'phase7_burnin_v1')"""), {"id": f"dd:{self._burnin_run_id}:{now}", "bid": self._burnin_run_id, "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id), "payload": json.dumps({"runtime_status": self._runtime_status})})
+                if drawdown_complete:
+                    current_drawdown = float(drawdown_state["rolling_drawdown_pct"])
+                    consecutive_losses = int(drawdown_state["consecutive_loss_count"])
+                    resolved = int(current_drawdown <= 1e-12 and consecutive_losses == 0)
+                    drawdown_payload = {
+                        "runtime_status": self._runtime_status,
+                        "evidence_status": "COMPLETE",
+                        "evidence_source": drawdown_state.get("risk_state_source"),
+                        "risk_state_complete": True,
+                        "risk_state_missing_fields": [],
+                        "current_equity": drawdown_state.get("equity"),
+                        "current_drawdown_pct": current_drawdown,
+                        "max_drawdown_pct": float(drawdown_state["max_drawdown_pct"]),
+                    }
+                    conn.execute(text("""INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_pct,consecutive_losses,rolling_expectancy,resolved,payload_json,schema_version) VALUES (:id,:bid,:rel,:peak,:trough,:drawdown,:losses,NULL,:resolved,:payload,'phase7_burnin_v1')"""), {
+                        "id": f"dd:{self._burnin_run_id}:{now}",
+                        "bid": self._burnin_run_id,
+                        "rel": os.getenv("ALPHAFORGE_RELEASE_ID", self.config.phase7_burnin_release_id),
+                        "peak": float(drawdown_state["max_drawdown_peak_equity"]),
+                        "trough": float(drawdown_state["max_drawdown_trough_equity"]),
+                        "drawdown": float(drawdown_state["max_drawdown_pct"]),
+                        "losses": consecutive_losses,
+                        "resolved": resolved,
+                        "payload": json.dumps(drawdown_payload, sort_keys=True),
+                    })
         except Exception as exc:
             self._burnin_evidence_incomplete = True
             self._fail_closed_reason = "PHASE7_BURNIN_PERSISTENCE_FAILURE"
@@ -3168,6 +3201,9 @@ class RuntimeOrchestrator:
                 "daily_realized_pnl": 0.0 if not missing else None,
                 "rolling_peak_equity": initial if not missing else None,
                 "rolling_drawdown_pct": 0.0 if not missing else None,
+                "max_drawdown_pct": 0.0 if not missing else None,
+                "max_drawdown_peak_equity": initial if not missing else None,
+                "max_drawdown_trough_equity": initial if not missing else None,
                 "consecutive_loss_count": 0 if not missing else None,
                 "symbol_consecutive_loss_count": 0 if not missing else None,
                 "trades_today_symbol": 0 if not missing else None,
@@ -3187,6 +3223,9 @@ class RuntimeOrchestrator:
                 "daily_realized_pnl": None,
                 "rolling_peak_equity": None,
                 "rolling_drawdown_pct": None,
+                "max_drawdown_pct": None,
+                "max_drawdown_peak_equity": None,
+                "max_drawdown_trough_equity": None,
                 "consecutive_loss_count": None,
                 "symbol_consecutive_loss_count": None,
                 "trades_today_symbol": None,
@@ -3231,6 +3270,9 @@ class RuntimeOrchestrator:
                 "daily_realized_pnl": None,
                 "rolling_peak_equity": None,
                 "rolling_drawdown_pct": None,
+                "max_drawdown_pct": None,
+                "max_drawdown_peak_equity": None,
+                "max_drawdown_trough_equity": None,
                 "consecutive_loss_count": None,
                 "symbol_consecutive_loss_count": None,
                 "trades_today_symbol": None,
@@ -3299,9 +3341,15 @@ class RuntimeOrchestrator:
         if initial is None:
             current_equity = None
             peak_equity = None
+            max_drawdown_pct = None
+            max_drawdown_peak_equity = None
+            max_drawdown_trough_equity = None
         else:
             current_equity = initial
             peak_equity = initial
+            max_drawdown_pct = 0.0
+            max_drawdown_peak_equity = initial
+            max_drawdown_trough_equity = initial
 
         daily_realized_pnl = 0.0
         consecutive_losses = 0
@@ -3343,6 +3391,18 @@ class RuntimeOrchestrator:
             if current_equity is not None and peak_equity is not None:
                 current_equity += net_pnl
                 peak_equity = max(peak_equity, current_equity)
+                current_drawdown = (
+                    max(0.0, (peak_equity - current_equity) / peak_equity)
+                    if peak_equity > 0 else None
+                )
+                if (
+                    current_drawdown is not None
+                    and max_drawdown_pct is not None
+                    and current_drawdown > max_drawdown_pct
+                ):
+                    max_drawdown_pct = current_drawdown
+                    max_drawdown_peak_equity = peak_equity
+                    max_drawdown_trough_equity = current_equity
             if closed_dt.date() == today:
                 daily_realized_pnl += net_pnl
 
@@ -3377,6 +3437,9 @@ class RuntimeOrchestrator:
             "daily_realized_pnl": daily_realized_pnl if complete else None,
             "rolling_peak_equity": peak_equity if complete else None,
             "rolling_drawdown_pct": rolling_drawdown_pct if complete else None,
+            "max_drawdown_pct": max_drawdown_pct if complete else None,
+            "max_drawdown_peak_equity": max_drawdown_peak_equity if complete else None,
+            "max_drawdown_trough_equity": max_drawdown_trough_equity if complete else None,
             "consecutive_loss_count": consecutive_losses if complete else None,
             "symbol_consecutive_loss_count": (
                 symbol_consecutive_losses if complete else None

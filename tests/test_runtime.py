@@ -663,6 +663,79 @@ def test_execution_reject_metric_uses_db_canonical_count_not_process_counter(
     assert _canonical_rejected_count(engine, campaign_id) == 1
 
 
+def test_periodic_metrics_persist_measured_drawdown_evidence(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, _, _ = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "measured-drawdown")
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_paper_portfolio_risk_state",
+        lambda self, _symbol, now_ts: {
+            "equity": 950.0,
+            "rolling_peak_equity": 1000.0,
+            "rolling_drawdown_pct": 0.05,
+            "max_drawdown_pct": 0.10,
+            "max_drawdown_peak_equity": 1000.0,
+            "max_drawdown_trough_equity": 900.0,
+            "consecutive_loss_count": 2,
+            "risk_state_complete": True,
+            "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+            "risk_state_missing_fields": [],
+        },
+    )
+
+    runtime._persist_burnin_periodic_metrics()
+
+    with engine.connect() as conn:
+        row=conn.execute(text("""
+            SELECT peak_equity,trough_equity,drawdown_pct,
+                   consecutive_losses,resolved,payload_json
+            FROM burnin_drawdown_events
+            WHERE burnin_run_id=:bid ORDER BY id DESC LIMIT 1
+        """), {"bid": runtime._burnin_run_id}).mappings().one()
+    payload=json.loads(row["payload_json"])
+    assert float(row["peak_equity"]) == pytest.approx(1000.0)
+    assert float(row["trough_equity"]) == pytest.approx(900.0)
+    assert float(row["drawdown_pct"]) == pytest.approx(0.10)
+    assert int(row["consecutive_losses"]) == 2
+    assert int(row["resolved"]) == 0
+    assert payload["evidence_status"] == "COMPLETE"
+    assert payload["evidence_source"] == "BURNIN_CAMPAIGN_EVIDENCE"
+    assert payload["risk_state_complete"] is True
+    assert payload["current_drawdown_pct"] == pytest.approx(0.05)
+
+
+def test_periodic_metrics_do_not_fabricate_drawdown_when_risk_state_incomplete(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, runtime, _, _ = _canonical_reject_fixture(
+        tmp_path, monkeypatch, "incomplete-drawdown")
+    monkeypatch.setattr(
+        RuntimeOrchestrator,
+        "_paper_portfolio_risk_state",
+        lambda self, _symbol, now_ts: {
+            "equity": None,
+            "rolling_peak_equity": None,
+            "rolling_drawdown_pct": None,
+            "max_drawdown_pct": None,
+            "max_drawdown_peak_equity": None,
+            "max_drawdown_trough_equity": None,
+            "consecutive_loss_count": None,
+            "risk_state_complete": False,
+            "risk_state_source": "BURNIN_CAMPAIGN_EVIDENCE",
+            "risk_state_missing_fields": ["closed_trade_outcome_missing:t1"],
+        },
+    )
+
+    runtime._persist_burnin_periodic_metrics()
+
+    with engine.connect() as conn:
+        count=int(conn.execute(text("""
+            SELECT COUNT(*) FROM burnin_drawdown_events
+            WHERE burnin_run_id=:bid
+        """), {"bid": runtime._burnin_run_id}).scalar_one())
+    assert count == 0
+
+
 def test_runtime_reject_core_and_forward_evidence_share_decision_id(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "linked-reject.db"

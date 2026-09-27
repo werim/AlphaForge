@@ -59,7 +59,7 @@ def _seed_campaign_for_qualification(tmp_path):
     conn.execute("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,max_drawdown,cost_drag,slippage_distribution_json,reject_accuracy,execution_failure_count,status,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(run['burnin_run_id'],'relq','TRENDING',3,2,1,0.5,0.1,0.01,0.01,'{}',1.0,0,'PASS','2026-01-01T00:00:00Z','test'))
     conn.execute("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,liquidity_depth_baseline,liquidity_depth_current,timeout_rate,execution_rejects,stale_data_count,reconciliation_quality,funding_cost,price_impact_proxy,status,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(run['burnin_run_id'],'relq','campaign',1,1,1,1,1,1,1,1,1,1,0,0,0,'CLEAN',0,0,'PASS','2026-01-01T00:00:00Z','test'))
     conn.execute("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,brier_score,log_loss,calibration_error,expected_calibration_error,reliability_buckets_json,observed_vs_predicted_json,status,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",(run['burnin_run_id'],'relq','all',10,0.1,0.1,0.01,0.01,'{}','{}','PASS','2026-01-01T00:00:00Z','test'))
-    conn.execute("INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_start,drawdown_end,drawdown_pct,drawdown_duration_seconds,recovery_duration_seconds,consecutive_losses,rolling_loss_cluster_json,rolling_expectancy,rolling_cost_drag,rolling_slippage,rolling_reject_accuracy,resolved,payload_json,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",('dd1',run['burnin_run_id'],'relq',1,0.99,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z',0.01,3600,3600,1,'{}',0.1,0.01,0.01,1.0,1,'{}','test'))
+    conn.execute("INSERT INTO burnin_drawdown_events(drawdown_event_id,burnin_run_id,release_id,peak_equity,trough_equity,drawdown_start,drawdown_end,drawdown_pct,drawdown_duration_seconds,recovery_duration_seconds,consecutive_losses,rolling_loss_cluster_json,rolling_expectancy,rolling_cost_drag,rolling_slippage,rolling_reject_accuracy,resolved,payload_json,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",('dd1',run['burnin_run_id'],'relq',1,0.99,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z',0.01,3600,3600,1,'{}',0.1,0.01,0.01,1.0,1,'{"evidence_status":"COMPLETE","evidence_source":"TEST_MEASURED_LEDGER","risk_state_complete":true}','test'))
     conn.commit(); conn.close()
     return db,camp.campaign_id
 
@@ -276,9 +276,42 @@ def test_campaign_aggregate_does_not_promote_missing_execution_measurements(tmp_
     assert row[0] is None
 
 
+def test_campaign_aggregate_keeps_unknown_drawdown_fail_closed(tmp_path):
+    db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
+    conn.execute(
+        "UPDATE burnin_drawdown_events SET "
+        "peak_equity=NULL,trough_equity=NULL,drawdown_pct=0,"
+        "consecutive_losses=0,resolved=1,payload_json='{}'"
+    )
+    conn.commit(); conn.close()
+    result=_qualify(db,cid)
+    conn=sqlite3.connect(db)
+    qualification_status,blockers_json=conn.execute(
+        "SELECT status,blockers_json FROM burnin_qualification_snapshots "
+        "WHERE qualification_id=?",
+        (result["qualification_id"],),
+    ).fetchone()
+    aggregate_row=conn.execute(
+        "SELECT peak_equity,trough_equity,drawdown_pct,resolved "
+        "FROM burnin_drawdown_events WHERE burnin_run_id=?",
+        (f"{cid}__aggregate",),
+    ).fetchone()
+    conn.close()
+    blockers=json.loads(blockers_json)
+    assert qualification_status != "CANARY_QUALIFIED"
+    assert any(b.startswith("DRAWDOWN_INSUFFICIENT_EVIDENCE:") for b in blockers)
+    assert aggregate_row is not None
+    assert aggregate_row[0] is None
+    assert aggregate_row[1] is None
+
+
 def test_campaign_excessive_drawdown_blocks(tmp_path):
     db,cid=_seed_campaign_for_qualification(tmp_path); conn=sqlite3.connect(db)
-    conn.execute("UPDATE burnin_drawdown_events SET drawdown_pct=0.5"); conn.commit(); conn.close()
+    conn.execute(
+        "UPDATE burnin_drawdown_events "
+        "SET peak_equity=1.0,trough_equity=0.5,drawdown_pct=0.5"
+    )
+    conn.commit(); conn.close()
     _qualify(db,cid)
     assert 'DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER' in _latest_blockers(db)
 
