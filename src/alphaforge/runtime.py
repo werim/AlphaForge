@@ -32,6 +32,9 @@ from alphaforge.execution import (
     build_execution_cost_semantics,
     execution_context_is_unavailable,
     weighted_average_fill_price,
+    adverse_expected_fill_price,
+    build_stop_risk_metrics,
+    evaluate_stop_risk_policy,
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
@@ -1708,10 +1711,14 @@ class RuntimeOrchestrator:
                 slippage_pct = max(float(raw_slippage), 0.0)
             except (TypeError, ValueError):
                 return None, None
-        side = str(market_ctx.get("side") or "LONG").strip().upper()
-        if side not in {"LONG", "SHORT"}:
+        try:
+            fill = adverse_expected_fill_price(
+                entry=entry,
+                side=market_ctx.get("side"),
+                slippage_pct=slippage_pct,
+            )
+        except ValueError:
             return None, None
-        fill = entry * (1.0 + slippage_pct if side == "LONG" else 1.0 - slippage_pct)
         return round(fill, 8), slippage_pct
 
     def _execution_rr_metrics(self, raw_rr: Any, market_ctx: Mapping[str, Any], execution_ctx: Mapping[str, Any]) -> dict[str, Any]:
