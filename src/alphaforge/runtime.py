@@ -46,6 +46,10 @@ from alphaforge.execution import (
     evaluate_stop_risk_policy,
 )
 from alphaforge.scoring_context import build_signal_payload, finite_numeric, normalize_scoring_context
+from alphaforge.decision_invariant import (
+    assert_pre_submit_invariant_parity,
+    project_pre_submit_invariant,
+)
 from alphaforge.live_readiness import LiveReadinessEvaluator, QualificationReport
 from alphaforge.runtime_heartbeat import is_sqlite_busy_error, save_runtime_heartbeat
 from alphaforge.runtime_control import RuntimeControlStore
