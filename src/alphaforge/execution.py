@@ -211,6 +211,99 @@ def build_execution_cost_semantics(
     )
 
 
+STOP_DISTANCE_BASIS_PLANNED_ENTRY = "PLANNED_ENTRY"
+STOP_DISTANCE_BASIS_EXPECTED_FILL = "EXPECTED_FILL"
+
+
+@dataclass(frozen=True)
+class StopDistanceEvidence:
+    planned_entry: float
+    stop: float
+    expected_fill: float | None
+    planned_stop_distance_pct: float
+    executable_stop_distance_pct: float | None
+    authoritative_stop_distance_pct: float | None
+    authority_basis: str
+    evidence_status: str
+    missing_fields: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "planned_entry": self.planned_entry,
+            "stop": self.stop,
+            "expected_fill": self.expected_fill,
+            "planned_stop_distance_pct": self.planned_stop_distance_pct,
+            "executable_stop_distance_pct": self.executable_stop_distance_pct,
+            "stop_distance_pct": self.authoritative_stop_distance_pct,
+            "stop_distance_basis": self.authority_basis,
+            "stop_distance_evidence_status": self.evidence_status,
+            "stop_distance_missing_fields": list(self.missing_fields),
+        }
+
+
+def build_stop_distance_evidence(
+    *,
+    entry: Any,
+    stop: Any,
+    expected_fill: Any | None = None,
+    require_expected_fill: bool = False,
+) -> StopDistanceEvidence:
+    """Build structural and executable stop-distance evidence.
+
+    Structural stop/target levels remain unchanged. When expected-fill evidence
+    is available it is the authoritative denominator for pre-submit stop-risk
+    viability. PAPER/LIVE_PRECHECK callers can require it and fail closed when
+    unavailable instead of silently falling back to planned geometry.
+    """
+    planned_entry = _finite_positive_price(entry, field="entry")
+    stop_price = _finite_positive_price(stop, field="stop")
+    planned_pct = abs(planned_entry - stop_price) / planned_entry * 100.0
+
+    expected_price: float | None = None
+    if expected_fill not in (None, "", "UNKNOWN", "UNAVAILABLE", "UNAVAILABLE_BACKTEST"):
+        try:
+            expected_price = _finite_positive_price(expected_fill, field="expected_fill")
+        except ValueError:
+            expected_price = None
+
+    if expected_price is not None:
+        executable_pct = abs(expected_price - stop_price) / expected_price * 100.0
+        return StopDistanceEvidence(
+            planned_entry=planned_entry,
+            stop=stop_price,
+            expected_fill=expected_price,
+            planned_stop_distance_pct=planned_pct,
+            executable_stop_distance_pct=executable_pct,
+            authoritative_stop_distance_pct=executable_pct,
+            authority_basis=STOP_DISTANCE_BASIS_EXPECTED_FILL,
+            evidence_status="COMPLETE",
+        )
+
+    if require_expected_fill:
+        return StopDistanceEvidence(
+            planned_entry=planned_entry,
+            stop=stop_price,
+            expected_fill=None,
+            planned_stop_distance_pct=planned_pct,
+            executable_stop_distance_pct=None,
+            authoritative_stop_distance_pct=None,
+            authority_basis=STOP_DISTANCE_BASIS_EXPECTED_FILL,
+            evidence_status="UNAVAILABLE",
+            missing_fields=("expected_fill",),
+        )
+
+    return StopDistanceEvidence(
+        planned_entry=planned_entry,
+        stop=stop_price,
+        expected_fill=None,
+        planned_stop_distance_pct=planned_pct,
+        executable_stop_distance_pct=None,
+        authoritative_stop_distance_pct=planned_pct,
+        authority_basis=STOP_DISTANCE_BASIS_PLANNED_ENTRY,
+        evidence_status="COMPLETE",
+    )
+
+
 def weighted_average_fill_price(fills: Any) -> float | None:
     """Return the quantity-weighted price for canonical ``fills`` ledger rows.
 
