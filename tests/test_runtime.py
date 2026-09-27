@@ -940,6 +940,13 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
         "decision_timestamp": "2026-01-01T00:00:00Z",
         "execution_ctx": {"spread_pct": .001, "expected_slippage_pct": .001, "fee_pct": .001,
                           "funding_rate_pct": 0.0, "latency_ms": 10},
+        "execution_safety": {
+            "failed_gate_evidence": [{
+                "gate": "LOW_EFFECTIVE_RR", "observed": 1.1, "threshold": 1.1,
+                "comparison": "<", "source": "EXECUTION_SAFETY_CONTRACT",
+            }],
+            "all_failed_gates": ["LOW_EFFECTIVE_RR"],
+        },
         "mtf": {"generation": {"mode": "REGIME_GUIDED", "candidate": None,
                                 "evidence_status": "INCOMPLETE"},
                 "setup": {"candidate_ready": False, "trade_side": None,
@@ -956,6 +963,8 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
     assert canonical["legacy_shadow_geometry"]["rr"] == pytest.approx(1.2)
     assert canonical["legacy_shadow_geometry"]["geometry_status"] == "COMPLETE"
     assert canonical["legacy_shadow_geometry"]["attributable"] is False
+    assert "LOW_EFFECTIVE_RR" in canonical["legacy_shadow_geometry"]["all_failed_gates"]
+    assert "LOW_EFFECTIVE_RR" not in canonical["all_failed_gates"]
     assert canonical["reason"] == "MTF_EXECUTION_COUNTER_REGIME"
 
     asyncio.run(orchestrator._persist_reject(source))
@@ -969,6 +978,7 @@ def test_guided_null_candidate_separates_canonical_and_shadow_geometry(tmp_path:
     assert tuple(pending[:4]) == ("LONG", 100.0, 90.0, 112.0)
     assert provenance["forward_label_subject"] == "LEGACY_SCANNER_SHADOW_CANDIDATE"
     assert provenance["reject_quality_attributable"] is False
+    assert "LOW_EFFECTIVE_RR" not in provenance["all_failed_gates"]
 
 
 def test_guided_null_low_effective_rr_is_not_authoritative(tmp_path: Path) -> None:

@@ -4013,6 +4013,13 @@ class RuntimeOrchestrator:
             # back into canonical multi-gate evidence for a missing guided candidate.
             all_failed_gates = []
             failed_gate_evidence = []
+            # Drop packaged upstream audit evidence before the canonical re-audit.
+            # Otherwise execution_safety.failed_gate_evidence can resurrect
+            # geometry-dependent gates (for example LOW_EFFECTIVE_RR) after the
+            # corresponding canonical geometry/effective_rr fields are scrubbed.
+            result.pop("execution_safety", None)
+            result.pop("all_failed_gates", None)
+            result.pop("failed_gate_evidence", None)
             for key in (
                 "side", "entry", "entry_price", "sl", "stop", "stop_loss", "structural_stop",
                 "tp", "target", "take_profit", "structural_target", "rr", "raw_rr",
