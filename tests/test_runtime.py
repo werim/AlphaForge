@@ -668,9 +668,9 @@ def test_periodic_metrics_persist_measured_drawdown_evidence(
     engine, runtime, _, _ = _canonical_reject_fixture(
         tmp_path, monkeypatch, "measured-drawdown")
     monkeypatch.setattr(
-        runtime,
+        RuntimeOrchestrator,
         "_paper_portfolio_risk_state",
-        lambda _symbol, now_ts: {
+        lambda self, _symbol, now_ts: {
             "equity": 950.0,
             "rolling_peak_equity": 1000.0,
             "rolling_drawdown_pct": 0.05,
