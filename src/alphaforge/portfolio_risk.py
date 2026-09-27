@@ -305,14 +305,22 @@ class BacktestPortfolioState:
 
     def notional_for(self, *, entry: Any, balance: Any | None = None, risk_pct: Any | None = None, risk_scale: Any = 1.0, notional: Any | None = None) -> float | None:
         explicit = _num(notional, None)
-        if explicit is not None and explicit > 0:
-            return explicit * max(_num(risk_scale, 1.0) or 1.0, 0.0)
-        equity = _num(balance, self.current_equity)
-        pct = _num(risk_pct, None)
-        if equity is None or pct is None:
+        base_notional = explicit
+        if base_notional is None:
+            equity = _num(balance, self.current_equity)
+            pct = _num(risk_pct, None)
+            if equity is None or pct is None:
+                return None
+            base_notional = equity * (pct / 100.0)
+        projection = scale_candidate_exposure(
+            original_notional=base_notional,
+            risk_scale=risk_scale,
+            require_scale=False,
+        )
+        effective = projection.get("effective_notional")
+        if projection.get("status") != "COMPLETE" or effective is None:
             return None
-        scaled = equity * (pct / 100.0) * max(_num(risk_scale, 1.0) or 1.0, 0.0)
-        return scaled if scaled > 0 else None
+        return float(effective) if float(effective) > 0.0 else None
 
     def snapshot(self, *, mode: str, symbol: str, side: str = "LONG", config: Mapping[str, Any] | Any | None = None, timestamp: int | float | None = None, candidate_notional: float | None = None) -> PortfolioRiskSnapshot:
         day = self._day_key(timestamp)
