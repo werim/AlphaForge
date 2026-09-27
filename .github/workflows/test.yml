@@ -108,6 +108,11 @@ jobs:
           pytest -q tests/test_trade_quality.py
           pytest -q tests/test_paper_rr_geometry.py
           pytest -q tests/test_issue374_reject_execution_parity.py tests/test_issue322_reject_geometry.py
+          pytest -q tests/test_env_safety_and_filters.py tests/test_trading_modes.py
+          pytest -q tests/test_multi_timeframe.py -k "issue481_guided_sub_min_stop or issue481_min_stop_boundary"
+          pytest -q tests/test_phase123_foundations.py -k "major_reject_reason_classes"
+          pytest -q tests/test_phase7_burnin.py -k "entry_fill_does_not_create_closed_burnin_outcome"
+          pytest -q tests/test_runtime_live_authorization.py -k "runtime_non_live_execution"
 
       - name: Protected safety mutation gate
         run: python scripts/run_safety_mutations.py
