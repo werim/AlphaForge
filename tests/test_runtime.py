@@ -1255,6 +1255,55 @@ def test_runtime_signal_uses_dynamic_rr_not_fallback_when_present() -> None:
     assert payload["risk_reward"] == pytest.approx(3.25)
 
 
+def test_pre_ai_duplicate_position_keeps_score_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    rejects: list[dict] = []
+
+    class _MustNotScoreBrain:
+        def before_real_order(self, *args, **kwargs):
+            raise AssertionError("pre-AI risk reject must not invoke scoring")
+
+    async def capture_reject(self, payload: dict) -> None:
+        rejects.append(self._canonical_reject_payload(payload))
+
+    monkeypatch.setattr(RuntimeOrchestrator, "_persist_reject", capture_reject)
+    orchestrator = RuntimeOrchestrator(
+        config=RuntimeConfig(
+            execution_mode=ExecutionMode.BACKTEST,
+            mtf_guided_signal_generation_enabled=False,
+        ),
+        ai_brain=_MustNotScoreBrain(),
+        market_scanner=lambda: asyncio.sleep(0, result=[]),
+    )
+    orchestrator._active_positions["BTCUSDT"] = 10.0
+    selection = SimpleNamespace(
+        symbol="BTCUSDT",
+        regime_hint="TRENDING",
+        diagnostics={"inputs": {
+            "market_ts": time.time(),
+            "entry": 100.0,
+            "sl": 99.0,
+            "tp": 102.0,
+            "rr": 2.0,
+            "side": "LONG",
+            "volume_24h_usdt": 90_000_000.0,
+            "spread_pct": 0.0002,
+            "expected_slippage_pct": 0.0002,
+            "funding_rate_pct": 0.0,
+            "latency_ms": 10.0,
+            "liquidity_score": 0.9,
+            "volatility_regime": "MODERATE",
+        }},
+    )
+
+    asyncio.run(orchestrator._process_symbol(selection))
+
+    assert rejects
+    payload = rejects[-1]
+    assert payload["reason"] == "DUPLICATE_POSITION"
+    assert payload["score"] is None
+    assert "LOW_SCORE" not in payload["all_failed_gates"]
+
+
 def test_paper_accept_path_uses_canonical_lifecycle_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[dict] = []
     portfolio_evidence: dict = {}

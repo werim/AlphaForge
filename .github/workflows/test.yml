@@ -87,7 +87,7 @@ jobs:
         run: |
           pytest -q tests/test_phase7_qualification.py -k "execution_metrics"
           pytest -q tests/test_phase8_burnin_campaign.py -k "execution_measurements"
-          pytest -q tests/test_runtime.py -k "execution_reject_metric_uses_db_canonical_count or guided_null_candidate_separates_canonical_and_shadow_geometry or guided_null_low_effective_rr_is_not_authoritative"
+          pytest -q tests/test_runtime.py -k "execution_reject_metric_uses_db_canonical_count or guided_null_candidate_separates_canonical_and_shadow_geometry or guided_null_low_effective_rr_is_not_authoritative or pre_ai_duplicate_position_keeps_score_unknown"
 
       - name: Burn-in drawdown evidence gate
         if: github.event_name == 'pull_request'
