@@ -113,7 +113,7 @@ def test_trade_quality_uses_expected_fill_not_planned_entry_for_stop_gate():
         "volatility_regime": "normal",
         "spread_pct": 0.01,
         "expected_slippage_pct": 0.001,
-        "effective_rr": 1.5,
+        "effective_rr": 1.7,
         "atr_pct": 1.0,
         "timestamp": 1_000_000,
     }
