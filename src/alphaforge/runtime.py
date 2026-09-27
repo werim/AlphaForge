@@ -3946,14 +3946,14 @@ class RuntimeOrchestrator:
             "forward_label_subject": (forward_label_subject if guided_generation
                                       else result.get("forward_label_subject") or forward_label_subject),
         })
-        try:
-            entry_value = float(result.get("entry"))
-            stop_value = float(result.get("sl"))
-            stop_distance_pct = abs(entry_value - stop_value) / entry_value * 100.0 if entry_value > 0 else None
-        except (TypeError, ValueError):
-            stop_distance_pct = None
+        stop_metrics = build_stop_risk_metrics(
+            planned_entry=result.get("entry", result.get("entry_price")),
+            expected_fill=result.get("expected_fill"),
+            stop=result.get("sl", result.get("stop_loss", result.get("stop"))),
+            allow_planned_fallback=(self.config.execution_mode is ExecutionMode.BACKTEST),
+        )
         result.update({
-            "stop_distance_pct": stop_distance_pct,
+            **stop_metrics,
             "min_signal_score": float(self.config.min_signal_score),
             "min_raw_rr": float(self.config.min_rr),
             "min_effective_rr": float(self.config.min_effective_rr),
