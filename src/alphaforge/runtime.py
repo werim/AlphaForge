@@ -3790,14 +3790,42 @@ class RuntimeOrchestrator:
         if effective_rr is not None and effective_rr < float(self.config.min_effective_rr):
             add("LOW_EFFECTIVE_RR", effective_rr, float(self.config.min_effective_rr), "<")
 
-        entry = number(payload.get("entry", payload.get("entry_price")))
-        stop = number(payload.get("sl", payload.get("stop_loss", payload.get("stop"))))
-        if entry is not None and entry > 0 and stop is not None:
-            stop_distance_pct = abs(entry - stop) / entry * 100.0
-            if stop_distance_pct < float(self.config.min_sl_pct):
-                add("STOP_TOO_TIGHT", stop_distance_pct, float(self.config.min_sl_pct), "<")
-            if stop_distance_pct > float(self.config.max_sl_pct):
-                add("STOP_TOO_WIDE", stop_distance_pct, float(self.config.max_sl_pct), ">")
+        stop_metrics = build_stop_risk_metrics(
+            planned_entry=payload.get("entry", payload.get("entry_price")),
+            expected_fill=payload.get("expected_fill"),
+            stop=payload.get("sl", payload.get("stop_loss", payload.get("stop"))),
+            allow_planned_fallback=(self.config.execution_mode is ExecutionMode.BACKTEST),
+        )
+        stop_policy = evaluate_stop_risk_policy(
+            stop_metrics,
+            score=payload.get("score"),
+            effective_rr=payload.get("effective_rr"),
+            config=self._canonical_filter_config(),
+            bypass_wide_reject=(
+                "STOP_TOO_WIDE" in {
+                    str(value).upper()
+                    for value in (payload.get("bypassed_reject_reasons") or [])
+                }
+            ),
+        )
+        stop_reason = str(stop_policy.get("reject_reason") or "").upper()
+        stop_observed = stop_policy.get("executable_stop_distance_pct")
+        if stop_reason == "STOP_TOO_TIGHT":
+            add(
+                "STOP_TOO_TIGHT",
+                stop_observed,
+                float(self.config.min_sl_pct),
+                "<",
+                "EXECUTABLE_STOP_RISK",
+            )
+        elif stop_reason == "STOP_TOO_WIDE":
+            add(
+                "STOP_TOO_WIDE",
+                stop_observed,
+                float(self.config.max_sl_pct),
+                ">",
+                "EXECUTABLE_STOP_RISK",
+            )
 
         spread = number(payload.get("spread_pct", execution.get("spread_pct")))
         if spread is not None and spread > float(self.config.max_spread_pct):
