@@ -142,6 +142,7 @@ def test_paper_final_gate_accepts_normal_width_fill_geometry():
         "sl": 99.0,
         "tp": 101.2,
         "rr": 1.2,
+        "expectancy": 0.2,
         "side": "LONG",
         "market_ts": time.time(),
         "volume_24h_usdt": 90_000_000.0,
