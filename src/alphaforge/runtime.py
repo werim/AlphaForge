@@ -2564,15 +2564,22 @@ class RuntimeOrchestrator:
             and isinstance(generation_for_geometry.get("candidate"), Mapping)
         )
         if guided_geometry:
-            executable_stop_pct = stop_risk.get("executable_stop_distance_pct")
+            pre_score_stop_policy = evaluate_stop_risk_policy(
+                stop_risk,
+                score=None,
+                effective_rr=effective_rr,
+                config=self._canonical_filter_config(),
+            )
+            pre_score_stop_reason = str(
+                pre_score_stop_policy.get("reject_reason") or ""
+            ).upper()
             if stop_risk.get("stop_risk_evidence_status") == "UNAVAILABLE_BLOCKING":
                 reject_reason = "UNKNOWN_EXECUTION_CONTEXT"
-            elif (
-                executable_stop_pct is not None
-                and float(executable_stop_pct) < float(self.config.min_sl_pct)
-            ):
+            elif pre_score_stop_reason == "STOP_TOO_TIGHT":
                 reject_reason = "STOP_TOO_TIGHT"
             else:
+                # Wide-stop softening depends on score and remains downstream
+                # in evaluate_trade_quality after AIBrain scoring.
                 reject_reason = None
             if reject_reason is not None:
                 reject_payload = {
