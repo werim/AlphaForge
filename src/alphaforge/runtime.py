@@ -1724,7 +1724,7 @@ class RuntimeOrchestrator:
         try:
             fill = adverse_expected_fill_price(
                 entry=entry,
-                side=market_ctx.get("side"),
+                side=market_ctx.get("side") or "LONG",
                 slippage_pct=slippage_pct,
             )
         except ValueError:

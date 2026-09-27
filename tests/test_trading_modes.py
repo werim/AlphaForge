@@ -17,6 +17,7 @@ def _market_ctx():
         "expectancy": 0.2,
         "side": "LONG",
         "spread_pct": 0.0001,
+        "expected_slippage_pct": 0.0002,
     }
 
 
