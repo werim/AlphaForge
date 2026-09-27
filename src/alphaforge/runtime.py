@@ -1970,6 +1970,12 @@ class RuntimeOrchestrator:
         config = {
             **self._canonical_filter_config(),
             "MODE": self.config.execution_mode.value,
+            # AIBrain already owns score/expectancy acceptance and reject
+            # precedence in RuntimeOrchestrator. Re-running those gates here
+            # would create duplicate authority. Direct/backtest callers keep
+            # both gates enabled by default.
+            "SCORE_GATE_ACTIVE": False,
+            "EXPECTANCY_GATE_ACTIVE": False,
             # Runtime portfolio/cooldown/daily-loss state has its own canonical
             # authority and must not be re-evaluated from a second stats model.
             "RUNTIME_LIMITS_ACTIVE": False,
