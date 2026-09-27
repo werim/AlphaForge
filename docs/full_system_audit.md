@@ -29,6 +29,7 @@ Audit phase is read-only: no threshold promotion, gate loosening, target manipul
 | #503 | P2 | Leveraged derivatives realism lacks liquidation/margin and hold-aware funding authority. |
 | #504 | P2 | Canonical MTF regime authority collapses broad regime vocabulary to TRENDING/CHOPPY/UNKNOWN. |
 | #505 | P2 | Post-entry PAPER management is static; adaptive tighten/partial/trailing/protective reevaluation lacks authority. |
+| #506 | P2 | Strategy promotion lacks explicit walk-forward/OOS and historical-universe bias contract. |
 
 ## Audit principles
 
@@ -85,6 +86,7 @@ Severity:
 | Derivatives realism | leverage/liquidation/funding cashflows are LIVE-equivalent | **GAP #503** | P2 | Funding is modeled as a cost component, but no authoritative leverage/margin/liquidation or hold-aware funding schedule was found. |
 | Regime breadth | canonical decision path distinguishes required market regimes | **GAP #504** | P2 | MTF regime context currently emits TRENDING/CHOPPY/UNKNOWN; broader regime vocabulary is not canonical PAPER classification. |
 | Position management | post-entry quality is continuously reevaluated with authoritative adaptive exits | **GAP #505** | P2 | PAPER resolver uses fixed fill/stop/target; no authoritative tighten/partial/trailing management loop was found. |
+| Generalization evidence | strategy/threshold promotion requires OOS/walk-forward evidence | **GAP #506** | P2 | No canonical walk-forward/OOS/universe-bias contract was found; large in-sample evidence cannot prove generalization. |
 | System golden scenario inventory | major failure modes are represented | PASS | P2 | #421 fixtures include stale/future, execution unavailable, MTF conflict, ambiguous, partial fill, outage, restart, orphan, delayed resolver. |
 | Golden semantic depth | green fixtures prove all internal economic relationships | GAP | P1 | #486/#490 show fixture/parity checks can miss semantics not projected into protected contract. |
 
@@ -183,6 +185,7 @@ Until those are fixed and revalidated with fresh evidence, a CANARY qualificatio
 - #503 derivatives leverage/liquidation/funding realism if leveraged futures LIVE is intended;
 - #504 canonical regime breadth;
 - #505 adaptive post-entry position management;
+- #506 walk-forward/OOS promotion evidence;
 - empirical stop/ATR/volatility policy calibration;
 - metric naming/observability cleanup;
 - legacy/dead-path quarantine;
