@@ -109,6 +109,13 @@ jobs:
           pytest -q tests/test_paper_rr_geometry.py
           pytest -q tests/test_issue374_reject_execution_parity.py tests/test_issue322_reject_geometry.py
 
+      - name: Risk-scale sizing gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue489_risk_scale_sizing.py
+          pytest -q tests/test_issue492_executable_stop_risk.py
+          pytest -q tests/test_issue421_portfolio_risk_state.py -k "portfolio or risk"
+
       - name: Protected safety mutation gate
         run: python scripts/run_safety_mutations.py
 
