@@ -53,6 +53,10 @@ DDL = (
         score REAL,
         confidence REAL,
         raw_rr REAL,
+        candidate_raw_rr REAL,
+        executable_raw_rr REAL,
+        remaining_execution_penalty REAL,
+        rr_basis TEXT,
         effective_rr REAL,
         min_effective_rr REAL,
         entry REAL,
@@ -170,6 +174,17 @@ def bootstrap_audit_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys=ON")
     for statement in DDL:
         conn.execute(statement)
+    envelope_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(audit_decision_envelopes)")
+    }
+    for column_name, ddl in (
+        ("candidate_raw_rr", "candidate_raw_rr REAL"),
+        ("executable_raw_rr", "executable_raw_rr REAL"),
+        ("remaining_execution_penalty", "remaining_execution_penalty REAL"),
+        ("rr_basis", "rr_basis TEXT"),
+    ):
+        if column_name not in envelope_columns:
+            conn.execute(f"ALTER TABLE audit_decision_envelopes ADD COLUMN {ddl}")
     for table in IMMUTABLE_TABLES:
         conn.execute(_immutable_trigger_sql(table, "UPDATE"))
         conn.execute(_immutable_trigger_sql(table, "DELETE"))
@@ -458,11 +473,12 @@ def _insert_envelope(
             envelope_id,source_evidence_id,source_hash,source_version,campaign_id,burnin_run_id,
             release_id,git_commit,config_hash,strategy_config_hash,runtime_instance_id,mode,
             decision_time,signal_id,decision_id,symbol,side,setup_type,regime,decision,reject_reason,
-            score,confidence,raw_rr,effective_rr,min_effective_rr,entry,stop,target,spread_pct,
+            score,confidence,raw_rr,candidate_raw_rr,executable_raw_rr,
+            remaining_execution_penalty,rr_basis,effective_rr,min_effective_rr,entry,stop,target,spread_pct,
             expected_slippage_pct,fee_pct,funding_rate_pct,latency_ms,liquidity_score,volume_24h_usdt,
             volatility_regime,gate_outputs_json,gate_thresholds_json,gate_margins_json,
             decision_payload_json,source_provenance_json,ingested_at,schema_version
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             envelope_id, source_evidence_id, source_hash, version, campaign_id,
             str(row.get("run_id") or ""), run_meta.get("release_id"), run_meta.get("git_commit"),
@@ -471,6 +487,8 @@ def _insert_envelope(
             row.get("timestamp"), row.get("signal_id"), decision_id, row.get("symbol"), row.get("side"),
             row.get("setup_type"), row.get("regime"), decision, row.get("reject_reason"),
             _finite(row.get("score")), _finite(diagnostics.get("confidence")), _finite(row.get("raw_rr")),
+            _finite(row.get("candidate_raw_rr")), _finite(row.get("executable_raw_rr")),
+            _finite(row.get("remaining_execution_penalty")), row.get("rr_basis"),
             _finite(row.get("effective_rr")), _finite(row.get("min_effective_rr")),
             _finite(row.get("entry")), _finite(row.get("sl")), _finite(row.get("tp")),
             _finite(row.get("spread_pct")), _finite(row.get("expected_slippage_pct")),
@@ -487,7 +505,10 @@ def _insert_envelope(
         campaign_id=campaign_id, burnin_run_id=str(row.get("run_id") or ""),
         decision=decision, signal_id=row.get("signal_id"), reject_reason=row.get("reject_reason"),
         side=row.get("side"), entry=row.get("entry"), stop=row.get("sl"), target=row.get("tp"),
-        raw_rr=row.get("raw_rr"), effective_rr=row.get("effective_rr"),
+        raw_rr=row.get("raw_rr"), candidate_raw_rr=row.get("candidate_raw_rr"),
+        executable_raw_rr=row.get("executable_raw_rr"),
+        remaining_execution_penalty=row.get("remaining_execution_penalty"),
+        rr_basis=row.get("rr_basis"), effective_rr=row.get("effective_rr"),
     )
     return envelope_id, diagnostics, envelope
 
