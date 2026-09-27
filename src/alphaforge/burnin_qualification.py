@@ -471,10 +471,137 @@ class BurnInQualificationEngine:
         if worst>self.thresholds.max_calibration_error: blockers.append("CALIBRATION_QUALITY_INSUFFICIENT"); return "FAIL"
         return "PASS"
     def _compute_drawdown(self,dds,blockers,metrics):
-        maxdd=max([float(d.get("drawdown_pct") or 0) for d in dds], default=0.0); unresolved=sum(1 for d in dds if not int(d.get("resolved") or 0)); rolling=min([float(d.get("rolling_expectancy")) for d in dds if d.get("rolling_expectancy") is not None], default=None)
-        recovery_status="INSUFFICIENT" if unresolved else "RECOVERED"
-        metrics.update(max_drawdown_pct=maxdd,unresolved_drawdown_events=unresolved,rolling_expectancy=rolling,loss_cluster_state="UNRESOLVED" if unresolved else "RESOLVED",drawdown_recovery_status=recovery_status,recovery_status=recovery_status)
-        if maxdd>self.thresholds.max_drawdown_pct or unresolved: blockers.append("DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER"); return "FAIL"
+        if not dds:
+            blockers.append("DRAWDOWN_INSUFFICIENT_EVIDENCE")
+            metrics.update(
+                max_drawdown_pct=None,
+                unresolved_drawdown_events=None,
+                rolling_expectancy=None,
+                loss_cluster_state="UNKNOWN",
+                drawdown_recovery_status="INSUFFICIENT",
+                recovery_status="INSUFFICIENT",
+                drawdown_evidence_count=0,
+                drawdown_missing_fields=["burnin_drawdown_events"],
+            )
+            return "INSUFFICIENT_EVIDENCE"
+
+        valid_rows=[]
+        gaps=[]
+        for index,d in enumerate(dds):
+            event_id=str(d.get("drawdown_event_id") or f"row_{index}")
+            missing=[
+                field for field in (
+                    "peak_equity","trough_equity","drawdown_pct",
+                    "consecutive_losses","resolved","payload_json",
+                ) if d.get(field) is None
+            ]
+            payload={}
+            try:
+                payload=json.loads(d.get("payload_json") or "")
+            except (TypeError,json.JSONDecodeError):
+                missing.append("payload_json")
+            if not isinstance(payload,dict):
+                missing.append("payload_json")
+                payload={}
+
+            numeric={}
+            for field in ("peak_equity","trough_equity","drawdown_pct"):
+                value=d.get(field)
+                if value is None:
+                    continue
+                try:
+                    parsed=float(value)
+                except (TypeError,ValueError):
+                    missing.append(field)
+                    continue
+                if not math.isfinite(parsed):
+                    missing.append(field)
+                    continue
+                numeric[field]=parsed
+            try:
+                consecutive_losses=int(d.get("consecutive_losses"))
+                if consecutive_losses < 0:
+                    missing.append("consecutive_losses")
+            except (TypeError,ValueError):
+                consecutive_losses=None
+                missing.append("consecutive_losses")
+            try:
+                resolved=int(d.get("resolved"))
+                if resolved not in (0,1):
+                    missing.append("resolved")
+            except (TypeError,ValueError):
+                resolved=None
+                missing.append("resolved")
+
+            if payload.get("evidence_status") != "COMPLETE":
+                missing.append("payload.evidence_status")
+            if not payload.get("evidence_source"):
+                missing.append("payload.evidence_source")
+            if payload.get("risk_state_complete") is not True:
+                missing.append("payload.risk_state_complete")
+
+            peak=numeric.get("peak_equity")
+            trough=numeric.get("trough_equity")
+            drawdown=numeric.get("drawdown_pct")
+            if peak is not None and peak <= 0:
+                missing.append("peak_equity")
+            if peak is not None and trough is not None:
+                if trough < 0 or trough > peak:
+                    missing.append("trough_equity")
+                elif drawdown is not None and peak > 0:
+                    expected=max(0.0,(peak-trough)/peak)
+                    if not math.isclose(drawdown,expected,rel_tol=1e-6,abs_tol=1e-9):
+                        missing.append("drawdown_pct_consistency")
+            if drawdown is not None and not 0.0 <= drawdown <= 1.0:
+                missing.append("drawdown_pct")
+
+            if missing:
+                gaps.append(f"{event_id}:" + ",".join(sorted(set(missing))))
+                continue
+            valid_rows.append({
+                **dict(d),
+                "_drawdown_pct": drawdown,
+                "_consecutive_losses": consecutive_losses,
+                "_resolved": resolved,
+            })
+
+        if gaps:
+            metrics.update(
+                max_drawdown_pct=None,
+                unresolved_drawdown_events=None,
+                rolling_expectancy=None,
+                loss_cluster_state="UNKNOWN",
+                drawdown_recovery_status="INSUFFICIENT",
+                recovery_status="INSUFFICIENT",
+                drawdown_evidence_count=len(valid_rows),
+                drawdown_missing_fields=gaps,
+            )
+            blockers.append("DRAWDOWN_INSUFFICIENT_EVIDENCE:" + "|".join(gaps))
+            return "INSUFFICIENT_EVIDENCE"
+
+        maxdd=max(float(d["_drawdown_pct"]) for d in valid_rows)
+        unresolved=sum(1 for d in valid_rows if int(d["_resolved"]) == 0)
+        max_consecutive_losses=max(int(d["_consecutive_losses"]) for d in valid_rows)
+        rolling=min(
+            [float(d.get("rolling_expectancy")) for d in valid_rows
+             if d.get("rolling_expectancy") is not None],
+            default=None,
+        )
+        recovery_status="UNRESOLVED" if unresolved else "RECOVERED"
+        metrics.update(
+            max_drawdown_pct=maxdd,
+            unresolved_drawdown_events=unresolved,
+            max_consecutive_losses=max_consecutive_losses,
+            rolling_expectancy=rolling,
+            loss_cluster_state="UNRESOLVED" if unresolved else "RESOLVED",
+            drawdown_recovery_status=recovery_status,
+            recovery_status=recovery_status,
+            drawdown_evidence_count=len(valid_rows),
+            drawdown_missing_fields=[],
+        )
+        if maxdd>self.thresholds.max_drawdown_pct or unresolved:
+            blockers.append("DRAWDOWN_OR_LOSS_CLUSTER_BLOCKER")
+            return "FAIL"
         return "PASS"
     def _compute_execution(self,execm,blockers,metrics):
         if not execm:
