@@ -1198,7 +1198,10 @@ class RuntimeOrchestrator:
                     "stop_distance_basis", "stop_risk_evidence_status",
                     "stop_risk_missing_fields", "stop_too_wide_softened",
                     "stop_too_wide_extreme", "stop_too_wide_soft_eligible",
-                    "risk_scale", "min_signal_score", "min_raw_rr", "min_effective_rr",
+                    "risk_scale", "sizing_status", "sizing_reason",
+                    "original_notional", "effective_notional",
+                    "original_quantity", "effective_quantity",
+                    "min_signal_score", "min_raw_rr", "min_effective_rr",
                     "min_stop_pct", "max_stop_pct")}
                 metrics.update({"reject_decision_id": payload.get("reject_decision_id"),
                                 "signal_id": payload.get("signal_id"),
