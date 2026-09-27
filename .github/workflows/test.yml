@@ -114,6 +114,13 @@ jobs:
           pytest -q tests/test_phase7_burnin.py -k "entry_fill_does_not_create_closed_burnin_outcome"
           pytest -q tests/test_runtime_live_authorization.py -k "runtime_non_live_execution"
 
+      - name: Portfolio-risk authority gate
+        if: github.event_name == 'pull_request'
+        run: |
+          pytest -q tests/test_issue496_portfolio_risk_authority.py
+          pytest -q tests/test_portfolio_risk_engine.py
+          pytest -q tests/test_live_readiness.py -k "portfolio or phase4"
+
       - name: Protected safety mutation gate
         run: python scripts/run_safety_mutations.py
 
