@@ -486,7 +486,7 @@ class _AlwaysAcceptBrain:
         return SimpleNamespace(
             total_score=.9,
             components={},
-            probabilistic={"raw_expectancy": 0.2},
+            probabilistic={"raw_expectancy": 0.2, "expectancy_after_costs": 0.2},
         ), plan, "accepted"
 
 
