@@ -110,6 +110,10 @@ def _decision(
         reject_reason=reject_reason,
         score=0.71,
         raw_rr=1.8,
+        candidate_raw_rr=1.8,
+        executable_raw_rr=1.6,
+        remaining_execution_penalty=0.1,
+        rr_basis="EXPECTED_FILL_RUNTIME_PARITY",
         effective_rr=1.5,
         min_effective_rr=1.1,
         entry=entry,
@@ -331,6 +335,19 @@ def test_l0_ingests_accept_and_execution_aligned_reject_idempotently(tmp_path: P
     assert second["outcomes_added"] == 0
     assert second["shadow_decisions_added"] == 0
     assert second["shadow_outcomes_added"] == 0
+
+    envelope = audit.execute(
+        "SELECT raw_rr,candidate_raw_rr,executable_raw_rr,remaining_execution_penalty,rr_basis,effective_rr "
+        "FROM audit_decision_envelopes WHERE source_evidence_id='e-accept'"
+    ).fetchone()
+    assert tuple(envelope) == (
+        pytest.approx(1.8),
+        pytest.approx(1.8),
+        pytest.approx(1.6),
+        pytest.approx(0.1),
+        "EXPECTED_FILL_RUNTIME_PARITY",
+        pytest.approx(1.5),
+    )
 
     reject = audit.execute(
         "SELECT eligibility,authoritative,reject_reasons_json FROM shadow_decisions"
