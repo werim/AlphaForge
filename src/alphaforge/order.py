@@ -345,6 +345,10 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         reject_reason, failed_filter = "ORDERBOOK_CONTEXT_MISSING", "orderbook_present"
     elif orderbook_filter_enabled and orderbook_risky:
         reject_reason, failed_filter = "ORDERBOOK_RISK", "orderbook_quality"
+    elif expected_slippage_pct > float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]):
+        # Excessive slippage is the causal execution failure.  Do not let the
+        # derived expected-fill stop distance mask the unsafe execution input.
+        reject_reason, failed_filter = "SLIPPAGE_TOO_HIGH", "expected_slippage_pct"
     elif sl_pct is None:
         reject_reason, failed_filter = "UNKNOWN_EXECUTION_CONTEXT", "stop_execution_basis"
     elif sl_pct < float(cfg["MIN_SL_PCT"]):
@@ -366,8 +370,6 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             failed_filter = ""
     elif spread_pct > float(cfg["MAX_SPREAD_PCT"]):
         reject_reason, failed_filter = "SPREAD_TOO_HIGH", "spread_pct"
-    elif expected_slippage_pct > float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]):
-        reject_reason, failed_filter = "SLIPPAGE_TOO_HIGH", "expected_slippage_pct"
     elif atr_pct is not None and atr_pct < float(cfg["MIN_ATR_PCT"]):
         reject_reason, failed_filter = "VOLATILITY_TOO_LOW", "atr_pct"
     elif atr_pct is not None and atr_pct > float(cfg["MAX_ATR_PCT"]):
