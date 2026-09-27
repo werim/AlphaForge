@@ -26,6 +26,7 @@ Audit phase is read-only: no threshold promotion, gate loosening, target manipul
 | #498 | P1 | CI mutation gate protects local guards but not enough cross-component economic/evidence relationships. |
 | #500 | P1 | Production correlation risk limits remain runtime literals/direct config outside canonical managed SSOT. |
 | #502 | P2 | Microstructure authority incomplete: orderbook/spoof optional; absorption not execution-gating. |
+| #503 | P2 | Leveraged derivatives realism lacks liquidation/margin and hold-aware funding authority. |
 
 ## Audit principles
 
@@ -79,6 +80,7 @@ Severity:
 | Calibration | missing calibration evidence cannot PASS | PASS | P1 | no rows => sample 0 / worst error sentinel; insufficient/fail closed. |
 | Regime qualification | UNKNOWN regime cannot be declared PASS | PASS | P1 | explicit UNKNOWN_REGIME_CANNOT_PASS blocker. |
 | Microstructure coverage | LIVE-equivalent orderbook/spoof/absorption evidence is authoritative | **GAP #502** | P2 | Orderbook/spoof gate exists but defaults off; absorption is not an authoritative execution gate; candle-only PAPER cannot prove LIVE microstructure quality. |
+| Derivatives realism | leverage/liquidation/funding cashflows are LIVE-equivalent | **GAP #503** | P2 | Funding is modeled as a cost component, but no authoritative leverage/margin/liquidation or hold-aware funding schedule was found. |
 | System golden scenario inventory | major failure modes are represented | PASS | P2 | #421 fixtures include stale/future, execution unavailable, MTF conflict, ambiguous, partial fill, outage, restart, orphan, delayed resolver. |
 | Golden semantic depth | green fixtures prove all internal economic relationships | GAP | P1 | #486/#490 show fixture/parity checks can miss semantics not projected into protected contract. |
 
