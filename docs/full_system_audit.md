@@ -30,6 +30,7 @@ Audit phase is read-only: no threshold promotion, gate loosening, target manipul
 | #504 | P2 | Canonical MTF regime authority collapses broad regime vocabulary to TRENDING/CHOPPY/UNKNOWN. |
 | #505 | P2 | Post-entry PAPER management is static; adaptive tighten/partial/trailing/protective reevaluation lacks authority. |
 | #506 | P2 | Strategy promotion lacks explicit walk-forward/OOS and historical-universe bias contract. |
+| #507 | P1 | Independent runtimes lack account-wide execution ownership/fencing and shared capital-risk authority. |
 
 ## Audit principles
 
@@ -75,6 +76,7 @@ Severity:
 | Semantic invariants | internally impossible evidence fails even when surfaces agree | **GAP #486** | P1 | Validator exists and parity calls it, but no production-wide single-surface enforcement call site was found. |
 | Decision evidence RR stages | candidate/executable/effective RR retain distinct meanings | **BUG #495** | P1 | decision_evidence.raw_rr is candidate RR in BACKTEST and executable RR in runtime. |
 | Readiness mode parity | PASS means equal protected risk/execution semantics | **GAP #490** | P1 | Existing mode parity compares a limited field set; portfolio “shared engine” check can pass from row presence. |
+| Runtime ownership | independent runtimes cannot exceed account-wide capital authority | **GAP #507** | P1 | Campaign worker ownership is strong, but independent runtime/account fencing is not established. |
 | Persistence failure | failed canonical decision persistence blocks further execution | PASS | P0 | Runtime sets PHASE7_BURNIN_PERSISTENCE_FAILURE; reconciliation execution blocker consumes fail_closed_reason. |
 | Partial fills | exposure uses actual partial filled quantity/notional | PASS | P0 | Full-chain tests verify partial notional and active-position state. |
 | Reconciliation/orphans | unknown exchange state/orphans/recovery block execution | PASS | P0 | Runtime reconciliation blocker + full-chain/provider recovery tests cover fail-closed behavior. |
@@ -179,6 +181,7 @@ Until those are fixed and revalidated with fresh evidence, a CANARY qualificatio
 8. #495 explicit RR-stage persistence.
 9. #496 single portfolio-risk authority.
 10. #491 candidate-notional SSOT.
+11. #507 account-wide runtime ownership/fencing.
 
 ### P2/P3 after safety/evidence closure
 - #502 authoritative microstructure coverage;
