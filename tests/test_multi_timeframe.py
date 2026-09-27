@@ -483,7 +483,11 @@ class _AlwaysAcceptBrain:
     def before_real_order(self, *_args, **_kwargs):
         plan = SimpleNamespace(decision="ACCEPTED", reason="", confidence=.9,
                                order_type="MARKET", limit_price=None, stop_price=None)
-        return SimpleNamespace(total_score=.9, components={}), plan, "accepted"
+        return SimpleNamespace(
+            total_score=.9,
+            components={},
+            probabilistic={"raw_expectancy": 0.2},
+        ), plan, "accepted"
 
 
 def _runtime_candidate():
