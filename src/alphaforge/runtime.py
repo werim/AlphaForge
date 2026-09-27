@@ -2938,6 +2938,40 @@ class RuntimeOrchestrator:
                 market_ctx["notional"] = candidate_notional
         elif candidate_notional is None:
             candidate_notional = min(float(self.config.max_symbol_notional or 0.0), float(self.config.max_notional_exposure or 0.0)) * 0.1
+        def _portfolio_snapshot_for(candidate_value: float | None):
+            return snapshot_from_state(
+                mode=self.config.execution_mode.value,
+                symbol=selection.symbol,
+                side=str(market_ctx.get("side", signal_payload.get("side", "LONG"))),
+                candidate_notional=candidate_value,
+                equity=inferred_equity,
+                available_balance=available_balance,
+                open_positions={
+                    key: {
+                        "notional": value,
+                        "side": self._active_position_sides.get(key, "UNKNOWN"),
+                    }
+                    for key, value in self._active_positions.items()
+                },
+                config=self.config,
+                now=portfolio_now,
+                cooldown_until=cooldown_until,
+                daily_realized_pnl=historical_risk.get("daily_realized_pnl"),
+                trades_today_symbol=historical_risk.get("trades_today_symbol"),
+                trades_today_global=historical_risk.get("trades_today_global"),
+                consecutive_loss_count=historical_risk.get("consecutive_loss_count"),
+                symbol_consecutive_loss_count=historical_risk.get(
+                    "symbol_consecutive_loss_count"
+                ),
+                rolling_peak_equity=historical_risk.get("rolling_peak_equity"),
+                rolling_drawdown_pct=historical_risk.get("rolling_drawdown_pct"),
+                risk_state_complete=historical_risk.get("risk_state_complete"),
+                risk_state_source=historical_risk.get("risk_state_source"),
+                risk_state_missing_fields=list(
+                    historical_risk.get("risk_state_missing_fields") or []
+                ),
+            )
+
         original_quantity = next(
             (
                 market_ctx.get(key)
@@ -2962,7 +2996,25 @@ class RuntimeOrchestrator:
             "effective_quantity": sizing_projection.get("effective_quantity"),
         })
         if sizing_projection.get("status") != "COMPLETE":
-            reject_reason = "UNKNOWN_PORTFOLIO_RISK"
+            # Missing/invalid sizing evidence is a portfolio-risk failure, but
+            # preserve the canonical portfolio snapshot and diagnostics rather
+            # than emitting a second, evidence-poor UNKNOWN path.
+            snapshot = _portfolio_snapshot_for(candidate_notional)
+            portfolio_decision = evaluate_portfolio_risk(
+                {
+                    "symbol": selection.symbol,
+                    "side": market_ctx.get("side"),
+                    "entry": market_ctx.get("entry"),
+                    "quantity": original_quantity,
+                    "notional": candidate_notional,
+                },
+                snapshot,
+                self.config,
+                mode=self.config.execution_mode.value,
+            )
+            portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
+            portfolio_decision.diagnostics["sizing_projection"] = dict(sizing_projection)
+            reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
             reject_payload = {
                 "signal_id": signal_id,
                 "symbol": selection.symbol,
@@ -2979,6 +3031,10 @@ class RuntimeOrchestrator:
                 "effective_rr": effective_rr,
                 "explanation": "canonical_risk_scaling_gate",
                 "execution_ctx": execution_ctx,
+                "portfolio_reject_reason": reject_reason,
+                "portfolio_risk_state": portfolio_decision.risk_state,
+                "portfolio_diagnostics": portfolio_decision.diagnostics,
+                "risk_flags": portfolio_decision.risk_flags,
                 "sizing_status": sizing_projection.get("status"),
                 "sizing_reason": sizing_projection.get("reason"),
                 "original_notional": sizing_projection.get("original_notional"),
@@ -3004,30 +3060,7 @@ class RuntimeOrchestrator:
         if effective_quantity is not None:
             market_ctx["quantity"] = float(effective_quantity)
             market_ctx["qty"] = float(effective_quantity)
-        snapshot = snapshot_from_state(
-            mode=self.config.execution_mode.value,
-            symbol=selection.symbol,
-            side=str(market_ctx.get("side", signal_payload.get("side", "LONG"))),
-            candidate_notional=candidate_notional,
-            equity=inferred_equity,
-            available_balance=available_balance,
-            open_positions={k: {"notional": v, "side": self._active_position_sides.get(k, "UNKNOWN")} for k, v in self._active_positions.items()},
-            config=self.config,
-            now=portfolio_now,
-            cooldown_until=cooldown_until,
-            daily_realized_pnl=historical_risk.get("daily_realized_pnl"),
-            trades_today_symbol=historical_risk.get("trades_today_symbol"),
-            trades_today_global=historical_risk.get("trades_today_global"),
-            consecutive_loss_count=historical_risk.get("consecutive_loss_count"),
-            symbol_consecutive_loss_count=historical_risk.get("symbol_consecutive_loss_count"),
-            rolling_peak_equity=historical_risk.get("rolling_peak_equity"),
-            rolling_drawdown_pct=historical_risk.get("rolling_drawdown_pct"),
-            risk_state_complete=historical_risk.get("risk_state_complete"),
-            risk_state_source=historical_risk.get("risk_state_source"),
-            risk_state_missing_fields=list(
-                historical_risk.get("risk_state_missing_fields") or []
-            ),
-        )
+        snapshot = _portfolio_snapshot_for(candidate_notional)
         portfolio_decision = evaluate_portfolio_risk({"symbol": selection.symbol, "side": market_ctx.get("side"), "entry": market_ctx.get("entry"), "quantity": market_ctx.get("quantity", market_ctx.get("qty")), "notional": candidate_notional}, snapshot, self.config, mode=self.config.execution_mode.value)
         portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
         portfolio_decision.diagnostics["sizing_projection"] = dict(sizing_projection)
