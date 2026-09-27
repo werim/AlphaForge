@@ -211,6 +211,181 @@ def build_execution_cost_semantics(
     )
 
 
+def adverse_expected_fill_price(*, entry: Any, side: Any, slippage_pct: Any) -> float:
+    """Return the decision-time adverse fill estimate for LONG/SHORT execution."""
+    entry_price = _finite_positive_price(entry, field="entry")
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side not in {"LONG", "SHORT"}:
+        raise ValueError("side must be LONG or SHORT")
+    try:
+        slip = float(slippage_pct)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("slippage_pct must be finite and non-negative") from exc
+    if not math.isfinite(slip) or slip < 0.0:
+        raise ValueError("slippage_pct must be finite and non-negative")
+    fill = entry_price * (1.0 + slip if normalized_side == "LONG" else 1.0 - slip)
+    return _finite_positive_price(fill, field="expected_fill")
+
+
+def build_stop_risk_metrics(
+    *,
+    planned_entry: Any,
+    expected_fill: Any,
+    stop: Any,
+    allow_planned_fallback: bool = False,
+) -> dict[str, Any]:
+    """Build planned and executable stop-distance evidence without moving the stop."""
+    missing_fields: list[str] = []
+    try:
+        planned = _finite_positive_price(planned_entry, field="planned_entry")
+    except ValueError:
+        planned = None
+        missing_fields.append("planned_entry")
+    try:
+        stop_price = _finite_positive_price(stop, field="stop")
+    except ValueError:
+        stop_price = None
+        missing_fields.append("stop")
+
+    planned_pct = (
+        None
+        if planned is None or stop_price is None
+        else abs(planned - stop_price) / planned * 100.0
+    )
+    try:
+        executable = _finite_positive_price(expected_fill, field="expected_fill")
+    except ValueError:
+        executable = None
+
+    if executable is None:
+        if allow_planned_fallback and planned is not None:
+            executable = planned
+            basis = "PLANNED_ENTRY_BACKTEST"
+            evidence_status = "PLANNED_FALLBACK"
+        else:
+            basis = "EXPECTED_FILL"
+            evidence_status = EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+            missing_fields.append("expected_fill")
+    else:
+        basis = "EXPECTED_FILL"
+        evidence_status = "COMPLETE"
+
+    executable_pct = (
+        None
+        if executable is None or stop_price is None
+        else abs(executable - stop_price) / executable * 100.0
+    )
+    return {
+        "planned_entry": planned,
+        "executable_entry": executable,
+        "stop": stop_price,
+        "planned_stop_distance_pct": planned_pct,
+        "executable_stop_distance_pct": executable_pct,
+        "stop_distance_pct": executable_pct,
+        "stop_distance_basis": basis,
+        "stop_risk_evidence_status": evidence_status,
+        "stop_risk_missing_fields": sorted(set(missing_fields)),
+    }
+
+
+def evaluate_stop_risk_policy(
+    metrics: Mapping[str, Any],
+    *,
+    score: Any,
+    effective_rr: Any,
+    config: Mapping[str, Any],
+    bypass_wide_reject: bool = False,
+) -> dict[str, Any]:
+    """Apply stop-distance policy to executable stop-risk evidence."""
+    result = dict(metrics)
+    if result.get("stop_risk_evidence_status") == EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING:
+        result.update(
+            accepted=False,
+            reject_reason="UNKNOWN_EXECUTION_CONTEXT",
+            stop_too_wide_softened=False,
+            risk_scale=1.0,
+        )
+        return result
+
+    stop_pct = result.get("stop_distance_pct")
+    try:
+        stop_value = float(stop_pct)
+    except (TypeError, ValueError):
+        result.update(
+            accepted=False,
+            reject_reason="UNKNOWN_EXECUTION_CONTEXT",
+            stop_too_wide_softened=False,
+            risk_scale=1.0,
+        )
+        return result
+    if not math.isfinite(stop_value):
+        result.update(
+            accepted=False,
+            reject_reason="UNKNOWN_EXECUTION_CONTEXT",
+            stop_too_wide_softened=False,
+            risk_scale=1.0,
+        )
+        return result
+
+    min_stop = float(config["MIN_SL_PCT"])
+    max_stop = float(config["MAX_SL_PCT"])
+    result.update(
+        min_stop_pct=min_stop,
+        max_stop_pct=max_stop,
+        accepted=True,
+        reject_reason="",
+        stop_too_wide_softened=False,
+        risk_scale=1.0,
+    )
+    if stop_value < min_stop:
+        result.update(accepted=False, reject_reason="STOP_TOO_TIGHT")
+        return result
+    if stop_value <= max_stop:
+        return result
+
+    soft_score_min = float(config["STOP_TOO_WIDE_SOFT_SCORE_MIN"])
+    try:
+        score_value = float(score)
+    except (TypeError, ValueError):
+        score_value = float("-inf")
+    if soft_score_min > 1.0 and 0.0 <= score_value < 1.0:
+        score_value *= 10.0
+    try:
+        effective_value = float(effective_rr)
+    except (TypeError, ValueError):
+        effective_value = float("-inf")
+
+    extreme = stop_value > max_stop * float(config["STOP_TOO_WIDE_EXTREME_MULT"])
+    soft_eligible = (
+        bool(config.get("STOP_TOO_WIDE_SOFTEN_FOR_HIGH_SCORE", True))
+        and math.isfinite(score_value)
+        and score_value >= soft_score_min
+        and math.isfinite(effective_value)
+        and effective_value >= float(config["STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN"])
+    )
+    hard_reject = bool(config["STOP_TOO_WIDE_HARD_REJECT"])
+    if hard_reject and (extreme or not soft_eligible) and not bypass_wide_reject:
+        result.update(
+            accepted=False,
+            reject_reason="STOP_TOO_WIDE",
+            stop_too_wide_softened=False,
+            stop_too_wide_extreme=extreme,
+            stop_too_wide_soft_eligible=soft_eligible,
+        )
+        return result
+
+    result.update(
+        accepted=True,
+        reject_reason="",
+        stop_too_wide_softened=True,
+        stop_too_wide_extreme=extreme,
+        stop_too_wide_soft_eligible=soft_eligible,
+        stop_too_wide_bypassed=bool(bypass_wide_reject),
+        risk_scale=min(max(float(config["STOP_TOO_WIDE_MAX_RISK_SCALE"]), 0.0), 1.0),
+    )
+    return result
+
+
 def weighted_average_fill_price(fills: Any) -> float | None:
     """Return the quantity-weighted price for canonical ``fills`` ledger rows.
 
