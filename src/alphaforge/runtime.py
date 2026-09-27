@@ -1308,7 +1308,20 @@ class RuntimeOrchestrator:
                     lifecycle_state_after=lifecycle_state,
                     decision=payload.get("decision"),
                     score=payload.get("score"),
-                    raw_rr=payload.get("executable_raw_rr") if payload.get("executable_raw_rr") is not None else payload.get("rr"),
+                    raw_rr=payload.get("candidate_rr") if payload.get("candidate_rr") is not None else payload.get("rr"),
+                    candidate_raw_rr=payload.get("candidate_rr") if payload.get("candidate_rr") is not None else payload.get("rr"),
+                    executable_raw_rr=payload.get("executable_raw_rr"),
+                    remaining_execution_penalty=payload.get("remaining_execution_penalty"),
+                    rr_basis=(
+                        payload.get("reject_execution_basis")
+                        or (
+                            "EXPECTED_FILL_RUNTIME_PARITY"
+                            if payload.get("executable_raw_rr") is not None
+                            and payload.get("expected_fill") is not None
+                            else "PLANNED_ENTRY_LEGACY"
+                        )
+                    ),
+                    execution_cost_semantics=payload.get("execution_cost_semantics"),
                     effective_rr=payload.get("effective_rr"),
                     min_effective_rr=payload.get("min_effective_rr") if payload.get("min_effective_rr") is not None else float(self.config.min_effective_rr),
                     expectancy=payload.get("expectancy"),

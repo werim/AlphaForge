@@ -245,6 +245,11 @@ def init_db(database_url: str | None = None) -> Engine:
             decision TEXT,
             score REAL,
             raw_rr REAL,
+            candidate_raw_rr REAL,
+            executable_raw_rr REAL,
+            remaining_execution_penalty REAL,
+            rr_basis TEXT,
+            execution_cost_semantics TEXT,
             effective_rr REAL,
             min_effective_rr REAL,
             expectancy REAL,
@@ -576,6 +581,9 @@ def _ensure_sqlite_runtime_schema(conn: Any) -> None:
             ("setup_reason", "setup_reason TEXT"), ("regime", "regime TEXT"),
             ("lifecycle_state_before", "lifecycle_state_before TEXT"), ("lifecycle_state_after", "lifecycle_state_after TEXT"),
             ("decision", "decision TEXT"), ("score", "score REAL"), ("raw_rr", "raw_rr REAL"),
+            ("candidate_raw_rr", "candidate_raw_rr REAL"), ("executable_raw_rr", "executable_raw_rr REAL"),
+            ("remaining_execution_penalty", "remaining_execution_penalty REAL"), ("rr_basis", "rr_basis TEXT"),
+            ("execution_cost_semantics", "execution_cost_semantics TEXT"),
             ("effective_rr", "effective_rr REAL"), ("min_effective_rr", "min_effective_rr REAL"),
             ("expectancy", "expectancy REAL"), ("expectancy_bucket", "expectancy_bucket TEXT"),
             ("reject_reason", "reject_reason TEXT"), ("cancel_reason", "cancel_reason TEXT"), ("close_reason", "close_reason TEXT"),
@@ -689,10 +697,24 @@ def _apply_sqlite_migrations(conn: Any) -> None:
         ("2026_07_06_phase2_decision_evidence", "Add SQL-backed decision evidence export surface for lifecycle/dashboard reconciliation."),
         ("2026_09_22_decision_threshold_provenance", "Add decision-time min_effective_rr provenance to durable decision evidence."),
         ("2026_09_26_rollback_evidence_git_provenance", "Add exact git commit provenance to rollback validation evidence."),
+        ("2026_09_27_decision_rr_stage_semantics", "Separate candidate, executable, remaining-penalty and effective RR evidence stages."),
     ]
     _ensure_sqlite_rollback_evidence_schema(conn)
     _ensure_core_identifier_schema(conn)
     _ensure_sqlite_runtime_schema(conn)
+    decision_evidence_cols = _sqlite_columns(conn, "decision_evidence")
+    if {"raw_rr", "rr_basis"} <= decision_evidence_cols:
+        # Historical raw_rr differs by writer/mode. Never infer a stage from it.
+        # Keep legacy rows queryable but explicitly non-authoritative for staged
+        # RR readiness/parity until fresh evidence is generated.
+        conn.execute(text("""
+            UPDATE decision_evidence
+            SET rr_basis='LEGACY_AMBIGUOUS_RAW_RR'
+            WHERE raw_rr IS NOT NULL
+              AND (rr_basis IS NULL OR TRIM(rr_basis)='')
+              AND candidate_raw_rr IS NULL
+              AND executable_raw_rr IS NULL
+        """))
     signal_cols = _sqlite_columns(conn, "signals")
     if "signal_id" in signal_cols and "uq_signals_signal_id_not_null" not in existing:
         conn.execute(text("UPDATE signals SET signal_id = 'legacy-signal-' || id WHERE signal_id IS NULL OR TRIM(signal_id) = ''"))
@@ -957,7 +979,9 @@ def save_order_decision(session: Any, **decision: Any) -> Any:
 DECISION_EVIDENCE_COLUMNS: tuple[str, ...] = (
     "evidence_id", "run_id", "profile_id", "profile_name", "mode", "timestamp", "symbol", "side",
     "setup_type", "setup_reason", "regime", "lifecycle_state_before", "lifecycle_state_after",
-    "decision", "score", "raw_rr", "effective_rr", "min_effective_rr", "expectancy",
+    "decision", "score", "raw_rr", "candidate_raw_rr", "executable_raw_rr",
+    "remaining_execution_penalty", "rr_basis", "execution_cost_semantics",
+    "effective_rr", "min_effective_rr", "expectancy",
     "expectancy_bucket", "reject_reason", "cancel_reason", "close_reason", "entry", "sl", "tp",
     "trigger_price", "close_price", "net_pnl_pct", "net_pnl_usdt", "hold_minutes",
     "volume_24h_usdt", "spread_pct", "funding_rate_pct", "expected_slippage_pct",
@@ -977,7 +1001,12 @@ DECISION_EVIDENCE_COLUMNS: tuple[str, ...] = (
 )
 
 _DECISION_EVIDENCE_JSON_FIELDS = {
-    "diagnostics_json", "portfolio_diagnostics_json", "risk_flags", "reject_flags", "unavailable_fields",
+    "diagnostics_json",
+    "portfolio_diagnostics_json",
+    "risk_flags",
+    "reject_flags",
+    "unavailable_fields",
+    "execution_cost_semantics",
 }
 
 
@@ -1007,6 +1036,10 @@ def save_decision_evidence(session: Any, **evidence: Any) -> str | None:
     }.get(decision_raw, decision_raw or None)
 
     payload = {column: evidence.get(column) for column in DECISION_EVIDENCE_COLUMNS}
+    # Compatibility contract: raw_rr means candidate/structural RR only.
+    # Never let executable RR silently occupy the legacy alias.
+    if evidence.get("candidate_raw_rr") is not None:
+        payload["raw_rr"] = evidence.get("candidate_raw_rr")
     payload["evidence_id"] = evidence_id
     payload["decision"] = decision
     payload["timestamp"] = evidence.get("timestamp")
