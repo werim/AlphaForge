@@ -42,7 +42,8 @@ def test_paper_accept_writes_one_execution_aligned_decision_evidence_row(tmp_pat
     orchestrator._persist_burnin_decision(payload, lifecycle_state=LifecycleState.POSITION_OPENED.value)
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT run_id,mode,decision,signal_id,raw_rr,effective_rr,min_effective_rr,
+            SELECT run_id,mode,decision,signal_id,raw_rr,candidate_raw_rr,executable_raw_rr,
+                   remaining_execution_penalty,rr_basis,effective_rr,min_effective_rr,
                    entry,sl,tp,spread_pct,expected_slippage_pct,lifecycle_state_after,diagnostics_json
             FROM decision_evidence WHERE signal_id='sig-391-accept'
         """)).mappings().all()
@@ -51,7 +52,11 @@ def test_paper_accept_writes_one_execution_aligned_decision_evidence_row(tmp_pat
     assert row["run_id"] == "run-391-accept"
     assert row["mode"] == "PAPER"
     assert row["decision"] == "ACCEPT"
-    assert row["raw_rr"] == pytest.approx(1.88)
+    assert row["raw_rr"] == pytest.approx(2.0)
+    assert row["candidate_raw_rr"] == pytest.approx(2.0)
+    assert row["executable_raw_rr"] == pytest.approx(1.88)
+    assert row["remaining_execution_penalty"] == pytest.approx(0.08)
+    assert row["rr_basis"] == "EXPECTED_FILL_RUNTIME_PARITY"
     assert row["effective_rr"] == pytest.approx(1.80)
     assert row["min_effective_rr"] == pytest.approx(orchestrator.config.min_effective_rr)
     assert row["entry"] == pytest.approx(100.1)
@@ -72,7 +77,7 @@ def test_paper_reject_persists_primary_reason_and_multi_gate_evidence(tmp_path: 
         "decision": "REJECTED", "decision_time": "2026-09-22T15:01:00Z",
         "symbol": "ETHUSDT", "side": "SHORT", "score": 0.40, "rr": 1.25,
         "candidate_rr": 1.25, "expected_fill": 2500.5, "executable_raw_rr": 0.96,
-        "effective_rr": 0.90, "min_effective_rr": 1.10,
+        "remaining_execution_penalty": 0.06, "effective_rr": 0.90, "min_effective_rr": 1.10,
         "entry": 2500.0, "sl": 2520.0, "tp": 2475.0,
         "primary_reject_reason": "LOW_SCORE", "reason": "LOW_SCORE",
         "all_failed_gates": ["LOW_SCORE", "LOW_EFFECTIVE_RR", "STOP_TOO_TIGHT"],
@@ -84,7 +89,8 @@ def test_paper_reject_persists_primary_reason_and_multi_gate_evidence(tmp_path: 
     }, lifecycle_state=LifecycleState.SIGNAL_REJECTED.value)
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT run_id,mode,decision,reject_reason,raw_rr,effective_rr,min_effective_rr,
+            SELECT run_id,mode,decision,reject_reason,raw_rr,candidate_raw_rr,executable_raw_rr,
+                   remaining_execution_penalty,rr_basis,effective_rr,min_effective_rr,
                    reject_flags,diagnostics_json
             FROM decision_evidence WHERE signal_id='sig-391-reject'
         """)).mappings().one()
@@ -92,7 +98,11 @@ def test_paper_reject_persists_primary_reason_and_multi_gate_evidence(tmp_path: 
     assert row["mode"] == "PAPER"
     assert row["decision"] == "REJECT"
     assert row["reject_reason"] == "LOW_SCORE"
-    assert row["raw_rr"] == pytest.approx(0.96)
+    assert row["raw_rr"] == pytest.approx(1.25)
+    assert row["candidate_raw_rr"] == pytest.approx(1.25)
+    assert row["executable_raw_rr"] == pytest.approx(0.96)
+    assert row["remaining_execution_penalty"] == pytest.approx(0.06)
+    assert row["rr_basis"] == "EXPECTED_FILL_RUNTIME_PARITY"
     assert row["effective_rr"] == pytest.approx(0.90)
     assert row["min_effective_rr"] == pytest.approx(1.10)
     assert json.loads(row["reject_flags"]) == ["LOW_SCORE", "LOW_EFFECTIVE_RR", "STOP_TOO_TIGHT"]
@@ -105,17 +115,24 @@ def test_live_precheck_writes_scoped_no_submit_decision_evidence(tmp_path: Path)
         "signal_id": "sig-391-precheck", "setup_identity": "setup-391-precheck",
         "decision": "ACCEPTED", "decision_time": "2026-09-22T15:02:00Z",
         "symbol": "BTCUSDT", "side": "LONG", "score": 0.75, "rr": 1.7,
-        "executable_raw_rr": 1.55, "effective_rr": 1.42, "entry": 100.0,
+        "candidate_rr": 1.7, "executable_raw_rr": 1.55,
+        "remaining_execution_penalty": 0.13, "effective_rr": 1.42, "entry": 100.0,
         "expected_fill": 100.05, "sl": 98.0, "tp": 103.4, "execution_ctx": {},
     }, lifecycle_state=LifecycleState.ORDER_PLACED.value)
     with engine.connect() as conn:
         row = conn.execute(text("""
-            SELECT run_id,mode,decision,diagnostics_json
+            SELECT run_id,mode,decision,raw_rr,candidate_raw_rr,executable_raw_rr,
+                   remaining_execution_penalty,rr_basis,diagnostics_json
             FROM decision_evidence WHERE signal_id='sig-391-precheck'
         """)).mappings().one()
     assert row["run_id"] == "run-391-precheck"
     assert row["mode"] == "LIVE_PRECHECK"
     assert row["decision"] == "ACCEPT"
+    assert row["raw_rr"] == pytest.approx(1.7)
+    assert row["candidate_raw_rr"] == pytest.approx(1.7)
+    assert row["executable_raw_rr"] == pytest.approx(1.55)
+    assert row["remaining_execution_penalty"] == pytest.approx(0.13)
+    assert row["rr_basis"] == "EXPECTED_FILL_RUNTIME_PARITY"
     assert json.loads(row["diagnostics_json"])["no_submit_verified"] is True
 
 
