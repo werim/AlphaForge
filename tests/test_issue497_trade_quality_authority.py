@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+
+import pytest
 from types import SimpleNamespace
 
 import alphaforge.runtime as runtime_module
@@ -152,7 +154,7 @@ def test_aibrain_exposes_raw_expectancy_used_for_scoring():
             "sample_size": 100,
         },
     )
-    assert score.probabilistic["raw_expectancy"] == 0.2
+    assert score.probabilistic["raw_expectancy"] == pytest.approx(0.2)
     assert score.probabilistic["raw_expectancy_source"] == "setup_regime_symbol_expectancy_stats"
 
 
