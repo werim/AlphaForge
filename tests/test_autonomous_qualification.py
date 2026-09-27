@@ -363,8 +363,13 @@ def test_issue481_soak_exercises_guided_geometry_semantics(tmp_path: Path) -> No
         assert evidence["guided_stop_too_tight_primary"] == 1
         assert evidence["guided_unattributed_stop_violations"] == 0
         assert evidence["guided_executable_rr_zero"] == 1
-        assert evidence["guided_min_stop_distance_pct"] == pytest.approx(0.01)
-        assert evidence["guided_max_stop_distance_pct"] == pytest.approx(0.5)
+        assert evidence["guided_min_planned_stop_distance_pct"] == pytest.approx(0.01)
+        assert evidence["guided_max_planned_stop_distance_pct"] == pytest.approx(0.5)
+        assert evidence["guided_expected_fill_basis_decisions"] == 2
+        expected_tight_stop_pct = abs(100.02 - 99.99) / 100.02 * 100.0
+        expected_valid_stop_pct = abs(100.02 - 99.5) / 100.02 * 100.0
+        assert evidence["guided_min_stop_distance_pct"] == pytest.approx(expected_tight_stop_pct)
+        assert evidence["guided_max_stop_distance_pct"] == pytest.approx(expected_valid_stop_pct)
         assert evidence["guided_avg_fill_geometry_loss_r"] > 0.0
         assert evidence["guided_avg_residual_penalty_r"] >= 0.0
         assert checks["guided_geometry_semantic_probe_exercised"] is True
