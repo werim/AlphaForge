@@ -31,7 +31,7 @@ def _qualifying_evidence(e):
             c.execute(text("INSERT INTO burnin_reject_outcomes(reject_outcome_id,burnin_run_id,release_id,reject_reason,symbol,regime,forward_label,avoided_loss,missed_profit,hypothetical_net_r_after_costs,evidence_complete,payload_json,schema_version) VALUES (:id,'r','rel','LOW_EFFECTIVE_RR','X','TRENDING','SL_BEFORE_TP',1,0,-1,1,'{}','v')"), {"id":f"rej{i}"})
         c.execute(text("INSERT INTO burnin_regime_metrics(burnin_run_id,release_id,regime,sample_count,accepted_count,rejected_count,mean_net_r,lower_confidence_bound_expectancy,status,generated_at,schema_version) VALUES ('r','rel','TRENDING',4,4,3,.6,.5,'PASS','now','v')"))
         c.execute(text("INSERT INTO burnin_calibration_metrics(burnin_run_id,release_id,scope,sample_count,calibration_error,status,generated_at,schema_version) VALUES ('r','rel','GLOBAL',3,.01,'PASS','now','v')"))
-        c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE','now','v')"))
+        c.execute(text("INSERT INTO burnin_execution_metrics(burnin_run_id,release_id,metric_window,status,spread_baseline,spread_current,slippage_baseline,slippage_current,latency_baseline,latency_current,fill_probability_baseline,fill_probability_current,timeout_rate,stale_data_count,execution_rejects,reconciliation_quality,generated_at,schema_version) VALUES ('r','rel','CURRENT','STABLE',1,1,1,1,1,1,.9,.9,0,0,0,'CLEAN','now','v')"))
 
 
 def _qualifying_thresholds():
@@ -103,6 +103,55 @@ def test_positive_lcb_can_qualify_but_live_not_enabled():
     snap=BurnInQualificationEngine(e, _qualifying_thresholds()).evaluate("r")
     assert snap.status == "CANARY_QUALIFIED"
     assert snap.status not in {"LIVE_REAL_ORDERS_READY","LIVE_ENABLED","PROMOTED_TO_LIVE"}
+
+def test_execution_metrics_missing_measurements_are_insufficient():
+    e=_engine()
+    engine=BurnInQualificationEngine(e, _qualifying_thresholds())
+    blockers=[]; metrics={}
+    status=engine._compute_execution({
+        "status":"STABLE",
+        "spread_baseline":None, "spread_current":None,
+        "slippage_baseline":None, "slippage_current":None,
+        "latency_baseline":None, "latency_current":None,
+        "fill_probability_baseline":None, "fill_probability_current":None,
+        "timeout_rate":None, "stale_data_count":0, "execution_rejects":0,
+        "reconciliation_quality":"CLEAN",
+    }, blockers, metrics)
+    assert status == "INSUFFICIENT_EVIDENCE"
+    assert any(b.startswith("EXECUTION_INSUFFICIENT_EVIDENCE:") for b in blockers)
+    assert "spread_baseline" in metrics["execution_missing_fields"]
+    assert metrics["execution_status"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_execution_metrics_one_missing_mandatory_field_blocks_canary():
+    e=_engine(); _run(e); _qualifying_evidence(e)
+    with e.begin() as c:
+        c.execute(text("UPDATE burnin_execution_metrics SET latency_current=NULL WHERE burnin_run_id='r'"))
+    snap=BurnInQualificationEngine(e, _qualifying_thresholds()).evaluate("r")
+    assert snap.status != "CANARY_QUALIFIED"
+    assert snap.execution_status == "INSUFFICIENT_EVIDENCE"
+    assert any("latency_current" in b for b in snap.blockers if b.startswith("EXECUTION_INSUFFICIENT_EVIDENCE:"))
+
+
+def test_execution_metrics_measured_zero_baseline_and_current_are_not_missing():
+    e=_engine()
+    engine=BurnInQualificationEngine(e, _qualifying_thresholds())
+    blockers=[]; metrics={}
+    status=engine._compute_execution({
+        "status":"STABLE",
+        "spread_baseline":0, "spread_current":0,
+        "slippage_baseline":0, "slippage_current":0,
+        "latency_baseline":1, "latency_current":1,
+        "fill_probability_baseline":1, "fill_probability_current":1,
+        "timeout_rate":0, "stale_data_count":0, "execution_rejects":0,
+        "reconciliation_quality":"CLEAN",
+    }, blockers, metrics)
+    assert status == "PASS"
+    assert blockers == []
+    assert metrics["spread_degradation_ratio"] == 1.0
+    assert metrics["slippage_degradation_ratio"] == 1.0
+    assert metrics["execution_missing_fields"] == []
+
 
 
 def test_persisted_lifecycle_error_blocks_qualification():
