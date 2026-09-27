@@ -2905,6 +2905,7 @@ class RuntimeOrchestrator:
         )
         portfolio_decision = evaluate_portfolio_risk({"symbol": selection.symbol, "side": market_ctx.get("side"), "entry": market_ctx.get("entry"), "quantity": market_ctx.get("quantity", market_ctx.get("qty")), "notional": candidate_notional}, snapshot, self.config, mode=self.config.execution_mode.value)
         portfolio_decision.diagnostics["accounting_source"] = portfolio_evidence_source
+        portfolio_decision.diagnostics["sizing_projection"] = dict(sizing_projection)
         if not portfolio_decision.accepted:
             reject_reason = portfolio_decision.reject_reason or "UNKNOWN_PORTFOLIO_RISK"
             reject_payload = {"signal_id": signal_id, "symbol": selection.symbol, "mode": self.config.execution_mode.value, "phase": "final", "decision": "REJECTED", "reason": reject_reason, "reject_reason": reject_reason, "confidence": order_plan.confidence, "score": getattr(score_ctx, "total_score", None), "rr": signal_payload.get("risk_reward"), "effective_rr": effective_rr, "explanation": "portfolio_risk_gate", "execution_ctx": execution_ctx, "portfolio_reject_reason": reject_reason, "portfolio_risk_state": portfolio_decision.risk_state, "portfolio_diagnostics": portfolio_decision.diagnostics, "risk_flags": portfolio_decision.risk_flags, "spread_pct": execution_ctx.get("spread_pct"), "expected_slippage_pct": execution_ctx.get("expected_slippage_pct"), "latency_ms": execution_ctx.get("latency_ms"), "funding_rate_pct": execution_ctx.get("funding_rate_pct"), "orderbook_imbalance": execution_ctx.get("orderbook_imbalance"), "volatility_regime": execution_ctx.get("volatility_regime")}
@@ -2960,6 +2961,12 @@ class RuntimeOrchestrator:
             "stop_too_wide_extreme": market_ctx.get("stop_too_wide_extreme"),
             "stop_too_wide_soft_eligible": market_ctx.get("stop_too_wide_soft_eligible"),
             "risk_scale": market_ctx.get("risk_scale", 1.0),
+            "sizing_status": market_ctx.get("sizing_status"),
+            "sizing_reason": market_ctx.get("sizing_reason"),
+            "original_notional": market_ctx.get("original_notional"),
+            "effective_notional": market_ctx.get("effective_notional"),
+            "original_quantity": market_ctx.get("original_quantity"),
+            "effective_quantity": market_ctx.get("effective_quantity"),
             "min_stop_pct": float(self.config.min_sl_pct),
             "max_stop_pct": float(self.config.max_sl_pct),
             "min_effective_rr": float(self.config.min_effective_rr),
@@ -3239,9 +3246,23 @@ class RuntimeOrchestrator:
             raise RuntimeError("PAPER_FILL_EVIDENCE_UNAVAILABLE")
         fill = float(actual_fill)
         planned_entry = float(market_ctx.get("entry"))
-        requested_notional = market_ctx.get("notional") or market_ctx.get("notional_usdt") or market_ctx.get("order_notional")
+        requested_notional = next(
+            (
+                market_ctx.get(key)
+                for key in ("notional", "notional_usdt", "order_notional")
+                if market_ctx.get(key) is not None
+            ),
+            None,
+        )
         if requested_notional is None:
-            requested_quantity = market_ctx.get("quantity") or market_ctx.get("qty")
+            requested_quantity = next(
+                (
+                    market_ctx.get(key)
+                    for key in ("quantity", "qty")
+                    if market_ctx.get(key) is not None
+                ),
+                None,
+            )
             if requested_quantity is None:
                 requested_notional = self.config.paper_candidate_notional
                 if requested_notional is None:
@@ -3296,6 +3317,13 @@ class RuntimeOrchestrator:
             "fill_timestamp": fill_timestamp,
             "fill_state": "PARTIAL" if str(result.get("status") or "").lower() == "partial_fill" else "FILLED",
             "filled_quantity": quantity,
+            "sizing_status": market_ctx.get("sizing_status"),
+            "sizing_reason": market_ctx.get("sizing_reason"),
+            "original_notional": market_ctx.get("original_notional"),
+            "risk_scale": market_ctx.get("risk_scale"),
+            "effective_notional": market_ctx.get("effective_notional"),
+            "original_quantity": market_ctx.get("original_quantity"),
+            "effective_quantity": market_ctx.get("effective_quantity"),
             "execution_cost_semantics": cost_semantics.as_dict(),
             "executable_raw_rr": market_ctx.get("executable_raw_rr"),
             "remaining_execution_penalty": market_ctx.get("remaining_execution_penalty"),
