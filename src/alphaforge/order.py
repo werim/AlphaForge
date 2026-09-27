@@ -9,7 +9,7 @@ from typing import Any, Callable, Literal, Mapping
 from sqlalchemy.orm import Session
 
 from alphaforge.ai_brain import AIBrain
-from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING
+from alphaforge.execution import build_execution_context, neutral_execution_context, build_execution_cost_model, build_execution_review_metrics, classify_execution_evidence, EXECUTION_EVIDENCE_INVALID_FAKE_ZERO, EXECUTION_EVIDENCE_UNAVAILABLE_BLOCKING, adverse_expected_fill_price, build_stop_risk_metrics, evaluate_stop_risk_policy
 from alphaforge.effective_rr import calculate_effective_rr
 from alphaforge.config_registry import decision_filter_config
 from alphaforge.portfolio_risk import evaluate_portfolio_risk, snapshot_from_state
@@ -226,7 +226,25 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     expected_slippage_pct = float(market_ctx.get("expected_slippage_pct", 0.0) or 0.0)
     atr_pct = market_ctx.get("atr_pct", recent_stats.get("atr_pct"))
     atr_pct = float(atr_pct) if atr_pct not in (None, "") else None
-    sl_pct = abs(float(candidate.entry) - float(candidate.sl)) / float(candidate.entry) * 100 if getattr(candidate, "entry", 0) else 0.0
+    expected_fill_for_stop = _nullable_float(market_ctx.get("expected_fill"))
+    if expected_fill_for_stop is None:
+        raw_stop_slippage = _nullable_float(market_ctx.get("expected_slippage_pct"))
+        if raw_stop_slippage is not None:
+            try:
+                expected_fill_for_stop = adverse_expected_fill_price(
+                    entry=candidate.entry,
+                    side=side,
+                    slippage_pct=raw_stop_slippage,
+                )
+            except ValueError:
+                expected_fill_for_stop = None
+    stop_risk = build_stop_risk_metrics(
+        planned_entry=candidate.entry,
+        expected_fill=expected_fill_for_stop,
+        stop=candidate.sl,
+        allow_planned_fallback=(mode == "BACKTEST"),
+    )
+    sl_pct = stop_risk.get("stop_distance_pct")
     expectancy = candidate.expectancy
     if expectancy in (None, "UNKNOWN", ""):
         bucket = market_ctx.get("expectancy_bucket", getattr(candidate, "expectancy_bucket", None))
@@ -278,8 +296,8 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
     _check((not cfg["REQUIRE_REGIME_ALIGNMENT"]) or regime_ok, "regime")
     _check((not orderbook_filter_enabled) or (not orderbook_missing), "orderbook_present")
     _check((not orderbook_filter_enabled) or (not orderbook_risky), "orderbook_quality")
-    _check(sl_pct >= float(cfg["MIN_SL_PCT"]), "min_sl")
-    _check(sl_pct <= float(cfg["MAX_SL_PCT"]), "max_sl")
+    _check(sl_pct is not None and sl_pct >= float(cfg["MIN_SL_PCT"]), "min_sl")
+    _check(sl_pct is not None and sl_pct <= float(cfg["MAX_SL_PCT"]), "max_sl")
     _check(spread_pct <= float(cfg["MAX_SPREAD_PCT"]), "spread")
     _check(expected_slippage_pct <= float(cfg["MAX_EXPECTED_SLIPPAGE_PCT"]), "slippage")
     _check(atr_pct is None or atr_pct >= float(cfg["MIN_ATR_PCT"]), "min_atr")
@@ -327,22 +345,23 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
         reject_reason, failed_filter = "ORDERBOOK_CONTEXT_MISSING", "orderbook_present"
     elif orderbook_filter_enabled and orderbook_risky:
         reject_reason, failed_filter = "ORDERBOOK_RISK", "orderbook_quality"
+    elif sl_pct is None:
+        reject_reason, failed_filter = "UNKNOWN_EXECUTION_CONTEXT", "stop_execution_basis"
     elif sl_pct < float(cfg["MIN_SL_PCT"]):
         reject_reason, failed_filter = "STOP_TOO_TIGHT", "sl_pct"
     elif sl_pct > float(cfg["MAX_SL_PCT"]):
         effective_rr_for_stop = _nullable_float(market_ctx.get("effective_rr"))
         if effective_rr_for_stop is None:
             effective_rr_for_stop = rr
-        stop_limit = float(cfg["MAX_SL_PCT"])
-        is_extreme_stop = sl_pct > stop_limit * float(cfg["STOP_TOO_WIDE_EXTREME_MULT"])
-        hard_reject_enabled = bool(cfg["STOP_TOO_WIDE_HARD_REJECT"])
-        soft_eligible = (
-            bool(cfg["STOP_TOO_WIDE_SOFTEN_FOR_HIGH_SCORE"])
-            and score_eval >= float(cfg["STOP_TOO_WIDE_SOFT_SCORE_MIN"])
-            and effective_rr_for_stop >= float(cfg["STOP_TOO_WIDE_SOFT_EFFECTIVE_RR_MIN"])
+        stop_risk = evaluate_stop_risk_policy(
+            stop_risk,
+            score=score_eval,
+            effective_rr=effective_rr_for_stop,
+            config=cfg,
+            bypass_wide_reject=_bypass("STOP_TOO_WIDE"),
         )
-        if hard_reject_enabled and (is_extreme_stop or not soft_eligible) and not _bypass("STOP_TOO_WIDE"):
-            reject_reason, failed_filter = "STOP_TOO_WIDE", "sl_pct"
+        if not bool(stop_risk.get("accepted")):
+            reject_reason, failed_filter = str(stop_risk.get("reject_reason") or "STOP_TOO_WIDE"), "sl_pct"
         else:
             failed_filter = ""
     elif spread_pct > float(cfg["MAX_SPREAD_PCT"]):
@@ -389,14 +408,14 @@ def evaluate_trade_quality(candidate: OrderCandidate, market_ctx: Mapping[str, A
             elif bool(cfg.get("RUNTIME_LIMITS_ACTIVE", True)) and int(recent_stats.get("global_loss_block_until", 0) or 0) > now_ts:
                 reject_reason, failed_filter = "GLOBAL_LOSS_STREAK_BLOCK", "global_block"
 
-    stop_too_wide_softened = sl_pct > float(cfg["MAX_SL_PCT"]) and reject_reason == ""
-    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "effective_rr": effective_rr, "min_effective_rr": float(cfg["MIN_EFFECTIVE_RR"]), "min_raw_rr": float(cfg["MIN_RR"]), "min_score": min_trade_score, "reject_unknown_expectancy": bool(cfg["BLOCK_UNKNOWN_EXPECTANCY"]), "require_execution_context": False, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
+    stop_too_wide_softened = bool(stop_risk.get("stop_too_wide_softened")) and reject_reason == ""
+    diagnostics = {"symbol": symbol, "side": side, "setup_type": setup_type, "setup_reason": setup_reason, "score": score_eval, "rr": rr, "effective_rr": effective_rr, "min_effective_rr": float(cfg["MIN_EFFECTIVE_RR"]), "min_raw_rr": float(cfg["MIN_RR"]), "min_score": min_trade_score, "reject_unknown_expectancy": bool(cfg["BLOCK_UNKNOWN_EXPECTANCY"]), "require_execution_context": False, "expectancy": expectancy_val, "regime": regime, "volatility_regime": volatility_regime, "sl_pct": sl_pct, "planned_stop_distance_pct": stop_risk.get("planned_stop_distance_pct"), "executable_stop_distance_pct": stop_risk.get("executable_stop_distance_pct"), "stop_distance_basis": stop_risk.get("stop_distance_basis"), "stop_risk_evidence_status": stop_risk.get("stop_risk_evidence_status"), "spread_pct": spread_pct, "expected_slippage_pct": expected_slippage_pct, "atr_pct": atr_pct, "reject_reason": reject_reason, "failed_filter": failed_filter, "quality_score": quality_score, "adaptive_thresholds": adaptive, "min_required_score": min_trade_score, "all_failed_gates": all_failed_gates, "bypassed_reject_reasons": bypassed_reject_reasons, "disabled_filters": sorted(backtest_disabled), "disabled_filter_bypass_count": len(bypassed_reject_reasons), "filter_switch_experiment_active": bool(backtest_disabled)}
     if stop_too_wide_softened:
         diagnostics.update({
             "stop_too_wide_softened": True,
             "original_reject_reason": "STOP_TOO_WIDE",
             "reject_reason_softened": "STOP_TOO_WIDE",
-            "risk_scale": min(float(cfg["STOP_TOO_WIDE_MAX_RISK_SCALE"]), 1.0),
+            "risk_scale": float(stop_risk.get("risk_scale", 1.0)),
             "stop_too_wide_hard_reject_enabled": bool(cfg["STOP_TOO_WIDE_HARD_REJECT"]),
         })
     return TradeQualityDecision(accepted=(reject_reason == ""), reject_reason=reject_reason, quality_score=quality_score, diagnostics=diagnostics)
